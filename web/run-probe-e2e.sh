@@ -11,7 +11,7 @@
 # zero checks ran** — `docs/plan/12-testing.md` names a silently-skipped e2e job
 # as a known trap and this is the guard against it.
 #
-# WHAT THIS IS THE ONLY GATE FOR. Groups G through AH in
+# WHAT THIS IS THE ONLY GATE FOR. Groups G through AI in
 # `web/tools/probe-groups.mjs` drive `crcbl-webgpu`'s command stream directly
 # rather than through the engine: the wasm→JS→wasm round trip and the device it
 # opens, a surface, the capability query held against what `navigator.gpu` tells
@@ -22,7 +22,9 @@
 # chain, a sub-range fill, a presented canvas frame, a reconfigured swapchain, an
 # indirect draw, a dispatch that reads its workgroup counts out of a buffer, and
 # a triangle past the far plane that one pipeline clamps and the pipeline beside
-# it clips. `web/run-browser-e2e.sh` proves the demos render through this
+# it clips, and two indirect draws whose argument structures differ only in
+# `firstInstance` landing a half-target apart. `web/run-browser-e2e.sh` proves
+# the demos render through this
 # backend; nothing but this proves the seam underneath them command by command.
 #
 # WHY IT IS A SEPARATE PAGE. The probe exports install their own command-stream
@@ -308,7 +310,7 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;

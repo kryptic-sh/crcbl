@@ -290,6 +290,36 @@ export const CLAMP = Object.freeze({
 });
 
 /**
+ * The `FIRST_INSTANCE_*` codes `__crcbl_web_gpu_probe_first_instance_state`
+ * answers, from `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The first-instance probe is a readback at heart — its setup frame ends in the
+ * same `request_readback` — so its codes are {@link CLAMP}'s, `UNSUPPORTED` and
+ * the `FAILED` of `7` included. `READY` carries two blocks of `Rgba8Unorm`
+ * texels: the target an indirect draw whose `firstInstance` is zero painted,
+ * then the target an otherwise identical draw whose `firstInstance` is one
+ * painted. The shader shifts its quad right by `@builtin(instance_index)`, so
+ * *which half of each block* holds the draw colour is the whole evidence that
+ * the number in the argument structure reached the GPU.
+ *
+ * `UNSUPPORTED` is the device opening without `indirect-first-instance`, which
+ * is also why this probe has a supported flag beside it: core WebGPU accepts
+ * only a zero `firstInstance` in an indirect draw, so nothing was encoded
+ * rather than two identical blocks being read back and called a pass. Read
+ * `__crcbl_web_gpu_probe_first_instance_supported` to say which happened.
+ */
+export const FIRST_INSTANCE = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+  UNSUPPORTED: 6,
+  FAILED: 7,
+});
+
+/**
  * The `OCCLUSION_*` codes `__crcbl_web_gpu_probe_occlusion_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1932,6 +1962,110 @@ export function readClampProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: clampStateName(state), reason, bytes };
+}
+
+/**
+ * The same state-name helper again, for the first-instance codes. Its own
+ * function for {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function firstInstanceStateName(state) {
+  const found = Object.entries(FIRST_INSTANCE).find(
+    ([, code]) => code === state
+  );
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Whether the device this page opened has the browser's
+ * `indirect-first-instance`.
+ *
+ * Read this *before* {@link startFirstInstanceProbe}, and read it again when the
+ * state is `UNSUPPORTED`: it is what tells "this device withheld the feature the
+ * non-zero `firstInstance` needs" from "nothing asked it to". `false` before a
+ * device opens.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean}
+ */
+export function firstInstanceSupported({ exports }) {
+  return exports.__crcbl_web_gpu_probe_first_instance_supported() === 1;
+}
+
+/**
+ * Ask wasm to draw one half-width quad twice through one pipeline — off an
+ * indirect argument structure whose `firstInstance` is zero and off one whose is
+ * one — and start reading both targets back on the device it opened.
+ *
+ * The only gate anywhere that carries a non-zero `firstInstance` to a browser at
+ * all. What comes back is a *difference*: the shader shifts its quad right by
+ * `@builtin(instance_index)`, which WebGPU defines as the draw's `firstInstance`
+ * plus the instance number, so the zero draw paints the left half of its target
+ * and the one draw the right half of its. The zero half is the control and is
+ * not optional — without it, a shader that shifted every instance would paint the
+ * right half whatever the argument structure said, and prove nothing.
+ * {@link pollFirstInstanceProbe} drives the poll and
+ * {@link readFirstInstanceProbe} reads the bytes when they land.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — wait for {@link readDeviceProbe} to
+ * say `OPENED`. `false` also means the device opened without the feature, which
+ * {@link firstInstanceSupported} and a state of `UNSUPPORTED` are what
+ * distinguish.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame.
+ */
+export function startFirstInstanceProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_first_instance() === 1;
+}
+
+/**
+ * Poll the first-instance readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered, the bytes are already
+ * in, or the device withheld the feature, so the gate can call it every frame.
+ * See `__crcbl_web_gpu_probe_first_instance_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollFirstInstanceProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_first_instance_poll() === 1;
+}
+
+/**
+ * Read where the first-instance readback has got to, and its bytes once it is
+ * `READY` — the zero draw's target first, the one draw's second.
+ *
+ * {@link readClampProbe}'s sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
+ */
+export function readFirstInstanceProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_first_instance_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_first_instance_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_first_instance_reason_len()
+  );
+  const ptr = exports.__crcbl_web_gpu_probe_first_instance_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_first_instance_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: firstInstanceStateName(state), reason, bytes };
 }
 
 /**

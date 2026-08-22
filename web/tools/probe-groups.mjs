@@ -1,4 +1,4 @@
-// The `crcbl-webgpu` seam groups — G through AE — and nothing else.
+// The `crcbl-webgpu` seam groups — G through AI — and nothing else.
 //
 // The letters are allocation order rather than run order: AC, AD and AE run
 // between W and X, where a group that reads bytes back has to sit on a platform
@@ -646,12 +646,14 @@ export async function runProbeGroups({
   // engine: a reference device opened by the code under test would agree with it
   // whatever it asked for.
   //
-  // `timestamp-query` and `depth-clip-control` are in the request because
-  // `probe_device_desc` asks for both — group AF has nothing to observe without
-  // a `'timestamp'` query set, and group AH nothing without a pipeline WebGPU
-  // will accept `unclippedDepth` on, and each needs its feature. Optional on both
-  // sides: a browser without either opens a device here and there, and the two
-  // still match.
+  // `timestamp-query`, `depth-clip-control` and `indirect-first-instance` are in
+  // the request because `probe_device_desc` asks for all three — group AF has
+  // nothing to observe without a `'timestamp'` query set, group AH nothing
+  // without a pipeline WebGPU will accept `unclippedDepth` on, and group AI
+  // nothing without an indirect draw WebGPU will accept a non-zero
+  // `firstInstance` in, and each needs its feature. Optional on both sides: a
+  // browser without any of them opens a device here and there, and the two still
+  // match.
   const liveDevice = await evaluate(
     page,
     `(async () => {
@@ -663,8 +665,11 @@ export async function runProbeGroups({
          requiredLimits[key] = value;
        }
      }
-     const requiredFeatures = ['timestamp-query', 'depth-clip-control']
-       .filter((name) => adapter.features.has(name));
+     const requiredFeatures = [
+       'timestamp-query',
+       'depth-clip-control',
+       'indirect-first-instance',
+     ].filter((name) => adapter.features.has(name));
      const device = await adapter.requestDevice({ requiredLimits, requiredFeatures });
      return {
        features: [...device.features].sort(),
@@ -3539,6 +3544,231 @@ export async function runProbeGroups({
                     : 'a mixture, so something other than the flag decided which fragments survived') +
               ` (first texel of each block ${JSON.stringify(clamp.sample)})` +
               `${clamp.error ? ` — ${clamp.error}` : ''}`
+  );
+
+  // **THE GATE THAT SHOWS A NON-ZERO `firstInstance` REACHING A GPU.** Group Z
+  // proves an indirect draw happened and walked a padded stride; every argument
+  // structure it reads sets `firstInstance` to zero, because core WebGPU accepts
+  // no other value. `Features::INDIRECT_FIRST_INSTANCE` is reported to callers
+  // off the browser's `indirect-first-instance` and, until this group, nothing
+  // anywhere had ever put another number in one of those structures — no probe
+  // shader even read `@builtin(instance_index)`, so a constant-colour fullscreen
+  // triangle could not have shown the difference if one had.
+  //
+  // Group AH's shape exactly: the *same* half-width quad, through the *same*
+  // pipeline, off the *same* args buffer, into two targets of the same size
+  // cleared to the same colour — and the only difference between the two draws
+  // is the `firstInstance` in the structure each reads. The shader shifts the
+  // quad right by `instance_index`, which WebGPU defines as `firstInstance` plus
+  // the instance number and both draws set `instanceCount` to one, so the zero
+  // draw must paint the left half of its target and the one draw the right half
+  // of its. What is asserted is which texels came back, not that a draw survived:
+  // a browser that read the arguments and dropped the field raises no error, and
+  // the readback is the only place it shows.
+  //
+  // **A BROWSER WITHOUT `indirect-first-instance` OWES THIS GROUP NOTHING — BUT
+  // IT HAS TO BE THE BROWSER THAT SAID SO.** Group AH's rule and its reason: the
+  // page asks `navigator.gpu` for itself, and an adapter that HAS the feature
+  // while wasm reports the device without it is an optional feature lost between
+  // the request and the device that opened — a bug here, not a platform limit,
+  // and it fails rather than being waved through.
+  //
+  // WHERE IT BELONGS IN THE RUN: **before X**, group AH's reason exactly. This
+  // group reads bytes back, so behind X's stuck canvas readback it would be
+  // stranded on Windows, and it is not in that platform's `--expect-fail` list.
+  group(
+    'AI — an indirect draw’s firstInstance decides which half of the target is painted'
+  );
+
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_FIRST_INSTANCE_*`, spelled out
+  // here rather than imported, as every expected value in this file is.
+  const PROBE_FIRST_INSTANCE_SIZE = 64;
+  const PROBE_FIRST_INSTANCE_HALF_PIXELS =
+    (PROBE_FIRST_INSTANCE_SIZE / 2) * PROBE_FIRST_INSTANCE_SIZE;
+  const PROBE_FIRST_INSTANCE_CLEAR_BYTES = [35, 105, 175, 255];
+  const PROBE_FIRST_INSTANCE_DRAW_BYTES = [200, 145, 55, 235];
+
+  const firstInstanceStart = await evaluate(
+    page,
+    `(async () => {
+     const { startFirstInstanceProbe, firstInstanceSupported } =
+       await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     // Supported first: it is what tells a device that withheld the feature
+     // from a request that never happened.
+     const supported = firstInstanceSupported({ exports });
+     // And what the browser itself says, so the excuse below cannot be given
+     // by the thing under test. Asked of navigator.gpu, not of anything of ours.
+     const adapter = await navigator.gpu.requestAdapter();
+     const adapterHas =
+       adapter?.features?.has('indirect-first-instance') === true;
+     return {
+       supported,
+       adapterHas,
+       started: startFirstInstanceProbe({ exports }),
+     };
+   })()`
+  );
+  // Poll across frames exactly as group AH does.
+  const firstInstance = firstInstanceStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readFirstInstanceProbe, pollFirstInstanceProbe, FIRST_INSTANCE } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readFirstInstanceProbe({ exports, memory: exports.memory });
+           if (
+             r.state === FIRST_INSTANCE.FAILED ||
+             r.state === FIRST_INSTANCE.UNDECODABLE
+           ) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
+           }
+           if (r.state !== FIRST_INSTANCE.READY) {
+             pollFirstInstanceProbe({ exports });
+             return null;
+           }
+           // Ready: classify every texel here rather than shipping 32768 bytes
+           // out. Which colour each HALF of each block came back as is the whole
+           // verdict, so the counts are what crosses — a half that produced a
+           // mixture is a different failure from one that produced the wrong
+           // colour evenly, and the message has to be able to say which.
+           const draw = ${JSON.stringify(PROBE_FIRST_INSTANCE_DRAW_BYTES)};
+           const clear = ${JSON.stringify(PROBE_FIRST_INSTANCE_CLEAR_BYTES)};
+           const size = ${PROBE_FIRST_INSTANCE_SIZE};
+           const same = (at, colour) =>
+             r.bytes[at] === colour[0] &&
+             r.bytes[at + 1] === colour[1] &&
+             r.bytes[at + 2] === colour[2] &&
+             r.bytes[at + 3] === colour[3];
+           const block = r.bytes.length / 2;
+           // Rows are tight — 64 Rgba8Unorm texels is 256 bytes, the alignment
+           // copyTextureToBuffer wants — so a texel's column is its index within
+           // the row and nothing has to be skipped.
+           const tally = (from, leftHalf) => {
+             let drawn = 0;
+             let cleared = 0;
+             let other = 0;
+             let firstOther = -1;
+             for (let texel = 0; texel < block / 4; texel += 1) {
+               const column = texel % size;
+               if (column < size / 2 !== leftHalf) continue;
+               const at = from + texel * 4;
+               if (same(at, draw)) drawn += 1;
+               else if (same(at, clear)) cleared += 1;
+               else {
+                 if (firstOther < 0) firstOther = at;
+                 other += 1;
+               }
+             }
+             return { drawn, cleared, other, firstOther };
+           };
+           const midpoint = (size / 2) * 4;
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             zeroLeft: tally(0, true),
+             zeroRight: tally(0, false),
+             oneLeft: tally(block, true),
+             oneRight: tally(block, false),
+             sample: [
+               ...r.bytes.slice(0, 4),
+               ...r.bytes.slice(midpoint, midpoint + 4),
+               ...r.bytes.slice(block, block + 4),
+               ...r.bytes.slice(block + midpoint, block + midpoint + 4),
+             ],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+
+  const firstInstanceAbsent =
+    firstInstanceStart?.supported === false &&
+    firstInstanceStart?.adapterHas === false;
+  const absentFirstInstanceDetail =
+    "this browser's adapter reports no 'indirect-first-instance', so the device " +
+    'could not enable it and WebGPU would refuse a non-zero firstInstance in an ' +
+    'indirect draw — the capability is NotOnThisDevice here and there is nothing ' +
+    'to hold it to';
+  check(
+    'AI',
+    'wasm encoded the first-instance frame — two targets, one pipeline, two indirect draws off argument structures differing only in firstInstance, both copies, the request',
+    firstInstanceStart?.started === true || firstInstanceAbsent,
+    firstInstanceStart?.started
+      ? 'the zero and one passes are on the stream'
+      : firstInstanceStart?.supported === false
+        ? firstInstanceStart?.adapterHas
+          ? "this browser's adapter HAS 'indirect-first-instance' and wasm still reports the " +
+            'device without it — the optional feature was lost between the request and the ' +
+            'device that opened, which is a bug here and not a platform limit'
+          : absentFirstInstanceDetail
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  const firstInstanceLanded =
+    firstInstance?.done === true &&
+    firstInstance.len ===
+      PROBE_FIRST_INSTANCE_SIZE * PROBE_FIRST_INSTANCE_SIZE * 4 * 2 &&
+    firstInstance.zeroLeft?.drawn === PROBE_FIRST_INSTANCE_HALF_PIXELS &&
+    firstInstance.zeroRight?.cleared === PROBE_FIRST_INSTANCE_HALF_PIXELS &&
+    firstInstance.oneLeft?.cleared === PROBE_FIRST_INSTANCE_HALF_PIXELS &&
+    firstInstance.oneRight?.drawn === PROBE_FIRST_INSTANCE_HALF_PIXELS;
+  // Which half of each block was painted, named so a failure says what came back
+  // where rather than only that something did.
+  const halfName = (left, right) =>
+    left?.drawn === PROBE_FIRST_INSTANCE_HALF_PIXELS &&
+    right?.cleared === PROBE_FIRST_INSTANCE_HALF_PIXELS
+      ? 'left'
+      : right?.drawn === PROBE_FIRST_INSTANCE_HALF_PIXELS &&
+          left?.cleared === PROBE_FIRST_INSTANCE_HALF_PIXELS
+        ? 'right'
+        : left?.cleared === PROBE_FIRST_INSTANCE_HALF_PIXELS &&
+            right?.cleared === PROBE_FIRST_INSTANCE_HALF_PIXELS
+          ? 'neither'
+          : 'a mixture';
+  const zeroHalf = halfName(firstInstance?.zeroLeft, firstInstance?.zeroRight);
+  const oneHalf = halfName(firstInstance?.oneLeft, firstInstance?.oneRight);
+  check(
+    'AI',
+    'the firstInstance in the argument structure decided where the quad landed — the zero draw painted the left half and the one draw the right',
+    firstInstanceAbsent || firstInstanceLanded,
+    firstInstanceAbsent
+      ? absentFirstInstanceDetail
+      : firstInstanceStart?.started !== true
+        ? 'no frame was encoded, so there is nothing to read — see the check above for why'
+        : firstInstance?.done !== true
+          ? `no first-instance readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+          : firstInstanceLanded
+            ? `${firstInstance.len} bytes: the zero draw's target is [${PROBE_FIRST_INSTANCE_DRAW_BYTES.join(', ')}] ` +
+              'across its left half and untouched clear across its right, and the one draw’s ' +
+              'target is the mirror of that — so the same quad, drawn through the same ' +
+              'pipeline, landed a half-target apart because of the firstInstance it read'
+            : `state ${firstInstance.state}, ${firstInstance.len ?? 0} bytes: the zero draw painted ${zeroHalf} ` +
+              `(${firstInstance.zeroLeft?.drawn} drawn / ${firstInstance.zeroLeft?.cleared} clear / ${firstInstance.zeroLeft?.other} other on the left, ` +
+              `${firstInstance.zeroRight?.drawn} / ${firstInstance.zeroRight?.cleared} / ${firstInstance.zeroRight?.other} on the right), ` +
+              `the one draw painted ${oneHalf} ` +
+              `(${firstInstance.oneLeft?.drawn} / ${firstInstance.oneLeft?.cleared} / ${firstInstance.oneLeft?.other} on the left, ` +
+              `${firstInstance.oneRight?.drawn} / ${firstInstance.oneRight?.cleared} / ${firstInstance.oneRight?.other} on the right) — ` +
+              (zeroHalf === 'left' && oneHalf === 'left'
+                ? 'both landed on the left, so the second draw’s firstInstance reached nothing'
+                : zeroHalf === 'right' && oneHalf === 'right'
+                  ? 'both landed on the right, so something other than the argument structure is ' +
+                    'choosing the instance index and the pair proves nothing'
+                  : zeroHalf === 'right' && oneHalf === 'left'
+                    ? 'the two are inverted — the non-zero firstInstance is on the draw that was ' +
+                      'meant to be the control'
+                    : zeroHalf === 'neither' || oneHalf === 'neither'
+                      ? 'a target came back untouched, so a draw produced no fragments at all'
+                      : 'a mixture, so something other than the firstInstance decided where the ' +
+                        'quad landed') +
+              ` (first texel of each half ${JSON.stringify(firstInstance.sample)},` +
+              ` first unexpected texel at ${firstInstance.zeroLeft?.firstOther}/${firstInstance.zeroRight?.firstOther}/` +
+              `${firstInstance.oneLeft?.firstOther}/${firstInstance.oneRight?.firstOther})` +
+              `${firstInstance.error ? ` — ${firstInstance.error}` : ''}`
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**

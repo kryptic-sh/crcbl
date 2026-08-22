@@ -168,6 +168,14 @@
 //! | [`__crcbl_web_gpu_probe_clamp_reason_len`](shim::__crcbl_web_gpu_probe_clamp_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_clamp_bytes_ptr`](shim::__crcbl_web_gpu_probe_clamp_bytes_ptr) | `() -> i32` | Where the two targets' texels start — the clamped one's block first — once [`__crcbl_web_gpu_probe_clamp_state`](shim::__crcbl_web_gpu_probe_clamp_state) answers [`CLAMP_READY`]. |
 //! | [`__crcbl_web_gpu_probe_clamp_bytes_len`](shim::__crcbl_web_gpu_probe_clamp_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the depth-clamp probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_first_instance_supported`](shim::__crcbl_web_gpu_probe_first_instance_supported) | `() -> i32` | Whether the opened device has the browser's `indirect-first-instance`, as `1` or `0`. Read this before asking. |
+//! | [`__crcbl_web_gpu_probe_first_instance`](shim::__crcbl_web_gpu_probe_first_instance) | `() -> i32` | Encode two passes that draw one half-width quad through one pipeline off two argument structures differing only in `firstInstance`, copy both targets out and ask for the bytes. |
+//! | [`__crcbl_web_gpu_probe_first_instance_poll`](shim::__crcbl_web_gpu_probe_first_instance_poll) | `() -> i32` | Poll that readback once, and register the wait. |
+//! | [`__crcbl_web_gpu_probe_first_instance_state`](shim::__crcbl_web_gpu_probe_first_instance_state) | `() -> i32` | Drain, and answer one of the `FIRST_INSTANCE_*` codes. |
+//! | [`__crcbl_web_gpu_probe_first_instance_reason_ptr`](shim::__crcbl_web_gpu_probe_first_instance_reason_ptr) | `() -> i32` | Where the reason the first-instance readback stopped starts. Empty unless the state is [`FIRST_INSTANCE_FAILED`] or [`FIRST_INSTANCE_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_first_instance_reason_len`](shim::__crcbl_web_gpu_probe_first_instance_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_first_instance_bytes_ptr`](shim::__crcbl_web_gpu_probe_first_instance_bytes_ptr) | `() -> i32` | Where the two targets' texels start — the zero draw's block first — once [`__crcbl_web_gpu_probe_first_instance_state`](shim::__crcbl_web_gpu_probe_first_instance_state) answers [`FIRST_INSTANCE_READY`]. |
+//! | [`__crcbl_web_gpu_probe_first_instance_bytes_len`](shim::__crcbl_web_gpu_probe_first_instance_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the first-instance probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -249,11 +257,21 @@
 //! plane rasterises through the clamped pipeline and is clipped away by the one
 //! beside it, and no device that withheld the gate can show that.
 //!
-//! Both are *optional* rather than required, so a browser without either still
-//! opens a device and the probe reports [`TIMESTAMP_UNSUPPORTED`] or
-//! [`CLAMP_UNSUPPORTED`] with a reason rather than failing to start.
-//! `web/tools/probe-groups.mjs` opens its reference device with the same
-//! request, so the two are compared like for like.
+//! [`INDIRECT_FIRST_INSTANCE`](crcbl_hal::Features::INDIRECT_FIRST_INSTANCE) is
+//! the third, on the same test again: this crate reports it off the browser's
+//! `indirect-first-instance`, core WebGPU accepts only a zero `firstInstance` in
+//! an indirect draw's argument structure, and until group AI nothing had ever
+//! put another number in one — [`PROBE_INDIRECT_ARGS_BYTES`] zeroes the field in
+//! every structure it holds, because on a device without the gate it must. What
+//! the device buys is the *difference* group AI reads back: the same quad,
+//! drawn twice off structures that differ only in that field, lands on opposite
+//! halves of its target, and no device that withheld the gate can show that.
+//!
+//! All three are *optional* rather than required, so a browser without any of
+//! them still opens a device and the probe reports [`TIMESTAMP_UNSUPPORTED`],
+//! [`CLAMP_UNSUPPORTED`] or [`FIRST_INSTANCE_UNSUPPORTED`] with a reason rather
+//! than failing to start. `web/tools/probe-groups.mjs` opens its reference
+//! device with the same request, so the two are compared like for like.
 //!
 //! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) is
 //! deliberately *not* what this uses: it requires
@@ -1113,6 +1131,49 @@ pub const CLAMP_UNSUPPORTED: u32 = 6;
 /// a timeout.
 pub const CLAMP_FAILED: u32 = 7;
 
+/// Nothing has been asked, or there is no channel to ask through.
+pub const FIRST_INSTANCE_UNASKED: u32 = 0;
+/// The setup frame — two colour targets of the same size, one pipeline, the
+/// args and index buffers filled, a pass into each target that clears to
+/// [`PROBE_FIRST_INSTANCE_CLEAR_BYTES`] and records one
+/// `draw_indexed_indirect` off [`PROBE_FIRST_INSTANCE_ARGS_BYTES`], the two
+/// copies into one buffer, the submit and the request — is on the stream, and
+/// no poll has been issued.
+pub const FIRST_INSTANCE_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const FIRST_INSTANCE_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const FIRST_INSTANCE_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_first_instance_bytes_ptr`]
+/// and [`shim::__crcbl_web_gpu_probe_first_instance_bytes_len`] carry them — the
+/// zero draw's target followed by the one draw's, and the `firstInstance`
+/// reached the GPU exactly when the first block's left half is
+/// [`PROBE_FIRST_INSTANCE_DRAW_BYTES`] and the second block's right half is.
+pub const FIRST_INSTANCE_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`CLAMP_UNDECODABLE`]'s twin.
+pub const FIRST_INSTANCE_UNDECODABLE: u32 = 5;
+/// The **device** opened without [`Features::INDIRECT_FIRST_INSTANCE`], so
+/// nothing was encoded: core WebGPU accepts only a zero `firstInstance` in an
+/// indirect draw, and a frame that quietly wrote zero into both structures
+/// instead would read back two identical halves and prove nothing.
+/// [`CLAMP_UNSUPPORTED`]'s shape, and
+/// [`shim::__crcbl_web_gpu_probe_first_instance_supported`] is what the device
+/// reported.
+pub const FIRST_INSTANCE_UNSUPPORTED: u32 = 6;
+/// The browser refused the first-instance readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_first_instance_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_first_instance_reason_len`].
+///
+/// **A settled code, not a step**, [`CLAMP_FAILED`]'s reasoning: a readback is
+/// answered exactly once, so nothing further is coming.
+pub const FIRST_INSTANCE_FAILED: u32 = 7;
+
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
 pub const PARITY_UNASKED: u32 = 0;
@@ -1249,14 +1310,17 @@ pub const fn probe_readback_copy() -> BufferImageCopy {
 /// capability cannot be witnessed without them and no others — see the
 /// [module docs](self#the-device-this-asks-for-and-why-it-asks-for-so-little)
 /// for why the parsimony is the point rather than a placeholder, and for the one
-/// test [`Features::TIMESTAMP_QUERY`] and [`Features::DEPTH_CLAMP`] meet.
+/// test [`Features::TIMESTAMP_QUERY`], [`Features::DEPTH_CLAMP`] and
+/// [`Features::INDIRECT_FIRST_INSTANCE`] meet.
 #[must_use]
 pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
     DeviceDesc {
         label: Some("crcbl-webgpu probe"),
         adapter,
         required_features: Features::COMPUTE,
-        optional_features: Features::TIMESTAMP_QUERY.union(Features::DEPTH_CLAMP),
+        optional_features: Features::TIMESTAMP_QUERY
+            .union(Features::DEPTH_CLAMP)
+            .union(Features::INDIRECT_FIRST_INSTANCE),
         compatible_surface: None,
     }
 }
@@ -5561,6 +5625,493 @@ pub const fn probe_clamp_clipped_pipeline_desc() -> GraphicsPipelineDesc<'static
     probe_clamp_pipeline_desc("crcbl-webgpu clipped pipeline", false)
 }
 
+// The first-instance probe (group AI): the one gate that shows a NON-ZERO
+// `firstInstance` changing what a GPU produced. Every handle it names is
+// `15 << 32` — a generation past the depth-clamp probe's `14 << 32` — so its
+// live resources never land in another probe's slot in the shared page. It
+// creates two images and two views, which those two types distinguish by index,
+// and three buffers, which that type distinguishes the indirect probe's way;
+// the module, the layout, the pipeline, the queue, the command buffer and the
+// readback are each the only one of their kind at this generation.
+//
+// It is here because `Features::INDIRECT_FIRST_INSTANCE` is reported to callers
+// off the browser's `indirect-first-instance` and nothing anywhere has ever
+// carried a non-zero `firstInstance` to a browser. [`PROBE_INDIRECT_ARGS_BYTES`]
+// sets it to zero in every structure it holds — core WebGPU accepts no other
+// value — and no other probe shader reads
+// [`@builtin(instance_index)`](PROBE_FIRST_INSTANCE_WGSL) at all, so a
+// constant-colour fullscreen triangle could not have shown the difference even
+// if one had. The feature was granted, reported through the seam, and exercised
+// by nothing.
+//
+// **THE OBSERVABLE IS WHICH HALF OF THE TARGET WAS PAINTED.** A draw whose
+// `firstInstance` a browser quietly dropped raises no error anywhere — the
+// buffer is written, the pass runs, the readback resolves — so the probe draws
+// the *same* half-width quad twice, through one pipeline and one args buffer,
+// into two targets of the same size cleared to the same colour, and the only
+// difference between the two draws is the `firstInstance` in the argument
+// structure each reads. [`PROBE_FIRST_INSTANCE_WGSL`] shifts the quad right by
+// `instance_index`, so `firstInstance = 0` paints the left half and
+// `firstInstance = 1` the right one; the pair of readings is the claim. See
+// [`probe_first_instance_pipeline_desc`] for the four readings and what each of
+// them means.
+
+/// Texels across and down each of the two colour targets. [`PROBE_READBACK_SIZE`]'s
+/// figure, for its 256-byte-row reason.
+pub const PROBE_FIRST_INSTANCE_SIZE: u32 = PROBE_READBACK_SIZE;
+
+/// The colour both passes clear their targets to.
+///
+/// **The reading that means the quad did not land here**, which is what each
+/// target's *other* half must show. It is not a channel permutation of
+/// [`PROBE_FIRST_INSTANCE_DRAW_BYTES`] and its alpha differs, so no swap on the
+/// way out can turn one reading into the other, and every colour channel is a
+/// mid-tone — away from the `0` and `255` an untouched or saturated one reads
+/// as.
+pub const PROBE_FIRST_INSTANCE_CLEAR_BYTES: [u8; 4] = [35, 105, 175, 255];
+
+/// The colour the fragment shader writes.
+///
+/// **The reading that means the quad landed here**, which is what the half the
+/// instance index selects must show.
+pub const PROBE_FIRST_INSTANCE_DRAW_BYTES: [u8; 4] = [200, 145, 55, 235];
+
+/// How many argument structures each of the two draws reads: **one**.
+///
+/// The pair is not a stride walk — [`PROBE_INDIRECT_DRAWS`] is what holds the
+/// padded stride, and holding it twice would prove nothing new. What separates
+/// these two draws is the offset each starts at, and so the structure each
+/// reads its `firstInstance` out of.
+pub const PROBE_FIRST_INSTANCE_DRAWS: u32 = 1;
+
+/// Where the draw that must paint the **left** half reads its arguments — the
+/// start of the buffer, where [`PROBE_FIRST_INSTANCE_ARGS_BYTES`] puts the
+/// structure whose `firstInstance` is zero.
+pub const PROBE_FIRST_INSTANCE_ZERO_OFFSET: u64 = 0;
+
+/// Where the draw that must paint the **right** half reads its arguments — two
+/// [`PROBE_INDIRECT_TIGHT_STRIDE`]s in, past the decoy, where
+/// [`PROBE_FIRST_INSTANCE_ARGS_BYTES`] puts the structure whose `firstInstance`
+/// is one.
+///
+/// A multiple of 4, which is what `drawIndexedIndirect` requires of an
+/// `indirectOffset`.
+pub const PROBE_FIRST_INSTANCE_ONE_OFFSET: u64 = 2 * PROBE_INDIRECT_TIGHT_STRIDE as u64;
+
+/// The args buffer's contents: the two argument structures the two draws read,
+/// with a **decoy** between them, as the little-endian bytes WebGPU's
+/// `drawIndexedIndirect` reads.
+///
+/// [`PROBE_INDIRECT_ARGS_BYTES`]'s layout and its habit — a wrong reading of the
+/// buffer leaves the clear rather than a plausible picture. The first structure
+/// draws the quad with `firstInstance = 0`; the decoy one tight stride in draws
+/// nothing at all, so a second draw that ignored
+/// [`PROBE_FIRST_INSTANCE_ONE_OFFSET`] and stepped by the tight stride leaves
+/// its target untouched; and the structure at that offset draws the same quad
+/// with `firstInstance = 1`.
+///
+/// **The two structures differ in `firstInstance` and in nothing else**, which
+/// is what makes the two readings a comparison rather than two unrelated draws.
+/// `the_first_instance_args_differ_in_first_instance_and_nothing_else` is what
+/// holds them to that.
+pub const PROBE_FIRST_INSTANCE_ARGS_BYTES: [u8; 60] = [
+    // The structure at PROBE_FIRST_INSTANCE_ZERO_OFFSET — the quad, unshifted.
+    6, 0, 0, 0, // indexCount = 6
+    1, 0, 0, 0, // instanceCount = 1
+    0, 0, 0, 0, // firstIndex = 0
+    0, 0, 0, 0, // baseVertex = 0
+    0, 0, 0, 0, // firstInstance = 0
+    // The decoy, one tight stride in: what a walk that stepped by the packed
+    // size would read as its second structure. It draws nothing, so that walk
+    // leaves the clear.
+    0, 0, 0, 0, // decoy indexCount = 0
+    1, 0, 0, 0, // decoy instanceCount = 1
+    0, 0, 0, 0, // decoy firstIndex = 0
+    0, 0, 0, 0, // decoy baseVertex = 0
+    0, 0, 0, 0, // decoy firstInstance = 0
+    // The structure at PROBE_FIRST_INSTANCE_ONE_OFFSET — the same quad, one
+    // instance along, which is the whole of what this probe reads back.
+    6, 0, 0, 0, // indexCount = 6
+    1, 0, 0, 0, // instanceCount = 1
+    0, 0, 0, 0, // firstIndex = 0
+    0, 0, 0, 0, // baseVertex = 0
+    1, 0, 0, 0, // firstInstance = 1
+];
+
+/// The index buffer's contents, as the 12 little-endian bytes of six `Uint16`
+/// indices `[0, 1, 2, 3, 4, 5]` — the two triangles of
+/// [`PROBE_FIRST_INSTANCE_WGSL`]'s quad, in the order its corner array holds
+/// them. Twelve bytes is a multiple of the 4 `queue.writeBuffer` requires, so
+/// nothing pads it.
+pub const PROBE_FIRST_INSTANCE_INDEX_BYTES: [u8; 12] = [0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0];
+
+/// The queue the first-instance probe names in its command encoder. `15 << 32`.
+pub const PROBE_FIRST_INSTANCE_QUEUE: QueueHandle = match QueueHandle::from_bits(15 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 15 is not zero"),
+};
+
+/// The command buffer the first-instance probe finishes its encoder into.
+/// `15 << 32`.
+pub const PROBE_FIRST_INSTANCE_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(15 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The in-flight readback the first-instance probe requests and polls.
+/// `15 << 32`.
+pub const PROBE_FIRST_INSTANCE_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(15 << 32)
+{
+    Some(readback) => readback,
+    None => panic!("generation 15 is not zero"),
+};
+
+/// The target the draw whose `firstInstance` is **zero** paints. `15 << 32`,
+/// index `0`.
+pub const PROBE_FIRST_INSTANCE_ZERO_IMAGE: ImageHandle = match ImageHandle::from_bits(15 << 32) {
+    Some(image) => image,
+    None => panic!("generation 15 is not zero"),
+};
+
+/// The target the draw whose `firstInstance` is **one** paints. `15 << 32`,
+/// index `1`.
+pub const PROBE_FIRST_INSTANCE_ONE_IMAGE: ImageHandle = match ImageHandle::from_bits((15 << 32) | 1)
+{
+    Some(image) => image,
+    None => panic!("generation 15 is not zero"),
+};
+
+/// Either target's descriptor — they are the same size, the same format and the
+/// same usage, because the *only* difference the probe permits between the two
+/// halves of its readback is the `firstInstance` the draw read.
+#[must_use]
+pub const fn probe_first_instance_image_desc(label: &'static str) -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some(label),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_FIRST_INSTANCE_SIZE, PROBE_FIRST_INSTANCE_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The zero draw's target view. `15 << 32`, index `0`.
+pub const PROBE_FIRST_INSTANCE_ZERO_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits(15 << 32) {
+        Some(view) => view,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The one draw's target view. `15 << 32`, index `1`.
+pub const PROBE_FIRST_INSTANCE_ONE_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits((15 << 32) | 1) {
+        Some(view) => view,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The view of the zero draw's target its pass renders into.
+pub const PROBE_FIRST_INSTANCE_ZERO_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu first-instance zero view"),
+    image: PROBE_FIRST_INSTANCE_ZERO_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The view of the one draw's target its pass renders into.
+pub const PROBE_FIRST_INSTANCE_ONE_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu first-instance one view"),
+    image: PROBE_FIRST_INSTANCE_ONE_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The buffer both targets are copied into and read back from. `15 << 32`,
+/// index `0`.
+pub const PROBE_FIRST_INSTANCE_BUFFER: BufferHandle = match BufferHandle::from_bits(15 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 15 is not zero"),
+};
+
+/// How many bytes one target occupies in [`probe_first_instance_buffer_desc`]'s
+/// buffer — and the offset the second target's copy lands at, since the first
+/// starts at zero.
+///
+/// A multiple of 256 by construction, which is what `copyTextureToBuffer`
+/// requires of a `bufferLayout.offset` here: [`PROBE_FIRST_INSTANCE_SIZE`] rows
+/// of [`PROBE_FIRST_INSTANCE_SIZE`] `Rgba8Unorm` texels are 256-byte rows, so
+/// any whole number of them is aligned.
+pub const PROBE_FIRST_INSTANCE_BLOCK_BYTES: u64 =
+    (PROBE_FIRST_INSTANCE_SIZE as u64) * (PROBE_FIRST_INSTANCE_SIZE as u64) * 4;
+
+/// The readback buffer's descriptor — **both** targets, the zero draw's first.
+///
+/// One buffer rather than two, and one readback rather than two, on
+/// [`probe_clamp_buffer_desc`]'s reasoning: the evidence is the *pair*, so there
+/// is one answer and it either holds both blocks or holds nothing.
+#[must_use]
+pub const fn probe_first_instance_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu first-instance buffer"),
+        size: PROBE_FIRST_INSTANCE_BLOCK_BYTES * 2,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The indirect-args buffer handle `write_buffer` fills and both
+/// `draw_indexed_indirect`s read. `15 << 32`, index `1`.
+pub const PROBE_FIRST_INSTANCE_ARGS_BUFFER: BufferHandle =
+    match BufferHandle::from_bits((15 << 32) | 1) {
+        Some(buffer) => buffer,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The indirect-args buffer — [`PROBE_FIRST_INSTANCE_ARGS_BYTES`] on the device,
+/// [`BufferUsage::INDIRECT`] so it can back both draws and
+/// [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can fill it.
+///
+/// Sized from those bytes, which is what keeps the structure at
+/// [`PROBE_FIRST_INSTANCE_ONE_OFFSET`] inside the buffer: WebGPU refuses a
+/// `drawIndexedIndirect` whose `indirectOffset` leaves fewer than
+/// [`PROBE_INDIRECT_TIGHT_STRIDE`] bytes behind it.
+#[must_use]
+pub const fn probe_first_instance_args_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu first-instance args buffer"),
+        size: PROBE_FIRST_INSTANCE_ARGS_BYTES.len() as u64,
+        usage: BufferUsage::INDIRECT.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The index buffer handle `write_buffer` fills and both passes bind.
+/// `15 << 32`, index `2`.
+pub const PROBE_FIRST_INSTANCE_INDEX_BUFFER: BufferHandle =
+    match BufferHandle::from_bits((15 << 32) | 2) {
+        Some(buffer) => buffer,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The index buffer — [`PROBE_FIRST_INSTANCE_INDEX_BYTES`] on the device,
+/// [`BufferUsage::INDEX`] so the passes can bind it and
+/// [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can fill it.
+#[must_use]
+pub const fn probe_first_instance_index_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu first-instance index buffer"),
+        size: PROBE_FIRST_INSTANCE_INDEX_BYTES.len() as u64,
+        usage: BufferUsage::INDEX.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The clear both passes load with — [`PROBE_FIRST_INSTANCE_CLEAR_BYTES`] in the
+/// colour slot, and a depth and stencil slot neither pass has an attachment for.
+#[must_use]
+pub const fn probe_first_instance_clear_value() -> ClearValue {
+    ClearValue {
+        color: [
+            unorm8(PROBE_FIRST_INSTANCE_CLEAR_BYTES[0]),
+            unorm8(PROBE_FIRST_INSTANCE_CLEAR_BYTES[1]),
+            unorm8(PROBE_FIRST_INSTANCE_CLEAR_BYTES[2]),
+            unorm8(PROBE_FIRST_INSTANCE_CLEAR_BYTES[3]),
+        ],
+        depth: 0.0,
+        stencil: 0,
+    }
+}
+
+/// The colour attachment a first-instance pass writes — cleared to
+/// [`PROBE_FIRST_INSTANCE_CLEAR_BYTES`] and stored, so the copy afterwards reads
+/// what the draw left.
+#[must_use]
+pub const fn probe_first_instance_color_attachment(view: ImageViewHandle) -> ColorAttachment {
+    ColorAttachment {
+        view,
+        resolve: None,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: probe_first_instance_clear_value(),
+    }
+}
+
+/// The image→buffer copy that moves one target's texels into its block of the
+/// readback buffer.
+#[must_use]
+pub const fn probe_first_instance_copy(image: ImageHandle, buffer_offset: u64) -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_FIRST_INSTANCE_BUFFER,
+        buffer_offset,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_FIRST_INSTANCE_SIZE, PROBE_FIRST_INSTANCE_SIZE),
+    }
+}
+
+/// A half-width quad in a flat colour, shifted right by the instance index.
+///
+/// **No vertex buffers**, [`PROBE_DRAW_WGSL`]'s trick: `vsMain` positions from
+/// `@builtin(vertex_index)` alone, out of a six-corner array the index buffer
+/// walks as two triangles. The quad spans `-1..0` in clip space — the left half
+/// of the target — and `f32(instance)` slides it one full half to the right, so
+/// instance `0` paints the left half and instance `1` the right one and neither
+/// touches the other's texels.
+///
+/// **`@builtin(instance_index)` is the whole of the fixture.** WebGPU defines it
+/// as the draw's `firstInstance` plus the instance number, and both draws here
+/// have `instanceCount = 1` — so it *is* the `firstInstance` the argument
+/// structure carried, and which half comes back painted is what says whether
+/// that number reached the GPU. A shader that ignored it would paint the same
+/// half in both targets, which is the reading group AI calls a failure.
+///
+/// **Each channel is spelled `n.0/255.0`**, the byte the readback is compared
+/// against divided by the `Rgba8Unorm` maximum, rather than a decimal that would
+/// have to be kept in step by hand.
+/// `the_first_instance_wgsl_paints_the_colour_the_gate_asserts` is what holds
+/// the string to the constants, and
+/// `the_first_instance_wgsl_shifts_the_quad_by_the_instance_index` what holds it
+/// to reading the builtin at all.
+pub const PROBE_FIRST_INSTANCE_WGSL: &str = concat!(
+    "@vertex fn vsMain(@builtin(vertex_index) vertex: u32, ",
+    "@builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> { ",
+    "var corners = array<vec2<f32>, 6>(",
+    "vec2<f32>(-1.0, -1.0), vec2<f32>(0.0, -1.0), vec2<f32>(-1.0, 1.0), ",
+    "vec2<f32>(0.0, -1.0), vec2<f32>(0.0, 1.0), vec2<f32>(-1.0, 1.0)); ",
+    "let corner = corners[vertex]; ",
+    "return vec4<f32>(corner.x + f32(instance), corner.y, 0.0, 1.0); } ",
+    "@fragment fn fsMain() -> @location(0) vec4<f32> { return vec4<f32>(",
+    "200.0/255.0, 145.0/255.0, 55.0/255.0, 235.0/255.0); }"
+);
+
+/// The shader module the first-instance probe's frame creates. WGSL only, on
+/// [`PROBE_GRAPHICS_SHADER_MODULE_DESC`]'s terms.
+pub const PROBE_FIRST_INSTANCE_SHADER_MODULE_DESC: ShaderModuleDesc<'static> = ShaderModuleDesc {
+    label: Some("crcbl-webgpu first-instance shader"),
+    spirv: &[],
+    wgsl: Some(PROBE_FIRST_INSTANCE_WGSL),
+    msl: None,
+    dxil: &[],
+};
+
+/// The shader-module handle the first-instance pipeline names. `15 << 32`.
+pub const PROBE_FIRST_INSTANCE_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(15 << 32) {
+        Some(module) => module,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The pipeline-layout handle the first-instance pipeline is built against.
+/// `15 << 32`.
+pub const PROBE_FIRST_INSTANCE_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(15 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The pipeline layout the first-instance probe's frame creates. **Empty** — the
+/// shaders bind nothing.
+pub const PROBE_FIRST_INSTANCE_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> =
+    PipelineLayoutDesc {
+        label: Some("crcbl-webgpu first-instance pipeline layout"),
+        bind_group_layouts: &[],
+        push_constants: None,
+    };
+
+/// The pipeline handle both passes bind. `15 << 32`.
+///
+/// **One pipeline, not two.** The depth-clamp probe needs a pair because the
+/// flag it is testing lives in the pipeline; `firstInstance` lives in the
+/// argument structure, so a second pipeline would be a second thing that could
+/// differ and nothing that could be tested.
+pub const PROBE_FIRST_INSTANCE_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(15 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 15 is not zero"),
+    };
+
+/// The one colour target [`probe_first_instance_pipeline_desc`] writes — opaque,
+/// so a surviving fragment's colour reaches the texel exactly rather than
+/// blended with the clear underneath it.
+pub const PROBE_FIRST_INSTANCE_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTargetState {
+    format: Format::Rgba8Unorm,
+    blend: None,
+    write_mask: ColorWrites::ALL,
+}];
+
+/// The pipeline both first-instance passes draw the quad through.
+///
+/// # The four readings, and why only one of them is a pass
+///
+/// Both passes draw [`PROBE_FIRST_INSTANCE_WGSL`]'s half-width quad into targets
+/// cleared to [`PROBE_FIRST_INSTANCE_CLEAR_BYTES`], through this pipeline and
+/// off [`PROBE_FIRST_INSTANCE_ARGS_BYTES`]; what separates them is the
+/// `firstInstance` in the structure each reads. Reading the zero draw's block
+/// first and the one draw's block second:
+///
+/// * **left, right** — the only pass. The `firstInstance` in the argument
+///   structure reached the shader's `instance_index`, and the two draws landed
+///   a half-target apart because of it.
+/// * **left, left** — the second draw's `firstInstance` reached nothing: it was
+///   dropped on the wire, or the browser read the arguments and ignored the
+///   field. Both draws behaved as the zero one, which is the state this probe
+///   was written to end.
+/// * **right, right** — both draws were shifted, so something other than the
+///   argument structure is deciding the instance index and the pair proves
+///   nothing. That is the probe's own control failing rather than the browser.
+/// * **right, left** — inverted: the two passes, the two offsets or the two
+///   copies were crossed, and the non-zero `firstInstance` is on the draw that
+///   was meant to be the control.
+///
+/// The control is not optional. Without it, a shader that quietly shifted every
+/// instance would paint the right half whatever `firstInstance` did, and the
+/// gate would be green and worthless.
+///
+/// The rest is the shape [`PROBE_GRAPHICS_PIPELINE_DESC`] settled on: a
+/// [`PrimitiveTopology::TriangleList`] with counter-clockwise winding, no culling
+/// — so neither triangle's winding is a second reason it could disappear — no
+/// depth-stencil state, and a single-sampled, unblended `Rgba8Unorm` target.
+#[must_use]
+pub const fn probe_first_instance_pipeline_desc() -> GraphicsPipelineDesc<'static> {
+    GraphicsPipelineDesc {
+        label: Some("crcbl-webgpu first-instance pipeline"),
+        layout: PROBE_FIRST_INSTANCE_PIPELINE_LAYOUT,
+        vertex: ShaderEntry {
+            module: PROBE_FIRST_INSTANCE_SHADER_MODULE,
+            entry_point: "vsMain",
+        },
+        fragment: Some(ShaderEntry {
+            module: PROBE_FIRST_INSTANCE_SHADER_MODULE,
+            entry_point: "fsMain",
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            front_face: FrontFace::Ccw,
+            cull_mode: CullMode::None,
+            polygon_mode: PolygonMode::Fill,
+            depth_clamp: false,
+        },
+        depth_stencil: None,
+        multisample: MultisampleState {
+            samples: 1,
+            alpha_to_coverage: false,
+        },
+        color_targets: &PROBE_FIRST_INSTANCE_COLOR_TARGETS,
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -6882,6 +7433,88 @@ impl ClampProbe {
     }
 }
 
+/// One first-instance exercise's **readback** half, from the frame that set it
+/// up to the bytes that came back.
+///
+/// [`ClampProbe`]'s state machine on the first-instance probe's handle, down to
+/// the [`Unsupported`](Self::Unsupported) arm: the setup frame ends in the same
+/// `request_readback` and is answered by the same [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], and the one thing that can stop it before it
+/// starts is a device that withheld the feature its fixture needs.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum FirstInstanceProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — the zero draw's target's `Rgba8Unorm` texels
+        /// followed by the one draw's, each
+        /// [`PROBE_FIRST_INSTANCE_BLOCK_BYTES`] long.
+        bytes: Vec<u8>,
+    },
+    /// The device opened without [`Features::INDIRECT_FIRST_INSTANCE`], so
+    /// nothing was encoded and nothing will be: core WebGPU accepts only a zero
+    /// `firstInstance` in an indirect draw, and two zeroed structures would
+    /// agree with each other while proving nothing.
+    Unsupported,
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step, [`ClampProbe::Failed`]'s reasoning: a
+    /// readback is answered exactly once, so there is nothing left for a later
+    /// frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
+}
+
+impl FirstInstanceProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`ClampProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -7050,6 +7683,12 @@ struct Probe {
     /// hit under [`CLAMP_UNDECODABLE`]. Its own string for
     /// [`reason`](Self::reason)'s reason.
     clamp_reason: String,
+    first_instance: FirstInstanceProbe,
+    /// Why the first-instance probe stopped: the browser's own words under
+    /// [`FIRST_INSTANCE_FAILED`], or the [`DecodeError`](crate::DecodeError) the
+    /// drain hit under [`FIRST_INSTANCE_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
+    first_instance_reason: String,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -7095,6 +7734,8 @@ impl Probe {
             timestamp: TimestampProbe::Unasked,
             clamp: ClampProbe::Unasked,
             clamp_reason: String::new(),
+            first_instance: FirstInstanceProbe::Unasked,
+            first_instance_reason: String::new(),
             parity: ParityReport::new(),
         }
     }
@@ -7525,6 +8166,7 @@ impl Probe {
                 self.occlusion_values.absorb(&replies);
                 self.timestamp.absorb(&replies);
                 self.clamp.absorb(&replies);
+                self.first_instance.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -9140,6 +9782,240 @@ impl Probe {
     fn clamp_bytes(&self) -> &[u8] {
         match &self.clamp {
             ClampProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Whether the device this page opened has the browser's
+    /// `indirect-first-instance`.
+    ///
+    /// [`clamp_supported`](Self::clamp_supported)'s shape and its reason: a fact
+    /// the *device* reported, so a probe that could not run says why rather than
+    /// being silently skipped.
+    fn first_instance_supported(&mut self) -> bool {
+        self.opened()
+            .is_some_and(|caps| caps.features.contains(Features::INDIRECT_FIRST_INSTANCE))
+    }
+
+    /// Encode the first-instance setup frame: two colour targets, one pipeline,
+    /// the args and index buffers, a pass into each target that clears and
+    /// records one `draw_indexed_indirect`, the two copies into one buffer, and
+    /// the request that reads both blocks back.
+    ///
+    /// **One frame, two passes, one reply** — [`request_clamp`](Self::request_clamp)'s
+    /// shape, and the two draws are in passes of their own for its reason: what
+    /// is being compared is where each draw landed, and one target could only
+    /// hold whichever drew last.
+    ///
+    /// The two draws differ in the offset they read their arguments from and in
+    /// nothing else, so what separates their pictures is the `firstInstance` in
+    /// the structure at that offset. [`PROBE_FIRST_INSTANCE_ARGS_BYTES`] says
+    /// which reading of the buffer each outcome is.
+    ///
+    /// The writes are recorded before the encoder so `queue.writeBuffer` is
+    /// ordered on the queue ahead of the submit that reads the buffers.
+    ///
+    /// `false` on three counts, and the third is not a failure:
+    ///
+    /// * no device has opened — [`request_readback`](Self::request_readback)'s
+    ///   ordering rule, since every command here is a device method;
+    /// * the channel had no room, or another channel is installed;
+    /// * **the device opened without [`Features::INDIRECT_FIRST_INSTANCE`]**,
+    ///   which leaves the probe [`FIRST_INSTANCE_UNSUPPORTED`] and encodes
+    ///   nothing. Core WebGPU accepts only a zero `firstInstance` in an indirect
+    ///   draw, and a frame that quietly zeroed both structures instead would read
+    ///   back two identical blocks and call that a pass.
+    fn request_first_instance(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        if !self.first_instance_supported() {
+            self.first_instance = FirstInstanceProbe::Unsupported;
+            self.first_instance_reason.clear();
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(
+                    PROBE_FIRST_INSTANCE_ZERO_IMAGE,
+                    &probe_first_instance_image_desc("crcbl-webgpu first-instance zero image"),
+                );
+                stream.create_image_view(
+                    PROBE_FIRST_INSTANCE_ZERO_VIEW,
+                    &PROBE_FIRST_INSTANCE_ZERO_VIEW_DESC,
+                );
+                stream.create_image(
+                    PROBE_FIRST_INSTANCE_ONE_IMAGE,
+                    &probe_first_instance_image_desc("crcbl-webgpu first-instance one image"),
+                );
+                stream.create_image_view(
+                    PROBE_FIRST_INSTANCE_ONE_VIEW,
+                    &PROBE_FIRST_INSTANCE_ONE_VIEW_DESC,
+                );
+                stream.create_buffer(
+                    PROBE_FIRST_INSTANCE_BUFFER,
+                    &probe_first_instance_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_FIRST_INSTANCE_ARGS_BUFFER,
+                    &probe_first_instance_args_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_FIRST_INSTANCE_INDEX_BUFFER,
+                    &probe_first_instance_index_buffer_desc(),
+                );
+                stream.create_shader_module(
+                    PROBE_FIRST_INSTANCE_SHADER_MODULE,
+                    &PROBE_FIRST_INSTANCE_SHADER_MODULE_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_FIRST_INSTANCE_PIPELINE_LAYOUT,
+                    &PROBE_FIRST_INSTANCE_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_FIRST_INSTANCE_PIPELINE,
+                    &probe_first_instance_pipeline_desc(),
+                );
+                stream.write_buffer(
+                    PROBE_FIRST_INSTANCE_ARGS_BUFFER,
+                    0,
+                    &PROBE_FIRST_INSTANCE_ARGS_BYTES,
+                );
+                stream.write_buffer(
+                    PROBE_FIRST_INSTANCE_INDEX_BUFFER,
+                    0,
+                    &PROBE_FIRST_INSTANCE_INDEX_BYTES,
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu first-instance encoder"),
+                    queue: PROBE_FIRST_INSTANCE_QUEUE,
+                });
+                let zero = [probe_first_instance_color_attachment(
+                    PROBE_FIRST_INSTANCE_ZERO_VIEW,
+                )];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu first-instance zero pass"),
+                    color_attachments: &zero,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(
+                        PROBE_FIRST_INSTANCE_SIZE,
+                        PROBE_FIRST_INSTANCE_SIZE,
+                    ),
+                    timestamp_writes: None,
+                });
+                stream.bind_graphics_pipeline(PROBE_FIRST_INSTANCE_PIPELINE);
+                stream.bind_index_buffer(PROBE_FIRST_INSTANCE_INDEX_BUFFER, 0, IndexFormat::Uint16);
+                stream.draw_indexed_indirect(
+                    PROBE_FIRST_INSTANCE_ARGS_BUFFER,
+                    PROBE_FIRST_INSTANCE_ZERO_OFFSET,
+                    PROBE_FIRST_INSTANCE_DRAWS,
+                    PROBE_INDIRECT_TIGHT_STRIDE,
+                );
+                stream.end_render_pass();
+                let one = [probe_first_instance_color_attachment(
+                    PROBE_FIRST_INSTANCE_ONE_VIEW,
+                )];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu first-instance one pass"),
+                    color_attachments: &one,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(
+                        PROBE_FIRST_INSTANCE_SIZE,
+                        PROBE_FIRST_INSTANCE_SIZE,
+                    ),
+                    timestamp_writes: None,
+                });
+                stream.bind_graphics_pipeline(PROBE_FIRST_INSTANCE_PIPELINE);
+                stream.bind_index_buffer(PROBE_FIRST_INSTANCE_INDEX_BUFFER, 0, IndexFormat::Uint16);
+                stream.draw_indexed_indirect(
+                    PROBE_FIRST_INSTANCE_ARGS_BUFFER,
+                    PROBE_FIRST_INSTANCE_ONE_OFFSET,
+                    PROBE_FIRST_INSTANCE_DRAWS,
+                    PROBE_INDIRECT_TIGHT_STRIDE,
+                );
+                stream.end_render_pass();
+                // The zero draw's block first, so the readback's two halves are
+                // in the order the gate names them.
+                stream.copy_image_to_buffer(&probe_first_instance_copy(
+                    PROBE_FIRST_INSTANCE_ZERO_IMAGE,
+                    0,
+                ));
+                stream.copy_image_to_buffer(&probe_first_instance_copy(
+                    PROBE_FIRST_INSTANCE_ONE_IMAGE,
+                    PROBE_FIRST_INSTANCE_BLOCK_BYTES,
+                ));
+                stream.finish(PROBE_FIRST_INSTANCE_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_FIRST_INSTANCE_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_FIRST_INSTANCE_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu first-instance readback"),
+                        buffer: PROBE_FIRST_INSTANCE_BUFFER,
+                        offset: 0,
+                        size: probe_first_instance_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.first_instance = FirstInstanceProbe::Requested;
+            self.first_instance_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// first-instance readback and register its wait, unless it is already
+    /// waiting, ready or unsupported — [`poll_clamp`](Self::poll_clamp)'s
+    /// protocol on the first-instance handle.
+    fn poll_first_instance(&mut self) -> bool {
+        if !matches!(
+            self.first_instance,
+            FirstInstanceProbe::Requested | FirstInstanceProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_FIRST_INSTANCE_READBACK))
+        else {
+            return false;
+        };
+        self.first_instance = FirstInstanceProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the first-instance readback has got to.
+    fn first_instance_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.first_instance_reason = error.to_string();
+            return FIRST_INSTANCE_UNDECODABLE;
+        }
+        match &self.first_instance {
+            FirstInstanceProbe::Unasked => FIRST_INSTANCE_UNASKED,
+            FirstInstanceProbe::Requested => FIRST_INSTANCE_REQUESTED,
+            FirstInstanceProbe::Waiting { .. } => FIRST_INSTANCE_WAITING,
+            FirstInstanceProbe::Pending => FIRST_INSTANCE_PENDING,
+            FirstInstanceProbe::Ready { .. } => FIRST_INSTANCE_READY,
+            FirstInstanceProbe::Unsupported => FIRST_INSTANCE_UNSUPPORTED,
+            FirstInstanceProbe::Failed { reason } => {
+                self.first_instance_reason.clone_from(reason);
+                FIRST_INSTANCE_FAILED
+            }
+        }
+    }
+
+    /// The bytes the first-instance readback came back with, or an empty slice
+    /// if it has not.
+    fn first_instance_bytes(&self) -> &[u8] {
+        match &self.first_instance {
+            FirstInstanceProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -11973,6 +12849,101 @@ pub mod shim {
         })
     }
 
+    /// Whether the device this page opened has the browser's
+    /// `indirect-first-instance`.
+    ///
+    /// **Read before `__crcbl_web_gpu_probe_first_instance`, and the reason the
+    /// first-instance probe has a flag of its own**: it is what says whether a
+    /// [`super::FIRST_INSTANCE_UNSUPPORTED`] is a device that withheld the
+    /// feature or a request that never happened. `0` before a device opens.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance_supported() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.first_instance_supported()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Encode the first-instance setup frame — the two targets, the one
+    /// pipeline, the args and index buffers, a pass into each target that draws
+    /// the same quad off an argument structure of its own, the two copies, the
+    /// submit and the readback request.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// device opened without `indirect-first-instance`, the probe is re-entered,
+    /// or another channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_first_instance()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the first-instance readback once. `1` when a poll is on the stream,
+    /// `0` when there is nothing to poll for.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_first_instance()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `FIRST_INSTANCE_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.first_instance_state(),
+            Err(_) => super::FIRST_INSTANCE_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_first_instance_state`] starts — the browser's
+    /// words under [`FIRST_INSTANCE_FAILED`](super::FIRST_INSTANCE_FAILED), the
+    /// decode error under
+    /// [`FIRST_INSTANCE_UNDECODABLE`](super::FIRST_INSTANCE_UNDECODABLE), and
+    /// empty otherwise. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.first_instance_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.first_instance_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Where the two targets' texels start, once
+    /// [`__crcbl_web_gpu_probe_first_instance_state`] answers
+    /// [`super::FIRST_INSTANCE_READY`] — the zero draw's block first. Null while
+    /// it has not; the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.first_instance_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_first_instance_bytes_ptr`] points
+    /// at — the first-instance readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_first_instance_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.first_instance_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -12114,41 +13085,47 @@ mod tests {
         __crcbl_web_gpu_probe_fill, __crcbl_web_gpu_probe_fill_bytes_len,
         __crcbl_web_gpu_probe_fill_bytes_ptr, __crcbl_web_gpu_probe_fill_poll,
         __crcbl_web_gpu_probe_fill_reason_len, __crcbl_web_gpu_probe_fill_reason_ptr,
-        __crcbl_web_gpu_probe_fill_state, __crcbl_web_gpu_probe_graphics_pipeline,
-        __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
-        __crcbl_web_gpu_probe_indirect, __crcbl_web_gpu_probe_indirect_bytes_len,
-        __crcbl_web_gpu_probe_indirect_bytes_ptr, __crcbl_web_gpu_probe_indirect_poll,
-        __crcbl_web_gpu_probe_indirect_reason_len, __crcbl_web_gpu_probe_indirect_reason_ptr,
-        __crcbl_web_gpu_probe_indirect_state, __crcbl_web_gpu_probe_max_image_2d,
-        __crcbl_web_gpu_probe_msaa, __crcbl_web_gpu_probe_msaa_bytes_len,
-        __crcbl_web_gpu_probe_msaa_bytes_ptr, __crcbl_web_gpu_probe_msaa_poll,
-        __crcbl_web_gpu_probe_msaa_reason_len, __crcbl_web_gpu_probe_msaa_reason_ptr,
-        __crcbl_web_gpu_probe_msaa_samples, __crcbl_web_gpu_probe_msaa_state,
-        __crcbl_web_gpu_probe_occlusion, __crcbl_web_gpu_probe_occlusion_bytes_len,
-        __crcbl_web_gpu_probe_occlusion_bytes_ptr, __crcbl_web_gpu_probe_occlusion_poll,
-        __crcbl_web_gpu_probe_occlusion_reason_len, __crcbl_web_gpu_probe_occlusion_reason_ptr,
-        __crcbl_web_gpu_probe_occlusion_state, __crcbl_web_gpu_probe_occlusion_values_len,
-        __crcbl_web_gpu_probe_occlusion_values_ptr, __crcbl_web_gpu_probe_occlusion_values_state,
-        __crcbl_web_gpu_probe_parity, __crcbl_web_gpu_probe_parity_checked,
-        __crcbl_web_gpu_probe_parity_failures_len, __crcbl_web_gpu_probe_parity_failures_ptr,
-        __crcbl_web_gpu_probe_parity_held, __crcbl_web_gpu_probe_parity_report_len,
-        __crcbl_web_gpu_probe_parity_report_ptr, __crcbl_web_gpu_probe_pipeline_layout,
-        __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
-        __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
-        __crcbl_web_gpu_probe_present_reason_len, __crcbl_web_gpu_probe_present_reason_ptr,
-        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_readback_reason_len,
-        __crcbl_web_gpu_probe_readback_reason_ptr, __crcbl_web_gpu_probe_readback_state,
-        __crcbl_web_gpu_probe_reconfigure, __crcbl_web_gpu_probe_reconfigure_bytes_len,
-        __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
-        __crcbl_web_gpu_probe_reconfigure_reason_len, __crcbl_web_gpu_probe_reconfigure_reason_ptr,
-        __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_stencil, __crcbl_web_gpu_probe_stencil_bytes_len,
-        __crcbl_web_gpu_probe_stencil_bytes_ptr, __crcbl_web_gpu_probe_stencil_poll,
-        __crcbl_web_gpu_probe_stencil_reason_len, __crcbl_web_gpu_probe_stencil_reason_ptr,
-        __crcbl_web_gpu_probe_stencil_state, __crcbl_web_gpu_probe_surface,
-        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
-        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_fill_state, __crcbl_web_gpu_probe_first_instance,
+        __crcbl_web_gpu_probe_first_instance_bytes_len,
+        __crcbl_web_gpu_probe_first_instance_bytes_ptr, __crcbl_web_gpu_probe_first_instance_poll,
+        __crcbl_web_gpu_probe_first_instance_reason_len,
+        __crcbl_web_gpu_probe_first_instance_reason_ptr,
+        __crcbl_web_gpu_probe_first_instance_state, __crcbl_web_gpu_probe_first_instance_supported,
+        __crcbl_web_gpu_probe_graphics_pipeline, __crcbl_web_gpu_probe_image,
+        __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_indirect,
+        __crcbl_web_gpu_probe_indirect_bytes_len, __crcbl_web_gpu_probe_indirect_bytes_ptr,
+        __crcbl_web_gpu_probe_indirect_poll, __crcbl_web_gpu_probe_indirect_reason_len,
+        __crcbl_web_gpu_probe_indirect_reason_ptr, __crcbl_web_gpu_probe_indirect_state,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_msaa,
+        __crcbl_web_gpu_probe_msaa_bytes_len, __crcbl_web_gpu_probe_msaa_bytes_ptr,
+        __crcbl_web_gpu_probe_msaa_poll, __crcbl_web_gpu_probe_msaa_reason_len,
+        __crcbl_web_gpu_probe_msaa_reason_ptr, __crcbl_web_gpu_probe_msaa_samples,
+        __crcbl_web_gpu_probe_msaa_state, __crcbl_web_gpu_probe_occlusion,
+        __crcbl_web_gpu_probe_occlusion_bytes_len, __crcbl_web_gpu_probe_occlusion_bytes_ptr,
+        __crcbl_web_gpu_probe_occlusion_poll, __crcbl_web_gpu_probe_occlusion_reason_len,
+        __crcbl_web_gpu_probe_occlusion_reason_ptr, __crcbl_web_gpu_probe_occlusion_state,
+        __crcbl_web_gpu_probe_occlusion_values_len, __crcbl_web_gpu_probe_occlusion_values_ptr,
+        __crcbl_web_gpu_probe_occlusion_values_state, __crcbl_web_gpu_probe_parity,
+        __crcbl_web_gpu_probe_parity_checked, __crcbl_web_gpu_probe_parity_failures_len,
+        __crcbl_web_gpu_probe_parity_failures_ptr, __crcbl_web_gpu_probe_parity_held,
+        __crcbl_web_gpu_probe_parity_report_len, __crcbl_web_gpu_probe_parity_report_ptr,
+        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_present,
+        __crcbl_web_gpu_probe_present_bytes_len, __crcbl_web_gpu_probe_present_bytes_ptr,
+        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_reason_len,
+        __crcbl_web_gpu_probe_present_reason_ptr, __crcbl_web_gpu_probe_present_state,
+        __crcbl_web_gpu_probe_readback_reason_len, __crcbl_web_gpu_probe_readback_reason_ptr,
+        __crcbl_web_gpu_probe_readback_state, __crcbl_web_gpu_probe_reconfigure,
+        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
+        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_reason_len,
+        __crcbl_web_gpu_probe_reconfigure_reason_ptr, __crcbl_web_gpu_probe_reconfigure_state,
+        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_stencil,
+        __crcbl_web_gpu_probe_stencil_bytes_len, __crcbl_web_gpu_probe_stencil_bytes_ptr,
+        __crcbl_web_gpu_probe_stencil_poll, __crcbl_web_gpu_probe_stencil_reason_len,
+        __crcbl_web_gpu_probe_stencil_reason_ptr, __crcbl_web_gpu_probe_stencil_state,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -12396,7 +13373,9 @@ mod tests {
                 adapter: AdapterId(0),
                 label: Some("crcbl-webgpu probe".into()),
                 required_features: Features::COMPUTE,
-                optional_features: Features::TIMESTAMP_QUERY.union(Features::DEPTH_CLAMP),
+                optional_features: Features::TIMESTAMP_QUERY
+                    .union(Features::DEPTH_CLAMP)
+                    .union(Features::INDIRECT_FIRST_INSTANCE),
                 compatible_surface: None,
             }]
         );
@@ -17860,6 +18839,451 @@ mod tests {
         );
     }
 
+    /// **The shader paints the colour the gate calls "the quad landed here".**
+    #[test]
+    fn the_first_instance_wgsl_paints_the_colour_the_gate_asserts() {
+        let colour = wgsl_colour(PROBE_FIRST_INSTANCE_DRAW_BYTES);
+        assert!(
+            PROBE_FIRST_INSTANCE_WGSL.contains(&colour),
+            "the WGSL's fragment colour is the byte the readback is compared against: \
+             {PROBE_FIRST_INSTANCE_WGSL}"
+        );
+    }
+
+    /// **The quad the shader emits moves with the instance index, by a whole
+    /// half-target.**
+    ///
+    /// The whole probe rests on this: a vertex shader that never read
+    /// `@builtin(instance_index)` would paint the same half in both targets
+    /// whatever `firstInstance` carried, and a gate reading one target alone
+    /// would call that a pass. The shift is one full unit of clip space, which is
+    /// the quad's own width, so the two instances tile the target rather than
+    /// overlapping by a texel — a near-miss the tally could not name.
+    #[test]
+    fn the_first_instance_wgsl_shifts_the_quad_by_the_instance_index() {
+        assert!(
+            PROBE_FIRST_INSTANCE_WGSL.contains("@builtin(instance_index) instance: u32"),
+            "the vertex shader takes the instance index: {PROBE_FIRST_INSTANCE_WGSL}"
+        );
+        assert!(
+            PROBE_FIRST_INSTANCE_WGSL.contains("corner.x + f32(instance)"),
+            "the quad's x moves with it: {PROBE_FIRST_INSTANCE_WGSL}"
+        );
+        // The corner array spans exactly the left half, so `+ 1.0` lands the next
+        // instance on exactly the right half and nowhere else.
+        for corner in ["vec2<f32>(-1.0, -1.0)", "vec2<f32>(0.0, 1.0)"] {
+            assert!(
+                PROBE_FIRST_INSTANCE_WGSL.contains(corner),
+                "the quad spans -1..0 in x: {PROBE_FIRST_INSTANCE_WGSL}"
+            );
+        }
+    }
+
+    /// **The two colours are not a channel permutation of each other and their
+    /// alphas differ**, so a path that swapped `r` and `b` on the way out cannot
+    /// turn "cleared" into "painted". Each colour channel is a mid-tone, away
+    /// from the `0` and `255` an untouched or saturated one reads as.
+    #[test]
+    fn the_two_first_instance_colours_survive_a_channel_swap() {
+        let sorted = |bytes: [u8; 4]| {
+            let mut rgb = [bytes[0], bytes[1], bytes[2]];
+            rgb.sort_unstable();
+            rgb
+        };
+        assert_ne!(
+            sorted(PROBE_FIRST_INSTANCE_CLEAR_BYTES),
+            sorted(PROBE_FIRST_INSTANCE_DRAW_BYTES)
+        );
+        assert_ne!(
+            PROBE_FIRST_INSTANCE_CLEAR_BYTES[3],
+            PROBE_FIRST_INSTANCE_DRAW_BYTES[3]
+        );
+        for bytes in [
+            PROBE_FIRST_INSTANCE_CLEAR_BYTES,
+            PROBE_FIRST_INSTANCE_DRAW_BYTES,
+        ] {
+            for channel in &bytes[..3] {
+                assert!(
+                    *channel > 0 && *channel < 255,
+                    "every colour channel is a mid-tone: {bytes:?}"
+                );
+            }
+        }
+    }
+
+    /// **The clear the passes load with is the untouched reading byte for
+    /// byte**, so a texel neither draw reached reads back as the value the gate
+    /// calls "cleared" rather than as something near it.
+    #[test]
+    fn the_first_instance_clear_is_the_colour_the_gate_asserts() {
+        let clear = probe_first_instance_clear_value();
+        for (channel, byte) in clear.color.iter().zip(PROBE_FIRST_INSTANCE_CLEAR_BYTES) {
+            let encoded = (channel * 255.0).round() as u8;
+            assert_eq!(encoded, byte, "the clear encodes to the untouched bytes");
+        }
+    }
+
+    /// **The two argument structures differ in `firstInstance` and in nothing
+    /// else**, which is what makes the pair of readings a comparison rather than
+    /// two unrelated draws — and the decoy between them draws nothing, so a walk
+    /// that stepped by the packed size leaves the clear.
+    #[test]
+    fn the_first_instance_args_differ_in_first_instance_and_nothing_else() {
+        let field = |structure: u64, index: usize| {
+            let at = structure as usize + index * 4;
+            u32::from_le_bytes(
+                PROBE_FIRST_INSTANCE_ARGS_BYTES[at..at + 4]
+                    .try_into()
+                    .expect("four bytes"),
+            )
+        };
+        let zero = PROBE_FIRST_INSTANCE_ZERO_OFFSET;
+        let one = PROBE_FIRST_INSTANCE_ONE_OFFSET;
+        // indexCount, instanceCount, firstIndex and baseVertex, which the two
+        // structures share.
+        for index in 0..4 {
+            assert_eq!(
+                field(zero, index),
+                field(one, index),
+                "the two structures agree on field {index}"
+            );
+        }
+        assert_eq!(
+            field(zero, 0),
+            PROBE_FIRST_INSTANCE_INDEX_BYTES.len() as u32 / 2
+        );
+        assert_eq!(
+            field(zero, 1),
+            1,
+            "one instance each, so instance_index is firstInstance"
+        );
+        assert_eq!(field(zero, 4), 0, "the control draws instance zero");
+        assert_eq!(field(one, 4), 1, "the other draws instance one");
+        // The decoy, one tight stride in, draws nothing.
+        let decoy = u64::from(PROBE_INDIRECT_TIGHT_STRIDE);
+        assert_eq!(field(decoy, 0), 0, "the decoy's indexCount draws nothing");
+        // And the structure the second draw reads is wholly inside the buffer.
+        assert!(
+            one + u64::from(PROBE_INDIRECT_TIGHT_STRIDE)
+                <= probe_first_instance_args_buffer_desc().size
+        );
+    }
+
+    /// **Every first-instance handle is generation fifteen**, a generation past
+    /// the depth-clamp probe's `14 << 32` and every probe before it: the two
+    /// images, their two views, the three buffers, the module, the layout, the
+    /// pipeline, the command buffer, the queue and the readback are all live at
+    /// once and none may land in another probe's slot in the shared page.
+    #[test]
+    fn the_first_instance_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_FIRST_INSTANCE_ZERO_IMAGE.to_bits(),
+            PROBE_FIRST_INSTANCE_ONE_IMAGE.to_bits(),
+            PROBE_FIRST_INSTANCE_ZERO_VIEW.to_bits(),
+            PROBE_FIRST_INSTANCE_ONE_VIEW.to_bits(),
+            PROBE_FIRST_INSTANCE_BUFFER.to_bits(),
+            PROBE_FIRST_INSTANCE_ARGS_BUFFER.to_bits(),
+            PROBE_FIRST_INSTANCE_INDEX_BUFFER.to_bits(),
+            PROBE_FIRST_INSTANCE_SHADER_MODULE.to_bits(),
+            PROBE_FIRST_INSTANCE_PIPELINE_LAYOUT.to_bits(),
+            PROBE_FIRST_INSTANCE_PIPELINE.to_bits(),
+            PROBE_FIRST_INSTANCE_COMMAND_BUFFER.to_bits(),
+            PROBE_FIRST_INSTANCE_QUEUE.to_bits(),
+            PROBE_FIRST_INSTANCE_READBACK.to_bits(),
+        ] {
+            assert_eq!(
+                bits >> 32,
+                15,
+                "every first-instance handle is generation fifteen"
+            );
+        }
+        // The sets that share a generation are kept apart by their indices.
+        assert_ne!(
+            PROBE_FIRST_INSTANCE_ZERO_IMAGE.to_bits(),
+            PROBE_FIRST_INSTANCE_ONE_IMAGE.to_bits()
+        );
+        assert_ne!(
+            PROBE_FIRST_INSTANCE_ZERO_VIEW.to_bits(),
+            PROBE_FIRST_INSTANCE_ONE_VIEW.to_bits()
+        );
+        for other in [
+            PROBE_FIRST_INSTANCE_ARGS_BUFFER.to_bits(),
+            PROBE_FIRST_INSTANCE_INDEX_BUFFER.to_bits(),
+        ] {
+            assert_ne!(PROBE_FIRST_INSTANCE_BUFFER.to_bits(), other);
+        }
+        assert_ne!(
+            PROBE_FIRST_INSTANCE_ARGS_BUFFER.to_bits(),
+            PROBE_FIRST_INSTANCE_INDEX_BUFFER.to_bits()
+        );
+        // A generation clear of the depth-clamp probe (`14 << 32`), the nearest
+        // neighbour.
+        assert_ne!(
+            PROBE_FIRST_INSTANCE_BUFFER.to_bits(),
+            PROBE_CLAMP_BUFFER.to_bits()
+        );
+    }
+
+    /// **The two copies land in two blocks of one buffer, in the order the gate
+    /// reads them**, and the second block's offset is 256-aligned — which
+    /// `copyTextureToBuffer` requires and a size that was not a whole number of
+    /// rows would break.
+    #[test]
+    fn the_first_instance_copies_fill_two_blocks_of_one_buffer() {
+        let zero = probe_first_instance_copy(PROBE_FIRST_INSTANCE_ZERO_IMAGE, 0);
+        let one = probe_first_instance_copy(
+            PROBE_FIRST_INSTANCE_ONE_IMAGE,
+            PROBE_FIRST_INSTANCE_BLOCK_BYTES,
+        );
+        assert_eq!(zero.buffer, one.buffer);
+        assert_eq!(zero.buffer_offset, 0);
+        assert_eq!(one.buffer_offset, PROBE_FIRST_INSTANCE_BLOCK_BYTES);
+        assert_eq!(PROBE_FIRST_INSTANCE_BLOCK_BYTES % 256, 0);
+        assert_eq!(
+            probe_first_instance_buffer_desc().size,
+            PROBE_FIRST_INSTANCE_BLOCK_BYTES * 2,
+            "the buffer holds both blocks and nothing more"
+        );
+        assert_eq!(
+            (PROBE_FIRST_INSTANCE_SIZE as u64) * 4 % 256,
+            0,
+            "the rows are aligned"
+        );
+        assert_ne!(zero.image, one.image);
+    }
+
+    /// **A device without `indirect-first-instance` gets no frame at all**, and
+    /// says so by name.
+    ///
+    /// The alternative is the failure this repository names outright: a probe
+    /// that quietly zeroed both structures would read back two identical blocks,
+    /// and "not supported here" would arrive as "passed".
+    #[test]
+    fn the_first_instance_export_is_refused_on_a_device_without_the_feature() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_first_instance_supported(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_first_instance(), 0);
+        assert!(take_frame().is_empty(), "a refused request encodes nothing");
+        assert_eq!(
+            __crcbl_web_gpu_probe_first_instance_state(),
+            FIRST_INSTANCE_UNSUPPORTED
+        );
+        assert_eq!(__crcbl_web_gpu_probe_first_instance_bytes_len(), 0);
+    }
+
+    /// **One export, a whole frame**: two targets, one pipeline, the two buffer
+    /// writes, a pass into each target with a draw of its own, two copies into
+    /// one buffer, and the readback — then the answer reaching the bytes exports.
+    ///
+    /// The two `DrawIndexedIndirect` commands are read out of the frame and their
+    /// offsets asserted, rather than only their names: a frame whose two draws
+    /// read the same structure has the same command names and replays to two
+    /// identical blocks, which is precisely the reading this probe must not be
+    /// able to produce by accident. A `cargo test` has no `navigator.gpu`, so the
+    /// replayer is stood in for by a `ReplyWriter` — which is why this proves the
+    /// state machine and the browser gate proves the pixels.
+    #[test]
+    fn the_first_instance_export_encodes_two_draws_that_differ_only_in_the_offset() {
+        grant(&granted("has indirect first instance"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(
+            1,
+            &DeviceCaps {
+                features: Features::COMPUTE | Features::INDIRECT_FIRST_INSTANCE,
+                ..device_caps()
+            },
+        );
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+
+        assert_eq!(__crcbl_web_gpu_probe_first_instance_supported(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_first_instance(), 1);
+        let frame = take_frame();
+        let names: Vec<&str> = frame.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+                "WriteBuffer",
+                "WriteBuffer",
+                "CreateCommandEncoder",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "BindIndexBuffer",
+                "DrawIndexedIndirect",
+                "EndRenderPass",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "BindIndexBuffer",
+                "DrawIndexedIndirect",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "each draw is in a pass of its own, into a target of its own, and both are copied out"
+        );
+        let draws: Vec<(BufferHandle, u64, u32)> = frame
+            .iter()
+            .filter_map(|command| match command {
+                Command::DrawIndexedIndirect {
+                    buffer,
+                    offset,
+                    draw_count,
+                    ..
+                } => Some((*buffer, *offset, *draw_count)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            draws,
+            vec![
+                (
+                    PROBE_FIRST_INSTANCE_ARGS_BUFFER,
+                    PROBE_FIRST_INSTANCE_ZERO_OFFSET,
+                    PROBE_FIRST_INSTANCE_DRAWS,
+                ),
+                (
+                    PROBE_FIRST_INSTANCE_ARGS_BUFFER,
+                    PROBE_FIRST_INSTANCE_ONE_OFFSET,
+                    PROBE_FIRST_INSTANCE_DRAWS,
+                ),
+            ],
+            "one args buffer, two offsets, and the offsets are the two structures'"
+        );
+        // The zero draw's target is copied to offset zero, so the first block the
+        // gate reads is the one whose `firstInstance` was zero.
+        let offsets: Vec<(ImageHandle, u64)> = frame
+            .iter()
+            .filter_map(|command| match command {
+                Command::CopyImageToBuffer {
+                    image,
+                    buffer_offset,
+                    ..
+                } => Some((*image, *buffer_offset)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offsets,
+            vec![
+                (PROBE_FIRST_INSTANCE_ZERO_IMAGE, 0),
+                (
+                    PROBE_FIRST_INSTANCE_ONE_IMAGE,
+                    PROBE_FIRST_INSTANCE_BLOCK_BYTES
+                ),
+            ]
+        );
+        assert_eq!(
+            __crcbl_web_gpu_probe_first_instance_state(),
+            FIRST_INSTANCE_REQUESTED
+        );
+
+        // The poll, and the answer that resolves it.
+        assert_eq!(__crcbl_web_gpu_probe_first_instance_poll(), 1);
+        assert_eq!(
+            __crcbl_web_gpu_probe_first_instance_state(),
+            FIRST_INSTANCE_WAITING
+        );
+        // The enumeration spent sequence 0 and the device request 1, so the
+        // frame above occupies the next `frame.len()` and the poll follows it.
+        let poll_sequence = 2 + frame.len() as u64;
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_FIRST_INSTANCE_READBACK,
+            }]
+        );
+        let block = PROBE_FIRST_INSTANCE_BLOCK_BYTES as usize;
+        let half = |left: [u8; 4], right: [u8; 4]| {
+            let mut rows: Vec<u8> = Vec::with_capacity(block);
+            for _ in 0..PROBE_FIRST_INSTANCE_SIZE {
+                for column in 0..PROBE_FIRST_INSTANCE_SIZE {
+                    rows.extend_from_slice(if column < PROBE_FIRST_INSTANCE_SIZE / 2 {
+                        &left
+                    } else {
+                        &right
+                    });
+                }
+            }
+            rows
+        };
+        let mut bytes = half(
+            PROBE_FIRST_INSTANCE_DRAW_BYTES,
+            PROBE_FIRST_INSTANCE_CLEAR_BYTES,
+        );
+        bytes.extend(half(
+            PROBE_FIRST_INSTANCE_CLEAR_BYTES,
+            PROBE_FIRST_INSTANCE_DRAW_BYTES,
+        ));
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_FIRST_INSTANCE_READBACK, &bytes);
+        deliver(replies.bytes());
+        assert_eq!(
+            __crcbl_web_gpu_probe_first_instance_state(),
+            FIRST_INSTANCE_READY
+        );
+        assert_eq!(
+            u64::from(__crcbl_web_gpu_probe_first_instance_bytes_len()),
+            PROBE_FIRST_INSTANCE_BLOCK_BYTES * 2
+        );
+        let ptr = __crcbl_web_gpu_probe_first_instance_bytes_ptr();
+        assert!(!ptr.is_null());
+        // SAFETY: the length above is the probe's own, and nothing has called
+        // back into wasm since it was read.
+        let read = unsafe { core::slice::from_raw_parts(ptr, block * 2) };
+        // The first texel of each block, and the first texel past each block's
+        // half — which is where the two draws disagree.
+        let midpoint = (PROBE_FIRST_INSTANCE_SIZE / 2) as usize * 4;
+        assert_eq!(&read[..4], &PROBE_FIRST_INSTANCE_DRAW_BYTES);
+        assert_eq!(
+            &read[midpoint..midpoint + 4],
+            &PROBE_FIRST_INSTANCE_CLEAR_BYTES
+        );
+        assert_eq!(&read[block..block + 4], &PROBE_FIRST_INSTANCE_CLEAR_BYTES);
+        assert_eq!(
+            &read[block + midpoint..block + midpoint + 4],
+            &PROBE_FIRST_INSTANCE_DRAW_BYTES
+        );
+    }
+
+    /// The first-instance probe's `Failed` reaches the ABI: the state export
+    /// answers [`FIRST_INSTANCE_FAILED`] and the reason exports carry the
+    /// browser's own words.
+    #[test]
+    fn the_first_instance_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().first_instance = FirstInstanceProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(
+            __crcbl_web_gpu_probe_first_instance_state(),
+            FIRST_INSTANCE_FAILED
+        );
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_first_instance_reason_ptr,
+                __crcbl_web_gpu_probe_first_instance_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
     /// `web/engine/gpu-probe.js` — the page's half of this file's state codes,
     /// pulled in whole so the mirror can be checked without a browser.
     ///
@@ -17911,6 +19335,8 @@ mod tests {
         "PROBE_OCCLUSION_QUERIES",
         "PROBE_TIMESTAMP_QUERIES",
         "PROBE_CLAMP_SIZE",
+        "PROBE_FIRST_INSTANCE_SIZE",
+        "PROBE_FIRST_INSTANCE_DRAWS",
     ];
 
     /// Every state code this crate publishes, against the
@@ -18124,6 +19550,20 @@ mod tests {
                 ],
             ),
             (
+                "FIRST_INSTANCE",
+                "FIRST_INSTANCE",
+                codes![
+                    FIRST_INSTANCE_UNASKED,
+                    FIRST_INSTANCE_REQUESTED,
+                    FIRST_INSTANCE_WAITING,
+                    FIRST_INSTANCE_PENDING,
+                    FIRST_INSTANCE_READY,
+                    FIRST_INSTANCE_UNDECODABLE,
+                    FIRST_INSTANCE_UNSUPPORTED,
+                    FIRST_INSTANCE_FAILED
+                ],
+            ),
+            (
                 "COMPUTE",
                 "COMPUTE",
                 codes![
@@ -18219,11 +19659,11 @@ mod tests {
         );
 
         assert_eq!(
-            tables, 22,
+            tables, 23,
             "gpu-probe.js's table count moved; the mirror above has to move with it"
         );
         assert_eq!(
-            codes, 131,
+            codes, 139,
             "gpu-probe.js's code count moved; the mirror above has to move with it"
         );
     }
@@ -18267,7 +19707,7 @@ mod tests {
                 .iter()
                 .filter(|name| mirrored.contains(*name))
                 .count(),
-            126,
+            134,
             "probe.rs's state-code count moved; the mirror above has to move with it"
         );
 
@@ -18446,7 +19886,7 @@ mod tests {
 
         assert_eq!(
             shims.len(),
-            151,
+            159,
             "`shim`'s export count moved; the `# Exports` table has to move with it"
         );
         let documented: BTreeSet<&str> = rows.iter().copied().collect();
