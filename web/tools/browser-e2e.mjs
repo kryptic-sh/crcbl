@@ -84,18 +84,18 @@
 // e2e job as a known trap, and a harness whose browser never started would
 // otherwise print nothing and succeed.
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  LAUNCH_TIMEOUT_MS,
-  browserFlags,
+  evaluate,
   findBrowser,
-  readDevToolsPort,
-  stopBrowser,
+  launch as launchBrowser,
+  openPage,
+  pause,
+  stopEverything,
+  until as pollUntil,
 } from './browser-launch.mjs';
 import { ISOLATION_HEADERS, MIME, serve } from './serve.mjs';
 
@@ -104,26 +104,6 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // ---------------------------------------------------------------------------
 // Arguments and environment
 // ---------------------------------------------------------------------------
-
-/**
- * Every browser this process started and has not stopped.
- *
- * A leaked Chromium is not a tidiness problem: it holds a GPU context and a
- * profile directory, and a developer who runs the harness a few times ends up
- * with several of them. [`fail`] and the exit hook below close over this so
- * that no exit path can skip the kill.
- *
- * **Declared here, above the argument parsing, and that placement is the fix
- * for a real bug.** `fail` calls `stopEverything`, which reads this; `fail` and
- * `stopEverything` are function declarations and hoist, but a `const` does not.
- * With this further down the file, every argument-parsing failure printed its
- * real message and then died in the temporal dead zone with
- * `ReferenceError: Cannot access 'running' before initialization`, burying the
- * diagnosis under a stack trace pointing at the cleanup path.
- *
- * @type {Set<{ stop: () => void }>}
- */
-const running = new Set();
 
 /** @type {Record<string, string>} */
 const args = {};
@@ -824,20 +804,8 @@ const PROVOCATION_MS = 5_000;
  */
 const isRealMiss = (path) => !path.endsWith('favicon.ico');
 
-function stopEverything() {
-  for (const browser of running) browser.stop();
-  running.clear();
-}
-
-// `process.exit` does not unwind, so a `finally` is not enough on its own.
-process.on('exit', stopEverything);
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    stopEverything();
-    process.exit(130);
-  });
-}
-
+// `stopEverything` and the exit hooks that call it are in
+// `web/tools/browser-launch.mjs`, with the launch that registers each browser.
 function fail(message) {
   console.error(`web e2e: ${message}`);
   stopEverything();
@@ -854,7 +822,13 @@ if (!['auto', 'hardware', 'swiftshader'].includes(ADAPTER)) {
   fail(`--adapter must be auto, hardware or swiftshader, got "${ADAPTER}"`);
 }
 
-const pause = (ms) => new Promise((ok) => setTimeout(ok, ms));
+/**
+ * Polls until the condition holds, on this gate's own `--timeout` by default.
+ *
+ * The poll itself is shared — see `until` in `web/tools/browser-launch.mjs`,
+ * which takes its deadline rather than keeping one.
+ */
+const until = (probe, timeout = TIMEOUT_MS) => pollUntil(probe, timeout);
 
 // ---------------------------------------------------------------------------
 // The static server
@@ -930,225 +904,30 @@ const CONTROL_ROUTES = {
 // The browser
 // ---------------------------------------------------------------------------
 
-// `findBrowser`, the flag builder and the kill are all in
+// `findBrowser`, the launch, the CDP client and the kill are all in
 // `web/tools/browser-launch.mjs`: the three gates in this directory need the
-// same browser started the same way, and every platform-specific thing about
-// doing that — where the binary lives, which flags name the real device, how to
-// take a process tree down — is decided there once. What stays here is the part
-// this gate alone owns: the window size its pixel counts depend on, and the
-// adapter mode its readback control picks.
+// same browser started the same way and driven the same way, and every
+// platform-specific thing about doing that — where the binary lives, which
+// flags name the real device, how to take a process tree down — is decided
+// there once. What stays here is the part this gate alone owns: the window size
+// its pixel counts depend on, and the adapter mode its readback control picks.
 
 /**
- * Starts the browser and returns its DevTools endpoint.
+ * Starts the browser this gate needs.
  *
- * The endpoint comes from `DevToolsActivePort`, which Chrome writes into the
- * profile once it is listening. Polling that file is how the launch is
- * synchronised: a sleep would be a flake on a slow machine and wasted time on a
- * fast one.
+ * The window size is fixed because the canvas is sized by CSS against the
+ * viewport, so a fixed window makes this gate's pixel counts mean the same
+ * thing on every machine. `mode` is whichever adapter the preflight is asking
+ * about.
  */
-async function launch(binary, mode) {
-  const profile = mkdtempSync(join(tmpdir(), 'crcbl-web-e2e-'));
-  // The canvas is sized by CSS against the viewport, so a fixed window makes
-  // this gate's pixel counts mean the same thing on every machine.
-  const flags = browserFlags({
-    profile,
+const launch = (binary, mode) =>
+  launchBrowser({
+    binary,
     mode,
+    profilePrefix: 'crcbl-web-e2e-',
     extra: ['--window-size=1024,768'],
+    fail,
   });
-  const child = spawn(binary, [...flags, 'about:blank'], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-    // Its own process group, so `stop` can kill the whole tree. Chromium is
-    // half a dozen processes and a `kill` aimed at the parent leaves the GPU
-    // process and the zygotes behind when the parent is wedged — which is how
-    // this harness left three Chromiums on the machine that wrote it.
-    detached: true,
-    env: {
-      ...process.env,
-      // A developer's `~/.config/chromium-flags.conf` is read by the launcher
-      // on some distributions and appended to the command line. On the machine
-      // this was written on it set `--ozone-platform=wayland`, which in a
-      // headless run takes the GPU process down with it and hides WebGPU
-      // entirely — indistinguishable from a browser that has no WebGPU.
-      // Pointing XDG_CONFIG_HOME at the throwaway profile makes the run depend
-      // on the flags above and nothing else.
-      XDG_CONFIG_HOME: profile,
-    },
-  });
-
-  /** Chrome's own diagnostics. Printed only when something fails. */
-  const stderr = [];
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => {
-    for (const line of chunk.split('\n'))
-      if (line.trim()) stderr.push(line.trimEnd());
-  });
-
-  let exited = null;
-  child.on('exit', (code, signal) => {
-    exited = signal ? `signal ${signal}` : `exit ${code}`;
-  });
-
-  const browser = {
-    child,
-    stderr,
-    flags,
-    mode,
-    endpoint: '',
-    stop() {
-      running.delete(browser);
-      stopBrowser(child, profile);
-    },
-  };
-  running.add(browser);
-
-  const portFile = join(profile, 'DevToolsActivePort');
-  const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (exited) {
-      console.error(stderr.join('\n'));
-      fail(`the browser stopped before it listened (${exited})`);
-    }
-    const endpoint = readDevToolsPort(portFile);
-    if (endpoint) {
-      browser.endpoint = `ws://127.0.0.1:${endpoint.port}${endpoint.path}`;
-      return browser;
-    }
-    await pause(50);
-  }
-  console.error(stderr.join('\n'));
-  return fail('the browser never wrote DevToolsActivePort');
-}
-
-// ---------------------------------------------------------------------------
-// A Chrome DevTools Protocol client, in about forty lines
-// ---------------------------------------------------------------------------
-//
-// Node 22 shipped a global `WebSocket`, so a CDP session needs no library. The
-// protocol is JSON both ways: `{ id, method, params }` out, `{ id, result }` or
-// `{ method, params }` back.
-
-class Cdp {
-  #socket;
-  #next = 0;
-  #pending = new Map();
-  /** @type {Map<string, Array<(params: any) => void>>} */
-  #listeners = new Map();
-
-  static async connect(url) {
-    const client = new Cdp();
-    client.#socket = new WebSocket(url);
-    await new Promise((ok, no) => {
-      client.#socket.onopen = ok;
-      client.#socket.onerror = () => no(new Error(`cannot reach ${url}`));
-    });
-    client.#socket.onmessage = (event) =>
-      client.#dispatch(JSON.parse(event.data));
-    return client;
-  }
-
-  #dispatch(message) {
-    if (message.id !== undefined) {
-      const slot = this.#pending.get(message.id);
-      if (!slot) return;
-      this.#pending.delete(message.id);
-      if (message.error)
-        slot.reject(
-          new Error(`${message.error.message} (${message.error.code})`)
-        );
-      else slot.resolve(message.result);
-      return;
-    }
-    for (const handler of this.#listeners.get(message.method) ?? [])
-      handler(message.params);
-  }
-
-  on(method, handler) {
-    if (!this.#listeners.has(method)) this.#listeners.set(method, []);
-    this.#listeners.get(method).push(handler);
-  }
-
-  send(method, params = {}) {
-    this.#next += 1;
-    const id = this.#next;
-    return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
-      this.#socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  close() {
-    this.#socket.close();
-  }
-}
-
-/**
- * Opens a fresh tab and attaches to it.
- *
- * Fresh, rather than the one the command line opened: the browser's *first*
- * renderer is created before the GPU process has finished reporting what it can
- * do, and a page loaded into it can miss `navigator.gpu` entirely even when the
- * browser has it. An hour went into chasing flags for that symptom.
- */
-async function openPage(browser) {
-  const control = await Cdp.connect(browser.endpoint);
-  const created = await control.send('Target.createTarget', {
-    url: 'about:blank',
-  });
-  control.close();
-  return Cdp.connect(
-    browser.endpoint.replace(
-      /\/devtools\/browser\/.*$/,
-      `/devtools/page/${created.targetId}`
-    )
-  );
-}
-
-/**
- * Evaluates `expression` in the page and returns its value.
- *
- * `awaitPromise` is on for everything, so an `async` IIFE works; anything that
- * throws comes back as a rejection here rather than as `undefined`, because a
- * check that silently reads `undefined` is a check that passes for the wrong
- * reason.
- */
-async function evaluate(page, expression) {
-  const result = await page.send('Runtime.evaluate', {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
-  });
-  if (result.exceptionDetails) {
-    const details = result.exceptionDetails;
-    throw new Error(
-      details.exception?.description ?? details.text ?? 'evaluation threw'
-    );
-  }
-  return result.result.value;
-}
-
-/**
- * Polls `probe` until it returns something truthy, or the deadline passes.
- *
- * `docs/plan/ROADMAP.md`: "Poll for the condition, never sleep." The interval is
- * one frame at 60 Hz, so a condition that becomes true on a rAF tick is seen on
- * the next one.
- */
-async function until(probe, timeout = TIMEOUT_MS) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    // A probe that throws is a condition not met yet — `crcbl` does not exist
-    // until the module has loaded — rather than a reason to abandon the run.
-    let value;
-    try {
-      value = await probe();
-    } catch {
-      value = null;
-    }
-    if (value) return value;
-    await pause(16);
-  }
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // Reading the canvas back

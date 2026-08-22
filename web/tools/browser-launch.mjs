@@ -1,4 +1,4 @@
-// Finding, configuring and killing the browser the three gates in this
+// Finding, configuring, driving and killing the browser the three gates in this
 // directory drive.
 //
 // `browser-e2e.mjs`, `probe-e2e.mjs` and `render-harness-e2e.mjs` each own a
@@ -7,6 +7,12 @@
 // three times over. It was pulled out when the gates were asked to run on macOS
 // and Windows, because all three copies were wrong in the same three ways at
 // once and a fourth copy of the fix was not worth having.
+//
+// What is here is everything up to the first check: the flags, the launch and
+// its `DevToolsActivePort` poll, the kill and the exit hooks that guarantee it,
+// a CDP client, the fresh tab, and `Runtime.evaluate`. Each gate keeps its own
+// `fail` — the name it prints and the exit code it chooses are its own — and
+// hands it in, the way {@link findBrowser} has always taken it.
 //
 // EVERYTHING PLATFORM-SPECIFIC ABOUT LAUNCHING CHROME IS IN THIS FILE, and none
 // of it is a detail:
@@ -35,8 +41,9 @@
 // `docs/backlog.md` records from Chrome 151, and the reason the gates run
 // Windows in `hardware` mode.
 
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 /**
@@ -127,13 +134,11 @@ function candidates() {
 /**
  * How long to wait for Chrome to write `DevToolsActivePort` before giving up.
  *
- * **Here rather than in each driver, because the three of them disagreed.** All
- * three run the same launch-and-poll loop — see this repository's backlog entry
- * on the three copies of the Chromium plumbing — and on 2026-08-20 two of them
- * were raised from thirty seconds and the third was not, which is precisely the
- * failure mode duplication produces. They import this file for
- * {@link readDevToolsPort} already, so the budget lives beside the thing it
- * bounds.
+ * **Here rather than in each driver, because the three of them disagreed.** On
+ * 2026-08-20 two were raised from thirty seconds and the third was not — it
+ * held an unnamed `30_000` literal — which is precisely the failure mode
+ * duplication produces. It was the first piece of the plumbing to be shared;
+ * the loop it bounds followed it into {@link launch} here.
  *
  * **Two minutes, and it was thirty seconds.** Three of the last eight
  * non-cancelled Pages runs on `main` failed at this deadline, and the failing
@@ -355,4 +360,279 @@ export function stopBrowser(child, profile) {
   } catch (error) {
     console.error(`  ..   left ${profile} behind: ${error.message}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// The launch, and the browsers this process has to answer for
+// ---------------------------------------------------------------------------
+
+/**
+ * Every browser {@link launch} started and has not stopped.
+ *
+ * A leaked Chromium is not a tidiness problem: it holds a GPU context and a
+ * profile directory, and a developer who runs a gate a few times ends up with
+ * several of them.
+ *
+ * @type {Set<{ stop: () => void }>}
+ */
+const running = new Set();
+
+/** Kills every browser this process started. Safe to call twice. */
+export function stopEverything() {
+  for (const browser of running) browser.stop();
+  running.clear();
+}
+
+// `process.exit` does not unwind, so a `finally` around the run is not enough on
+// its own, and a signal does not run one at all.
+//
+// **Registered here, on import, because one gate did not have them.**
+// `render-harness-e2e.mjs` stopped its browser from a `finally` in `main` and
+// called `process.exit` from `fail` — so every startup error it diagnosed (a
+// harness that never finished, a harness that could not run) left the Chromium
+// and its profile directory behind, and so did every Ctrl-C. The two gates that
+// did register these had them written out twice.
+process.on('exit', stopEverything);
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    stopEverything();
+    process.exit(130);
+  });
+}
+
+/** Resolves after `ms`. */
+export const pause = (ms) => new Promise((ok) => setTimeout(ok, ms));
+
+/**
+ * Starts the browser and returns it, listening, with its DevTools endpoint.
+ *
+ * The endpoint comes from `DevToolsActivePort`, which Chrome writes into the
+ * profile once it is listening. Polling that file is how the launch is
+ * synchronised: a sleep would be a flake on a slow machine and wasted time on a
+ * fast one.
+ *
+ * `profilePrefix` names the throwaway profile directory, so a leaked one says
+ * which gate left it. `mode` and `extra` go straight to {@link browserFlags}.
+ * `fail` is the caller's own, as it is for {@link findBrowser}: it prefixes the
+ * gate's name and does not return, and the browser is registered above before
+ * the poll begins, so the exit hook kills it whichever way `fail` leaves.
+ *
+ * @param {{
+ *   binary: string,
+ *   mode: string,
+ *   profilePrefix: string,
+ *   extra?: string[],
+ *   fail: (message: string) => never,
+ * }} options
+ * @returns {Promise<{
+ *   stderr: string[],
+ *   flags: string[],
+ *   endpoint: string,
+ *   stop: () => void,
+ * }>}
+ */
+export async function launch({
+  binary,
+  mode,
+  profilePrefix,
+  extra = [],
+  fail,
+}) {
+  const profile = mkdtempSync(join(tmpdir(), profilePrefix));
+  const flags = browserFlags({ profile, mode, extra });
+  const child = spawn(binary, [...flags, 'about:blank'], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    // Its own process group, so `stop` can kill the whole tree. Chromium is
+    // half a dozen processes and a `kill` aimed at the parent leaves the GPU
+    // process and the zygotes behind when the parent is wedged — which is how
+    // this harness left three Chromiums on the machine that wrote it.
+    detached: true,
+    env: {
+      ...process.env,
+      // A developer's `~/.config/chromium-flags.conf` is read by the launcher
+      // on some distributions and appended to the command line. On the machine
+      // this was written on it set `--ozone-platform=wayland`, which in a
+      // headless run takes the GPU process down with it and hides WebGPU
+      // entirely — indistinguishable from a browser that has no WebGPU.
+      // Pointing XDG_CONFIG_HOME at the throwaway profile makes the run depend
+      // on the flags above and nothing else.
+      XDG_CONFIG_HOME: profile,
+    },
+  });
+
+  /** Chrome's own diagnostics. Printed only when something fails. */
+  const stderr = [];
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    for (const line of chunk.split('\n'))
+      if (line.trim()) stderr.push(line.trimEnd());
+  });
+
+  let exited = null;
+  child.on('exit', (code, signal) => {
+    exited = signal ? `signal ${signal}` : `exit ${code}`;
+  });
+
+  const browser = {
+    stderr,
+    flags,
+    endpoint: '',
+    stop() {
+      running.delete(browser);
+      stopBrowser(child, profile);
+    },
+  };
+  running.add(browser);
+
+  const portFile = join(profile, 'DevToolsActivePort');
+  const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (exited) {
+      console.error(stderr.join('\n'));
+      fail(`the browser stopped before it listened (${exited})`);
+    }
+    const endpoint = readDevToolsPort(portFile);
+    if (endpoint) {
+      browser.endpoint = `ws://127.0.0.1:${endpoint.port}${endpoint.path}`;
+      return browser;
+    }
+    await pause(50);
+  }
+  console.error(stderr.join('\n'));
+  return fail('the browser never wrote DevToolsActivePort');
+}
+
+// ---------------------------------------------------------------------------
+// A Chrome DevTools Protocol client, in about forty lines
+// ---------------------------------------------------------------------------
+//
+// Node 22 shipped a global `WebSocket`, so a CDP session needs no library. The
+// protocol is JSON both ways: `{ id, method, params }` out, `{ id, result }` or
+// `{ method, params }` back.
+
+class Cdp {
+  #socket;
+  #next = 0;
+  #pending = new Map();
+  /** @type {Map<string, Array<(params: any) => void>>} */
+  #listeners = new Map();
+
+  static async connect(url) {
+    const client = new Cdp();
+    client.#socket = new WebSocket(url);
+    await new Promise((ok, no) => {
+      client.#socket.onopen = ok;
+      client.#socket.onerror = () => no(new Error(`cannot reach ${url}`));
+    });
+    client.#socket.onmessage = (event) =>
+      client.#dispatch(JSON.parse(event.data));
+    return client;
+  }
+
+  #dispatch(message) {
+    if (message.id !== undefined) {
+      const slot = this.#pending.get(message.id);
+      if (!slot) return;
+      this.#pending.delete(message.id);
+      if (message.error)
+        slot.reject(
+          new Error(`${message.error.message} (${message.error.code})`)
+        );
+      else slot.resolve(message.result);
+      return;
+    }
+    for (const handler of this.#listeners.get(message.method) ?? [])
+      handler(message.params);
+  }
+
+  on(method, handler) {
+    if (!this.#listeners.has(method)) this.#listeners.set(method, []);
+    this.#listeners.get(method).push(handler);
+  }
+
+  send(method, params = {}) {
+    this.#next += 1;
+    const id = this.#next;
+    return new Promise((resolve, reject) => {
+      this.#pending.set(id, { resolve, reject });
+      this.#socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  close() {
+    this.#socket.close();
+  }
+}
+
+/**
+ * Opens a fresh tab and attaches to it.
+ *
+ * Fresh, rather than the one the command line opened: the browser's *first*
+ * renderer is created before the GPU process has finished reporting what it can
+ * do, and a page loaded into it can miss `navigator.gpu` entirely even when the
+ * browser has it. An hour went into chasing flags for that symptom.
+ */
+export async function openPage(browser) {
+  const control = await Cdp.connect(browser.endpoint);
+  const created = await control.send('Target.createTarget', {
+    url: 'about:blank',
+  });
+  control.close();
+  return Cdp.connect(
+    browser.endpoint.replace(
+      /\/devtools\/browser\/.*$/,
+      `/devtools/page/${created.targetId}`
+    )
+  );
+}
+
+/**
+ * Evaluates `expression` in the page and returns its value.
+ *
+ * `awaitPromise` is on for everything, so an `async` IIFE works; anything that
+ * throws comes back as a rejection here rather than as `undefined`, because a
+ * check that silently reads `undefined` is a check that passes for the wrong
+ * reason.
+ */
+export async function evaluate(page, expression) {
+  const result = await page.send('Runtime.evaluate', {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (result.exceptionDetails) {
+    const details = result.exceptionDetails;
+    throw new Error(
+      details.exception?.description ?? details.text ?? 'evaluation threw'
+    );
+  }
+  return result.result.value;
+}
+
+/**
+ * Polls `probe` until it returns something truthy, or the deadline passes.
+ *
+ * `docs/plan/ROADMAP.md`: "Poll for the condition, never sleep." The interval is
+ * one frame at 60 Hz, so a condition that becomes true on a rAF tick is seen on
+ * the next one.
+ *
+ * `timeout` has no default here on purpose: the two gates that poll take theirs
+ * from their own `--timeout`, and a default in this file would be a third
+ * deadline able to disagree with both.
+ */
+export async function until(probe, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    // A probe that throws is a condition not met yet — `crcbl` does not exist
+    // until the module has loaded — rather than a reason to abandon the run.
+    let value;
+    try {
+      value = await probe();
+    } catch {
+      value = null;
+    }
+    if (value) return value;
+    await pause(16);
+  }
+  return null;
 }

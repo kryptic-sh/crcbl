@@ -54,37 +54,39 @@
 //      the two apart — the device errors are listed under the table.
 //   2  the harness could not run at all (no browser, no adapter, wasm failed).
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import {
-  LAUNCH_TIMEOUT_MS,
-  browserFlags,
+  evaluate,
   findBrowser,
-  readDevToolsPort,
-  stopBrowser,
+  launch,
+  openPage,
+  pause,
+  stopEverything,
 } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
 const RUN_TIMEOUT_MS = 180_000;
 
+// `stopEverything` and the exit hooks that call it are in
+// `web/tools/browser-launch.mjs`, with the launch that registers each browser.
+// It is called here as well as from those hooks so that this path says at the
+// point of the exit what it leaves behind: nothing.
 function fail(message) {
   console.error(`render-harness-e2e: ${message}`);
+  stopEverything();
   process.exit(2);
-}
-
-function pause(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ---------------------------------------------------------------------------
 // Browser launch
 // ---------------------------------------------------------------------------
 
-// `findBrowser`, the flag builder and the kill are in
+// `findBrowser`, the launch, the CDP client and the kill are in
 // `web/tools/browser-launch.mjs`, shared with the two gates beside this one.
+// This gate adds nothing of its own to the launch: it asks for `ADAPTER` and
+// takes the rest.
 //
 // **`swiftshader` is the default and stays the default**: this harness renders
 // offscreen and compares every scene against a golden image, so it is asking a
@@ -108,130 +110,6 @@ if (!['hardware', 'swiftshader'].includes(ADAPTER)) {
       `— there is no \`auto\` here, because a harness that silently changed ` +
       `rasteriser would change what its comparison means without saying so`
   );
-}
-
-async function launch(binary) {
-  const profile = mkdtempSync(join(tmpdir(), 'crcbl-harness-e2e-'));
-  const flags = browserFlags({ profile, mode: ADAPTER });
-  const child = spawn(binary, [...flags, 'about:blank'], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-    detached: true,
-    env: { ...process.env, XDG_CONFIG_HOME: profile },
-  });
-
-  const stderr = [];
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => {
-    for (const line of chunk.split('\n'))
-      if (line.trim()) stderr.push(line.trimEnd());
-  });
-
-  let exited = null;
-  child.on('exit', (code, signal) => {
-    exited = signal ? `signal ${signal}` : `exit ${code}`;
-  });
-
-  const browser = {
-    stderr,
-    flags,
-    endpoint: '',
-    stop() {
-      stopBrowser(child, profile);
-    },
-  };
-
-  const portFile = join(profile, 'DevToolsActivePort');
-  const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (exited) {
-      console.error(stderr.join('\n'));
-      browser.stop();
-      return fail(`the browser stopped before it listened (${exited})`);
-    }
-    const endpoint = readDevToolsPort(portFile);
-    if (endpoint) {
-      browser.endpoint = `ws://127.0.0.1:${endpoint.port}${endpoint.path}`;
-      return browser;
-    }
-    await pause(50);
-  }
-  console.error(stderr.join('\n'));
-  browser.stop();
-  return fail('the browser never wrote DevToolsActivePort');
-}
-
-// ---------------------------------------------------------------------------
-// A minimal Chrome DevTools Protocol client
-// ---------------------------------------------------------------------------
-
-class Cdp {
-  #socket;
-  #next = 0;
-  #pending = new Map();
-
-  static async connect(url) {
-    const client = new Cdp();
-    client.#socket = new WebSocket(url);
-    await new Promise((ok, no) => {
-      client.#socket.onopen = ok;
-      client.#socket.onerror = () => no(new Error(`cannot reach ${url}`));
-    });
-    client.#socket.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      if (message.id === undefined) return;
-      const slot = client.#pending.get(message.id);
-      if (!slot) return;
-      client.#pending.delete(message.id);
-      if (message.error)
-        slot.reject(
-          new Error(`${message.error.message} (${message.error.code})`)
-        );
-      else slot.resolve(message.result);
-    };
-    return client;
-  }
-
-  send(method, params = {}) {
-    this.#next += 1;
-    const id = this.#next;
-    return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
-      this.#socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  close() {
-    this.#socket.close();
-  }
-}
-
-async function openPage(browser) {
-  const control = await Cdp.connect(browser.endpoint);
-  const created = await control.send('Target.createTarget', {
-    url: 'about:blank',
-  });
-  control.close();
-  return Cdp.connect(
-    browser.endpoint.replace(
-      /\/devtools\/browser\/.*$/,
-      `/devtools/page/${created.targetId}`
-    )
-  );
-}
-
-async function evaluate(page, expression) {
-  const result = await page.send('Runtime.evaluate', {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
-  });
-  if (result.exceptionDetails) {
-    const details = result.exceptionDetails;
-    throw new Error(
-      details.exception?.description ?? details.text ?? 'evaluation threw'
-    );
-  }
-  return result.result.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +243,12 @@ async function main() {
   console.log(`render-harness-e2e: adapter ${ADAPTER}`);
 
   const server = await serve(site, { host: '127.0.0.1' });
-  const browser = await launch(findBrowser(fail));
+  const browser = await launch({
+    binary: findBrowser(fail),
+    mode: ADAPTER,
+    profilePrefix: 'crcbl-harness-e2e-',
+    fail,
+  });
   let page;
   try {
     page = await openPage(browser);
@@ -378,6 +261,14 @@ async function main() {
     // Poll for the harness to finish. It sets `window.harnessDone` once it has
     // driven every scene, whatever the outcome — a page that never sets it is a
     // page that failed to boot, which the timeout turns into a hard failure.
+    //
+    // Written out rather than run through the shared `until`, which the two
+    // check gates use: that one answers `null` on the deadline and swallows a
+    // throwing probe, and neither is right here. A page that cannot be
+    // evaluated in at all is this gate's exit 2 rather than a condition not met
+    // yet, and the deadline is a failure rather than an answer. The interval is
+    // coarse because one boolean over the wire every quarter second is enough
+    // to notice a run that takes minutes.
     const deadline = Date.now() + RUN_TIMEOUT_MS;
     let done = false;
     while (Date.now() < deadline) {

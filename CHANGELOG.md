@@ -907,6 +907,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`render-harness-e2e.mjs` left a Chromium and its profile behind on every
+  error it diagnosed.** It stopped the browser from a `finally` in `main`, and
+  its own `fail` calls `process.exit`, which does not unwind one — so a harness
+  that never finished, a harness that could not run, and every Ctrl-C leaked the
+  whole process tree. Reproduced by interrupting the driver mid-run: twelve
+  chromium processes and the profile directory survived, and none do now. The
+  browser registry and the exit and signal hooks the two other browser gates
+  each had their own copy of are now in `browser-launch.mjs`, which registers
+  every browser `launch` starts, so no gate can be written without them.
+
 - **`sandbox --backend` offered four backends of six, and both rejection
   messages are now built from the enum.** `apps/sandbox` named `vk`, `mtl`,
   `dx12` and `null`, having never been updated when `wgpu` and `webgpu` were
