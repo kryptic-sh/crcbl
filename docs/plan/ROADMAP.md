@@ -166,9 +166,10 @@ It is the **churn** sample and it earned the name: an 18,000-tick soak asserts
 the entity and collider accounting on every tick while the game spawns and
 destroys constantly, and `hundreds_of_spawns_and_deaths_leak_nothing` is what
 found that `GameModule::tick` runs after the ECS sweep. What the sample was
-built to produce is the findings note below — nine places the engine resisted a
-game that was neither breakout nor flappy, three of which are S1B findings
-coming round a second time.
+built to produce was a findings note — nine places the engine resisted a game
+that was neither breakout nor flappy, three of them the second game's findings
+coming round again. What became of all three lists is below; what is still open
+out of them is in `docs/backlog.md`.
 
 **P4B is complete: pixel art has a pipeline, and both games are drawn with it.**
 Eleven slices merged, from a format nothing could read to two retrofitted
@@ -551,465 +552,49 @@ artifact's exports == what the shim calls) and `web/tools/smoke.mjs`, which
 instantiates the deployed artifact under node with every import stubbed and
 drives the documented boot order.
 
-### S1B findings: what a second game found
+### What the second, third and fourth games found
 
-> **Status correction, 2026-08-09: findings 1, 2, 3, 4, 5 and 6 are all
-> closed.** The narrative below and in the S2/S3 sections still reads as though
-> several were open, because it was written as each sample landed and never
-> revised. It is kept as the record of what each sample _found_;
-> `docs/backlog.md` carries the verified closure list, checked by reading each
-> sample's manifest and the crates named — not by trusting this table. In short:
-> 1 by `SpriteRenderer` (P4B), 2 by `crates/crcbl/src/web.rs`, 3 inside the
-> phase that found it, 4 by `crcbl::store::record::Record`, 5 by
-> `crcbl_audio::mixer` reached through the blanket
-> `impl AudioSource for Arc<T>`, and 6 by the umbrella's re-exports. Where a
-> finding's text below says something is "owed" or "written a fourth time", read
-> it as history.
+Every sample after breakout carried the same exit criterion — _a findings note
+listing every place the engine's API resisted a game that was not the last one,
+even if the list is empty, because empty is itself the result_. None of the
+three lists was empty, and each answered a different question. The second told
+us whether a seam had been designed or merely fitted to breakout. The third told
+us whether the gaps the second found were being closed, and whether the copies
+made to work around them stayed in step — both answers were no. The fourth told
+us what happens to a duplication nobody closed on the deadline it was given: the
+browser entry point missed two deadlines by name and was written four times, and
+the audio and persistence copies drifted into three spellings while it waited.
 
-The sample's whole purpose, and its stated exit criterion — _"a findings note
-listing every place the engine's API resisted a game that was not breakout, even
-if the list is empty, because empty is itself the result"_. It is not empty.
+**That method is the part worth keeping, and it is why the lists are not
+reproduced here.** Every finding they raised is now either closed in the tree or
+carried in `docs/backlog.md` as an open entry, and a section that restated them
+would be a second copy of the backlog going stale beside it — which is what the
+"status correction" banner this replaces was admitting. `git log` holds each
+list as it was written.
 
-Each entry is a place two games with nothing else in common were pushed into the
-same workaround, which is the only evidence that distinguishes a gap from a
-preference. None of them were fixed inside the sample: growing the engine is
-what this sample is meant to _reveal_ the need for.
+**What closed.** The three seams the lists kept naming: `crcbl::web_exports!`
+and `impl_web_pending!` for the browser entry point,
+`crcbl::store::record::Record` with `Backing::platform` for "one number kept
+between sessions", and `crcbl_audio::mixer`'s `play`/`cue`/`set_listener` for
+"play this buffer once, panned". With them went `SpriteRenderer`'s instanced
+pass and its `batch_count`, `PhysicsWorld::broadphase_stats`, the
+`overlap_sphere_into` allocation, the server's tick/sweep order, `Sprite`'s
+`#[non_exhaustive]`, and the wasm32 rustdoc gate.
 
-1. **~~`ForwardRenderer` draws exactly one instance, so both games draw their
-   world through the UI pass.~~ Closed at P4B.** `begin_frame` takes a single
-   `model: Mat4` and `add_passes` records exactly
-   `draw_indexed(0..index_count, 0, 0..1)`. Breakout put its forty bricks
-   through `crcbl-ui`'s draw list and kept the paddle as the one lit mesh;
-   flappy put its pipes through the same door and kept the bird. Two unrelated
-   games, the same shape, the same reason — which is what bought
-   `SpriteRenderer`, an instanced world-space pass, rather than a third
-   workaround. Both samples now draw their worlds through it and neither uses
-   `ForwardRenderer` at all. This finding is what says a 2D game could not wait
-   for the 3D half. **That half has since landed** — see the 2026-08-10 entry
-   below; what P7 still owes is meshlets, QEM LOD and the material table.
+**What is still open** lives in `docs/backlog.md` and nowhere else: music
+streaming and ducking, the voice limit and stealing, `sweep_body`'s missing
+exclusion list, `overlap_sphere`'s fabricated `ShapeHit`, angular velocity, the
+BVH-traversal-order neighbour sum, horde's arena-size decision, the unrun
+windowed native path, and the fact that every performance number in this project
+was taken on an offscreen image ring rather than a real swapchain.
 
-2. **The browser entry point is per-sample and is the same file twice.**
-   `apps/flappy/src/web.rs` is `apps/breakout/src/web.rs` with a different
-   prefix: prepare, boot, one frame per `requestAnimationFrame`, status,
-   shutdown, and a log queue the page drains, plus the `Stage` state machine
-   around the polled start-up. The only genuinely per-game parts are the symbol
-   prefix and the two types named in `Stage`. `crcbl-shell`, `crcbl-audio` and
-   `crcbl-store` each export their own `__crcbl_web_*` ABI; the sixth — the one
-   that owns the loop — is left to every sample to write out. ~~**Owed before
-   S2**, which will otherwise write it a third time.~~ **The deadline was
-   missed: S2 wrote it a third time**, and the fix now costs three call sites
-   rather than two. ~~Re-owed before S3~~ **and missed again: S3 wrote a
-   fourth**, so the fix is now four call sites. See S2 finding 1, S3 finding 1
-   and `docs/backlog.md`.
-
-3. **The web tooling assumed there was one sample, and three pieces of it broke
-   on contact.** Closed in this phase rather than carried, because a broken gate
-   is not a finding, it is a broken gate. `check-exports.mjs` required every
-   `__crcbl_*` declared anywhere in the workspace to be exported by the artifact
-   under test, so breakout's check failed on flappy's symbols the moment they
-   existed; `smoke.mjs` had `__crcbl_breakout_` written into a dozen call sites;
-   and the browser gate asserted breakout's own HUD strings inline. All three
-   are now scoped to a named sample. This is the entry that most vindicates the
-   sample: none of it was visible from reading the code, and all of it would
-   have been discovered by whoever wrote the third demo instead.
-
-4. **`crcbl-store` has no "one number, kept between sessions".**
-   `apps/flappy/src/best.rs` and `apps/breakout/src/high_score.rs` are the same
-   file: three platform arms (native, headless, OPFS), a four-byte encode, a
-   corrupt-file case and a "headless persists nothing" rule. The crate offers a
-   `StorageSource` and an atomic write and stops there. **Owed by P10**, where
-   the settings UI arrives and will want the same thing a third time.
-
-5. **`crcbl-audio` has no "play this buffer once, panned".** The crate has a
-   device seam, a stream, a decoder and a full spatial cue grammar — and between
-   the stream and the grammar there is nothing, so each sample writes its own
-   voice queue, its own mixer source and its own interleaved-stereo playhead.
-   Both got the playhead right only because breakout had already got it wrong
-   once and left the comment. **Owed by P10**, alongside music streaming and
-   ducking.
-
-   **Resolved after S3**, and the diagnosis above was half wrong in a way worth
-   recording: the layer was not missing, it was
-   `crates/crcbl-audio/src/mixer.rs` all along and it could not be called.
-   `Mixer::play` wanted `&mut self`, `AudioStream::open` took its source by
-   value, and nothing could hold both ends — so four samples independently
-   concluded the crate had nothing to offer. A gap and an API that cannot be
-   reached look identical from a call site. The fix is in the delivered list
-   above; music streaming and ducking are still owed.
-
-6. **The `crcbl` umbrella re-exports the graphics stack and nothing else.**
-   `apps/flappy/Cargo.toml` names ten engine crates for the same reason
-   breakout's manifest names eleven: ECS, physics, input, net, server, client,
-   audio and store have no re-export. Breakout's manifest already recorded this;
-   flappy is the evidence that it is not a property of breakout. The fix is
-   `crcbl::ecs` / `::phys` / `::net` / … once the simulation crates stabilise.
-
-**What did not resist**, which is worth stating because it is the result the
-sample was equally likely to produce: the ECS, the fixed-tick server, the
-client-side interpolation, `crcbl-phys`'s bodies and colliders, the input action
-map, the render graph, the shell seam and the polled start-up all took a game
-built the other way round — gravity instead of no gravity, one button instead of
-two axes, entities created and destroyed forever instead of spawned once — with
-no change and no argument. The seams that were designed against breakout are the
-ones that held; the gaps are all in the _convenience_ layer above them, which is
-the half nobody has written yet.
-
-**A coverage note, not a finding.** Flappy's collision uses `sweep_sphere`
-because it is the correct query, but at this game's speeds a point test at the
-end of the tick catches every pipe a swept one does — verified down to a tick
-rate of 3 Hz. The CCD path is exercised, not demonstrated; `docs/backlog.md`
-records it as the gap it is.
-
-### S2 findings: what a third game found
-
-Same shape as the S1B note above, and the same rule: each entry is a place a
-game with nothing else in common was pushed into a workaround the earlier
-samples were pushed into too, and none of them were fixed inside the sample.
-Gathered from all three sub-slices — the game core, the art, and this one.
-
-A third consumer turns out to answer a different question from a second. The
-second tells you whether a seam was designed or merely fitted to breakout; the
-third tells you whether the _gaps_ the second found are being closed, and
-whether the copies made to work around them stay in step. Both answers here are
-no.
-
-1. **Three S1B findings came round again, and one of them was named for this
-   phase by number.** Finding 2 said the browser entry point was "owed before
-   S2, which will otherwise write it a third time". S2 wrote it a third time:
-   `apps/asteroids/src/web.rs` is `apps/flappy/src/web.rs` with a different
-   prefix. Finding 4 (`crcbl-store` has no "one number, kept between sessions")
-   and finding 5 (`crcbl-audio` has no "play this buffer once, panned") are both
-   owed by P10 and both were written a third time here. Finding 6 stands as
-   stated: this sample's manifest names eleven engine crates because the `crcbl`
-   umbrella re-exports the graphics stack and nothing else.
-
-   The cost of each has changed, which is the new information. Every one of them
-   is now "one shared implementation **plus three call sites to migrate**", and
-   the next sample makes it four. `docs/backlog.md` carries the itemised version
-   for the browser entry point, including why this slice declined to do it — it
-   is an engine-API change to `crates/` plus edits to two samples this slice was
-   not otherwise touching, and the JS half of the same duplication was done as
-   its own piece of work for exactly that reason.
-
-2. **The copies have started to drift, and a duplication that drifts is worse
-   than one that does not.** `apps/breakout/src/audio.rs` spells its entry point
-   `play_panned(id, emitter_x)` — one axis, no `y`, no listener — and has no
-   play counter at all, so breakout's cues cannot be asserted about;
-   `apps/flappy/src/audio.rs` has `play_at(id, listener_x, x, y)` and a
-   monotonic `plays`, added in P4B (`44837fc`) precisely because `voices()`
-   could not answer "was this cue emitted". Nothing carried that counter back to
-   breakout, because nothing links the two files. The persistence pair is the
-   same story one level down: `HighScore` in `high_score.rs` writing
-   `high_score.bin` against `Best` in `best.rs` writing `best.bin`, with
-   line-for-line identical bodies. A reader of either copy can no longer tell
-   what "the pattern" is.
-
-   The `web.rs` trio has **not** drifted yet — flappy's and asteroids' were
-   diffed with the sample name substituted out and the executable difference is
-   one extra field in a log line — which is what makes this a prediction rather
-   than a complaint. It is the youngest of the three duplications.
-
-3. **~~`crcbl-audio` has no listener~~, and no representation of a held sound.**
-   Two things the second sample could not have shown. **The listener half is
-   closed**: `Mixer` holds a `Mutex<Listener>`, starts at `Listener::ORIGIN` and
-   has `set_listener`, whose doc makes the same argument this finding did.
-
-   ~~`spatial::compute_cue` takes the listener's position as an argument on
-   every call, so "where the ears are" is a convention each game invents at each
-   call site — three games, three conventions, two of them undocumented until
-   asteroids' `audio.rs` wrote them down. There is no `set_listener`, no
-   listener transform, nothing that makes the answer one thing.~~
-
-   And thrust is the first cue any sample has needed that is _sustained_ rather
-   than an edge: the player holds the key. The crate had one-shot voices and
-   nothing reachable else — no start/stop handle — so the engine was a short
-   pulse re-fired every `game::THRUST_CUE_PERIOD`, and because the cue was
-   raised inside the deterministic tick that period was **simulation state**. An
-   audio implementation detail sat in the replay hash. This was the strongest
-   form finding 5 took, and a real looping-voice API deleted it outright:
-   `THRUST_CUE_PERIOD` and `GameLogic::thrust_cue_timer` are gone, the
-   simulation keeps a plain `thrusting` bool derived from the same tick's input,
-   and `audio::Audio::set_thrust` holds one looping voice and re-aims it at the
-   ship each tick. Note that `Voice::with_looping` had existed since P4A — the
-   loop was never the missing piece, the handle to steer one was.
-
-4. **`crcbl-phys` owes six things, found by being the P6 slice's first
-   consumer.** Itemised in `docs/backlog.md`. **Two are closed**:
-   ~~`DampingForce` has no per-entity route where `ThrustForce::world_force`
-   does~~ — `DampingForce::world_force` exists and its doc names this finding's
-   own reasoning, cap included; and ~~segment CCD has earned a named method and
-   has none~~ — `PhysicsSystem::sweep_body` is that method.
-
-   **Four stand.** There is no "what does entity E overlap, excluding these"
-   query, so the ship carries no collider at all and both earlier samples remove
-   and re-insert the sweeper's own collider around every sweep — `sweep_body`'s
-   own doc concedes it, under the heading "The swept entity must have no
-   collider". `PhysicsSystem::overlap_sphere` still fabricates its `ShapeHit`
-   (`t: 0.0`, normal `+Y`, `started_inside: true`) and no caller in the
-   workspace can use it. There is still no angular velocity, torque or
-   quaternion integration — `RigidBody` is `mass`, `inverse_mass`, `velocity`
-   and `force_accum` — so the ship integrates its own heading by hand. And a
-   consumer cannot measure broadphase quality, so the wrap-is-a-teleport rule is
-   chosen on an argument rather than on a number.
-
-   Two of P6's open questions are _answered_ rather than owed, which is what a
-   demand-driven physics build is for: a wrap is a teleport and a teleport is a
-   remove-and-re-insert, uniformly and with no distance threshold; and yes,
-   segment CCD is worth a named entry point.
-
-5. **`GameModule::tick` runs after the ECS sweep, so a game's destructions lag
-   by a tick.** `crcbl_ecs::World::tick` sweeps its deferred-destruction queue
-   at the end; `crcbl_server::Server::tick` calls `world.tick()` and _then_
-   `module.tick(&mut world)`. So everything a module destroys sits in the pool
-   for one more tick, and a game reading `World::entity_count()` between ticks
-   reads a count that is high by however many things died. Found by asteroids'
-   leak test, which compares against `1 + rocks + bullets` on every tick and
-   failed immediately; flappy's equivalent asserts a `<=` ceiling and tolerated
-   this without noticing. The snapshot is also emitted while those entities are
-   still in the pool. Two fixes, and the choice is the engine's — both in
-   `docs/backlog.md`.
-
-6. **~~`Sprite` is a public-field struct, so every new field is a breaking
-   change.~~** **Closed.** Adding `rotation` for this sample broke five literals
-   in `apps/*/src/art.rs` and four inside `crcbl-render` itself, none of which
-   had anything to do with turning. `Sprite` is now `#[non_exhaustive]` with
-   `Sprite::new` plus `with_rotation`/`with_tint`, and its doc cites this
-   finding by name; the fields stay `pub`, so only _construction_ moved.
-
-7. **The rustdoc gate has never read a single `web.rs`.** CI runs
-   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace` on the host target only,
-   and every sample's browser entry point is behind
-   `#[cfg(target_arch = "wasm32")]` — so the one module in each sample that is
-   almost entirely documentation, and that the JS shim is written against, is
-   the one module never checked. Measured with the same flags against
-   `--target wasm32-unknown-unknown`: **4 errors in breakout and 5 in flappy**,
-   all broken or private intra-doc links. Asteroids' copy had the same set and
-   was fixed as it was written. Found only because the third copy was built for
-   wasm before it was believed.
-
-8. **The debug panel really is one thing to switch on**, which sample rule 4
-   asks to be checked rather than assumed — "a sample that cannot turn the panel
-   on is a finding about the panel". It is not a finding. Asteroids is the first
-   sample built _after_ `DebugOverlay` existed rather than retrofitted onto it,
-   and switching it on is `DebugOverlay::with_visible(…)` in the constructor,
-   `record(dt)` and `render(…)` in the frame, and one `if let Some(timings)` for
-   the GPU pass timers because a device without timestamp queries has none. No
-   sample-specific module, no plumbing. Recorded as a result because the rule
-   asked for one either way.
-
-9. **Adding a demo to the site is one content file and two one-line list
-   entries** — checked by doing it, because the claim had been wrong before. The
-   whole of it: `web/pages/asteroids.html` (a content file that
-   `<!--include-->`s the shared window), one row in
-   `web/tools/build-pages.mjs`'s `DEMOS` (the bar), one row in `web/build.sh`'s
-   `DEMOS` (the wasm build), a two-file demo directory (`main.js` at 33 lines of
-   literal symbol names, and an empty asset manifest), one entry in
-   `web/tools/browser-e2e.mjs`'s expectation table, one CI step, and the index
-   page's own card and call-to-action, which are prose. **No existing page was
-   edited**, which is the property the shared template was built for, and
-   `build-pages.mjs` refuses a demo page that does not include the shared window
-   — falsified by removing the include and watching the build fail.
-
-   The roadmap's claim of "a content file and one line in the demo bar" is
-   therefore true of the chrome and understates the build: there are _two_
-   lists, one for the bar and one for the artifacts, and nothing keeps them in
-   step. **S3 found two more** — the gate's `EXPECTATIONS` table and the
-   per-demo CI step — so the real count is four, and `web/README.md` was wrong
-   about it until horde was added.
-
-**What did not resist.** The ECS, the fixed-tick server, `crcbl-phys`'s bodies
-and colliders, the input action map, the render graph, the shell seam, the
-polled browser start-up, `crcbl-store`'s atomic write, `crcbl-audio`'s cue
-grammar and null stream, the sprite pass and the menu system all took a game
-built around constant creation and destruction — a bullet every sixth of a
-second, one rock becoming two, a whole wave at a time, a field that wraps — with
-no change and no argument. The gaps above are all in the _convenience_ layer
-above those seams, which is still the half nobody has written; the seams
-themselves have now survived three unrelated games.
-
-**Two coverage notes, not findings.** No golden image covers a single asteroids
-pixel: the browser gate proves the canvas is not blank, not one flat colour and
-changes between frames (89 distinct colours at 959×463 on SwiftShader), and
-nothing proves it is the _right_ picture — in particular that a rotated
-`SampleMode::Pixel` sprite looks right on a real driver. And the three audio
-cues are synthesised deterministically from a fixed seed, so a golden buffer is
-possible and there is not one; nobody has listened to them on a real device.
-
-### S3 findings: what a fourth game found, and what the numbers found
-
-Same shape as the S1B and S2 notes above, and the same rule: each entry is a
-place a game with nothing else in common was pushed into a workaround, and none
-of them were fixed inside the sample. Gathered from all three sub-slices — the
-core loop, the art, and this one.
-
-The fourth consumer answers a third kind of question. The second told us whether
-a seam was designed or merely fitted to breakout; the third told us whether the
-gaps the second found were being closed. The fourth tells us what happens to a
-duplication nobody closed on the deadline it was given — and, because this is
-the sample that exists to be measured rather than played, what the phases the
-roadmap was saving it for are actually worth.
-
-1. **S1B finding 2's deadline has now been missed twice, by name, and the cost
-   has grown by a third.** It said the browser entry point was "owed before S2,
-   which will otherwise write it a third time"; S2 wrote it a third time and
-   re-owed it **before S3**. `apps/horde/src/web.rs` is
-   `apps/asteroids/src/web.rs` with a different prefix — the fourth copy, and
-   the second missed deadline for the same reason each time: it is an engine-API
-   change to `crates/` plus edits to samples the slice was not otherwise
-   touching. The fix is now one shared implementation plus **four** call sites,
-   four sets of `STATUS_*` constants, four prefixes through a macro and four
-   browser gates. Findings 4 (`crcbl-store` has no "one number, kept between
-   sessions") and 5 (`crcbl-audio` has no "play this buffer once, panned") were
-   each written a fourth time here too, and finding 6 stands: this manifest
-   names eleven engine crates.
-
-   **What changed is the evidence, not the complaint.** S2 predicted the
-   `web.rs` trio would drift and it still has not; the _other_ two have drifted
-   further. Four samples now spell the audio entry point three different ways —
-   `play_panned(id, emitter_x)`, `play_at(id, listener_x, x, y)`,
-   `play_at(id, x, y)` and `play_at(id, listener, at)` — and breakout still has
-   no play counter. The persistence copies now differ in what they even _store_:
-   three keep a score and this one keeps a **time**, truncated to whole seconds
-   so the comparison agrees with the `m:ss` the HUD shows. That last difference
-   is the useful one, because it says exactly which half is missing from the
-   engine: the _policy_ is genuinely per-game and the _plumbing_ — three
-   platform arms, a four-byte encode, a corrupt-file case,
-   headless-persists-nothing — has been identical in four games running.
-
-2. **`crcbl-audio` has no voice limit, no priority and no stealing**, and this
-   is the first sample that could not ignore it. The other three raise a handful
-   of cues a second. This one raises a cue per kill and a cue per gem against a
-   fire cooldown whose floor is a twentieth of a second, so a late run raises
-   about forty a second and every one of them is a voice that lives until it
-   runs out; `AudioSource::fill` walks whatever is in the queue on the audio
-   thread. `apps/horde/src/audio.rs` caps it at sixteen and refuses the newest
-   voice, which is the crudest answer that is honest, and counts the refusals.
-   It also forced the distinction the crate's shape hides: **"did this cue
-   happen" and "was there a speaker free" are different questions**, so `plays`
-   counts the emission before the cap and `voices()` counts what is sounding —
-   the trap flappy named and the one a `voices()`-based test walks into twice as
-   easily here.
-
-3. **~~There is still no listener anywhere in the crate~~, and this game is the
-   one that makes it hurt.** **Closed** — `Mixer::set_listener` is the one place
-   the answer lives now, and the standoff moved onto the listener with it (see
-   `docs/backlog.md` for the precision consequence of that move). The finding as
-   it was written:
-
-   `spatial::compute_cue` takes the listener's position on every call. Breakout
-   pans on one axis; flappy's bird sits at a fixed offset; asteroids nails the
-   listener to the origin because its camera never moves. Horde's camera
-   **follows the player**, so the only listener that agrees with the picture is
-   the player's own position, and it is threaded through every call site by
-   hand. Four games, four conventions, and the fourth is the first one where
-   getting it wrong is audible rather than theoretical: an origin-listener copy
-   of asteroids' version was written first and
-   `where_a_cue_happens_and_where_the_player_stands_both_change_how_it_sounds`
-   is what rejected it.
-
-4. **`crcbl-phys` owes four more things, found at scale rather than by shape.**
-   Itemised in `docs/backlog.md`. **Two are closed**: ~~`PhysicsSystem` has no
-   `body_mut`~~ (it does), and ~~steering is embarrassingly parallel and there
-   is nothing to run it on~~ — `crcbl-jobs` is that thing, and horde's
-   `steer_enemies` runs on `Pool::par_for`.
-
-   **Two stand.** `overlap_sphere` returns an owned `Vec` and
-   `Bvh::traverse_aabb` builds another underneath, so a game that queries per
-   body allocates twice per body per tick — 1.2 million allocations a second at
-   the plan's count. And the neighbour sum's order is the BVH's traversal order,
-   which is deterministic _because of the tree_ rather than independently of it.
-   Neither is a defect in an answer the crate gives; both are the per-query
-   overhead becoming the cost, which is what a consumer running `N` queries a
-   tick is for.
-
-5. **The numbers are themselves a finding about P7 and P8, and they invert the
-   roadmap's estimate.** Full tables and conditions in
-   [sample/03-horde.md](sample/03-horde.md). The render side is **flat**: CPU
-   frame time 0.096 ms at one thousand enemies and 0.120 ms at ten thousand on a
-   Radeon RX 7900 XTX at 960 × 720, so nine thousand more enemies cost 24 µs a
-   frame — 0.14 % of the budget. The tick is **not**: 14.66 ms with the crowd
-   spread over the arena and 84.09 ms once it has converged on the player, at
-   the same count, against 16.67 ms.
-
-   So **P8 is worth the whole gap and P7 is worth 0.7 % of a frame to this
-   sample.** GPU culling would replace a CPU cull that costs 28 µs; indirect
-   draws would replace two draw calls; instance deltas would replace an upload
-   of 2 446 × 64 bytes. P7 is still worth building, for 3D and for scenes that
-   are not a plane of 34-texel quads — but the roadmap put horde _behind_ P7 on
-   the assumption that a field of ten thousand was a rendering problem, and it
-   is not. It is a broadphase problem with no threads.
-
-6. **The tick's cost tracks local density, not entity count**, which is the
-   measurement nobody would have predicted from the code. The same ten thousand
-   enemies cost 14.66 ms spread and 84.09 ms converged, because an overlap query
-   costs what its _answer_ costs and a horde converges by construction. 18a's
-   provisional 8–9k figure read the same rise as a working set leaving cache and
-   was wrong about the cause; it was also taken on a fixture staged at 1.25
-   units regardless of count, which at ten thousand is a field of 125 × 125
-   units against an arena of 96 × 72 — a board the game cannot produce. Any
-   future claim about this budget has to say which crowd it means.
-
-7. **A sample can add its own section to the debug panel, and it is four
-   lines.** S2's finding 8 recorded that switching the panel _on_ needs no
-   per-sample plumbing. This is the other half of the same claim and it is also
-   not a finding: `art::SceneStats` implements `DebugModule`,
-   `Loop::draw_debug_overlay` calls `panel.add(&self.gpu.scene_stats())`, and
-   the running game shows how much of the field survived the cull and how many
-   draws the survivors cost. Recorded as a result because the rule asked for one
-   either way.
-
-   **And the panel's own cost is now measured**, which closes a gap
-   `docs/backlog.md` has carried since P10's core landed: at 960 × 720 with ten
-   thousand enemies on the field, switching the panel on moves the
-   `ui-composite` pass from 0.004 ms to 0.005 ms and leaves the CPU frame time
-   inside its own noise. `07-ui-debug.md`'s criterion is "<0.5 ms GPU at 1080p"
-   and this is 960 × 720, so the criterion is not _closed_ — but it is two
-   orders of magnitude the right side of it.
-
-8. **`SpriteRenderer` will not tell a caller how many batches it drew**, so the
-   claim this sample's whole art decision rests on can only be checked against a
-   copy of the rule. `art::batches` counts runs of consecutive sprites naming
-   one sheet, which is what `sprite_pass::batch` does, and `SpriteRenderer`
-   exposes `sheet_count()` and nothing else. The mirror is pinned to `A A B A` =
-   3 by a test — the case a distinct-sheet count gets wrong and the case this
-   game's own frames cannot distinguish, which is why it needed writing — but a
-   change to the engine's batching rule would leave the mirror green and the
-   picture wrong. Wanted: a `batch_count()` beside `sheet_count()`. Not taken
-   because `crates/` was outside this slice's write scope, which is the same
-   sentence as finding 1 and is starting to look like the shape of every
-   deferral here.
-
-9. **The plan's target count and the plan's "playable for five minutes" cannot
-   both be true of this arena**, and only a measurement could have said so. Ten
-   thousand enemies in 96 × 72 units is 0.82 units apart; several are inside
-   `PLAYER_RADIUS` on frame zero; contact damage is a rate summed over
-   everything touching, so the player dies in **under a second**. A default run
-   — the spawner doing its own work — dies at about 24 seconds with 46 things on
-   the field. This is a design finding rather than an engine one, and the honest
-   version of the exit criterion is that ten thousand is a _renderer and
-   broadphase_ target that this arena cannot host as gameplay. It is in
-   `docs/backlog.md` with the two ways out (a bigger arena, or a target that
-   admits it is a benchmark).
-
-**What did not resist.** The ECS, the fixed-tick server, the client, the input
-action map, the render graph, the shell seam, the polled browser start-up,
-`crcbl-store`'s atomic write, `crcbl-audio`'s cue grammar and null stream, the
-sprite pass, the layer stack and the menu system all took a fourth game — one
-holding ten thousand bodies, steering every one of them, and drawing two
-thousand of them a frame — with no change and no argument. `SpriteRenderer` in
-particular held up exactly as designed: two sheets, two draw calls, at every
-count from one to ten thousand, with no grouping pass and no emission order to
-get wrong. The gaps above are still all in the _convenience_ layer and in the
-things that were never built (threads); the seams themselves have now survived
-four unrelated games.
-
-**Two coverage notes, not findings.** The windowed native path is still compiled
-and never run — there is no display in this environment, so the follow camera,
-the sprite pass and the three menus have been checked by test, by argument, and
-now by a **browser** capture at 26/26, but by nobody's eyes in the running
-native game. And every number above was taken on an offscreen image ring rather
-than a real swapchain: it is the same acquire/record/submit/present path by
-construction, and it is not a windowed present and is not vsynced.
+**The one claim the lists made that this document still makes:** the seams
+themselves survived four unrelated games — the action map, the render graph, the
+shell seam, the polled browser start-up, `crcbl-store`'s atomic write,
+`crcbl-audio`'s cue grammar and null stream, the sprite pass, the layer stack
+and the menu system each took the fourth game with no change and no argument.
+Every gap the three lists found was in the convenience layer or in something
+never built.
 
 ### Known gaps, carried forward deliberately
 
@@ -1026,9 +611,6 @@ construction, and it is not a windowed present and is not vsynced.
   upscale-blit to native surface"; `18-render-features.md` orders the post chain
   around it. `ShellCaps::HW_UPSCALE` exists and `crcbl-render` contains no
   upscale path at all. Owed before borderless means what the doc says.
-- **One HAL seam finding remains open**, recorded in `crcbl-vk`'s crate docs:
-  vertex pulling depends on `shaderDrawParameters`, for which the seam has no
-  vocabulary.
 - **Two shader stops, both closed, both worth remembering (P5.9, P5.13).** Every
   SPIR-V artifact the engine ships declares `OpCapability DrawParameters` —
   Slang emits it because `SV_VertexID` lowers to
@@ -1059,28 +641,6 @@ construction, and it is not a windowed present and is not vsynced.
   were invisible to a green native run, and neither would have been found by
   reading the code.
 
-- **~~`crcbl-wgpu` cannot see a pipeline it failed to create.~~ Closed at S1B.0,
-  in two halves.** WebGPU delivers creation failures to the device's error
-  channel rather than to the call, so this backend returned a handle for a
-  module that had not compiled; the run that found the shader bug submitted 384
-  invalid command buffers while reporting a healthy status and a page that said
-  "Playing". `crcbl-wgpu` now installs an uncaptured-error handler on every
-  device it opens, and `WgpuDevice::checked` wraps each shader-module and
-  pipeline creation so an error raised _during_ the call — which is what
-  `wgpu-core` produces natively — comes back as `HalError::Backend` naming the
-  call. The browser raises it a turn of the event loop later instead, where
-  nothing can attribute it to a call, so the seam grew `Device::take_error` and
-  `GpuContext::acquire` drains it before recording a frame: a failed pipeline
-  now stops the loop with its reason instead of drawing nothing. Both halves are
-  needed and neither replaces the other.
-
-- **`VUID-vkAcquireNextImageKHR-fence-10066` fires once per acquire on Linux
-  under wgpu**, and is not reachable from this workspace: the fence is created
-  and reused inside `wgpu-hal`'s `NativeSwapchain`, which waits on and resets it
-  only under `cfg(windows)`. 30.0.0 is the newest published version. Frames are
-  correct and the runs pass; recorded rather than silenced by turning wgpu's
-  validation off.
-
 - **RenderDoc capture** has not been verified by hand; every object and pass
   carries a debug label and `DEBUG_MARKERS` is requested.
 - **A green local Vulkan run is weaker than CI's.** Synchronisation validation
@@ -1090,11 +650,6 @@ construction, and it is not a windowed present and is not vsynced.
   and says so loudly when the run is weaker than the CI job it stands in for.
   The real gate for that bug class is the no-GPU cross-frame graph suite, which
   runs everywhere.
-- ~~The seam does **not** freeze until P5 exit, when a second backend
-  (`crcbl-wgpu`) implements it. Changes before then are expected and cheap.~~
-  **Spent.** P5 shipped and the seam froze on this document's own criterion —
-  see "The HAL seam is now frozen" in the status section. Four backends
-  implement it now, not two.
 
 ### Standing requirements every sample inherits
 
@@ -1687,130 +1242,59 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
 
 ### The slices, ranked
 
-1. ~~**`SpriteRenderer::register_baked`**~~ — **shipped.** `fn baked` and
-   `fn register` were byte-identical at five sites (`art.rs` in asteroids,
-   breakout, flappy and horde, _and the engine's own_
-   `crcbl-render/src/menu.rs`). `SpriteRenderer::register_baked` holds the
-   `Loaded → SheetDesc` mapping and `crcbl_sprite::load::load_baked` holds the
-   failure policy; each crate keeps a one-line `baked` wrapper because
-   `ART_TICK_HZ` is generated per crate and the rate is genuinely the caller's.
-   One thing the survey got wrong: a sixth `SheetDesc` field is **not** a live
-   proposal — `docs/backlog.md` names it as the _condition_ under which
-   `#[non_exhaustive]` would be worth taking. The four `art.rs` files have now
-   been touched, which is the precondition the backlog sets for the
-   `WorldRect`/`SheetUv` newtypes.
+Five of the seven landed and are not restated here — `git log` has each. What
+they became: `SpriteRenderer::register_baked`, `crcbl::impl_game_gpu!` with a
+separate `impl_polled_gpu!`, `impl_polled_bundle!`, `Backing::platform` in
+`crcbl-store`, and `crcbl::engine`'s `open_shell`, `DEFAULT_WINDOW_SIZE`,
+`requested_window_size` and `log_first_configure`. Three lessons out of them are
+worth more than the code and are kept where they can act:
 
-2. ~~**`crcbl::impl_game_gpu!`**~~ — **shipped**, as `impl_game_gpu!` plus a
-   separate `impl_polled_gpu!`. `GameGpu` and `GpuSurface` were byte-identical
-   in all six samples and `PolledGpu` in five; lantern threads its own defaults
-   into `request_open`, so it takes the first and writes the second by hand.
+- **rustc suppresses its own lints inside an external macro's expansion**, so
+  moving hand-written forwards into a macro removed the only thing catching
+  them: each forward is `Self::method(self)`, which resolves to the _trait_
+  method when the bundle has no inherent one — infinite recursion rather than a
+  compile error, and `unconditional_recursion` silent about it. Measured by
+  deleting an inherent `counters`: it warns before the move and compiles clean
+  after. Both macros therefore open with a `const _` block coercing each
+  inherent method to a function pointer in a scope where the trait is not
+  imported, so path syntax cannot reach the trait method and a missing one is
+  `E0599`. This applies to any future forwarding macro.
+- **A generated `desc` would have made five guard tests vacuous.** The hud bug
+  that started this track came from a hand-copied `desc`, and the obvious fix
+  was to generate it — but doing so makes the hud shape unrepresentable, which
+  turns the five tests that assert against it into tests of the generator. With
+  all six samples guarded the safety argument was already spent, so
+  `impl_polled_bundle!` takes `desc` by name and all five tests still run.
+- **Read the `map_err` call sites, not the declaration.** A blocker recorded on
+  this track said each game had its own error enum whose `NoWindowSystem`
+  variant no generic bound could name. Every sample's error type is in fact a
+  type alias for `crcbl::engine::LoopError<TheirGameError>`.
 
-   **The survey's claim that "a mistake cannot ship silently" was wrong, and
-   finding out why is most of what this slice cost.** Each forward is
-   `Self::method(self)`, which resolves to the _trait_ method when the bundle
-   has no inherent one — infinite recursion rather than a compile error.
-   Hand-written, rustc's `unconditional_recursion` catches that and this
-   workspace denies warnings; but **rustc suppresses its lints inside an
-   external macro's expansion**, so the move would have removed the only thing
-   catching it. Measured by deleting an inherent `counters`: it warns before the
-   move and compiles clean after. The expansion therefore opens with a `const _`
-   block coercing each inherent method to a function pointer in a scope where
-   neither trait is imported, so path syntax cannot reach the trait method and a
-   missing one is `E0599`. `docs/backlog.md` carries the general hazard, which
-   applies to any future forwarding macro.
+**`with_shell` and `open_the_window` stay.** `open_the_window`'s title, app id
+and error type are the game's, and a wrapper taking all three needs six
+positional arguments with two adjacent `&str`s among them. `with_shell` looks
+like the others and is not: `apps/horde` builds its clock from
+`!options.real_clock()` rather than from `headless`, and `apps/lantern` opens
+its window through a different signature. Extracting it would need a callback
+per difference.
 
-3. ~~**The `desc`/`PendingGpu`/`open`/`request_open` block**~~ — **shipped** as
-   `impl_polled_bundle!`, and it is the entry that changed shape most between
-   being written and being done.
+The two that did not land:
 
-   It was ranked third because the hud bug came from `desc` and only four of six
-   samples tested for it. That count was already stale, and the real gap was
-   **lantern** — no guard at all, in the sample that most needs one, since it is
-   the only one that _deliberately_ overrides `optional_features`. That test
-   landed first, as containment rather than equality, because an unforced run
-   asks for `TASK_SHADER` on top.
+- **`web_exports!`'s residue.** The impl half shipped as
+  `crcbl::impl_web_pending!` — carrying the same `const _` coercion guard, and
+  working only while `WebPending` is not imported in the sample, which is why
+  the six lost that import and each says so. What is left is the ten literal
+  symbol names, which need a proc macro that can build identifiers:
+  `concat_idents!` is unstable and the names must stay per-sample so two demos
+  in one browser cannot collide. **That means a new dependency, which is the
+  repo owner's call** (see Decisions).
 
-   With all six guarded, the safety argument was spent and only the DRY one
-   remained, so the macro deliberately does **not** generate `desc`: doing so
-   would have made the hud shape unrepresentable for five samples and thereby
-   made their five guard tests vacuous, and lantern could not have used a
-   generated one at all. `desc` is passed in by name; all five tests still run.
-
-4. ~~**`Record::open_for`**~~ (`crcbl-store`) — **shipped** as
-   `Backing::platform`. `platform_backing` was four copies of a fact about the
-   platform, not about any game.
-
-   **The decision this entry recorded turned out not to exist.** It was written
-   up as a choice between one signature whose arms each ignore an argument and a
-   signature per platform — because the survey said the browser arm would need
-   each game to hand its store in. It did not: `crcbl_store::web::opfs` already
-   held a `Weak` to the installed store for the `__crcbl_web_opfs_*` exports and
-   only lacked a getter. With `installed()`, the record and the entry points
-   read the same slot instead of two paths agreeing by convention, nothing is
-   threaded through, and the four `opfs_store` accessors over `web_exports!`'s
-   `STORAGE` cell went with the copies. `app_name` does stay in the signature
-   and means nothing in a browser — kept deliberately, because a signature per
-   platform pushes the `#[cfg]` back out to every caller.
-
-   Verified in a real Chromium rather than by compiling, because the failure is
-   silent: had `installed()` answered `None`, scores would have stopped
-   persisting and every check would still have passed, since the gate asserts no
-   persistence. The evidence is that the page log carries
-   `record: no previous value`, a line only the `Backing::Browser` arm emits.
-
-5. ~~**`open_shell_and_window`**~~ (`crcbl::engine`) — **shipped**, in three
-   pieces, and one of them corrects this entry.
-   - `crcbl::engine::DEFAULT_WINDOW_SIZE` and `requested_window_size` own the
-     `LogicalSize::new(960.0, 720.0)` literal and the pixels-are-not-logical
-     rule that sat beside it in six `app.rs` files. The `crcbl new` template
-     takes them too, rather than keeping the constant it had already named.
-   - `crcbl::engine::open_shell(headless)` replaces the eight-line backend
-     choice in all six. Worth more than its size: both arms take the same
-     `ShellError` and differ only in which `LoopError` variant wraps it, and
-     only `NoWindowSystem` carries the hint that `--headless` runs everywhere.
-   - `log_first_configure` — the `shell: first configure at WxH` line existed
-     **eight times**: `PolledBoot` and seven samples. The browser gate asserts
-     it by exact text and reaches it only through `PolledBoot`, so the seven
-     copies it never runs could have drifted from the one it does.
-
-   **A blocker recorded here on 2026-08-15 did not exist.** It said each game
-   had its own error enum whose `NoWindowSystem` variant no generic bound could
-   name. Every sample's error type is in fact a type alias for
-   `crcbl::engine::LoopError<TheirGameError>` — read off the `map_err` call
-   sites instead of the declaration, which is the mistake to not repeat.
-
-   **`with_shell` and `open_the_window` stay.** `open_the_window`'s title, app
-   id and error type are the game's, and a wrapper taking all three needs six
-   positional arguments with two adjacent `&str`s among them. `with_shell` looks
-   like the others and is not: `apps/horde` builds its clock from
-   `!options.real_clock()` rather than from `headless`, with a documented reason
-   about what `--wall-clock` is for, and `apps/lantern` opens its window through
-   a different signature. Extracting it would need a callback per difference,
-   which is more machinery than the handful of genuinely shared lines buys — and
-   those lines are now in the engine anyway.
-
-6. **`web_exports!`'s residue** — the impl half is **shipped** as
-   `crcbl::impl_web_pending!`; the ten symbol names are still the owner's call.
-   The six `WebPending` impls were byte-identical once the sample's name was
-   normalised away, and are now one macro invocation each. It carries the same
-   `const _` coercion guard `impl_game_gpu!` documents, because both forwards
-   are `Self::method(..)` and rustc suppresses `unconditional_recursion` inside
-   a macro expansion — so a sample that loses its inherent `poll` would compile
-   into an infinite loop rather than an error. The guard only works while
-   `WebPending` is **not** imported in the sample, which is why the six lost
-   that import and each says so.
-
-   What is left is the ten literal names, which need a proc macro that can build
-   identifiers: `concat_idents!` is unstable and the names must stay per-sample
-   so two demos in one browser cannot collide — **that means a new dependency,
-   which is the repo owner's call** (see Decisions).
-
-7. **`crcbl_audio::CueDeck`** — the plumbing only: the stream-open-with-null-
-   fallback, the unknown-id guard, the cue→`VoiceMix` conversion and the `plays`
-   counter with its `id - 1` indexing, all repeated across four samples. **Not
-   the sound design**, which is supposed to differ, and not the per-sample debug
-   sections. **Blocked on the `CueGrammar` decision** below — build the seam
-   first and it gets built around a parameter that is about to disappear.
+- **`crcbl_audio::CueDeck`** — the plumbing only: the stream-open-with-null-
+  fallback, the unknown-id guard, the cue→`VoiceMix` conversion and the `plays`
+  counter with its `id - 1` indexing, all repeated across four samples. **Not
+  the sound design**, which is supposed to differ, and not the per-sample debug
+  sections. **Blocked on the `CueGrammar` decision** below — build the seam
+  first and it gets built around a parameter that is about to disappear.
 
 ### Decisions this needs, which are the owner's and not a refactor
 

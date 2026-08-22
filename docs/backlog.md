@@ -5289,6 +5289,67 @@ version strings, which were read from Steamworks.NET's header mirror rather than
 Valve's login-gated zip. The plan mandates re-reading both from a real SDK
 before any declaration is trusted.
 
+## Findings the roadmap carried that nothing else did (2026-08-22)
+
+Folding `docs/plan/ROADMAP.md`'s three sample-findings sections and its
+sample-seam survey left five things that were live in that document and had no
+entry here. They are recorded now because the roadmap is no longer where an open
+item lives.
+
+- **RenderDoc capture has never been verified by hand.** Every object and pass
+  carries a debug label and `DEBUG_MARKERS` is requested, so the capture is
+  expected to be legible — but nobody has taken one. There is no RenderDoc
+  harness anywhere in `tools/` or in any crate's tests, and there is no
+  automated way to check this: a capture is looked at, not asserted on. Stated
+  as a coverage gap rather than a task, because the honest form of it is "not
+  verified".
+
+- **XDND on X11 is not implemented, and the editor plan assumes otherwise.**
+  `ShellCaps::DRAG_DROP` is honestly clear on that backend and
+  `ShellEvent::DroppedFile` is never emitted; `crcbl-shell`'s `x11` module docs
+  carry the reason under "What was cut, and why that seam" — XDND is a
+  five-message handshake over a second selection with its own version
+  negotiation, which is the whole of the selection machinery again with a
+  different trigger. `docs/plan/08-editor.md` claims OS file drop is "editor
+  work, not seam work" because the shell carries file-list mimes from day one,
+  and that is false here. Owed before the editor's asset browser at P12. The
+  Win32 half of the same claim is already recorded separately in this file; this
+  is the X11 half, which had no entry.
+
+- **No golden audio buffer exists, and nobody has listened to the mixer's
+  output.** `crates/crcbl-audio/tests/` holds `spatial_chain.rs` and no fixture
+  that pins rendered samples against a known-good buffer, so every claim about
+  panning, attenuation and mixing is a claim about the arithmetic rather than
+  about the sound. The same shape as the RenderDoc gap and a different remedy:
+  this one _can_ be asserted — a short deterministic mix compared against
+  committed samples would catch a regression that the per-voice unit tests
+  cannot, because they never combine.
+
+- **`crcbl_audio::CueDeck` — the seam under four samples' audio plumbing.** The
+  stream-open-with-null-fallback, the unknown-id guard, the cue→`VoiceMix`
+  conversion and the `plays` counter with its `id - 1` indexing repeat in
+  `apps/{asteroids,breakout,flappy,horde}/src/audio.rs`. **Not the sound
+  design**, which is supposed to differ, and not the per-sample debug sections.
+  **Blocked on the `CueGrammar` decision recorded above** — building the deck
+  first means building it around a parameter that is about to disappear.
+
+- **DECISION NEEDED — does each game keep re-flattening `RunSummary`?** Every
+  sample declares its own `Summary` struct that re-states `RunSummary`'s fields
+  and copies them across one by one, in five `apps/*/src/app.rs` files, and
+  drift is already visible in the doc comments. The engine went the _other_ way
+  for arguments: `Common` is a field on each game's `Options` "so adding a
+  shared flag reaches four games without touching four structs", and `Summary`
+  does the opposite with no reason stated anywhere.
+  - _Keep flattening._ `main.rs` writes `summary.frames`, which is the whole of
+    the argument for it and is not nothing.
+  - _One `run: RunSummary` field._ A field added to `RunSummary` reaches every
+    sample without touching five structs, at the cost of `summary.run.frames` at
+    every read.
+
+  The trade-off is one level of indirection at every call site against five
+  copies that must be edited together, and the answer decides whether a future
+  `RunSummary` field is one edit or six.
+
 ## What the render-to-texture monitor found (2026-08-22)
 
 `apps/lantern` now draws its in-scene monitor from a second view, which made it
@@ -5319,7 +5380,11 @@ one graph. Four findings came out of that, none of them fixed, all of them in
   `ShaderRead → TransferDst → ShaderRead` around the copy; a caller that copied
   into the page without importing it would get none. Twenty-four frames under
   Vulkan synchronization validation report zero hazards, which says the barrier
-  the sample declares is doing the job, not that the renderer declared it.
+  the sample declares is doing the job, not that the renderer declared it — and
+  the copy and the draws that sample the page are in one submission, which is
+  the reach this machine's layer has (`run-vk-e2e.sh` prints
+  `record-time=yes one-submission=yes cross-submission=no` on radv), so that is
+  the half the run actually checked.
 - **One `ForwardRenderer` cannot serve two views.** `add_passes` takes
   `&'a mut self` against the graph's lifetime, so two calls on one renderer do
   not compile (`E0499`), and `begin_frame` writes one camera into the frame's
@@ -5343,15 +5408,9 @@ one graph. Four findings came out of that, none of them fixed, all of them in
 
 ## Owed
 
-The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six
-places two unrelated games were pushed into the same workaround. **All six are
-now closed**: 1 by `SpriteRenderer` (P4B), 2 by `crates/crcbl/src/web.rs`, 3
-inside the phase that found it, 4 by `crcbl::store::record::Record`, 5 by
-`crcbl_audio::mixer` reached through the blanket `impl AudioSource for Arc<T>`,
-and 6 by the umbrella's re-exports — verified by reading each sample's manifest
-and the crates named above, not by trusting the roadmap's own status column,
-which still carries the pre-closure narrative for 2. What is left below has no
-phase attached to it.
+What is left below has no phase attached to it. The six findings the second game
+produced are all closed and are not repeated here; `docs/plan/ROADMAP.md`'s
+retrospective on the three sample findings lists says which seam closed each.
 
 - **`rect` and `uv` are both `[f32; 4]` and adjacent in `Sprite::new`, and
   nothing but a picture catches a swap.** This is the hazard `SheetDesc`'s doc
