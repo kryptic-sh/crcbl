@@ -11,7 +11,7 @@
 # zero checks ran** — `docs/plan/12-testing.md` names a silently-skipped e2e job
 # as a known trap and this is the guard against it.
 #
-# WHAT THIS IS THE ONLY GATE FOR. Groups G through AI in
+# WHAT THIS IS THE ONLY GATE FOR. The seam groups in
 # `web/tools/probe-groups.mjs` drive `crcbl-webgpu`'s command stream directly
 # rather than through the engine: the wasm→JS→wasm round trip and the device it
 # opens, a surface, the capability query held against what `navigator.gpu` tells
