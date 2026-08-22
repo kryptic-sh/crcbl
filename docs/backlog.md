@@ -6172,10 +6172,12 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   an **exact stable** (`1.97.0`) on purpose and its own comment calls a floating
   channel a broken promise.
 
-  **`rust-src` was installed locally and CI does not add it.** `ci.yml`'s
-  nightly toolchain step installs the toolchain and not the component, so a job
-  running the command above would fail there while passing here. Adding
-  `components: rust-src` to that step is owed before any CI work depends on it.
+  **`rust-src` was installed locally and no CI job has it.** The only
+  `nightly-2026-07-02` in `ci.yml` today is the `decoder-fuzz` job, which does
+  not build threaded wasm and correctly does not ask for the component. So
+  nothing is owed to an existing step — what is owed is that the _new_ job which
+  builds the threaded artifact must set `components: rust-src` on its
+  `setup-rust-toolchain`, or it will fail there while passing here.
 
   No backend was written against a toolchain that could not build it:
   `default_spawner` still yields `Inline` on wasm, which is a whole answer
@@ -9146,7 +9148,7 @@ the transport seam over a third transport shape.
 - **`21-jobs.md`'s threaded-wasm finding is reproducible again** since
   `rust-src` was installed on `nightly-2026-07-02` (2026-08-22). Re-verified by
   running finding 1's build; the P5B entry above carries the command, its
-  output, and the `components: rust-src` that `ci.yml` still owes.
+  output, and what the future threaded-wasm CI job will have to ask for.
 
 ### Owed by the shader guardrails
 
