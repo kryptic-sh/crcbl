@@ -1355,6 +1355,74 @@ mod tests {
         ));
     }
 
+    /// **The owner id is what separates two owners whose tags collide**, and
+    /// this is the only thing in the workspace that asserts it.
+    ///
+    /// A tag is one byte of the handle's index half, so ids
+    /// [`OWNER_TAG_COUNT`](crate::device::OWNER_TAG_COUNT) apart stamp the same
+    /// one — reachable after that many live owners in a process. Past the tag,
+    /// `entry.owner == owner` is the whole of the check, and the test above
+    /// cannot reach it: its two instances carry different tags, so every lookup
+    /// there is refused a step earlier.
+    ///
+    /// The table below holds two owners' rows, which no real one ever does —
+    /// every surface pool belongs to a single `VkInstance`, which is exactly
+    /// why the id half is otherwise unexercised. A guard nothing can reach is a
+    /// guard nobody can tell is still wired up, so the shared table is built
+    /// here on purpose.
+    #[test]
+    fn a_surface_belongs_to_the_owner_that_filled_it_even_when_two_tags_collide() {
+        const MINE: u64 = 1;
+        const THEIRS: u64 = MINE + crate::device::OWNER_TAG_COUNT;
+        assert_eq!(
+            crate::device::owner_tag(MINE),
+            crate::device::owner_tag(THEIRS),
+            "the premise: these two ids stamp the same tag, so the tag cannot \
+             tell them apart and only the id can"
+        );
+
+        let mut surfaces = Surfaces::default();
+        let mine = windowed(&mut surfaces, MINE, 0xABCD);
+        let theirs = windowed(&mut surfaces, THEIRS, 0xDCBA);
+        assert_eq!(
+            crate::device::handle_tag(mine),
+            crate::device::handle_tag(theirs),
+            "both handles carry that one tag, so both get past `local`"
+        );
+
+        assert!(matches!(
+            surfaces.raw(mine, THEIRS),
+            Err(HalError::ForeignObject {
+                kind: "surface",
+                ..
+            })
+        ));
+        assert!(matches!(
+            surfaces.retain(mine, THEIRS),
+            Err(HalError::ForeignObject {
+                kind: "surface",
+                ..
+            })
+        ));
+        assert_eq!(
+            surfaces.destroy(mine, THEIRS),
+            None,
+            "and a colliding tag must not let one owner free the other's surface"
+        );
+
+        // The half that makes the refusal worth having: the row is still there
+        // and still answers its own owner. A `destroy` that removed it first and
+        // checked afterwards would pass every assertion above and fail here.
+        assert_eq!(
+            surfaces.raw(mine, MINE).expect("its owner still holds it"),
+            vk::SurfaceKHR::from_raw(0xABCD)
+        );
+        assert_eq!(
+            surfaces.raw(theirs, THEIRS).expect("and so does the other"),
+            vk::SurfaceKHR::from_raw(0xDCBA)
+        );
+    }
+
     /// The registry above this crate falls through on `NoLoader`, so the error
     /// must stay distinguishable after the conversion into `HalError`.
     #[test]

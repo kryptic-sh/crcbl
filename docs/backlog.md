@@ -10323,13 +10323,6 @@ taking a row this owner does not own — it is not a second line of defence
 against a colliding tag, and a test written to claim it was failed and said
 otherwise. The hole opens only after `OWNER_TAG_COUNT` owners in one process.
 
-**Nothing asserts the id half any more.** The test that pinned it,
-`a_wgpu_slot_belongs_to_the_owner_that_filled_it_even_when_two_tags_collide`,
-was in `crcbl-wgpu`'s suite and went with it; grepping the tree on 2026-08-21
-finds no equivalent in `crcbl-vk`, `crcbl-mtl` or `crcbl-dx12`, and only
-`crcbl-vk` spells `OWNER_TAG_COUNT` at all. Re-homing one of these into the
-agnostic seam suite is the obvious close.
-
 **Owner tagging is a hand-written copy per backend, and extracting it was
 declined.** Each backend spells the same idea itself, which is duplicated
 knowledge that will drift. Pulling it into `crcbl-hal` is the obvious move and

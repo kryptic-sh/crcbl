@@ -438,7 +438,12 @@ pub(crate) const OWNER_TAG_SHIFT: u32 = 24;
 pub(crate) const POOL_INDEX_MASK: u32 = (1 << OWNER_TAG_SHIFT) - 1;
 /// How many distinct owner tags exist. Tag `0` is reserved for "nobody", so a
 /// hand-made or un-stamped handle is foreign to every owner.
-const OWNER_TAG_COUNT: u64 = (u32::MAX >> OWNER_TAG_SHIFT) as u64;
+///
+/// `pub(crate)` for `instance.rs`'s
+/// `a_surface_belongs_to_the_owner_that_filled_it_even_when_two_tags_collide`,
+/// which has to name the distance between two ids that stamp the same tag
+/// rather than write the number down beside it.
+pub(crate) const OWNER_TAG_COUNT: u64 = (u32::MAX >> OWNER_TAG_SHIFT) as u64;
 
 /// The tag an owner with this id stamps into its handles. Never zero.
 pub(crate) fn owner_tag(id: u64) -> u32 {
