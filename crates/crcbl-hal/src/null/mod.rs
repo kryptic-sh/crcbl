@@ -787,6 +787,19 @@ impl NullDevice {
     }
 }
 
+/// The refusal both signalling paths share: a timeline only moves forwards.
+///
+/// One wording for [`Device::signal_semaphore`] and [`Device::submit`], because
+/// the rule is the semaphore's rather than either call's — a caller that learns
+/// it from the host signal meets the same rule the moment a submission carries
+/// one, and two spellings of it would read as two different rules.
+fn timeline_goes_backwards(value: u64, held: u64) -> HalError {
+    HalError::InvalidDescriptor(format!(
+        "a timeline semaphore signalled with {value} already holds {held}; a timeline only moves \
+         forwards and a waiter on the higher value would never wake"
+    ))
+}
+
 /// The index a queue kind occupies in a synthesised handle.
 const fn queue_kind_index(kind: QueueKind) -> u32 {
     match kind {
@@ -1558,13 +1571,13 @@ impl Device for NullDevice {
         self.remove(ObjectKind::Semaphore, semaphore.to_bits());
     }
 
-    /// The value the host has signalled onto this timeline, starting at the one
-    /// it was created with.
+    /// The value this timeline has reached, starting at the one it was created
+    /// with.
     ///
-    /// A signal a *submission* carries does not move it: nothing here executes,
-    /// so the submission is in the recorded stream and has not run. That is the
-    /// same answer this gave when it was a constant `0`, minus the part that was
-    /// wrong about a semaphore created with a non-zero `initial_value`.
+    /// Both a host signal and a *submission's* signal move it. A submission
+    /// moves it the instant it is recorded, because work that does not execute
+    /// takes no time to complete — see this backend's `submit`, which is where
+    /// that choice is argued.
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
         self.check(ObjectKind::Semaphore, semaphore.to_bits(), "semaphore")?;
         let state = self.recorder.lock();
@@ -1606,15 +1619,27 @@ impl Device for NullDevice {
             return Err(self.unsupported("a binary semaphore has no value to signal"));
         }
         if value <= *held {
-            return Err(HalError::InvalidDescriptor(format!(
-                "a timeline semaphore signalled with {value} already holds {held}; a timeline only \
-                 moves forwards and a waiter on the higher value would never wake"
-            )));
+            return Err(timeline_goes_backwards(value, *held));
         }
         *held = value;
         Ok(())
     }
 
+    /// Answers against the values the timelines have actually reached, and
+    /// never blocks.
+    ///
+    /// `timeout_ns` is ignored because there is nothing to wait *for*: a
+    /// submission's signals land the moment it is recorded, so every value that
+    /// is ever going to arrive has already arrived by the time this is called.
+    /// The answer is therefore immediate in both directions — `Ok(true)` once
+    /// every wait's value has been reached, and `Ok(false)` — the seam's
+    /// spelling of `vkWaitSemaphores`' `VK_TIMEOUT` — for a value nothing has
+    /// signalled.
+    ///
+    /// It used to answer `Ok(true)` unconditionally, on the grounds that
+    /// nothing is ever outstanding here. That is the one answer a caller cannot
+    /// check its own sequencing against: a wait on a value no signal will ever
+    /// produce — the mistake that deadlocks a real device — read as satisfied.
     fn wait_semaphores(&self, waits: &[SemaphoreWait], _timeout_ns: u64) -> Result<bool, HalError> {
         // Every `check` before the lock, never under it: `check` takes the
         // recorder itself, and this mutex is not reentrant. `signal_semaphore`
@@ -1623,8 +1648,9 @@ impl Device for NullDevice {
             self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
         }
         let state = self.recorder.lock();
+        let mut reached = true;
         for wait in waits {
-            let Some(Detail::Semaphore { timeline, .. }) = state
+            let Some(Detail::Semaphore { timeline, value }) = state
                 .get(ObjectKind::Semaphore, wait.semaphore.to_bits())
                 .map(|object| &object.detail)
             else {
@@ -1637,9 +1663,15 @@ impl Device for NullDevice {
             if !*timeline {
                 return Err(self.unsupported("a binary semaphore cannot be waited on from the CPU"));
             }
+            // Not an early `return`: a wait list holding both an unreached
+            // timeline and a binary semaphore has to report the refusal, and
+            // returning the verdict here would decide the call on whichever
+            // came first in the slice.
+            if wait.value > *value {
+                reached = false;
+            }
         }
-        // No submission is ever outstanding here, so nothing else can decide it.
-        Ok(true)
+        Ok(reached)
     }
 
     /// Records the wait and returns at once — nothing here is ever outstanding.
@@ -1676,6 +1708,30 @@ impl Device for NullDevice {
         self.remove(ObjectKind::CommandBuffer, buffer.to_bits());
     }
 
+    /// Records the submission and applies its signals at once.
+    ///
+    /// **A device that runs no work completes it instantly**, so the timeline
+    /// values `submit.signals` names are reached before this returns — the same
+    /// place a real queue reaches them, compressed to zero. The alternative,
+    /// recording the signal and leaving the counter behind, would make every
+    /// value a submission produces one that never arrives, which is the
+    /// `SilentlyIgnored` verdict
+    /// [`Capability::TimelineSemaphore`] exists to catch and which this backend
+    /// claims not to be.
+    ///
+    /// The queue-side [`SubmitInfo::waits`] are recorded and not evaluated:
+    /// [`Capability::TimelineWaitBeforeSignal`] says a submission may wait on a
+    /// value nothing has signalled yet, so a wait here is not a rule to check.
+    ///
+    /// # Errors
+    ///
+    /// The handle checks, and [`HalError::InvalidDescriptor`] for a signal that
+    /// does not move a timeline forwards — the rule
+    /// [`Device::signal_semaphore`] already enforces, applied to the other way a
+    /// timeline can be driven so that `submit` is not the one path that can move
+    /// one backwards. Every signal is validated before any is applied, so a
+    /// refused submission records no event and leaves every counter where it
+    /// was.
     fn submit(&self, queue: QueueHandle, submit: &SubmitInfo<'_>) -> Result<(), HalError> {
         self.check_queue(queue)?;
         for buffer in submit.command_buffers {
@@ -1695,7 +1751,48 @@ impl Device for NullDevice {
                 "semaphore",
             )?;
         }
-        self.recorder.lock().events.push(Event::Submitted {
+        let mut state = self.recorder.lock();
+        // Resolved and checked first, so a refused submission records nothing
+        // and changes nothing — the order `reconfigure_swapchain` puts its own
+        // failure in, for the same reason.
+        let mut advanced: Vec<(u64, u64)> = Vec::new();
+        for signal in submit.signals {
+            let bits = signal.semaphore.to_bits();
+            let Some(Detail::Semaphore {
+                timeline: true,
+                value: held,
+            }) = state
+                .get(ObjectKind::Semaphore, bits)
+                .map(|object| &object.detail)
+            else {
+                // A binary semaphore — the swapchain's acquire/present pair is
+                // where they come from — carries no value, so it is signalled
+                // by being recorded and there is nothing to advance.
+                continue;
+            };
+            // A second signal on the same semaphore in one batch measures
+            // against the first, not against the counter both started from,
+            // or an out-of-order pair would pass and land backwards anyway.
+            let held = advanced
+                .iter()
+                .rev()
+                .find(|(seen, _)| *seen == bits)
+                .map_or(*held, |(_, pending)| *pending);
+            if signal.value <= held {
+                return Err(timeline_goes_backwards(signal.value, held));
+            }
+            advanced.push((bits, signal.value));
+        }
+        for (bits, value) in advanced {
+            let Some(Detail::Semaphore { value: held, .. }) = state
+                .get_mut(ObjectKind::Semaphore, bits)
+                .map(|object| &mut object.detail)
+            else {
+                unreachable!("the pass above resolved these bits to a timeline semaphore");
+            };
+            *held = value;
+        }
+        state.events.push(Event::Submitted {
             queue,
             command_buffers: submit.command_buffers.to_vec(),
             waits: submit.waits.to_vec(),

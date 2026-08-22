@@ -85,6 +85,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   one's. The matching `DIVERGENCES` row is gone, so `parity_blockers()` is one
   shorter.
 
+- **`crcbl_hal::null` answers a timeline honestly instead of reporting every
+  wait satisfied.** `submit` now applies a submission's `SemaphoreSignal`s to
+  the timeline as it accepts them — a device that runs no work has already
+  finished it — and refuses a signal that does not move a timeline forwards,
+  with the same `HalError::InvalidDescriptor` `signal_semaphore` uses; a refused
+  submit records no event. `wait_semaphores` compares against the value the
+  device tracks and returns `Ok(false)` for one nothing has signalled, where it
+  used to return `Ok(true)` for every wait. A test that waited on a value
+  nothing reaches was passing on the strength of that answer and now fails,
+  which is the point: the null device is what a caller checks its own sequencing
+  against. Binary semaphores in a signal list are recorded and skipped, not
+  refused — the engine's frame loop signals its present semaphore that way every
+  frame.
+
 ### Breaking
 
 - **`crcbl_hal::null::Event::PresentWaited` carries a `timed_out` flag.**

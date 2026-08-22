@@ -617,9 +617,11 @@ pub(super) enum Detail {
     ///
     /// `value` starts at
     /// [`SemaphoreKind::Timeline::initial_value`](crate::SemaphoreKind::Timeline)
-    /// and moves only when the host signals it. A signal a *submission* carries
-    /// does not move it, for the reason nothing else here executes either: the
-    /// submission is recorded, not run.
+    /// and moves when the host signals it *or* when a submission signalling it
+    /// is accepted — work that never executes has already finished, so a
+    /// submission's signals land at once. That is what lets
+    /// [`wait_semaphores`](crate::Device::wait_semaphores) answer against this
+    /// field rather than reporting every wait satisfied.
     Semaphore { timeline: bool, value: u64 },
     /// A swapchain: its image ring and rotation state.
     Swapchain {

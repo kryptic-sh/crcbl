@@ -178,9 +178,10 @@ mod tests {
     ///
     /// `initial_value` is deliberately not asserted here: this test is about
     /// which *kinds* a device hands out. What [`crate::null`] does with the
-    /// value is `a_host_signal_moves_a_timeline_forwards_and_only_forwards`, and
-    /// the counter a submission advances belongs to the backends that execute
-    /// one.
+    /// value is `a_host_signal_moves_a_timeline_forwards_and_only_forwards` for
+    /// the host half and `a_submissions_signal_advances_the_timeline_it_names`
+    /// for the counter a submission drives — which that backend advances too,
+    /// since work it never executes has always already finished.
     #[test]
     fn only_the_timeline_kind_needs_the_timeline_feature() {
         use crate::null::NullInstance;

@@ -10,7 +10,7 @@ use crate::{
     BindGroupLayoutEntry, BindingKind, BindingModel, BufferUsage, ClearValue, ColorAttachment,
     ColorTargetState, DepthStencilState, GeometryPath, ImageSubresourceRange, ImageViewType,
     LightingPath, LoadOp, MultisampleState, PrimitiveState, PushConstantRange, ResourceState,
-    SampleType, ShaderEntry, StoreOp, depth,
+    SampleType, SemaphoreSignal, ShaderEntry, StoreOp, depth,
 };
 
 /// The SPIR-V magic number, so test modules look like modules.
@@ -2689,12 +2689,12 @@ fn wait_idle_and_semaphore_waits_are_recorded_and_satisfied() {
             .wait_semaphores(
                 &[SemaphoreWait {
                     semaphore,
-                    value: 1
+                    value: 0
                 }],
                 0
             )
             .expect("wait"),
-        "nothing is ever outstanding, so waits succeed immediately"
+        "the timeline was created holding 0, so a wait for 0 is already satisfied"
     );
     device.wait_idle().expect("wait idle");
     assert!(
@@ -2705,8 +2705,9 @@ fn wait_idle_and_semaphore_waits_are_recorded_and_satisfied() {
     );
 }
 
-/// A host signal moves the timeline, and one that would move it backwards is
-/// refused rather than accepted.
+/// A host signal moves the timeline, a host wait answers against where it got
+/// to, and a signal that would move it backwards is refused rather than
+/// accepted.
 ///
 /// **What turns it red.** Dropping the `<=` check makes the second half return
 /// `Ok`, which is the whole failure: a timeline that goes backwards leaves every
@@ -2714,6 +2715,14 @@ fn wait_idle_and_semaphore_waits_are_recorded_and_satisfied() {
 /// Reporting the value as a constant — which this backend did until
 /// [`Device::signal_semaphore`] existed — turns the first half red, and so does
 /// ignoring `initial_value`, which is why the semaphore is not created at zero.
+///
+/// The waits are here rather than in a test of their own because they are what
+/// makes the signal observable: a `wait_semaphores` that answered `Ok(true)`
+/// unconditionally — which this backend did, on the grounds that nothing is ever
+/// outstanding — passes both of them while reading the counter not at all, so
+/// the value above and the value below have to be asked for together. Widening
+/// the comparison to `>=` turns the `9` case red; narrowing it away turns the
+/// `10` case red.
 ///
 /// Refusing with anything but [`HalError::InvalidDescriptor`] is red too: the
 /// seam splits "a number you can correct" from "a capability this backend
@@ -2737,6 +2746,37 @@ fn a_host_signal_moves_a_timeline_forwards_and_only_forwards() {
 
     device.signal_semaphore(semaphore, 9).expect("forwards");
     assert_eq!(device.semaphore_value(semaphore).expect("value"), 9);
+
+    // The host wait, against the value the timeline actually holds. `0` is the
+    // timeout, and it is ignored: nothing here is outstanding, so the answer is
+    // immediate in both directions rather than after a wait.
+    for reached in [0, 5, 9] {
+        assert!(
+            device
+                .wait_semaphores(
+                    &[SemaphoreWait {
+                        semaphore,
+                        value: reached
+                    }],
+                    0
+                )
+                .expect("wait"),
+            "the timeline holds 9, so a wait for {reached} has been satisfied"
+        );
+    }
+    assert!(
+        !device
+            .wait_semaphores(
+                &[SemaphoreWait {
+                    semaphore,
+                    value: 10
+                }],
+                u64::MAX
+            )
+            .expect("a timeout is not an error"),
+        "nothing has signalled 10, so the wait timed out — `Ok(false)`, not the \
+         `Ok(true)` that would tell a caller a value it will never receive had arrived"
+    );
 
     for backwards in [0, 5, 9] {
         let error = device
@@ -2789,6 +2829,164 @@ fn a_host_signal_moves_a_timeline_forwards_and_only_forwards() {
         matches!(error, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
         "{error:?}"
     );
+}
+
+/// A submission's signal advances the timeline it names, so a host wait on that
+/// value is then satisfied.
+///
+/// **The half that separates this backend's model from "the host signal is the
+/// only thing that counts".** Nothing here signals from the host at all: the
+/// counter moves because a submission said it would, which is the whole of
+/// [`Capability::TimelineSemaphore`] — "a backend that hands out a handle whose
+/// value never moves has not got this, whatever its return codes say". This
+/// backend claims that capability on every preset granting
+/// [`Features::TIMELINE_SEMAPHORE`], and until `submit` applied the signals the
+/// claim was not true.
+///
+/// **What turns it red.** Recording [`Event::Submitted`] without applying the
+/// signals — what `submit` used to do — leaves the counter at its initial value,
+/// so the value and the wait both go red while the event assertion still passes.
+/// The binary semaphore rides along to prove the apply *skips* what carries no
+/// value rather than refusing it: the swapchain's present semaphore is in every
+/// frame's signal list, so a `submit` that refused one would break the engine's
+/// frame loop.
+#[test]
+fn a_submissions_signal_advances_the_timeline_it_names() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
+    let timeline = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("frame"),
+            kind: SemaphoreKind::Timeline { initial_value: 5 },
+        })
+        .expect("the gpu_driven preset has timeline semaphores");
+    let present = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("present"),
+            kind: SemaphoreKind::Binary,
+        })
+        .expect("every device hands one out for WSI");
+    assert!(
+        !device
+            .wait_semaphores(
+                &[SemaphoreWait {
+                    semaphore: timeline,
+                    value: 9
+                }],
+                0
+            )
+            .expect("wait"),
+        "nothing has signalled 9 yet, so the wait must not already be satisfied"
+    );
+
+    device
+        .submit(
+            queue,
+            &SubmitInfo {
+                command_buffers: &[],
+                waits: &[],
+                signals: &[
+                    SemaphoreSignal {
+                        semaphore: present,
+                        value: 0,
+                    },
+                    SemaphoreSignal {
+                        semaphore: timeline,
+                        value: 9,
+                    },
+                ],
+            },
+        )
+        .expect("a signal-only submission");
+
+    assert_eq!(
+        device.semaphore_value(timeline).expect("value"),
+        9,
+        "the submission signalled 9, and work that never executes has already finished"
+    );
+    assert!(
+        device
+            .wait_semaphores(
+                &[SemaphoreWait {
+                    semaphore: timeline,
+                    value: 9
+                }],
+                0
+            )
+            .expect("wait"),
+        "a host wait must see the value a submission signalled"
+    );
+    assert!(
+        recorder
+            .events()
+            .iter()
+            .any(|event| matches!(event, Event::Submitted { .. })),
+        "advancing the counter must not cost the recorded submission"
+    );
+
+    device.destroy_semaphore(present);
+    device.destroy_semaphore(timeline);
+}
+
+/// A submission whose signal does not move a timeline forwards is refused, and
+/// leaves no event behind.
+///
+/// The rule [`Device::signal_semaphore`] already enforces, applied to the other
+/// way a timeline can be driven — otherwise `submit` is the one path on this
+/// backend that can move one backwards, and a caller whose values collide finds
+/// out on a real driver instead of on the recorder.
+///
+/// **What turns it red.** Dropping the check turns the refusal assertions red.
+/// Applying the signals or pushing [`Event::Submitted`] *before* validating them
+/// turns the counter or the event assertion red instead: a call that answered
+/// `Err` must leave the stream and the objects as it found them, which is the
+/// property `reconfigure_swapchain` puts its own failure first for.
+#[test]
+fn a_submission_signalling_a_timeline_backwards_is_refused_and_records_nothing() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
+    let semaphore = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("frame"),
+            kind: SemaphoreKind::Timeline { initial_value: 9 },
+        })
+        .expect("the gpu_driven preset has timeline semaphores");
+
+    for backwards in [0, 5, 9] {
+        let error = device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore,
+                        value: backwards,
+                    }],
+                },
+            )
+            .expect_err("a timeline only moves forwards");
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "a submission signalling {backwards} onto a timeline holding 9: {error:?}"
+        );
+    }
+    assert_eq!(
+        device.semaphore_value(semaphore).expect("value"),
+        9,
+        "a refused submission must leave the counter where it was"
+    );
+    let events = recorder.events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Submitted { .. })),
+        "a refused submission must record nothing: {events:?}"
+    );
+
+    device.destroy_semaphore(semaphore);
 }
 
 #[test]
