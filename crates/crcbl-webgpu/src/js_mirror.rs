@@ -25,6 +25,19 @@
 //!   meaning something else — the failure that file's own comments spend the
 //!   most words on.
 //!
+//! # The bitflag tables are a fourth shape, and they mirror `crcbl-hal`
+//!
+//! Six of `gpu-stream.js`'s ordered tables — and the one mask beside them —
+//! restate a `crcbl_hal` `bitflags` type rather than anything [`crate::tag`]
+//! declares. A name's position in one of those is its **bit** rather than its
+//! code, and the page's `readFlags` claims `2 ** table.length - 1` of them, so
+//! a name in the wrong row is a usage, a stage mask or a channel mask the
+//! browser applies to the wrong thing. That failure is the quiet one: an
+//! unknown tag stops the stream, while a wrong usage bit creates a resource
+//! with a capability nobody asked for and renders on. [`check_flags`] holds
+//! each table against its type, and the type's flag list is read back out of
+//! `crcbl-hal`'s own text for [`pub_const_names`]'s reason.
+//!
 //! # What holds the parse honest
 //!
 //! Two properties, because a mirror guard's failure mode is matching less than
@@ -58,6 +71,16 @@ const GPU_REPLY_JS: &str = include_str!("../../../web/engine/gpu-reply.js");
 /// be read back out of the module.
 const TAG_RS: &str = include_str!("tag.rs");
 
+/// `crcbl-hal`'s `resource` module, for [`bitflags_names`] — [`TAG_RS`]'s reason
+/// applied to a `bitflags` type, which cannot say what it declares either.
+const HAL_RESOURCE_RS: &str = include_str!("../../crcbl-hal/src/resource.rs");
+
+/// `crcbl-hal`'s `shader` module, for [`HAL_RESOURCE_RS`]'s reason.
+const HAL_SHADER_RS: &str = include_str!("../../crcbl-hal/src/shader.rs");
+
+/// `crcbl-hal`'s `pipeline` module, for [`HAL_RESOURCE_RS`]'s reason.
+const HAL_PIPELINE_RS: &str = include_str!("../../crcbl-hal/src/pipeline.rs");
+
 // ── Reading the page's half ──────────────────────────────────────────────────
 
 /// One `Object.freeze` table parsed out of a `web/engine` module: its name, and
@@ -84,6 +107,9 @@ enum JsDecl {
     Bytes(Vec<u8>),
     /// `const NAME = '…';` — a string both halves spell out.
     Text(&'static str),
+    /// `const NAME = (1n << 27n) - 1n;` — a `BigInt` mask, sixty-four bits wide
+    /// because the field it guards is.
+    Mask(u64),
     /// An expression this parse deliberately does not read. Every one has to be
     /// named in its file's [`FileMirror::opaque`] list, so a new one fails by
     /// name rather than leaving a hole.
@@ -101,6 +127,35 @@ fn js_number(text: &str) -> Option<u32> {
     match text.strip_prefix("0x") {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),
         None => text.parse().ok(),
+    }
+}
+
+/// Read a JS `BigInt` mask: a `27n` literal, a left shift, a subtraction, or a
+/// parenthesised group of the three — the grammar `gpu-stream.js` spells
+/// `crcbl_hal::Features`'s claimed mask in.
+///
+/// Sixty-four bits rather than [`js_number`]'s thirty-two, because that is the
+/// width of the one field spelled this way: a mask that no longer fits is
+/// `None`, which [`js_decls`] turns into the panic every declaration it cannot
+/// read gets.
+fn js_bigint(text: &str) -> Option<u64> {
+    let text = text.trim();
+    if let Some(inner) = text
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return js_bigint(inner);
+    }
+    if let Some((left, right)) = text.split_once(" - ") {
+        return js_bigint(left)?.checked_sub(js_bigint(right)?);
+    }
+    if let Some((left, right)) = text.split_once(" << ") {
+        return js_bigint(left)?.checked_shl(js_bigint(right)?.try_into().ok()?);
+    }
+    let digits = text.strip_suffix('n')?;
+    match digits.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => digits.parse().ok(),
     }
 }
 
@@ -206,6 +261,8 @@ fn js_decls(file: &str, src: &'static str) -> Vec<(&'static str, JsDecl)> {
             JsDecl::Text(text)
         } else if let Some(number) = value.strip_suffix(';').and_then(js_number) {
             JsDecl::Scalar(number)
+        } else if let Some(mask) = value.strip_suffix(';').and_then(js_bigint) {
+            JsDecl::Mask(mask)
         } else {
             JsDecl::Opaque
         };
@@ -378,6 +435,63 @@ fn pub_const_value_names(src: &'static str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Every flag one `bitflags!` type declares, read back out of `crcbl-hal`'s own
+/// text, in declaration order.
+///
+/// [`pub_const_value_names`]'s reason applied to a block rather than a module: a
+/// `bitflags` type cannot enumerate itself either, so a mirror that named only
+/// the flags somebody remembered would narrow silently as the type grew. Total
+/// over the block's lines for [`js_decls`]'s reason — a doc comment, an
+/// attribute, a blank line and the continuation of a multi-line union are each
+/// recognised, and anything else is a panic naming the module and the line, so a
+/// flag written in a shape this cannot read fails rather than going unmirrored.
+fn bitflags_names(module: &str, src: &'static str, ty: &str) -> Vec<&'static str> {
+    let opening = format!("    pub struct {ty}: ");
+    let mut names: Vec<&'static str> = Vec::new();
+    let mut inside = false;
+    let mut closed = false;
+    let mut continuing = false;
+    for (index, line) in src.lines().enumerate() {
+        let number = index + 1;
+        if !inside {
+            inside = line.starts_with(opening.as_str()) && line.ends_with('{');
+            continue;
+        }
+        if line == "    }" {
+            closed = true;
+            break;
+        }
+        let text = line.trim();
+        if continuing {
+            continuing = !text.ends_with(';');
+            continue;
+        }
+        if text.is_empty() || text.starts_with("//") || text.starts_with("#[") {
+            continue;
+        }
+        let name = text
+            .strip_prefix("const ")
+            .and_then(|rest| rest.split_once(" = ").map(|(name, _)| name));
+        let Some(name) = name else {
+            panic!(
+                "{module}:{number}: a line inside `{ty}` this test cannot read, so the type \
+                 would be mirrored with a hole in it: {line}"
+            );
+        };
+        names.push(name);
+        continuing = !text.ends_with(';');
+    }
+    assert!(
+        inside,
+        "{module} declares no `{ty}` bitflags type, so the table that mirrors it mirrors nothing"
+    );
+    assert!(
+        closed,
+        "{module}'s `{ty}` block never closes, so its flag list is short"
+    );
+    names
+}
+
 /// A HAL variant name as [`crate::tag`] spells it: `D2Array` is `D2_ARRAY`.
 ///
 /// One underscore before an upper-case letter that follows a lower-case letter
@@ -420,6 +534,147 @@ macro_rules! codes {
     };
 }
 
+/// Each flag paired with its own name, written once, for [`codes!`]'s reason:
+/// the compiler binds the path, so a renamed or deleted flag stops this
+/// compiling rather than quietly narrowing what is checked.
+///
+/// The width comes from the same place. [`FlagMirror::bits`] is a `u32`, which
+/// is what the field crosses the seam as and what `gpu-stream.js` reads it back
+/// with, so a `crcbl-hal` type widened past that fails to compile here.
+macro_rules! flag_bits {
+    ($ty:ty $(, $flag:ident)+ $(,)?) => {
+        vec![$((stringify!($flag), <$ty>::$flag.bits())),+]
+    };
+}
+
+/// The flags of a type that are unions of its bits rather than bits of their
+/// own, each with why `gpu-stream.js`'s table has no row for it.
+///
+/// Same discipline as [`flag_bits!`], plus the reason, because this is the list
+/// that says a flag is missing from the page's half *on purpose* — and it is
+/// checked to really be a union, so a bit cannot hide in it.
+macro_rules! flag_unions {
+    ($ty:ty $(, $flag:ident => $why:literal)* $(,)?) => {
+        vec![$((stringify!($flag), <$ty>::$flag.bits(), $why)),*]
+    };
+}
+
+/// One `crcbl_hal` `bitflags` type and the `gpu-stream.js` table that restates
+/// it.
+struct FlagMirror {
+    /// The table's name in the page's half.
+    table: &'static str,
+    /// The `crcbl_hal` type it mirrors.
+    rust: &'static str,
+    /// That type's module in `crcbl-hal`, for the failure messages.
+    module: &'static str,
+    /// That module's text, for [`bitflags_names`].
+    src: &'static str,
+    /// Each single-bit flag paired with its own name, in ascending bit order —
+    /// which is the order the table has to spell them in, because a name's
+    /// position there is its bit.
+    bits: Vec<(&'static str, u32)>,
+    /// The type's composite flags, with the reason each is absent from the
+    /// table. Held from both directions.
+    composites: Vec<(&'static str, u32, &'static str)>,
+}
+
+/// The `crcbl_hal` bitflags types `web/engine/gpu-stream.js` restates, and the
+/// tables that restate them.
+///
+/// These are the fields where a disagreement does not stop the stream: the
+/// browser decodes a valid command carrying the wrong usage, the wrong
+/// visibility or the wrong write mask, and the frame is subtly wrong instead.
+fn stream_flag_mirrors() -> Vec<FlagMirror> {
+    use crcbl_hal::{
+        BindingFlags, BufferUsage, ColorWrites, ImageAspect, ImageUsage, ShaderStages,
+    };
+
+    vec![
+        FlagMirror {
+            table: "BUFFER_USAGE",
+            rust: "BufferUsage",
+            module: "crcbl-hal/src/resource.rs",
+            src: HAL_RESOURCE_RS,
+            bits: flag_bits![
+                BufferUsage,
+                TRANSFER_SRC,
+                TRANSFER_DST,
+                UNIFORM,
+                STORAGE,
+                INDEX,
+                INDIRECT,
+                DEVICE_ADDRESS,
+                QUERY_RESOLVE,
+            ],
+            composites: flag_unions![BufferUsage],
+        },
+        FlagMirror {
+            table: "SHADER_STAGES",
+            rust: "ShaderStages",
+            module: "crcbl-hal/src/shader.rs",
+            src: HAL_SHADER_RS,
+            bits: flag_bits![ShaderStages, VERTEX, FRAGMENT, COMPUTE, MESH, TASK],
+            composites: flag_unions![
+                ShaderStages,
+                GRAPHICS => "the guaranteed graphics stages, which the page decodes as the \
+                             two bits it is",
+                ALL => "every guaranteed stage, likewise — and deliberately without the two \
+                        mesh bits, which is the whole of that type's own note",
+            ],
+        },
+        FlagMirror {
+            table: "BINDING_FLAGS",
+            rust: "BindingFlags",
+            module: "crcbl-hal/src/pipeline.rs",
+            src: HAL_PIPELINE_RS,
+            bits: flag_bits![
+                BindingFlags,
+                PARTIALLY_BOUND,
+                UPDATE_AFTER_BIND,
+                VARIABLE_COUNT
+            ],
+            composites: flag_unions![BindingFlags],
+        },
+        FlagMirror {
+            table: "IMAGE_USAGE",
+            rust: "ImageUsage",
+            module: "crcbl-hal/src/resource.rs",
+            src: HAL_RESOURCE_RS,
+            bits: flag_bits![
+                ImageUsage,
+                TRANSFER_SRC,
+                TRANSFER_DST,
+                SAMPLED,
+                STORAGE,
+                COLOR_ATTACHMENT,
+                DEPTH_STENCIL_ATTACHMENT,
+                PRESENT,
+            ],
+            composites: flag_unions![ImageUsage],
+        },
+        FlagMirror {
+            table: "IMAGE_ASPECT",
+            rust: "ImageAspect",
+            module: "crcbl-hal/src/resource.rs",
+            src: HAL_RESOURCE_RS,
+            bits: flag_bits![ImageAspect, COLOR, DEPTH, STENCIL],
+            composites: flag_unions![ImageAspect],
+        },
+        FlagMirror {
+            table: "COLOR_WRITES",
+            rust: "ColorWrites",
+            module: "crcbl-hal/src/pipeline.rs",
+            src: HAL_PIPELINE_RS,
+            bits: flag_bits![ColorWrites, R, G, B, A],
+            composites: flag_unions![
+                ColorWrites,
+                ALL => "all four channels, which the page decodes as the four bits it is",
+            ],
+        },
+    ]
+}
+
 /// What one `web/engine` module's declarations must mirror.
 struct FileMirror {
     /// The file's name, for the failure messages.
@@ -436,6 +691,11 @@ struct FileMirror {
     bytes: Vec<(&'static str, &'static str, &'static [u8])>,
     /// Strings: the JS name and the Rust constant's own name and text.
     text: Vec<(&'static str, &'static str, &'static str)>,
+    /// Ordered tables whose positions are the bits of a `crcbl_hal` `bitflags`
+    /// type rather than [`crate::tag`] codes, held by [`check_flags`].
+    flags: Vec<FlagMirror>,
+    /// `BigInt` masks: the JS name and the Rust expression's own text and value.
+    masks: Vec<(&'static str, &'static str, u64)>,
     /// Ordered tables that mirror something *other* than [`crate::tag`], with
     /// the reason. Held from both directions, so one that stops existing fails.
     foreign: &'static [(&'static str, &'static str)],
@@ -724,13 +984,13 @@ fn stream_mirror() -> FileMirror {
         ],
         bytes: vec![("STREAM_MAGIC", "STREAM_MAGIC", STREAM_MAGIC)],
         text: Vec::new(),
+        flags: stream_flag_mirrors(),
+        masks: vec![(
+            "FEATURES_CLAIMED",
+            "crcbl_hal::Features::all().bits()",
+            crcbl_hal::Features::all().bits(),
+        )],
         foreign: &[
-            ("BUFFER_USAGE", "crcbl_hal::BufferUsage"),
-            ("SHADER_STAGES", "crcbl_hal::ShaderStages"),
-            ("BINDING_FLAGS", "crcbl_hal::BindingFlags"),
-            ("IMAGE_USAGE", "crcbl_hal::ImageUsage"),
-            ("IMAGE_ASPECT", "crcbl_hal::ImageAspect"),
-            ("COLOR_WRITES", "crcbl_hal::ColorWrites"),
             (
                 "IMAGE_FORMAT",
                 "gpu-reply.js's FORMAT table, inverted at module load",
@@ -744,10 +1004,7 @@ fn stream_mirror() -> FileMirror {
                 "gpu-reply.js's COMPOSITE_ALPHA table, inverted at module load",
             ),
         ],
-        opaque: &[(
-            "FEATURES_CLAIMED",
-            "crcbl_hal::Features::all().bits(), a mask rather than a code table",
-        )],
+        opaque: &[],
     }
 }
 
@@ -787,6 +1044,8 @@ fn reply_mirror() -> FileMirror {
             "crate::reply::TRUNCATION_MARKER",
             crate::reply::TRUNCATION_MARKER,
         )],
+        flags: Vec::new(),
+        masks: Vec::new(),
         foreign: &[],
         opaque: &[],
     }
@@ -955,6 +1214,118 @@ fn find_decl<'a>(file: &str, decls: &'a [(&'static str, JsDecl)], wanted: &str) 
         .1
 }
 
+/// Hold one file's bitflag tables against the `crcbl_hal` types they restate,
+/// and account for every table one restates.
+///
+/// Four directions, because this is the one shape on the seam whose failure is
+/// quiet — a wrong bit is a valid command carrying the wrong usage, not a
+/// command the browser cannot name:
+///
+/// * a row whose position is not the bit of the flag it names;
+/// * a flag the type declares that the table has no row for, which the page
+///   would refuse outright — `readFlags` claims `2 ** table.length - 1` bits and
+///   errors on the rest;
+/// * a row the type declares no flag for, which is a bit the page would accept
+///   and wasm can never send;
+/// * a composite left out of the table on purpose that turns out to hold a bit
+///   of its own, which is the first three wearing a reason.
+fn check_flags(file: &str, decls: &[(&'static str, JsDecl)], mirrors: &[FlagMirror]) {
+    for FlagMirror {
+        table,
+        rust,
+        module,
+        src,
+        bits,
+        composites,
+    } in mirrors
+    {
+        let JsDecl::Ordered(entries) = find_decl(file, decls, table) else {
+            panic!(
+                "{file}'s `{table}` is not an array, so its positions are not the bits of \
+                 crcbl_hal::{rust}"
+            );
+        };
+
+        for (index, (name, bit)) in bits.iter().enumerate() {
+            let position = widen("a bit index", index);
+            let expected = 1u32.checked_shl(position).unwrap_or_else(|| {
+                panic!(
+                    "`{table}` would put crcbl_hal::{rust}::{name} at bit {position}, which is \
+                     past the width the page reads it at"
+                )
+            });
+            assert_eq!(
+                *bit, expected,
+                "crcbl_hal::{rust}::{name} is {bit:#x}, but this mirror puts it in row \
+                 {position} of `{table}`, where the page's half reads it as {expected:#x}"
+            );
+            let entry = entries.get(index).unwrap_or_else(|| {
+                panic!(
+                    "{file}'s `{table}` has no row {index}, so the browser has no name for \
+                     crcbl_hal::{rust}::{name} = {bit:#x} and refuses every value that sets it"
+                )
+            });
+            assert_eq!(
+                entry, name,
+                "{file} has {table}[{index}] = '{entry}', but the flag at {bit:#x} is \
+                 crcbl_hal::{rust}::{name}"
+            );
+        }
+
+        let surplus: Vec<&str> = entries.iter().skip(bits.len()).copied().collect();
+        assert!(
+            surplus.is_empty(),
+            "{file}'s `{table}` names flags crcbl_hal::{rust} does not declare, so the browser \
+             accepts bits wasm can never send: {}",
+            surplus.join(", ")
+        );
+
+        let claimed = bits.iter().fold(0, |mask, (_, bit)| mask | bit);
+        let declared = bitflags_names(module, src, rust);
+        for (name, value, why) in composites {
+            assert!(
+                declared.contains(name),
+                "this mirror leaves crcbl_hal::{rust}::{name} out of `{table}` as {why}, but \
+                 {module} no longer declares it"
+            );
+            assert!(
+                value.count_ones() > 1,
+                "crcbl_hal::{rust}::{name} is {value:#x}, a bit of its own rather than a union \
+                 of the rows above, so `{table}` needs a row for it — it is left out as {why}"
+            );
+            assert_eq!(
+                value & !claimed,
+                0,
+                "crcbl_hal::{rust}::{name} sets {:#x}, which no row of `{table}` claims, so it \
+                 is not a union of the rows above — it is left out as {why}",
+                value & !claimed
+            );
+        }
+        for name in &declared {
+            let mirrored = bits.iter().any(|(flag, _)| flag == name)
+                || composites.iter().any(|(flag, _, _)| flag == name);
+            assert!(
+                mirrored,
+                "crcbl_hal::{rust} declares {name}, which {file}'s `{table}` has no row for, so \
+                 the browser refuses every value that sets it: give it a row and a line in this \
+                 file's mirror, or — if it is a union of other flags rather than a bit of its \
+                 own — add it to `composites`"
+            );
+        }
+        // Last, so that a flag that actually moved reports itself by name above
+        // rather than as a number that no longer matches. It is the guard on the
+        // parse itself: a block read as empty agrees with every direction above.
+        assert_eq!(
+            declared.len(),
+            bits.len() + composites.len(),
+            "{module} declares {} flags in `{rust}` and this mirror holds {} of them, so \
+             `{table}` is checked against a list that read less than the type holds",
+            declared.len(),
+            bits.len() + composites.len()
+        );
+    }
+}
+
 /// Hold one file's declarations against `mirror`, and answer the Rust constant
 /// names it claimed.
 ///
@@ -1042,6 +1413,25 @@ fn check_file(mirror: &FileMirror) -> BTreeSet<&'static str> {
         claimed.insert(rust_name);
     }
 
+    for (js_name, rust_name, value) in &mirror.masks {
+        let JsDecl::Mask(mask) = find_decl(file, &decls, js_name) else {
+            panic!(
+                "{file}'s `{js_name}` is not a mask expression, so it cannot mirror {rust_name}"
+            );
+        };
+        assert_eq!(
+            mask, value,
+            "{file}'s `{js_name}` is {mask:#x}, but {rust_name} is {value:#x}"
+        );
+        unclaimed.remove(js_name);
+        claimed.insert(rust_name);
+    }
+
+    check_flags(file, &decls, &mirror.flags);
+    for FlagMirror { table, .. } in &mirror.flags {
+        unclaimed.remove(table);
+    }
+
     // The frozen tables are held by `check_frozen` against their own mirror, so
     // here they are only accounted for.
     for (name, decl) in &decls {
@@ -1070,7 +1460,7 @@ fn check_file(mirror: &FileMirror) -> BTreeSet<&'static str> {
     let strays: Vec<&str> = unclaimed.iter().copied().collect();
     assert!(
         strays.is_empty(),
-        "{file} declares wire values nothing in tag.rs is checked against, so the browser \
+        "{file} declares wire values this file's mirror checks nothing against, so the browser \
          believes in codes wasm never sends: {}",
         strays.join(", ")
     );
@@ -1111,8 +1501,89 @@ fn gpu_stream_js_mirrors_every_command_tag_and_enum_code_tag_rs_declares() {
     );
     assert_eq!(
         claimed.len(),
-        172,
+        173,
         "the tag.rs constants gpu-stream.js mirrors moved; the mirror above has to move with it"
+    );
+}
+
+/// The `gpu-stream.js` helper every bitflag table is read through, and the width
+/// it is read at. `crcbl-hal` stores each of those types in a `u32` and
+/// [`crate::writer`] puts every one of their fields on the wire with `put_u32`,
+/// so this line is the premise the tables below are checked under.
+const FLAGS_READ_AS_U32: &str = "  readFlags(field, table) {\n    const bits = this.readU32();";
+
+/// The same for `crcbl_hal::Features`, which `crcbl-hal` stores in a `u64` and
+/// [`crate::writer`] puts on the wire with `put_u64` — which is why the page's
+/// half spells its mask as a `BigInt` and not as a number.
+const FEATURES_READ_AS_U64: &str = "  readFeatures(field) {\n    const bits = this.readU64();";
+
+/// The `gpu-stream.js` tables that restate a `crcbl_hal` `bitflags` type, held
+/// against the type — the class the guards above do not reach, because these
+/// mirror `crcbl-hal` rather than [`crate::tag`], and the class whose
+/// disagreement is silent: the browser decodes a valid command carrying the
+/// wrong usage, the wrong visibility or the wrong write mask.
+///
+/// [`check_flags`] runs inside [`check_file`], so a bit that disagrees fails the
+/// two tests above as well. What this one adds is the width the tables are read
+/// at and the totals, and the totals are what stop a table being quietly
+/// demoted back to [`FileMirror::foreign`], where nothing would compare its bits
+/// again.
+#[test]
+fn gpu_stream_js_mirrors_every_bit_of_the_crcbl_hal_flag_sets_it_restates() {
+    let mirror = stream_mirror();
+    check_file(&mirror);
+
+    assert!(
+        GPU_STREAM_JS.contains(FLAGS_READ_AS_U32),
+        "gpu-stream.js no longer reads a bitflags word as a u32, so its bitflag tables are \
+         checked against a width the stream does not use"
+    );
+    assert!(
+        GPU_STREAM_JS.contains(FEATURES_READ_AS_U64),
+        "gpu-stream.js no longer reads a crcbl_hal::Features word as a u64, so FEATURES_CLAIMED \
+         is checked against a width the stream does not use"
+    );
+
+    assert_eq!(
+        mirror
+            .flags
+            .iter()
+            .map(|flags| flags.table)
+            .collect::<Vec<_>>(),
+        [
+            "BUFFER_USAGE",
+            "SHADER_STAGES",
+            "BINDING_FLAGS",
+            "IMAGE_USAGE",
+            "IMAGE_ASPECT",
+            "COLOR_WRITES",
+        ],
+        "the gpu-stream.js tables held against a crcbl_hal type moved; a table that left this \
+         list is one nothing compares the bits of any more"
+    );
+    assert_eq!(
+        mirror
+            .flags
+            .iter()
+            .map(|flags| flags.bits.len())
+            .sum::<usize>(),
+        30,
+        "the crcbl-hal bits gpu-stream.js restates moved; the mirror above has to move with it"
+    );
+    assert_eq!(
+        mirror
+            .flags
+            .iter()
+            .map(|flags| flags.composites.len())
+            .sum::<usize>(),
+        3,
+        "the crcbl-hal composites gpu-stream.js leaves out moved; the mirror above has to move \
+         with it"
+    );
+    assert_eq!(
+        mirror.masks.len(),
+        1,
+        "gpu-stream.js's mask count moved; the mirror above has to move with it"
     );
 }
 
