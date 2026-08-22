@@ -14547,9 +14547,13 @@ maintenance burden rather than a second gate.
 `drain_replies` refuses a second reply for a sequence, in the same buffer or a
 later one, so an enumeration yields one adapter. That fits WebGPU, where
 `requestAdapter()` grants one or none. A backend that must report several needs
-a counted-list reply shape rather than several replies. `Reply::Adapter`'s doc
-still says "one entry of an enumeration", which implies the forbidden thing —
-wording, not behaviour.
+a counted-list reply shape rather than several replies.
+
+This entry used to end by complaining that `Reply::Adapter`'s doc said "one
+entry of an enumeration", implying the forbidden thing. It does not any more —
+the `NoAdapter` doc beside it now says "an enumeration is _one_ reply" and gives
+the refusal that enforces it — so that half is closed and only the design note
+above is worth keeping.
 
 ### Not verified
 
