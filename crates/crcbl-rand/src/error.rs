@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-/// Why an [`entropy`](crate::entropy) draw failed.
+/// Why an [`entropy`](crate::entropy()) draw failed.
 ///
 /// The variants are target-specific because the two entropy sources are:
 /// `Os` exists only where there is an OS CSPRNG to fail (native targets), and

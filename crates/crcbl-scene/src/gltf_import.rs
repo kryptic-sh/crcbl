@@ -537,7 +537,8 @@ pub fn import_gltf(source: &dyn AssetSource, key: &Path) -> Result<GltfScene, St
 /// suite is one, and it lists nothing in `extensionsRequired`, so the
 /// specification says it has to load.
 ///
-/// It has to load here in particular, because [`report_unsupported`] already
+/// It has to load here in particular, because [`warn_unsupported_extensions`]
+/// already
 /// skips every animation in every document and logs a line saying so. Refusing
 /// a file over a feature this code had decided to ignore is the shape of defect
 /// where a guard is present, correct, and ordered so it can never run.
@@ -564,7 +565,8 @@ fn parse(bytes: &[u8], key: &Path) -> Result<gltf::Gltf, StorageError> {
 /// this function has already altered.
 ///
 /// **Only `animations` is dropped, and only because nothing reads it.**
-/// `report_unsupported` skips them for every document already, so removing the
+/// `warn_unsupported_extensions` skips them for every document already, so
+/// removing the
 /// array loses nothing a successful parse would have kept — which is what makes
 /// this a repair rather than a way of forcing a file through. No other array
 /// has that property, so no other array is touched.
@@ -590,7 +592,8 @@ fn parse_without_animations(bytes: &[u8], key: &Path) -> Option<gltf::Gltf> {
 
     // The file, the feature and the reason — `docs/plan/sample/05-viewer.md`'s
     // exit criterion for a document that does not arrive whole. Louder than
-    // `report_unsupported`'s line about animations because this one has also
+    // `warn_unsupported_extensions`'s line about animations because this one has
+    // also
     // lost the `animations` array itself, so nothing downstream can count them.
     crcbl_core::log::warn!(
         "{}: dropping {count} animation(s) this importer cannot deserialize — the document \

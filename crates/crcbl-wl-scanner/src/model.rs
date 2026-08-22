@@ -254,7 +254,8 @@ fn required<'a>(attrs: &'a [(&str, String)], key: &str, what: &str) -> Result<&'
 
 /// A name that is pasted into generated Rust verbatim: `[A-Za-z_][A-Za-z0-9_]*`.
 ///
-/// Every name in a protocol file reaches [`crate::emit`] unescaped — as a `pub
+/// Every name in a protocol file reaches [`crate::emit`](mod@crate::emit)
+/// unescaped — as a `pub
 /// mod`/`pub unsafe fn` identifier, as the body of a `c"…"` literal, and as the
 /// text of a `///` line. [`crate::xml`] decodes `&quot;` to `"` and `&#10;` to a
 /// newline before any of that, so a protocol file is otherwise free to close a

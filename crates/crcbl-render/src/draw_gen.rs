@@ -1384,7 +1384,7 @@ pub(crate) fn compute_pipeline(
 /// A start-up staging copy on [`crate::mesh_pool`]'s and [`crate::texture`]'s
 /// terms, and it joins them on the crate docs' list of named exceptions to the
 /// no-manual-barriers rule. It is *not* a `write_buffer`, because the
-/// destination is device-local; not [`crcbl_hal::CommandEncoder::fill_buffer`],
+/// destination is device-local; not [`crcbl_hal::CommandEncoder::clear_buffer`],
 /// which `crcbl-dx12` refuses outright and the module docs argue about at
 /// length; and not the clearing dispatch, which runs inside every frame rather
 /// than once.

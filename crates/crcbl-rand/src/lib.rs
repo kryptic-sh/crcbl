@@ -10,7 +10,8 @@
 //!   in it — which is what lets it drive procedural generation, noise and
 //!   netcode that must agree across machines. It is **not** a source of secrets:
 //!   anyone who learns the seed can reproduce the whole stream.
-//! - [`entropy`] is the **secure, unpredictable** seed source. On native targets
+//! - [`entropy()`] is the **secure, unpredictable** seed source. On native
+//!   targets
 //!   it is the operating system's CSPRNG (via `getrandom`). On `wasm32` — where
 //!   there is no ambient OS entropy an engine with a no-imports ABI may call —
 //!   it is a host-seeded [`rand_chacha::ChaCha20Rng`] that **fails closed**:

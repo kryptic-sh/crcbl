@@ -73,8 +73,12 @@ const SLICE_BYTES: usize = 8;
 const LMS_LEN: usize = 4;
 const MAGIC: u32 = 0x716f_6166; // 'qoaf'
 
+/// The reference decoder's table, transcribed:
+///
+/// ```text
 /// dequant_tab[sf][qr] = round(scalefactor_tab[sf] * dqt[qr])
 /// with dqt = {0.75, -0.75, 2.5, -2.5, 4.5, -4.5, 7, -7}
+/// ```
 const DEQUANT_TAB: [[i32; 8]; 16] = [
     [1, -1, 3, -3, 5, -5, 7, -7],
     [5, -5, 18, -18, 32, -32, 49, -49],

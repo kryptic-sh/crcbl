@@ -347,8 +347,10 @@ struct InboxSlot {
 /// second copy of the id bookkeeping is a second place for an id to be reused
 /// while a delivery is outstanding.
 ///
-/// `BTreeMap` rather than `HashMap` so [`Inbox::names`] is ordered, which makes
-/// the tests' expectations stable.
+/// `BTreeMap` rather than `HashMap` so iteration is by id, which makes
+/// [`Inbox::find`] deterministic: two slots open under the same name resolve to
+/// the lower id every time rather than to whichever one the hasher reached
+/// first.
 #[derive(Debug, Default)]
 struct Inbox {
     slots: BTreeMap<u32, InboxSlot>,

@@ -1076,7 +1076,7 @@ pub struct ForwardRenderer {
     /// `[frame]`: the camera's group rebuilt against the blurred occlusion view,
     /// cached against that view.
     ///
-    /// [`ForwardRenderer::tonemap_group`]'s shape, one per frame in flight
+    /// [`ForwardRenderer::tonemap_groups`]'s shape, one per frame in flight
     /// because the group it replaces is per frame in flight. Rebuilt only when
     /// the view changes, which is only on a resize.
     ///
@@ -1371,7 +1371,7 @@ struct MeshGroup {
     ///
     /// **A buffer per pass** as well, because the colour pass and a cascade
     /// judge the same groups under different budgets — see
-    /// [`CascadeBuffers::group_state`].
+    /// [`TileBuffers::group_state`].
     group_state: Option<BufferHandle>,
     /// Binding [`SHADOW_ATLAS_BINDING`]. The atlas for the pass that reads it,
     /// and the placeholder for the pass that writes it — see
@@ -1385,7 +1385,7 @@ struct MeshGroup {
     /// camera's: the occlusion image may be a graph transient whose view exists
     /// only at execute time, so the camera's group is rebuilt against whatever
     /// the frame bound inside the forward pass and cached — the shape
-    /// [`ForwardRenderer::tonemap_group`] already has.
+    /// [`ForwardRenderer::tonemap_groups`] already has.
     ambient_occlusion: ImageViewHandle,
 }
 
