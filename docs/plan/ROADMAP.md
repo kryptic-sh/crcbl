@@ -18,6 +18,24 @@ Two hard rules govern the ordering:
 breakout onward ships as a browser demo on GitHub Pages. The demo site is the
 engine's public face and its continuous cross-backend regression test.
 
+## Status (as of 2026-08-21)
+
+**`crcbl-mtl` and `crcbl-dx12` are deferred.** Work on both stopped by the
+owner's decision; `docs/plan/09-backends-metal-dx12.md` carries the terms and
+`docs/backlog.md` the two `DEFERRED` entries. Neither crate is deleted and
+neither CI job is removed, so a regression on either still shows — what stops is
+new implementation: closing capability rows, chasing the WARP device removal,
+and writing Metal features no runner here can execute. Everything the section
+below reports about either backend is the state at the point work stopped, not
+work in progress. **`parity_blockers()` therefore cannot reach empty**, and
+`every_parity_blocker_is_on_a_deferred_backend` in `crcbl-hal/src/capability.rs`
+is what says so rather than letting a non-zero count read as work somebody is
+about to pick up.
+
+Effort goes to `crcbl-vk` and `crcbl-webgpu`, the two backends carrying a
+shipping platform each — Linux and Windows through Vulkan, the browser through
+WebGPU.
+
 ## Status (as of 2026-08-20)
 
 **Since 2026-08-15 the work has been backend parity and the viewer sample**, and
