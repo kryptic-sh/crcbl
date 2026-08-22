@@ -6225,8 +6225,25 @@ and fourth rustdoc invocation in a job that already runs four; whether that
 belongs in the `rustdoc` job or alongside the cross-target clippy steps is a
 placement question nobody has answered.
 
-The same question applies to every other crate with platform-gated code, and was
-not measured: only `crcbl-shell` was.
+**The rest of the workspace was then measured too**, and the answer is clean in
+the only sense that matters here. Running the same flags over
+`--workspace --exclude crcbl-shell --exclude crcbl-webgpu`:
+`x86_64-pc-windows-msvc` reports 21 errors and **every one is in `crcbl-dx12`**;
+`aarch64-apple-darwin` reports 14 and **every one is in `crcbl-mtl`**. No other
+crate with platform-gated code has any.
+
+Both are lower bounds rather than totals — a failing `cargo doc` stops
+scheduling further units, so a crate after the first failure is never reached —
+but the attribution holds: the rot outside `crcbl-shell` is confined to the two
+**deferred** backends.
+
+**So it is deliberately not being fixed.** Cleaning docs on `crcbl-mtl` and
+`crcbl-dx12` is not a feature and would not break the deferral, but it buys
+nothing while nobody is reading or extending those crates, and the standing
+priority is gap-closing work on Vulkan and WebGPU. What it does decide is the
+shape of the gate: a **workspace-wide** cross-target doc job cannot go green
+until those two are cleaned, whereas a `-p crcbl-shell --target …` pair can.
+That is the cheap version and the one to add if this is picked up.
 
 ## What the scaffold's gate does not cover
 
