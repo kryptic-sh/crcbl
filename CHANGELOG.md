@@ -1076,6 +1076,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   needs no GPU and pins that `Tolerance::RASTERISER` refuses the uniform
   multiply the reported defect amounted to.
 
+- **`apps/flappy`, `apps/hud`, `apps/asteroids` and `apps/horde` have golden
+  frames too**, so every sample in the tree now has the determinism check and
+  the golden frame `docs/plan/12-testing.md` asks for. Each is a
+  `tests/golden.rs` and a `tests/golden/*.png` driven by its own
+  `tests/run-<sample>-golden.sh`, each gets a step beside breakout's in
+  `.github/workflows/ci.yml`, and each runs the compiled binary with
+  `--screenshot`. All four declare `Common::with_screenshot`, so `--screenshot`
+  is a flag those binaries now have and list in `--help` instead of refusing
+  with exit 2.
+
+  **The claims in front of each comparison are the sample's own**, because a
+  golden passes on two blank images: flappy's blue sky against its green ground
+  band, hud's red health fill against its blue mana fill, asteroids' rock
+  against the space beside it, and — the one that is not a block ratio — the
+  fraction of horde's frame that is enemy-red, because a block on one enemy
+  cannot tell four enemies from four hundred.
+
+  **horde's golden is of a `--prefill` run.** A headless horde never leaves its
+  title screen, and a golden of an empty arena would go on passing after every
+  enemy sprite stopped drawing. The suite refuses the frame unless the summary
+  reports the run as `Playing`.
+
+  No sample repeats breakout's darkening test: that pins `Tolerance::RASTERISER`
+  itself, which all five compare under unchanged.
+
 - **`crcbl-mtl` builds mesh pipelines and records the mesh draws.** A real
   `MTLMeshRenderPipelineDescriptor` — object, mesh and fragment functions,
   colour attachments, depth and stencil, sample count — sharing the raster

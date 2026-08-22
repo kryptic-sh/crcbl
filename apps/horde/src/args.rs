@@ -67,6 +67,10 @@ OPTIONS:
                          the debug panel's frame timing measures the frame
                          rather than reporting the fixed step a headless clock
                          hands it. Windowed runs already do this.
+    --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
+                         Turns --headless on: the frame is read back off the
+                         offscreen ring, which is the only surface every backend
+                         can copy a presented image out of.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
@@ -96,6 +100,13 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            // `with_screenshot` is what makes `--screenshot` a flag this binary
+            // has rather than an unknown argument: `crate::app::assemble` arms
+            // the request on the context, and a sample that had not done that
+            // must refuse the flag instead of writing nothing.
+            #[cfg(not(target_arch = "wasm32"))]
+            common: Common::new(crate::game::DEFAULT_TICK_HZ).with_screenshot(),
+            #[cfg(target_arch = "wasm32")]
             common: Common::new(crate::game::DEFAULT_TICK_HZ),
             seed: crate::game::DEFAULT_SEED,
             max_enemies: crate::game::DEFAULT_MAX_ENEMIES,
@@ -299,6 +310,10 @@ mod tests {
         assert!(
             USAGE.contains(crcbl::args::COMMON_TAIL_HELP),
             "the shared tail has drifted from crcbl::args"
+        );
+        assert!(
+            USAGE.contains(crcbl::args::SCREENSHOT_HELP),
+            "the --screenshot block has drifted from crcbl::args"
         );
         assert!(USAGE.contains("horde — the engine's fourth game"));
     }

@@ -1359,6 +1359,25 @@ jobs:
         run: >-
           cargo run --locked --quiet --package asteroids -- --headless --frames
           60 --backend vk
+      # **Each of the four samples now gets a second step, right after the one
+      # that ran it, and this one looks at the frame.** A headless run proves
+      # its sample reaches a real driver without a validation error; it cannot
+      # tell a correct frame from a black one, and neither can the crates' own
+      # unit tests, which compare simulation state and never a pixel.
+      # `docs/plan/12-testing.md` asks each sample for a determinism check *and*
+      # a golden frame, and these are the second half: `--screenshot` writes the
+      # frame the run presented and each suite compares it, after asserting the
+      # frame holds its own subject at all — asteroids' rocks, flappy's sky and
+      # ground band, horde's field of enemies, hud's two bars.
+      #
+      # Driving the compiled binary rather than a scene the test rebuilt is the
+      # point — the flag is `crcbl::args::Common`'s, so what lands in each PNG
+      # is what a player would have seen.
+      - name: Draw asteroids' field on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: apps/asteroids/tests/run-asteroids-golden.sh
       - name: Run flappy headless against lavapipe
         env:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
@@ -1367,6 +1386,11 @@ jobs:
         run: >-
           cargo run --locked --quiet --package flappy -- --headless --frames 60
           --backend vk
+      - name: Draw flappy's course on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: apps/flappy/tests/run-flappy-golden.sh
       - name: Run horde headless against lavapipe
         env:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
@@ -1375,6 +1399,15 @@ jobs:
         run: >-
           cargo run --locked --quiet --package horde -- --headless --frames 60
           --backend vk
+      # Prefilled, unlike the step above: a headless horde never leaves its
+      # title screen, so the only frame a plain run can offer has none of the
+      # scale sample's subject on it. `--prefill` is `apps/horde`'s own fixture
+      # and `tests/golden.rs` says how much and why.
+      - name: Draw horde's field on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: apps/horde/tests/run-horde-golden.sh
       # **The viewer is driven through its tests, not its binary, and that is
       # deliberate.** Every step above runs a sample's executable headless; the
       # viewer's needs a `.glb` on disk, and glTF fixtures in this workspace are
@@ -1407,6 +1440,14 @@ jobs:
         run: >-
           cargo run --locked --quiet --package hud -- --headless --frames 60
           --backend vk
+      # The only golden in the tree whose frame is a clear plus `ui-composite`
+      # and nothing else — no sprite pass in front of a UI regression to have
+      # tripped first, which is what makes this step worth its own run.
+      - name: Draw hud's panels on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: apps/hud/tests/run-hud-golden.sh
       # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
       # The reference, what lavapipe actually rendered, and a red-marked diff of
       # the two — enough to tell "the tolerance is too tight" from "the triangle

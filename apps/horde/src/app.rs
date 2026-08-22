@@ -257,6 +257,22 @@ fn assemble<S: Shell + ?Sized>(
     booted: Booted<S, Gpu>,
     options: &Options,
 ) -> Result<Loop<S>, HordeError> {
+    // `--screenshot`, armed before the first frame because the frame it names
+    // is counted from this point. The flag forces `--headless` on, so the
+    // context behind this is always an offscreen ring — see
+    // [`crcbl::args::Common::screenshot`].
+    //
+    // The mutable binding lives inside the `cfg` rather than on the parameter:
+    // a browser build arms nothing, so a `mut` in the signature would be one
+    // the wasm32 target correctly reports as unused.
+    #[cfg(not(target_arch = "wasm32"))]
+    let booted = {
+        let mut booted = booted;
+        if let Some(request) = options.common.screenshot_request() {
+            booted.gpu.context_mut().set_screenshot(request);
+        }
+        booted
+    };
     let mut game = Game::with_setup(&options.setup()).map_err(HordeError::Game)?;
     if options.prefill > 0 {
         let staged = game.stage_field(options.prefill);

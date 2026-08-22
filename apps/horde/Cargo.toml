@@ -43,5 +43,22 @@ crcbl = { workspace = true }
 [build-dependencies]
 crcbl-sprite = { workspace = true, features = ["bake"] }
 
+# `tests/golden.rs`'s image I/O — loading the PNG the binary wrote and comparing
+# it against the reference. A dev-dependency on `crcbl-golden`'s own manifest
+# terms: nothing here reaches the shipped game. The *encoder* the binary uses is
+# `crcbl`'s, which links the same crate on native — see
+# `crates/crcbl/Cargo.toml`.
+[dev-dependencies]
+crcbl-golden = { workspace = true }
+
 [lints]
 workspace = true
+
+[features]
+# `tests/golden.rs` — the frame the compiled binary presents under
+# `--screenshot`, off a real device, against a checked-in golden. Feature-gated
+# *and* `#[ignore]`d, the same pair `crcbl`'s `render-e2e` and breakout's
+# `golden-e2e` use: a plain `cargo test --workspace --all-features` on a machine
+# with no GPU must stay green, and `tests/run-horde-golden.sh` is the only thing
+# that turns it on — and it fails when the suite reports zero tests run.
+golden-e2e = []

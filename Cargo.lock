@@ -50,6 +50,7 @@ name = "asteroids"
 version = "0.1.0"
 dependencies = [
  "crcbl",
+ "crcbl-golden",
  "crcbl-sprite",
 ]
 
@@ -635,6 +636,7 @@ name = "flappy"
 version = "0.1.0"
 dependencies = [
  "crcbl",
+ "crcbl-golden",
  "crcbl-sprite",
 ]
 
@@ -786,6 +788,7 @@ name = "horde"
 version = "0.1.0"
 dependencies = [
  "crcbl",
+ "crcbl-golden",
  "crcbl-sprite",
 ]
 
@@ -794,6 +797,7 @@ name = "hud"
 version = "0.1.0"
 dependencies = [
  "crcbl",
+ "crcbl-golden",
 ]
 
 [[package]]
