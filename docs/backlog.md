@@ -5289,6 +5289,42 @@ version strings, which were read from Steamworks.NET's header mirror rather than
 Valve's login-gated zip. The plan mandates re-reading both from a real SDK
 before any declaration is trusted.
 
+## Four source files are past the size where anyone can hold them (2026-08-22)
+
+Measured with `git ls-files '*.rs' | xargs wc -l`, not estimated:
+
+| file                                 |  lines |
+| ------------------------------------ | -----: |
+| `crates/crcbl-webgpu/src/probe.rs`   | 16,995 |
+| `crates/crcbl-dx12/src/device.rs`    | 12,932 |
+| `crates/crcbl-render/src/forward.rs` | 10,899 |
+| `crates/crcbl/src/engine.rs`         | 10,749 |
+
+`crcbl-dx12` is DEFERRED, so its file is not a question anyone has to answer
+now. The other three are live, and `probe.rs` is the one worth a decision.
+
+**`probe.rs` is roughly 11,000 lines of code and 6,000 of tests** —
+`pub mod shim` starts at 9,042 and `mod tests` at 11,034 — and it carries
+several responsibilities that have visible seams already: request encoding, the
+`StreamChannel` transport, the wasm export shim, the replayer, and the reply
+format. Splitting along those seams is mechanical.
+
+**The argument against splitting it is in its own module doc**, which says the
+module is transitional: `crcbl::backend`'s registry entry for
+`BackendKind::WebGpu` still refuses, so nothing installs the channel, and "when
+the backend arrives and installs its own channel, this module has done its job
+and goes". Reorganising a file that is scheduled for deletion buys nothing and
+costs a diff nobody wants to review.
+
+So the decision is genuinely open and it is the user's: **split it now** because
+"it goes when the backend lands" has been true for a while and every session
+that touches WebGPU pays the whole file to change any of it; or **leave it** and
+accept that cost until the backend actually lands, on the grounds that the split
+is wasted work if it does. Nothing here is blocked either way.
+
+`forward.rs` and `engine.rs` have no such expiry and no one has looked for their
+seams; that is a gap in this entry, not a judgement that they are fine.
+
 ## What the deleted WebGPU plan left behind (2026-08-22)
 
 `docs/plan/ROADMAP.md`'s 530-line "Replacing `wgpu` with our own WebGPU path"
