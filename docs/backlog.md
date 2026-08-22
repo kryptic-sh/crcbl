@@ -14712,11 +14712,23 @@ not one any more: `crcbl-webgpu/src/command.rs` defines
 
 ### Coverage gap in what the browser corroborates
 
-Group G corroborates one of nineteen limits through wasm (`max_image_2d`). The
-other eighteen are checked in-page against the live adapter, and field by field
-against a stub in `gpu-replay.mjs` — a weaker claim, since neither goes through
-the wire. `vendor_id`, `device_id`, `device_type` and `driver` are never
-corroborated at all, because a browser has nothing to disagree with.
+Group G now holds the **granted adapter's** whole `Limits` through wasm — every
+scalar, the count included — against the numbers the page mapped for that same
+adapter, which together with the browser-to-mapped check above it covers the
+struct end to end. Two things it still does not reach:
+
+- **The opened device's limits, all but `max_image_2d`.**
+  `__crcbl_web_gpu_probe_device_max_image_2d` is the only export carrying one of
+  those, and the device's numbers are not the adapter's arriving twice: they are
+  the specification's defaults unless something asked for more, so a
+  transposition on that reply is invisible in exactly the way the adapter's was.
+  Closing it is the adapter half's shape again — an indexed reader over the
+  opened device's caps — but the _expected_ side has to be built where group G
+  already opens a device, by mapping the live `GPUDevice`'s own limits through
+  `halLimitsFor`, and that is what kept it out of the same slice rather than any
+  difficulty in the export.
+- `vendor_id`, `device_id`, `device_type` and `driver`, never, because a browser
+  has nothing to disagree with.
 
 ### Not reviewed
 
