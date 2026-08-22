@@ -192,6 +192,28 @@ fn screenshot_from_a_real_run(backend: &str) -> (Image, String) {
         stdout.contains(&format!("{FRAMES} frames")),
         "the summary does not say the run presented {FRAMES} frames:\n{stdout}"
     );
+    // **And that the simulation advanced, which the frames do not say.** The
+    // picture this guards is of a menu over a still field, so a build whose
+    // `Game::tick` did nothing presented its frames, wrote a byte-identical
+    // image and passed every claim below. Measured by emptying `tick`.
+    //
+    // It has to be the *simulated* count, not the loop's: the loop counts the
+    // times it called `tick` and reads the same either way, while `sim_ticks`
+    // comes from `Game::ticks_run` and goes to zero. flappy's golden made
+    // exactly that mistake first and passed the frozen build twice.
+    //
+    // Half of `FRAMES` rather than the exact figure, because the exact one is
+    // the accumulator's business. Zero is the case that matters.
+    let simulated: u32 = stdout
+        .split_once(" simulated)")
+        .and_then(|(before, _)| before.rsplit('(').next())
+        .and_then(|word| word.parse().ok())
+        .unwrap_or_else(|| panic!("the summary names no simulated tick count:\n{stdout}"));
+    assert!(
+        simulated >= FRAMES / 2,
+        "the simulation advanced {simulated} times over {FRAMES} frames, so it was not \
+         running and this image is of a game that never started:\n{stdout}"
+    );
 
     assert!(
         path.exists(),

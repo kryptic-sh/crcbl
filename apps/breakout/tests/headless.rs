@@ -78,7 +78,11 @@ fn two_headless_runs_produce_identical_output() {
     assert_eq!(stdout(&first), stdout(&second));
     // 24 frames of 1/60 s, the first of which only establishes the clock's
     // baseline: 23 ticks at the default 60 Hz.
-    assert!(stdout(&first).contains("23 ticks"), "{}", stdout(&first));
+    assert!(
+        stdout(&first).contains("23 ticks (23 simulated)"),
+        "{}",
+        stdout(&first)
+    );
 }
 
 /// A frame budget is not optional headless: without one the loop would never

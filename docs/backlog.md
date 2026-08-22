@@ -1179,16 +1179,26 @@ accept the re-bless when it happens.
 **Measured by emptying each sample's `Game::tick` and running its golden**, not
 argued from the images.
 
+All four samples were tested. **asteroids and horde catch a stopped simulation;
+flappy and breakout did not, and now do.**
+
 - **asteroids catches it** — the entry that stood here said it did not.
   `apps/asteroids/tests/golden.rs`'s first content claim wants a rock at
   `ROCK_AT` brighter than the space beside it, and a frozen simulation never
   moves one there, so the run panics at that assertion. The catch is incidental
   rather than designed: it is a positional content claim that happens to need
   motion, not a check of motion.
+- **horde catches it too**, at `apps/horde/tests/golden.rs:258`. Like
+  asteroids', the catch is a content claim that happens to need motion.
 - **flappy did not, and now does.** Its picture is of a title screen that does
   not animate — frames 24, 60 and 61 are byte-identical — so a frozen build
   presented its frames, wrote a byte-identical image and passed every claim.
   Fixed by giving the summary the simulation's own tick count.
+- **breakout did not either, and now does.** Same shape as flappy: a menu over a
+  still field, and a private `ticks_run` the summary never carried. Its
+  `tests/headless.rs` pinned `23 ticks`, which the new format still satisfies as
+  a substring; that assertion was tightened to `23 ticks (23 simulated)` rather
+  than left to pass on the half that cannot fail.
 
 **The trap worth keeping, because the first fix was wrong.** The summary already
 carried a tick count and asserting it did **not** catch the frozen build: that
@@ -1202,8 +1212,7 @@ detect a wholly stopped simulation, which is the crude case. Neither would
 notice a simulation running at the wrong rate, or one advancing everything but
 the thing under test, because the image is insensitive to the frame index by
 construction. Closing that needs a scripted-input path into gameplay, which only
-`apps/horde`'s `--prefill` has. breakout and horde were not tested this way and
-are a coverage gap in this entry rather than a claim either way.
+`apps/horde`'s `--prefill` has.
 
 ### What the JS mirror guards still do not reach
 
