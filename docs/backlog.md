@@ -9723,20 +9723,25 @@ green run over content that does not use the feature.
   `start_device`, the engine's whole handling of the disagreement is one
   `log::info!` naming both sizes before it uses the shell's, so an injector
   there buys a test of a log line rather than of a behaviour. Worth doing when
-  something branches on it, and not before; `NullInstance::adapters` returns
-  exactly one adapter, so "no adapter can serve this surface" is unreachable;
-  `wait_until_presented` always returns `Ok`, so the lapsed-timeout path is
-  unreachable; and **neither preset advertises `PRESENT_FEEDBACK`**, so a device
-  that claims it has to be hand-built in the test.
+  something branches on it, and not before; and `NullInstance::adapters` returns
+  exactly one adapter, so "no adapter can serve this surface" is unreachable.
 
-  **One of these has been closed, and it is the worked example for the rest.**
-  `AcquiredFrame::suboptimal` is now `Recorder::report_suboptimal_acquires`,
-  beside `lose_device` and `report_swapchain_out_of_date`. The part worth
-  copying is not the plumbing but the question it forced: whether the injector
-  should _latch_ or _run out_. It runs out, because the engine answers
-  suboptimal by reconfiguring, so a latched one would rebuild on every frame and
-  a test that drove such a loop would hang instead of failing. Each remaining
-  injector owes the same question an answer.
+  **The closed ones are the worked examples for the rest.**
+  `AcquiredFrame::suboptimal` is `Recorder::report_suboptimal_acquires`, and the
+  lapsed present wait is `report_present_wait_timeouts` plus
+  `NullInstance::with_present_feedback` — that pair had to land together,
+  because the seam _requires_ an immediate `Ok(())` from a device without
+  `PRESENT_FEEDBACK`, so a null timeout was illegal until a null device could
+  claim the capability.
+
+  The part worth copying is not the plumbing but the question each forced:
+  whether the injector _latches_ or _runs out_, and the two answered it for
+  different reasons. Suboptimal runs out because the engine answers it by
+  reconfiguring, so a latch would rebuild every frame and a test driving that
+  loop would hang instead of failing. The present wait runs out because nothing
+  would ever clear a latch — no caller action makes a stalled compositor catch
+  up — and because the seam calls the recovery part of the policy, which a latch
+  makes unobservable. Each injector still owed answers the same question first.
 
 - **The observed half of the pacing line is pinned to `Unknown` in every test.**
   `NullDevice::display_timing` returns `Unknown` unconditionally, and no driver

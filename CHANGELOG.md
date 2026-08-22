@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_hal::null::Recorder::report_present_wait_timeouts` and
+  `NullInstance::with_present_feedback`** make a null device claim
+  `Features::PRESENT_FEEDBACK` and answer a present wait with
+  `SurfaceError::Timeout`. They land together because the seam requires an
+  immediate `Ok(())` from a device without that feature, so a null timeout was
+  illegal until a null device could claim it — and together they reach the
+  engine's render-the-frame-anyway answer to a display that fell behind, which
+  no test could get to before.
+
 - **`crcbl_hal::null::Recorder::report_suboptimal_acquires`** makes a null
   device hand back an `AcquiredFrame` with `suboptimal` set, which it could not
   do before — the field was a hardcoded `false`, so the engine's
@@ -69,6 +78,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   shorter.
 
 ### Breaking
+
+- **`crcbl_hal::null::Event::PresentWaited` carries a `timed_out` flag.**
+  `Event` is not `#[non_exhaustive]`, so a `match` that destructures that
+  variant by field needs the new one. It exists because the event stream could
+  not otherwise tell a wait that lapsed from one that did not: an engine that
+  renders the frame anyway — which is the documented policy — leaves the same
+  acquire and the same present either way.
 
 - **`Device::wait_semaphores` refuses a binary semaphore**, and the null backend
   now does so too. A host wait has no value to compare against on a semaphore
