@@ -1535,10 +1535,29 @@ impl Device for NullDevice {
     }
 
     fn wait_semaphores(&self, waits: &[SemaphoreWait], _timeout_ns: u64) -> Result<bool, HalError> {
+        // Every `check` before the lock, never under it: `check` takes the
+        // recorder itself, and this mutex is not reentrant. `signal_semaphore`
+        // one method up is written in this order for the same reason.
         for wait in waits {
             self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
         }
-        // No work is ever outstanding, so every wait is satisfied immediately.
+        let state = self.recorder.lock();
+        for wait in waits {
+            let Some(Detail::Semaphore { timeline, .. }) = state
+                .get(ObjectKind::Semaphore, wait.semaphore.to_bits())
+                .map(|object| &object.detail)
+            else {
+                return Err(HalError::invalid_handle("semaphore", wait.semaphore));
+            };
+            // The refusal every real backend makes, and the one this backend
+            // already makes in `signal_semaphore`: a binary semaphore carries no
+            // value, so a CPU wait has nothing to compare against. Answering
+            // `Ok(true)` said a wait no device will accept had been satisfied.
+            if !*timeline {
+                return Err(self.unsupported("a binary semaphore cannot be waited on from the CPU"));
+            }
+        }
+        // No submission is ever outstanding here, so nothing else can decide it.
         Ok(true)
     }
 

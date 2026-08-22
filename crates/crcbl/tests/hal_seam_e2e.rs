@@ -2400,12 +2400,34 @@ fn exercise_cpu_timeline_signal(headless: &Headless) -> Exercise {
                     kind: crcbl::hal::SemaphoreKind::Binary,
                 }) {
                     let refusal = device.signal_semaphore(binary, 1);
+                    // **The same refusal from the other side**, which had no
+                    // agnostic assertion at all until this one. A host *wait* on
+                    // a binary semaphore has nothing to compare against for the
+                    // same reason a host signal has nothing to advance, and
+                    // `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all refuse it in
+                    // the same words — while `crcbl-hal`'s null backend answered
+                    // `Ok(true)`, so a caller reading the seam's behaviour off
+                    // the null device was told a wait no real device accepts had
+                    // been satisfied.
+                    let waited = device.wait_semaphores(
+                        &[crcbl::hal::SemaphoreWait {
+                            semaphore: binary,
+                            value: 0,
+                        }],
+                        0,
+                    );
                     device.destroy_semaphore(binary);
                     assert!(
                         matches!(refusal, Err(HalError::Unsupported { .. })),
                         "signalling a binary semaphore must be refused as Unsupported — it \
                          carries no value for a host signal to advance, which is a thing the \
                          backend cannot do rather than a number the caller got wrong: {refusal:?}"
+                    );
+                    assert!(
+                        matches!(waited, Err(HalError::Unsupported { .. })),
+                        "and waiting on one must be refused the same way, rather than reported \
+                         as a wait that was satisfied or as a timeout the caller would retry \
+                         forever: {waited:?}"
                     );
                 }
 

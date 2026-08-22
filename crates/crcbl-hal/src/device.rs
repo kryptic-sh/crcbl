@@ -1010,10 +1010,13 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     ///
     /// # Errors
     ///
-    /// [`HalError::InvalidHandle`] or [`HalError::DeviceLost`], and
-    /// [`HalError::Unsupported`] on a backend with no timeline to block on at
-    /// all — see [`crate::sync`], where WebGPU is the case. A *timeout* is not
-    /// an error: that is `Ok(false)`.
+    /// [`HalError::InvalidHandle`] or [`HalError::DeviceLost`]; and
+    /// [`HalError::Unsupported`] both for a **binary** semaphore, which carries
+    /// no value for a host wait to compare against — the mirror of
+    /// [`Self::signal_semaphore`]'s refusal, and what every backend here
+    /// answers — and on a backend with no timeline to block on at all, see
+    /// [`crate::sync`], where WebGPU is the case. A *timeout* is not an error:
+    /// that is `Ok(false)`.
     fn wait_semaphores(
         &self,
         waits: &[crate::SemaphoreWait],

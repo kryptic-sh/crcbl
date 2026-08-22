@@ -2356,6 +2356,20 @@ fn a_host_signal_moves_a_timeline_forwards_and_only_forwards() {
         .signal_semaphore(binary, 1)
         .expect_err("a binary semaphore carries no value");
     assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
+    // And the same from the waiting side, which this backend used to answer
+    // `Ok(true)` to. Every real backend refuses it; a null device that reported
+    // the wait satisfied taught a caller reading its behaviour that a call no
+    // device accepts is one that works.
+    let error = device
+        .wait_semaphores(
+            &[SemaphoreWait {
+                semaphore: binary,
+                value: 0,
+            }],
+            0,
+        )
+        .expect_err("a binary semaphore carries no value to wait for either");
+    assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
 
     device.destroy_semaphore(binary);
     device.destroy_semaphore(semaphore);
