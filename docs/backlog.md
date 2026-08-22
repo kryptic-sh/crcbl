@@ -14762,6 +14762,24 @@ not one any more: `crcbl-webgpu/src/command.rs` defines
   above 1 but reports no queryable ceiling, and `Limits` is what the backend
   _guarantees_ — 16 would be a number nothing told us.
 
+### Group AI's absent branch has never been taken
+
+Measured on Pages run for `eb8b6b2`, the first run since AI landed whose seam
+probes were not cancelled. Every browser this project can reach reports
+`indirect-first-instance`: Chromium on Linux locally, the hardware RDNA-3
+adapter locally, SwiftShader on the Windows runner and the browser on the macOS
+runner all took the **present** branch and produced the pixel verdict. So the
+`NotOnThisDevice` half of group AI — the one that passes with a message saying
+there is nothing to hold the capability to — is written and unrun.
+
+Not a defect and not obviously fixable: the branch exists because the capability
+is optional, and no runner here lacks it. It is recorded because an untaken
+branch that always passes is the shape `docs/plan/12-testing.md` warns about,
+and because the same branch in group AF **is** taken — the macOS runner opens a
+device without `timestamp-query` — which shows the machinery works in general
+while saying nothing about AI's copy of it. If a runner ever loses the feature,
+this is the entry that says the path was never proven.
+
 ### Coverage gap in what the browser corroborates
 
 Group G now holds the granted adapter's **and** the opened device's whole
