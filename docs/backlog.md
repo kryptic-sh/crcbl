@@ -13945,49 +13945,24 @@ instead, and `poll` becomes `absorb` plus a match when `Device` lands.
 - **Pre-existing drift, untouched:** `web/tools/browser-e2e.mjs`'s header still
   says "Five groups" while A through G exist.
 
-## The WebGPU parity gate passes — wire it into CI
-
-`./web/run-render-harness-e2e.sh` drives all eleven golden `Scene`s through
-`crcbl-webgpu` in headless Chromium, reads each frame back, and compares it
-against `crcbl/tests/golden/<name>.png` with `crcbl-golden`'s comparator at
-`Tolerance::RASTERISER`. **All eleven match** on this machine's GPU; `dunes` and
-`probes` are pixel-identical, and the three with any residual (`spot_shadow`,
-`point_shadow`, `ssr`) differ only on shadow-comparison and march-crossing
-pixels, inside tolerance. The gate exits 0.
-
-**What is owed: a CI step.** The gate is still not wired in, and the reason is
-no longer that it fails — it is that a CI runner has no GPU, and SwiftShader's
-storage-buffer ceiling stops nine of the eleven scenes from drawing at all (see
-the ceiling entry below). Two ways forward, and they are not exclusive:
-
-- **Wire it now for the two scenes SwiftShader can draw** (`sprite`, `ui`). That
-  needs a scene filter on the harness — it drives `GreyboxSprite::ALL`-style
-  whole-set today — and would catch a regression in the 2D path, the offscreen
-  surface, the readback and the comparator, which is most of the machinery.
-- **Split the draw-args bind group** so the forward path fits the guaranteed
-  floor, after which all eleven run on a software adapter and the gate covers
-  the whole set in CI. That is the durable answer.
-
-Until one of them lands, the eleven-scene result is a thing someone ran by hand
-on hardware, not a thing CI defends — so it can silently regress.
-
 ## Left over from packing draw args into eight storage buffers
 
 The draw-args pass is at exactly 8 storage bindings now and all eleven golden
 scenes render on a software adapter. Three things that slice surfaced and did
 not fix:
 
-- **`ssr` does not match its golden on SwiftShader** — 58 gross pixels (0.118%
-  against a 0.1% budget) and ssim 0.988822 against a 0.99 floor. Marginal on
-  both thresholds, and **newly observable rather than newly caused**: that scene
-  could not create a pipeline on a software adapter before, so it has never been
-  compared there. On real hardware it matches with max channel delta 9 and zero
-  gross pixels, and the diff is banding confined to the reflection ray-march and
-  the horizon edges — geometry and instancing are right, which is what a
-  regrouping error would have broken. **Decide**: widen the rasteriser tolerance
-  for this scene, or record it as a known software-rasteriser difference beside
-  `ui` (506 pixels, ssim 0.983). Until then a CI gate on the software adapter
-  can only claim 9 of 11.
+- **Settled — `ssr` and `ui` are excused by name on SwiftShader, and widening
+  the tolerance was declined.** The choice this entry posed was between widening
+  `Tolerance::RASTERISER` for those scenes and recording them as known
+  software-rasteriser differences. The second was taken: the `render-harness`
+  job's Linux and Windows legs pass `--expect-fail ssr,ui`, both scenes still
+  render and still print their numbers every run, and
+  `web/tools/render-harness-verdict.mjs` fails the job the moment either starts
+  matching or anything else stops. Widening instead would have quietly weakened
+  all eleven scenes to excuse two. The macOS leg carries **no** excuse list and
+  gates all eleven, which is what says these are a rasteriser limit rather than
+  a backend defect. The reasoning is in `.github/workflows/pages.yml` above the
+  `render-harness:` job, which is where someone re-opening it will be standing.
 - **The new seam check covers 4 of the 12 `create_pipeline_layout` sites** in
   `crcbl-render` — draw_gen's three and `forward.rs`'s `mesh frame`. Unchecked:
   `light_grid`, `sprite_pass`, `ssao` (x2), `ssr` (x2), `ui_pass`, and
