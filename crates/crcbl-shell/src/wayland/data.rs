@@ -48,9 +48,10 @@ impl Offer {
         }
     }
 
-    /// Records one announced format, dropping it once [`MAX_OFFER_MIMES`] is
-    /// reached. Dropping rather than destroying the offer keeps a real offer
-    /// claimable; it is only its format list that is capped.
+    /// Records one announced format, dropping it once
+    /// [`MAX_OFFER_MIMES`](Self::MAX_OFFER_MIMES) is reached. Dropping rather
+    /// than destroying the offer keeps a real offer claimable; it is only its
+    /// format list that is capped.
     pub(super) fn note_mime(&mut self, mime: String) {
         if self.mimes.len() < Self::MAX_OFFER_MIMES {
             self.mimes.push(mime);
@@ -197,7 +198,8 @@ impl Device {
     }
 
     /// Records an announced offer, returning the oldest pending one to destroy
-    /// when the list is already at [`MAX_PENDING_OFFERS`].
+    /// when the list is already at
+    /// [`MAX_PENDING_OFFERS`](Self::MAX_PENDING_OFFERS).
     ///
     /// FIFO eviction: a real compositor claims offers in the order it announced
     /// them, so the oldest is the one most likely to have been superseded — and

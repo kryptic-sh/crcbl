@@ -1,6 +1,12 @@
 //! The Wayland backend: connection, registry, `xdg-shell` window lifecycle,
 //! `wl_seat` input, pointer constraints, fractional scale and decorations.
 //!
+//! Not `pub`: [`backend`](crate::backend) is the only way to reach a real
+//! shell, because `WaylandShell::new()` in a consumer's source is the platform
+//! leak this whole seam exists to prevent. `#[cfg(target_os = "linux")]` rather
+//! than `#[cfg(unix)]` — macOS is a Unix with no Wayland, and the BSDs are not
+//! a target this engine claims.
+//!
 //! `docs/plan/15-windowing.md`'s Linux policy in one sentence:
 //! **libwayland-client owns the connection and the proxy objects; the protocol
 //! layer above `wl_proxy_marshal_array_flags` is ours.** [`ffi`] is the first
@@ -41,7 +47,7 @@
 //! last one is a real gap and is stated as one: the destination half is here,
 //! the origin half needs a seam request and a drag icon, and an icon is a
 //! surface with a buffer, which is the renderer's. [`ShellCaps`] reflects all of
-//! this exactly — see [`WaylandShell::caps`].
+//! this exactly — see `WaylandShell::caps`.
 //!
 //! # What a real compositor does that `HeadlessShell` does not model
 //!
@@ -257,7 +263,7 @@ const TRANSFER_POLL: Duration = Duration::from_millis(50);
 /// Converts Wayland's `CLOCK_MONOTONIC` milliseconds onto the engine epoch.
 ///
 /// [`EventTime`] requires "a duration measured from the same origin as the
-/// [`TimeSource`](crcbl_core::TimeSource) driving
+/// [`TimeSource`](crcbl_core::time::TimeSource) driving
 /// [`FrameClock::update`](crcbl_core::FrameClock::update)". Wayland gives a
 /// **32-bit** millisecond counter sampled from `CLOCK_MONOTONIC`, which is a
 /// different origin *and* wraps every 49.7 days, so a backend that forwards it
@@ -2004,7 +2010,8 @@ impl WaylandShell {
         caps
     }
 
-    /// Aligns event timestamps with an engine [`TimeSource`](crcbl_core::TimeSource).
+    /// Aligns event timestamps with an engine
+    /// [`TimeSource`](crcbl_core::time::TimeSource).
     ///
     /// See [`Shell::align_event_clock`], which this implements.
     pub fn align_time_base(&mut self, elapsed: Duration) {

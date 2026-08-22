@@ -1,9 +1,10 @@
 //! Startup negotiation: which extensions the server has, whether a window
 //! manager is running, and what scale the desktop is at.
 //!
-//! Everything here runs once, in [`X11Shell::open`], and everything it produces
-//! is latched — see [`X11Shell::latch_caps`] for why that is not merely a
-//! convenience.
+//! Everything here runs once, in [`X11Shell::open`](super::X11Shell::open), and
+//! everything it produces is latched — see
+//! [`X11Shell::latch_caps`](super::X11Shell::latch_caps) for why that is not
+//! merely a convenience.
 
 use super::{BASE_DPI, Conn, DEFAULT_SCALE, ffi};
 

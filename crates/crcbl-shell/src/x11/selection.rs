@@ -41,9 +41,9 @@
 //!
 //! On Wayland the transfer is a pipe, so a peer that stops writing shows up as
 //! a descriptor that is never ready, and
-//! [`wayland::fd::TIMEOUT`](crate::wayland::fd) bounds it. On X11 there is no
-//! descriptor: a peer that stops answering simply stops sending
-//! `PropertyNotify`, which is indistinguishable from a peer that is slow. Worse,
+//! `wayland::fd::TIMEOUT` bounds it. On X11 there is no descriptor: a peer that
+//! stops answering simply stops sending `PropertyNotify`, which is
+//! indistinguishable from a peer that is slow. Worse,
 //! step 2 has the same problem — an owning client that has crashed *after*
 //! taking the selection never sends `SelectionNotify` at all, and the X server
 //! will not notice, because it never knew the conversation was happening.
@@ -86,10 +86,9 @@ use crate::{ClipboardContent, ClipboardRequestId, MimeType, WindowId};
 
 /// How long a read may make no progress before it is abandoned.
 ///
-/// Two seconds, matching [`wayland::fd::TIMEOUT`](crate::wayland::fd) so that
-/// the two Linux backends fail a stalled paste on the same schedule — a UI that
-/// tuned its "pasting…" spinner against one must not need retuning against the
-/// other.
+/// Two seconds, matching `wayland::fd::TIMEOUT` so that the two Linux backends
+/// fail a stalled paste on the same schedule — a UI that tuned its "pasting…"
+/// spinner against one must not need retuning against the other.
 ///
 /// Refreshed on progress rather than measured from the start, so a genuinely
 /// large `INCR` transfer over a slow connection is not cut off halfway.

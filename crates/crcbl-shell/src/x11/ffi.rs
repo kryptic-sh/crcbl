@@ -1162,7 +1162,7 @@ pub mod value {
     pub const PROP_MODE_REPLACE: u8 = 0;
     /// `XCB_PROP_MODE_APPEND`. Appending *nothing* is how a client with no
     /// recent input event learns the server's current time; see
-    /// [`super::xselection`].
+    /// [`xselection`](crate::x11::xselection).
     pub const PROP_MODE_APPEND: u8 = 2;
     /// `XCB_ATOM_NONE` / `XCB_NONE` / `XCB_WINDOW_NONE`.
     pub const NONE: u32 = 0;
@@ -1190,9 +1190,9 @@ pub mod value {
     pub const ATOM_WM_CLASS: u32 = 67;
     /// `XCB_ATOM_WM_HINTS` — the ICCCM property *and* its own type atom.
     ///
-    /// Not to be confused with [`ATOM_WM_NORMAL_HINTS`](Self::ATOM_WM_NORMAL_HINTS),
-    /// which is the geometry one. This is the property that says whether the
-    /// window wants the keyboard.
+    /// Not to be confused with [`ATOM_WM_NORMAL_HINTS`], which is the geometry
+    /// one. This is the property that says whether the window wants the
+    /// keyboard.
     pub const ATOM_WM_HINTS: u32 = 35;
     /// `XCB_ATOM_RESOURCE_MANAGER` — the root property `Xft.dpi` lives in.
     pub const ATOM_RESOURCE_MANAGER: u32 = 23;
@@ -1200,8 +1200,7 @@ pub mod value {
     pub const XI_ALL_MASTER_DEVICES: u16 = 1;
     /// `XCB_INPUT_RAW_MOTION` — the XI2 event number, not a mask bit.
     pub const XI_RAW_MOTION: u16 = 17;
-    /// The mask bit for [`XI_RAW_MOTION`](Self::XI_RAW_MOTION) in an
-    /// `xcb_input_event_mask_t`.
+    /// The mask bit for [`XI_RAW_MOTION`] in an `xcb_input_event_mask_t`.
     pub const XI_RAW_MOTION_MASK: u32 = 1 << 17;
     /// `XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE`.
     pub const RANDR_SCREEN_CHANGE_MASK: u16 = 1;
@@ -1218,7 +1217,7 @@ pub mod value {
     /// The XKB version this backend asks for. 1.0 is the version that defined
     /// `XkbPerClientFlags`, so anything newer also has it.
     pub const XKB_MAJOR: u16 = 1;
-    /// See [`XKB_MAJOR`](Self::XKB_MAJOR).
+    /// See [`XKB_MAJOR`].
     pub const XKB_MINOR: u16 = 0;
 }
 
@@ -1267,8 +1266,10 @@ const CLOCK_MONOTONIC: c_int = 1;
 /// ABI-stable across libxcb 1.x.
 ///
 /// Requests that return no reply are declared as returning [`Cookie`] rather
-/// than `()` because they do — `xcb_void_cookie_t` — and the return value is
-/// what [`Lib::request_check`] needs to turn a request into a checked one.
+/// than `()` because they do — `xcb_void_cookie_t`. Nothing here consumes one:
+/// this backend never calls `xcb_request_check`, so those requests go out
+/// unchecked and a protocol error from one arrives asynchronously, on the event
+/// queue, rather than at the call site.
 mod prototype {
     #[cfg(feature = "x11-e2e")]
     use super::QueryTreeReply;
@@ -1393,8 +1394,8 @@ mod prototype {
     /// xcb_window_t window)`
     ///
     /// Only the harness walks another process's window tree, so these four are
-    /// behind the `x11-e2e` feature like the [`Lib`] fields that use them;
-    /// see [`super::Lib::query_tree`].
+    /// behind the `x11-e2e` feature like the [`Lib`](super::Lib) fields that
+    /// use them; see [`super::Lib::query_tree`].
     #[cfg(feature = "x11-e2e")]
     pub type QueryTree = unsafe extern "C" fn(*mut Connection, u32) -> Cookie;
     /// `xcb_query_tree_reply_t *xcb_query_tree_reply(xcb_connection_t *,
@@ -1621,15 +1622,16 @@ pub struct Lib {
     /// reason is visible at the definition.
     #[cfg(feature = "x11-e2e")]
     pub query_tree: prototype::QueryTree,
-    /// `xcb_query_tree_reply_t *xcb_query_tree_reply(…)`; see [`query_tree`].
+    /// `xcb_query_tree_reply_t *xcb_query_tree_reply(…)`; see
+    /// [`query_tree`](Self::query_tree).
     #[cfg(feature = "x11-e2e")]
     pub query_tree_reply: prototype::QueryTreeReplyFn,
     /// `xcb_window_t *xcb_query_tree_children(const xcb_query_tree_reply_t *)`;
-    /// see [`query_tree`].
+    /// see [`query_tree`](Self::query_tree).
     #[cfg(feature = "x11-e2e")]
     pub query_tree_children: prototype::QueryTreeChildren,
     /// `int xcb_query_tree_children_length(const xcb_query_tree_reply_t *)`;
-    /// see [`query_tree`].
+    /// see [`query_tree`](Self::query_tree).
     #[cfg(feature = "x11-e2e")]
     pub query_tree_children_length: prototype::QueryTreeChildrenLength,
     pub intern_atom: prototype::InternAtom,

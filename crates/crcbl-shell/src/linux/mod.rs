@@ -1,5 +1,7 @@
 //! What the two Linux backends share, and deliberately nothing else.
 //!
+//! Not `pub`, like the backends themselves.
+//!
 //! Wayland (P0.5) and X11 (P0.6) are different protocols reached through
 //! different libraries, and almost nothing crosses between them. Two things do,
 //! because they are properties of **Linux** rather than of either window

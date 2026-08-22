@@ -14,9 +14,9 @@
 //!   `ld.so`, before `main`. [`open`](crate::open)'s registry, which exists
 //!   precisely to try Wayland and fall back to X11 or headless, never runs. A
 //!   fallback that a dynamic loader can pre-empt is not a fallback.
-//! * `dlopen` at [`Lib::load`] time makes a missing library an ordinary
-//!   [`ShellError::Connect`], the registry moves on to the next backend, and
-//!   the log line says which library was missing.
+//! * `dlopen` at [`load`] time makes a missing library an ordinary
+//!   [`ShellError::Connect`](crate::ShellError::Connect), the registry moves
+//!   on to the next backend, and the log line says which library was missing.
 //!
 //! Packaging pushes the same way: with `DT_NEEDED` the engine package must
 //! *depend* on libwayland, so installing the game on a headless box drags in a
@@ -25,7 +25,7 @@
 //!
 //! The cost is real and worth stating: symbols are resolved by hand, so a
 //! typo'd name is a runtime error rather than a link error. The mitigation is
-//! that [`Lib::load`] resolves **every** symbol eagerly and fails as a whole —
+//! that [`load`] resolves **every** symbol eagerly and fails as a whole —
 //! there is no lazily-missing function that surfaces three hours into a
 //! session.
 //!

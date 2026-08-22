@@ -283,29 +283,12 @@ pub mod window;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod keysym;
 
-/// What the two Linux backends share: the evdev key table and libxkbcommon.
-///
-/// Not `pub`, like the backends themselves. See the module's own docs for why
-/// exactly two things are in it and nothing protocol-shaped ever will be.
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 
-/// The Wayland backend (P0.5).
-///
-/// Not `pub`: [`backend`] is the only way to reach a real shell, because
-/// `WaylandShell::new()` in a consumer's source is the platform leak this whole
-/// seam exists to prevent. `#[cfg(target_os = "linux")]` rather than
-/// `#[cfg(unix)]` — macOS is a Unix with no Wayland, and the BSDs are not a
-/// target this engine claims.
 #[cfg(target_os = "linux")]
 pub(crate) mod wayland;
 
-/// The X11 backend (P0.6).
-///
-/// Same terms as [`wayland`]: private, reached only through [`open`], and
-/// Linux-only. libxcb is loaded with `dlopen` for the reason the registry
-/// exists — a hard link would kill the process in `ld.so` on a machine with no
-/// X libraries and the Wayland entry above would never be tried.
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
 

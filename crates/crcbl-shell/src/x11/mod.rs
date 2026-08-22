@@ -1,13 +1,19 @@
 //! The X11 backend: connection, window lifecycle, EWMH, RandR, XKB, XI2 raw
 //! motion, pointer grabs and the selection protocol.
 //!
+//! Same terms as [`wayland`](crate::wayland): private, reached only through
+//! [`open`](crate::open), and Linux-only. libxcb is loaded with `dlopen` for
+//! the reason the registry exists — a hard link would kill the process in
+//! `ld.so` on a machine with no X libraries and the Wayland entry before it
+//! would never be tried.
+//!
 //! `docs/plan/15-windowing.md`'s Linux policy applied to the other half:
 //! **libxcb owns the connection and the wire encoding; the request/event layer
 //! above it — core, EWMH atoms, RandR, XKB — is ours.** [`ffi`] is the first
 //! part, `dlopen`'d for the reasons that module states. [`atoms`], [`keys`] and
-//! [`selection`] are the second. [`xkb`](crate::linux::xkb) and
-//! [`keymap`](crate::linux::keymap) are shared with the Wayland backend,
-//! because a keymap is a Linux fact rather than a protocol one.
+//! [`selection`] are the second. [`xkb`] and [`keymap`](crate::linux::keymap)
+//! are shared with the Wayland backend, because a keymap is a Linux fact rather
+//! than a protocol one.
 //!
 //! # What is in this backend, and what was cut
 //!
@@ -50,7 +56,7 @@
 //!    [`pump`](Shell::pump)**, not a round trip, because the answer was already
 //!    known when [`create_window`](Shell::create_window) returned. Nothing is
 //!    delayed to look symmetrical with Wayland; see
-//!    [`create_window`](X11Shell::create_window).
+//!    `X11Shell::create_window`.
 //! 2. **The event clock has an origin nobody can name.** Wayland stamps input
 //!    with `CLOCK_MONOTONIC` milliseconds, so a backend knows the origin a
 //!    priori. X11 stamps with milliseconds **since the server started**, which
@@ -81,8 +87,8 @@
 //!    on Wayland at mixed scales. That is what makes
 //!    [`DisplayMode::Borderless`] with a named monitor implementable, and it is
 //!    why [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) is set here for the
-//!    first time; see [`caps`](X11Shell::caps) for exactly what that bit is
-//!    and is not claiming.
+//!    first time; see `X11Shell::caps` for exactly what that bit is and is
+//!    not claiming.
 //! 6. **Scale is a string in a property, not a protocol.** X11 has no
 //!    per-monitor scale factor and no fractional-scale extension. What every
 //!    toolkit actually reads is `Xft.dpi` out of the `RESOURCE_MANAGER`
@@ -196,7 +202,7 @@ const LOCK_RECENTRE_FRACTION: f64 = 0.25;
 /// # Why this is harder than Wayland's
 ///
 /// [`EventTime`] requires "a duration measured from the same origin as the
-/// [`TimeSource`](crcbl_core::TimeSource) driving
+/// [`TimeSource`](crcbl_core::time::TimeSource) driving
 /// [`FrameClock::update`](crcbl_core::FrameClock::update)". The Wayland backend
 /// gets most of the way there for free, because `wl_pointer` and `wl_keyboard`
 /// timestamps are `CLOCK_MONOTONIC` milliseconds — the same clock, just a
@@ -621,7 +627,8 @@ pub(super) fn read_wire<T: Copy>(raw: &[u8]) -> Option<T> {
 /// One X11 window.
 #[derive(Debug)]
 struct XWindow {
-    /// The XID. Also what [`SurfaceTarget::Xcb`] carries.
+    /// The XID. Also what
+    /// [`SurfaceTarget::Xcb`](crcbl_core::SurfaceTarget::Xcb) carries.
     id: u32,
     title: String,
     requested_size: LogicalSize,
@@ -1028,7 +1035,7 @@ impl X11Shell {
     }
 
     /// Aligns event timestamps with an engine
-    /// [`TimeSource`](crcbl_core::TimeSource).
+    /// [`TimeSource`](crcbl_core::time::TimeSource).
     ///
     /// See [`Shell::align_event_clock`], which this implements.
     pub fn align_time_base(&mut self, elapsed: Duration) {
