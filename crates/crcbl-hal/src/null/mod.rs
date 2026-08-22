@@ -1124,7 +1124,7 @@ impl Device for NullDevice {
     /// The null backend compiles nothing, so it is the one backend with no
     /// reason to prefer a format — and that is what makes it the place a test
     /// asserts what a *caller* supplied. See
-    /// [`Recorder::shader_module_sources`](crate::null::Recorder::shader_module_sources).
+    /// [`Recorder::shader_modules_created`](crate::null::Recorder::shader_modules_created).
     fn create_shader_module(
         &self,
         desc: &ShaderModuleDesc<'_>,
