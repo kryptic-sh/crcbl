@@ -15190,4 +15190,535 @@ mod tests {
             "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
         );
     }
+
+    /// `web/engine/gpu-probe.js` — the page's half of this file's state codes,
+    /// pulled in whole so the mirror can be checked without a browser.
+    ///
+    /// `include_str!` resolves against this file, so the crate is coupled to the
+    /// repository's layout on purpose. Move the page's half and this stops
+    /// compiling, which is a failure nobody can read as a pass.
+    const GPU_PROBE_JS: &str = include_str!("../../../web/engine/gpu-probe.js");
+
+    /// This file's own text, for the names the mirror is checked to be complete
+    /// over. Rust has no reflection, so the list of what a module declares can
+    /// only be read back out of the module.
+    const PROBE_RS: &str = include_str!("probe.rs");
+
+    /// [`crate::tag`]'s text, for the two tables in [`GPU_PROBE_JS`] whose codes
+    /// are wire codes declared there rather than state codes declared here.
+    const TAG_RS: &str = include_str!("tag.rs");
+
+    /// The `pub const … : u32` this file declares that are *not* state codes —
+    /// the sizes, patterns and masks the probes are built from, which no
+    /// `web/engine/gpu-probe.js` table names.
+    ///
+    /// Written out so the partition is exhaustive: a constant this file declares
+    /// is either mirrored by a table there or listed here, and a new one is
+    /// neither until somebody says which it is.
+    const NOT_MIRRORED: &[&str] = &[
+        "PROBE_READBACK_SIZE",
+        "PROBE_DISPATCH_PATTERN",
+        "PROBE_DISPATCH_SLOTS",
+        "PROBE_COPYCHAIN_PATTERN",
+        "PROBE_COPYCHAIN_SIZE",
+        "PROBE_COPYCHAIN_SLOTS",
+        "PROBE_FILL_PATTERN",
+        "PROBE_FILL_SLOTS",
+        "PROBE_DEPTH_SIZE",
+        "PROBE_STENCIL_CLEARED",
+        "PROBE_STENCIL_MISS",
+        "PROBE_STENCIL_READ_MASK",
+        "PROBE_STENCIL_SIZE",
+        "PROBE_MSAA_SAMPLES",
+        "PROBE_MSAA_WIDTH",
+        "PROBE_MSAA_HEIGHT",
+        "PROBE_OCCLUSION_QUERIES",
+        "PROBE_TIMESTAMP_QUERIES",
+    ];
+
+    /// One `Object.freeze` table parsed out of [`GPU_PROBE_JS`]: its name, and
+    /// its entries in file order.
+    type JsTable = (&'static str, Vec<(&'static str, u32)>);
+
+    /// One of those tables and the Rust constants that must mirror it: the
+    /// table's name in `web/engine/gpu-probe.js`, the shared prefix of the
+    /// constants, and each constant's own name and value.
+    type MirrorTable = (&'static str, &'static str, Vec<(&'static str, u32)>);
+
+    /// Every `Object.freeze` table in [`GPU_PROBE_JS`], parsed.
+    ///
+    /// A line inside a table body this cannot read is a panic rather than a
+    /// skip, and the table count is held against the `Object.freeze` count in
+    /// the whole file: a parse that quietly matched less than it claims would
+    /// leave the mirror checked with a hole in it and the test still green.
+    fn js_state_tables() -> Vec<JsTable> {
+        let mut tables: Vec<JsTable> = Vec::new();
+        let mut inside = false;
+        for (index, line) in GPU_PROBE_JS.lines().enumerate() {
+            let number = index + 1;
+            if !inside {
+                if let Some(name) = line
+                    .strip_prefix("export const ")
+                    .and_then(|rest| rest.strip_suffix(" = Object.freeze({"))
+                {
+                    tables.push((name, Vec::new()));
+                    inside = true;
+                }
+                continue;
+            }
+            if line == "});" {
+                inside = false;
+                continue;
+            }
+            let (name, entries) = tables.last_mut().expect("a table is open");
+            let entry = line
+                .strip_prefix("  ")
+                .and_then(|rest| rest.strip_suffix(','))
+                .and_then(|rest| rest.split_once(": "))
+                .and_then(|(key, code)| code.parse::<u32>().ok().map(|code| (key, code)));
+            let Some(entry) = entry else {
+                panic!(
+                    "gpu-probe.js:{number}: `{name}` holds a line this test cannot read, so the \
+                     table would be checked with a hole in it: {line}"
+                );
+            };
+            entries.push(entry);
+        }
+        assert!(
+            !inside,
+            "gpu-probe.js ends inside an Object.freeze table, so its last table is short"
+        );
+        assert_eq!(
+            tables.len(),
+            GPU_PROBE_JS.matches("Object.freeze").count(),
+            "gpu-probe.js has Object.freeze tables this parse never reached, so they are \
+             mirrored by nothing"
+        );
+        tables
+    }
+
+    /// Every state code this crate publishes, against the
+    /// `web/engine/gpu-probe.js` table that must mirror it.
+    ///
+    /// The JS key is the Rust name with its prefix cut off, which is why the
+    /// prefix is written beside each table rather than taken to be its name:
+    /// `CAPS_FAILURE`'s codes are `SURFACE_CAPS_FAILURE_*`, the one table whose
+    /// two halves are not named alike.
+    fn mirror() -> Vec<MirrorTable> {
+        use crate::tag::{
+            PRESENT_MODE_FIFO, PRESENT_MODE_FIFO_RELAXED, PRESENT_MODE_IMMEDIATE,
+            PRESENT_MODE_MAILBOX, SURFACE_CAPS_FAILURE_BACKEND,
+        };
+
+        /// Each constant paired with its own name, written once: the compiler
+        /// binds the identifier, so renaming or deleting one stops this
+        /// compiling rather than quietly narrowing what is checked.
+        macro_rules! codes {
+            ($($konst:ident),+ $(,)?) => { vec![$((stringify!($konst), $konst)),+] };
+        }
+
+        /// The same for the two tables whose codes are `u8` wire codes.
+        macro_rules! wire_codes {
+            ($($konst:ident),+ $(,)?) => { vec![$((stringify!($konst), u32::from($konst))),+] };
+        }
+
+        vec![
+            (
+                "PROBE",
+                "PROBE",
+                codes![
+                    PROBE_UNASKED,
+                    PROBE_WAITING,
+                    PROBE_GRANTED,
+                    PROBE_REFUSED,
+                    PROBE_UNDECODABLE
+                ],
+            ),
+            (
+                "DEVICE",
+                "DEVICE",
+                codes![
+                    DEVICE_UNASKED,
+                    DEVICE_WAITING,
+                    DEVICE_OPENED,
+                    DEVICE_FAILED,
+                    DEVICE_UNDECODABLE
+                ],
+            ),
+            (
+                "CAPS",
+                "CAPS",
+                codes![
+                    CAPS_UNASKED,
+                    CAPS_WAITING,
+                    CAPS_ANSWERED,
+                    CAPS_REFUSED,
+                    CAPS_UNDECODABLE
+                ],
+            ),
+            (
+                "READBACK",
+                "READBACK",
+                codes![
+                    READBACK_UNASKED,
+                    READBACK_REQUESTED,
+                    READBACK_WAITING,
+                    READBACK_PENDING,
+                    READBACK_READY,
+                    READBACK_UNDECODABLE,
+                    READBACK_FAILED
+                ],
+            ),
+            (
+                "DRAW",
+                "DRAW",
+                codes![
+                    DRAW_UNASKED,
+                    DRAW_REQUESTED,
+                    DRAW_WAITING,
+                    DRAW_PENDING,
+                    DRAW_READY,
+                    DRAW_UNDECODABLE,
+                    DRAW_FAILED
+                ],
+            ),
+            (
+                "PRESENT",
+                "PRESENT",
+                codes![
+                    PRESENT_UNASKED,
+                    PRESENT_REQUESTED,
+                    PRESENT_WAITING,
+                    PRESENT_PENDING,
+                    PRESENT_READY,
+                    PRESENT_UNDECODABLE,
+                    PRESENT_FAILED
+                ],
+            ),
+            (
+                "RECONFIG",
+                "RECONFIG",
+                codes![
+                    RECONFIG_UNASKED,
+                    RECONFIG_REQUESTED,
+                    RECONFIG_WAITING,
+                    RECONFIG_PENDING,
+                    RECONFIG_READY,
+                    RECONFIG_UNDECODABLE,
+                    RECONFIG_FAILED
+                ],
+            ),
+            (
+                "INDIRECT",
+                "INDIRECT",
+                codes![
+                    INDIRECT_UNASKED,
+                    INDIRECT_REQUESTED,
+                    INDIRECT_WAITING,
+                    INDIRECT_PENDING,
+                    INDIRECT_READY,
+                    INDIRECT_UNDECODABLE,
+                    INDIRECT_FAILED
+                ],
+            ),
+            (
+                "DEPTH",
+                "DEPTH",
+                codes![
+                    DEPTH_UNASKED,
+                    DEPTH_REQUESTED,
+                    DEPTH_WAITING,
+                    DEPTH_PENDING,
+                    DEPTH_READY,
+                    DEPTH_UNDECODABLE,
+                    DEPTH_FAILED
+                ],
+            ),
+            (
+                "STENCIL",
+                "STENCIL",
+                codes![
+                    STENCIL_UNASKED,
+                    STENCIL_REQUESTED,
+                    STENCIL_WAITING,
+                    STENCIL_PENDING,
+                    STENCIL_READY,
+                    STENCIL_UNDECODABLE,
+                    STENCIL_FAILED
+                ],
+            ),
+            (
+                "MSAA",
+                "MSAA",
+                codes![
+                    MSAA_UNASKED,
+                    MSAA_REQUESTED,
+                    MSAA_WAITING,
+                    MSAA_PENDING,
+                    MSAA_READY,
+                    MSAA_UNDECODABLE,
+                    MSAA_UNSUPPORTED,
+                    MSAA_FAILED
+                ],
+            ),
+            (
+                "OCCLUSION",
+                "OCCLUSION",
+                codes![
+                    OCCLUSION_UNASKED,
+                    OCCLUSION_REQUESTED,
+                    OCCLUSION_WAITING,
+                    OCCLUSION_PENDING,
+                    OCCLUSION_READY,
+                    OCCLUSION_UNDECODABLE,
+                    OCCLUSION_FAILED
+                ],
+            ),
+            (
+                "OCCLUSION_VALUES",
+                "OCCLUSION_VALUES",
+                codes![
+                    OCCLUSION_VALUES_UNASKED,
+                    OCCLUSION_VALUES_WAITING,
+                    OCCLUSION_VALUES_READY
+                ],
+            ),
+            (
+                "TIMESTAMP",
+                "TIMESTAMP",
+                codes![
+                    TIMESTAMP_UNASKED,
+                    TIMESTAMP_WAITING,
+                    TIMESTAMP_READY,
+                    TIMESTAMP_UNSUPPORTED
+                ],
+            ),
+            (
+                "COMPUTE",
+                "COMPUTE",
+                codes![
+                    COMPUTE_UNASKED,
+                    COMPUTE_REQUESTED,
+                    COMPUTE_WAITING,
+                    COMPUTE_PENDING,
+                    COMPUTE_READY,
+                    COMPUTE_UNDECODABLE,
+                    COMPUTE_FAILED
+                ],
+            ),
+            (
+                "COPYCHAIN",
+                "COPYCHAIN",
+                codes![
+                    COPYCHAIN_UNASKED,
+                    COPYCHAIN_REQUESTED,
+                    COPYCHAIN_WAITING,
+                    COPYCHAIN_PENDING,
+                    COPYCHAIN_READY,
+                    COPYCHAIN_UNDECODABLE,
+                    COPYCHAIN_FAILED
+                ],
+            ),
+            (
+                "FILL",
+                "FILL",
+                codes![
+                    FILL_UNASKED,
+                    FILL_REQUESTED,
+                    FILL_WAITING,
+                    FILL_PENDING,
+                    FILL_READY,
+                    FILL_UNDECODABLE,
+                    FILL_FAILED
+                ],
+            ),
+            (
+                "CAPS_FAILURE",
+                "SURFACE_CAPS_FAILURE",
+                wire_codes![SURFACE_CAPS_FAILURE_BACKEND],
+            ),
+            (
+                "PRESENT_MODE",
+                "PRESENT_MODE",
+                wire_codes![
+                    PRESENT_MODE_FIFO,
+                    PRESENT_MODE_FIFO_RELAXED,
+                    PRESENT_MODE_MAILBOX,
+                    PRESENT_MODE_IMMEDIATE
+                ],
+            ),
+            (
+                "PARITY",
+                "PARITY",
+                codes![
+                    PARITY_UNASKED,
+                    PARITY_NO_DEVICE,
+                    PARITY_MATCHED,
+                    PARITY_MISMATCHED
+                ],
+            ),
+        ]
+    }
+
+    /// Every `pub const <NAME>: <ty> = …;` a module's own text declares at its
+    /// top level, in file order.
+    fn pub_const_names(src: &'static str, ty: &str) -> Vec<&'static str> {
+        let opening = format!(": {ty} = ");
+        src.lines()
+            .filter_map(|line| line.strip_prefix("pub const "))
+            .filter_map(|rest| rest.split_once(opening.as_str()).map(|(name, _)| name))
+            .collect()
+    }
+
+    /// `web/engine/gpu-probe.js`'s tables and this crate's constants are two
+    /// hand-written halves of one format, and nothing else compares them.
+    ///
+    /// A value that disagrees, a table the page's half has lost, and a name the
+    /// page's half believes in that no constant here publishes all fail by name.
+    /// The totals are pinned because a parse that narrowed would still agree
+    /// with itself, so an added or retired table has to move them deliberately.
+    #[test]
+    fn gpu_probe_js_mirrors_every_state_code_this_crate_publishes() {
+        use std::collections::BTreeSet;
+
+        let tables = js_state_tables();
+        let mirror = mirror();
+        let js_codes: usize = tables.iter().map(|(_, entries)| entries.len()).sum();
+
+        let mut unclaimed: BTreeSet<(&str, &str)> = tables
+            .iter()
+            .flat_map(|(table, entries)| entries.iter().map(move |(key, _)| (*table, *key)))
+            .collect();
+
+        for (table, prefix, codes) in &mirror {
+            let entries = &tables
+                .iter()
+                .find(|(name, _)| name == table)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "gpu-probe.js declares no `{table}` table, so the {prefix}_* codes are \
+                         named nowhere in the page's half"
+                    )
+                })
+                .1;
+            for (name, code) in codes {
+                let key = name
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_prefix('_'))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{name} is mirrored by gpu-probe.js's `{table}` table but is not \
+                             named `{prefix}_…`, so this test cannot say which entry is its own"
+                        )
+                    });
+                let js = entries
+                    .iter()
+                    .find(|(entry, _)| *entry == key)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "gpu-probe.js's `{table}` table has no `{key}`, so the browser has \
+                             no name for {name} = {code}"
+                        )
+                    })
+                    .1;
+                assert_eq!(
+                    *code, js,
+                    "gpu-probe.js has {table}.{key} = {js}, but {name} = {code}"
+                );
+                unclaimed.remove(&(*table, key));
+            }
+        }
+
+        let strays: Vec<String> = unclaimed
+            .iter()
+            .map(|(table, key)| format!("{table}.{key}"))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "gpu-probe.js names codes this crate publishes no constant for, so the browser \
+             believes in states wasm never sends: {}",
+            strays.join(", ")
+        );
+
+        // Last, so that a table or an entry that actually moved reports itself
+        // by name above rather than as a number that no longer matches.
+        assert_eq!(
+            tables.len(),
+            mirror.len(),
+            "gpu-probe.js has {} tables and this test mirrors {}",
+            tables.len(),
+            mirror.len()
+        );
+        assert_eq!(
+            js_codes,
+            mirror
+                .iter()
+                .map(|(_, _, codes)| codes.len())
+                .sum::<usize>(),
+            "gpu-probe.js and this test's mirror hold different numbers of codes"
+        );
+        assert_eq!(
+            tables.len(),
+            20,
+            "gpu-probe.js's table count moved; the mirror above has to move with it"
+        );
+        assert_eq!(
+            js_codes, 116,
+            "gpu-probe.js's code count moved; the mirror above has to move with it"
+        );
+    }
+
+    /// The other direction: a state code added here and never named in
+    /// `web/engine/gpu-probe.js`, which is the browser reading a state it has no
+    /// name for.
+    ///
+    /// Exhaustive rather than a spot check, because the partition is: every
+    /// `pub const … : u32` this file declares is either mirrored by a table
+    /// there or listed in [`NOT_MIRRORED`], and one that is neither fails by
+    /// name. [`NOT_MIRRORED`] is held the other way too — every name in it must
+    /// still be declared — which is also what proves the parse read anything at
+    /// all.
+    #[test]
+    fn every_state_code_this_crate_publishes_is_named_in_gpu_probe_js() {
+        use std::collections::BTreeSet;
+
+        let mirrored: BTreeSet<&str> = mirror()
+            .iter()
+            .flat_map(|(_, _, codes)| codes.iter().map(|(name, _)| *name))
+            .collect();
+        let declared = pub_const_names(PROBE_RS, "u32");
+
+        for &name in NOT_MIRRORED {
+            assert!(
+                declared.contains(&name),
+                "`NOT_MIRRORED` names {name}, which probe.rs no longer declares"
+            );
+        }
+        for &name in &declared {
+            assert!(
+                mirrored.contains(&name) || NOT_MIRRORED.contains(&name),
+                "probe.rs declares {name}, which no gpu-probe.js table names: give it an entry \
+                 there and a line in this test's `mirror`, or — if it is a size or a pattern \
+                 rather than a state code — add it to `NOT_MIRRORED`"
+            );
+        }
+        assert_eq!(
+            declared
+                .iter()
+                .filter(|name| mirrored.contains(*name))
+                .count(),
+            111,
+            "probe.rs's state-code count moved; the mirror above has to move with it"
+        );
+
+        for name in pub_const_names(TAG_RS, "u8") {
+            if name.starts_with("PRESENT_MODE_") || name.starts_with("SURFACE_CAPS_FAILURE_") {
+                assert!(
+                    mirrored.contains(&name),
+                    "tag.rs declares {name}, which gpu-probe.js's mirror of that table does not \
+                     name"
+                );
+            }
+        }
+    }
 }
