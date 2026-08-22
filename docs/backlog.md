@@ -5327,16 +5327,24 @@ Measured with `git ls-files '*.rs' | xargs wc -l`, not estimated:
 
 | file                                 |  lines |
 | ------------------------------------ | -----: |
-| `crates/crcbl-webgpu/src/probe.rs`   | 16,995 |
+| `crates/crcbl-webgpu/src/probe.rs`   | 19,915 |
 | `crates/crcbl-dx12/src/device.rs`    | 12,932 |
-| `crates/crcbl-render/src/forward.rs` | 10,899 |
+| `crates/crcbl-render/src/forward.rs` | 10,905 |
 | `crates/crcbl/src/engine.rs`         | 10,749 |
 
 `crcbl-dx12` is DEFERRED, so its file is not a question anyone has to answer
 now. The other three are live, and `probe.rs` is the one worth a decision.
 
-**`probe.rs` is roughly 11,000 lines of code and 6,000 of tests** —
-`pub mod shim` starts at 9,042 and `mod tests` at 11,034 — and it carries
+**Re-measured 2026-08-23 and `probe.rs` has grown by about 2,900 lines since**,
+which is the part worth watching: two browser-gate slices — the indexed limit
+readers and group AI's first-instance contrast — each added a probe, its state
+machine, its exports and its tests to this one file, because that is where every
+probe lives. The growth is not drift; it is the file doing its job. It is also
+the argument for the decision below getting an answer rather than being deferred
+again, since every future group lands here too.
+
+**`probe.rs` is roughly 13,000 lines of code and 6,900 of tests** —
+`pub mod shim` starts at 10,752 and `mod tests` at 13,048 — and it carries
 several responsibilities that have visible seams already: request encoding, the
 `StreamChannel` transport, the wasm export shim, the replayer, and the reply
 format. Splitting along those seams is mechanical.
@@ -14648,13 +14656,26 @@ optionally to get a device that can, and the module's parsimony argument is now
 an admission test rather than a list.
 
 What that leaves is the general point, which still stands: the JS gate answers
-for the replayer, and only a group like AH answers for the wire. **The other
-three mapped features have no such group.** `texture-compression-bc`,
-`timestamp-query` and `indirect-first-instance` are each driven end to end by
-some existing group or corpus command, which is weaker than AH's construction —
-none of them contrasts a device that has the feature against one that does not.
-Whether that is worth building three more of is unanswered; AH cost more than a
-one-line check and bought a real witness.
+for the replayer, and only a group like AH answers for the wire.
+`indirect-first-instance` has since got its group — **AI**, two indirect draws
+off argument structures differing only in `firstInstance`, landing a half-target
+apart — so **two mapped features are left without one**:
+
+- **`texture-compression-bc`.** The sharp version needs a BC block with known
+  decoded texels; the workspace has no BC encoder and adding one is not in
+  scope, but a single hand-written BC1 block is small and the format is exactly
+  specified, so this is a transcription job with a specification to check
+  against rather than a design problem. CI matters here: SwiftShader does not
+  report the feature, so the absent branch is what most runners would take and
+  the present branch would rest on the local hardware adapter.
+- **`timestamp-query`.** The cheapest to encode and the hardest to assert on.
+  Browsers quantise timestamp values for privacy, so "non-zero" and "strictly
+  increasing" are not safe claims without measuring first what this browser
+  actually returns — sweep the values before fixing any threshold, or the gate
+  becomes the flake it was meant to catch.
+
+AI cost about as much as AH and bought the same kind of witness, so the pattern
+is proven; what is unanswered is only whether these two are worth it.
 
 ### The probe gate's expected local failure is documented in the wrong file
 
