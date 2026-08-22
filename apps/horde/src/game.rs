@@ -90,7 +90,7 @@ use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::jobs::{Inline, Pool, Spawn, default_spawner};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
-use crcbl::phys::{ColliderComponent, PhysicsSystem, QueryScratch, RigidBody, Segment, Transform};
+use crcbl::phys::{ColliderComponent, PhysicsSystem, QueryScratch, RigidBody, Transform};
 use crcbl::session::Loopback;
 
 /// Distinct from breakout's, flappy's and asteroids', because they are distinct
@@ -2181,17 +2181,17 @@ fn contact_damage(logic: &mut GameLogic, world: &mut World, dt: f64) {
 
 /// Sweeps every bolt along the path it took this tick and resolves what it hit.
 ///
-/// **This is the "never miss at any speed" half of the plan, and it is written
-/// by hand.** `crcbl-phys` has the machinery — [`PhysicsSystem::sweep_sphere`]
-/// takes a [`Segment`] and a radius — and no bullet-shaped entry point, so every
-/// game that fires anything writes this same "from where it was to where it is"
-/// itself. `docs/backlog.md` records that; this is the third consumer to decide
-/// it is still worth writing rather than worked around.
+/// **This is the "never miss at any speed" half of the plan.**
+/// [`PhysicsSystem::sweep_body`] reads the bolt's own body and reconstructs the
+/// segment — from where it was (`position − velocity·dt`) to where it is
+/// (`position`) — so the "from where it was to where it is" that this function
+/// used to write by hand is gone, and the one copy asteroids also calls is the
+/// only one.
 ///
 /// A bolt therefore has **no collider**. It is a query, not a body in the
-/// broadphase: giving it one would put the bolt's own shape at the far end of
-/// its own sweep, where it reports hitting itself at `t = 0`, and would need a
-/// remove-and-re-insert per bolt per tick to avoid.
+/// broadphase: nothing here ever asks what a bolt is touching, so a collider
+/// would be an insert and a remove per bolt per tick buying nothing, and bolts
+/// would start stopping each other.
 fn sweep_bolts(logic: &mut GameLogic, world: &mut World, dt: f64) {
     if logic.bolts.is_empty() {
         return;
@@ -2202,18 +2202,7 @@ fn sweep_bolts(logic: &mut GameLogic, world: &mut World, dt: f64) {
     let bolts = logic.bolts.clone();
     with_physics(world, |phys| {
         for (index, bolt) in bolts.iter().enumerate() {
-            let Some((body, transform)) = phys
-                .body(bolt.entity)
-                .copied()
-                .zip(phys.transform(bolt.entity).copied())
-            else {
-                continue;
-            };
-            let segment = Segment {
-                start: transform.position - body.velocity * dt,
-                end: transform.position,
-            };
-            if let Some((entity, _hit)) = phys.sweep_sphere(&segment, BOLT_RADIUS) {
+            if let Some((entity, _hit)) = phys.sweep_body(bolt.entity, dt, BOLT_RADIUS) {
                 hits.push((index, entity));
             }
         }
