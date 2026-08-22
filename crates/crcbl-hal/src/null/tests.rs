@@ -1251,14 +1251,21 @@ fn reconfiguring_to_a_larger_ring_reissues_the_semaphores_too() {
 }
 
 /// The seam's answer for a device that cannot observe presents: the wait is
-/// answered rather than refused, and it still resolves what it was given.
+/// answered rather than refused, it still resolves what it was given, and not
+/// even an injected timeout makes it refuse.
 ///
-/// Both halves matter. A refusal would put a branch on every frame of every
-/// caller for a condition that cannot change after device creation, and the
-/// caller that skipped the branch would turn a missing capability into a failed
-/// frame. Answering it without looking at the handle would let a wait on a
-/// destroyed swapchain — a real ordering bug in a frame loop — pass unnoticed
-/// on the one backend whose whole job is noticing.
+/// All three halves matter. A refusal would put a branch on every frame of
+/// every caller for a condition that cannot change after device creation, and
+/// the caller that skipped the branch would turn a missing capability into a
+/// failed frame. Answering it without looking at the handle would let a wait on
+/// a destroyed swapchain — a real ordering bug in a frame loop — pass unnoticed
+/// on the one backend whose whole job is noticing. And
+/// [`Recorder::report_present_wait_timeouts`] must not reach past the
+/// capability: a device that cannot observe presents cannot observe one being
+/// late either, so the report stays owed until a device that claims
+/// [`Features::PRESENT_FEEDBACK`] takes it — which is what the second device
+/// below is for, and what proves the first one refrained rather than having
+/// nothing to refrain from.
 #[test]
 fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
     let instance = NullInstance::gpu_driven();
@@ -1289,9 +1296,46 @@ fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
         recorder.events().contains(&Event::PresentWaited {
             swapchain,
             present_id: 7,
+            timed_out: false,
         }),
         "the request is what a test of a caller's pacing reads, so it is recorded"
     );
+
+    // Nor can a timeout be injected onto a device that cannot observe presents:
+    // the seam's `Ok` is unconditional there, so the injection is left owed
+    // rather than spent by a device that had no business honouring it.
+    recorder.report_present_wait_timeouts(1);
+    device
+        .wait_until_presented(swapchain, 7, Duration::from_secs(30))
+        .expect("still no capability, so still no refusal to make");
+    let capable = NullInstance::gpu_driven()
+        .with_present_feedback()
+        .with_recorder(recorder.clone());
+    let paced = open(&capable);
+    assert!(
+        paced.caps().features.contains(Features::PRESENT_FEEDBACK),
+        "the builder is what makes the injection above reachable at all"
+    );
+    // SAFETY: an offscreen target holds no platform pointers.
+    let other_surface =
+        unsafe { capable.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let other_swapchain = paced
+        .create_swapchain(&SwapchainDesc {
+            label: None,
+            surface: other_surface,
+            format: Format::Bgra8UnormSrgb,
+            extent: (8, 8),
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        })
+        .expect("swapchain");
+    let lapsed = paced
+        .wait_until_presented(other_swapchain, 7, Duration::from_secs(30))
+        .expect_err("the report was still owed, so the first device that can honour it does");
+    assert!(matches!(lapsed, SurfaceError::Timeout), "{lapsed}");
+    paced.destroy_swapchain(other_swapchain);
+    capable.destroy_surface(other_surface);
 
     device.destroy_swapchain(swapchain);
     let error = device
@@ -1506,6 +1550,139 @@ fn a_suboptimal_acquire_is_counted_out_and_presents_all_the_same() {
             .suboptimal,
         "the refused acquire consumed nothing"
     );
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
+/// The present-wait timeout, from the seam's side: a device that claims
+/// [`Features::PRESENT_FEEDBACK`] can be made to let a wait lapse, the frame it
+/// was waiting on is still there to be acquired and presented, and **it runs
+/// out**.
+///
+/// The capability is half the mechanism. `wait_until_presented` has two legal
+/// answers and the flag is what picks between them, so a null device that never
+/// claimed the flag could only ever give the immediate one — which is why the
+/// timeout arm of every frame loop in this workspace was unreachable until
+/// [`NullInstance::with_present_feedback`] existed.
+/// [`a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain`]
+/// covers the other side, that the flag is load-bearing rather than decorative:
+/// the same injection reaches nothing on a device that does not claim it.
+///
+/// Running out rather than latching is the decision this injector owed. A latch
+/// would not spin the way a latched suboptimal report would — the caller's
+/// answer to a timeout is to render the frame anyway, so nothing rebuilds and
+/// nothing retries — but nothing would clear it either: a resize is cleared by
+/// the rebuild that answers it, and no caller has an action that makes a
+/// stalled compositor catch up. The seam calls a timeout expected traffic that
+/// the next wait catches up from, so the recovery is part of the behaviour, and
+/// only a count lets a test watch it happen.
+#[test]
+fn a_present_wait_times_out_while_it_is_owed_and_is_counted_out() {
+    let instance = NullInstance::gpu_driven().with_present_feedback();
+    let recorder = instance.recorder();
+    let device = open(&instance);
+    assert!(
+        device.caps().features.contains(Features::PRESENT_FEEDBACK),
+        "the injection below reaches nothing on a device that cannot observe presents"
+    );
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("every device has a graphics queue");
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let desc = SwapchainDesc {
+        label: None,
+        surface,
+        format: Format::Bgra8UnormSrgb,
+        extent: (8, 8),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device.create_swapchain(&desc).expect("swapchain");
+
+    // The control: nothing has been injected, so the capable device answers
+    // exactly as the featureless one did.
+    device
+        .wait_until_presented(swapchain, 1, Duration::from_secs(30))
+        .expect("a wait nobody delayed is answered at once");
+    assert_eq!(
+        recorder.events().last(),
+        Some(&Event::PresentWaited {
+            swapchain,
+            present_id: 1,
+            timed_out: false,
+        }),
+        "and is recorded as answered, which is what the injected ones are read against"
+    );
+
+    const OWED: u32 = 2;
+    recorder.report_present_wait_timeouts(OWED);
+    for spent in 0..OWED {
+        let present_id = u64::from(spent) + 1;
+        let lapsed = device
+            .wait_until_presented(swapchain, present_id, Duration::from_secs(30))
+            .expect_err("a timeout is still owed, so this wait must lapse");
+        assert!(
+            matches!(lapsed, SurfaceError::Timeout),
+            "wait {spent} of the {OWED} injected: {lapsed}"
+        );
+        assert_eq!(
+            recorder.events().last(),
+            Some(&Event::PresentWaited {
+                swapchain,
+                present_id,
+                timed_out: true,
+            }),
+            "the refusal is recorded beside the request, or a caller that renders \
+             the frame anyway leaves a stream indistinguishable from never waiting"
+        );
+
+        // And the swapchain is untouched by it: a compositor that is behind has
+        // not taken the frame loop's images away, which is the whole reason the
+        // seam says to render anyway rather than to skip or to fail.
+        let frame = device
+            .acquire_next_frame(swapchain)
+            .expect("a late display is not a swapchain that refuses images");
+        device
+            .present(
+                queue,
+                &PresentInfo {
+                    swapchain,
+                    waits: frame.present_semaphore.as_slice(),
+                    present_id: Some(present_id),
+                },
+            )
+            .expect("nor one that refuses presents");
+    }
+
+    device
+        .wait_until_presented(swapchain, 2, Duration::from_secs(30))
+        .expect("the injection is spent, so the next wait catches up");
+
+    // A refused wait spends none of it: the out-of-date latch answers before the
+    // count is read, so what a caller is owed outlives the resize rather than
+    // being eaten by it — and the refused wait records nothing at all.
+    recorder.report_present_wait_timeouts(1);
+    recorder.report_swapchain_out_of_date();
+    let events = recorder.events().len();
+    let refused = device
+        .wait_until_presented(swapchain, 2, Duration::from_secs(30))
+        .expect_err("the surface moved under the swapchain");
+    assert!(matches!(refused, SurfaceError::OutOfDate), "{refused}");
+    assert_eq!(
+        recorder.events().len(),
+        events,
+        "a wait that was never answered is not a wait that happened"
+    );
+    device
+        .reconfigure_swapchain(swapchain, &desc)
+        .expect("reconfigure");
+    let lapsed = device
+        .wait_until_presented(swapchain, 2, Duration::from_secs(30))
+        .expect_err("the refused wait consumed nothing");
+    assert!(matches!(lapsed, SurfaceError::Timeout), "{lapsed}");
 
     device.destroy_swapchain(swapchain);
     instance.destroy_surface(surface);

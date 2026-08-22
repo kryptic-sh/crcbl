@@ -8596,15 +8596,40 @@ mod tests {
         crcbl_hal::null::Recorder,
         GpuContext,
     ) {
-        use crcbl_hal::null::{NullInstance, Recorder};
+        null_context_with(
+            crcbl_hal::null::NullInstance::gpu_driven(),
+            label,
+            pacing,
+            Features::empty(),
+        )
+    }
+
+    /// The same, on an adapter the caller chose and asking for `optional` on top
+    /// of nothing.
+    ///
+    /// Which adapter and which features are one question, not two: the device
+    /// gets a capability only where the adapter has it *and* the open asked for
+    /// it, so a test that wants one has to say both, and saying only one is the
+    /// silent way to end up asserting against a device that never had it.
+    fn null_context_with(
+        instance: crcbl_hal::null::NullInstance,
+        label: &str,
+        pacing: Pacing,
+        optional: Features,
+    ) -> (
+        crcbl_shell::HeadlessShell,
+        WindowId,
+        crcbl_hal::null::Recorder,
+        GpuContext,
+    ) {
+        use crcbl_hal::null::Recorder;
 
         let (mut shell, window) = shell();
         let mut shell_events = 0;
         let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
 
         let recorder = Recorder::new();
-        let instance: Box<dyn Instance> =
-            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
+        let instance: Box<dyn Instance> = Box::new(instance.with_recorder(recorder.clone()));
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
@@ -8614,7 +8639,7 @@ mod tests {
             extent,
             label,
             Features::empty(),
-            Features::empty(),
+            optional,
             pacing,
         )
         .expect("the null backend opens everywhere");
@@ -8624,7 +8649,7 @@ mod tests {
             extent,
             label: label.to_string(),
             required_features: Features::empty(),
-            optional_features: Features::empty(),
+            optional_features: optional,
             pacing,
         };
         let gpu = loop {
@@ -8690,6 +8715,32 @@ mod tests {
             .events()
             .iter()
             .filter_map(|event| match event {
+                crcbl_hal::null::Event::Presented { .. } => Some("present"),
+                crcbl_hal::null::Event::Reconfigured { .. } => Some("reconfigure"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The whole of a paced frame as the recorder saw it: the pacing wait — with
+    /// one that lapsed named apart from one that was answered — then the
+    /// acquire, the present and any rebuild.
+    ///
+    /// [`presentation_sequence`] cannot be used for a timed-out wait, because
+    /// the acquire is exactly what the candidate policies disagree about and it
+    /// does not appear there: an engine that skipped the frame and an engine
+    /// that rendered it both leave a present-and-rebuild stream that is empty
+    /// of rebuilds.
+    fn paced_frame_sequence(recorder: &crcbl_hal::null::Recorder) -> Vec<&'static str> {
+        recorder
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                crcbl_hal::null::Event::PresentWaited {
+                    timed_out: true, ..
+                } => Some("wait timed out"),
+                crcbl_hal::null::Event::PresentWaited { .. } => Some("wait"),
+                crcbl_hal::null::Event::Acquired { .. } => Some("acquire"),
                 crcbl_hal::null::Event::Presented { .. } => Some("present"),
                 crcbl_hal::null::Event::Reconfigured { .. } => Some("reconfigure"),
                 _ => None,
@@ -9133,6 +9184,161 @@ mod tests {
             reconfigures(&recorder),
             usize::try_from(SUBOPTIMAL).expect("the injected count fits a usize"),
             "one rebuild per suboptimal frame, and none once the report ran out"
+        );
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// **A frame whose pacing wait timed out is still rendered and still
+    /// presented**, which is the whole of the policy that arm exists to carry
+    /// out: a frame skipped because the *last* one was late is two frames lost
+    /// instead of one.
+    ///
+    /// The observable is the recorder's event sequence for the one frame, and
+    /// it has to separate three candidate engines rather than two. One that
+    /// renders anyway leaves `wait timed out`, an `acquire` and a `present`.
+    /// One that treated the timeout the way it treats
+    /// [`SurfaceError::OutOfDate`] would leave the lapsed wait and **nothing
+    /// else** — no image was ever taken — and hand its caller
+    /// [`FrameOutcome::Reconfigured`] for a frame that never reached the
+    /// display. One that let the error propagate leaves that same truncated
+    /// sequence but fails the frame outright, so the outcome assertion is what
+    /// separates those two from each other and the sequence is what separates
+    /// both from the right answer.
+    ///
+    /// Naming the lapsed wait apart from an answered one is the other half.
+    /// Every candidate above presents on a frame whose wait *succeeded*, so an
+    /// assertion that could not see the refusal would pass on an injection that
+    /// silently reached nothing — which is exactly what an injection on a device
+    /// without [`Features::PRESENT_FEEDBACK`] does, and why this context asks
+    /// for the capability on an adapter built to have it.
+    ///
+    /// The frame after it is the seam's other claim — "let the next wait catch
+    /// up" — and it is testable only because
+    /// [`Recorder::report_present_wait_timeouts`] is counted rather than
+    /// latched.
+    #[test]
+    fn a_timed_out_pacing_wait_still_renders_and_presents_the_frame() {
+        use crcbl_hal::null::NullInstance;
+
+        let (mut shell, window, recorder, mut gpu) = null_context_with(
+            NullInstance::gpu_driven().with_present_feedback(),
+            "timed-out wait test",
+            Pacing::Vsync,
+            Features::PRESENT_FEEDBACK,
+        );
+        assert!(
+            gpu.device()
+                .caps()
+                .features
+                .contains(Features::PRESENT_FEEDBACK),
+            "a device that cannot observe presents cannot be told one was late, \
+             and every assertion below would pass without the injection landing"
+        );
+
+        // Fill the pipeline: the first `FRAMES_IN_FLIGHT` frames have nothing
+        // far enough behind them to wait for, so none of them would consume the
+        // injection or exercise the arm.
+        for _ in 0..=FRAMES_IN_FLIGHT {
+            assert_eq!(
+                null_frame(&mut gpu).expect("a healthy frame"),
+                FrameOutcome::Presented
+            );
+        }
+        assert!(
+            GpuContext::present_to_wait_for(gpu.submitted, gpu.effective_pacing()).is_some(),
+            "the rest of this test asserts nothing unless the next frame is one that waits"
+        );
+
+        // The control: the same frame with its wait answered, so the sequence
+        // below is this one with the wait's answer changed and nothing else.
+        recorder.clear();
+        assert_eq!(
+            null_frame(&mut gpu).expect("a healthy frame"),
+            FrameOutcome::Presented
+        );
+        assert_eq!(
+            paced_frame_sequence(&recorder),
+            ["wait", "acquire", "present"],
+            "a paced frame waits, then takes an image, then presents it: {:?}",
+            recorder.events()
+        );
+
+        recorder.report_present_wait_timeouts(1);
+        recorder.clear();
+        assert_eq!(
+            null_frame(&mut gpu).expect("a display that is behind does not fail the frame"),
+            FrameOutcome::Presented,
+            "the frame reached the display, so the loop counts it as presented"
+        );
+        assert_eq!(
+            paced_frame_sequence(&recorder),
+            ["wait timed out", "acquire", "present"],
+            "the frame is rendered anyway: an engine that skipped or failed it \
+             stops after the wait: {:?}",
+            recorder.events()
+        );
+        assert_eq!(
+            reconfigures(&recorder),
+            0,
+            "and a late display is not a resize, so nothing is rebuilt"
+        );
+
+        // The next wait catches up, which the arm's comment promises and only a
+        // counted injection can show.
+        recorder.clear();
+        assert_eq!(
+            null_frame(&mut gpu).expect("a healthy frame"),
+            FrameOutcome::Presented
+        );
+        assert_eq!(
+            paced_frame_sequence(&recorder),
+            ["wait", "acquire", "present"],
+            "the stall was one frame's, not this device's forever"
+        );
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+
+        // Driven, so the arm runs where it lives: inside a loop with a budget it
+        // can be seen spending in full.
+        const BUDGET: u64 = 8;
+        const TIMEOUTS: u32 = 2;
+
+        let (mut shell, window, recorder, gpu) = null_context_with(
+            NullInstance::gpu_driven().with_present_feedback(),
+            "driven timed-out wait",
+            Pacing::Vsync,
+            Features::PRESENT_FEEDBACK,
+        );
+        recorder.report_present_wait_timeouts(TIMEOUTS);
+        let frames = std::rc::Rc::new(std::cell::Cell::new(0));
+        let ran = drive(DeviceOnlyLoop {
+            gpu,
+            frames: std::rc::Rc::clone(&frames),
+            stop_after: BUDGET,
+        })
+        .expect("a compositor that fell behind is not a run that failed");
+        assert_eq!(
+            ran, BUDGET,
+            "the loop spent its whole budget rather than stopping on a late display"
+        );
+        assert_eq!(
+            paced_frame_sequence(&recorder)
+                .iter()
+                .filter(|step| **step == "wait timed out")
+                .count(),
+            usize::try_from(TIMEOUTS).expect("the injected count fits a usize"),
+            "both injected timeouts were spent by real waits, and no more were invented"
+        );
+        assert_eq!(
+            presents(&recorder),
+            usize::try_from(BUDGET).expect("the budget fits a usize"),
+            "and every frame reached the display, waited-for or not"
+        );
+        assert_eq!(
+            reconfigures(&recorder),
+            0,
+            "with nothing rebuilt on the way through"
         );
         shell.destroy_window(window).expect("the window goes away");
     }

@@ -445,15 +445,28 @@ pub enum Event {
     /// The caller asked to wait for a numbered present with
     /// [`Device::wait_until_presented`](crate::Device::wait_until_presented).
     ///
-    /// Recorded even though nothing is waited for: this backend does not
-    /// advertise [`Features::PRESENT_FEEDBACK`](crate::Features::PRESENT_FEEDBACK)
-    /// and has no display behind it, so the call returns at once. The event is
-    /// the request, which is what a test of a frame loop's pacing needs to see.
+    /// Recorded even though nothing is ever waited *for*: there is no display
+    /// behind this backend, so the call returns without blocking whether or not
+    /// the device advertises
+    /// [`Features::PRESENT_FEEDBACK`](crate::Features::PRESENT_FEEDBACK). The
+    /// event is the request, which is what a test of a frame loop's pacing
+    /// needs to see.
     PresentWaited {
         /// Swapchain the wait named.
         swapchain: SwapchainHandle,
         /// Present the caller waited for.
         present_id: u64,
+        /// Whether the wait was answered with
+        /// [`SurfaceError::Timeout`](crate::SurfaceError::Timeout) instead of
+        /// with the frame, which only
+        /// [`Recorder::report_present_wait_timeouts`] makes true.
+        ///
+        /// Here because the request alone cannot carry the difference: a caller
+        /// that renders the frame anyway — which is what the seam asks of one —
+        /// leaves the same acquire and the same present behind it either way,
+        /// so a test of that policy could not tell an injection that landed
+        /// from one that silently did nothing.
+        timed_out: bool,
     },
     /// A swapchain was reconfigured (resize, present-mode change).
     Reconfigured {
@@ -674,6 +687,10 @@ pub(super) struct State {
     /// [`suboptimal`](crate::AcquiredFrame::suboptimal). See
     /// [`Recorder::report_suboptimal_acquires`].
     pub(super) suboptimal_acquires: u32,
+    /// How many `wait_until_presented` calls report
+    /// [`SurfaceError::Timeout`](crate::SurfaceError::Timeout). See
+    /// [`Recorder::report_present_wait_timeouts`].
+    pub(super) present_wait_timeouts: u32,
     /// Why the device is lost, once it is — and never cleared, which is what
     /// separates it from `device_errors`. See [`Recorder::lose_device`].
     pub(super) lost_device: Option<String>,
@@ -693,6 +710,7 @@ impl State {
             reconfigure_failures: 0,
             swapchain_out_of_date: false,
             suboptimal_acquires: 0,
+            present_wait_timeouts: 0,
             lost_device: None,
         }
     }
@@ -1103,6 +1121,58 @@ impl Recorder {
         let mut state = self.lock();
         if state.suboptimal_acquires > 0 {
             state.suboptimal_acquires -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Makes the next `wait_until_presented` call(s) report
+    /// [`SurfaceError::Timeout`](crate::SurfaceError::Timeout), as if the
+    /// compositor had still not got the numbered frame onto the display when
+    /// the caller's deadline passed.
+    ///
+    /// **Only on a device that advertises
+    /// [`Features::PRESENT_FEEDBACK`](crate::Features::PRESENT_FEEDBACK)** —
+    /// see [`NullInstance::with_present_feedback`](super::NullInstance::with_present_feedback),
+    /// since no preset does. The seam promises that a device *without* the
+    /// capability answers the wait immediately and never refuses it, so a
+    /// timeout there would be this backend breaking the one contract it exists
+    /// to police. A wait on such a device therefore spends nothing: what was
+    /// injected is still owed to the first device that can honour it, rather
+    /// than being eaten by a device that could not.
+    ///
+    /// Why it was missing: there is no display here to be late, so this backend
+    /// could only ever return `Ok`, and a frame loop's timed-out-wait arm — in
+    /// `crcbl/src/engine.rs`'s `acquire`, the one that renders the frame anyway
+    /// rather than skipping it — was reachable on no backend in this workspace.
+    ///
+    /// **Counted rather than latched**, following
+    /// [`report_suboptimal_acquires`](Self::report_suboptimal_acquires) and for
+    /// a different reason than its sibling's. A latch here would not run away —
+    /// the engine's answer to a timeout is to carry on, so nothing would spin —
+    /// but nothing would ever clear it either: a resize is cleared by the
+    /// rebuild that answers it, while a caller has no action that makes a
+    /// stalled display catch up. A latched device is one whose presents can
+    /// never be waited on again, which is not what the seam calls this —
+    /// "expected traffic on a stalled compositor … render it and let the next
+    /// wait catch up". A count is the only shape in which *the next wait
+    /// catching up* is something a test can watch happen.
+    ///
+    /// Consumed one per wait, and only by a wait that got as far as being
+    /// answered: one refused by the out-of-date latch or by a dead handle
+    /// spends nothing. After `times` waits the device answers them again.
+    /// Default `0`.
+    pub fn report_present_wait_timeouts(&self, times: u32) {
+        self.lock().present_wait_timeouts = times;
+    }
+
+    /// Consumes one present-wait timeout, if any are owed. The backend's half
+    /// of [`report_present_wait_timeouts`](Self::report_present_wait_timeouts).
+    pub(super) fn take_present_wait_timeout(&self) -> bool {
+        let mut state = self.lock();
+        if state.present_wait_timeouts > 0 {
+            state.present_wait_timeouts -= 1;
             true
         } else {
             false

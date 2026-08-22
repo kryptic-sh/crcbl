@@ -35,11 +35,15 @@
 //! a swapchain rebuild, [`report_swapchain_out_of_date`](Recorder::report_swapchain_out_of_date)
 //! resizes the window out from under the frame loop,
 //! [`report_suboptimal_acquires`](Recorder::report_suboptimal_acquires) hands
-//! out a frame the surface has outgrown but will still take, and
+//! out a frame the surface has outgrown but will still take,
+//! [`report_present_wait_timeouts`](Recorder::report_present_wait_timeouts)
+//! leaves a pacing wait unanswered until its deadline passes — on a device that
+//! claims [`Features::PRESENT_FEEDBACK`], which is what
+//! [`NullInstance::with_present_feedback`] is for — and
 //! [`lose_device`](Recorder::lose_device) kills the device for good. The
 //! swapchain ones and the loss exist because the conditions they model — a
-//! resize, a stale extent and a TDR — are otherwise reachable only on a real
-//! driver at a moment nobody can schedule.
+//! resize, a stale extent, a stalled compositor and a TDR — are otherwise
+//! reachable only on a real driver at a moment nobody can schedule.
 //!
 //! # Always compiled
 //!
@@ -242,6 +246,29 @@ impl NullInstance {
         });
         instance.name = "null adapter (portable)".to_string();
         instance
+    }
+
+    /// This instance's adapter, plus [`Features::PRESENT_FEEDBACK`].
+    ///
+    /// Neither preset advertises it and neither should: there is no display
+    /// under this backend, so an adapter that claimed by default to observe
+    /// presents would be telling every test that opened one something untrue.
+    /// But the capability is the switch on the seam's two answers for
+    /// [`Device::wait_until_presented`] — without it the wait must return `Ok`
+    /// at once, with it the wait may lapse — so a caller's timed-out-wait path
+    /// needs a device that claims it, and until this existed such a device had
+    /// to be assembled from [`DeviceCaps`] by hand in each test that wanted
+    /// one.
+    ///
+    /// Claiming it is only half of what makes a wait lapse: nothing here is
+    /// slow, so the timeout itself comes from
+    /// [`Recorder::report_present_wait_timeouts`]. And this is the *adapter's*
+    /// capability, so a device still gets it only by asking, as it would from a
+    /// real backend.
+    #[must_use]
+    pub fn with_present_feedback(mut self) -> Self {
+        self.caps.features.insert(Features::PRESENT_FEEDBACK);
+        self
     }
 
     /// Uses `recorder` instead of this instance's own, so a caller can keep a
@@ -1823,12 +1850,19 @@ impl Device for NullDevice {
         Ok(())
     }
 
-    /// Records the request and returns at once.
+    /// Records the request and returns at once, unless a timeout was injected.
     ///
     /// There is no display under this backend, so there is nothing a wait could
-    /// observe — which is exactly the seam's answer for a device that does not
-    /// advertise [`Features::PRESENT_FEEDBACK`], and this one never does. The
-    /// handle is still checked, because a caller waiting on a swapchain it
+    /// observe and nothing that could make one late. On a device that does not
+    /// advertise [`Features::PRESENT_FEEDBACK`] the seam requires exactly that
+    /// answer anyway — an immediate `Ok`, never a refusal — so such a device
+    /// needs no injection to be honest and is given none: it consumes nothing
+    /// from [`Recorder::report_present_wait_timeouts`], leaving what was asked
+    /// for owed to a device that can honour it. A device built with
+    /// [`NullInstance::with_present_feedback`] claims the other half of the
+    /// contract, and that is where an injected timeout comes out.
+    ///
+    /// The handle is still checked, because a caller waiting on a swapchain it
     /// already destroyed has a bug whether or not anyone was going to block —
     /// and so is the out-of-date latch, because a pacing wait is one of the
     /// three calls a resize makes fail. See [`check_current`](Self::check_current).
@@ -1839,12 +1873,25 @@ impl Device for NullDevice {
         _timeout: Duration,
     ) -> Result<(), SurfaceError> {
         self.check_current(swapchain)?;
+        // After the checks and before the lock, exactly as `acquire_next_frame`
+        // takes its own injection and for both of that call's reasons: the
+        // recorder's mutex is not reentrant, and a wait the checks above
+        // refused must spend nothing.
+        let timed_out = self.caps.features.contains(Features::PRESENT_FEEDBACK)
+            && self.recorder.take_present_wait_timeout();
         let mut state = self.recorder.lock();
+        // Recorded either way. The wait was asked for and answered; which of
+        // the two answers it got is the part the event has to carry.
         state.events.push(Event::PresentWaited {
             swapchain,
             present_id,
+            timed_out,
         });
-        Ok(())
+        if timed_out {
+            Err(SurfaceError::Timeout)
+        } else {
+            Ok(())
+        }
     }
 
     /// Always [`DisplayTiming::Unknown`], and the handle is checked first.
