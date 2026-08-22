@@ -5467,11 +5467,29 @@ job is cancelled. On that run Windows' `Post Run Swatinem/rust-cache@v2` is
 timeout → save skipped → next run cold. The nine consecutive
 `cancel-in-progress` kills before it did the same thing for the same reason.
 
-**Acted on:** the Windows `timeout` in the matrix is now 180, sized to let one
-cold run complete and seed the cache. Once it has, this leg should join the
-other two at well under a minute — **lower the number then, against a measured
-warm run rather than another extrapolation.** The 90 that failed was itself
-extrapolated from a partial run.
+**Tried, and it failed: 180 minutes is not enough either.** The `timeout` was
+raised to 180 to let one cold run complete and seed the cache. Run
+**32561651591** got the clear field it needed — no push landed on it for three
+hours — and still died: job started `08:12:35Z`, ended `11:12:47Z`, conclusion
+`cancelled`, with the single step
+`Compare every golden scene rendered in a browser` consuming the whole budget.
+`Post Run Swatinem/rust-cache@v2` is `skipped` again. Two attempts, two
+different timeouts, same ending.
+
+**So the "give it a bigger number" option is measurably dead**, and it should
+not be tried a third time. Each attempt costs three hours of wall clock and
+produces nothing, GitHub's own ceiling is six hours, and nothing in the evidence
+says the next number is the one that works — the step was still running when it
+was killed, so its actual cold duration is unknown and unbounded by anything
+measured. A fix has to remove the cold rebuild or stop the leg needing one; it
+cannot wait it out.
+
+**DECISION NEEDED — and the trade-off has changed shape.** The four options
+already recorded below were written when "raise the timeout" was still live. It
+is not. Whichever is chosen has to make the Windows leg's _first_ run cheap
+rather than merely permitted, or take the leg off the critical path. The
+`cancel-in-progress` question is now the smaller half of this, not the whole of
+it.
 
 **Still open, and it is the user's call**, because it is about runner minutes
 rather than correctness:
