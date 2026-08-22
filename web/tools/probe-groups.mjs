@@ -651,14 +651,16 @@ export async function runProbeGroups({
   // engine: a reference device opened by the code under test would agree with it
   // whatever it asked for.
   //
-  // `timestamp-query`, `depth-clip-control` and `indirect-first-instance` are in
-  // the request because `probe_device_desc` asks for all three — group AF has
-  // nothing to observe without a `'timestamp'` query set, group AH nothing
-  // without a pipeline WebGPU will accept `unclippedDepth` on, and group AI
-  // nothing without an indirect draw WebGPU will accept a non-zero
-  // `firstInstance` in, and each needs its feature. Optional on both sides: a
-  // browser without any of them opens a device here and there, and the two still
-  // match.
+  // The optional features are in the request because `probe_device_desc` asks
+  // for them — group AF has nothing to observe without a `'timestamp'` query
+  // set, group AH nothing without a pipeline WebGPU will accept `unclippedDepth`
+  // on, group AI nothing without an indirect draw WebGPU will accept a non-zero
+  // `firstInstance` in, and group AK nothing without a texture WebGPU will let
+  // it create in a BC format at all. Optional on both sides: a browser without
+  // any of them opens a device here and there, and the two still match. **A name
+  // missing from this list is a red group G on any machine whose adapter has
+  // it**, because wasm's device would carry a feature this reference device
+  // does not.
   const liveDevice = await evaluate(
     page,
     `(async () => {
@@ -675,6 +677,7 @@ export async function runProbeGroups({
        'timestamp-query',
        'depth-clip-control',
        'indirect-first-instance',
+       'texture-compression-bc',
      ].filter((name) => adapter.features.has(name));
      const device = await adapter.requestDevice({ requiredLimits, requiredFeatures });
      return {
@@ -4121,6 +4124,336 @@ export async function runProbeGroups({
             ` first wrong texel at ${textureSample.topLeft?.firstWrong}/${textureSample.topRight?.firstWrong}/` +
             `${textureSample.bottomLeft?.firstWrong}/${textureSample.bottomRight?.firstWrong})` +
             `${textureSample.error ? ` — ${textureSample.error}` : ''}`
+  );
+
+  // **THE GATE THAT SHOWS A COMPRESSED TEXTURE BEING DECODED.** This crate
+  // reports `Features::TEXTURE_COMPRESSION_BC` to callers off the browser's
+  // `texture-compression-bc`, `crcbl_hal::Format` spells nine BC formats and
+  // `gpu-replay.js` maps every one of them — and the whole of that was answered
+  // by `web/tools/gpu-replay.mjs` under node, against a stub device that records
+  // the descriptor it is handed. A recorded descriptor is not a decoded block:
+  // the feature gate, the block-pitch conversion and the bytes themselves had
+  // never met a browser.
+  //
+  // WHAT IT DOES: group AJ's frame with the source swapped for a compressed one.
+  // wasm uploads an 8×8 `bc1-rgba-unorm` source — two BC1 blocks each way —
+  // through a copy whose `bytesPerRow` has to be a multiple of 256, which for
+  // 8-byte blocks means a row pitch of 128 texels where the image is 8. The same
+  // nearest sampler, the same fullscreen quad, the same shader.
+  //
+  // **NOTHING ON THIS SIDE DECOMPRESSES BC1.** The blocks are laid out byte by
+  // byte in `probe.rs` and handed to WebGPU; what comes back is whatever the
+  // GPU's own decoder produced. So the quadrants are a claim about the hardware
+  // and the wire together — that the block reached the texture at the right
+  // pitch, and that its endpoint decoded to the colour that endpoint spells.
+  //
+  // **WHY THE FOUR COLOURS ARE CUBE CORNERS AND NOT MID-TONES**, which looks
+  // like a worse fixture and is the only defensible one. There is no single
+  // decoded value for a mid-tone BC1 endpoint: the Khronos Data Format
+  // Specification 1.3 §18.1 — which WebGPU defers to so completely that it never
+  // defines the decode itself — gives an exact rational (`R = c^15..11 / 31`),
+  // while D3D 11.3 §19.5.3 gives bit replication, and the two disagree by a step
+  // at 5-bit 3, 7, 24, 28 and 6-bit 11..15, 48..52. D3D §19.5.2 licenses both,
+  // and its tolerance is stated "for all channels of all texels" — the endpoints
+  // are NOT privileged, so "assert on the endpoints and avoid the interpolants"
+  // is not on its own enough. What §19.5.2 does guarantee is that values the
+  // reference decodes to 0.0 or 1.0 "must always be exact", and that is also the
+  // only place the two expansions agree. So every channel of every endpoint here
+  // is at a rail, and the comparison below is exact **because the specification
+  // says so** rather than because this GPU obliges.
+  //
+  // The cost is group AJ's colour rules: a cube corner has two channels alike,
+  // so no multiset rule can hold. The discrimination is positional instead — no
+  // channel permutation carries the ordered four onto itself, and a channel
+  // stuck at either rail moves at least one quadrant.
+  // `the_four_bc_sample_colours_are_told_apart_where_they_sit` holds that.
+  //
+  // **AND THERE IS NO ALPHA CHECK HERE, WHICH GROUP AJ HAS.** A four-colour BC1
+  // block is opaque: every texel decodes with alpha 1.0, so these four cannot
+  // carry four distinct alphas and an alpha dropped between the source and the
+  // readback is invisible to this group. Group AJ is where that is caught, on a
+  // source whose alphas can differ. Nothing below should be read as checking it.
+  //
+  // **A BROWSER WITHOUT `texture-compression-bc` OWES THIS GROUP ITS BYTES — BUT
+  // IT HAS TO SHOW THAT IT REFUSES THEM.** This is the absent branch CI's Linux
+  // runner takes, because SwiftShader does not report the feature, so it is the
+  // one that must not read as covered while proving nothing. Group AH's rule is
+  // kept — the page asks `navigator.gpu` itself, and an adapter that HAS the
+  // feature while wasm reports the device without it fails here — and one more
+  // is added on top: the page asks the **real GPUDevice** to create a
+  // `bc1-rgba-unorm` texture inside a validation error scope, and holds the
+  // answer to what wasm did. Refused where wasm encoded nothing, accepted where
+  // wasm encoded the frame. That check has teeth on both platforms rather than
+  // excusing one of them.
+  //
+  // WHERE IT BELONGS IN THE RUN: **before X**, group AJ's reason exactly. This
+  // group reads bytes back, so behind X's stuck canvas readback it would be
+  // stranded on Windows, and it is not in that platform's `--expect-fail` list.
+  group('AK — a BC1 block is decoded by the GPU and its endpoint comes out');
+
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_BC_SAMPLE_*`, spelled out here
+  // rather than imported, as every expected value in this file is. The target is
+  // group AJ's, so its size and its clear are group AJ's too.
+  const PROBE_BC_SAMPLE_SOURCE_SIZE = 8;
+  const PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS = 128;
+  const PROBE_BC_SAMPLE_TOP_LEFT_BYTES = [255, 0, 0, 255];
+  const PROBE_BC_SAMPLE_TOP_RIGHT_BYTES = [0, 255, 0, 255];
+  const PROBE_BC_SAMPLE_BOTTOM_LEFT_BYTES = [0, 0, 255, 255];
+  const PROBE_BC_SAMPLE_BOTTOM_RIGHT_BYTES = [255, 255, 0, 255];
+
+  const bcStart = await evaluate(
+    page,
+    `(async () => {
+     const { startBcSampleProbe, bcSampleSupported } =
+       await import('/engine/gpu-probe.js');
+     const { exports, gpu } = globalThis.crcbl;
+     // Supported first: it is what tells a device that withheld the feature
+     // from a request that never happened.
+     const supported = bcSampleSupported({ exports });
+     // And what the browser itself says, so the excuse below cannot be given
+     // by the thing under test. Asked of navigator.gpu, not of anything of ours.
+     const adapter = await navigator.gpu.requestAdapter();
+     const adapterHas =
+       adapter?.features?.has('texture-compression-bc') === true;
+     // **THE ABSENT BRANCH'S OWN CLAIM.** Ask the real device for the very
+     // texture this probe needs, inside a validation scope so the answer is
+     // caught rather than reported as an uncaptured error. A device without the
+     // feature must refuse it; a device with it must not. Either way this is the
+     // browser answering, not wasm.
+     const device = gpu.replayer.device;
+     let refusal = null;
+     let asked = false;
+     if (device) {
+       asked = true;
+       device.pushErrorScope('validation');
+       let texture = null;
+       try {
+         texture = device.createTexture({
+           size: [${PROBE_BC_SAMPLE_SOURCE_SIZE}, ${PROBE_BC_SAMPLE_SOURCE_SIZE}],
+           format: 'bc1-rgba-unorm',
+           usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+         });
+       } catch (error) {
+         refusal = String(error?.message ?? error);
+       }
+       const scoped = await device.popErrorScope();
+       if (scoped) refusal = scoped.message;
+       try {
+         texture?.destroy();
+       } catch {
+         // An invalid texture may refuse to be destroyed; it is going away with
+         // the device either way and this is not what is under test.
+       }
+     }
+     return {
+       supported,
+       adapterHas,
+       asked,
+       refusal,
+       started: startBcSampleProbe({ exports }),
+     };
+   })()`
+  );
+  // Poll across frames exactly as group AJ does.
+  const bcSample = bcStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const { readBcSampleProbe, pollBcSampleProbe, BC_SAMPLE } =
+             await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readBcSampleProbe({ exports, memory: exports.memory });
+           if (
+             r.state === BC_SAMPLE.FAILED ||
+             r.state === BC_SAMPLE.UNDECODABLE
+           ) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
+           }
+           if (r.state !== BC_SAMPLE.READY) {
+             pollBcSampleProbe({ exports });
+             return null;
+           }
+           // Ready: classify every texel here rather than shipping 16384 bytes
+           // out, group AJ's reason and its shape. Each quadrant crosses as how
+           // many of its texels are the colour that BELONGS there and which
+           // named colour it holds uniformly if it holds one.
+           const size = ${PROBE_TEXTURE_SAMPLE_SIZE};
+           const palette = [
+             ['top-left', ${JSON.stringify(PROBE_BC_SAMPLE_TOP_LEFT_BYTES)}],
+             ['top-right', ${JSON.stringify(PROBE_BC_SAMPLE_TOP_RIGHT_BYTES)}],
+             ['bottom-left', ${JSON.stringify(PROBE_BC_SAMPLE_BOTTOM_LEFT_BYTES)}],
+             ['bottom-right', ${JSON.stringify(PROBE_BC_SAMPLE_BOTTOM_RIGHT_BYTES)}],
+             ['the clear', ${JSON.stringify(PROBE_TEXTURE_SAMPLE_CLEAR_BYTES)}],
+           ];
+           const same = (at, colour) =>
+             r.bytes[at] === colour[0] &&
+             r.bytes[at + 1] === colour[1] &&
+             r.bytes[at + 2] === colour[2] &&
+             r.bytes[at + 3] === colour[3];
+           const quadrant = (topHalf, leftHalf, expected) => {
+             let matched = 0;
+             let holds = null;
+             let firstWrong = -1;
+             let first = null;
+             for (let row = 0; row < size; row += 1) {
+               if (row < size / 2 !== topHalf) continue;
+               for (let column = 0; column < size; column += 1) {
+                 if (column < size / 2 !== leftHalf) continue;
+                 const at = (row * size + column) * 4;
+                 if (first === null) first = [...r.bytes.slice(at, at + 4)];
+                 if (same(at, expected)) matched += 1;
+                 else if (firstWrong < 0) firstWrong = at;
+                 const named = palette.find(([, colour]) => same(at, colour));
+                 const label = named ? named[0] : 'an unnamed colour';
+                 if (holds === null) holds = label;
+                 else if (holds !== label) holds = 'a mixture';
+               }
+             }
+             return { matched, holds, firstWrong, first };
+           };
+           const midpoint = (size / 2) * 4;
+           const half = ((size * size) / 2) * 4;
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             topLeft: quadrant(true, true, palette[0][1]),
+             topRight: quadrant(true, false, palette[1][1]),
+             bottomLeft: quadrant(false, true, palette[2][1]),
+             bottomRight: quadrant(false, false, palette[3][1]),
+             sample: [
+               ...r.bytes.slice(0, 4),
+               ...r.bytes.slice(midpoint, midpoint + 4),
+               ...r.bytes.slice(half, half + 4),
+               ...r.bytes.slice(half + midpoint, half + midpoint + 4),
+             ],
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+
+  const bcAbsent =
+    bcStart?.supported === false && bcStart?.adapterHas === false;
+  const absentBcDetail =
+    "this browser's adapter reports no 'texture-compression-bc', so no " +
+    'bc1-rgba-unorm texture could be created here — the capability is ' +
+    'NotOnThisDevice and there is no decoded block to hold anything to';
+  check(
+    'AK',
+    'wasm encoded the BC frame — a bc1-rgba-unorm source two blocks square uploaded at a padded block pitch, a nearest sampler, a bind group holding that compressed view, a pass that samples it across a fullscreen quad, the copy, the request',
+    bcStart?.started === true || bcAbsent,
+    bcStart?.started
+      ? 'the block upload and the sampling pass are on the stream'
+      : bcStart?.supported === false
+        ? bcStart?.adapterHas
+          ? "this browser's adapter HAS 'texture-compression-bc' and wasm still reports the " +
+            'device without it — the optional feature was lost between the request and the ' +
+            'device that opened, which is a bug here and not a platform limit'
+          : absentBcDetail
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  // The arity first, then the four corners — group AJ's order and for its
+  // reason: a block of the wrong length means the quadrant walk read texels that
+  // are not there, and its tallies would be meaningless rather than merely wrong.
+  const bcLanded =
+    bcSample?.done === true &&
+    bcSample.len ===
+      PROBE_TEXTURE_SAMPLE_SIZE * PROBE_TEXTURE_SAMPLE_SIZE * 4 &&
+    bcSample.topLeft?.matched === PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS &&
+    bcSample.topRight?.matched === PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS &&
+    bcSample.bottomLeft?.matched === PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS &&
+    bcSample.bottomRight?.matched === PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS;
+  const bcHeld = [
+    bcSample?.topLeft?.holds,
+    bcSample?.topRight?.holds,
+    bcSample?.bottomLeft?.holds,
+    bcSample?.bottomRight?.holds,
+  ];
+  const bcHolding = (expected) =>
+    bcHeld.every((name, at) => name === expected[at]);
+  const bcWrongWay = bcHolding([
+    'bottom-left',
+    'bottom-right',
+    'top-left',
+    'top-right',
+  ])
+    ? 'top and bottom are exchanged, so the V axis is flipped or the two block rows were ' +
+      'uploaded in the wrong order'
+    : bcHolding(['top-right', 'top-left', 'bottom-right', 'bottom-left'])
+      ? 'left and right are exchanged, so the U axis is flipped or the two blocks of each ' +
+        'row were written the wrong way round'
+      : bcHolding(['top-left', 'bottom-left', 'top-right', 'bottom-right'])
+        ? 'the diagonal is unmoved and the other two corners are exchanged, so u and v are ' +
+          'transposed'
+        : bcHeld.every((name) => name === 'the clear')
+          ? 'every quadrant is the clear, so the draw produced no fragments at all'
+          : bcHeld.every((name) => name === 'an unnamed colour')
+            ? 'no quadrant holds a colour the fixture named, which is what a block read at the ' +
+              'wrong offset looks like — the decoder saw bytes that were not a block of ours. ' +
+              'The row pitch is the first thing to suspect: it is 256 bytes, which is ' +
+              `${PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS} texels through the block extent, and a ` +
+              'pitch converted per texel instead would read every row from the wrong place'
+            : bcHeld.some((name) => name === 'a mixture')
+              ? 'a quadrant holds more than one colour, so the sampler filtered across a block ' +
+                'boundary or the indices in a block are not all selecting its endpoint'
+              : 'the four corners hold colours the fixture does not account for';
+  check(
+    'AK',
+    'a BC1 block was decoded by the GPU and its endpoint came out — each quadrant of the target is the colour the block in that corner spells',
+    bcAbsent || bcLanded,
+    bcAbsent
+      ? absentBcDetail
+      : bcStart?.started !== true
+        ? 'no frame was encoded, so there is nothing to read — see the check above for why'
+        : bcSample?.done !== true
+          ? `no BC readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+          : bcLanded
+            ? `${bcSample.len} bytes: the four quadrants are ` +
+              `[${PROBE_BC_SAMPLE_TOP_LEFT_BYTES.join(', ')}], ` +
+              `[${PROBE_BC_SAMPLE_TOP_RIGHT_BYTES.join(', ')}], ` +
+              `[${PROBE_BC_SAMPLE_BOTTOM_LEFT_BYTES.join(', ')}] and ` +
+              `[${PROBE_BC_SAMPLE_BOTTOM_RIGHT_BYTES.join(', ')}] throughout — so a real ` +
+              'GPUTexture in a compressed format was decoded by the GPU and every endpoint ' +
+              'came back exactly, which is the only comparison the specifications license'
+            : `state ${bcSample.state}, ${bcSample.len ?? 0} bytes: the quadrants hold ` +
+              `${bcHeld.join(', ')} in reading order from the top left ` +
+              `(${bcSample.topLeft?.matched}/${bcSample.topRight?.matched}/` +
+              `${bcSample.bottomLeft?.matched}/${bcSample.bottomRight?.matched} of ` +
+              `${PROBE_TEXTURE_SAMPLE_QUADRANT_PIXELS} texels right in each) — ${bcWrongWay}` +
+              ` (first texel of each quadrant ${JSON.stringify(bcSample.sample)},` +
+              ` first wrong texel at ${bcSample.topLeft?.firstWrong}/${bcSample.topRight?.firstWrong}/` +
+              `${bcSample.bottomLeft?.firstWrong}/${bcSample.bottomRight?.firstWrong})` +
+              `${bcSample.error ? ` — ${bcSample.error}` : ''}`
+  );
+  // **THE CHECK THAT MAKES THE ABSENT BRANCH A CHECK.** Every platform runs it
+  // and it can fail on either side: a device that lacks the feature must refuse
+  // the texture this probe is built on, and a device that has it must not. It is
+  // what stops "not supported here" arriving as "passed" on the Linux runner,
+  // where the branch above is excused.
+  const bcRefused = bcStart?.refusal !== null && bcStart?.refusal !== undefined;
+  check(
+    'AK',
+    "the browser's own answer about bc1-rgba-unorm is the one wasm acted on — the real device refuses that texture where the feature is absent and accepts it where it is present",
+    bcStart?.asked === true && bcRefused === !bcStart?.supported,
+    bcStart?.asked !== true
+      ? 'no GPUDevice to ask — the replayer has not opened one, so this proves nothing and ' +
+          'fails rather than being skipped'
+      : bcRefused === !bcStart?.supported
+        ? bcStart.supported
+          ? 'the device has the feature, wasm encoded the frame, and createTexture accepted a ' +
+            'bc1-rgba-unorm texture with no validation error'
+          : 'the device lacks the feature, wasm encoded nothing, and createTexture was refused ' +
+            `by the browser — ${bcStart.refusal}`
+        : bcStart.supported
+          ? 'wasm reports the device HAS texture-compression-bc and the browser refused a ' +
+            `bc1-rgba-unorm texture anyway — ${bcStart.refusal}`
+          : 'wasm reports the device WITHOUT texture-compression-bc and the browser created a ' +
+            'bc1-rgba-unorm texture regardless, so the probe skipped a frame this device could ' +
+            'have run — which is exactly the shape that reads as covered while proving nothing'
   );
 
   // **THE PRESENT GATE, AND THE FIRST THAT PROVES THE REAL CANVAS-CONTEXT PATH.**

@@ -349,6 +349,36 @@ export const TEXTURE_SAMPLE = Object.freeze({
 });
 
 /**
+ * The `BC_SAMPLE_*` codes `__crcbl_web_gpu_probe_bc_sample_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * Group AJ's probe with a **compressed** source, so its codes are
+ * {@link FIRST_INSTANCE}'s **eight** rather than {@link TEXTURE_SAMPLE}'s seven:
+ * sampling is core WebGPU and no device can withhold it, while a
+ * `bc1-rgba-unorm` texture cannot be created at all without
+ * `texture-compression-bc`, so this probe has an `UNSUPPORTED` that a real
+ * runner reaches. SwiftShader is that runner.
+ *
+ * `READY` carries one block of `Rgba8Unorm` texels: the target a fullscreen quad
+ * painted by sampling an 8×8 BC1 source whose four blocks each decode to a
+ * single colour. Which colour each *quadrant* holds is the evidence that the
+ * GPU decoded a block nothing on this side decompressed — and the four are cube
+ * corners rather than mid-tones because those are the only endpoint values two
+ * specifications agree on exactly. See `PROBE_BC_SAMPLE_TOP_LEFT_565` in
+ * `probe.rs` for the whole of that reasoning.
+ */
+export const BC_SAMPLE = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+  UNSUPPORTED: 6,
+  FAILED: 7,
+});
+
+/**
  * The `OCCLUSION_*` codes `__crcbl_web_gpu_probe_occlusion_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -2230,6 +2260,109 @@ export function readTextureSampleProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: textureSampleStateName(state), reason, bytes };
+}
+
+/**
+ * The same state-name helper again, for the BC codes. Its own function for
+ * {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function bcSampleStateName(state) {
+  const found = Object.entries(BC_SAMPLE).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Whether the device this page opened has the browser's
+ * `texture-compression-bc`.
+ *
+ * Read this *before* {@link startBcSampleProbe}, and read it again when the
+ * state is `UNSUPPORTED`: it is what tells "this device withheld the feature a
+ * compressed texture needs" from "nothing asked it to". `false` before a device
+ * opens.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean}
+ */
+export function bcSampleSupported({ exports }) {
+  return exports.__crcbl_web_gpu_probe_bc_sample_supported() === 1;
+}
+
+/**
+ * Ask wasm to upload four BC1 blocks, sample the compressed texture they make
+ * across a fullscreen quad through a nearest sampler, and start reading the
+ * target back on the device it opened.
+ *
+ * **The only gate anywhere that puts a compressed texture in front of a GPU.**
+ * `Features::TEXTURE_COMPRESSION_BC` is reported to callers and every BC format
+ * is mapped in `gpu-replay.js`, but until this probe the whole of that was
+ * exercised against a node stub that records descriptors. Nothing on this side
+ * decompresses BC1: the blocks are laid out byte by byte in Rust, and what comes
+ * back is whatever the GPU's own decoder produced.
+ *
+ * What comes back is one block, and the claim is *which colour each quadrant
+ * holds*: the source's four blocks decode to four different colours, one per
+ * quadrant. {@link pollBcSampleProbe} drives the poll and
+ * {@link readBcSampleProbe} reads the bytes when they land.
+ *
+ * Its answer is *data* and it needs a **device**, so `false` before one has
+ * opened is ordering rather than failure — wait for {@link readDeviceProbe} to
+ * say `OPENED`. `false` also means the device opened without the feature, which
+ * {@link bcSampleSupported} and a state of `UNSUPPORTED` are what distinguish.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame.
+ */
+export function startBcSampleProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_bc_sample() === 1;
+}
+
+/**
+ * Poll the BC readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_bc_sample_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollBcSampleProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_bc_sample_poll() === 1;
+}
+
+/**
+ * Read where the BC readback has got to, and its bytes once it is `READY` — one
+ * block of the decoded target's texels.
+ *
+ * {@link readTextureSampleProbe}'s sibling, and `state` first for its reason.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error under
+ *   `UNDECODABLE`, and empty otherwise.
+ */
+export function readBcSampleProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_bc_sample_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_bc_sample_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_bc_sample_reason_len()
+  );
+  const ptr = exports.__crcbl_web_gpu_probe_bc_sample_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_bc_sample_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: bcSampleStateName(state), reason, bytes };
 }
 
 /**

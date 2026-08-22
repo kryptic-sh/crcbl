@@ -14741,49 +14741,33 @@ for the replayer, and only a group like AH answers for the wire.
 off argument structures differing only in `firstInstance`, landing a half-target
 apart — so **two mapped features are left without one**:
 
-- **`texture-compression-bc`.** Both things that blocked this have gone. The
-  replayer derived `bytesPerRow` from a bytes-per-texel table with no BC row, so
-  a BC copy was refused before any texel could be compared; and no probe sampled
-  a texture at all, so there was no pipeline to read a decoded block through.
-  Group **AJ** is now that pipeline — a sampled source, a nearest sampler and a
-  quadrant-by-quadrant readback — and a BC group is AJ with a compressed source
-  and the feature gate around it. The first half is fixed — `BLOCK_FOOTPRINT` in
-  `web/engine/gpu-replay.js` converts both pitches through the block extent — so
-  what is left is the group itself. It needs a BC block with known decoded
-  texels; the workspace has no BC encoder and adding one is not in scope, but a
-  single hand-written BC1 block is small, but this is **a design problem and not
-  a transcription job** — this entry claimed the opposite until 2026-08-23, and
-  the reasoning it gave for the assertion was wrong twice over.
+- **`texture-compression-bc` has its group — AK — and what it left owed is a
+  branch nothing here can reach.** The group uploads an 8×8 BC1 source as four
+  blocks, one per quadrant, every index zero so every texel decodes to its
+  block's `color0`, and holds each quadrant against that endpoint byte for byte.
+  The endpoints are **cube corners** (`red`/`green`/`blue`/`yellow`), and that
+  is the whole design rather than a detail: D3D 11.3 §19.5.2 permits a decode
+  tolerance across every channel of every texel — about ±8.65 in UNORM8 against
+  a black `color1` — with no carve-out for the endpoints, and mandates bit
+  accuracy only for BC6H and BC7. Its one exactness clause is that values the
+  reference decodes to 0.0 or 1.0 must always be exact, and the rails are also
+  the only place D3D's bit replication and Khronos Data Format 1.3 §18.1's
+  rational agree (they part at 5-bit 3, 7, 24, 28 and 6-bit 11–15, 48–52).
+  `the_four_bc_sample_colours_are_exact_on_every_decoder` holds the four to both
+  formulas and carries a vacuity guard proving the two are different arithmetic.
+  Both local adapters decoded them byte-exact.
 
-  It said a BC1 block's two endpoints "decode by exact bit replication" and only
-  the 1/3 and 2/3 interpolants vary between vendors. Both halves are false:
-  - **Bit replication is D3D's rule, not the normative one.** Khronos Data
-    Format 1.3 §18.1, which Vulkan and WebGPU inherit, specifies the exact
-    rational — `R = bits/31`, `G = bits/63`. The two disagree by one UNORM8 step
-    for 5-bit values 3, 7, 24 and 28, and for 6-bit values 11–15 and 48–52
-    (computed, not recalled). They agree only where a channel is all-zeroes or
-    all-ones.
-  - **The tolerance covers the endpoints too.** D3D 11.3 §19.5.2 permits
-    `|generated − reference|` up to
-    `absolute_error + 0.03 × |endpoint_0 − endpoint_1|` **for all channels of
-    all texels**, with no carve-out for indices 0 and 1, and mandates bit
-    accuracy only for BC6H and BC7. Against a black `color1` that band is about
-    ±8.65 in UNORM8. Its one exactness clause is that values the reference
-    decodes to 0.0 or 1.0 must always be exact.
-
-  So the endpoints must be **cube corners** — every channel 0 or full — which is
-  why the `0xFFFF`/`0x0000` example this entry always gave was sound despite the
-  reasoning under it. That costs group AJ's colour rules: a corner like red has
-  two channels alike, and BC1's opaque mode gives every texel alpha 1.0, so AJ's
-  dropped-alpha discrimination is unavailable here and the group must not imply
-  it has one. What recovers the rest is a **position-aware** form — of the 35
-  four-subsets of the eight corners, 32 satisfy both "no non-identity channel
-  permutation maps the ordered four-tuple to itself" and "a channel stuck at 0
-  or at 255 changes at least one quadrant"; `red`/`green`/`blue`/`yellow` is one
-  such set. The render target's clear stays a mid-tone, so "nothing was drawn"
-  keeps its own reading. CI matters here: SwiftShader does not report the
-  feature, so the absent branch is what most runners would take and the present
-  branch would rest on the local hardware adapter.
+  **This entry said "SwiftShader does not report the feature" and that was
+  wrong** — measured 2026-08-23, its adapter lists `texture-compression-bc` and
+  the device opens with it. So **AK's absent branch is taken by no adapter
+  available here**, neither SwiftShader under Xvfb nor the RX 7900 XTX. It is
+  guarded rather than merely present — a device that drops the feature while the
+  adapter keeps it fails the group, and a probe reporting the feature absent on
+  a device that can create a BC texture fails it too, so "not supported" cannot
+  arrive as "passed" — but the branch itself has run nowhere. Whether the macOS
+  or Windows runner reaches it is the open question; if none does, the branch is
+  reasoned-about code with no execution anywhere, which is the same standing as
+  group AI's absent branch and should be recorded the same way.
 
 - **`timestamp-query`.** The cheapest to encode and the hardest to assert on.
   Browsers quantise timestamp values for privacy, so "non-zero" and "strictly

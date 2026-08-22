@@ -311,7 +311,7 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI AJ; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI AJ AK; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
@@ -594,6 +594,22 @@ SAMPLED_TEXTURE_TRIP="$(grep -F 'a texture reached the fragment shader and the t
 if [ -z "$SAMPLED_TEXTURE_TRIP" ]; then
     echo "crcbl probe e2e: the driver never read back what a shader sampled out of a texture;" >&2
     echo "                 crcbl-webgpu's sampled-image and sampler bindings are ungated in a real browser" >&2
+    exit 1
+fi
+
+# And the browser's own answer about a compressed texture, which is group AK and
+# is the only exercise `Features::TEXTURE_COMPRESSION_BC` has against a GPU
+# anywhere. **This is the one line here that holds on every platform**: the
+# decoded block is excused where the adapter lacks the feature — which is this
+# harness's own SwiftShader run — so the claim that survives everywhere is that
+# the browser refuses a bc1-rgba-unorm texture exactly where wasm declined to
+# encode a frame for one. Without it the whole group would be excusable, and a
+# runner that silently stopped asking would look identical to one that asked and
+# was told no.
+BC_ANSWER_TRIP="$(grep -F "the browser's own answer about bc1-rgba-unorm is the one wasm acted on" "${OUTPUT}.plain" || true)"
+if [ -z "$BC_ANSWER_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never asked the browser whether it takes a BC texture;" >&2
+    echo "                 crcbl-webgpu reports Features::TEXTURE_COMPRESSION_BC and nothing tried it" >&2
     exit 1
 fi
 

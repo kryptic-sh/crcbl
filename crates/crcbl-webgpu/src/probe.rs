@@ -185,6 +185,14 @@
 //! | [`__crcbl_web_gpu_probe_texture_sample_reason_len`](shim::__crcbl_web_gpu_probe_texture_sample_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_texture_sample_bytes_ptr`](shim::__crcbl_web_gpu_probe_texture_sample_bytes_ptr) | `() -> i32` | Where the sampled target's texels start, once [`__crcbl_web_gpu_probe_texture_sample_state`](shim::__crcbl_web_gpu_probe_texture_sample_state) answers [`TEXTURE_SAMPLE_READY`]. |
 //! | [`__crcbl_web_gpu_probe_texture_sample_bytes_len`](shim::__crcbl_web_gpu_probe_texture_sample_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the texture-sampling probe has not answered. |
+//! | [`__crcbl_web_gpu_probe_bc_sample_supported`](shim::__crcbl_web_gpu_probe_bc_sample_supported) | `() -> i32` | `1` if the **opened device** has `texture-compression-bc`. What tells a device that withheld the feature from a request that never happened. |
+//! | [`__crcbl_web_gpu_probe_bc_sample`](shim::__crcbl_web_gpu_probe_bc_sample) | `() -> i32` | Encode one frame — a `Bc1RgbaUnorm` source two blocks square uploaded at a padded block pitch, group AJ's **nearest** sampler and shader, a bind group holding that compressed view and that sampler, and a pass drawing a fullscreen quad whose fragment shader samples it — then copy the target out and ask for the bytes. `0` if the device opened without the feature, which leaves the probe [`BC_SAMPLE_UNSUPPORTED`]. |
+//! | [`__crcbl_web_gpu_probe_bc_sample_poll`](shim::__crcbl_web_gpu_probe_bc_sample_poll) | `() -> i32` | Poll that readback once, and register the wait. |
+//! | [`__crcbl_web_gpu_probe_bc_sample_state`](shim::__crcbl_web_gpu_probe_bc_sample_state) | `() -> i32` | Drain, and answer one of the `BC_SAMPLE_*` codes. |
+//! | [`__crcbl_web_gpu_probe_bc_sample_reason_ptr`](shim::__crcbl_web_gpu_probe_bc_sample_reason_ptr) | `() -> i32` | Where the reason the BC readback stopped starts. Empty unless the state is [`BC_SAMPLE_FAILED`] or [`BC_SAMPLE_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_bc_sample_reason_len`](shim::__crcbl_web_gpu_probe_bc_sample_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_bc_sample_bytes_ptr`](shim::__crcbl_web_gpu_probe_bc_sample_bytes_ptr) | `() -> i32` | Where the decoded target's texels start, once [`__crcbl_web_gpu_probe_bc_sample_state`](shim::__crcbl_web_gpu_probe_bc_sample_state) answers [`BC_SAMPLE_READY`]. |
+//! | [`__crcbl_web_gpu_probe_bc_sample_bytes_len`](shim::__crcbl_web_gpu_probe_bc_sample_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the BC probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_parity`](shim::__crcbl_web_gpu_probe_parity) | `() -> i32` | Build a [`WebGpuDevice`] around the opened device's caps, walk its whole [`supports`](crcbl_hal::Device::supports) matrix and hold it against [`DIVERGENCES`](crcbl_hal::DIVERGENCES). One of the `PARITY_*` codes. Asks the browser nothing. |
 //! | [`__crcbl_web_gpu_probe_parity_checked`](shim::__crcbl_web_gpu_probe_parity_checked) | `() -> i32` | How many capabilities that walked, or `0` if it has not run. |
 //! | [`__crcbl_web_gpu_probe_parity_held`](shim::__crcbl_web_gpu_probe_parity_held) | `() -> i32` | How many of those were settled, rather than left unprovable by a device that withheld the gating feature. |
@@ -277,11 +285,23 @@
 //! drawn twice off structures that differ only in that field, lands on opposite
 //! halves of its target, and no device that withheld the gate can show that.
 //!
-//! All three are *optional* rather than required, so a browser without any of
-//! them still opens a device and the probe reports [`TIMESTAMP_UNSUPPORTED`],
-//! [`CLAMP_UNSUPPORTED`] or [`FIRST_INSTANCE_UNSUPPORTED`] with a reason rather
-//! than failing to start. `web/tools/probe-groups.mjs` opens its reference
-//! device with the same request, so the two are compared like for like.
+//! [`TEXTURE_COMPRESSION_BC`](crcbl_hal::Features::TEXTURE_COMPRESSION_BC) is
+//! the last, on the same test once more: this crate reports it off the browser's
+//! `texture-compression-bc`, [`Format`] spells nine BC
+//! formats, and WebGPU refuses to *create* a texture in any of them on a device
+//! that did not enable the feature — so before group AK no compressed texture
+//! had ever existed in a browser here, and the capability rested on a node stub
+//! recording the descriptor it was handed. What the device buys is the picture
+//! group AK reads back: a source no CPU in this repository can decode, sampled
+//! through group AJ's own shader, coming back as the four endpoints its blocks
+//! spell.
+//!
+//! Each is *optional* rather than required, so a browser without any of them
+//! still opens a device and the probe reports [`TIMESTAMP_UNSUPPORTED`],
+//! [`CLAMP_UNSUPPORTED`], [`FIRST_INSTANCE_UNSUPPORTED`] or
+//! [`BC_SAMPLE_UNSUPPORTED`] with a reason rather than failing to start.
+//! `web/tools/probe-groups.mjs` opens its reference device with the same
+//! request, so the two are compared like for like.
 //!
 //! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) is
 //! deliberately *not* what this uses: it requires
@@ -1225,6 +1245,57 @@ pub const TEXTURE_SAMPLE_UNDECODABLE: u32 = 5;
 /// An arm nothing can reach would read as covered and cover nothing.
 pub const TEXTURE_SAMPLE_FAILED: u32 = 6;
 
+/// Nothing has been asked, or there is no channel to ask through.
+pub const BC_SAMPLE_UNASKED: u32 = 0;
+/// The setup frame — a [`PROBE_BC_SAMPLE_SOURCE_SIZE`]-square
+/// [`Format::Bc1RgbaUnorm`] source and a
+/// [`PROBE_TEXTURE_SAMPLE_SIZE`] target, the upload buffer filled with
+/// [`PROBE_BC_SAMPLE_UPLOAD_BYTES`] and copied into the source, the sampler
+/// group AJ samples through, a bind group holding the source's view and that
+/// sampler, one pipeline, a pass that clears to
+/// [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] and draws a quad sampling the source,
+/// the copy out, the submit and the request — is on the stream, and no poll has
+/// been issued.
+pub const BC_SAMPLE_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const BC_SAMPLE_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const BC_SAMPLE_PENDING: u32 = 3;
+/// The bytes are in. [`shim::__crcbl_web_gpu_probe_bc_sample_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_bc_sample_bytes_len`] carry them — one block of
+/// `Rgba8Unorm` texels, and the GPU decoded the compressed source exactly when
+/// each quadrant of it is the `color0` of the BC1 block in the same corner.
+pub const BC_SAMPLE_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`TEXTURE_SAMPLE_UNDECODABLE`]'s twin.
+pub const BC_SAMPLE_UNDECODABLE: u32 = 5;
+/// The **device** opened without
+/// [`Features::TEXTURE_COMPRESSION_BC`](crcbl_hal::Features::TEXTURE_COMPRESSION_BC),
+/// so nothing was encoded: WebGPU refuses a `bc1-rgba-unorm` texture on such a
+/// device outright, and a frame that quietly uploaded the same colours through
+/// an *uncompressed* source instead would read back four correct quadrants and
+/// prove only what group AJ already proves.
+/// [`FIRST_INSTANCE_UNSUPPORTED`]'s shape, and
+/// [`shim::__crcbl_web_gpu_probe_bc_sample_supported`] is what the device
+/// reported.
+///
+/// **This is the arm CI's Linux runner takes**, so it is the one that must not
+/// read as covered on its own: the browser gate holds it to the browser's own
+/// refusal of a BC1 texture rather than to nothing at all.
+pub const BC_SAMPLE_UNSUPPORTED: u32 = 6;
+/// The browser refused the BC readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_bc_sample_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_bc_sample_reason_len`].
+///
+/// **A settled code, not a step**, [`CLAMP_FAILED`]'s reasoning: a readback is
+/// answered exactly once, so nothing further is coming.
+pub const BC_SAMPLE_FAILED: u32 = 7;
+
 /// Nothing has run the report, or there is no channel to have opened a device
 /// through.
 pub const PARITY_UNASKED: u32 = 0;
@@ -1361,8 +1432,9 @@ pub const fn probe_readback_copy() -> BufferImageCopy {
 /// capability cannot be witnessed without them and no others — see the
 /// [module docs](self#the-device-this-asks-for-and-why-it-asks-for-so-little)
 /// for why the parsimony is the point rather than a placeholder, and for the one
-/// test [`Features::TIMESTAMP_QUERY`], [`Features::DEPTH_CLAMP`] and
-/// [`Features::INDIRECT_FIRST_INSTANCE`] meet.
+/// test [`Features::TIMESTAMP_QUERY`], [`Features::DEPTH_CLAMP`],
+/// [`Features::INDIRECT_FIRST_INSTANCE`] and
+/// [`Features::TEXTURE_COMPRESSION_BC`] each meet.
 #[must_use]
 pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
     DeviceDesc {
@@ -1371,7 +1443,8 @@ pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
         required_features: Features::COMPUTE,
         optional_features: Features::TIMESTAMP_QUERY
             .union(Features::DEPTH_CLAMP)
-            .union(Features::INDIRECT_FIRST_INSTANCE),
+            .union(Features::INDIRECT_FIRST_INSTANCE)
+            .union(Features::TEXTURE_COMPRESSION_BC),
         compatible_surface: None,
     }
 }
@@ -6355,15 +6428,8 @@ pub const PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE_DESC: ImageDesc<'static> = ImageDesc
 
 /// The target's descriptor — the shape every readback probe here uses, at
 /// [`PROBE_TEXTURE_SAMPLE_SIZE`].
-pub const PROBE_TEXTURE_SAMPLE_TARGET_IMAGE_DESC: ImageDesc<'static> = ImageDesc {
-    label: Some("crcbl-webgpu texture-sample target image"),
-    image_type: ImageType::D2,
-    extent: Extent3d::d2(PROBE_TEXTURE_SAMPLE_SIZE, PROBE_TEXTURE_SAMPLE_SIZE),
-    format: Format::Rgba8Unorm,
-    mip_levels: 1,
-    samples: 1,
-    usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
-};
+pub const PROBE_TEXTURE_SAMPLE_TARGET_IMAGE_DESC: ImageDesc<'static> =
+    probe_sampled_quad_target_image_desc("crcbl-webgpu texture-sample target image");
 
 /// The view of the source the bind group binds. `16 << 32`, index `0`.
 pub const PROBE_TEXTURE_SAMPLE_SOURCE_VIEW: ImageViewHandle =
@@ -6389,13 +6455,11 @@ pub const PROBE_TEXTURE_SAMPLE_SOURCE_VIEW_DESC: ImageViewDesc<'static> = ImageV
 };
 
 /// The target view's descriptor.
-pub const PROBE_TEXTURE_SAMPLE_TARGET_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
-    label: Some("crcbl-webgpu texture-sample target view"),
-    image: PROBE_TEXTURE_SAMPLE_TARGET_IMAGE,
-    view_type: ImageViewType::D2,
-    format: Format::Rgba8Unorm,
-    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
-};
+pub const PROBE_TEXTURE_SAMPLE_TARGET_VIEW_DESC: ImageViewDesc<'static> =
+    probe_sampled_quad_target_view_desc(
+        "crcbl-webgpu texture-sample target view",
+        PROBE_TEXTURE_SAMPLE_TARGET_IMAGE,
+    );
 
 /// The buffer `write_buffer` fills with [`PROBE_TEXTURE_SAMPLE_UPLOAD_BYTES`]
 /// and the upload copy reads out of. `16 << 32`, index `0`.
@@ -6581,18 +6645,11 @@ pub const fn probe_texture_sample_clear_value() -> ClearValue {
     }
 }
 
-/// The colour attachment the sampling pass writes — cleared to
-/// [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] and stored, so the copy afterwards reads
-/// what the draw left.
+/// The colour attachment the sampling pass writes —
+/// [`probe_sampled_quad_color_attachment`] on this probe's view.
 #[must_use]
 pub const fn probe_texture_sample_color_attachment() -> ColorAttachment {
-    ColorAttachment {
-        view: PROBE_TEXTURE_SAMPLE_TARGET_VIEW,
-        resolve: None,
-        load: LoadOp::Clear,
-        store: StoreOp::Store,
-        clear: probe_texture_sample_clear_value(),
-    }
+    probe_sampled_quad_color_attachment(PROBE_TEXTURE_SAMPLE_TARGET_VIEW)
 }
 
 /// The buffer→image copy that puts the four colours into the source image.
@@ -6625,25 +6682,13 @@ pub const fn probe_texture_sample_upload_copy() -> BufferImageCopy {
 }
 
 /// The image→buffer copy that moves the target's texels into the readback
-/// buffer. Tightly packed, because a row of
-/// [`PROBE_TEXTURE_SAMPLE_SIZE`] `Rgba8Unorm` texels is already 256 bytes.
+/// buffer — [`probe_sampled_quad_readback_copy`] on this probe's handles.
 #[must_use]
 pub const fn probe_texture_sample_readback_copy() -> BufferImageCopy {
-    BufferImageCopy {
-        buffer: PROBE_TEXTURE_SAMPLE_BUFFER,
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image: PROBE_TEXTURE_SAMPLE_TARGET_IMAGE,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: Offset3d { x: 0, y: 0, z: 0 },
-        image_extent: Extent3d::d2(PROBE_TEXTURE_SAMPLE_SIZE, PROBE_TEXTURE_SAMPLE_SIZE),
-    }
+    probe_sampled_quad_readback_copy(
+        PROBE_TEXTURE_SAMPLE_BUFFER,
+        PROBE_TEXTURE_SAMPLE_TARGET_IMAGE,
+    )
 }
 
 /// A fullscreen quad that samples the whole source over the whole target.
@@ -6783,21 +6828,130 @@ pub const PROBE_TEXTURE_SAMPLE_COLOR_TARGETS: [ColorTargetState; 1] = [ColorTarg
 ///   quadrant tallies requiring *every* texel of a quadrant to match, not a
 ///   majority.
 ///
-/// The rest is the shape [`probe_first_instance_pipeline_desc`] settled on: a
-/// [`PrimitiveTopology::TriangleList`] with counter-clockwise winding and no
-/// culling — so neither triangle's winding is a second reason it could disappear
-/// — no depth-stencil state, and a single-sampled `Rgba8Unorm` target.
+/// The rest is [`probe_sampled_quad_pipeline_desc`] — the shape
+/// [`probe_first_instance_pipeline_desc`] settled on, and the state group AK
+/// draws its own quad through, so the two probes differ in their source's format
+/// and in nothing else.
 #[must_use]
 pub const fn probe_texture_sample_pipeline_desc() -> GraphicsPipelineDesc<'static> {
+    probe_sampled_quad_pipeline_desc(
+        "crcbl-webgpu texture-sample pipeline",
+        PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT,
+        PROBE_TEXTURE_SAMPLE_SHADER_MODULE,
+    )
+}
+
+/// The target a sampling probe draws into, at [`PROBE_TEXTURE_SAMPLE_SIZE`].
+///
+/// **Shared by the two sampling probes rather than written twice.** Groups AJ
+/// and AK differ in the *source* they sample — one `Rgba8Unorm`, one
+/// `Bc1RgbaUnorm` — and in nothing on the target side: both read back one block
+/// of the same size and divide it into the same four quadrants, so a target that
+/// differed between them would make the two quadrant walks two arithmetics
+/// instead of one.
+#[must_use]
+pub const fn probe_sampled_quad_target_image_desc(label: &'static str) -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some(label),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(PROBE_TEXTURE_SAMPLE_SIZE, PROBE_TEXTURE_SAMPLE_SIZE),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+    }
+}
+
+/// The view of one of those targets the pass renders into — the whole image, in
+/// the image's own format.
+#[must_use]
+pub const fn probe_sampled_quad_target_view_desc(
+    label: &'static str,
+    image: ImageHandle,
+) -> ImageViewDesc<'static> {
+    ImageViewDesc {
+        label: Some(label),
+        image,
+        view_type: ImageViewType::D2,
+        format: Format::Rgba8Unorm,
+        range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+    }
+}
+
+/// The colour attachment a sampling pass writes — cleared to
+/// [`PROBE_TEXTURE_SAMPLE_CLEAR_BYTES`] and stored, so the copy afterwards reads
+/// what the draw left.
+///
+/// The clear is shared for [`probe_sampled_quad_target_image_desc`]'s reason,
+/// and it carries a claim each probe's own colours are held to: it is the
+/// reading that means *no fragment reached the target at all*, so it must be
+/// none of the colours that probe expects.
+/// `the_four_texture_sample_colours_survive_a_channel_swap` and
+/// `the_four_bc_sample_colours_are_told_apart_where_they_sit` are what hold it.
+#[must_use]
+pub const fn probe_sampled_quad_color_attachment(view: ImageViewHandle) -> ColorAttachment {
+    ColorAttachment {
+        view,
+        resolve: None,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: probe_texture_sample_clear_value(),
+    }
+}
+
+/// The image→buffer copy that moves a sampling probe's target into its readback
+/// buffer. Tightly packed, because a row of [`PROBE_TEXTURE_SAMPLE_SIZE`]
+/// `Rgba8Unorm` texels is already 256 bytes.
+#[must_use]
+pub const fn probe_sampled_quad_readback_copy(
+    buffer: BufferHandle,
+    image: ImageHandle,
+) -> BufferImageCopy {
+    BufferImageCopy {
+        buffer,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_TEXTURE_SAMPLE_SIZE, PROBE_TEXTURE_SAMPLE_SIZE),
+    }
+}
+
+/// The pipeline a sampling probe draws its fullscreen quad through, built
+/// against `layout` and running `module`.
+///
+/// **The whole of the rasteriser state is shared between the two sampling
+/// probes**, and deliberately: what group AK varies against group AJ is the
+/// source's *format*, so every other knob being the same value from the same
+/// place is what makes the comparison mean anything. See
+/// [`probe_texture_sample_pipeline_desc`] for which wrong reading each quadrant
+/// of the readback rules out.
+///
+/// [`PrimitiveTopology::TriangleList`] with counter-clockwise winding and no
+/// culling — so neither triangle's winding is a second reason it could
+/// disappear — no depth-stencil state, and a single-sampled `Rgba8Unorm` target.
+#[must_use]
+pub const fn probe_sampled_quad_pipeline_desc(
+    label: &'static str,
+    layout: PipelineLayoutHandle,
+    module: ShaderModuleHandle,
+) -> GraphicsPipelineDesc<'static> {
     GraphicsPipelineDesc {
-        label: Some("crcbl-webgpu texture-sample pipeline"),
-        layout: PROBE_TEXTURE_SAMPLE_PIPELINE_LAYOUT,
+        label: Some(label),
+        layout,
         vertex: ShaderEntry {
-            module: PROBE_TEXTURE_SAMPLE_SHADER_MODULE,
+            module,
             entry_point: "vsMain",
         },
         fragment: Some(ShaderEntry {
-            module: PROBE_TEXTURE_SAMPLE_SHADER_MODULE,
+            module,
             entry_point: "fsMain",
         }),
         primitive: PrimitiveState {
@@ -6814,6 +6968,558 @@ pub const fn probe_texture_sample_pipeline_desc() -> GraphicsPipelineDesc<'stati
         },
         color_targets: &PROBE_TEXTURE_SAMPLE_COLOR_TARGETS,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Group AK — a BC1 block is decoded by the GPU
+// ---------------------------------------------------------------------------
+//
+// **THE GATE THAT SHOWS A COMPRESSED TEXTURE BEING DECODED.** This crate reports
+// `Features::TEXTURE_COMPRESSION_BC` to callers off the browser's
+// `texture-compression-bc`, `crcbl_hal::Format` spells nine BC formats and
+// `web/engine/gpu-replay.js` maps every one of them — and until this group the
+// whole of that was answered by `web/tools/gpu-replay.mjs` under node, against a
+// stub device that records the descriptor it is handed. **A recorded descriptor
+// is not a decoded block**: the feature gate, the block-pitch conversion and the
+// bytes themselves had never met a browser.
+//
+// WHAT IT DOES: group AJ's frame with the source swapped for a compressed one.
+// The source is [`PROBE_BC_SAMPLE_SOURCE_SIZE`] texels square, which is two BC1
+// blocks each way, and every block is encoded so that *every texel of it is that
+// block's `color0`* — see [`probe_bc_sample_block`] for why that is the only
+// reading a fixture may assert on. The same nearest sampler, the same fullscreen
+// quad and the same shader as group AJ, so the four quadrants of the readback
+// are the four blocks' colours.
+//
+// **THE OBSERVABLE IS THE SAME AS GROUP AJ'S, FROM DATA NO CPU HERE DECODED.**
+// Nothing in this repository decompresses BC1: the bytes are laid out by
+// [`probe_bc_sample_block`], handed to WebGPU, and what comes back is whatever
+// the GPU's own decoder produced. So the quadrants are a claim about the
+// hardware and the wire together — that the block reached the texture at the
+// right pitch, and that its endpoint decoded to the colour that endpoint spells.
+//
+// **THE FEATURE GATES IT, AND BOTH BRANCHES ARE REAL.** Group AJ has no absent
+// branch because sampling is core WebGPU; this one has, and SwiftShader is the
+// browser that takes it — so it is the arm CI's Linux job runs. The page holds
+// it to the browser's own refusal of a `bc1-rgba-unorm` texture rather than to
+// nothing, which is what keeps "not supported here" from arriving as "passed".
+
+/// Texels a BC1 block covers, each way —
+/// [`Format::block_extent`](crcbl_hal::Format::block_extent) asked of the format
+/// this probe uses, rather than the number restated.
+pub const PROBE_BC_SAMPLE_BLOCK_TEXELS: u32 = Format::Bc1RgbaUnorm.block_extent().0;
+
+/// Bytes one BC1 block occupies —
+/// [`Format::block_size`](crcbl_hal::Format::block_size), for
+/// [`PROBE_BC_SAMPLE_BLOCK_TEXELS`]'s reason.
+pub const PROBE_BC_SAMPLE_BLOCK_SIZE: u32 = Format::Bc1RgbaUnorm.block_size();
+
+/// Texels across and down the **source** image — the compressed one.
+///
+/// Two blocks each way, which is group AJ's two-by-two source with each of its
+/// texels grown into a block. It is the smallest compressed image with a
+/// quadrant to put each colour in, and the smallest whose copy is more than one
+/// block row deep — which is what makes [`PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS`]
+/// have to exist at all.
+pub const PROBE_BC_SAMPLE_SOURCE_SIZE: u32 = PROBE_BC_SAMPLE_BLOCK_TEXELS * 2;
+
+/// WebGPU's alignment for a `copyBufferToTexture` whose copy is more than one
+/// row deep: a fixed number in the specification rather than a limit anything
+/// reports, and one the seam has no padding field to satisfy any other way.
+const BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+
+/// Blocks that fit in one [`BYTES_PER_ROW_ALIGNMENT`]-byte row.
+///
+/// Its own constant so [`PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS`] fits on one line,
+/// which is not cosmetic: `js_mirror`'s parse reads a `pub const … : u32 = `
+/// and its value off a single line, so a declaration rustfmt wraps is one that
+/// guard cannot see — and it says so rather than skipping it.
+const BC_ROW_BLOCKS: u32 = BYTES_PER_ROW_ALIGNMENT / PROBE_BC_SAMPLE_BLOCK_SIZE;
+
+/// The **padded** row pitch of [`PROBE_BC_SAMPLE_UPLOAD_BYTES`], in texels.
+///
+/// # The arithmetic, because a block-compressed pitch has two conversions in it
+///
+/// WebGPU's `bytesPerRow` counts bytes between **block rows** and must be a
+/// multiple of `BYTES_PER_ROW_ALIGNMENT` on a copy this deep. The seam — like
+/// Vulkan — states `buffer_row_length` in **texels**, and
+/// `web/engine/gpu-replay.js`'s `BLOCK_FOOTPRINT` is what carries it across:
+/// texels ÷ block width × block bytes. So the texel figure that lands on the
+/// alignment is `BYTES_PER_ROW_ALIGNMENT ÷ PROBE_BC_SAMPLE_BLOCK_SIZE ×
+/// PROBE_BC_SAMPLE_BLOCK_TEXELS`, and the row it names is far wider than the
+/// image — the rest is padding the copy never reads.
+///
+/// A tight row here would be two blocks, which is the one thing WebGPU will not
+/// accept from a copy two block rows deep. `0` — the seam's "tightly packed" —
+/// would produce exactly that, which is why this copy names its pitch and group
+/// AJ's readback copy does not.
+///
+/// `the_bc_sample_upload_row_is_a_legal_bytes_per_row` is what holds all of that
+/// to the number.
+pub const PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS: u32 = BC_ROW_BLOCKS * PROBE_BC_SAMPLE_BLOCK_TEXELS;
+
+/// Bytes one padded block row of [`PROBE_BC_SAMPLE_UPLOAD_BYTES`] occupies —
+/// [`PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS`] put through the conversion its own
+/// documentation describes, which is [`BYTES_PER_ROW_ALIGNMENT`] by
+/// construction.
+const BC_SAMPLE_UPLOAD_ROW_BYTES: usize = PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS as usize
+    / PROBE_BC_SAMPLE_BLOCK_TEXELS as usize
+    * PROBE_BC_SAMPLE_BLOCK_SIZE as usize;
+
+/// The `color1` every block of [`PROBE_BC_SAMPLE_UPLOAD_BYTES`] carries.
+///
+/// **Zero, and nothing ever reads it.** A BC1 block is in four-colour *opaque*
+/// mode exactly when `color0 > color1` compared as unsigned 16-bit, and in
+/// three-colour-plus-transparent mode otherwise; zero is the smallest value a
+/// `u16` has, so every `color0` this probe uses is strictly greater than it and
+/// every block is opaque. Every index in every block is `0`, so the palette
+/// entry this names is never selected — it is chosen to settle the *mode*, not
+/// to be seen.
+///
+/// **Its distance from `color0` would matter if the endpoints were mid-tones,
+/// and it is why they are not.** D3D's error bound grows with
+/// `|endpoint_0 - endpoint_1|`, so a black `color1` is the worst case for a
+/// mid-tone fixture; [`PROBE_BC_SAMPLE_TOP_LEFT_565`] explains why this one is
+/// exempt from that bound entirely rather than merely inside it.
+pub const PROBE_BC_SAMPLE_COLOR1: u16 = 0;
+
+/// The `color0` of the block the **top-left** quadrant of the target samples,
+/// in RGB565 — opaque red.
+///
+/// # Why these four colours, and not four prettier mid-tones
+///
+/// **Every channel of every one of them is either fully off or fully on**, so
+/// the four are corners of the RGB cube rather than the mid-tones group AJ
+/// chose. That looks like a worse fixture and is the only defensible one, for a
+/// reason that took two specifications to establish and must not be undone by a
+/// later reader reaching for nicer colours:
+///
+/// * **There is no single decoded value for a mid-tone BC1 endpoint.** The
+///   Khronos Data Format Specification 1.3 §18.1 — the text Vulkan and WebGPU
+///   inherit, and WebGPU defers to it so completely that it never defines the
+///   decode itself — gives `R = color^15..11 / 31`, `G = color^10..5 / 63`,
+///   `B = color^4..0 / 31`, an exact rational. Direct3D 11.3's functional
+///   specification §19.5.3 gives bit replication (`UNORMPromote`, MSB
+///   extension) instead. The two disagree by one UNORM8 step at 5-bit values
+///   `3, 7, 24, 28` and 6-bit values `11..=15, 48..=52`, and §19.5.2 licenses
+///   *both*: an implementation "may optionally promote **or** do
+///   round-to-nearest division".
+/// * **The endpoints are not privileged.** §19.5.2's tolerance —
+///   `absolute_error + 0.03 × MAX(|endpoint_0 - endpoint_1|, …)` — is stated
+///   "for all channels of all texels", with no carve-out for the two palette
+///   entries that are the endpoints. Only BC6H and BC7 are required to be bit
+///   accurate. So "assert on the endpoint texels and avoid the interpolants" is
+///   *not* on its own enough to make an exact comparison legal.
+/// * **What is exact is named, and it is the only thing that is.** §19.5.2 ends
+///   "Values that the reference decodes to 0.0, 1.0 or -1.0 must always be
+///   exact." A channel of `0` or of full scale decodes to exactly `0.0` or
+///   `1.0`, which is also the only place the Khronos rational and bit
+///   replication agree — `0/31 = 0/255` and `31/31 = 255/255`. One guarantee
+///   from the specification, not two implementations that happen to concur.
+///
+/// So the assertion these support is exact **because the specification says so**
+/// rather than because the hardware here obliges, and
+/// `the_four_bc_sample_colours_are_exact_on_every_decoder` is what holds them to
+/// it — by doing both expansions independently and requiring them to agree.
+///
+/// # What that costs, and what replaces it
+///
+/// Cube corners cannot satisfy [`PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES`]'s
+/// multiset rule: red has two channels alike, so a swap of those two leaves it
+/// unchanged. The discrimination is recovered **positionally** instead — no
+/// channel permutation carries this ordered four onto itself, and a channel
+/// stuck at either rail changes at least one quadrant — which
+/// `the_four_bc_sample_colours_are_told_apart_where_they_sit` holds and which is
+/// what the quadrant-by-quadrant comparison actually needs.
+///
+/// **The alpha rule cannot be recovered at all, and this is where that is
+/// said.** A four-colour BC1 block is opaque: every texel decodes with alpha
+/// `1.0`, so these four cannot carry four distinct alphas and **an alpha dropped
+/// between the source and the readback is invisible to this group**. Group AJ is
+/// where that failure is caught, on a source whose alphas can differ. Nothing
+/// here should be read as checking it. The clear keeps an alpha below full so
+/// that "nothing was drawn" is still its own reading.
+pub const PROBE_BC_SAMPLE_TOP_LEFT_565: u16 = 0xF800;
+
+/// The `color0` of the **top-right** quadrant's block — opaque green. See
+/// [`PROBE_BC_SAMPLE_TOP_LEFT_565`] for why the four are cube corners.
+pub const PROBE_BC_SAMPLE_TOP_RIGHT_565: u16 = 0x07E0;
+
+/// The `color0` of the **bottom-left** quadrant's block — opaque blue. See
+/// [`PROBE_BC_SAMPLE_TOP_LEFT_565`].
+pub const PROBE_BC_SAMPLE_BOTTOM_LEFT_565: u16 = 0x001F;
+
+/// The `color0` of the **bottom-right** quadrant's block — opaque yellow, the
+/// one of the four that lights two channels at once. See
+/// [`PROBE_BC_SAMPLE_TOP_LEFT_565`].
+pub const PROBE_BC_SAMPLE_BOTTOM_RIGHT_565: u16 = 0xFFE0;
+
+/// The texel the **top-left** quadrant of the target must come back as:
+/// [`PROBE_BC_SAMPLE_TOP_LEFT_565`] decoded, opaque.
+///
+/// Written out rather than computed here **because the thing under test is a
+/// decoder's expansion of that endpoint**, and a constant derived by this
+/// crate's own arithmetic would agree with this crate's own arithmetic whatever
+/// either of them said. The test named on [`PROBE_BC_SAMPLE_TOP_LEFT_565`] does
+/// both specifications' expansions independently and holds all three together.
+pub const PROBE_BC_SAMPLE_TOP_LEFT_BYTES: [u8; 4] = [255, 0, 0, 255];
+
+/// The texel the **top-right** quadrant must come back as. See
+/// [`PROBE_BC_SAMPLE_TOP_LEFT_BYTES`].
+pub const PROBE_BC_SAMPLE_TOP_RIGHT_BYTES: [u8; 4] = [0, 255, 0, 255];
+
+/// The texel the **bottom-left** quadrant must come back as. See
+/// [`PROBE_BC_SAMPLE_TOP_LEFT_BYTES`].
+pub const PROBE_BC_SAMPLE_BOTTOM_LEFT_BYTES: [u8; 4] = [0, 0, 255, 255];
+
+/// The texel the **bottom-right** quadrant must come back as. See
+/// [`PROBE_BC_SAMPLE_TOP_LEFT_BYTES`].
+pub const PROBE_BC_SAMPLE_BOTTOM_RIGHT_BYTES: [u8; 4] = [255, 255, 0, 255];
+
+/// One BC1 block whose every texel is `color0`.
+///
+/// # The block, transcribed from the format's own definition
+///
+/// The Khronos Data Format Specification 1.3 §18.1 lays a `bc1-rgba-unorm`
+/// block out as [`PROBE_BC_SAMPLE_BLOCK_SIZE`] bytes covering
+/// [`PROBE_BC_SAMPLE_BLOCK_TEXELS`] texels each way, "in order of increasing
+/// address":
+///
+/// * bytes 0–1 are `color0`, a `u16` **little-endian** in RGB565 — the
+///   specification spells it `color_0 = c0_lo + c0_hi × 256`;
+/// * bytes 2–3 are `color1`, likewise — [`PROBE_BC_SAMPLE_COLOR1`] here;
+/// * bytes 4–7 are sixteen two-bit indices, `code(x, y) = bits[2 × (4y + x) + 1
+///   … 2 × (4y + x) + 0]`, where `bits[0]` is the least significant bit — so the
+///   indices run row-major with texel `(0, 0)` in the **low** two bits of byte
+///   4.
+///
+/// **Every index is zero**, so every texel selects palette entry 0, which is
+/// `color0` decoded. That, plus [`PROBE_BC_SAMPLE_TOP_LEFT_565`]'s choice of
+/// endpoints, is what makes the readback comparable byte for byte: the two
+/// interpolated entries a four-colour block also carries are not exact under
+/// either specification, so a fixture that used one would be asserting on a
+/// value nothing pins and would fail on a conforming GPU.
+///
+/// `the_bc_sample_blocks_select_only_their_endpoint` is what holds the bytes to
+/// that.
+#[must_use]
+pub const fn probe_bc_sample_block(color0: u16) -> [u8; PROBE_BC_SAMPLE_BLOCK_SIZE as usize] {
+    let [color0_lo, color0_hi] = color0.to_le_bytes();
+    let [color1_lo, color1_hi] = PROBE_BC_SAMPLE_COLOR1.to_le_bytes();
+    [color0_lo, color0_hi, color1_lo, color1_hi, 0, 0, 0, 0]
+}
+
+/// The upload buffer's contents: the four blocks laid out the way
+/// `copyBufferToTexture` reads them, with the padding
+/// [`PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS`] requires between the two block rows.
+///
+/// Built rather than written out, because almost all of these bytes are padding
+/// the copy never reads. The two blocks of the top block row sit at the start;
+/// the two of the bottom row sit one padded row in. Two padded rows long, which
+/// is `rowsPerImage × bytesPerRow` and so comfortably past the
+/// `(rows - 1) × bytesPerRow + last row` a copy of this shape actually needs.
+///
+/// `the_bc_sample_upload_places_each_block_in_its_own_quadrant` is what holds
+/// the layout to the four endpoints.
+pub const PROBE_BC_SAMPLE_UPLOAD_BYTES: [u8; BC_SAMPLE_UPLOAD_ROW_BYTES * 2] = {
+    let mut bytes = [0u8; BC_SAMPLE_UPLOAD_ROW_BYTES * 2];
+    let stride = PROBE_BC_SAMPLE_BLOCK_SIZE as usize;
+    let blocks = [
+        (0, probe_bc_sample_block(PROBE_BC_SAMPLE_TOP_LEFT_565)),
+        (stride, probe_bc_sample_block(PROBE_BC_SAMPLE_TOP_RIGHT_565)),
+        (
+            BC_SAMPLE_UPLOAD_ROW_BYTES,
+            probe_bc_sample_block(PROBE_BC_SAMPLE_BOTTOM_LEFT_565),
+        ),
+        (
+            BC_SAMPLE_UPLOAD_ROW_BYTES + stride,
+            probe_bc_sample_block(PROBE_BC_SAMPLE_BOTTOM_RIGHT_565),
+        ),
+    ];
+    let mut at = 0;
+    while at < blocks.len() {
+        let (offset, encoded) = blocks[at];
+        let mut byte = 0;
+        while byte < encoded.len() {
+            bytes[offset + byte] = encoded[byte];
+            byte += 1;
+        }
+        at += 1;
+    }
+    bytes
+};
+
+/// The queue the BC probe names in its command encoder. `17 << 32`.
+pub const PROBE_BC_SAMPLE_QUEUE: QueueHandle = match QueueHandle::from_bits(17 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The command buffer the BC probe finishes its encoder into. `17 << 32`.
+pub const PROBE_BC_SAMPLE_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(17 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 17 is not zero"),
+    };
+
+/// The in-flight readback the BC probe requests and polls. `17 << 32`.
+pub const PROBE_BC_SAMPLE_READBACK: ReadbackHandle = match ReadbackHandle::from_bits(17 << 32) {
+    Some(readback) => readback,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The compressed image the blocks are uploaded into and the shader samples.
+/// `17 << 32`, index `0`.
+pub const PROBE_BC_SAMPLE_SOURCE_IMAGE: ImageHandle = match ImageHandle::from_bits(17 << 32) {
+    Some(image) => image,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The image the pass draws into and the copy reads back. `17 << 32`, index `1`.
+pub const PROBE_BC_SAMPLE_TARGET_IMAGE: ImageHandle = match ImageHandle::from_bits((17 << 32) | 1) {
+    Some(image) => image,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The source image's descriptor — [`Format::Bc1RgbaUnorm`], with
+/// [`ImageUsage::SAMPLED`] so a bind group can name a view of it and
+/// [`ImageUsage::TRANSFER_DST`] so the upload copy can fill it.
+///
+/// **No [`ImageUsage::COLOR_ATTACHMENT`], and that is not an omission**: a
+/// compressed format is one nothing renders to, and asking for it would be
+/// refused by the browser for a reason that has nothing to do with this probe.
+///
+/// One mip level, which is also what keeps the extent legal: WebGPU refuses to
+/// *create* a compressed texture whose size is not a whole number of blocks, and
+/// halving [`PROBE_BC_SAMPLE_SOURCE_SIZE`] would reach one that is not.
+pub const PROBE_BC_SAMPLE_SOURCE_IMAGE_DESC: ImageDesc<'static> = ImageDesc {
+    label: Some("crcbl-webgpu bc-sample source image"),
+    image_type: ImageType::D2,
+    extent: Extent3d::d2(PROBE_BC_SAMPLE_SOURCE_SIZE, PROBE_BC_SAMPLE_SOURCE_SIZE),
+    format: Format::Bc1RgbaUnorm,
+    mip_levels: 1,
+    samples: 1,
+    usage: ImageUsage::TRANSFER_DST.union(ImageUsage::SAMPLED),
+};
+
+/// The target's descriptor — group AJ's target, from the same place.
+pub const PROBE_BC_SAMPLE_TARGET_IMAGE_DESC: ImageDesc<'static> =
+    probe_sampled_quad_target_image_desc("crcbl-webgpu bc-sample target image");
+
+/// The view of the compressed source the bind group binds. `17 << 32`, index
+/// `0`.
+pub const PROBE_BC_SAMPLE_SOURCE_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(17 << 32)
+{
+    Some(view) => view,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The view of the target the pass renders into. `17 << 32`, index `1`.
+pub const PROBE_BC_SAMPLE_TARGET_VIEW: ImageViewHandle =
+    match ImageViewHandle::from_bits((17 << 32) | 1) {
+        Some(view) => view,
+        None => panic!("generation 17 is not zero"),
+    };
+
+/// The source view's descriptor — the whole image, in the image's own
+/// compressed format. A view that reinterpreted it as an uncompressed one would
+/// be refused, and WGSL samples it as a `texture_2d<f32>` either way.
+pub const PROBE_BC_SAMPLE_SOURCE_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu bc-sample source view"),
+    image: PROBE_BC_SAMPLE_SOURCE_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Bc1RgbaUnorm,
+    range: ImageSubresourceRange::all(Format::Bc1RgbaUnorm),
+};
+
+/// The target view's descriptor.
+pub const PROBE_BC_SAMPLE_TARGET_VIEW_DESC: ImageViewDesc<'static> =
+    probe_sampled_quad_target_view_desc(
+        "crcbl-webgpu bc-sample target view",
+        PROBE_BC_SAMPLE_TARGET_IMAGE,
+    );
+
+/// The buffer `write_buffer` fills with [`PROBE_BC_SAMPLE_UPLOAD_BYTES`] and the
+/// upload copy reads out of. `17 << 32`, index `0`.
+pub const PROBE_BC_SAMPLE_UPLOAD_BUFFER: BufferHandle = match BufferHandle::from_bits(17 << 32) {
+    Some(buffer) => buffer,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The upload buffer — [`probe_texture_sample_upload_buffer_desc`]'s shape, at
+/// this probe's own size.
+#[must_use]
+pub const fn probe_bc_sample_upload_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu bc-sample upload buffer"),
+        size: PROBE_BC_SAMPLE_UPLOAD_BYTES.len() as u64,
+        usage: BufferUsage::TRANSFER_SRC.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The buffer the target is copied into and read back from. `17 << 32`, index
+/// `1`.
+pub const PROBE_BC_SAMPLE_BUFFER: BufferHandle = match BufferHandle::from_bits((17 << 32) | 1) {
+    Some(buffer) => buffer,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The readback buffer's descriptor — one block of
+/// [`PROBE_TEXTURE_SAMPLE_BLOCK_BYTES`], because the target it reads is group
+/// AJ's target.
+#[must_use]
+pub const fn probe_bc_sample_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu bc-sample buffer"),
+        size: PROBE_TEXTURE_SAMPLE_BLOCK_BYTES,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The sampler the bind group binds. `17 << 32`.
+///
+/// Its descriptor is [`PROBE_TEXTURE_SAMPLE_SAMPLER_DESC`] — the same nearest,
+/// clamped, non-comparison sampler group AJ samples through, and for exactly
+/// that documentation's reasons. A linear filter here would blend across the
+/// block boundary and hand back gradients no byte comparison could name.
+pub const PROBE_BC_SAMPLE_SAMPLER: SamplerHandle = match SamplerHandle::from_bits(17 << 32) {
+    Some(sampler) => sampler,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// The bind-group layout handle the pipeline layout is built from. `17 << 32`.
+pub const PROBE_BC_SAMPLE_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits(17 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 17 is not zero"),
+    };
+
+/// The layout the BC bind group conforms to —
+/// [`PROBE_TEXTURE_SAMPLE_LAYOUT_ENTRIES`], because the shader is group AJ's
+/// shader and declares the same two slots.
+///
+/// [`SampleType::Float`] is right for a BC1 view: a compressed colour format is
+/// filterable float on this seam and in WebGPU alike, so nothing about the
+/// binding changes when the source does.
+pub const PROBE_BC_SAMPLE_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> =
+    BindGroupLayoutDesc {
+        label: Some("crcbl-webgpu bc-sample layout"),
+        entries: &PROBE_TEXTURE_SAMPLE_LAYOUT_ENTRIES,
+    };
+
+/// The bind group the pass binds. `17 << 32`.
+pub const PROBE_BC_SAMPLE_BIND_GROUP: BindGroupHandle = match BindGroupHandle::from_bits(17 << 32) {
+    Some(group) => group,
+    None => panic!("generation 17 is not zero"),
+};
+
+/// What the bind group binds: the compressed source's view, then the sampler.
+pub const PROBE_BC_SAMPLE_BIND_GROUP_ENTRIES: [BindGroupEntry; 2] = [
+    BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: BindingResource::ImageView(PROBE_BC_SAMPLE_SOURCE_VIEW),
+    },
+    BindGroupEntry {
+        binding: 1,
+        array_index: 0,
+        resource: BindingResource::Sampler(PROBE_BC_SAMPLE_SAMPLER),
+    },
+];
+
+/// The bind group's descriptor.
+pub const PROBE_BC_SAMPLE_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu bc-sample bind group"),
+    layout: PROBE_BC_SAMPLE_BIND_GROUP_LAYOUT,
+    entries: &PROBE_BC_SAMPLE_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
+/// The buffer→image copy that puts the four blocks into the compressed source.
+///
+/// `buffer_row_length` is [`PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS`] and not `0` for
+/// that constant's documented reason, and it is in **texels** —
+/// `web/engine/gpu-replay.js` converts it through the block extent on the way to
+/// WebGPU's `bytesPerRow`. `image_extent` is in texels too and takes **no**
+/// conversion: dividing it as well would shrink this copy to a quarter of the
+/// image it names, which is the same trap in the opposite direction.
+/// `buffer_image_height` stays `0`, which is the copy's own height and carries
+/// no alignment rule.
+#[must_use]
+pub const fn probe_bc_sample_upload_copy() -> BufferImageCopy {
+    BufferImageCopy {
+        buffer: PROBE_BC_SAMPLE_UPLOAD_BUFFER,
+        buffer_offset: 0,
+        buffer_row_length: PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS,
+        buffer_image_height: 0,
+        image: PROBE_BC_SAMPLE_SOURCE_IMAGE,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d { x: 0, y: 0, z: 0 },
+        image_extent: Extent3d::d2(PROBE_BC_SAMPLE_SOURCE_SIZE, PROBE_BC_SAMPLE_SOURCE_SIZE),
+    }
+}
+
+/// The shader-module handle the BC pipeline names. `17 << 32`.
+///
+/// Its descriptor is [`PROBE_TEXTURE_SAMPLE_SHADER_MODULE_DESC`]: **the same
+/// WGSL**, because a compressed texture is sampled through a `texture_2d<f32>`
+/// exactly as an uncompressed one is. A second copy of the shader would be a
+/// second place for the V flip to be wrong in.
+pub const PROBE_BC_SAMPLE_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(17 << 32) {
+        Some(module) => module,
+        None => panic!("generation 17 is not zero"),
+    };
+
+/// The pipeline-layout handle the BC pipeline is built against. `17 << 32`.
+pub const PROBE_BC_SAMPLE_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(17 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 17 is not zero"),
+    };
+
+/// The one set the BC pipeline layout names.
+pub const PROBE_BC_SAMPLE_SET_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_BC_SAMPLE_BIND_GROUP_LAYOUT];
+
+/// The pipeline layout the BC probe's frame creates.
+pub const PROBE_BC_SAMPLE_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> = PipelineLayoutDesc {
+    label: Some("crcbl-webgpu bc-sample pipeline layout"),
+    bind_group_layouts: &PROBE_BC_SAMPLE_SET_LAYOUTS,
+    push_constants: None,
+};
+
+/// The pipeline handle the pass binds. `17 << 32`.
+pub const PROBE_BC_SAMPLE_PIPELINE: GraphicsPipelineHandle =
+    match GraphicsPipelineHandle::from_bits(17 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 17 is not zero"),
+    };
+
+/// The pipeline the BC pass draws its quad through — group AJ's rasteriser
+/// state, on this probe's layout and module.
+///
+/// The readings [`probe_texture_sample_pipeline_desc`] enumerates all apply
+/// here, and this probe adds one of its own: **a quadrant holding a colour near
+/// but not equal to the one expected** is a decoder that produced an
+/// interpolated palette entry rather than the endpoint, or a block read at the
+/// wrong offset so that a neighbouring endpoint was selected. It is caught by
+/// the comparison being exact, byte for byte, over every texel of a quadrant —
+/// which [`PROBE_BC_SAMPLE_TOP_LEFT_565`] is what makes legal.
+#[must_use]
+pub const fn probe_bc_sample_pipeline_desc() -> GraphicsPipelineDesc<'static> {
+    probe_sampled_quad_pipeline_desc(
+        "crcbl-webgpu bc-sample pipeline",
+        PROBE_BC_SAMPLE_PIPELINE_LAYOUT,
+        PROBE_BC_SAMPLE_SHADER_MODULE,
+    )
 }
 
 /// One surface-capability query, from the frame that asked to the frame that
@@ -8297,6 +9003,88 @@ impl TextureSampleProbe {
     }
 }
 
+/// One BC-decoding exercise's **readback** half, from the frame that set it up
+/// to the bytes that came back.
+///
+/// [`FirstInstanceProbe`]'s state machine on this probe's handle, down to the
+/// [`Unsupported`](Self::Unsupported) arm: the setup frame ends in the same
+/// `request_readback` and is answered by the same [`Reply::ReadbackReady`] /
+/// [`Reply::ReadbackPending`], and the one thing that can stop it before it
+/// starts is a device that withheld the feature its fixture needs.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum BcSampleProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — the target's `Rgba8Unorm` texels, one block of
+        /// [`PROBE_TEXTURE_SAMPLE_BLOCK_BYTES`].
+        bytes: Vec<u8>,
+    },
+    /// The device opened without [`Features::TEXTURE_COMPRESSION_BC`], so
+    /// nothing was encoded and nothing will be: WebGPU refuses a
+    /// `bc1-rgba-unorm` texture outright on such a device, and a frame that
+    /// quietly fell back to an uncompressed source would read back four correct
+    /// quadrants while proving only what group AJ already proves.
+    Unsupported,
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step, [`ClampProbe::Failed`]'s reasoning: a
+    /// readback is answered exactly once, so there is nothing left for a later
+    /// frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
+}
+
+impl BcSampleProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`FirstInstanceProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The parity report
 // ---------------------------------------------------------------------------
@@ -8477,6 +9265,12 @@ struct Probe {
     /// drain hit under [`TEXTURE_SAMPLE_UNDECODABLE`]. Its own string for
     /// [`reason`](Self::reason)'s reason.
     texture_sample_reason: String,
+    bc_sample: BcSampleProbe,
+    /// Why the BC probe stopped: the browser's own words under
+    /// [`BC_SAMPLE_FAILED`], or the [`DecodeError`](crate::DecodeError) the
+    /// drain hit under [`BC_SAMPLE_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
+    bc_sample_reason: String,
     /// The last run of the parity report. Nothing on the channel feeds it — see
     /// [`run_parity`](Self::run_parity).
     parity: ParityReport,
@@ -8526,6 +9320,8 @@ impl Probe {
             first_instance_reason: String::new(),
             texture_sample: TextureSampleProbe::Unasked,
             texture_sample_reason: String::new(),
+            bc_sample: BcSampleProbe::Unasked,
+            bc_sample_reason: String::new(),
             parity: ParityReport::new(),
         }
     }
@@ -8958,6 +9754,7 @@ impl Probe {
                 self.clamp.absorb(&replies);
                 self.first_instance.absorb(&replies);
                 self.texture_sample.absorb(&replies);
+                self.bc_sample.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -10985,6 +11782,210 @@ impl Probe {
     fn texture_sample_bytes(&self) -> &[u8] {
         match &self.texture_sample {
             TextureSampleProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// Whether the device this page opened has the browser's
+    /// `texture-compression-bc`.
+    ///
+    /// [`first_instance_supported`](Self::first_instance_supported)'s shape and
+    /// its reason: a fact the *device* reported, so a probe that could not run
+    /// says why rather than being silently skipped.
+    fn bc_sample_supported(&mut self) -> bool {
+        self.opened()
+            .is_some_and(|caps| caps.features.contains(Features::TEXTURE_COMPRESSION_BC))
+    }
+
+    /// Encode the BC setup frame: a `Bc1RgbaUnorm` source and group AJ's target,
+    /// the upload buffer written with [`PROBE_BC_SAMPLE_UPLOAD_BYTES`] and
+    /// copied into the source at [`PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS`], group
+    /// AJ's sampler and shader, a bind group holding the compressed view and
+    /// that sampler, a pass that draws a fullscreen quad sampling it, the copy
+    /// out and the request.
+    ///
+    /// [`request_texture_sample`](Self::request_texture_sample)'s frame with the
+    /// source's format changed, which is the whole of what this group varies.
+    ///
+    /// `false` on three counts, and the third is not a failure:
+    ///
+    /// * no device has opened — [`request_readback`](Self::request_readback)'s
+    ///   ordering rule, since every command here is a device method;
+    /// * the channel had no room, or another channel is installed;
+    /// * **the device opened without [`Features::TEXTURE_COMPRESSION_BC`]**,
+    ///   which leaves the probe [`BC_SAMPLE_UNSUPPORTED`] and encodes nothing.
+    ///   WebGPU refuses a compressed texture on such a device, and the replayer
+    ///   refuses it one step earlier still — `webgpuTextureFormatFor` in
+    ///   `web/engine/gpu-replay.js` — so a frame encoded anyway would produce a
+    ///   refusal per command and a readback of a buffer nothing wrote.
+    fn request_bc_sample(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        if !self.bc_sample_supported() {
+            self.bc_sample = BcSampleProbe::Unsupported;
+            self.bc_sample_reason.clear();
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_image(
+                    PROBE_BC_SAMPLE_SOURCE_IMAGE,
+                    &PROBE_BC_SAMPLE_SOURCE_IMAGE_DESC,
+                );
+                stream.create_image_view(
+                    PROBE_BC_SAMPLE_SOURCE_VIEW,
+                    &PROBE_BC_SAMPLE_SOURCE_VIEW_DESC,
+                );
+                stream.create_image(
+                    PROBE_BC_SAMPLE_TARGET_IMAGE,
+                    &PROBE_BC_SAMPLE_TARGET_IMAGE_DESC,
+                );
+                stream.create_image_view(
+                    PROBE_BC_SAMPLE_TARGET_VIEW,
+                    &PROBE_BC_SAMPLE_TARGET_VIEW_DESC,
+                );
+                stream.create_buffer(
+                    PROBE_BC_SAMPLE_UPLOAD_BUFFER,
+                    &probe_bc_sample_upload_buffer_desc(),
+                );
+                stream.create_buffer(PROBE_BC_SAMPLE_BUFFER, &probe_bc_sample_buffer_desc());
+                // Group AJ's sampler descriptor, on this probe's handle: nearest
+                // on every filter, so each quadrant is one endpoint exactly.
+                stream.create_sampler(PROBE_BC_SAMPLE_SAMPLER, &PROBE_TEXTURE_SAMPLE_SAMPLER_DESC);
+                // The layout before the group that names it, and both before the
+                // pipeline layout built from the layout.
+                stream.create_bind_group_layout(
+                    PROBE_BC_SAMPLE_BIND_GROUP_LAYOUT,
+                    &PROBE_BC_SAMPLE_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream.create_bind_group(
+                    PROBE_BC_SAMPLE_BIND_GROUP,
+                    &PROBE_BC_SAMPLE_BIND_GROUP_DESC,
+                );
+                stream.create_shader_module(
+                    PROBE_BC_SAMPLE_SHADER_MODULE,
+                    &PROBE_TEXTURE_SAMPLE_SHADER_MODULE_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_BC_SAMPLE_PIPELINE_LAYOUT,
+                    &PROBE_BC_SAMPLE_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_graphics_pipeline(
+                    PROBE_BC_SAMPLE_PIPELINE,
+                    &probe_bc_sample_pipeline_desc(),
+                );
+                stream.write_buffer(
+                    PROBE_BC_SAMPLE_UPLOAD_BUFFER,
+                    0,
+                    &PROBE_BC_SAMPLE_UPLOAD_BYTES,
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu bc-sample encoder"),
+                    queue: PROBE_BC_SAMPLE_QUEUE,
+                });
+                // The blocks reach the compressed source here, before the pass
+                // that samples it. WebGPU tracks the hazard itself, which is why
+                // no barrier sits between the two.
+                stream.copy_buffer_to_image(&probe_bc_sample_upload_copy());
+                let target = [probe_sampled_quad_color_attachment(
+                    PROBE_BC_SAMPLE_TARGET_VIEW,
+                )];
+                stream.begin_render_pass(&RenderPassDesc {
+                    label: Some("crcbl-webgpu bc-sample pass"),
+                    color_attachments: &target,
+                    depth_stencil_attachment: None,
+                    render_area: Rect2d::from_size(
+                        PROBE_TEXTURE_SAMPLE_SIZE,
+                        PROBE_TEXTURE_SAMPLE_SIZE,
+                    ),
+                    timestamp_writes: None,
+                });
+                stream.bind_graphics_pipeline(PROBE_BC_SAMPLE_PIPELINE);
+                stream.bind_group(
+                    0,
+                    PROBE_BC_SAMPLE_BIND_GROUP,
+                    &[],
+                    PROBE_BC_SAMPLE_PIPELINE_LAYOUT,
+                );
+                stream.draw(0..PROBE_TEXTURE_SAMPLE_CORNERS, 0..1);
+                stream.end_render_pass();
+                stream.copy_image_to_buffer(&probe_sampled_quad_readback_copy(
+                    PROBE_BC_SAMPLE_BUFFER,
+                    PROBE_BC_SAMPLE_TARGET_IMAGE,
+                ));
+                stream.finish(PROBE_BC_SAMPLE_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_BC_SAMPLE_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_BC_SAMPLE_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu bc-sample readback"),
+                        buffer: PROBE_BC_SAMPLE_BUFFER,
+                        offset: 0,
+                        size: probe_bc_sample_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.bc_sample = BcSampleProbe::Requested;
+            self.bc_sample_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// BC readback and register its wait, unless it is already waiting or ready
+    /// — [`poll_texture_sample`](Self::poll_texture_sample)'s protocol on the BC
+    /// handle.
+    fn poll_bc_sample(&mut self) -> bool {
+        if !matches!(
+            self.bc_sample,
+            BcSampleProbe::Requested | BcSampleProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_BC_SAMPLE_READBACK))
+        else {
+            return false;
+        };
+        self.bc_sample = BcSampleProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the BC readback has got to.
+    fn bc_sample_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.bc_sample_reason = error.to_string();
+            return BC_SAMPLE_UNDECODABLE;
+        }
+        match &self.bc_sample {
+            BcSampleProbe::Unasked => BC_SAMPLE_UNASKED,
+            BcSampleProbe::Requested => BC_SAMPLE_REQUESTED,
+            BcSampleProbe::Waiting { .. } => BC_SAMPLE_WAITING,
+            BcSampleProbe::Pending => BC_SAMPLE_PENDING,
+            BcSampleProbe::Ready { .. } => BC_SAMPLE_READY,
+            BcSampleProbe::Unsupported => BC_SAMPLE_UNSUPPORTED,
+            BcSampleProbe::Failed { reason } => {
+                self.bc_sample_reason.clone_from(reason);
+                BC_SAMPLE_FAILED
+            }
+        }
+    }
+
+    /// The bytes the BC readback came back with, or an empty slice if it has
+    /// not.
+    fn bc_sample_bytes(&self) -> &[u8] {
+        match &self.bc_sample {
+            BcSampleProbe::Ready { bytes } => bytes,
             _ => &[],
         }
     }
@@ -14061,6 +15062,99 @@ pub mod shim {
         })
     }
 
+    /// Whether the device this page opened has the browser's
+    /// `texture-compression-bc`.
+    ///
+    /// `1` when it does. Read this to tell a device that withheld the feature
+    /// from a request that never happened. `0` before a device opens.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample_supported() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.bc_sample_supported()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Encode the BC setup frame — a `Bc1RgbaUnorm` source uploaded with four
+    /// single-endpoint blocks, group AJ's nearest sampler and shader, a bind
+    /// group holding the compressed view and that sampler, one pipeline, a pass
+    /// that draws a fullscreen quad sampling the source, the copy and the
+    /// readback request.
+    ///
+    /// `1` when the frame is on the stream, `0` if no device has opened, the
+    /// device opened without `texture-compression-bc`, the probe is re-entered,
+    /// or another channel is installed.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_bc_sample()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the BC readback once. `1` when a poll is on the stream, `0` when
+    /// there is nothing to poll for.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_bc_sample()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain, and answer one of the `BC_SAMPLE_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.bc_sample_state(),
+            Err(_) => super::BC_SAMPLE_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_bc_sample_state`] starts — the browser's words
+    /// under [`BC_SAMPLE_FAILED`](super::BC_SAMPLE_FAILED), the decode error
+    /// under [`BC_SAMPLE_UNDECODABLE`](super::BC_SAMPLE_UNDECODABLE), and empty
+    /// otherwise. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.bc_sample_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.bc_sample_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Where the decoded target's texels start, once
+    /// [`__crcbl_web_gpu_probe_bc_sample_state`] answers
+    /// [`super::BC_SAMPLE_READY`]. Null while it has not; the pointer is stable
+    /// until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.bc_sample_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_bc_sample_bytes_ptr`] points at —
+    /// the BC readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bc_sample_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.bc_sample_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Run the parity report against the device the browser opened, and answer
     /// one of the `PARITY_*` codes.
     ///
@@ -14169,7 +15263,11 @@ mod tests {
     };
 
     use super::shim::{
-        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_bind_group,
+        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_bc_sample,
+        __crcbl_web_gpu_probe_bc_sample_bytes_len, __crcbl_web_gpu_probe_bc_sample_bytes_ptr,
+        __crcbl_web_gpu_probe_bc_sample_poll, __crcbl_web_gpu_probe_bc_sample_reason_len,
+        __crcbl_web_gpu_probe_bc_sample_reason_ptr, __crcbl_web_gpu_probe_bc_sample_state,
+        __crcbl_web_gpu_probe_bc_sample_supported, __crcbl_web_gpu_probe_bind_group,
         __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_clamp,
         __crcbl_web_gpu_probe_clamp_bytes_len, __crcbl_web_gpu_probe_clamp_bytes_ptr,
         __crcbl_web_gpu_probe_clamp_poll, __crcbl_web_gpu_probe_clamp_reason_len,
@@ -14496,7 +15594,8 @@ mod tests {
                 required_features: Features::COMPUTE,
                 optional_features: Features::TIMESTAMP_QUERY
                     .union(Features::DEPTH_CLAMP)
-                    .union(Features::INDIRECT_FIRST_INSTANCE),
+                    .union(Features::INDIRECT_FIRST_INSTANCE)
+                    .union(Features::TEXTURE_COMPRESSION_BC),
                 compatible_surface: None,
             }]
         );
@@ -20716,6 +21815,547 @@ mod tests {
         );
     }
 
+    /// Direct3D 11.3's `UNORMPromote` (functional specification §19.5.3),
+    /// transcribed — MSB extension, which is bit replication for these widths.
+    ///
+    /// The specification's own listing spells the loop counter two ways
+    /// (`numBits` and `numbits`) and so does not terminate as written; what is
+    /// transcribed is the arithmetic it plainly describes, which for a 5-bit
+    /// input is `(v << 3) | (v >> 2)` and for a 6-bit one `(v << 2) | (v >> 4)`.
+    fn d3d_promote(value: u32, base_bits: u32) -> u8 {
+        let mut remaining = 8 - base_bits;
+        let mut input = value << remaining;
+        let mut out = input;
+        loop {
+            input >>= base_bits;
+            out |= input;
+            if remaining <= base_bits {
+                break;
+            }
+            remaining -= base_bits;
+        }
+        u8::try_from(out & 0xFF).expect("masked to a byte")
+    }
+
+    /// The Khronos Data Format Specification 1.3 §18.1 expansion — `value` over
+    /// its full scale, quantised to UNORM8 by round-to-nearest.
+    ///
+    /// Integer arithmetic rather than floating point, so the rounding is the
+    /// one written here and not the one a platform's `libm` chose.
+    fn khronos_rational(value: u32, base_bits: u32) -> u8 {
+        let full = (1 << base_bits) - 1;
+        u8::try_from((value * 255 * 2 + full) / (2 * full)).expect("at most 255")
+    }
+
+    /// The four endpoints, each with the texel the gate expects from it.
+    fn bc_sample_colours() -> [(&'static str, u16, [u8; 4]); 4] {
+        [
+            (
+                "top left",
+                PROBE_BC_SAMPLE_TOP_LEFT_565,
+                PROBE_BC_SAMPLE_TOP_LEFT_BYTES,
+            ),
+            (
+                "top right",
+                PROBE_BC_SAMPLE_TOP_RIGHT_565,
+                PROBE_BC_SAMPLE_TOP_RIGHT_BYTES,
+            ),
+            (
+                "bottom left",
+                PROBE_BC_SAMPLE_BOTTOM_LEFT_565,
+                PROBE_BC_SAMPLE_BOTTOM_LEFT_BYTES,
+            ),
+            (
+                "bottom right",
+                PROBE_BC_SAMPLE_BOTTOM_RIGHT_565,
+                PROBE_BC_SAMPLE_BOTTOM_RIGHT_BYTES,
+            ),
+        ]
+    }
+
+    /// **Every one of the four decodes to the same bytes under both
+    /// specifications, and those bytes are the constants the gate asserts.**
+    ///
+    /// This is what makes group AK's comparison exact rather than approximate,
+    /// and it is the reason the four are cube corners instead of the mid-tones
+    /// group AJ chose — see [`PROBE_BC_SAMPLE_TOP_LEFT_565`]. Both expansions
+    /// are written out here from their own specifications, so a constant that
+    /// drifted, an endpoint edited to something prettier, or a channel left off
+    /// a rail all fail by name.
+    ///
+    /// **The vacuity guard is the last assertion, and it is the important one.**
+    /// "Both formulas agree" proves nothing if the two functions are the same
+    /// arithmetic twice, so the pair is first shown to *disagree* at a value the
+    /// fixture does not use. Without it this test would pass on two copies of
+    /// one mistake.
+    #[test]
+    fn the_four_bc_sample_colours_are_exact_on_every_decoder() {
+        for (name, endpoint, expected) in bc_sample_colours() {
+            let channels = [
+                ("red", u32::from(endpoint >> 11), 5, expected[0]),
+                ("green", u32::from((endpoint >> 5) & 0x3F), 6, expected[1]),
+                ("blue", u32::from(endpoint & 0x1F), 5, expected[2]),
+            ];
+            for (channel, value, bits, want) in channels {
+                let full = (1u32 << bits) - 1;
+                assert!(
+                    value == 0 || value == full,
+                    "{name}'s {channel} is {value}, which is neither rail of a {bits}-bit \
+                     endpoint — only 0.0 and 1.0 are exact under D3D 11.3 §19.5.2, and only \
+                     there do the two expansions agree"
+                );
+                assert_eq!(
+                    d3d_promote(value, bits),
+                    want,
+                    "{name}'s {channel} is not what bit replication gives"
+                );
+                assert_eq!(
+                    khronos_rational(value, bits),
+                    want,
+                    "{name}'s {channel} is not what the Khronos rational gives"
+                );
+            }
+            assert_eq!(
+                expected[3], 255,
+                "{name} is not opaque, and a four-colour BC1 block has no other alpha"
+            );
+        }
+        // The two expansions really are different arithmetic: they part company
+        // at 5-bit 3, 7, 24, 28 and 6-bit 11..=15, 48..=52, and this fixture
+        // uses none of those precisely because they are ambiguous.
+        assert_ne!(
+            d3d_promote(15, 6),
+            khronos_rational(15, 6),
+            "the two expansions agree everywhere, so holding the endpoints to both proves nothing"
+        );
+        assert_ne!(d3d_promote(3, 5), khronos_rational(3, 5));
+    }
+
+    /// **The four are told apart by where they sit, which is what replaces group
+    /// AJ's multiset rule.**
+    ///
+    /// A cube corner has two channels alike, so
+    /// [`PROBE_TEXTURE_SAMPLE_TOP_LEFT_BYTES`]'s rule cannot hold here and a
+    /// weaker, position-aware one does: no channel permutation carries this
+    /// *ordered* four onto itself, so a swap on the way out moves at least one
+    /// quadrant off the colour that quadrant expects. A channel stuck at either
+    /// rail is held the same way.
+    ///
+    /// **What is deliberately absent is an alpha claim.** Every one of the four
+    /// is opaque because a four-colour BC1 block is, so a dropped alpha reads
+    /// back correct here; group AJ is where that is caught. The clear keeps an
+    /// alpha below `255` only so "nothing was drawn" stays its own reading.
+    #[test]
+    fn the_four_bc_sample_colours_are_told_apart_where_they_sit() {
+        let colours: Vec<[u8; 4]> = bc_sample_colours()
+            .iter()
+            .map(|(_, _, bytes)| *bytes)
+            .collect();
+        for (at, colour) in colours.iter().enumerate() {
+            for other in &colours[at + 1..] {
+                assert_ne!(colour, other, "two quadrants expect the same colour");
+            }
+            assert_ne!(
+                *colour, PROBE_TEXTURE_SAMPLE_CLEAR_BYTES,
+                "a quadrant expects the clear, so 'nothing was drawn' cannot be told from a pass"
+            );
+        }
+        assert_ne!(
+            PROBE_TEXTURE_SAMPLE_CLEAR_BYTES[3], 255,
+            "the clear is opaque like the four, so its alpha adds nothing to telling it apart"
+        );
+        // Every non-identity permutation of the three colour channels.
+        for swap in [[0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            assert!(
+                colours
+                    .iter()
+                    .any(|c| [c[swap[0]], c[swap[1]], c[swap[2]]] != [c[0], c[1], c[2]]),
+                "channel permutation {swap:?} carries all four colours onto themselves, so a \
+                 path that swapped those channels would read back as a pass"
+            );
+        }
+        // A channel held at either rail has to move at least one quadrant.
+        for channel in 0..3 {
+            for rail in [0u8, 255] {
+                assert!(
+                    colours.iter().any(|c| c[channel] != rail),
+                    "every quadrant already has channel {channel} at {rail}, so a channel stuck \
+                     there would be invisible"
+                );
+            }
+        }
+    }
+
+    /// **Every block is opaque four-colour mode and every index selects the
+    /// endpoint**, which is the whole reason the readback can be compared byte
+    /// for byte.
+    ///
+    /// A block whose index bytes were not zero would select an interpolated
+    /// palette entry, and those are not exact under either specification — see
+    /// [`probe_bc_sample_block`].
+    #[test]
+    fn the_bc_sample_blocks_select_only_their_endpoint() {
+        for (name, endpoint, _) in bc_sample_colours() {
+            let block = probe_bc_sample_block(endpoint);
+            assert_eq!(
+                block.len(),
+                PROBE_BC_SAMPLE_BLOCK_SIZE as usize,
+                "{name}'s block is not the format's block size"
+            );
+            assert_eq!(
+                u16::from_le_bytes([block[0], block[1]]),
+                endpoint,
+                "{name}'s color0 is not little-endian in bytes 0 and 1"
+            );
+            assert_eq!(
+                u16::from_le_bytes([block[2], block[3]]),
+                PROBE_BC_SAMPLE_COLOR1,
+                "{name}'s color1 is not where the format puts it"
+            );
+            assert!(
+                endpoint > PROBE_BC_SAMPLE_COLOR1,
+                "{name} has color0 <= color1, which is the three-colour mode where index 3 is \
+                 transparent black rather than the opaque four-colour one"
+            );
+            assert!(
+                block[4..].iter().all(|byte| *byte == 0),
+                "{name} has a non-zero index, so some texel selects an interpolated entry no \
+                 specification pins: {block:?}"
+            );
+        }
+    }
+
+    /// **The upload puts each block in the quadrant the gate reads it back
+    /// from**, and puts the two block rows a padded row apart.
+    #[test]
+    fn the_bc_sample_upload_places_each_block_in_its_own_quadrant() {
+        let row = BC_SAMPLE_UPLOAD_ROW_BYTES;
+        let size = PROBE_BC_SAMPLE_BLOCK_SIZE as usize;
+        let bytes = &PROBE_BC_SAMPLE_UPLOAD_BYTES;
+        assert_eq!(
+            &bytes[..size],
+            &probe_bc_sample_block(PROBE_BC_SAMPLE_TOP_LEFT_565)
+        );
+        assert_eq!(
+            &bytes[size..size * 2],
+            &probe_bc_sample_block(PROBE_BC_SAMPLE_TOP_RIGHT_565)
+        );
+        assert_eq!(
+            &bytes[row..row + size],
+            &probe_bc_sample_block(PROBE_BC_SAMPLE_BOTTOM_LEFT_565)
+        );
+        assert_eq!(
+            &bytes[row + size..row + size * 2],
+            &probe_bc_sample_block(PROBE_BC_SAMPLE_BOTTOM_RIGHT_565)
+        );
+        // The gap between the two block rows is padding the copy skips, and it
+        // is only padding while nothing is written into it.
+        assert!(
+            bytes[size * 2..row].iter().all(|byte| *byte == 0),
+            "the space between the two block rows carries a block, so the row pitch is not what \
+             it says"
+        );
+        assert_eq!(
+            bytes.len() as u64,
+            probe_bc_sample_upload_buffer_desc().size,
+            "the buffer is sized from these bytes"
+        );
+    }
+
+    /// **The padded pitch is a legal `bytesPerRow` and a tight one would not
+    /// be**, which is the only reason this copy names a pitch at all.
+    ///
+    /// The second assertion is what keeps the first from being decoration: if a
+    /// tightly packed row were already aligned, the padding would buy nothing
+    /// and the constant should go.
+    #[test]
+    fn the_bc_sample_upload_row_is_a_legal_bytes_per_row() {
+        let alignment = BYTES_PER_ROW_ALIGNMENT as usize;
+        assert_eq!(
+            BC_SAMPLE_UPLOAD_ROW_BYTES % alignment,
+            0,
+            "the padded row is not a legal bytesPerRow"
+        );
+        let blocks_across = (PROBE_BC_SAMPLE_SOURCE_SIZE / PROBE_BC_SAMPLE_BLOCK_TEXELS) as usize;
+        let tight = blocks_across * PROBE_BC_SAMPLE_BLOCK_SIZE as usize;
+        assert_ne!(
+            tight % alignment,
+            0,
+            "a tightly packed block row is already aligned, so the padded pitch buys nothing"
+        );
+        const {
+            assert!(
+                PROBE_BC_SAMPLE_SOURCE_SIZE / PROBE_BC_SAMPLE_BLOCK_TEXELS > 1,
+                "the copy is one block row deep, and the alignment rule only applies past that"
+            );
+        }
+        let copy = probe_bc_sample_upload_copy();
+        assert_eq!(
+            copy.buffer_row_length, PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS,
+            "the copy reads the rows at the pitch these bytes were laid out at"
+        );
+        assert_eq!(
+            copy.buffer_image_height, 0,
+            "the copy's height carries no alignment rule and should stay tightly packed"
+        );
+        // The extent takes no block conversion — dividing it as well would copy
+        // a quarter of the image.
+        assert_eq!(
+            copy.image_extent,
+            Extent3d::d2(PROBE_BC_SAMPLE_SOURCE_SIZE, PROBE_BC_SAMPLE_SOURCE_SIZE)
+        );
+    }
+
+    /// The BC probe's handles are a generation past every other probe's, so no
+    /// object it creates can collide with one still live from another frame.
+    #[test]
+    fn the_bc_sample_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_BC_SAMPLE_SOURCE_IMAGE.to_bits(),
+            PROBE_BC_SAMPLE_TARGET_IMAGE.to_bits(),
+            PROBE_BC_SAMPLE_SOURCE_VIEW.to_bits(),
+            PROBE_BC_SAMPLE_TARGET_VIEW.to_bits(),
+            PROBE_BC_SAMPLE_UPLOAD_BUFFER.to_bits(),
+            PROBE_BC_SAMPLE_BUFFER.to_bits(),
+            PROBE_BC_SAMPLE_SAMPLER.to_bits(),
+            PROBE_BC_SAMPLE_BIND_GROUP_LAYOUT.to_bits(),
+            PROBE_BC_SAMPLE_BIND_GROUP.to_bits(),
+            PROBE_BC_SAMPLE_SHADER_MODULE.to_bits(),
+            PROBE_BC_SAMPLE_PIPELINE_LAYOUT.to_bits(),
+            PROBE_BC_SAMPLE_PIPELINE.to_bits(),
+            PROBE_BC_SAMPLE_COMMAND_BUFFER.to_bits(),
+            PROBE_BC_SAMPLE_QUEUE.to_bits(),
+            PROBE_BC_SAMPLE_READBACK.to_bits(),
+        ] {
+            assert_eq!(
+                bits >> 32,
+                17,
+                "every bc-sample handle is generation seventeen"
+            );
+        }
+        // The sets that share a generation are kept apart by their indices.
+        assert_ne!(
+            PROBE_BC_SAMPLE_SOURCE_IMAGE.to_bits(),
+            PROBE_BC_SAMPLE_TARGET_IMAGE.to_bits()
+        );
+        assert_ne!(
+            PROBE_BC_SAMPLE_SOURCE_VIEW.to_bits(),
+            PROBE_BC_SAMPLE_TARGET_VIEW.to_bits()
+        );
+        assert_ne!(
+            PROBE_BC_SAMPLE_UPLOAD_BUFFER.to_bits(),
+            PROBE_BC_SAMPLE_BUFFER.to_bits()
+        );
+        // A generation clear of the texture-sampling probe, the nearest
+        // neighbour — and the one whose objects are still live when this frame
+        // is encoded.
+        assert_ne!(
+            PROBE_BC_SAMPLE_SOURCE_IMAGE.to_bits(),
+            PROBE_TEXTURE_SAMPLE_SOURCE_IMAGE.to_bits()
+        );
+        assert_ne!(
+            PROBE_BC_SAMPLE_SAMPLER.to_bits(),
+            PROBE_TEXTURE_SAMPLE_SAMPLER.to_bits()
+        );
+    }
+
+    /// **A device without `texture-compression-bc` gets no frame at all**, and
+    /// says so by name.
+    ///
+    /// This is the arm CI's Linux runner takes, so it is the one that most needs
+    /// to not read as covered: the browser gate holds it to the browser's own
+    /// refusal of a `bc1-rgba-unorm` texture, and this holds wasm to encoding
+    /// nothing rather than encoding a frame every command of which would be
+    /// refused.
+    #[test]
+    fn the_bc_sample_export_is_refused_on_a_device_without_the_feature() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_supported(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample(), 0);
+        assert!(take_frame().is_empty(), "a refused request encodes nothing");
+        assert_eq!(
+            __crcbl_web_gpu_probe_bc_sample_state(),
+            BC_SAMPLE_UNSUPPORTED
+        );
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_bytes_len(), 0);
+    }
+
+    /// **One export, a whole frame**: the compressed source and its view, the
+    /// target and its view, the two buffers, the sampler, the layout and the
+    /// group built against it, the module, the pipeline layout and the pipeline,
+    /// the upload write and copy, a pass that binds the group and draws, the
+    /// copy out and the readback — then the answer reaching the bytes exports.
+    ///
+    /// The source's *format* and the upload copy's *pitch* are read out of the
+    /// frame rather than only the command names: this group is group AJ's frame
+    /// with those two things changed, so a frame that lost either has the same
+    /// names in the same order and replays to a picture group AJ already proves.
+    /// A `cargo test` has no `navigator.gpu`, so the replayer is stood in for by
+    /// a `ReplyWriter` — which is why this proves the state machine and the
+    /// browser gate proves the decoded block.
+    #[test]
+    fn the_bc_sample_export_encodes_the_block_upload_and_the_sampling_pass() {
+        grant(&granted("has block compression"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(
+            1,
+            &DeviceCaps {
+                features: Features::COMPUTE | Features::TEXTURE_COMPRESSION_BC,
+                ..device_caps()
+            },
+        );
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_supported(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample(), 1);
+        let frame = take_frame();
+        let names: Vec<&str> = frame.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateImage",
+                "CreateImageView",
+                "CreateImage",
+                "CreateImageView",
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateSampler",
+                "CreateBindGroupLayout",
+                "CreateBindGroup",
+                "CreateShaderModule",
+                "CreatePipelineLayout",
+                "CreateGraphicsPipeline",
+                "WriteBuffer",
+                "CreateCommandEncoder",
+                "CopyBufferToImage",
+                "BeginRenderPass",
+                "BindGraphicsPipeline",
+                "BindGroup",
+                "Draw",
+                "EndRenderPass",
+                "CopyImageToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the blocks reach the source before the pass that samples it, and the target is \
+             copied out after"
+        );
+        // The source is compressed, and at an extent a block divides.
+        assert!(frame.contains(&Command::CreateImage {
+            image: PROBE_BC_SAMPLE_SOURCE_IMAGE,
+            label: Some("crcbl-webgpu bc-sample source image".into()),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(PROBE_BC_SAMPLE_SOURCE_SIZE, PROBE_BC_SAMPLE_SOURCE_SIZE),
+            format: Format::Bc1RgbaUnorm,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+        }));
+        // And the upload names the padded block pitch rather than a tight row.
+        assert!(frame.contains(&Command::CopyBufferToImage {
+            copy: probe_bc_sample_upload_copy(),
+        }));
+        assert!(frame.contains(&Command::BindGroup {
+            slot: 0,
+            group: PROBE_BC_SAMPLE_BIND_GROUP,
+            dynamic_offsets: Vec::new(),
+            layout: PROBE_BC_SAMPLE_PIPELINE_LAYOUT,
+        }));
+        assert!(frame.contains(&Command::Draw {
+            vertices: 0..PROBE_TEXTURE_SAMPLE_CORNERS,
+            instances: 0..1,
+        }));
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_state(), BC_SAMPLE_REQUESTED);
+
+        // The poll, and the answer that resolves it.
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_poll(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_state(), BC_SAMPLE_WAITING);
+        // The grant and the device request spent sequences 0 and 1, so the frame
+        // above occupies the next `frame.len()` and the poll follows it.
+        let poll_sequence = 2 + frame.len() as u64;
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_BC_SAMPLE_READBACK,
+            }]
+        );
+        // A target whose four quadrants are the four endpoints — what a browser
+        // that decoded the blocks correctly hands back.
+        let size = PROBE_TEXTURE_SAMPLE_SIZE as usize;
+        let mut bytes: Vec<u8> = Vec::with_capacity(size * size * 4);
+        for row in 0..size {
+            for column in 0..size {
+                bytes.extend_from_slice(match (row < size / 2, column < size / 2) {
+                    (true, true) => &PROBE_BC_SAMPLE_TOP_LEFT_BYTES,
+                    (true, false) => &PROBE_BC_SAMPLE_TOP_RIGHT_BYTES,
+                    (false, true) => &PROBE_BC_SAMPLE_BOTTOM_LEFT_BYTES,
+                    (false, false) => &PROBE_BC_SAMPLE_BOTTOM_RIGHT_BYTES,
+                });
+            }
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_BC_SAMPLE_READBACK, &bytes);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_state(), BC_SAMPLE_READY);
+        assert_eq!(
+            u64::from(__crcbl_web_gpu_probe_bc_sample_bytes_len()),
+            PROBE_TEXTURE_SAMPLE_BLOCK_BYTES
+        );
+        let ptr = __crcbl_web_gpu_probe_bc_sample_bytes_ptr();
+        assert!(!ptr.is_null());
+        // SAFETY: the length above is the probe's own, and nothing has called
+        // back into wasm since it was read.
+        let read =
+            unsafe { core::slice::from_raw_parts(ptr, PROBE_TEXTURE_SAMPLE_BLOCK_BYTES as usize) };
+        // The first texel of each quadrant — the four corners the gate reads.
+        let midpoint = size / 2 * 4;
+        let half = size * size / 2 * 4;
+        assert_eq!(&read[..4], &PROBE_BC_SAMPLE_TOP_LEFT_BYTES);
+        assert_eq!(
+            &read[midpoint..midpoint + 4],
+            &PROBE_BC_SAMPLE_TOP_RIGHT_BYTES
+        );
+        assert_eq!(&read[half..half + 4], &PROBE_BC_SAMPLE_BOTTOM_LEFT_BYTES);
+        assert_eq!(
+            &read[half + midpoint..half + midpoint + 4],
+            &PROBE_BC_SAMPLE_BOTTOM_RIGHT_BYTES
+        );
+    }
+
+    /// **A device has to have opened first**, the readback probe's ordering
+    /// rule: every command the frame carries is a device method.
+    #[test]
+    fn a_bc_sample_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_state(), BC_SAMPLE_UNASKED);
+    }
+
+    /// The BC probe's `Failed` reaches the ABI: the state export answers
+    /// [`BC_SAMPLE_FAILED`] and the reason exports carry the browser's own
+    /// words.
+    #[test]
+    fn the_bc_sample_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().bc_sample = BcSampleProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_bc_sample_state(), BC_SAMPLE_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_bc_sample_reason_ptr,
+                __crcbl_web_gpu_probe_bc_sample_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
     /// `web/engine/gpu-probe.js` — the page's half of this file's state codes,
     /// pulled in whole so the mirror can be checked without a browser.
     ///
@@ -20773,6 +22413,10 @@ mod tests {
         "PROBE_TEXTURE_SAMPLE_SOURCE_SIZE",
         "PROBE_TEXTURE_SAMPLE_CORNERS",
         "PROBE_TEXTURE_SAMPLE_UPLOAD_ROW_TEXELS",
+        "PROBE_BC_SAMPLE_BLOCK_TEXELS",
+        "PROBE_BC_SAMPLE_BLOCK_SIZE",
+        "PROBE_BC_SAMPLE_SOURCE_SIZE",
+        "PROBE_BC_SAMPLE_UPLOAD_ROW_TEXELS",
     ];
 
     /// Every state code this crate publishes, against the
@@ -21013,6 +22657,20 @@ mod tests {
                 ],
             ),
             (
+                "BC_SAMPLE",
+                "BC_SAMPLE",
+                codes![
+                    BC_SAMPLE_UNASKED,
+                    BC_SAMPLE_REQUESTED,
+                    BC_SAMPLE_WAITING,
+                    BC_SAMPLE_PENDING,
+                    BC_SAMPLE_READY,
+                    BC_SAMPLE_UNDECODABLE,
+                    BC_SAMPLE_UNSUPPORTED,
+                    BC_SAMPLE_FAILED
+                ],
+            ),
+            (
                 "COMPUTE",
                 "COMPUTE",
                 codes![
@@ -21108,11 +22766,11 @@ mod tests {
         );
 
         assert_eq!(
-            tables, 24,
+            tables, 25,
             "gpu-probe.js's table count moved; the mirror above has to move with it"
         );
         assert_eq!(
-            codes, 146,
+            codes, 154,
             "gpu-probe.js's code count moved; the mirror above has to move with it"
         );
     }
@@ -21156,7 +22814,7 @@ mod tests {
                 .iter()
                 .filter(|name| mirrored.contains(*name))
                 .count(),
-            141,
+            149,
             "probe.rs's state-code count moved; the mirror above has to move with it"
         );
 
@@ -21335,7 +22993,7 @@ mod tests {
 
         assert_eq!(
             shims.len(),
-            168,
+            176,
             "`shim`'s export count moved; the `# Exports` table has to move with it"
         );
         let documented: BTreeSet<&str> = rows.iter().copied().collect();

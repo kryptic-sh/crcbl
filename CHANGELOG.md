@@ -70,6 +70,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   which is what makes a swapped channel or a dropped alpha fail rather than
   pass.
 
+- **`crcbl_webgpu::probe` gained the BC1 fixture and its shims**, and group
+  **AK** with them — the contrast group for `texture-compression-bc`, the last
+  mapped WebGPU feature whose bit was reported to callers on the strength of a
+  node stub. It uploads an 8×8 `bc1-rgba-unorm` source as four blocks, one per
+  quadrant, and holds each decoded quadrant against its block's endpoint byte
+  for byte. The endpoints are cube corners because that is the only thing the
+  specifications make exact: D3D 11.3 §19.5.2 permits a decode tolerance across
+  every channel of every texel and requires bit accuracy only of BC6H and BC7,
+  its one exactness clause being for values decoding to `0.0` or `1.0` — which
+  are also the only values where bit replication and Khronos Data Format 1.3
+  §18.1's rational agree. A mid-tone endpoint would have been a gate that can
+  fail a conformant GPU. `probe_device_desc` now asks for
+  `Features::TEXTURE_COMPRESSION_BC` optionally, so a device that has it opens
+  with it.
+
 ### Changed
 
 - **`crcbl_webgpu::probe::probe_device_desc` now asks for `DEPTH_CLAMP` as well
