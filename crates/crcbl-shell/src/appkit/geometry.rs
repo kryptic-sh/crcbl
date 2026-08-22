@@ -4,9 +4,8 @@
 //! Everything in here is a **pure function of numbers AppKit handed us**, and
 //! that is why it is a module of its own rather than a scattering of helpers
 //! through [`window`](super::window) and [`monitors`](super::monitors). The
-//! Win32 backend splits [`geometry`](crate::win32::geometry) out for two
-//! reasons and the second is the load-bearing one; both apply here and the
-//! second applies harder:
+//! Win32 backend splits `win32::geometry` out for two reasons and the second is
+//! the load-bearing one; both apply here and the second applies harder:
 //!
 //! 1. A delegate callback runs inside `[NSApp sendEvent:]`, which runs inside
 //!    this crate's own `pump`. Keeping the arithmetic it needs in functions that

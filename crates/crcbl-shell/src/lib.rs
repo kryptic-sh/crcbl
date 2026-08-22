@@ -273,13 +273,6 @@ pub mod headless;
 pub mod monitor;
 pub mod window;
 
-/// The `KeyCode` → keysym table that has no platform in it, shared by the
-/// backends that need one (see the module docs for why it is a separate module
-/// rather than a third copy beside the evdev table).
-///
-/// Compiled wherever a consumer exists — the AppKit and Win32 backends — and,
-/// under `cfg(test)`, on every host so the table's own tests run in `cargo
-/// test` on the machine the engine is developed on.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod keysym;
 
@@ -292,45 +285,12 @@ pub(crate) mod wayland;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
 
-/// The Win32 backend (P5C).
-///
-/// Same terms as the two Linux backends: private, reached only through
-/// [`open`]. The `cfg` is not the same, and deliberately: **the parts of this
-/// backend that are pure arithmetic compile on every host under `cfg(test)`**,
-/// so the aspect-lock algebra, the resize-storm coalescing and the 32-bit
-/// tick-count wrap are exercised by `cargo test` on the Linux machine the
-/// engine is developed on rather than only by the Windows CI runner. Everything
-/// that calls `user32` is `#[cfg(target_os = "windows")]` inside the module,
-/// which is also why there is no `dlopen` here — see `win32::ffi` for that
-/// argument, which is the reverse of the one `src/x11/ffi.rs` makes.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod win32;
 
-/// The AppKit backend (P5C).
-///
-/// Same terms as the other three native backends: private, reached only through
-/// [`open`]. The `cfg` is the Win32 one for the Win32 reason — **the parts of
-/// this backend that are pure arithmetic compile on every host under
-/// `cfg(test)`** — and it earns more here than it did there, because more of
-/// this backend *is* arithmetic: macOS is the only platform whose coordinate
-/// system disagrees with the seam's about which way the Y axis points, and the
-/// flip that reconciles them is exercised by `cargo test` on the Linux machine
-/// this engine is developed on. Everything that calls AppKit is
-/// `#[cfg(target_os = "macos")]` inside the module, which is also why there is
-/// no `dlopen` here — see `appkit::ffi`, which makes the same argument
-/// `src/win32/ffi.rs` does and the reverse of `src/x11/ffi.rs`'s.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) mod appkit;
 
-/// The Web/canvas backend (P5).
-///
-/// Compiled on `wasm32`, where it is the real backend, and under `cfg(test)`,
-/// where its own tests drive the JS→wasm entry points exactly as a browser
-/// would. **Not** in a native build: there is no shim to call it, and compiling
-/// it everywhere exported the shim's `__crcbl_web_*` symbols from every binary
-/// that links the engine. The registry entry stays on every target regardless,
-/// so `CRCBL_SHELL=web` off wasm names the problem instead of hanging — see
-/// [`backend`].
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod web;
 
@@ -353,17 +313,6 @@ pub use wayland::e2e as wayland_test_support;
 #[cfg(all(target_os = "linux", feature = "x11-e2e"))]
 pub use x11::e2e as x11_test_support;
 
-/// Scaffolding for the AppKit window session, `tests/appkit_session.rs`.
-///
-/// Not part of the seam and not for consumers. Behind no feature, unlike the
-/// two above, because the session target is behind none either: `libtest`
-/// always runs a body on a thread it spawns and AppKit is main-thread-only, so
-/// that target owns its `main` and there is no version of it that a feature
-/// flag could turn off.
-///
-/// What it holds is the checks that need a live `NSApplication` **on that
-/// thread** — a distinction P5C has now paid for twice, and which the module's
-/// own docs state as a rule.
 #[cfg(target_os = "macos")]
 pub use appkit::session_support;
 

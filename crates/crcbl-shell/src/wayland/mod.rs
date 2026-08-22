@@ -47,7 +47,7 @@
 //! last one is a real gap and is stated as one: the destination half is here,
 //! the origin half needs a seam request and a drag icon, and an icon is a
 //! surface with a buffer, which is the renderer's. [`ShellCaps`] reflects all of
-//! this exactly — see `WaylandShell::caps`.
+//! this exactly — see [`WaylandShell::caps`].
 //!
 //! # What a real compositor does that `HeadlessShell` does not model
 //!

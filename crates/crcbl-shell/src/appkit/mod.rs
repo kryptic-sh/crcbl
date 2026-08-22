@@ -2,6 +2,18 @@
 //! lifecycle, display modes, size constraints, `NSScreen` and the
 //! `CAMetalLayer`.
 //!
+//! Same terms as the other three native backends: private, reached only through
+//! [`open`](crate::open). The `cfg` is the Win32 one for the Win32 reason —
+//! **the parts of this backend that are pure arithmetic compile on every host
+//! under `cfg(test)`** — and it earns more here than it did there, because more
+//! of this backend *is* arithmetic: macOS is the only platform whose coordinate
+//! system disagrees with the seam's about which way the Y axis points, and the
+//! flip that reconciles them is exercised by `cargo test` on the Linux machine
+//! this engine is developed on. Everything that calls AppKit is
+//! `#[cfg(target_os = "macos")]` inside the module, which is also why there is
+//! no `dlopen` here — see [`ffi`], which makes the same argument
+//! `src/win32/ffi.rs` does and the reverse of `src/x11/ffi.rs`'s.
+//!
 //! `docs/plan/15-windowing.md`'s macOS row, which reads in full: "hand-written
 //! Objective-C runtime FFI (`objc_msgSend`) to AppKit". Every declaration in
 //! [`ffi`] is ours; there is no `objc2`, no `cocoa`, no `core-foundation`, no
@@ -12,7 +24,7 @@
 //!
 //! **P5C M1** was the window lifecycle, **M2** added input and **M3** the
 //! pasteboard and drag and drop. M4 is the end-to-end pass. What is left is
-//! stated here rather than implied, and [`ShellCaps`](crate::ShellCaps) agrees
+//! stated here rather than implied, and [`ShellCaps`] agrees
 //! with it bit for bit:
 //!
 //! | Area | State |
@@ -27,7 +39,7 @@
 //! | `CAMetalLayer` on a layer-hosting `NSView`, as [`SurfaceTarget::AppKit`](crcbl_core::SurfaceTarget::AppKit) | complete — [`window`] |
 //! | Keyboard: `kVK_*` codes, [`KeyCode`](crcbl_core::KeyCode), keysyms, modifiers through `flagsChanged:`, auto-repeat | complete — [`keys`] |
 //! | Text: `interpretKeyEvents:` through a real `NSTextInputClient`, as [`TextCommit`](crate::ShellEvent::TextCommit) | complete — [`TEXT_IME`](crate::ShellCaps::TEXT_IME), see [`view`] and [`caps`](AppKitShell::caps) |
-//! | Pointer: motion, buttons past the fifth, enter and leave through an `NSTrackingArea`, both scroll units | complete — [`pointer`] |
+//! | Pointer: motion, buttons past the fifth, enter and leave through an `NSTrackingArea`, both scroll units | complete — [`mod@pointer`] |
 //! | Relative motion from `NSEvent`'s `deltaX`/`deltaY` | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), **accelerated**; [`caps`](AppKitShell::caps) says exactly what the bit means here |
 //! | [`PointerMode::Locked`](crate::PointerMode) and [`warp_pointer`](crate::Shell::warp_pointer) | complete — [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP) |
 //! | [`PointerMode::Confined`](crate::PointerMode) | **never** — macOS has no confine API at all, and every approximation is a warp fighting the user. [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE) is clear; see [`set_pointer_mode`](crate::Shell::set_pointer_mode) |
@@ -137,8 +149,8 @@
 //! 14. **A position is Y-up and the delta beside it is Y-down, on one event.**
 //!     `locationInWindow` is AppKit's own space and `deltaX`/`deltaY` are
 //!     Quartz's, which already agrees with this seam. So the position is
-//!     reflected and the delta is not — see [`pointer`], which exists to make
-//!     that visible rather than surprising.
+//!     reflected and the delta is not — see [`mod@pointer`], which exists to
+//!     make that visible rather than surprising.
 //! 15. **macOS cannot confine the pointer, and can lock it more simply than
 //!     anyone else.** There is no `ClipCursor` and no `confine_to`;
 //!     [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE) is therefore clear
@@ -243,7 +255,7 @@ use crate::ShellCaps;
 /// # A `double` of seconds, where the other three backends count milliseconds
 ///
 /// [`EventTime`] wants "a duration measured from the same origin as the
-/// [`TimeSource`](crcbl_core::TimeSource) driving
+/// [`TimeSource`](crcbl_core::time::TimeSource) driving
 /// [`FrameClock::update`](crcbl_core::FrameClock::update)". Each platform
 /// arrives at that from somewhere different, and this one is the odd member:
 ///

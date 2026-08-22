@@ -48,8 +48,8 @@
 //! `WM_GETMINMAXINFO` and `WM_SIZING` cannot be: the system is asking a
 //! question mid-drag and will use whatever is in the structure when the
 //! procedure returns. Both are answered from numbers the shell precomputed —
-//! see [`geometry`](super::geometry) — so the procedure does arithmetic and
-//! nothing else. That is what makes the aspect lock
+//! see [`geometry`] — so the procedure does arithmetic and nothing else. That
+//! is what makes the aspect lock
 //! ([`ShellCaps::ASPECT_HINT_HONORED`](crate::ShellCaps::ASPECT_HINT_HONORED))
 //! and the size constraints work *during* a drag rather than after it.
 //!
@@ -84,7 +84,7 @@
 //! pointer is over a window of this thread — so an un-hide that arrives a frame
 //! late is an invisible cursor over our own window for one frame, and cannot
 //! escape onto the desktop the way a clip can. It stays with the shell, where
-//! the count has one owner. See [`pointer::Visibility`](super::pointer::Visibility).
+//! the count has one owner. See [`pointer::Visibility`].
 
 use core::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -161,11 +161,10 @@ pub(super) struct Shape {
 
 /// The paths one `WM_DROPFILES` carried.
 ///
-/// Kept beside the event queue rather than in it, because a
-/// [`RawEvent`] is `Copy` and this is not — see
-/// [`dnd`](super::dnd) for why the reading cannot be deferred to the pump
-/// either. [`RawEvent::FilesDropped`] is the marker that keeps this in order
-/// relative to everything else the procedure saw.
+/// Kept beside the event queue rather than in it, because a [`RawEvent`] is
+/// `Copy` and this is not — see [`dnd`] for why the reading cannot be deferred
+/// to the pump either. [`RawEvent::FilesDropped`] is the marker that keeps this
+/// in order relative to everything else the procedure saw.
 #[derive(Clone, Debug)]
 pub(super) struct FileDrop {
     /// Which window, so a marker claims its own payload.
@@ -207,8 +206,7 @@ pub(super) struct Shared {
     tracked: Cell<isize>,
     /// The window holding the mouse capture, and which buttons are down on it.
     ///
-    /// A mask rather than a count; [`pointer::button_bit`](super::pointer::button_bit)
-    /// says why.
+    /// A mask rather than a count; [`pointer::button_bit`] says why.
     capture: Cell<(isize, u32)>,
     /// The window the cursor is clipped to, or zero.
     ///

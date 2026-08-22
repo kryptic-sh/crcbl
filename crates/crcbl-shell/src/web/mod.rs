@@ -1,5 +1,13 @@
 //! The Web/canvas shell backend (P5).
 //!
+//! Compiled on `wasm32`, where it is the real backend, and under `cfg(test)`,
+//! where its own tests drive the JS→wasm entry points exactly as a browser
+//! would. **Not** in a native build: there is no shim to call it, and compiling
+//! it everywhere exported the shim's `__crcbl_web_*` symbols from every binary
+//! that links the engine. The registry entry stays on every target regardless,
+//! so `CRCBL_SHELL=web` off wasm names the problem instead of hanging — see
+//! [`backend`](crate::backend).
+//!
 //! Implements [`Shell`] for a browser `<canvas>` driven by a hand-rolled JS
 //! shim. The shim calls into wasm through the `extern "C"` entry points in
 //! [`shim`]; each one appends to the queue [`pump`](WebShell::pump) drains.
@@ -607,11 +615,10 @@ pub(crate) mod shim {
     /// [`ShellEvent::Touch`] carries the argument.
     ///
     /// `contact` is the DOM `pointerId`. The browser guarantees exactly what
-    /// [`ContactId`](crcbl_core::input::ContactId) promises — distinct for
-    /// contacts that are down together, constant for the life of a gesture,
-    /// reusable afterwards — so it is passed through rather than renumbered
-    /// into ids of our own, which would be a second identity to keep in step
-    /// with the browser's.
+    /// [`ContactId`] promises — distinct for contacts that are down together,
+    /// constant for the life of a gesture, reusable afterwards — so it is
+    /// passed through rather than renumbered into ids of our own, which would
+    /// be a second identity to keep in step with the browser's.
     ///
     /// `phase` is one of [`TOUCH_BEGAN`], [`TOUCH_MOVED`], [`TOUCH_ENDED`] or
     /// [`TOUCH_CANCELLED`]. Anything else is dropped with a log line rather

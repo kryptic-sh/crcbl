@@ -8,12 +8,12 @@
 //!
 //! # Decision: `#[link]`, not `dlopen` — the same argument `win32::ffi` makes
 //!
-//! [`x11::ffi`](crate::x11::ffi) and [`wayland::ffi`](crate::wayland::ffi) both
-//! load their libraries with `dlopen`, because the registry in
-//! [`backend`](crate::backend) is a fall-through list and an entry has to be
-//! able to fail at *runtime*: a `DT_NEEDED` on `libwayland-client.so.0` kills
-//! the process in `ld.so` before [`open`](crate::open) runs, on any machine that
-//! does not have it — and a machine without libwayland is an ordinary machine.
+//! `x11::ffi` and `wayland::ffi` both load their libraries with `dlopen`,
+//! because the registry in [`backend`](crate::backend) is a fall-through list
+//! and an entry has to be able to fail at *runtime*: a `DT_NEEDED` on
+//! `libwayland-client.so.0` kills the process in `ld.so` before
+//! [`open`](crate::open) runs, on any machine that does not have it — and a
+//! machine without libwayland is an ordinary machine.
 //!
 //! **That premise does not hold here either.** AppKit, Foundation, QuartzCore,
 //! CoreGraphics and `libobjc` are the operating system: a macOS that lacks them
@@ -68,7 +68,7 @@
 //! | `NSFilenamesPboardType`, `com.apple.pasteboard.promised-file-url` | older and promised file drops | deprecated in 10.13 and, for a promise, a file the seam has no way to name a destination directory for. See [`pasteboard`](super::pasteboard) |
 //! | `IOHIDManager`, `IOHIDGetAccelerationWithKey` | genuinely unaccelerated pointer deltas | `NSEvent`'s `deltaX`/`deltaY` carry the system's pointer acceleration and macOS exposes no public way to take it off. Reaching past AppKit into IOKit for it is a slice of its own; [`caps`](super::AppKitShell::caps) states exactly what [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) does and does not mean here |
 //! | any `_windowResize*Cursor` and `busyButClickableCursor` | diagonal-resize and busy cursors | **private selectors.** `NSCursor`'s public set has no diagonal resize and no wait cursor; [`pointer::cursor_selector`](super::pointer::cursor_selector) names each approximation rather than calling a method Apple does not publish |
-//! | `NSAutoreleasePool` as an object | a scope for autoreleased returns | [`objc_autoreleasePoolPush`]/[`objc_autoreleasePoolPop`] are the same thing without a message send, and are the form that works under ARC and non-ARC alike |
+//! | `NSAutoreleasePool` as an object | a scope for autoreleased returns | [`objc_autoreleasePoolPush`](sys::objc_autoreleasePoolPush)/[`objc_autoreleasePoolPop`](sys::objc_autoreleasePoolPop) are the same thing without a message send, and are the form that works under ARC and non-ARC alike |
 //! | `CGDisplayModeGetRefreshRate`'s `CGDisplayModeGetRefreshRateRational` twin | an exact 60000/1001 | it does not exist; the `double` this one returns already expresses 59.94, which is more than Win32's integer hertz can do |
 //! | `NSApplication`'s delegate slot | screen-parameter changes | taking it would displace a host application's own delegate. `NSNotificationCenter` is the polite form and is what [`app`](super::app) uses |
 
@@ -338,9 +338,9 @@ pub mod value {
     ///
     /// The one event type this backend inspects by number rather than by which
     /// responder method AppKit called, and it is there for a defect: **while
-    /// Command is held, AppKit does not deliver `keyUp:` to a view at all.** The
-    /// pump routes such an event to the key window itself; see
-    /// [`AppKitShell::drain_events`](super::AppKitShell).
+    /// Command is held, AppKit does not deliver `keyUp:` to a view at all.**
+    /// The pump routes such an event to the key window itself; see
+    /// [`AppKitShell::drain_events`](crate::appkit::AppKitShell).
     pub const EVENT_TYPE_KEY_UP: NSUInteger = 11;
 
     /// `NSDragOperationCopy` — the only operation this backend ever answers.
@@ -352,7 +352,7 @@ pub mod value {
     /// decide. `NSDragOperationNone` is deliberately **not** declared beside
     /// it: this module is audited by use, and a refusal is expressed by a `NO`
     /// from `performDragOperation:` rather than by an operation mask — see
-    /// [`view`](super::view).
+    /// [`view`](crate::appkit::view).
     pub const DRAG_OPERATION_COPY: NSUInteger = 1;
 }
 
@@ -637,10 +637,11 @@ pub fn sel(name: &CStr) -> Sel {
 /// run loop; this backend does not have that loop, so it pushes its own around
 /// every entry point that talks to AppKit.
 ///
-/// [`objc_autoreleasePoolPush`] rather than an `NSAutoreleasePool` object: it is
-/// the same mechanism with no message send, and it is the form that is legal
-/// under ARC — which matters because a host application that embeds this engine
-/// is compiled with ARC even though this crate is not.
+/// [`objc_autoreleasePoolPush`](sys::objc_autoreleasePoolPush) rather than an
+/// `NSAutoreleasePool` object: it is the same mechanism with no message send,
+/// and it is the form that is legal under ARC — which matters because a host
+/// application that embeds this engine is compiled with ARC even though this
+/// crate is not.
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
 pub struct Pool(*mut c_void);

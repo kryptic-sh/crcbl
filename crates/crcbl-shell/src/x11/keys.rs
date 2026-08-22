@@ -340,8 +340,8 @@ pub enum WmStateAction {
 /// owns the property once the window is managed, and a client that writes it
 /// directly has its write silently reverted on the next state change. The
 /// property is only ours to set before the window is first mapped, which is why
-/// `X11Shell::create_window` does both — the property for the initial state,
-/// this message for every change after.
+/// [`X11Shell::create_window`](super::X11Shell) does both — the property for
+/// the initial state, this message for every change after.
 ///
 /// The fifth word is the *source indication*: `1` means "a normal application",
 /// and `2` means "a pager". Sending `0` is the legacy value and some window

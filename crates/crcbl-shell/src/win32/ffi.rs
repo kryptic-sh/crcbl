@@ -3,13 +3,12 @@
 //!
 //! # Decision: `#[link]`, not `dlopen` — the opposite of the two Linux backends
 //!
-//! [`x11::ffi`](crate::x11::ffi) and [`wayland::ffi`](crate::wayland::ffi) both
-//! load their libraries with `dlopen`, and both state the same reason: the
-//! registry in [`backend`](crate::backend) is a fall-through list, so an entry
-//! has to be able to fail at *runtime*. A `DT_NEEDED` on `libwayland-client.so.0`
-//! kills the process in `ld.so` before [`open`](crate::open) runs, on any
-//! machine that does not have it — and a machine without libwayland is an
-//! ordinary machine.
+//! `x11::ffi` and `wayland::ffi` both load their libraries with `dlopen`, and
+//! both state the same reason: the registry in [`backend`](crate::backend) is a
+//! fall-through list, so an entry has to be able to fail at *runtime*. A
+//! `DT_NEEDED` on `libwayland-client.so.0` kills the process in `ld.so` before
+//! [`open`](crate::open) runs, on any machine that does not have it — and a
+//! machine without libwayland is an ordinary machine.
 //!
 //! **That premise does not hold here, and the asymmetry is deliberate rather
 //! than an oversight.** `user32.dll`, `gdi32.dll`, `shell32.dll` and
@@ -1078,7 +1077,7 @@ pub mod value {
     #[cfg(test)]
     pub const QS_ALL_INPUT: u32 = 0x04FF;
     /// `QS_ALLEVENTS` — `QS_ALLINPUT` **minus `QS_SENDMESSAGE`**, and what
-    /// [`wait`](super::Win32Shell) actually sleeps on.
+    /// [`wait`](crate::win32::Win32Shell) actually sleeps on.
     ///
     /// # The one bit that cannot be drained
     ///
@@ -1160,7 +1159,8 @@ pub mod value {
     /// `MOUSE_VIRTUAL_DESKTOP` — an absolute report normalized over the whole
     /// virtual desktop rather than over the primary monitor.
     pub const MOUSE_VIRTUAL_DESKTOP: u16 = 0x0002;
-    /// The range an absolute [`RawMouse`] coordinate is normalized to.
+    /// The range an absolute [`RawMouse`](super::RawMouse) coordinate is
+    /// normalized to.
     pub const ABSOLUTE_RANGE: i32 = 65_535;
 
     /// `SM_CXSCREEN`.
@@ -1213,8 +1213,9 @@ pub mod value {
     /// `VK_SHIFT`-adjacent virtual keys, left and right told apart.
     ///
     /// The unsided `VK_SHIFT`/`VK_CONTROL`/`VK_MENU` are deliberately not here:
-    /// the AltGr disambiguation in [`keys::modifiers`](super::keys::modifiers)
-    /// depends on seeing *which* Control is down.
+    /// the AltGr disambiguation in
+    /// [`keys::modifiers`](crate::win32::keys::modifiers) depends on seeing
+    /// *which* Control is down.
     pub const VK_L_SHIFT: usize = 0xA0;
     /// See [`VK_L_SHIFT`].
     pub const VK_R_SHIFT: usize = 0xA1;

@@ -22,10 +22,9 @@
 //!
 //! So there is a class, and the events reach the shell the way everything else
 //! in this backend does: recorded into [`Shared`](super::app::Shared) and
-//! translated later. The view carries no instance storage, exactly as
-//! [`app`](super::app)'s delegate does not — it finds its shell through
-//! `[[self window] delegate]`, which is the delegate object that *is* in the
-//! registry.
+//! translated later. The view carries no instance storage, exactly as [`app`]'s
+//! delegate does not — it finds its shell through `[[self window] delegate]`,
+//! which is the delegate object that *is* in the registry.
 //!
 //! # The AppKit shape of the `TranslateMessage` gap, and it is four gaps
 //!
@@ -236,7 +235,7 @@ unsafe fn window_of(view: Id) -> Id {
 ///
 /// **This is the whole of the view-to-shell mapping**, and it is why the view
 /// needs no registry entry of its own: `[window delegate]` is the object
-/// [`app::Delegate`](super::app::Delegate) created and registered, and
+/// [`app::Delegate`] created and registered, and
 /// `release_window` clears it before the window closes — so a callback that
 /// arrives afterwards finds `nil` and records nothing, which is exactly what it
 /// should do.
@@ -943,11 +942,11 @@ fn range_imp(implementation: unsafe extern "C" fn(Id, Sel) -> NSRange) -> Imp {
 
 /// Builds — or returns — the `NSView` subclass.
 ///
-/// Same shape and same reasoning as [`app`](super::app)'s delegate class and
+/// Same shape and same reasoning as [`app`]'s delegate class and
 /// [`window`](super::window)'s window class, including the already-registered
 /// fallback: a null from `objc_allocateClassPair` means the same code is loaded
-/// twice in one process, and the class that is already there is ours by name and
-/// by method table.
+/// twice in one process, and the class that is already there is ours by name
+/// and by method table.
 ///
 /// # Errors
 ///

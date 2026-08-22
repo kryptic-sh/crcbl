@@ -1,9 +1,9 @@
 //! Where AppKit input meets the shell: the translation of what the view
 //! recorded, the pointer modes, the cursor, and the warp.
 //!
-//! The arithmetic is in [`keys`](super::keys) and [`pointer`](super::pointer) and
-//! is tested on any host; this module is what cannot be — every function here
-//! either sends a message or needs the shell's `&mut self`.
+//! The arithmetic is in [`keys`] and [`mod@pointer`] and is tested on any host;
+//! this module is what cannot be — every function here either sends a message
+//! or needs the shell's `&mut self`.
 //!
 //! # Decision: locked is a frozen cursor, and there is nothing to recentre
 //!

@@ -590,14 +590,13 @@ impl Win32Shell {
 
     /// Writes both style words, carrying the extended bits that are *state*.
     ///
-    /// `WS_EX_ACCEPTFILES` is what `DragAcceptFiles` sets, so it is a fact about
-    /// the window rather than a consequence of its display mode — exactly like
-    /// `WS_VISIBLE` in the word next door, which the callers carry across by
-    /// hand. Recomputing the extended style from
-    /// [`geometry::styles`](super::geometry::styles) and writing it back
-    /// without this bit stops a window receiving `WM_DROPFILES` the first time
-    /// it goes borderless, with nothing anywhere reporting that drops stopped
-    /// working.
+    /// `WS_EX_ACCEPTFILES` is what `DragAcceptFiles` sets, so it is a fact
+    /// about the window rather than a consequence of its display mode — exactly
+    /// like `WS_VISIBLE` in the word next door, which the callers carry across
+    /// by hand. Recomputing the extended style from [`geometry::styles`] and
+    /// writing it back without this bit stops a window receiving `WM_DROPFILES`
+    /// the first time it goes borderless, with nothing anywhere reporting that
+    /// drops stopped working.
     fn set_styles(hwnd: Handle, window_style: u32, ex_style: u32) {
         // SAFETY: reading this shell's own window's extended style, only to
         // carry the drop registration across the write below.

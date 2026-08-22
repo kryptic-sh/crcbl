@@ -8,17 +8,16 @@
 //!
 //! # A third numbering, and it resembles neither of the other two
 //!
-//! The two Linux backends share [`linux::keymap`](crate::linux::keymap) because
-//! X11 keycodes really are evdev codes plus eight, and
-//! [`win32::keys`](crate::win32::keys) is a second table because Win32 scan
-//! codes are PS/2 set 1 — which *coincides* with evdev for the letters and
+//! The two Linux backends share `linux::keymap` because X11 keycodes really are
+//! evdev codes plus eight, and `win32::keys` is a second table because Win32
+//! scan codes are PS/2 set 1 — which *coincides* with evdev for the letters and
 //! diverges above `0x53`. **Apple's `kVK_*` numbering coincides with neither at
 //! any point.** `A` is `0x00`, `S` is `0x01`, `D` is `0x02`: the codes are the
 //! positions of the original Apple Extended Keyboard's key matrix, so the
-//! alphabetic block is not even contiguous and the digits run
-//! `1 2 3 4 6 5 = 9 7 - 8 0` in code order. There is nothing to share and
-//! nothing to be tempted by; the risk here is transcription, which is what the
-//! tests below are pointed at.
+//! alphabetic block is not even contiguous and the digits run `1 2 3 4 6 5 = 9
+//! 7 - 8 0` in code order. There is nothing to share and nothing to be tempted
+//! by; the risk here is transcription, which is what the tests below are
+//! pointed at.
 //!
 //! # Four keys the seam names and macOS cannot produce
 //!

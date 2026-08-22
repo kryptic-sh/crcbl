@@ -163,10 +163,9 @@ pub fn warp_source(position: PhysicalPoint, height: f64, scale: f64) -> NSPoint 
 /// process's life with no error anywhere.
 ///
 /// This type is the whole of the fix, and it is the same type
-/// [`win32::pointer::Visibility`](crate::win32::pointer::Visibility) is: it
-/// records what this shell has asked for and answers each request with the calls
-/// actually owed, which is zero whenever the state already matches and never
-/// more than one.
+/// `win32::pointer::Visibility` is: it records what this shell has asked for
+/// and answers each request with the calls actually owed, which is zero
+/// whenever the state already matches and never more than one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Visibility {
     /// Whether this shell currently holds one hide.

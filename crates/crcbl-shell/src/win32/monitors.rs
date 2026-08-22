@@ -243,7 +243,8 @@ const MIN_PLAUSIBLE_REFRESH_MHZ: u32 = 10_000;
 /// `DEVMODEW` cannot: 60000/1001 for a 59.94 Hz mode, which
 /// `EnumDisplaySettingsW` reports as the integer 60. Each path is named through
 /// `DisplayConfigGetDeviceInfo`'s source-name request so it can be matched to
-/// the monitor whose `\\.\DISPLAYn` [`enumerate_monitors`] already keys on.
+/// the monitor whose `\\.\DISPLAYn`
+/// [`enumerate_monitors`](Win32Shell::enumerate_monitors) already keys on.
 /// Empty when the API will not answer at all — a remote session or a driver
 /// that refuses — which is what the caller falls back from.
 fn exact_refreshes() -> Vec<(String, u32)> {

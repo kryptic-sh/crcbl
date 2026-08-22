@@ -56,7 +56,7 @@
 //!    [`pump`](Shell::pump)**, not a round trip, because the answer was already
 //!    known when [`create_window`](Shell::create_window) returned. Nothing is
 //!    delayed to look symmetrical with Wayland; see
-//!    `X11Shell::create_window`.
+//!    [`create_window`](X11Shell::create_window).
 //! 2. **The event clock has an origin nobody can name.** Wayland stamps input
 //!    with `CLOCK_MONOTONIC` milliseconds, so a backend knows the origin a
 //!    priori. X11 stamps with milliseconds **since the server started**, which
@@ -87,8 +87,8 @@
 //!    on Wayland at mixed scales. That is what makes
 //!    [`DisplayMode::Borderless`] with a named monitor implementable, and it is
 //!    why [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) is set here for the
-//!    first time; see `X11Shell::caps` for exactly what that bit is and is
-//!    not claiming.
+//!    first time; see [`caps`](X11Shell::caps) for exactly what that bit is
+//!    and is not claiming.
 //! 6. **Scale is a string in a property, not a protocol.** X11 has no
 //!    per-monitor scale factor and no fractional-scale extension. What every
 //!    toolkit actually reads is `Xft.dpi` out of the `RESOURCE_MANAGER`

@@ -1,6 +1,16 @@
 //! The Win32 backend: window class, message pump, display modes, size
 //! constraints, monitors, per-monitor DPI, and the whole of input.
 //!
+//! Same terms as the two Linux backends: private, reached only through
+//! [`open`](crate::open). The `cfg` is not the same, and deliberately: **the
+//! parts of this backend that are pure arithmetic compile on every host under
+//! `cfg(test)`**, so the aspect-lock algebra, the resize-storm coalescing and
+//! the 32-bit tick-count wrap are exercised by `cargo test` on the Linux
+//! machine the engine is developed on rather than only by the Windows CI
+//! runner. Everything that calls `user32` is `#[cfg(target_os = "windows")]`
+//! inside the module, which is also why there is no `dlopen` here — see [`ffi`]
+//! for that argument, which is the reverse of the one `src/x11/ffi.rs` makes.
+//!
 //! `docs/plan/15-windowing.md`'s Windows row, which reads in full: "hand-written
 //! Win32 FFI (`extern "system"` decls for the surface we use)". Every
 //! declaration in [`ffi`] is ours; there is no `windows-rs`, no `winapi`, no
@@ -24,7 +34,7 @@
 //! | [`SurfaceTarget::Win32`](crcbl_core::SurfaceTarget::Win32) for the HAL | complete |
 //! | Keyboard: scan codes, [`KeyCode`](crcbl_core::KeyCode), keysyms, modifiers, auto-repeat | complete — [`keys`] |
 //! | Text: `WM_CHAR` with surrogate pairs, as [`TextCommit`](crate::ShellEvent::TextCommit) | complete, but **not** [`TEXT_IME`](crate::ShellCaps::TEXT_IME) — see [`caps`](Win32Shell::caps) |
-//! | Pointer: motion, five buttons, enter/leave, capture, both wheel axes | complete — [`pointer`] |
+//! | Pointer: motion, five buttons, enter/leave, capture, both wheel axes | complete — [`mod@pointer`] |
 //! | Raw relative motion, absolute devices included | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), latched on the registration |
 //! | [`PointerMode`](crate::PointerMode) confine and lock, and [`warp_pointer`](crate::Shell::warp_pointer) | complete — [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE), [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP) |
 //! | Cursor shapes and hiding | complete — stock `IDC_*` cursors through `WM_SETCURSOR`, hiding through a balanced `ShowCursor` |
@@ -235,7 +245,7 @@ use crcbl_core::EventTime;
 /// # The easiest of the three native backends, and still not free
 ///
 /// [`EventTime`] wants "a duration measured from the same origin as the
-/// [`TimeSource`](crcbl_core::TimeSource) driving
+/// [`TimeSource`](crcbl_core::time::TimeSource) driving
 /// [`FrameClock::update`](crcbl_core::FrameClock::update)". The three platforms
 /// are three different problems:
 ///

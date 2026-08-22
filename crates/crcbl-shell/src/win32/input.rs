@@ -2,9 +2,9 @@
 //! cursor, and the translation of what the window procedure recorded into
 //! [`ShellEvent`]s.
 //!
-//! The arithmetic is in [`keys`](super::keys) and [`pointer`](super::pointer)
-//! and is tested on any host; this module is what cannot be — every function
-//! here either calls into `user32` or needs the shell's `&mut self`.
+//! The arithmetic is in [`keys`] and [`mod@pointer`] and is tested on any host;
+//! this module is what cannot be — every function here either calls into
+//! `user32` or needs the shell's `&mut self`.
 //!
 //! # Decision: raw input is registered once and never removed
 //!
@@ -53,11 +53,11 @@
 //!
 //! # Decision: the cursor is hidden for the focused window, not for any window
 //!
-//! `ShowCursor`'s count is per **thread**, and every window of a shell is on one
-//! thread — so "hide the cursor" cannot be scoped to a window by the API itself.
-//! The rule this backend applies is that the cursor is hidden while the window
-//! that has the keyboard focus wants it hidden, either by
-//! [`PointerMode::Locked`](crate::PointerMode::Locked) or by an explicit
+//! `ShowCursor`'s count is per **thread**, and every window of a shell is on
+//! one thread — so "hide the cursor" cannot be scoped to a window by the API
+//! itself. The rule this backend applies is that the cursor is hidden while the
+//! window that has the keyboard focus wants it hidden, either by
+//! [`PointerMode::Locked`] or by an explicit
 //! [`set_cursor(None)`](crate::Shell::set_cursor).
 //!
 //! Keying on focus rather than on which window the pointer is inside has one

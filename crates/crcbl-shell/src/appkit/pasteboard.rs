@@ -20,13 +20,12 @@
 //! | Win32 | the window station — `SetClipboardData` takes the memory | `OpenClipboard` refused while another process holds it |
 //! | **AppKit** | **the pasteboard server** — `setData:forType:` copies it out | **nothing this backend can name** |
 //!
-//! So this module has no equivalent of [`x11::selection`](crate::x11::selection),
-//! no deadline, no retry budget and no state carried across a
-//! [`pump`](crate::Shell::pump). `-[NSPasteboard setData:forType:]` copies the
-//! bytes to `pbs`, the pasteboard server, and the shell keeps nothing. It is
-//! Win32's shape **without Win32's hazard**: there is no exclusive open to be
-//! refused, because a pasteboard is not locked — it is versioned, by
-//! [`change_count`](system::change_count).
+//! So this module has no equivalent of `x11::selection`, no deadline, no retry
+//! budget and no state carried across a [`pump`](crate::Shell::pump).
+//! `-[NSPasteboard setData:forType:]` copies the bytes to `pbs`, the pasteboard
+//! server, and the shell keeps nothing. It is Win32's shape **without Win32's
+//! hazard**: there is no exclusive open to be refused, because a pasteboard is
+//! not locked — it is versioned, by [`change_count`].
 //!
 //! # Decision: `owner:nil`, so nothing is provided lazily
 //!
@@ -77,12 +76,12 @@
 //!
 //! `win32::dnd` is a separate module because there a drop is a *shell object*
 //! delivered as a window message and has nothing to do with the window-station
-//! clipboard. Here they are one mechanism: `-[NSDraggingInfo draggingPasteboard]`
-//! answers an `NSPasteboard`, read with the same `dataForType:` and
-//! `pasteboardItems` calls as the general one. That is the "one implementation,
-//! two triggers" `docs/plan/15-windowing.md` states for Wayland and X11,
-//! arriving on a third platform — so [`file_urls`](system::file_urls) serves a
-//! drop and [`get`](system::get) serves a paste, from one place.
+//! clipboard. Here they are one mechanism: `-[NSDraggingInfo
+//! draggingPasteboard]` answers an `NSPasteboard`, read with the same
+//! `dataForType:` and `pasteboardItems` calls as the general one. That is the
+//! "one implementation, two triggers" `docs/plan/15-windowing.md` states for
+//! Wayland and X11, arriving on a third platform — so [`file_urls`] serves a
+//! drop and [`get`] serves a paste, from one place.
 //!
 //! # What a drop is read as, and what is deliberately not
 //!

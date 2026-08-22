@@ -62,8 +62,7 @@ pub(super) enum Wake {
 /// The windowed style and placement a borderless window will be restored to.
 ///
 /// Captured on the way into [`DisplayMode::Borderless`] and applied verbatim on
-/// the way out; see [`window`](super::window) for why a placement rather than a
-/// rectangle.
+/// the way out; see [`window`] for why a placement rather than a rectangle.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Saved {
     /// `GWL_STYLE` as it was.
@@ -392,9 +391,8 @@ impl Win32Shell {
     /// The clipboard's content in `mime`, read now.
     ///
     /// The whole of the read, and it is synchronous because Win32's clipboard
-    /// is content rather than an owner to negotiate with — see
-    /// [`clipboard`](super::clipboard). The three outcomes are the three
-    /// [`ClipboardContent`] means:
+    /// is content rather than an owner to negotiate with — see [`clipboard`].
+    /// The three outcomes are the three [`ClipboardContent`] means:
     ///
     /// * **The format is not there** — [`Empty`](ClipboardContent::Empty),
     ///   which the seam defines as merging "holds nothing" with "holds nothing
@@ -545,7 +543,7 @@ impl Win32Shell {
     /// answer.** The third CI run reported `0x80008` — `QS_POSTMESSAGE` in both
     /// halves of `GetQueueStatus` — on a queue drained microseconds earlier. So
     /// the failure was instrumented rather than guessed at a third time:
-    /// [`peek_pending`](Self::peek_pending) was added to print the `MSG` itself
+    /// `peek_pending` was added to print the `MSG` itself
     /// beside the `QS_` word, on the reasoning that a message id is a number
     /// that can be looked up.
     ///
@@ -572,12 +570,11 @@ impl Win32Shell {
     /// exactly `QS_ALLINPUT` without `QS_SENDMESSAGE` — the one bit that cannot
     /// be cleared and therefore must not be waited on. Sent messages are still
     /// dispatched, by the `PeekMessageW` in
-    /// [`drain_messages`](Self::drain_messages) on the next pump; what changes is
-    /// that one arriving *during* a sleep waits out the timeout instead of
+    /// [`drain_messages`](Self::drain_messages) on the next pump; what changes
+    /// is that one arriving *during* a sleep waits out the timeout instead of
     /// cutting it short. [`QS_ALL_EVENTS`](value::QS_ALL_EVENTS) states that
-    /// trade in full, and [`queue_status`](Self::queue_status) keeps asking for
-    /// `QS_ALLINPUT`, because a diagnosis wants every bit including the one the
-    /// wait ignores.
+    /// trade in full, and `queue_status` keeps asking for `QS_ALLINPUT`,
+    /// because a diagnosis wants every bit including the one the wait ignores.
     ///
     /// **Nobody has run this on Windows yet.** The three previous rounds each
     /// looked like a fix too; what is different is that this one is a
@@ -907,7 +904,7 @@ impl Shell for Win32Shell {
     ///   `GetDpiForWindow` reports.
     /// * [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) — `WM_SIZING`,
     ///   named by `docs/plan/15-windowing.md` as this platform's form of it,
-    ///   and implemented in [`geometry`](super::geometry).
+    ///   and implemented in [`geometry`].
     /// * [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) and
     ///   [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) — `ClipCursor` over the
     ///   client rectangle, plus a hidden cursor and a recentre for the second.
@@ -927,7 +924,7 @@ impl Shell for Win32Shell {
     ///   else, so an engine-to-engine copy is lossless while Notepad still gets
     ///   the text. A constant rather than a latch: the calls are `user32`'s and
     ///   are present or the process did not start. See
-    ///   [`clipboard`](super::clipboard).
+    ///   [`clipboard`].
     /// * [`DRAG_DROP`](ShellCaps::DRAG_DROP) — `DragAcceptFiles` plus
     ///   `WM_DROPFILES`, honouring
     ///   [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops). The bit
@@ -1186,9 +1183,9 @@ impl Shell for Win32Shell {
     /// Asks for resize limits and an aspect lock.
     ///
     /// Applied through the window procedure, which answers `WM_GETMINMAXINFO`
-    /// and `WM_SIZING` from numbers this call precomputes — see
-    /// [`geometry`](super::geometry). Unlike X11's `WM_NORMAL_HINTS`, there is
-    /// nobody who might not read them: the enforcement is in this process.
+    /// and `WM_SIZING` from numbers this call precomputes — see [`geometry`].
+    /// Unlike X11's `WM_NORMAL_HINTS`, there is nobody who might not read them:
+    /// the enforcement is in this process.
     ///
     /// Nothing is resized here. A constraint bounds what the *user* may drag
     /// to; a window that is already outside it stays there until it is next
@@ -1320,11 +1317,11 @@ impl Shell for Win32Shell {
     ///   is unaffected by either the clip or the recentre.
     ///
     /// Unlike X11 there is no grab to be refused: `ClipCursor` is not a request
-    /// to another client, so this cannot fail for a reason outside this process.
-    /// It *can* stop being in effect, and does — see
-    /// [`input`](super::input) and the window procedure, which release the clip
-    /// the instant the window loses focus and re-establish it when focus
-    /// returns, when the window moves and when it is resized.
+    /// to another client, so this cannot fail for a reason outside this
+    /// process. It *can* stop being in effect, and does — see [`input`] and the
+    /// window procedure, which release the clip the instant the window loses
+    /// focus and re-establish it when focus returns, when the window moves and
+    /// when it is resized.
     ///
     /// # Errors
     ///
@@ -1382,15 +1379,15 @@ impl Shell for Win32Shell {
     /// system asks on every pointer movement and applies the window class's
     /// cursor if nothing answers, so a `SetCursor` called from here would be
     /// overwritten before the next frame. The loaded `HCURSOR` is therefore
-    /// recorded for the window procedure — see [`proc`](super::proc) — and takes
-    /// effect on the next movement, which is the first moment anything could
-    /// have been drawn anyway.
+    /// recorded for the window procedure — see [`proc`] — and takes effect on
+    /// the next movement, which is the first moment anything could have been
+    /// drawn anyway.
     ///
     /// *Hiding* is `ShowCursor`, whose per-thread reference count is the classic
     /// bug in this API and is kept balanced by
     /// [`pointer::Visibility`](super::pointer::Visibility) rather than by
     /// counting calls by hand. It applies while the **focused** window wants it
-    /// hidden; [`input`](super::input) states that rule and its one visible
+    /// hidden; [`input`] states that rule and its one visible
     /// consequence.
     ///
     /// Unlike the X11 backend, a named shape really is applied here: Windows
@@ -1462,8 +1459,7 @@ impl Shell for Win32Shell {
     /// Every offer is written under its own format — `CF_UNICODETEXT` for text
     /// and a registered format named after the mime for everything else — so a
     /// `[text, ron]` pair reaches Notepad *and* round-trips through another
-    /// Crucible losslessly. The reader picks; see
-    /// [`clipboard`](super::clipboard).
+    /// Crucible losslessly. The reader picks; see [`clipboard`].
     ///
     /// # "Release" means "empty", because that is what Win32 has
     ///
@@ -1490,8 +1486,8 @@ impl Shell for Win32Shell {
     ///
     /// [`ShellError::InvalidWindow`] for a stale handle, or
     /// [`ShellError::Backend`] if the clipboard could not be opened within
-    /// [`clipboard::OPEN_BUDGET`](super::clipboard::OPEN_BUDGET) — another
-    /// process is holding it — or if the system refused every format.
+    /// [`clipboard::OPEN_BUDGET`] — another process is holding it — or if the
+    /// system refused every format.
     fn clipboard_offer(
         &mut self,
         window: WindowId,
@@ -1569,7 +1565,7 @@ impl Shell for Win32Shell {
     ///   [`drop_clipboard_answers`](Self::drop_clipboard_answers).
     /// * **Within a bounded time** (also 4): the only wait is
     ///   `OpenClipboard` being refused by a process that has it open, and that
-    ///   is retried for [`clipboard::OPEN_BUDGET`](super::clipboard::OPEN_BUDGET)
+    ///   is retried for [`clipboard::OPEN_BUDGET`]
     ///   and then answered [`Unavailable`](ClipboardContent::Unavailable). There
     ///   is no transfer to stall: `GetClipboardData` hands over memory rather
     ///   than starting a conversation with another process, so this backend has
@@ -1627,9 +1623,8 @@ impl Drop for Win32Shell {
     /// have to run while this `Rc` is still alive, which is exactly what doing
     /// it here — before the field is dropped — guarantees.
     ///
-    /// The window class is deliberately not unregistered; see
-    /// [`window`](super::window). Neither is the raw-input registration; see
-    /// [`input`](super::input).
+    /// The window class is deliberately not unregistered; see [`window`].
+    /// Neither is the raw-input registration; see [`input`].
     ///
     /// # Two pieces of desktop state have to be handed back
     ///

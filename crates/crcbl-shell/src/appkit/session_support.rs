@@ -1,12 +1,18 @@
-//! Checks that need a live `NSApplication` **on the process's main thread**,
-//! for `tests/appkit_session.rs` to run.
+//! Scaffolding for the AppKit window session, `tests/appkit_session.rs`.
+//!
+//! What it holds is the checks that need a live `NSApplication` **on the
+//! process's main thread** — a distinction P5C has now paid for twice, and one
+//! this module states as a rule.
 //!
 //! Not part of the seam and not for consumers, on the same terms as
-//! [`x11_test_support`](crate::x11_test_support) and
-//! [`wayland_test_support`](crate::wayland_test_support): those exist because
-//! on Linux the window manager, the input devices and the clipboard owner are
-//! other *programs*. This one exists because of a **finding**, and the finding
-//! is worth stating before the functions are read.
+//! `x11_test_support` and `wayland_test_support`: those exist because on Linux
+//! the window manager, the input devices and the clipboard owner are other
+//! *programs*. This one exists because of a **finding**, and the finding is
+//! worth stating before the functions are read. It is behind no feature, unlike
+//! those two, because the session target is behind none either: `libtest`
+//! always runs a body on a thread it spawns and AppKit is main-thread-only, so
+//! that target owns its `main` and there is no version of it that a feature
+//! flag could turn off.
 //!
 //! # On macOS a test's thread and app state are part of its preconditions
 //!
@@ -17,26 +23,25 @@
 //! * **M1** found that a `#[test]` can never drive a window, because AppKit
 //!   raises off the main thread. That is what made `tests/appkit_session.rs`
 //!   exist at all.
-//! * **M2** shipped a green `#[test]` asserting every
-//!   [`CursorIcon`](crate::CursorIcon)'s `NSCursor` selector exists, and the
-//!   macOS runner failed it with `+[NSCursor "arrowCursor"] answered nil`. The
-//!   selector table was right; the environment was not one in which an AppKit
-//!   *object* can be created.
+//! * **M2** shipped a green `#[test]` asserting every [`CursorIcon`]'s
+//!   `NSCursor` selector exists, and the macOS runner failed it with
+//!   `+[NSCursor "arrowCursor"] answered nil`. The selector table was right;
+//!   the environment was not one in which an AppKit *object* can be created.
 //!
 //! So the rule, with two instances behind it: **the Objective-C runtime is
 //! thread-safe and needs no application — an AppKit object needs both.**
 //! Building a class, registering a selector and dispatching a message are all
-//! fine in a `#[test]`, which is why [`view`](super::view)'s and
-//! [`shell`](super::shell)'s runtime suites stay where they are. Asking AppKit
-//! for a cursor, a pasteboard or a view is not, and belongs here.
+//! fine in a `#[test]`, which is why `view`'s and `shell`'s runtime suites stay
+//! where they are. Asking AppKit for a cursor, a pasteboard or a view is not,
+//! and belongs here.
 //!
 //! # Everything here answers `Result<(), String>`
 //!
 //! Rather than asserting: the caller is a `harness = false` target whose
 //! failures have to name the step they reached, and an error carrying the
-//! selector or the value that disagreed is what made the M2 failure
-//! diagnosable at a glance. It is the same reason [`Wake`](super::shell) is a
-//! named value rather than a duration.
+//! selector or the value that disagreed is what made the M2 failure diagnosable
+//! at a glance. It is the same reason `shell::Wake` is a named value rather
+//! than a duration.
 
 use core::ffi::{CStr, c_char};
 
@@ -61,10 +66,10 @@ unsafe extern "C" {
 /// Every cursor shape this backend names exists in this AppKit, and answers a
 /// real object.
 ///
-/// [`cursor_selector`](super::pointer::cursor_selector) is a table of selectors
-/// written on a host that has no `NSCursor`; this is the other half. A shape
-/// naming a method Apple removed — or one the table spelled wrong — is
-/// otherwise a `nil` cursor and a `set` that silently does nothing.
+/// `pointer::cursor_selector` is a table of selectors written on a host that
+/// has no `NSCursor`; this is the other half. A shape naming a method Apple
+/// removed — or one the table spelled wrong — is otherwise a `nil` cursor and a
+/// `set` that silently does nothing.
 ///
 /// Moved out of a `#[test]` after the M2 runner failed it; see the
 /// [module docs](self).
@@ -426,14 +431,14 @@ pub fn activation(title: &str) -> Result<Activation, String> {
 ///
 /// # Three of the five switches become mechanisms here
 ///
-/// [`view`](super::view) lists five things that have to be switched on before a
-/// real event exists, and says they are structural claims rather than observed
-/// behaviour. Three of them have a readback on a **live** window and are in this
-/// struct: [`accepts_mouse_moved`](Self::accepts_mouse_moved),
+/// `view` lists five things that have to be switched on before a real event
+/// exists, and says they are structural claims rather than observed behaviour.
+/// Three of them have a readback on a **live** window and are in this struct:
+/// [`accepts_mouse_moved`](Self::accepts_mouse_moved),
 /// [`first_responder`](Self::first_responder) — which has to be `CrcblView` and
-/// not the window — and [`dragged_types`](Self::dragged_types). Reading them off
-/// the window a shell actually created is what turns "we called the setter" into
-/// "the window is in that state".
+/// not the window — and [`dragged_types`](Self::dragged_types). Reading them
+/// off the window a shell actually created is what turns "we called the setter"
+/// into "the window is in that state".
 ///
 /// # None of it needs the keyboard, and that is the finding this shape exists for
 ///

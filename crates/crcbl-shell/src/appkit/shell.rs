@@ -48,8 +48,8 @@ pub(super) enum Wake {
 /// The windowed style mask and frame a borderless window will be restored to.
 ///
 /// Captured on the way into [`DisplayMode::Borderless`] and applied verbatim on
-/// the way out; see [`window`](super::window) for why there is no
-/// `WINDOWPLACEMENT` equivalent to save.
+/// the way out; see [`window`] for why there is no `WINDOWPLACEMENT` equivalent
+/// to save.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Saved {
     /// `styleMask` as it was.
@@ -65,8 +65,7 @@ pub(super) struct AppWindow {
     pub window: Id,
     /// The content view, owned by the window.
     pub view: Id,
-    /// The `CAMetalLayer`, which is what
-    /// [`SurfaceTarget::AppKit`](crcbl_core::SurfaceTarget::AppKit) carries.
+    /// The `CAMetalLayer`, which is what [`SurfaceTarget::AppKit`] carries.
     /// Retained by this shell as well as by the view.
     pub layer: Id,
     /// The same pointer as the integer the raw queue matches on.
@@ -139,7 +138,7 @@ pub struct AppKitShell {
     /// process.
     app: Id,
     /// Whether this process was allowed to become a regular, focusable
-    /// application. See [`app::Bootstrap`](super::app::Bootstrap).
+    /// application. See [`app::Bootstrap`].
     policy_accepted: bool,
     /// What the delegate callbacks write into.
     ///
@@ -149,8 +148,8 @@ pub struct AppKitShell {
     shared: Rc<Shared>,
     delegate: Delegate,
     windows: Pool<AppWindow>,
-    /// The screens in AppKit's own space, for placement. See
-    /// [`monitors`](super::monitors) for why both forms are kept.
+    /// The screens in AppKit's own space, for placement. See [`monitors`] for
+    /// why both forms are kept.
     pub(super) screens: Vec<Screen>,
     monitors: Vec<MonitorInfo>,
     /// `CGDirectDisplayID` → the [`MonitorId`] it was given, so an id is never
@@ -162,8 +161,7 @@ pub struct AppKitShell {
     /// The presentation options last written to `NSApplication`, so that the
     /// process-wide setting is touched only when it changes.
     presentation: usize,
-    /// Puts `-[NSEvent timestamp]` on the engine's clock. See
-    /// [`TimeBase`](super::TimeBase).
+    /// Puts `-[NSEvent timestamp]` on the engine's clock. See [`TimeBase`].
     pub(super) time: TimeBase,
     /// The `+[NSCursor hide]` count this shell holds, kept balanced.
     pub(super) visibility: Visibility,
@@ -176,8 +174,8 @@ pub struct AppKitShell {
     /// Whether this shell currently has the mouse disconnected from the cursor.
     ///
     /// Desktop-wide state, so it is tracked and handed back exactly as the
-    /// presentation options are — see [`input`](super::input), which argues why
-    /// losing focus releases it.
+    /// presentation options are — see [`input`], which argues why losing focus
+    /// releases it.
     pub(super) pointer_frozen: bool,
     caps: ShellCaps,
 }
@@ -204,11 +202,11 @@ impl AppKitShell {
     /// # Errors
     ///
     /// [`ShellError::Backend`] if this is not the process's main thread — see
-    /// [`app`](super::app), which is where that rule is argued and where the
-    /// consequence for the test suite is written down — or
-    /// [`ShellError::Connect`] if `NSApplication` is not in this image or its
-    /// singleton could not be created, which is what a process with no
-    /// WindowServer session looks like.
+    /// [`app`], which is where that rule is argued and where the consequence
+    /// for the test suite is written down — or [`ShellError::Connect`] if
+    /// `NSApplication` is not in this image or its singleton could not be
+    /// created, which is what a process with no WindowServer session looks
+    /// like.
     pub fn open() -> Result<Self, ShellError> {
         app::require_main_thread()?;
         let _pool = AutoreleasePool::push();
@@ -314,7 +312,7 @@ impl AppKitShell {
     ///
     /// The whole of the read, and it is synchronous because a pasteboard is
     /// *content the server holds* rather than an owner to negotiate with — see
-    /// [`pasteboard`](super::pasteboard). The three outcomes are the three
+    /// [`pasteboard`]. The three outcomes are the three
     /// [`ClipboardContent`] means:
     ///
     /// * **AppKit could not be reached at all** — no `NSPasteboard` class, no
@@ -810,7 +808,7 @@ impl Shell for AppKitShell {
     /// * [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) — one global
     ///   coordinate space, `setFrame:` moves a window in it, and a borderless
     ///   window is placed on a **named** screen by writing that screen's own
-    ///   frame. See [`monitors`](super::monitors) for why the space being
+    ///   frame. See [`monitors`] for why the space being
     ///   *points* rather than pixels makes this bit more honest here than the
     ///   pixel rectangles in [`MonitorInfo::bounds`] would suggest.
     /// * [`SERVER_DECORATIONS`](ShellCaps::SERVER_DECORATIONS) — a windowed
@@ -824,7 +822,7 @@ impl Shell for AppKitShell {
     ///   `CGAssociateMouseAndMouseCursorPosition(false)` plus `+[NSCursor hide]`.
     ///   The cursor stops dead and the deltas keep arriving, so this is the one
     ///   platform where the mode needs no clip and no recentring at all; see
-    ///   [`input`](super::input).
+    ///   [`input`].
     /// * [`POINTER_WARP`](ShellCaps::POINTER_WARP) —
     ///   `CGWarpMouseCursorPosition`, across the two reflections
     ///   [`warp_pointer`](Shell::warp_pointer) describes.
@@ -861,7 +859,7 @@ impl Shell for AppKitShell {
     ///   are handed to the pasteboard server outright rather than promised, so
     ///   this backend keeps nothing and needs no deadline; the whole argument,
     ///   including why `pasteboard:provideDataForType:` is structurally
-    ///   unavailable here, is in [`pasteboard`](super::pasteboard).
+    ///   unavailable here, is in [`pasteboard`].
     /// * [`DRAG_DROP`](ShellCaps::DRAG_DROP) — `registerForDraggedTypes:` and
     ///   the `NSDraggingDestination` methods on the content view, honouring
     ///   [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops). The bit
@@ -1271,7 +1269,7 @@ impl Shell for AppKitShell {
     ///
     /// The freeze is **desktop-wide**, so it follows the keyboard focus rather
     /// than the request: a background window that kept it would take the cursor
-    /// away from every other application. See [`input`](super::input).
+    /// away from every other application. See [`input`].
     ///
     /// # Errors
     ///
@@ -1396,9 +1394,9 @@ impl Shell for AppKitShell {
 
     /// Puts input timestamps on the engine's clock.
     ///
-    /// See [`TimeBase`](super::TimeBase), which is where the whole of this
-    /// platform's rebasing lives and why it is a `double` of seconds rather than
-    /// a millisecond counter.
+    /// See [`TimeBase`], which is where the whole of this platform's rebasing
+    /// lives and why it is a `double` of seconds rather than a millisecond
+    /// counter.
     fn align_event_clock(&mut self, elapsed: Duration) {
         self.time.align_at(input::now_seconds(), elapsed);
     }
@@ -1426,7 +1424,7 @@ impl Shell for AppKitShell {
     /// [`public.utf8-plain-text`](super::pasteboard::UTF8_PLAIN_TEXT) for text
     /// and the mime string itself for everything else — so a `[text, ron]` pair
     /// reaches TextEdit *and* round-trips through another Crucible losslessly.
-    /// The reader picks; see [`pasteboard`](super::pasteboard).
+    /// The reader picks; see [`pasteboard`].
     ///
     /// The claim and the declaration are one call, `declareTypes:owner:`, with
     /// **`owner:nil`**: nothing here is provided lazily, and that module argues

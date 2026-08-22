@@ -1,5 +1,9 @@
 //! The one `KeyCode` → keysym mapping that has no platform in it.
 //!
+//! Compiled wherever a consumer exists — the AppKit and Win32 backends — and,
+//! under `cfg(test)`, on every host so the table's own tests run in `cargo
+//! test` on the machine the engine is developed on.
+//!
 //! Most of a backend's keysym work is layout-shaped and stays in the backend:
 //! which scancode a physical key has, whether a character key answers for a
 //! layout's symbol, whether AltGr is `ISO_Level3_Shift`. The table here is the

@@ -27,11 +27,11 @@
 //!
 //! # This is a different table from evdev, and the resemblance is the trap
 //!
-//! The two Linux backends share [`linux::keymap`](crate::linux::keymap), because
-//! X11 keycodes really are evdev codes plus eight. **Win32 scan codes are PS/2
-//! set 1**, and the tempting observation is that the main block *coincides*:
-//! evdev's numbering was defined from set 1, so `KEY_A` is 30 and set 1's A is
-//! `0x1E`, which is the same number.
+//! The two Linux backends share `linux::keymap`, because X11 keycodes really
+//! are evdev codes plus eight. **Win32 scan codes are PS/2 set 1**, and the
+//! tempting observation is that the main block *coincides*: evdev's numbering
+//! was defined from set 1, so `KEY_A` is 30 and set 1's A is `0x1E`, which is
+//! the same number.
 //!
 //! That coincidence is exactly what makes reusing the table a trap, because it
 //! stops at `0x53`. Above it the two diverge completely — evdev continues flat

@@ -948,8 +948,7 @@ unsafe fn presentation_options() -> Option<usize> {
 /// stops being first responder, which was measured on a runner — `true` before
 /// the call and `false` one statement after, on both legs of a mode round trip.
 /// A game that pressed F11 therefore went permanently deaf, and it is the exact
-/// failure this call is on [`view`](super::view)'s list of five switches to
-/// prevent.
+/// failure this call is on [`view`]'s list of five switches to prevent.
 ///
 /// # Safety
 ///

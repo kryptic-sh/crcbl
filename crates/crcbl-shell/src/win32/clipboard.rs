@@ -47,12 +47,10 @@
 //! Everything that is not text goes under a **registered** format, which is a
 //! format named by an arbitrary string: `RegisterClipboardFormatW` interns the
 //! name in the window station and answers the same id in every process that
-//! asks for it. That is exactly a mime type, so
-//! [`MimeType::CrcblRon`](crate::MimeType::CrcblRon) is published under
-//! `application/x-crcbl+ron` and read back losslessly, while
-//! [`MimeType::TextUtf8`](crate::MimeType::TextUtf8) reaches Notepad. Offering
-//! both is the caller's job and the reader picks, which is what
-//! `docs/plan/15-windowing.md` specifies.
+//! asks for it. That is exactly a mime type, so [`MimeType::CrcblRon`] is
+//! published under `application/x-crcbl+ron` and read back losslessly, while
+//! [`MimeType::TextUtf8`] reaches Notepad. Offering both is the caller's job
+//! and the reader picks, which is what `docs/plan/15-windowing.md` specifies.
 //!
 //! # Decision: a payload is NUL-terminated and read back NUL-trimmed
 //!
