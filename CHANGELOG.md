@@ -57,6 +57,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A `windowed-e2e` feature on `crcbl`**, and `tests/run-windowed-e2e.sh`
+  behind it: the first suite in this workspace to create a surface that is not
+  `SurfaceTarget::Offscreen`. On `crcbl-vk` a null `VkSurfaceKHR` is the
+  discriminator the backend branches on, so the offscreen arms of
+  `acquire_next_frame` and `present` return before `vkAcquireNextImageKHR` and
+  `vkQueuePresentKHR` are reached — the acquire semaphores, the per-slot acquire
+  fence, the `oldSwapchain` handoff and the extent clamp against a real
+  `VkSurfaceCapabilitiesKHR` were checked by nothing. Consumers gain a feature
+  they can turn on; the suite itself is `#[ignore]`d and needs an X server.
+
 - **`PhysicsWorld::sweep_sphere_excluding(&Segment, radius, Option<ColliderId>)`**
   is the sweep with one collider held out of the candidate set, and
   `sweep_sphere` is now its `None` case. The exclusion is by `ColliderId`, so it

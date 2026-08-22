@@ -250,6 +250,33 @@ sprite-e2e = []
 # scene for the HDR target beside the swapchain image.
 mesh-e2e = []
 
+# `tests/windowed_e2e.rs` — the **windowed** swapchain, on a real X server and a
+# real Vulkan WSI, driven by `tests/run-windowed-e2e.sh`. Gated and `#[ignore]`d
+# for exactly the reason `render-e2e` above is.
+#
+# The gate it closes is that every GPU suite in this workspace creates a
+# `SurfaceTarget::Offscreen` surface, and on `crcbl-vk` a null `VkSurfaceKHR` is
+# the discriminator the whole backend branches on: the offscreen arms of
+# `acquire_next_frame` and `present` return before `vkAcquireNextImageKHR` and
+# `vkQueuePresentKHR` are ever called. So the acquire semaphores, the per-slot
+# acquire fence, `VkPresentIdKHR`, the suboptimal flag, the `oldSwapchain`
+# handoff and the extent clamp against *real* `VkSurfaceCapabilitiesKHR` were
+# reached by no test at all — `tests/hal_seam_e2e.rs` says so in as many words.
+#
+# A seventh feature rather than more of `hal-seam-e2e` because the two cannot
+# run on the same machines: that suite is the whole backend matrix on any GPU,
+# this one needs an X server and is Vulkan-only by construction. It is also the
+# only test target in the workspace that needs *both* halves of the join, which
+# is why it is here — `crcbl-vk` and `crcbl-shell` deliberately do not depend on
+# each other.
+#
+# **The forward is what makes the resize reachable.** `crcbl-shell`'s `Peer` test
+# client is `#[cfg(all(target_os = "linux", feature = "x11-e2e"))]`, and driving
+# a resize from outside is the whole of the `oldSwapchain` test; plain window
+# creation and `surface_target` need no feature. Off Linux the forwarded feature
+# selects nothing, exactly as it does in `crcbl-shell` itself.
+windowed-e2e = ["crcbl-shell/x11-e2e"]
+
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
 # `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,

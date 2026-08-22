@@ -5325,6 +5325,49 @@ is wasted work if it does. Nothing here is blocked either way.
 `forward.rs` and `engine.rs` have no such expiry and no one has looked for their
 seams; that is a gap in this entry, not a judgement that they are fine.
 
+## What the windowed swapchain e2e still does not reach (2026-08-22)
+
+`crates/crcbl/tests/windowed_e2e.rs` closes the gap `hal_seam_e2e.rs` admitted
+in its own doc — that the windowed path was "covered only by each backend's own
+unit tests over a fabricated `SurfaceCaps`". It puts a real `crcbl-vk` swapchain
+on a real X11 window and asserts at the seam: the surface reports a
+`current_extent` where the offscreen ring reports `None`, the acquired frame
+carries both semaphores where the offscreen arm returns neither, the extent is
+clamped rather than echoed, a run longer than the ring rotates through its
+images with a clean validation report, and a resize from outside forces a
+reconfigure at the new size.
+
+The clamp assertion is the one that could only be made here, and the claim under
+it was measured rather than assumed: with the clamp sabotaged the layer printed
+`currentExtent = (640, 480), minImageExtent = (640, 480), maxImageExtent = (640, 480)`
+— the single legal point X11 reports, confirmed by `vulkaninfo` on the same
+display.
+
+Four things it does **not** reach:
+
+- **`VkPresentIdKHR` is still unreached, on this hardware and on CI's.** The
+  fixture wires the chain — a `present_id` on every present and a
+  `wait_until_presented` behind it — but llvmpipe under Xvfb offers no
+  `VK_KHR_present_wait`, so the device never gets `Features::PRESENT_FEEDBACK`
+  and `crcbl-vk`'s `present` skips the `push_next`. The suite prints
+  `present feedback unavailable, so presents go unnumbered` on every run, so the
+  gap is visible rather than silent. Closing it needs a driver that advertises
+  the extension, and none is reachable from CI.
+- **`pending_suboptimal` is not asserted.** Nothing in these runs produces
+  `VK_SUBOPTIMAL_KHR`: the resize test reconfigures at the shell's new size
+  immediately, so no acquire lands on a surface that has moved. Provoking it
+  means presenting to a swapchain whose surface has already resized and racing
+  the server, which was judged not worth a flaky assertion.
+- **`SurfaceError::OutOfDate` recovery is not exercised.** `Windowed::acquire`
+  panics naming the error rather than reconfiguring and retrying, deliberately:
+  every acquire in the file is made where the fixture has already established
+  that window and swapchain agree, so an `OutOfDate` there is a finding, not a
+  condition to handle.
+- **The per-slot acquire fence is observed only through the validation layer.**
+  Nothing at the seam says "the fence was waited on". The 32-frame run is what
+  makes the slot reuse happen at all — it is dead code on any run shorter than
+  the image count — and the clean report is what would catch it going wrong.
+
 ## What the windowed-sample gate does not reach (2026-08-22)
 
 `tools/run-samples-windowed.sh` closes the "no sample has ever been run in a

@@ -723,6 +723,67 @@ jobs:
       - name: Run every sample in a window on Xvfb
         run: tools/run-samples-windowed.sh
 
+  # The only job that exercises the **windowed** swapchain path itself. Every
+  # other GPU job on this board — `vk-e2e`, `cli-e2e`, the five `crcbl` GPU
+  # suites — creates a `SurfaceTarget::Offscreen` surface, and on `crcbl-vk` a
+  # null `VkSurfaceKHR` is the discriminator the whole backend branches on: the
+  # offscreen arms of `acquire_next_frame` and `present` return before
+  # `vkAcquireNextImageKHR` and `vkQueuePresentKHR` are ever called. So the
+  # acquire semaphores, the per-slot acquire fence, `VkPresentIdKHR`, the
+  # suboptimal flag, the `oldSwapchain` handoff and the extent clamp against a
+  # *real* `VkSurfaceCapabilitiesKHR` failed nothing on this board until this job
+  # existed.
+  #
+  # It is not covered by `x11-e2e` or by `samples-windowed` either. Those two run
+  # a *program* — the sandbox, then each game — and assert the summary line it
+  # prints as it exits: the frames, the shell, the extent, the mode. That is an
+  # end-to-end statement about the engine and it says nothing about which
+  # `AcquiredFrame` fields were populated, whether the ring rotated, or what the
+  # validation layer thought of the layouts. This job asserts those directly, at
+  # the seam, and fails on the value rather than on a return code.
+  #
+  # **Two passes, like `x11-e2e`.** The harness's own docs claim a window manager
+  # changes nothing here — `openbox` decorates around the client area rather than
+  # shrinking it, and every extent assertion reads the size back from the shell —
+  # and a claim nothing executes is one that stops being true quietly.
+  windowed-e2e:
+    name: windowed swapchain e2e (Xvfb)
+    runs-on: ubuntu-latest
+    # Server startup plus a full compile of the umbrella crate's test targets.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # The `x11-e2e` job's list, unchanged and for the same reasons — including
+      # `libxcb-xtest0`, which the suite's peer client needs to drive the resize
+      # the `oldSwapchain` test is about, and `openbox` for the second pass.
+      # `vulkan-validationlayers` is not optional here: the fixture asserts the
+      # report was **enabled** as well as clean, so a runner without the layer
+      # fails rather than reporting a clean run about a check that never happened.
+      #
+      # Its own package list is its own cache entry — the action keys on the list
+      # — so this neither shares nor spoils `x11-e2e`'s.
+      - name: Install Xvfb, openbox, the X client libraries, ALSA and Vulkan
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            xvfb openbox libasound2-dev libxcb1 libxcb-randr0 libxcb-xinput0
+            libxcb-xtest0 libxkbcommon0 libxkbcommon-x11-0 libvulkan1
+            mesa-vulkan-drivers vulkan-validationlayers
+      - name: Present to a real window under Xvfb, with no window manager
+        run: crates/crcbl/tests/run-windowed-e2e.sh
+      - name: Present to a real window under Xvfb, with openbox managing
+        run: CRCBL_E2E_X11_WM=openbox crates/crcbl/tests/run-windowed-e2e.sh
+
   # The only job that runs the Win32 backend end to end, and the P5C W4
   # deliverable. `docs/plan/ROADMAP.md`'s 2026-08-04 correction is the reason it
   # can exist at all: `windows-latest` is a desktop, so the shell is reachable
