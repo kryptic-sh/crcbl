@@ -88,7 +88,7 @@ without re-deriving it. It is not in the plan today.
 
 ## Rules for all samples
 
-1. **Engine API only.** Samples never link `crcbl-vk`/`crcbl-wgpu` directly,
+1. **Engine API only.** Samples never link `crcbl-vk`/`crcbl-webgpu` directly,
    never reach around the facade. A sample needing a backdoor = engine API gap =
    engine work item, filed and fixed in the engine.
 2. **Server-authoritative always.** Even breakout runs client+server over the

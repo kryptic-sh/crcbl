@@ -136,9 +136,9 @@ Milestone ladder, each a sandbox commit:
   queue-family **acquire/release** from the start so a dedicated transfer queue
   is additive later rather than a barrier-model rewrite.
 - **HAL freeze wording**: the seam is **provisional** at stage-2 exit and
-  **frozen at P5 exit**, when a second backend (`crcbl-wgpu`) has implemented
-  it. ROADMAP is canonical; this doc's earlier "frozen at stage exit" is
-  superseded.
+  **frozen at P5 exit**, when a second backend has implemented it — that backend
+  is `crcbl-webgpu`; this said `crcbl-wgpu`, which was deleted 2026-08-21.
+  ROADMAP is canonical; this doc's earlier "frozen at stage exit" is superseded.
 - **Lavapipe golden-image e2e is a hard P1 gate**, not "if practical" — a gate
   cannot be optional.
 

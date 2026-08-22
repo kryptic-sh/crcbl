@@ -374,9 +374,15 @@ Two consequences worth stating before somebody meets them:
 
 ## Screen-space AO: what the one-line row was missing (decided 2026-08-13)
 
+> **Built 2026-08-14; what follows is the survey that preceded it.** Two of the
+> three blockers below have since gone and the section says so further down —
+> `forward.rs` has a depth prepass (`prepass_groups`), and the ambient term is
+> separable. Kept because the survey is why the row was not implementable
+> earlier, not because any of it still blocks.
+
 The table above says "screen-space AO" and nothing else, and — exactly as the
-shadow rows were not implementable before the light list existed — that row sits
-on three things this engine does not have:
+shadow rows were not implementable before the light list existed — that row sat
+on three things this engine did not have:
 
 - **There is no depth prepass, and the depth buffer is built never to be read.**
   `TransientImageDesc::scene_depth` carries `DEPTH_STENCIL_ATTACHMENT` and
@@ -897,17 +903,17 @@ dispatches them cannot disagree.
 
 ## Delivery
 
-| Slice                                                                 | Phase                                                     |
-| --------------------------------------------------------------------- | --------------------------------------------------------- |
-| HDR target + exposure/tonemap pass + FXAA                             | P7                                                        |
-| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7                                                        |
-| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B — irradiance probes **built** (`crcbl_render::probe`) |
-| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C                                                       |
-| Ray-traced shadows + AO                                               | P7C                                                       |
-| Ray-traced reflections                                                | P7C                                                       |
-| Ray-traced global illumination                                        | P7C                                                       |
-| Bloom chain                                                           | P10                                                       |
-| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP                                                  |
+| Slice                                                                 | Phase                                                                            |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| HDR target + exposure/tonemap pass + FXAA                             | P7                                                                               |
+| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7                                                                               |
+| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs` |
+| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C                                                                              |
+| Ray-traced shadows + AO                                               | P7C                                                                              |
+| Ray-traced reflections                                                | P7C                                                                              |
+| Ray-traced global illumination                                        | P7C                                                                              |
+| Bloom chain                                                           | P10                                                                              |
+| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP                                                                         |
 
 **P7B and P7C are new phases** carrying the raster twin and the ray-traced path
 respectively; the roadmap's phase table is authoritative for their ordering. The

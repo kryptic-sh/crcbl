@@ -5792,12 +5792,19 @@ retrospective on the three sample findings lists says which seam closed each.
   coordinates ever grow.
 
 - **`CueGrammar` is a parameter of `Mixer::cue` that every call site passes
-  `&CueGrammar::default()` to** — five of them. By the workspace's own rule that
-  is a parameter nothing varies, and putting the grammar on the mixer beside the
-  listener would collapse `cue(emitter, &CueGrammar::default())` to
-  `cue(emitter)`. Deliberately not taken with the listener: "this mixer's
-  grammar" is a bigger claim than "this mixer's listener", and it was not part
-  of the decision that was delegated.
+  `&CueGrammar::default()` to.** By the workspace's own rule that is a parameter
+  nothing varies, and putting the grammar on the mixer beside the listener would
+  collapse `cue(emitter, &CueGrammar::default())` to `cue(emitter)`. **The
+  argument is weaker than it was written**, corrected 2026-08-23: `ROADMAP.md`
+  stated that nothing in the workspace ever constructs a non-default grammar,
+  and `distance_rolloff_reaches_zero` in `crcbl-audio/src/spatial.rs` has built
+  one with its own rolloff since 2026-07-31 — before the claim was made. The
+  type does vary; what does not vary is the argument at any `Mixer::cue` call
+  site. This entry also said "five of them" and there are thirteen
+  `CueGrammar::default()` sites across the samples and the crate's own tests.
+  Deliberately not taken with the listener: "this mixer's grammar" is a bigger
+  claim than "this mixer's listener", and it was not part of the decision that
+  was delegated.
 
 - **`Listener` has a position and no orientation**, so `compute_cue` still
   hard-codes "the listener faces +Z" and its module docs say so. That is the

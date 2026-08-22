@@ -430,12 +430,13 @@ was intended.
   build for `wasm32-unknown-unknown`. `crcbl-vk` moved to a
   `cfg(not(target_arch = "wasm32"))` dependency of the umbrella (`ash` reaches
   `libloading`, which has no wasm build), and its registry entry is `#[cfg]`-ed
-  out to match; `wgpu` becomes the auto-selectable backend on wasm only, so
-  native selection order is unchanged. `crcbl::screenshot` is native-only —
-  every step of it blocks. `getrandom`'s `wasm_js` backend is enabled from
-  `crcbl-server`'s wasm target section, so `wasm-bindgen`/`js-sys` stay out of
-  native binaries. CI's wasm32 job now checks and clippies the whole workspace
-  minus `crcbl-vk`, with `apps/breakout` first and by name.
+  out to match; the browser backend — `crcbl-wgpu` when this was written,
+  `crcbl-webgpu` since it was deleted — becomes the auto-selectable one on wasm
+  only, so native selection order is unchanged. `crcbl::screenshot` is
+  native-only — every step of it blocks. `getrandom`'s `wasm_js` backend is
+  enabled from `crcbl-server`'s wasm target section, so `wasm-bindgen`/`js-sys`
+  stay out of native binaries. CI's wasm32 job now checks and clippies the whole
+  workspace minus `crcbl-vk`, with `apps/breakout` first and by name.
 - **JS shim, wasm entry point, Pages deploy** (P5.8): `apps/breakout` is a
   library with two front ends — `main.rs` (argv, exit codes) and `src/web.rs`
   (`cdylib`, `extern "C"`, driven by `requestAnimationFrame`). Start-up is
@@ -893,7 +894,7 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 
 ## Cross-cutting tracks
 
-Six pillars deliver in slices across every phase (their own docs carry the slice
+The pillars deliver in slices across every phase (their own docs carry the slice
 tables):
 
 - **CLI/headless** ([11-cli-headless.md](11-cli-headless.md)) — `crcbl` binary
@@ -957,8 +958,9 @@ tables):
   after the ladder was written keep the next free number rather than renumbering
   the rest: 12 flappy, then 13 lantern, 14 quarry, 15 shard, 16 bracket.
 - HAL freeze moves in practice to P5 exit: the seam isn't frozen until _two_
-  backends (vk + wgpu) implement it — earlier and stronger than the old "freeze
-  at stage 2 exit", superseding it.
+  backends implement it — earlier and stronger than the old "freeze at stage 2
+  exit", superseding it. The second backend is `crcbl-webgpu`; this rule named
+  `wgpu` until 2026-08-23, and `crcbl-wgpu` was deleted on 2026-08-21.
 
 ## Corrections (design review, 2026-07-27)
 
@@ -1109,10 +1111,14 @@ of a `Texture2DArray` page the fragment stage samples. It is
 
 Still owed by P7 **as of that date**: meshlet geometry as the primary path
 (§3.5), QEM cluster LOD (topic 25), the bindless form of the material page, and
-the P7B/P7C lighting work. Two of the four have since closed — meshlet geometry
-draws through a real mesh pipeline rather than degrading and saying so, and QEM
-cluster LOD shipped with `crcbl-scene`'s simplifier, the cluster DAG and runtime
-cut selection. What remains is the bindless page and the lighting work.
+the P7B/P7C lighting work. Three of the four have since closed — meshlet
+geometry draws through a real mesh pipeline rather than degrading and saying so,
+QEM cluster LOD shipped with `crcbl-scene`'s simplifier, the cluster DAG and
+runtime cut selection, and **P7B is complete**: spot and point shadows, SSAO,
+SSR and irradiance probes are each built and each gated by a golden in
+`crates/crcbl/tests/render_e2e.rs`. What remains is the bindless page and P7C.
+(This line said "the lighting work" until 2026-08-23, contradicting the P7B row
+in this file's own phase table.)
 
 ## Correction (capabilities, scope and networking, 2026-08-09)
 
@@ -1273,7 +1279,7 @@ worth more than the code and are kept where they can act:
   that started this track came from a hand-copied `desc`, and the obvious fix
   was to generate it — but doing so makes the hud shape unrepresentable, which
   turns the five tests that assert against it into tests of the generator. With
-  all six samples guarded the safety argument was already spent, so
+  every sample guarded the safety argument was already spent, so
   `impl_polled_bundle!` takes `desc` by name and all five tests still run.
 - **Read the `map_err` call sites, not the declaration.** A blocker recorded on
   this track said each game had its own error enum whose `NoWindowSystem`
@@ -1309,12 +1315,16 @@ The two that did not land:
 ### Decisions this needs, which are the owner's and not a refactor
 
 - **`CueGrammar` on the `Mixer`.** Every call site passes
-  `&CueGrammar::default()` — four in the samples, three more in `crcbl-audio`'s
-  own tests, and **nothing in the workspace ever constructs a non-default one**.
-  Moving it beside the listener collapses `cue(emitter, &grammar)` to
-  `cue(emitter)`. Deliberately not taken when the listener moved, because "this
-  mixer's grammar" is a bigger claim than "this mixer's listener". Slice 7 waits
-  on it.
+  `&CueGrammar::default()`, in the samples and in `crcbl-audio`'s own tests.
+  **This entry used to add that nothing in the workspace ever constructs a
+  non-default one, and that was never true**: `distance_rolloff_reaches_zero` in
+  `crcbl-audio/src/spatial.rs` builds one with its own rolloff, and has since
+  2026-07-31 — before this was written. It varies the grammar without varying it
+  per call site, which is a weaker argument for moving it than the one that
+  stood here, and the decision is the owner's on those terms. Moving it beside
+  the listener collapses `cue(emitter, &grammar)` to `cue(emitter)`.
+  Deliberately not taken when the listener moved, because "this mixer's grammar"
+  is a bigger claim than "this mixer's listener". Slice 7 waits on it.
 - **A proc-macro dependency for identifier concatenation**, for slice 6. Ten
   lines per sample against one new crate in the tree.
 - **Does `Summary` keep re-flattening `RunSummary`?** Every sample re-declares
@@ -1356,19 +1366,24 @@ turned out not to arise, but its answer still holds and is why the profiler was
 left alone: the trace ring is drained per frame into the debug panel, and the
 log is read by a person afterwards.
 
-**The dependency cannot be dropped, and the survey implied it could.** `wgpu`,
-`naga` and `gpu-allocator` all report through the `log` facade, and their
-diagnostics are the ones that have mattered — a shader naga refused, a device
-that would not open. So the sink still implements `log::Log`, and the macros
-dispatch through `log::logger()` rather than reaching for this crate's own
-static. That last part is not a style choice: `wasm32` installs `crcbl::web`'s
-queue instead of the stderr sink, and a version that bypassed the facade
-compiled everywhere while silently dropping every engine log line in the
-browser. `web/tools/smoke.mjs` caught it.
+**The dependency cannot be dropped, and the survey implied it could.** The
+evidence given here was that `wgpu`, `naga` and `gpu-allocator` all report
+through the `log` facade — but two of those three left with `crcbl-wgpu` on
+2026-08-21 and are at zero occurrences in `Cargo.lock`. `naga` survives only as
+`crcbl-shaders`' WGSL validator, so "a device that would not open" is no longer
+a diagnostic anything here can emit. **The conclusion still holds on the
+browser-queue argument below, which is the load-bearing one**; a reader
+reopening this decision should weigh that and not the dead crates. So the sink
+still implements `log::Log`, and the macros dispatch through `log::logger()`
+rather than reaching for this crate's own static. That last part is not a style
+choice: `wasm32` installs `crcbl::web`'s queue instead of the stderr sink, and a
+version that bypassed the facade compiled everywhere while silently dropping
+every engine log line in the browser. `web/tools/smoke.mjs` caught it.
 
-What did change is that seven crates no longer name `log` at all (`crcbl-dx12`,
-`crcbl-mtl`, `crcbl-render`, `crcbl-shell`, `crcbl-store`, `crcbl-vk`,
-`crcbl-wgpu`), and `crcbl::log` is the engine's module rather than the facade
+What did change is that the backend and platform crates no longer name `log` at
+all — `crcbl-dx12`, `crcbl-mtl`, `crcbl-render`, `crcbl-shell`, `crcbl-store`
+and `crcbl-vk`, the list having also carried `crcbl-wgpu` until that crate was
+deleted — and `crcbl::log` is the engine's module rather than the facade
 re-exported — the call sites did not move, because the path is the same either
 way.
 
