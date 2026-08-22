@@ -14764,23 +14764,28 @@ not one any more: `crcbl-webgpu/src/command.rs` defines
 
 ### Coverage gap in what the browser corroborates
 
-Group G now holds the **granted adapter's** whole `Limits` through wasm — every
-scalar, the count included — against the numbers the page mapped for that same
-adapter, which together with the browser-to-mapped check above it covers the
-struct end to end. Two things it still does not reach:
+Group G now holds the granted adapter's **and** the opened device's whole
+`Limits` through wasm — every scalar, the count included — against the numbers
+the page mapped for each. What that does and does not establish is worth being
+precise about, because an earlier version of this entry got it wrong:
 
-- **The opened device's limits, all but `max_image_2d`.**
-  `__crcbl_web_gpu_probe_device_max_image_2d` is the only export carrying one of
-  those, and the device's numbers are not the adapter's arriving twice: they are
-  the specification's defaults unless something asked for more, so a
-  transposition on that reply is invisible in exactly the way the adapter's was.
-  Closing it is the adapter half's shape again — an indexed reader over the
-  opened device's caps — but the _expected_ side has to be built where group G
-  already opens a device, by mapping the live `GPUDevice`'s own limits through
-  `halLimitsFor`, and that is what kept it out of the same slice rather than any
-  difficulty in the export.
-- `vendor_id`, `device_id`, `device_type` and `driver`, never, because a browser
-  has nothing to disagree with.
+- **It corroborates each reply's decode, field by field.** `Reply::Device` is a
+  separately decoded record, so a transposition in it was invisible while only
+  `max_image_2d` crossed, exactly as it was for the adapter. A device-only index
+  transposition now leaves the adapter check green and turns the device one red,
+  which is the witness.
+- **It does _not_ establish that wasm read the device's record rather than the
+  adapter's, and on this backend nothing can.** `requiredLimitsFor` in
+  `web/engine/gpu-replay.js` asks `requestDevice` for every member the adapter
+  reports, so the device opens at the adapter's ceiling and the two tables hold
+  the same numbers by construction — that file says so where it maps them, and
+  warns in the same breath that it is not a licence to read one off the other,
+  because the features still differ. The earlier claim here that the device's
+  numbers are "the specification's defaults unless something asked for more" was
+  wrong for this backend for that reason. The device-is-not-its-adapter claim is
+  carried by the features, and by group G's own check that says so.
+- `vendor_id`, `device_id`, `device_type` and `driver` are corroborated by
+  nothing, ever, because a browser has nothing to disagree with.
 
 ### Not reviewed
 
