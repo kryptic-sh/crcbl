@@ -59,8 +59,9 @@ use crate::game::{GameState, RenderState};
 /// re-entering its own input path.
 ///
 /// It is nonetheless delivered to the simulation *as* a key, in
-/// `crate::app::Asteroids`'s `HostedGame::apply`: starting and restarting a game is the simulation's business and the
-/// simulation is driven by its action map.
+/// `crate::app::Asteroids`'s [`crcbl::engine::HostedGame::apply`]: starting
+/// and restarting a game is the simulation's business and the simulation is
+/// driven by its action map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fire {
     /// Pull the trigger — which starts a waiting game and restarts a finished one.

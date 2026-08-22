@@ -73,9 +73,9 @@ use crate::game::{GameState, RenderState, UPGRADE_CHOICES, Upgrade};
 /// menu re-entering its own input path.
 ///
 /// Both are nonetheless delivered to the simulation *as* keys, in
-/// `crate::app::Horde`'s `HostedGame::apply`: starting a run and taking an
-/// upgrade are the simulation's business and the simulation is driven by its
-/// action map.
+/// `crate::app::Horde`'s [`crcbl::engine::HostedGame::apply`]: starting a run
+/// and taking an upgrade are the simulation's business and the simulation is
+/// driven by its action map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HordeAction {
     /// Begin a run — the one edge `run_tick` reads for both `PLAY` on the start
