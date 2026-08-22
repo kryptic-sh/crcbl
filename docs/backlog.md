@@ -122,6 +122,29 @@ taken back to back, spanning a few milliseconds, so they were eight looks at one
 frame rather than eight frames. They are spaced now, and the spacing is scaled
 by the measured slowdown like every other budget.
 
+### An inlined re-export's doc resolves its links in the wrong module
+
+**Latent, not broken — recorded because the shape already cost a sweep once.**
+rustdoc merges an outer `///` doc on a module _declaration_ with that module's
+own `//!` header and resolves every link in the merged block against the
+**parent**, which is what broke roughly sixty links across `crcbl-shell` and was
+fixed by moving those docs into the modules. Two doc comments in
+`crates/crcbl-shell/src/lib.rs` still have the same shape:
+`pub use wayland::e2e as wayland_test_support` and
+`pub use x11::e2e as x11_test_support`. Both name modules under
+`pub(crate) mod`, so rustdoc _inlines_ the re-export rather than linking to it,
+and inlining merges the same two blocks the same way.
+
+Neither doc contains an intra-doc link today, which is the only reason nothing
+is wrong. Adding one would resolve it in `lib.rs`'s scope while the reader is
+looking at the module's own page — and it would resolve _successfully_ if the
+name happens to exist in both, which is the version nothing catches.
+
+Left alone deliberately: there is nothing to fix until a link is written, and
+moving the prose into `e2e`'s header would put per-feature scaffolding notes in
+a module that is compiled behind a different feature gate. Whoever adds a link
+to either of those two comments should move the doc first.
+
 ### The wasm rustdoc gate cannot see two whole backends
 
 **Measured 2026-08-21, and it had already cost three real breakages.**
