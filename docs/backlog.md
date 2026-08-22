@@ -3372,23 +3372,6 @@ two argument structures a draw read, and CI's Metal device reports no
 anything a caller records, because `CommandEncoder` has no begin/end query verb.
 Their `Yes` means a set can be made and read, which is what Vulkan's means too.
 
-### `exercise_push_constants_on_compute`'s RADV note is stale
-
-Its doc comment still carries a section headed "The shader indexes its block
-with a divergent index, and that does not work on RADV", saying the exercise is
-"honest about a real defect" and that `push_constant_probe.slang` reads
-`constants.values[index]` through a pointer. The shader has since been changed
-to the `switch (index)` over `values.x`/`.y`/`.z`/`.w` that very paragraph
-prescribes, and the exercise passes on this machine's RADV Navi31. The panic
-message in `push_constant_dispatch` points back at the same stale claim ("which
-is the driver reading the block with a divergent index and is not this backend's
-doing").
-
-Not fixed here because it is unrelated to the slice that found it. The
-measurement itself is worth keeping — it is the reason the shader is written the
-way it is, and `push_constant_probe.slang`'s own comment records it correctly —
-so the fix is to rewrite the section as history rather than delete it.
-
 ### The seam cannot use occlusion or pipeline-statistics queries at all
 
 Exercising the query capabilities turned up three defects in the query seam
