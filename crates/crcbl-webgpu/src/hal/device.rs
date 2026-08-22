@@ -581,9 +581,11 @@ impl Device for WebGpuDevice {
 
     fn take_error(&self) -> Option<String> {
         // The browser's out-of-band errors, one per call, exactly as the seam
-        // asks: `uncapturederror` fires on the JS side long after the command
-        // that caused it returned, the replayer queues what it hears, and a
-        // `TakeError` on the stream is what brings the queue across.
+        // asks: a failure surfaces on the JS side long after the command that
+        // caused it returned — through the error scope the replayer wraps each
+        // flush in, or through `uncapturederror` for anything that fires with no
+        // flush open — the replayer queues what it hears, and a `TakeError` on
+        // the stream is what brings the queue across.
         //
         // **A frame late, and that is the seam's shape rather than a shortfall.**
         // Nothing here can block on a browser, so the answer to this frame's ask

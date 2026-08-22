@@ -697,6 +697,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A browser device error now names the commands it came from.** The replayer
+  wraps each flush that carries commands in one `pushErrorScope` per
+  `GPUErrorFilter`, so a validation, out-of-memory or internal error the browser
+  raises reaches `Device::take_error` as
+  `the device reported … during commands 60–61` instead of arriving as the
+  device's and unattributed. Errors that fire with no flush open still arrive
+  through `uncapturederror`, unattributed, as they did. The attribution is
+  **not** synchronous with the failing call — `popErrorScope` answers a round
+  trip later, and no granularity changes that.
+
 - **`crcbl-mtl` implements `QueryKind::Timestamp` and
   `QueryKind::PipelineStatistics`.** Both refused with "this device advertises
   no counter-sampled set" before. `create_query_set` builds an

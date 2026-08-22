@@ -2559,6 +2559,32 @@ const MAX_PENDING_ERRORS = 64;
 const ERROR_READERS = Object.freeze(['gate', 'wasm']);
 
 /**
+ * The filters one flush's nested error scopes cover, outermost first.
+ *
+ * ALL THREE, BECAUSE A SCOPE IS EXCLUSIVE RATHER THAN ADDITIONAL. An error a
+ * scope captures never reaches `uncapturederror`; an error no open scope's
+ * filter matches propagates outward and does. So partial coverage loses nothing
+ * — a flush that pushed only `'validation'` would attribute validation failures
+ * and go on receiving the other two on the listener, unattributed — but it is
+ * incomplete for no saving worth having, since the cost of a flush's scopes is
+ * paid once per flush however many there are.
+ *
+ * These are `GPUErrorFilter`'s whole domain, so between them every error the
+ * device reports on the content timeline is attributed rather than merely
+ * delivered. Should WebGPU grow a fourth error type, errors of it would fall
+ * through to the listener exactly as they do now: unattributed, not lost.
+ *
+ * The filters are disjoint, so the nesting order decides nothing about which
+ * scope an error lands in; it is fixed only so that the pops can be spelled as
+ * the reverse of the pushes.
+ */
+const ERROR_SCOPE_FILTERS = Object.freeze([
+  'internal',
+  'out-of-memory',
+  'validation',
+]);
+
+/**
  * The device's out-of-band errors, oldest first, with one cursor per reader.
  *
  * `Device::take_error`'s queue on this side of the seam: each reader is handed
@@ -3337,6 +3363,45 @@ export class Replayer {
   replay(frame) {
     if (frame === null || frame === undefined) return;
     const { baseSequence, commands } = frame;
+    // A frame that carries nothing is not scoped. The pump runs on every
+    // animation frame of every page and almost every one of them finds an empty
+    // stream, so scoping here would be a stack push, a pop and a round trip to
+    // the GPU process sixty times a second to ask about commands that were
+    // never issued.
+    if (commands.length === 0) return;
+    // THE SCOPES ARE OPENED BEFORE THE FIRST COMMAND AND CLOSED AFTER THE LAST,
+    // WHICH IS WHAT MAKES THE ATTRIBUTION A SEQUENCE RANGE. See
+    // {@link Replayer#openErrorScopes}. `null` means this flush is unscoped —
+    // no device yet, or a device that is already lost — and its errors reach
+    // the `uncapturederror` listener as they always have.
+    const scoped = this.#openErrorScopes();
+    try {
+      this.#replayEach(baseSequence, commands);
+    } finally {
+      // IN A `finally` BECAUSE THE SCOPE STACK IS THE DEVICE'S, NOT THIS CALL'S.
+      // `replay` throws on a `ReplayError` and on a `SurfaceError`, and a throw
+      // that left three scopes pushed would leave them there for the life of the
+      // page — every later flush nesting three more, and every one of those
+      // capturing errors nothing will ever pop.
+      if (scoped !== null) {
+        this.#closeErrorScopes(scoped, baseSequence, commands.length);
+      }
+    }
+  }
+
+  /**
+   * Executes the commands of one frame, in order, dispatching each to its
+   * handler.
+   *
+   * The whole of what {@link Replayer#replay} used to be, split out so that the
+   * error scopes wrapping it can be closed in a `finally` — the pair has to
+   * balance whichever way this returns, and a `try` around two hundred lines of
+   * `switch` says less about what is guarded than a `try` around one call.
+   *
+   * @param {bigint} baseSequence
+   * @param {object[]} commands
+   */
+  #replayEach(baseSequence, commands) {
     for (let i = 0; i < commands.length; i += 1) {
       // Positional, and wrapped to 64 bits for the reason the decoders wrap:
       // the base came off the wire, so a buffer declaring the largest possible
@@ -3721,9 +3786,16 @@ export class Replayer {
         device.addEventListener('uncapturederror', (event) => {
           // `event.error` is a `GPUError`, whose `message` is the whole of what
           // the browser has to say. Named as the device's own rather than
-          // attributed to a command: these arrive after the frame that caused
-          // them, in submission order rather than by sequence, so a number here
-          // would be a guess dressed as attribution.
+          // attributed to a command, and this is now the *narrower* of the two
+          // paths into that queue rather than the only one:
+          // {@link Replayer#openErrorScopes} scopes each flush, and a scope is
+          // exclusive, so everything a command issued is captured there and
+          // arrives with the sequence range it came from. What is left for this
+          // listener is what happens with no flush open — an error from the
+          // continuation of a `mapAsync`, a device opening, anything the browser
+          // reports between frames — and for those there genuinely is no
+          // currently-executing command, so a number here would be a guess
+          // dressed as attribution.
           this.#deviceError(
             `the device reported ${String(event.error?.message ?? event.error)}`
           );
@@ -7535,6 +7607,104 @@ export class Replayer {
     this.#deviceError(reason);
     this.#replies.queryResults(sequence, command.set, command.firstQuery, []);
     this.#queued = true;
+  }
+
+  /**
+   * Opens this flush's error scopes on the device, or answers `null`.
+   *
+   * WHAT THIS BUYS, AND WHAT IT DOES NOT. WebGPU reports its own validation and
+   * out-of-memory failures **on the device rather than to the call**, so
+   * `createBuffer` returns a plausible `GPUBuffer` and the refusal arrives
+   * later with no currently-executing command to name — which is why
+   * {@link Replayer#takeError}'s queue used to record every one of them as the
+   * device's and unattributed. A scope around the flush changes what can be
+   * said about them from nothing to a **range**: the failure came from one of
+   * the commands between the first and last sequence this flush replayed.
+   *
+   * **IT IS STILL NOT SYNCHRONOUS WITH THE FAILING CALL, and per-command scopes
+   * would not have been either.** `popErrorScope` hands back a promise, so the
+   * attribution exists a round trip after the frame it belongs to whatever the
+   * granularity. What per-command would buy over this is precision — one
+   * sequence instead of a range — and
+   * `web/tools/error-scope-bench.mjs` is what measured the price of that
+   * precision.
+   *
+   * **A GPU-TIMELINE ERROR IS ATTRIBUTED TO THE FLUSH THAT ISSUED IT, NOT TO
+   * WHICHEVER ONE HAPPENS TO BE OPEN WHEN IT SURFACES.** WebGPU routes an error
+   * to the scope that was current when the operation was *issued*, so a
+   * submission this flush made that fails after `replay` has returned still
+   * lands in this flush's scope rather than in the next frame's.
+   *
+   * `null` — an unscoped flush — for the two states where there is nothing to
+   * push onto: no device has opened yet, and a device that is already lost.
+   * Both are exactly the states in which the commands are not reaching WebGPU
+   * either, so there is no error for a scope to capture.
+   *
+   * @returns {GPUDevice | null} The device the scopes were pushed on.
+   */
+  #openErrorScopes() {
+    const device = this.#device;
+    if (device === null || this.#lost !== null) return null;
+    // Unguarded, for the reason {@link Replayer#requestDevice} registers its
+    // listener unguarded: `pushErrorScope` is on every `GPUDevice`, and a stub
+    // that has none should fail loudly rather than quietly stop attributing.
+    for (const filter of ERROR_SCOPE_FILTERS) device.pushErrorScope(filter);
+    return device;
+  }
+
+  /**
+   * Pops this flush's scopes and files whatever they caught, stamped with the
+   * sequence range the flush covered.
+   *
+   * **THE CAPTURED ERRORS GO TO THE SAME LOG `uncapturederror` FEEDS, AND THAT
+   * IS THE WHOLE POINT.** A scope is exclusive rather than additional: an error
+   * it captures never reaches the listener {@link Replayer#requestDevice}
+   * registered. So a `popErrorScope` whose result went anywhere but
+   * {@link Replayer#deviceError} would not merely fail to attribute — it would
+   * make the device stop reporting altogether, on a path where every gate stays
+   * green because nothing counts errors that were never delivered.
+   * `web/tools/gpu-replay.mjs` holds the arms that fail when that path is cut.
+   *
+   * **THE ATTRIBUTED LINE ARRIVES AFTER THE REPLAYER'S OWN REFUSALS FROM THE
+   * SAME FLUSH.** Those are pushed inside the call; this one is pushed when the
+   * promise settles, a round trip later. The log's order is still "what went
+   * wrong first is what caused the rest" for everything the replayer decided
+   * itself, and the device's own answer about a flush lands after it — which is
+   * the order it landed in before this existed, through the listener.
+   *
+   * A REJECTION IS NOT SWALLOWED. `popErrorScope` rejects when the device is
+   * lost, which {@link Replayer#loseDevice} has already recorded as the terminal
+   * thing it is, so that case adds nothing; anything else is this replayer
+   * having lost track of the scope stack and is filed as the fault it is.
+   *
+   * @param {GPUDevice} device What {@link Replayer#openErrorScopes} returned.
+   * @param {bigint} baseSequence The sequence of the flush's first command.
+   * @param {number} count How many commands it carried; at least one.
+   */
+  #closeErrorScopes(device, baseSequence, count) {
+    const last = BigInt.asUintN(64, baseSequence + BigInt(count - 1));
+    const during =
+      last === baseSequence
+        ? `during command ${baseSequence}`
+        : `during commands ${baseSequence}–${last}`;
+    for (let i = 0; i < ERROR_SCOPE_FILTERS.length; i += 1) {
+      device.popErrorScope().then(
+        (error) => {
+          // Null is the ordinary answer: a scope that caught nothing. Only a
+          // `GPUError` is worth a line.
+          if (!error) return;
+          this.#deviceError(
+            `the device reported ${String(error.message ?? error)} ${during}`
+          );
+        },
+        (reason) => {
+          if (this.#lost !== null) return;
+          this.#deviceError(
+            `the device's error scope ${during} could not be popped: ${String(reason)}`
+          );
+        }
+      );
+    }
   }
 
   /**

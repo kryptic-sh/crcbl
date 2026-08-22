@@ -157,6 +157,20 @@ const MAX_REASON_CHARS = 512;
 /** `MAX_PENDING_ERRORS` in `web/engine/gpu-replay.js`, restated for that reason. */
 const MAX_PENDING_ERRORS = 64;
 
+/**
+ * Every `GPUErrorFilter` a `pushErrorScope` may name.
+ *
+ * Written out here rather than imported from the replayer, which does not
+ * export its list: this is the *specification's* domain, and a stub that took
+ * the list from the thing under test would accept whatever that thing decided
+ * to push.
+ */
+const ERROR_FILTERS = Object.freeze([
+  'validation',
+  'out-of-memory',
+  'internal',
+]);
+
 /** `tag::MAX_DEVICE_ERRORS` — the most one `DeviceErrors` reply carries.
  * Restated rather than imported, for `MAX_PENDING_ERRORS`'s reason: the two are
  * equal today and neither follows the other. */
@@ -1157,6 +1171,8 @@ function stubDevice(
     refuseComputePipelines,
     refuseRenderPipelines,
     refuseQuerySets,
+    /** @type {{ message: string, type?: string } | undefined} */
+    reportOnBuffers,
   } = {}
 ) {
   /** @type {(info: { reason: string, message: string }) => void} */
@@ -1213,14 +1229,82 @@ function stubDevice(
       device.listeners.push([type, listener]);
     },
     /**
+     * The error scopes `pushErrorScope` has opened and `popErrorScope` has not
+     * closed, outermost first.
+     *
+     * @type {Array<{ filter: string, errors: Array<{ message: string }> }>}
+     */
+    scopes: [],
+    /**
+     * Every filter `pushErrorScope` was handed, in order, for the life of the
+     * device.
+     *
+     * A list rather than a count, because the claim a flush's scopes make is not
+     * "three were pushed" but "every error the device can report has a scope to
+     * land in" — and only the names can say that.
+     *
+     * @type {string[]}
+     */
+    pushed: [],
+    /**
+     * Opens an error scope, refusing a filter `GPUErrorFilter` does not have.
+     *
+     * Refusing matters: the replayer names its filters as constants, and a stub
+     * that accepted any string would let a typo in one of them through as a
+     * scope that captures nothing — which looks identical to a scope that
+     * caught nothing.
+     *
+     * @param {string} filter
+     */
+    pushErrorScope(filter) {
+      if (!ERROR_FILTERS.includes(filter)) {
+        throw new TypeError(`no GPUErrorFilter is called "${filter}"`);
+      }
+      device.pushed.push(filter);
+      device.scopes.push({ filter, errors: [] });
+    },
+    /**
+     * Closes the innermost scope and answers what it caught, or `null`.
+     *
+     * The FIRST error rather than all of them, as the specification has it, and
+     * a rejection on an empty stack rather than a `null` — an unbalanced pop is
+     * the replayer having lost track of its own scopes, and answering "nothing
+     * went wrong" for it is how that stays invisible.
+     *
+     * @returns {Promise<{ message: string } | null>}
+     */
+    popErrorScope() {
+      const scope = device.scopes.pop();
+      if (scope === undefined) {
+        return Promise.reject(
+          new Error('popErrorScope was called with an empty scope stack')
+        );
+      }
+      return Promise.resolve(scope.errors[0] ?? null);
+    },
+    /**
      * Reports an error the way a browser does: on the device, after the call
      * that caused it has already returned a plausible object.
      *
+     * **AND A SCOPE IS EXCLUSIVE, WHICH IS THE HALF THIS STUB EXISTS TO MODEL.**
+     * An error the innermost matching scope captures does **not** also reach
+     * `uncapturederror`; it reaches the scope instead. A stub that fired the
+     * listener regardless would let a replayer that pushed scopes and then
+     * dropped what they caught pass every arm in this file, while a real browser
+     * stopped reporting device errors altogether.
+     *
      * @param {string} message
+     * @param {string} [type] Which `GPUErrorFilter` matches it.
      */
-    report(message) {
-      for (const [type, listener] of device.listeners) {
-        if (type === 'uncapturederror') listener({ error: { message } });
+    report(message, type = 'validation') {
+      for (let i = device.scopes.length - 1; i >= 0; i -= 1) {
+        if (device.scopes[i].filter === type) {
+          device.scopes[i].errors.push({ message });
+          return;
+        }
+      }
+      for (const [kind, listener] of device.listeners) {
+        if (kind === 'uncapturederror') listener({ error: { message } });
       }
     },
     /**
@@ -1294,6 +1378,20 @@ function stubDevice(
     createBuffer(desc) {
       device.created.push(desc);
       if (refuseBuffers !== undefined) throw refuseBuffers;
+      // `reportOnBuffers` IS THE CASE THE BROWSER ACTUALLY HAS, and it is not
+      // `refuseBuffers` with a different spelling: WebGPU hands back a
+      // `GPUBuffer` for a descriptor it will not honour and reports the reason
+      // on the *device*, in the call, which is exactly the error an error scope
+      // is there to catch. Refusing throws instead and never reaches one.
+      //
+      // It carries the error's `type` as well as its text because which scope
+      // catches it is the whole question: a buffer too large for the device is
+      // an `'out-of-memory'` and a buffer with a nonsense usage is a
+      // `'validation'`, and a replayer covering only one of the two would
+      // attribute one and silently hand the other back to `uncapturederror`.
+      if (reportOnBuffers !== undefined) {
+        device.report(reportOnBuffers.message, reportOnBuffers.type);
+      }
       return stubBuffer(desc);
     },
     /** @param {object} desc */
@@ -3522,6 +3620,141 @@ async function main() {
     check(
       replayer.takeError() === null,
       'and each error is reported once, which is what take_error promises'
+    );
+  }
+
+  // ---- and the ones a scope catches, which reach the same log ------------
+  //
+  // THE PATH THAT WOULD FAIL SILENTLY. `Replayer#replay` opens an error scope
+  // per filter around every flush that carries commands, and a scope is
+  // **exclusive**: what it captures never reaches the `uncapturederror`
+  // listener the arm above drives. So these are not decoration on top of that
+  // arm — they are the arm that catches the regression it cannot. Cut the feed
+  // from `popErrorScope` into the error queue and the device stops reporting
+  // anything a command caused, while every check above still passes, because
+  // every one of them reports with no flush open.
+  {
+    const device = stubDevice([], {
+      reportOnBuffers: {
+        message: 'Buffer usage (MAP_READ|STORAGE) is invalid',
+      },
+    });
+    const { replayer } = await readyWithDevice({ device });
+    replayer.replay(frameOf(deviceLocalBuffer, 37n));
+    check(
+      replayer.pendingErrors === 0,
+      `the scope holds it until the pop, so the call itself queues nothing (${replayer.pendingErrors})`
+    );
+    await settle();
+    const reason = replayer.takeError();
+    check(
+      String(reason).includes('MAP_READ|STORAGE') &&
+        String(reason).includes('during command 37'),
+      `an error the flush's scope caught reaches the queue naming that command (${JSON.stringify(reason)})`
+    );
+    check(
+      replayer.takeError() === null,
+      'once, rather than once per scope the flush pushed'
+    );
+    check(
+      device.scopes.length === 0,
+      `and the flush left nothing on the device's scope stack (${device.scopes.length})`
+    );
+  }
+  {
+    // **AND NOT ONLY VALIDATION.** A device out of room reports a
+    // `GPUOutOfMemoryError`, which no `'validation'` scope catches — it would
+    // propagate past one and land on the listener, unattributed, with every
+    // check above still green. The flush pushes a scope per filter precisely so
+    // that this one is attributed too, and this is the arm that fails if a
+    // filter is dropped from that list.
+    const device = stubDevice([], {
+      reportOnBuffers: {
+        message: 'Not enough memory left to allocate 4 GiB',
+        type: 'out-of-memory',
+      },
+    });
+    const { replayer } = await readyWithDevice({ device });
+    replayer.replay(frameOf(deviceLocalBuffer, 50n));
+    await settle();
+    const reason = replayer.takeError();
+    check(
+      String(reason).includes('Not enough memory left') &&
+        String(reason).includes('during command 50'),
+      `an out-of-memory error is attributed too, not only a validation one (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A RANGE IS WHAT PER-FLUSH BUYS, AND THE RANGE IS THE WHOLE FLUSH.**
+    // `docs/plan/41-webgpu-stream.md` leaves the granularity open;
+    // `web/tools/error-scope-bench.mjs` measured it and per-flush is what was
+    // built, so what a browser's own refusal can say is "one of these commands",
+    // not "this one". A flush of two names both.
+    const device = stubDevice([], {
+      reportOnBuffers: { message: 'Buffer size 0 is invalid' },
+    });
+    const { replayer } = await readyWithDevice({ device });
+    replayer.replay({
+      baseSequence: 60n,
+      commands: [deviceLocalBuffer, hostUploadBuffer],
+    });
+    await settle();
+    const reason = replayer.takeError();
+    check(
+      String(reason).includes('during commands 60–61'),
+      `a flush of two names the range it covered (${JSON.stringify(reason)})`
+    );
+    // ONE LINE FOR THE FLUSH, NOT ONE PER COMMAND THAT FAILED IN IT. Both
+    // creates reported, and a scope answers with the *first* error it caught —
+    // so what the range buys is a range, and what it costs is that a second
+    // failure inside the same flush is not separately named. That is the trade
+    // per-flush granularity is, spelled out.
+    check(
+      replayer.takeError() === null,
+      'and the scope answered once for the whole flush, not once per command'
+    );
+  }
+  {
+    // **EVERY FILTER, WHICH IS WHAT KEEPS THE TWO MECHANISMS FROM BOTH MISSING.**
+    // An error no pushed scope's filter matches propagates outward and reaches
+    // `uncapturederror` — so a flush covering only `'validation'` would attribute
+    // validation failures and leave out-of-memory ones to the listener. Covering
+    // the specification's whole domain is what makes the flush's answer complete.
+    const device = stubDevice();
+    const { replayer } = await readyWithDevice({ device });
+    check(
+      device.pushed.length === 0,
+      `the flushes that opened the device pushed no scope (${device.pushed.length})`
+    );
+    replayer.replay({ baseSequence: 80n, commands: [] });
+    check(
+      device.pushed.length === 0,
+      'and a frame carrying no commands pushes none either — the pump finds one ' +
+        'of those on almost every animation frame of every page'
+    );
+    replayer.replay(frameOf(deviceLocalBuffer, 81n));
+    const pushed = [...device.pushed].sort();
+    check(
+      JSON.stringify(pushed) === JSON.stringify([...ERROR_FILTERS].sort()),
+      `a flush that carries a command pushes a scope for every GPUErrorFilter (${pushed.join(', ')})`
+    );
+  }
+  {
+    // **A THROW MUST NOT LEAVE THE SCOPES PUSHED.** `replay` throws on an opcode
+    // it cannot execute, and a flush that left three scopes behind would have
+    // every later flush nest three more — an unbounded stack whose captures
+    // nothing will ever pop, which is the device silently ceasing to report.
+    const device = stubDevice();
+    const { replayer } = await readyWithDevice({ device });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf({ name: 'NoSuchCommandExists' }, 90n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown instanceof ReplayError && device.scopes.length === 0,
+      `a flush that throws still pops its scopes (${String(thrown)}, ${device.scopes.length} left)`
     );
   }
   {

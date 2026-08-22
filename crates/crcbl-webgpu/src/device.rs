@@ -65,10 +65,20 @@
 //! Reporting a lost device as a failed request would be wrong in both
 //! directions: the request succeeded, and the device that was lost had already
 //! been used. So the second has a command and a reply of its own — the command
-//! asks, because an `uncapturederror` arrives with no sequence of its own to name
-//! — and `docs/plan/41-webgpu-stream.md`'s error-attribution section is what
-//! remains: which *encoded command* a browser's own validation failure belongs
-//! to is still not carried, so a message says what went wrong and not where.
+//! asks, because a browser's own failure arrives with no sequence of its own to
+//! name.
+//!
+//! **What a message says about *where* is a range, not a command.** The
+//! replayer opens a `pushErrorScope` per `GPUErrorFilter` around each flush that
+//! carries commands and pops them after the last one, so a validation or
+//! out-of-memory failure the browser raises arrives naming the span of sequences
+//! that flush covered — `during commands 4180–4200` rather than nothing at all.
+//! Narrowing that to the one command would take a scope pair per command;
+//! `web/tools/error-scope-bench.mjs` is what measured the price of doing so, and
+//! `docs/plan/41-webgpu-stream.md`'s error-attribution section is where the
+//! granularity is argued. The attribution is asynchronous either way:
+//! `popErrorScope` answers a microtask later at the earliest, so no granularity
+//! makes it synchronous with the failing call.
 //!
 //! # Worked exchange
 //!
