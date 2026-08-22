@@ -11,7 +11,7 @@
 # zero checks ran** — `docs/plan/12-testing.md` names a silently-skipped e2e job
 # as a known trap and this is the guard against it.
 #
-# WHAT THIS IS THE ONLY GATE FOR. Groups G through AG in
+# WHAT THIS IS THE ONLY GATE FOR. Groups G through AH in
 # `web/tools/probe-groups.mjs` drive `crcbl-webgpu`'s command stream directly
 # rather than through the engine: the wasm→JS→wasm round trip and the device it
 # opens, a surface, the capability query held against what `navigator.gpu` tells
@@ -20,7 +20,9 @@
 # and from S onward the ones that read bytes back and compare their *values*: a
 # cleared texture, a drawn triangle, a compute shader's storage writes, a copy
 # chain, a sub-range fill, a presented canvas frame, a reconfigured swapchain, an
-# indirect draw and a dispatch that reads its workgroup counts out of a buffer. `web/run-browser-e2e.sh` proves the demos render through this
+# indirect draw, a dispatch that reads its workgroup counts out of a buffer, and
+# a triangle past the far plane that one pipeline clamps and the pipeline beside
+# it clips. `web/run-browser-e2e.sh` proves the demos render through this
 # backend; nothing but this proves the seam underneath them command by command.
 #
 # WHY IT IS A SEPARATE PAGE. The probe exports install their own command-stream
@@ -143,10 +145,22 @@ else
     # whatever `$SITE` already holds, so an edit to the page or to the engine
     # modules is tested in its previous form. A warning rather than a rebuild,
     # because CI runs `web/build.sh` itself before calling this.
+    #
+    # **THE RUST SIDE COUNTS TOO, AND USED TO BE MISSED.** Half of what this
+    # harness drives is `crcbl-webgpu` compiled into the probe's wasm, and this
+    # check watched only the JS — so editing `crates/crcbl-webgpu/src/probe.rs`
+    # and re-running produced no warning and silently tested the previous wasm.
+    # Found 2026-08-22 by a red check that flipped `depth_clamp` to `false` in
+    # `probe_clamp_clamped_pipeline_desc` and still saw the run pass: exactly
+    # the shape this warning exists to prevent, arriving through the input it
+    # did not cover. `.rs` is matched as well as `.js` now, over the crates the
+    # probe's wasm is built from.
     STAMP="$SITE/probe/main.js"
     if [ -f "$STAMP" ]; then
         NEWER="$(find "$REPO/web/engine" "$REPO/web/probe" \
-            -name '*.js' -newer "$STAMP")"
+            "$REPO/crates/crcbl-webgpu/src" "$REPO/crates/crcbl-shell/src" \
+            "$REPO/crates/crcbl-core/src" "$REPO/crates/crcbl-hal/src" \
+            \( -name '*.js' -o -name '*.rs' \) -newer "$STAMP")"
         if [ -n "$NEWER" ]; then
             echo "crcbl probe e2e: WARNING — $SITE is older than these sources, so this run does not test them:" >&2
             # Indented with a read loop rather than `sed 's|^|  |'`, which is
@@ -294,7 +308,7 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
@@ -547,6 +561,21 @@ INDIRECT_DISPATCH_TRIP="$(grep -F 'the per-axis tally spells the three workgroup
 if [ -z "$INDIRECT_DISPATCH_TRIP" ]; then
     echo "crcbl probe e2e: the driver never read back which workgroup counts an indirect dispatch used;" >&2
     echo "                 crcbl-webgpu's dispatch_indirect is ungated in a real browser" >&2
+    exit 1
+fi
+
+# And the two targets a clamped pipeline and its control drew into, which is
+# group AH and is the only exercise `Features::DEPTH_CLAMP` has against a GPU
+# anywhere. It is worth its own line because of what a wrong answer looks like:
+# not an error but a pipeline that was built, accepted and quietly clipped
+# anyway — geometry a caller asked to have clamped disappearing, which is a
+# shadow cascade with holes in it rather than a crash. This crate reports the
+# feature to callers, and until this group existed the only thing that had ever
+# seen `depth_clamp` set was a node stub recording the descriptor it was handed.
+CLAMP_TRIP="$(grep -F 'depth clamping decided which fragments survived' "${OUTPUT}.plain" || true)"
+if [ -z "$CLAMP_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never read back what depth clamping changed;" >&2
+    echo "                 crcbl-webgpu reports Features::DEPTH_CLAMP and no GPU ever tried it" >&2
     exit 1
 fi
 
