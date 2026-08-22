@@ -88,11 +88,6 @@ pub const fn flap_from_id(id: WidgetId) -> Option<Flap> {
     }
 }
 
-/// An item on `id`, labelled and with its key printed beside it.
-fn item(id: WidgetId, label: &str, hint: &str) -> MenuItem {
-    MenuItem::new(id, label, hint)
-}
-
 /// Which menu a frame shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MenuKind {
@@ -152,9 +147,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "FLAPPY",
                     vec![
-                        item(FLAP_ID, "FLY", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(FLAP_ID, "FLY", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -163,9 +158,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "PAUSED",
                     vec![
-                        item(RESUME_ID, "RESUME", "ESC"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(RESUME_ID, "RESUME", "ESC"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -174,8 +169,8 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "GAME OVER",
                     vec![
-                        item(FLAP_ID, "TRY AGAIN", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(FLAP_ID, "TRY AGAIN", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
                     ],
                 ),
             ),

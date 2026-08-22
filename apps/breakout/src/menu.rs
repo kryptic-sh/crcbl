@@ -86,11 +86,6 @@ pub const fn launch_from_id(id: WidgetId) -> Option<Launch> {
     }
 }
 
-/// An item on `id`, labelled and with its key printed beside it.
-fn item(id: WidgetId, label: &str, hint: &str) -> MenuItem {
-    MenuItem::new(id, label, hint)
-}
-
 /// Which menu a frame shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MenuKind {
@@ -163,9 +158,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "BREAKOUT",
                     vec![
-                        item(LAUNCH_ID, "PLAY", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(LAUNCH_ID, "PLAY", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -174,9 +169,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "PAUSED",
                     vec![
-                        item(RESUME_ID, "RESUME", "ESC"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(RESUME_ID, "RESUME", "ESC"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -185,8 +180,8 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "YOU WIN",
                     vec![
-                        item(LAUNCH_ID, "PLAY AGAIN", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(LAUNCH_ID, "PLAY AGAIN", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
                     ],
                 ),
             ),
@@ -195,8 +190,8 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "GAME OVER",
                     vec![
-                        item(LAUNCH_ID, "PLAY AGAIN", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(LAUNCH_ID, "PLAY AGAIN", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
                     ],
                 ),
             ),

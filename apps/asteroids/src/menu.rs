@@ -81,11 +81,6 @@ pub const fn fire_from_id(id: WidgetId) -> Option<Fire> {
     if id == FIRE_ID { Some(Fire::Now) } else { None }
 }
 
-/// An item on `id`, labelled and with its key printed beside it.
-fn item(id: WidgetId, label: &str, hint: &str) -> MenuItem {
-    MenuItem::new(id, label, hint)
-}
-
 /// Which menu a frame shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MenuKind {
@@ -141,9 +136,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "ASTEROIDS",
                     vec![
-                        item(FIRE_ID, "FLY", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(FIRE_ID, "FLY", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -152,9 +147,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "PAUSED",
                     vec![
-                        item(RESUME_ID, "RESUME", "ESC"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(RESUME_ID, "RESUME", "ESC"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -163,8 +158,8 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "GAME OVER",
                     vec![
-                        item(FIRE_ID, "TRY AGAIN", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(FIRE_ID, "TRY AGAIN", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
                     ],
                 ),
             ),

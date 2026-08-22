@@ -1846,9 +1846,6 @@ is about duplicated _knowledge_, not duplicated shape.
   correction in `docs/backlog.md` about what its caching does and does not buy.
 - **`fn still`** in three `art.rs` files — it returns a _game-local_ struct, so
   sharing it would put a per-sample type in the engine.
-- **`fn item(id, label, hint)`** in four `menu.rs` files — not a seam to extract
-  but 12 lines of pass-through **to delete**: `crcbl_ui::menu::MenuItem::new`
-  already takes `impl Into<String>` and the wrapper adds nothing.
 
 ## Structured logging: the engine's own macros (2026-08-15)
 

@@ -123,11 +123,6 @@ pub fn action_from_id(id: WidgetId) -> Option<HordeAction> {
     (index < UPGRADE_CHOICES).then_some(HordeAction::Choose(index))
 }
 
-/// An item on `id`, labelled and with its key printed beside it.
-fn item(id: WidgetId, label: &str, hint: &str) -> MenuItem {
-    MenuItem::new(id, label, hint)
-}
-
 /// Which menu a frame shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MenuKind {
@@ -198,9 +193,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "HORDE",
                     vec![
-                        item(RESTART_ID, "PLAY", "SPACE"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(RESTART_ID, "PLAY", "SPACE"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -209,9 +204,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "PAUSED",
                     vec![
-                        item(RESUME_ID, "RESUME", "ESC"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                        MenuItem::new(RESUME_ID, "RESUME", "ESC"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -224,8 +219,8 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "YOU DIED",
                     vec![
-                        item(RESTART_ID, "TRY AGAIN", "R"),
-                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(RESTART_ID, "TRY AGAIN", "R"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
                     ],
                 ),
             ),
@@ -241,12 +236,12 @@ fn offer_menu(level: u32, offer: &[Upgrade; UPGRADE_CHOICES]) -> Menu {
             .iter()
             .enumerate()
             .map(|(index, upgrade)| {
-                item(
+                MenuItem::new(
                     choose_id(index),
                     upgrade.label(),
                     // One-based, because it is the digit key the player
                     // presses and `ACTION_CHOOSE` binds.
-                    &(index + 1).to_string(),
+                    (index + 1).to_string(),
                 )
             })
             .collect(),
