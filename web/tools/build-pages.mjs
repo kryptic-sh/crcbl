@@ -233,6 +233,51 @@ function substitute(text, subs, where) {
  * resolution check can run before the copy does and still know what the finished
  * site will contain.
  */
+// The demo slugs `web/build.sh` builds artifacts for, read out of its own
+// `DEMOS=( ... )` array.
+//
+// Two lists, deliberately: that one carries a crate and a lib name per row and
+// this one carries a label and a href, which are different facts about a demo
+// and would not travel together well. What they share is the *set of demos*,
+// and that is what `checkDemoLists` holds them to — the shape of duplication
+// worth a guard rather than a merge.
+function shellDemoSlugs() {
+  const text = readFileSync(join(ROOT, 'build.sh'), 'utf8');
+  const block = /^DEMOS=\(\n([\s\S]*?)^\)$/m.exec(text);
+  if (!block) {
+    die('web/build.sh: no DEMOS=( ... ) array to read the demo list out of');
+  }
+  const slugs = [...block[1].matchAll(/^\s*"([^:"]+):/gm)].map((row) => row[1]);
+  if (slugs.length === 0) {
+    die(
+      'web/build.sh: the DEMOS array parsed as empty, so this check would pass on anything'
+    );
+  }
+  return slugs;
+}
+
+// Fail the build when the demo bar and the artifact build disagree about which
+// demos exist.
+//
+// A demo added to one and not the other does not break either script: the site
+// grows a nav entry pointing at a directory nothing built (a 404 the link
+// checker cannot see, because the target is written by `build.sh` after this
+// runs), or an artifact ships with no way to reach it. Both are silent.
+function checkDemoLists() {
+  // `''` is the demo index rather than a demo, so it is not a build target.
+  const bar = DEMOS.map(([slug]) => slug).filter((slug) => slug !== '');
+  const shell = shellDemoSlugs();
+  const missing = shell.filter((slug) => !bar.includes(slug));
+  const extra = bar.filter((slug) => !shell.includes(slug));
+  if (missing.length > 0 || extra.length > 0) {
+    die(
+      `the demo lists disagree: web/build.sh builds ${JSON.stringify(missing)} ` +
+        `that the demo bar in this file does not name, and the bar names ` +
+        `${JSON.stringify(extra)} that web/build.sh does not build`
+    );
+  }
+}
+
 function staticSiteFiles() {
   const files = [];
   const walk = (directory, prefix) => {
@@ -383,6 +428,8 @@ function main() {
     die('usage: build-pages.mjs <site-dir>');
   }
   const site = resolve(process.argv[2]);
+
+  checkDemoLists();
 
   const templates = join(ROOT, 'templates');
   const layout = readFileSync(join(templates, 'layout.html'), 'utf8');
