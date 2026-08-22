@@ -297,8 +297,10 @@ fn ready(result: Result<Box<dyn Instance>, HalError>) -> InstanceFuture {
 /// One entry in the backend table.
 struct Registration {
     backend: GpuBackend,
-    /// Whether [`open`] may select this entry without being asked for it by
-    /// name. `false` for [`GpuBackend::Null`] — see the module docs.
+    /// Whether [`request_open`] may select this entry without being asked for
+    /// it by name — and so whether `open`, which blocks on it and does not
+    /// exist on `wasm32`, may. `false` for [`GpuBackend::Null`] — see the
+    /// module docs.
     auto: bool,
     /// Starts opening this backend. Returning a future rather than an instance
     /// is what makes the web path expressible; two of the three complete on

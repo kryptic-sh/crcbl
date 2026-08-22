@@ -431,8 +431,9 @@ impl PendingDevice for NullPendingDevice {
 
 /// A no-op, recording [`Device`].
 ///
-/// Reached through `dyn Device` from [`Instance::create_device`]; there is no
-/// reason for a test to name this type.
+/// Reached through `dyn Device` from [`Instance::request_device`] — and from
+/// `Instance::create_device`, which wraps it and does not exist on `wasm32`;
+/// there is no reason for a test to name this type.
 #[derive(Debug)]
 struct NullDevice {
     recorder: Recorder,

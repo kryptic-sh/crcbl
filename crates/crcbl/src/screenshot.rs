@@ -1910,7 +1910,8 @@ const RING_IMAGES: u32 = 2;
 /// type a browser harness can hold across frames — and so the private
 /// [`SceneState`] it returns never surfaces in a public generic signature. The
 /// `'b` is the closure's own capture lifetime: [`OffscreenSetup::request`]'s scene
-/// closure is `'static`, while [`OffscreenSetup::open_forward_with`]'s may borrow
+/// closure is `'static`, while `OffscreenSetup::open_forward_with`'s — native
+/// only, so not linkable from a `wasm32` build of these docs — may borrow
 /// a caller's locals, and a native open drives it to completion before returning
 /// so the borrow never outlives them.
 type BuildScene<'b> =
