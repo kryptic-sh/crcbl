@@ -772,7 +772,7 @@ fn the_extent_is_clamped_to_what_the_server_actually_permits() {
     const OVERSHOOT: (u32, u32) = (137, 91);
 
     let mut requested = None;
-    let fixture = Windowed::open_requesting(|size| {
+    let mut fixture = Windowed::open_requesting(|size| {
         let asked = (size.0 + OVERSHOOT.0, size.1 + OVERSHOOT.1);
         requested = Some(asked);
         asked
@@ -794,6 +794,15 @@ fn the_extent_is_clamped_to_what_the_server_actually_permits() {
          request was echoed, which is a render area, viewport and scissor that do not match \
          the image."
     );
+
+    // And then actually draw with it. This is the only acquire in the tree
+    // whose extent is not the one that was asked for, so it is the only place
+    // the render area can be checked against a genuinely clamped image rather
+    // than against one where both numbers happen to agree. `draw_and_present`
+    // sets `render_area` from `acquired.extent`; the validation layer is what
+    // reads the two against each other, and `finish` is what fails if it
+    // complained.
+    fixture.draw_and_present(&acquired);
 
     fixture.finish();
 }
