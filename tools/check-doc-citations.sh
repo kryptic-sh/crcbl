@@ -31,9 +31,6 @@ allowed() {
   case "$1" in
     # A layout the entry proposes if `web.rs` is ever split; not a real path.
     'crates/crcbl/src/web/') return 0 ;;
-    # The shared launcher an entry argues for. `web/tools/browser-launch.mjs`
-    # is the part of it that has since been built.
-    'web/tools/chromium.mjs') return 0 ;;
     # Cited *because* it is stale: the entry reports that `docs/code-review.md`
     # still points at a file that no longer exists.
     'crates/crcbl-server/tests/integration.rs') return 0 ;;

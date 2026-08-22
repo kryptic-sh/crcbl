@@ -1075,37 +1075,38 @@ there. What it does not do, and why:
   silhouette fit that re-ran on every orbit step would be tighter and is not
   written.
 
-### Three copies of the Chromium launch and CDP plumbing
+### What the three browser gates still keep to themselves
 
-`web/tools/browser-e2e.mjs`, `web/tools/render-harness-e2e.mjs` and now
-`web/tools/probe-e2e.mjs` each carry a near-identical copy of the same code:
-finding a browser, the flag list, launching it, waiting on `DevToolsActivePort`,
-a minimal CDP client, and `Runtime.evaluate` wrapping. The third arrived with
-the standalone probe page, which followed the existing per-driver-copy pattern
-rather than extracting a shared module — consolidating would have meant editing
-the parity gate, which that slice had no mandate to touch.
+The launch-and-poll loop, the CDP client, `openPage`, `evaluate`, `until`, the
+browser registry and the exit hooks are one copy each in
+`web/tools/browser-launch.mjs`. What is left is deliberate and worth not
+"fixing":
 
-Three copies is where drift starts, and the flag list is the part that matters:
-it encodes which adapter Chromium picks and whether WebGPU is exposed at all, so
-two drivers disagreeing about it means two gates testing different things while
-both look green. A shared `web/tools/chromium.mjs` is the obvious shape.
+- **`fail` stays per gate.** The prefix differs and so does the meaning of the
+  exit code — `render-harness-e2e.mjs` documents 0/1/2 as a contract in its
+  usage header. A `makeFail(prefix)` factory would be a helper whose whole body
+  is its parameter. The part that _was_ shared knowledge, "kill the browsers
+  before you go", is now the exit hook rather than something each copy must
+  remember.
+- **`render-harness-e2e.mjs`'s own poll stays.** It must hard-fail on its
+  deadline rather than answer `null`, must let a throwing `evaluate` through as
+  its exit 2, and polls at 250 ms against `until`'s 16. Merging it needs a flag
+  per difference, which is the shape that argues against merging.
+- **`check` and `group` are still two copies**, shared between `browser-e2e.mjs`
+  and `probe-e2e.mjs`. `check` is byte-identical; `group` differs only in the
+  gate name it prints. Not moved because they are the checks-and-verdict layer
+  rather than the browser layer, and `render-harness-e2e.mjs` has no counterpart
+  — so a third caller does not exist and may never.
 
-**The drift is no longer hypothetical, and it took one afternoon.** On
-2026-08-20 the launch timeout was raised from 30 seconds in two of the three
-drivers and not the third, which held it as an unnamed `30_000` literal — so for
-one commit the gates disagreed about how long a browser may take to start.
-`LAUNCH_TIMEOUT_MS` now lives in `browser-launch.mjs` and all three import it.
-
-That fixes the one value, not the pattern: `browserFlags`, `findBrowser`,
-`readDevToolsPort` and `stopBrowser` were already shared through that file, and
-what remains duplicated is the launch-and-poll loop itself and the CDP client.
-The loop is now three copies of the same six lines around one shared constant,
-which is the cheapest possible version of the problem and still a version of it.
-
-**Do this together with the cross-platform work below**, not before it: that
-work has to touch browser discovery and the Xvfb branch in every driver anyway,
-and doing both at once means changing the plumbing in one place instead of
-three, and then again three more times per platform.
+**One thing found by doing it, and it was a real defect rather than a tidiness
+question:** `render-harness-e2e.mjs` leaked its whole browser process tree on
+every error it diagnosed. It stopped the browser from a `finally` in `main`, but
+`fail` calls `process.exit`, which does not unwind one, and it had no signal
+handlers where the other two did. Interrupted mid-run it left **12 chromium
+processes and a profile directory**; it leaves none now. Worth keeping because
+it is the argument for the sharing: the registry and the hooks live with the
+`launch` that registers every browser, so a fourth gate cannot be written
+without them.
 
 ### DECIDED — the browser has no WebGL2 fallback, and the deletion closed the alternative
 
@@ -3764,11 +3765,12 @@ the run as stale, so the list cannot rot into a blanket suppression.
   everything else passes means headed did not close the readback gap either, and
   Windows cannot host this gate.
 
-**Coverage gap in what landed:** `render-harness-e2e.mjs` was moved onto the
-shared launcher but its _launch_ path was never executed — only its startup
-error path. Its imports resolve at link time and its call shape matches the two
-that were exercised, but that is reasoning, not a run. It also remains wired
-into no workflow at all.
+**~~Coverage gap in what landed~~ — both halves are spent, 2026-08-22.** This
+said `render-harness-e2e.mjs`'s _launch_ path had never been executed and that
+it was "wired into no workflow at all". Neither holds: `pages.yml` runs
+`./web/run-render-harness-e2e.sh` and two later steps consume its readbacks, and
+the launch path has since been run here repeatedly — which is how the browser
+leak it was hiding got found.
 
 **One behaviour change on Linux:** `--enable-unsafe-webgpu` is now passed in
 hardware mode as well as swiftshader. Verified on real hardware here (57/57 and
