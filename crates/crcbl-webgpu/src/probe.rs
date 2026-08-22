@@ -31,6 +31,9 @@
 //! | [`__crcbl_web_gpu_probe_features_lo`](shim::__crcbl_web_gpu_probe_features_lo) | `() -> i32` | Low 32 bits of the granted adapter's [`Features`]. |
 //! | [`__crcbl_web_gpu_probe_features_hi`](shim::__crcbl_web_gpu_probe_features_hi) | `() -> i32` | High 32 bits of the same. |
 //! | [`__crcbl_web_gpu_probe_max_image_2d`](shim::__crcbl_web_gpu_probe_max_image_2d) | `() -> i32` | The granted adapter's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
+//! | [`__crcbl_web_gpu_probe_limit_count`](shim::__crcbl_web_gpu_probe_limit_count) | `() -> i32` | How many scalars the granted adapter's [`Limits`](crcbl_hal::Limits) flattens into, which is the length of the index order below. Answers the same before anything is granted. |
+//! | [`__crcbl_web_gpu_probe_limit_lo`](shim::__crcbl_web_gpu_probe_limit_lo) | `(i32) -> i32` | Low 32 bits of the granted adapter's limit scalar at `index`. `0` for an out-of-range index, and `0` is a legal value for every row. |
+//! | [`__crcbl_web_gpu_probe_limit_hi`](shim::__crcbl_web_gpu_probe_limit_hi) | `(i32) -> i32` | High 32 bits of the same scalar. Zero on every row the seam declares `u32` or `f32`. |
 //! | [`__crcbl_web_gpu_probe_device`](shim::__crcbl_web_gpu_probe_device) | `() -> i32` | Encode one device request for the adapter that was granted, and register its wait. `1`, or `0` if nothing has been granted yet, there was no room, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_device_state`](shim::__crcbl_web_gpu_probe_device_state) | `() -> i32` | Drain, and answer one of the `DEVICE_*` codes. |
 //! | [`__crcbl_web_gpu_probe_device_reason_ptr`](shim::__crcbl_web_gpu_probe_device_reason_ptr) | `() -> i32` | Where the reason no device opened starts. Empty when one did. |
@@ -172,6 +175,30 @@
 //! | [`__crcbl_web_gpu_probe_parity_report_len`](shim::__crcbl_web_gpu_probe_parity_report_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_parity_failures_ptr`](shim::__crcbl_web_gpu_probe_parity_failures_ptr) | `() -> i32` | Where the disagreements start, one per line. Empty on [`PARITY_MATCHED`]. |
 //! | [`__crcbl_web_gpu_probe_parity_failures_len`](shim::__crcbl_web_gpu_probe_parity_failures_len) | `() -> i32` | How long that text is, in UTF-8 bytes. |
+//!
+//! **The limit index order** the two `limit_` readers take is
+//! [`Limits`](crcbl_hal::Limits)' own field order, with
+//! `max_compute_workgroup_size` spending three consecutive indices on X, Y and
+//! Z. It is written out here because the JS side reads it back against this
+//! table and nothing else states it:
+//!
+//! ```text
+//!  0 max_image_2d                   10 max_draw_indirect_count
+//!  1 max_image_3d                   11 max_compute_workgroup_size[0]
+//!  2 max_image_array_layers         12 max_compute_workgroup_size[1]
+//!  3 max_storage_buffer_range       13 max_compute_workgroup_size[2]
+//!  4 max_uniform_buffer_range       14 max_compute_invocations_per_workgroup
+//!  5 max_bind_groups                15 max_compute_workgroups_per_dimension
+//!  6 max_bindless_descriptors       16 min_uniform_buffer_offset_alignment
+//!  7 max_push_constant_size         17 min_storage_buffer_offset_alignment
+//!  8 max_color_attachments          18 optimal_buffer_copy_offset_alignment
+//!  9 max_sample_count               19 max_sampler_anisotropy, as f32::to_bits
+//! ```
+//!
+//! Every row but the last is an unsigned integer widened to 64 bits. The last
+//! is an `f32` carried as its bit pattern, because this ABI has no float in it
+//! — a reader that rounded it instead would report `1.5` and `1.0` as the same
+//! ceiling.
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -9988,6 +10015,121 @@ pub mod shim {
         granted_u32(|info| info.caps.limits.max_image_2d)
     }
 
+    /// How many scalars [`granted_limits`] flattens
+    /// [`Limits`](crcbl_hal::Limits) into.
+    ///
+    /// Not the field count: `max_compute_workgroup_size` is three of them. The
+    /// array literal in that function has to be exactly this long, so a row
+    /// added without moving this is a compile error rather than a scalar no
+    /// reader can reach.
+    const LIMIT_COUNT: usize = 20;
+
+    /// The granted adapter's [`Limits`](crcbl_hal::Limits) flattened to one
+    /// scalar per index, in the order the [module docs](super#exports) name.
+    ///
+    /// **Destructured with no `..` rest pattern on purpose.** A field added to
+    /// `Limits` fails to compile here rather than going quietly unread by the
+    /// browser gate that reads this table back — which is the whole point of
+    /// having an indexed reader instead of one export per limit.
+    fn granted_limits(limits: crcbl_hal::Limits) -> [u64; LIMIT_COUNT] {
+        let crcbl_hal::Limits {
+            max_image_2d,
+            max_image_3d,
+            max_image_array_layers,
+            max_storage_buffer_range,
+            max_uniform_buffer_range,
+            max_bind_groups,
+            max_bindless_descriptors,
+            max_push_constant_size,
+            max_color_attachments,
+            max_sample_count,
+            max_draw_indirect_count,
+            max_compute_workgroup_size,
+            max_compute_invocations_per_workgroup,
+            max_compute_workgroups_per_dimension,
+            min_uniform_buffer_offset_alignment,
+            min_storage_buffer_offset_alignment,
+            optimal_buffer_copy_offset_alignment,
+            max_sampler_anisotropy,
+        } = limits;
+        [
+            u64::from(max_image_2d),
+            u64::from(max_image_3d),
+            u64::from(max_image_array_layers),
+            max_storage_buffer_range,
+            max_uniform_buffer_range,
+            u64::from(max_bind_groups),
+            u64::from(max_bindless_descriptors),
+            u64::from(max_push_constant_size),
+            u64::from(max_color_attachments),
+            u64::from(max_sample_count),
+            u64::from(max_draw_indirect_count),
+            // Three consecutive indices, X then Y then Z.
+            u64::from(max_compute_workgroup_size[0]),
+            u64::from(max_compute_workgroup_size[1]),
+            u64::from(max_compute_workgroup_size[2]),
+            u64::from(max_compute_invocations_per_workgroup),
+            u64::from(max_compute_workgroups_per_dimension),
+            min_uniform_buffer_offset_alignment,
+            min_storage_buffer_offset_alignment,
+            optimal_buffer_copy_offset_alignment,
+            // THE ONE ROW THAT IS NOT A NUMBER'S OWN VALUE. This field is an
+            // `f32`, and this ABI carries integers, so it travels as
+            // [`f32::to_bits`] and the reader turns the pattern back into a
+            // float. Rounding it to an integer here would make `1.5` and `1.0`
+            // the same answer, which is a limit the gate could not tell apart.
+            u64::from(max_sampler_anisotropy.to_bits()),
+        ]
+    }
+
+    /// The scalar at `index` in that table, or `0`.
+    ///
+    /// `0` for an out-of-range index as much as for nothing granted yet, on
+    /// [`granted_u32`]'s terms and for its reason: `0` is a legal value for
+    /// every row, so this is not a failure code. Allocates nothing.
+    fn granted_limit(index: i32) -> u64 {
+        let Ok(index) = usize::try_from(index) else {
+            return 0;
+        };
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.granted().map_or(0, |info| {
+                granted_limits(info.caps.limits)
+                    .get(index)
+                    .copied()
+                    .unwrap_or(0)
+            }),
+            Err(_) => 0,
+        })
+    }
+
+    /// How many scalars [`__crcbl_web_gpu_probe_limit_lo`] indexes.
+    ///
+    /// A constant of the build rather than of the granted adapter: it answers
+    /// the same number before anything has been granted. A reader driving its
+    /// loop off this rather than off a count of its own is a reader that fails
+    /// loudly the day the seam grows a limit.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_limit_count() -> u32 {
+        u32::try_from(LIMIT_COUNT).unwrap_or(u32::MAX)
+    }
+
+    /// Low 32 bits of the granted adapter's limit scalar at `index`. `0` when
+    /// nothing has been granted or the index is out of range, on the terms
+    /// [`__crcbl_web_gpu_probe_features_lo`] states.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_limit_lo(index: i32) -> u32 {
+        granted_limit(index) as u32
+    }
+
+    /// High 32 bits of the same scalar, on the same terms. Zero on every row
+    /// the seam declares `u32` or `f32`, and split for
+    /// [`__crcbl_web_gpu_probe_features_hi`]'s reason: the whole of this ABI is
+    /// `(i32, …) -> i32`.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_limit_hi(index: i32) -> u32 {
+        (granted_limit(index) >> 32) as u32
+    }
+
     /// Ask the page to make a surface out of one of its canvases.
     ///
     /// `1` when one [`CreateSurface`](crate::Command::CreateSurface) is on the
@@ -18304,7 +18446,7 @@ mod tests {
 
         assert_eq!(
             shims.len(),
-            148,
+            151,
             "`shim`'s export count moved; the `# Exports` table has to move with it"
         );
         let documented: BTreeSet<&str> = rows.iter().copied().collect();

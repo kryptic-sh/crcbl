@@ -463,10 +463,11 @@ export async function runProbeGroups({
       ` maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
   );
 
-  // …and the other eighteen limits, which no export carries. Checked where they
-  // can be: against the live adapter, in the page, through the same mapping the
-  // replayer used to fill the reply. `gpu-replay.mjs` does this against a stub
-  // with distinct numbers; this is the same table meeting a real browser's.
+  // …and then the mapping itself, in the page: every limit the browser reports,
+  // against the field `halLimitsFor` put it in. `gpu-replay.mjs` does this
+  // against a stub with distinct numbers; this is the same table meeting a real
+  // browser's. It is the first half of the pair — browser → mapped — and the
+  // check after it is the second.
   const limitPairs = [
     ['maxImage2d', 'maxTextureDimension2D'],
     ['maxImage3d', 'maxTextureDimension3D'],
@@ -501,6 +502,69 @@ export async function runProbeGroups({
     mismatched.length
       ? mismatched.join('; ')
       : `${limitPairs.length + 1} mapped, on maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
+  );
+
+  // **AND THE SECOND HALF: MAPPED → WASM.** The check above says the mapping put
+  // each of the browser's limits in the field that names it; this one says the
+  // numbers that mapping produced are the numbers the module ended up holding,
+  // after the reply encoder wrote them and `crcbl-webgpu` decoded them back into
+  // a `crcbl_hal::Limits`. Between the two, every scalar of that struct is held
+  // against this browser end to end.
+  //
+  // **Which is what only `maxImage2d` used to be.** One export carried one
+  // limit, so a decode that transposed two fields — `max_image_3d` receiving
+  // `max_image_array_layers` — agreed with the browser on the one number that
+  // crossed and was invisible on every one that did not.
+  //
+  // The expected side is `live.mapped` rather than `live.limits`: this half is
+  // about the wire, and holding it against the browser directly would fail here
+  // for a mapping fault the check above already names better.
+  const wasmLimits = wasmCaps?.limits ?? {};
+  const mappedLimits = live?.mapped ?? {};
+  const mappedFields = Object.keys(mappedLimits);
+  /** One limit beside another, `maxComputeWorkgroupSize`'s array included. */
+  const sameLimit = (got, want) =>
+    Array.isArray(want)
+      ? Array.isArray(got) &&
+        got.length === want.length &&
+        got.every((value, index) => value === want[index])
+      : got === want;
+  const show = (value) =>
+    Array.isArray(value) ? `[${value.join(', ')}]` : String(value);
+  const wrongLimits = mappedFields
+    .filter((field) => !sameLimit(wasmLimits[field], mappedLimits[field]))
+    .map(
+      (field) =>
+        `${field}: wasm has ${show(wasmLimits[field])}, the page mapped ${show(mappedLimits[field])}`
+    );
+  // **THE ARITY IS PART OF THE CLAIM.** `limitCount` is wasm's own count of the
+  // scalars it flattened `Limits` into, and the loop above walks the fields the
+  // page mapped — so a seam that grew a limit neither side's table knows about
+  // is a shorter walk that would otherwise pass on the fields it did reach.
+  // `maxComputeWorkgroupSize` is three scalars, which is why this counts values
+  // rather than keys.
+  const mappedScalars = Object.values(mappedLimits).reduce(
+    (total, value) => total + (Array.isArray(value) ? value.length : 1),
+    0
+  );
+  if (wasmCaps?.limitCount !== mappedScalars) {
+    wrongLimits.unshift(
+      `wasm reports ${wasmCaps?.limitCount} limit scalars, the page mapped ${mappedScalars}`
+    );
+  }
+  if (mappedFields.length === 0) {
+    wrongLimits.unshift(
+      'the page mapped no limits at all, so nothing was compared'
+    );
+  }
+  check(
+    'G',
+    'every limit the page mapped is the number wasm ended up holding',
+    wrongLimits.length === 0,
+    wrongLimits.length
+      ? wrongLimits.join('; ')
+      : `${mappedScalars} scalars agree, on maxImage3d ${show(wasmLimits.maxImage3d)}` +
+          ` and maxComputeWorkgroupSize ${show(wasmLimits.maxComputeWorkgroupSize)}`
   );
 
   // **AND THEN A DEVICE OPENS.** The enumeration proves a command crossed and an

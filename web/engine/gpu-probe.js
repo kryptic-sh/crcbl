@@ -942,6 +942,64 @@ export function startSurfaceCapsProbe({ exports }) {
 }
 
 /**
+ * How a limit row's two halves become one JavaScript number.
+ *
+ * `>>> 0` on each because a wasm `i32` arrives signed. The 64-bit join
+ * multiplies rather than shifts: `<<` in JavaScript is a 32-bit operator, so
+ * `hi << 32` is `hi`. Every value the seam carries here is an image dimension,
+ * a buffer size or an alignment, all far below `2 ** 53`, so a `number` holds
+ * them exactly and nothing has to become a `BigInt` — which would not survive
+ * the wire back to the browser-gate driver anyway.
+ */
+const joinU32 = (lo) => lo >>> 0;
+const joinU64 = (lo, hi) => (hi >>> 0) * 2 ** 32 + (lo >>> 0);
+/**
+ * The one row that is not an integer: `max_sampler_anisotropy` is an `f32` and
+ * this ABI carries no floats, so it travels as `f32::to_bits` and the bit
+ * pattern is reinterpreted here.
+ */
+const joinF32 = (lo) => new Float32Array(new Uint32Array([lo >>> 0]).buffer)[0];
+
+/**
+ * `crcbl_hal::Limits` in the index order `__crcbl_web_gpu_probe_limit_lo` takes,
+ * which is the order `crates/crcbl-webgpu/src/probe.rs` writes out under its
+ * `# Exports` heading. Each row names the seam field in the lowerCamel spelling
+ * `halLimitsFor` in `gpu-replay.js` uses, says how its two halves join, and — for the one
+ * array field — how many consecutive indices it spends.
+ *
+ * **What keeps the two lists in step is not this file.** The Rust side
+ * destructures `Limits` with no rest pattern, so a field added to the seam
+ * cannot compile without a row there; and `__crcbl_web_gpu_probe_limit_count`
+ * is what says whether the table below reaches as far as that one does, which
+ * is why {@link readAdapterProbe} reports the count it read rather than
+ * assuming this list is the whole of it.
+ *
+ * @type {ReadonlyArray<{ field: string,
+ *                        join: (lo: number, hi: number) => number,
+ *                        arity?: number }>}
+ */
+const LIMIT_ROWS = [
+  { field: 'maxImage2d', join: joinU32 },
+  { field: 'maxImage3d', join: joinU32 },
+  { field: 'maxImageArrayLayers', join: joinU32 },
+  { field: 'maxStorageBufferRange', join: joinU64 },
+  { field: 'maxUniformBufferRange', join: joinU64 },
+  { field: 'maxBindGroups', join: joinU32 },
+  { field: 'maxBindlessDescriptors', join: joinU32 },
+  { field: 'maxPushConstantSize', join: joinU32 },
+  { field: 'maxColorAttachments', join: joinU32 },
+  { field: 'maxSampleCount', join: joinU32 },
+  { field: 'maxDrawIndirectCount', join: joinU32 },
+  { field: 'maxComputeWorkgroupSize', join: joinU32, arity: 3 },
+  { field: 'maxComputeInvocationsPerWorkgroup', join: joinU32 },
+  { field: 'maxComputeWorkgroupsPerDimension', join: joinU32 },
+  { field: 'minUniformBufferOffsetAlignment', join: joinU64 },
+  { field: 'minStorageBufferOffsetAlignment', join: joinU64 },
+  { field: 'optimalBufferCopyOffsetAlignment', join: joinU64 },
+  { field: 'maxSamplerAnisotropy', join: joinF32 },
+];
+
+/**
  * Reads where the adapter probe has got to.
  *
  * A reader and nothing more: the replies it is reading reached wasm through the
@@ -954,17 +1012,23 @@ export function startSurfaceCapsProbe({ exports }) {
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
  * @returns {{ state: number, name: string, text: string,
- *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number } }}
+ *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number,
+ *                    limitCount: number,
+ *                    limits: Record<string, number | number[] | undefined> } }}
  *   `text` is the adapter's name under `GRANTED`, the reason under `REFUSED`,
  *   and the decode error under `UNDECODABLE`. `caps` is the part of the granted
  *   adapter's `DeviceCaps` the probe exports — see below — and is all zeros
  *   under every state but `GRANTED`, where `0` is also a legal value, so read it
- *   only once the state says so.
+ *   only once the state says so. `caps.limits` is the whole of the adapter's
+ *   `crcbl_hal::Limits`, keyed by {@link LIMIT_ROWS}; `caps.limitCount` is how
+ *   many scalars wasm said it had, so a caller can tell a full read from a
+ *   table this file has fallen behind on.
  */
 export function readAdapterProbe({ exports, memory }) {
   // `state` first, `ptr` second: `state` decodes a buffer and clones a string,
   // so it allocates, and an allocation may grow wasm memory and detach any view
-  // built before it. `ptr`, `len` and the three numbers below allocate nothing.
+  // built before it. `ptr`, `len` and every number read below allocate nothing,
+  // which is what lets the limit table be read after the string.
   const state = exports.__crcbl_web_gpu_probe_state();
   const text = readUtf8(
     memory,
@@ -974,16 +1038,49 @@ export function readAdapterProbe({ exports, memory }) {
   // THE PART OF THE ANSWER A BROWSER CAN CORROBORATE. The whole of
   // `AdapterInfo` crosses the wire, but five of its seven wire fields are the
   // absences WebGPU forces — a browser has nothing to disagree with about a
-  // vendor id it does not have. The feature word and a limit are the two that
-  // vary per machine, so they are what `crates/crcbl-webgpu/src/probe.rs`
-  // exports and what `browser-e2e.mjs` checks against `navigator.gpu`.
+  // vendor id it does not have. The feature word and the limits are what vary
+  // per machine, so they are what `crates/crcbl-webgpu/src/probe.rs` exports
+  // and what `browser-e2e.mjs` checks against `navigator.gpu`.
   //
   // Two halves rather than one `i64`, because the whole of this ABI is
   // `(i32, …) -> i32`. `>>> 0` because a wasm `i32` arrives signed.
+  //
+  // `maxImage2d` stays a member of its own beside the indexed table that also
+  // carries it: it is the number every existing caller reads, and the table
+  // arrived later.
+  const limitCount = exports.__crcbl_web_gpu_probe_limit_count() >>> 0;
+  // Driven by wasm's own count rather than by `LIMIT_ROWS`' length, so
+  // that a seam which grew a limit shows up as a table this file is short of
+  // rather than as a loop that stopped early and looked complete.
+  /** @type {{ lo: number, hi: number }[]} */
+  const scalars = [];
+  for (let index = 0; index < limitCount; index += 1) {
+    scalars.push({
+      lo: exports.__crcbl_web_gpu_probe_limit_lo(index) >>> 0,
+      hi: exports.__crcbl_web_gpu_probe_limit_hi(index) >>> 0,
+    });
+  }
+  let cursor = 0;
+  /** The next scalar, joined, or `undefined` if wasm reported fewer than that. */
+  const take = (join) => {
+    const scalar = scalars[cursor];
+    cursor += 1;
+    return scalar === undefined ? undefined : join(scalar.lo, scalar.hi);
+  };
+  /** @type {Record<string, number | number[] | undefined>} */
+  const limits = {};
+  for (const { field, join, arity } of LIMIT_ROWS) {
+    limits[field] =
+      arity === undefined
+        ? take(join)
+        : Array.from({ length: arity }, () => take(join));
+  }
   const caps = {
     featuresLo: exports.__crcbl_web_gpu_probe_features_lo() >>> 0,
     featuresHi: exports.__crcbl_web_gpu_probe_features_hi() >>> 0,
     maxImage2d: exports.__crcbl_web_gpu_probe_max_image_2d() >>> 0,
+    limitCount,
+    limits,
   };
   return { state, name: probeStateName(state), text, caps };
 }
