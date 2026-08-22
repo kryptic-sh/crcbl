@@ -6269,6 +6269,71 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   an **exact stable** (`1.97.0`) on purpose and its own comment calls a floating
   channel a broken promise.
 
+  **Correction 2026-08-23: that command's artifact cannot be used by a worker,
+  so "it builds" was a weaker result than it read as.** Built exactly as above,
+  `crcbl_horde.wasm` has **zero imports** and exports its memory. A worker
+  cannot attach to a memory the module owns — only to one the host constructs
+  and the module imports — so nothing about that artifact is threaded beyond the
+  atomic instructions being legal. The link arguments are the missing half, and
+  with them the surface a worker needs is all reachable:
+
+  ```
+  -C link-arg=--shared-memory  -C link-arg=--import-memory
+  -C link-arg=--max-memory=1073741824
+  -C link-arg=--export=__wasm_init_tls   -C link-arg=--export=__tls_base
+  -C link-arg=--export=__tls_size        -C link-arg=--export=__tls_align
+  -C link-arg=--export=__stack_pointer   -C link-arg=--export=__heap_base
+  ```
+
+  That artifact imports `env.memory`, instantiates under node against a
+  `WebAssembly.Memory({initial: 257, maximum: 16384, shared: true})` whose
+  buffer **is** a `SharedArrayBuffer`, and reports `__tls_size` 2041 with
+  `__tls_align` 8. `__stack_pointer` comes back as a mutable global that JS can
+  **write** — checked by writing it, not by reading its type — which is the one
+  fact the whole bootstrap turns on: wasm globals are per-instance, so every
+  worker would otherwise run on the main thread's stack region.
+
+  **This settles the shape of the worker backend, and it needs no new
+  dependency.** `wasm-bindgen-rayon` and `wasm_thread` are the ecosystem's
+  answers and both drag in `wasm-bindgen`, which this repo deliberately does not
+  use — `web/tools/wasm-loader.js` is hand-written against raw `__crcbl_web_*`
+  exports. With the symbols above the bootstrap is: the main thread allocates a
+  stack and a `__tls_size` block from its own allocator and double-boxes the
+  `Work` to a thin pointer; JS posts
+  `{module, memory, stackTop, tlsPtr, workPtr}` to a `Worker`; the worker
+  instantiates against the same memory, sets `__stack_pointer`, calls
+  `__wasm_init_tls(tlsPtr)`, and calls an exported entry that reconstitutes the
+  `Box` and runs it.
+
+  **The bootstrap was then run, not just designed** (2026-08-23, under
+  `node:worker_threads`, against a throwaway crate exporting one function that
+  reads a `thread_local`, allocates a `Vec`, and bumps a `static AtomicU32`).
+  Three workers instantiated the same module against the same shared memory and
+  each ran Rust: allocation from the shared heap returned the right answer, the
+  `AtomicU32` accumulated every call from every thread, each worker saw its own
+  `thread_local` start at zero and increment, and the main thread's own
+  `thread_local` was still correct afterwards. So a worker backend behind the
+  `Spawn` seam is a real option and not a hoped-for one.
+
+  **Both bootstrap steps were red-checked by removing them, and the failure
+  modes are not alike.** Skipping `__wasm_init_tls` traps at once —
+  `RuntimeError: unreachable`, no call lands, impossible to miss. Skipping the
+  `__stack_pointer` write is the dangerous one: every worker keeps the main
+  thread's stack region, the function that only allocates and returns still
+  gives the **right** answer on every call, and the damage shows solely in the
+  one probe that writes a large stack array — two workers returned garbage where
+  the value is deterministic and a third died with
+  `memory access out of bounds`. A "did the closure run" smoke test passes that
+  build. Whatever gate covers the worker backend therefore has to make a worker
+  **use** its stack; observing that work happened is not enough to tell the two
+  builds apart.
+
+  Still unmeasured: what stack size per worker is right (the probe used 1 MiB,
+  chosen to match LLD's default rather than measured), and whether a browser
+  `Worker` accepts a structured-cloned `WebAssembly.Module` on all three runners
+  — node is not evidence for that, though the local `crossOriginIsolated` gate
+  means it can be asked without touching Pages.
+
   **`rust-src` was installed locally and no CI job has it.** The only
   `nightly-2026-07-02` in `ci.yml` today is the `decoder-fuzz` job, which does
   not build threaded wasm and correctly does not ask for the component. So
