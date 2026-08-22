@@ -14751,15 +14751,40 @@ apart — so **two mapped features are left without one**:
   `web/engine/gpu-replay.js` converts both pitches through the block extent — so
   what is left is the group itself. It needs a BC block with known decoded
   texels; the workspace has no BC encoder and adding one is not in scope, but a
-  single hand-written BC1 block is small and the format is exactly specified, so
-  this is a transcription job with a specification to check against rather than
-  a design problem. **Assert only on the endpoint texels.** A BC1 block's two
-  endpoints decode by exact bit replication, but its 1/3 and 2/3 interpolants
-  are where vendors have always differed by a step, so a block of
-  `0xFFFF`/`0x0000` read at index 0 and index 1 is white and black on every
-  decoder while indices 2 and 3 need a tolerance. CI matters here: SwiftShader
-  does not report the feature, so the absent branch is what most runners would
-  take and the present branch would rest on the local hardware adapter.
+  single hand-written BC1 block is small, but this is **a design problem and not
+  a transcription job** — this entry claimed the opposite until 2026-08-23, and
+  the reasoning it gave for the assertion was wrong twice over.
+
+  It said a BC1 block's two endpoints "decode by exact bit replication" and only
+  the 1/3 and 2/3 interpolants vary between vendors. Both halves are false:
+  - **Bit replication is D3D's rule, not the normative one.** Khronos Data
+    Format 1.3 §18.1, which Vulkan and WebGPU inherit, specifies the exact
+    rational — `R = bits/31`, `G = bits/63`. The two disagree by one UNORM8 step
+    for 5-bit values 3, 7, 24 and 28, and for 6-bit values 11–15 and 48–52
+    (computed, not recalled). They agree only where a channel is all-zeroes or
+    all-ones.
+  - **The tolerance covers the endpoints too.** D3D 11.3 §19.5.2 permits
+    `|generated − reference|` up to
+    `absolute_error + 0.03 × |endpoint_0 − endpoint_1|` **for all channels of
+    all texels**, with no carve-out for indices 0 and 1, and mandates bit
+    accuracy only for BC6H and BC7. Against a black `color1` that band is about
+    ±8.65 in UNORM8. Its one exactness clause is that values the reference
+    decodes to 0.0 or 1.0 must always be exact.
+
+  So the endpoints must be **cube corners** — every channel 0 or full — which is
+  why the `0xFFFF`/`0x0000` example this entry always gave was sound despite the
+  reasoning under it. That costs group AJ's colour rules: a corner like red has
+  two channels alike, and BC1's opaque mode gives every texel alpha 1.0, so AJ's
+  dropped-alpha discrimination is unavailable here and the group must not imply
+  it has one. What recovers the rest is a **position-aware** form — of the 35
+  four-subsets of the eight corners, 32 satisfy both "no non-identity channel
+  permutation maps the ordered four-tuple to itself" and "a channel stuck at 0
+  or at 255 changes at least one quadrant"; `red`/`green`/`blue`/`yellow` is one
+  such set. The render target's clear stays a mid-tone, so "nothing was drawn"
+  keeps its own reading. CI matters here: SwiftShader does not report the
+  feature, so the absent branch is what most runners would take and the present
+  branch would rest on the local hardware adapter.
+
 - **`timestamp-query`.** The cheapest to encode and the hardest to assert on.
   Browsers quantise timestamp values for privacy, so "non-zero" and "strictly
   increasing" are not safe claims without measuring first what this browser
