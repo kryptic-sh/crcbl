@@ -22,8 +22,8 @@ use core::ops::Range;
 use crcbl_core::{Handle, Pool};
 
 use crate::{
-    BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferBarrier, BufferCopy,
-    BufferHandle, BufferImageCopy, CommandBufferHandle, ComputePipelineHandle,
+    AdapterId, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferBarrier,
+    BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle, ComputePipelineHandle,
     DepthStencilAttachment, DrawIndirect, DrawIndirectCount, GraphicsPipelineHandle, ImageBarrier,
     ImageCopy, ImageHandle, IndexFormat, MemoryLocation, QuerySetHandle, QueueHandle, Rect2d,
     SemaphoreSignal, SemaphoreWait, ShaderSources, ShaderStages, SwapchainHandle, Viewport,
@@ -691,6 +691,9 @@ pub(super) struct State {
     /// [`SurfaceError::Timeout`](crate::SurfaceError::Timeout). See
     /// [`Recorder::report_present_wait_timeouts`].
     pub(super) present_wait_timeouts: u32,
+    /// Adapters whose `surface_caps` refuses every surface, permanently. See
+    /// [`Recorder::refuse_surface_on`].
+    pub(super) refused_adapters: std::collections::BTreeSet<AdapterId>,
     /// Why the device is lost, once it is — and never cleared, which is what
     /// separates it from `device_errors`. See [`Recorder::lose_device`].
     pub(super) lost_device: Option<String>,
@@ -711,6 +714,7 @@ impl State {
             swapchain_out_of_date: false,
             suboptimal_acquires: 0,
             present_wait_timeouts: 0,
+            refused_adapters: std::collections::BTreeSet::new(),
             lost_device: None,
         }
     }
@@ -1177,6 +1181,56 @@ impl Recorder {
         } else {
             false
         }
+    }
+
+    /// Makes [`Instance::surface_caps`](crate::Instance::surface_caps) refuse
+    /// every surface on `adapter`, as if that GPU had no path to the display
+    /// the surface belongs to.
+    ///
+    /// The refusal is
+    /// [`HalError::Unsupported`](crate::HalError::Unsupported) — the same
+    /// variant `crcbl-vk` returns when no queue family on a physical device can
+    /// present to a surface, deliberately, because the engine's answer to it is
+    /// "not this one, try the next" and a test of that answer should be handed
+    /// the error shape a real driver produces.
+    ///
+    /// Why it was missing: `NullInstance::adapters` reported one adapter and
+    /// nothing made it refuse, so `crcbl/src/engine.rs`'s `start_device` could
+    /// only ever take the first adapter it was offered. That loop is not
+    /// decoration — `crates/crcbl/tests/windowed_e2e.rs` records a discrete
+    /// RADV GPU that enumerates first under Xvfb and cannot present at all,
+    /// while the software rasteriser behind it can — and it was reachable on no
+    /// backend in this workspace. Pair this with
+    /// [`NullInstance::with_adapters`](super::NullInstance::with_adapters),
+    /// which is what gives a refusal somewhere to fall through *to*.
+    ///
+    /// **Latched rather than counted, and for a reason neither of the counted
+    /// injectors has: this is a property of a pairing, not an event.** An
+    /// adapter with no path to a display does not acquire one, so there is
+    /// nothing for a count to run out of — where a suboptimal frame and a
+    /// stalled compositor are both conditions that pass. And a count would be
+    /// spent by the very walk it exists to steer: start-up asks each adapter
+    /// once, then the engine asks the *chosen* adapter again on every resize,
+    /// so a one-shot refusal would leave the adapter it had just rejected
+    /// answering the next question. Latched, the answer is the same at every
+    /// call, which is the only shape in which "this adapter is not the one" is
+    /// a fact rather than a moment.
+    ///
+    /// Nothing clears it, as nothing clears [`lose_device`](Self::lose_device).
+    /// It is keyed by adapter, so the adapters left out of it go on serving.
+    ///
+    /// Only `surface_caps` refuses; a device requested from a refused adapter
+    /// still opens. The engine only ever requests one from the adapter that
+    /// just served it a `SurfaceCaps`, so refusing there would be surface
+    /// nothing exercises.
+    pub fn refuse_surface_on(&self, adapter: AdapterId) {
+        self.lock().refused_adapters.insert(adapter);
+    }
+
+    /// Whether `adapter` has been refused. The backend's half of
+    /// [`refuse_surface_on`](Self::refuse_surface_on).
+    pub(super) fn refuses_surface(&self, adapter: AdapterId) -> bool {
+        self.lock().refused_adapters.contains(&adapter)
     }
 
     /// Loses the device, permanently: every later call that resolves a handle —

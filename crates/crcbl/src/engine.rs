@@ -7845,6 +7845,175 @@ mod tests {
             .expect("teardown is in the seam's stated order");
     }
 
+    /// The debug line `start_device` writes for each adapter it passes over.
+    const REFUSED_LINE: &str = "hal: adapter ";
+
+    /// Runs [`GpuContext::start_device`] against `instance` and hands back
+    /// whatever it refused with.
+    ///
+    /// The shell is dropped on the way out, which is only safe because nothing
+    /// survived the call: a failed start-up destroys the surface it made before
+    /// returning, so no object outlives the window it was made for.
+    fn start_device_error(instance: crcbl_hal::null::NullInstance) -> GpuError {
+        let (shell, window) = shell();
+        let target = shell
+            .surface_target(window)
+            .expect("the headless window is still alive");
+        match GpuContext::start_device(
+            Box::new(instance),
+            &target,
+            (320, 240),
+            "adapter walk test",
+            Features::empty(),
+            Features::empty(),
+            Pacing::Off,
+        ) {
+            Ok(_) => panic!("nothing could serve this surface, so start-up must not have"),
+            Err(error) => error,
+        }
+    }
+
+    /// **The adapter walk passes over one that cannot present and opens the
+    /// device on a later one.**
+    ///
+    /// The case `crates/crcbl/tests/windowed_e2e.rs` says the loop exists for: a
+    /// discrete RADV GPU enumerates first under Xvfb and cannot present to the
+    /// window at all, while the software rasteriser behind it can. Until
+    /// [`Recorder::refuse_surface_on`] and
+    /// [`NullInstance::with_adapters`](crcbl_hal::null::NullInstance::with_adapters)
+    /// existed, the null backend reported one adapter that never refused, so
+    /// `break`ing out of this loop on the first `Err` would have left the whole
+    /// suite green.
+    ///
+    /// **The observable is `GpuContext::adapter`** — the id `request_device` was
+    /// actually called with — not that start-up succeeded. A `break` on the
+    /// first refusal fails start-up outright, but a walk that took the *first*
+    /// adapter's caps and the *second* adapter's id, or the reverse, would
+    /// succeed here and be wrong on the machine this is modelling. The adapter
+    /// line the engine logs is asserted beside it, because it is the only
+    /// record a run leaves of which adapter it took.
+    #[test]
+    fn the_adapter_walk_passes_over_one_that_cannot_present() {
+        use crcbl_hal::AdapterId;
+        use crcbl_hal::null::{NullInstance, Recorder};
+
+        let logs = crcbl_core::log::capture();
+        let recorder = Recorder::new();
+        recorder.refuse_surface_on(AdapterId(0));
+        let (_shell, mut gpu) = open_null_context(
+            NullInstance::gpu_driven()
+                .with_adapters(2)
+                .with_recorder(recorder),
+            Features::empty(),
+            Pacing::Off,
+        );
+        assert_eq!(
+            gpu.adapter,
+            AdapterId(1),
+            "the device was requested from the adapter that served the surface"
+        );
+
+        let records = logs.records();
+        let chosen: Vec<_> = records
+            .iter()
+            .filter(|record| record.message.contains(", geometry "))
+            .collect();
+        assert_eq!(
+            chosen.len(),
+            1,
+            "one adapter is taken, and named once: {records:?}"
+        );
+        assert!(
+            chosen[0].message.contains("null adapter #1"),
+            "the line names the adapter that served, not the one that refused: {}",
+            chosen[0].message
+        );
+        let passed_over: Vec<_> = records
+            .iter()
+            .filter(|record| record.message.starts_with(REFUSED_LINE))
+            .collect();
+        assert_eq!(
+            passed_over.len(),
+            1,
+            "the refusal is not silent — it is the only record of why the first \
+             adapter was not used: {records:?}"
+        );
+        assert!(
+            passed_over[0].message.contains("null adapter #0"),
+            "{}",
+            passed_over[0].message
+        );
+
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy()
+            .expect("teardown is in the seam's stated order");
+    }
+
+    /// **An exhausted walk and an empty adapter list fail differently**, and
+    /// each says which happened.
+    ///
+    /// Two failures, two errors, and the distinction is the whole point:
+    /// "every adapter here refused this window" is a pairing problem a user can
+    /// act on — a second GPU, a display not wired to the card — while "no
+    /// adapter" is a machine with no GPU at all. An assertion that only checked
+    /// `is_err` would pass with the two collapsed into one message, and the
+    /// run's only diagnostic would then name the wrong cause half the time.
+    ///
+    /// The refusal arm also carries the *adapter's own* error out rather than
+    /// replacing it with a sentence of the engine's, which is what makes a real
+    /// backend's reason — `crcbl-vk`'s "no queue family on this adapter can
+    /// present to this surface" — reach the log at all.
+    #[test]
+    fn an_exhausted_adapter_walk_and_an_empty_one_fail_differently() {
+        use crcbl_hal::null::{NullInstance, ObjectKind, Recorder};
+        use crcbl_hal::{AdapterId, BackendKind};
+
+        let logs = crcbl_core::log::capture();
+        let recorder = Recorder::new();
+        recorder.refuse_surface_on(AdapterId(0));
+        recorder.refuse_surface_on(AdapterId(1));
+        let exhausted = start_device_error(
+            NullInstance::gpu_driven()
+                .with_adapters(2)
+                .with_recorder(recorder.clone()),
+        );
+        assert!(
+            matches!(
+                exhausted,
+                GpuError::Hal(HalError::Unsupported {
+                    backend: BackendKind::Null,
+                    ..
+                })
+            ),
+            "the adapter's own refusal is what comes out: {exhausted}"
+        );
+        assert_eq!(
+            logs.records()
+                .iter()
+                .filter(|record| record.message.starts_with(REFUSED_LINE))
+                .count(),
+            2,
+            "both adapters were asked; the walk ran out rather than stopping at the first"
+        );
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Surface),
+            0,
+            "the surface start-up made is destroyed on the way out, or every failed \
+             open leaks one"
+        );
+
+        let empty = start_device_error(NullInstance::gpu_driven().with_adapters(0));
+        assert!(
+            matches!(empty, GpuError::Unusable("no adapter")),
+            "a machine with no GPU is not a window nothing can present to: {empty}"
+        );
+        assert_ne!(
+            exhausted.to_string(),
+            empty.to_string(),
+            "the two causes must be readable apart in a log, not only in a `match`"
+        );
+    }
+
     /// The two halves of the present-feedback line [`GpuContext::finish`] logs,
     /// exactly as it writes them.
     const FEEDBACK_LINE: &str = "hal: pacing on presents";

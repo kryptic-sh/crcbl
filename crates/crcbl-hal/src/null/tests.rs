@@ -1348,6 +1348,141 @@ fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
     instance.destroy_surface(surface);
 }
 
+/// **An instance can report a list of adapters, and every id in it works.**
+///
+/// One adapter is the default and stays the default, because it is what every
+/// other test in this workspace has been written against. What matters here is
+/// that the list is not the only shape: `crcbl/src/engine.rs` walks it, and a
+/// walk over one element has one outcome.
+///
+/// The ids and the *names* are both asserted, and the names are not decoration:
+/// the engine logs the adapter it took, and a list whose entries all read "null
+/// adapter" would leave that line unable to say which one that was.
+#[test]
+fn an_instance_reports_the_adapters_it_was_built_with() {
+    let one = NullInstance::gpu_driven();
+    let listed = one.adapters();
+    assert_eq!(listed.len(), 1, "one adapter is still the default");
+    assert_eq!(listed[0].id, AdapterId(0));
+    assert_eq!(
+        listed[0].name, "null adapter",
+        "a lone adapter keeps the preset's plain name"
+    );
+
+    let many = NullInstance::gpu_driven().with_adapters(3);
+    let listed = many.adapters();
+    assert_eq!(
+        listed.iter().map(|adapter| adapter.id).collect::<Vec<_>>(),
+        vec![AdapterId(0), AdapterId(1), AdapterId(2)],
+        "the ids are the indices, which is what `AdapterId` means"
+    );
+    assert_eq!(
+        listed
+            .iter()
+            .map(|adapter| &*adapter.name)
+            .collect::<Vec<_>>(),
+        vec!["null adapter #0", "null adapter #1", "null adapter #2"],
+        "distinguishable, or the engine's adapter line names nothing"
+    );
+
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { many.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    for adapter in &listed {
+        many.surface_caps(surface, adapter.id)
+            .unwrap_or_else(|error| panic!("{:?} serves this surface: {error}", adapter.name));
+        many.create_device(&DeviceDesc::for_adapter(adapter.id))
+            .unwrap_or_else(|error| panic!("{:?} opens a device: {error}", adapter.name));
+    }
+    // One past the end is still no adapter at all, on both calls.
+    let past = AdapterId(3);
+    assert!(
+        matches!(
+            many.surface_caps(surface, past),
+            Err(HalError::NoSuchAdapter(3))
+        ),
+        "an id off the end of the list must not resolve"
+    );
+    assert!(matches!(
+        many.create_device(&DeviceDesc::for_adapter(past)),
+        Err(HalError::NoSuchAdapter(3))
+    ));
+    many.destroy_surface(surface);
+
+    assert!(
+        NullInstance::gpu_driven()
+            .with_adapters(0)
+            .adapters()
+            .is_empty(),
+        "a machine with no GPU is a real state, and the engine has an answer for it"
+    );
+}
+
+/// **A refused adapter never serves a surface, and its neighbours are
+/// untouched.**
+///
+/// The injection `crcbl/src/engine.rs`'s adapter walk exists for: an `Err` from
+/// [`Instance::surface_caps`] means "not this one", so the engine's loop is
+/// only a loop if some adapter can say it and some other adapter can still say
+/// `Ok`. Both halves are asserted here, and the baseline before the injection
+/// too — without it a `refuse_surface_on` that did nothing at all would be
+/// indistinguishable from one that refused everything, since the assertion
+/// below would be reading an adapter that never worked.
+///
+/// The latch is the third half: [`Recorder::refuse_surface_on`] is permanent by
+/// design, so the second ask gets the same answer as the first. A counted
+/// refusal would be spent by start-up's own walk and let the rejected adapter
+/// answer the engine's next question — the resize-time `surface_caps` — as if
+/// it had been serving all along.
+#[test]
+fn a_refused_adapter_never_serves_a_surface_while_its_neighbours_do() {
+    let instance = NullInstance::gpu_driven().with_adapters(2);
+    let recorder = instance.recorder();
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    for id in [AdapterId(0), AdapterId(1)] {
+        assert!(
+            instance.surface_caps(surface, id).is_ok(),
+            "the baseline: both adapters serve before anything is injected"
+        );
+    }
+
+    recorder.refuse_surface_on(AdapterId(0));
+    let refused = instance
+        .surface_caps(surface, AdapterId(0))
+        .expect_err("the refused adapter has no path to this surface");
+    assert!(
+        matches!(
+            refused,
+            HalError::Unsupported {
+                backend: BackendKind::Null,
+                ..
+            }
+        ),
+        "the variant `crcbl-vk` refuses with, so the engine's arm sees the real shape: {refused}"
+    );
+    assert!(
+        instance
+            .surface_caps(surface, AdapterId(0))
+            .is_err_and(|error| matches!(error, HalError::Unsupported { .. })),
+        "latched: asking again does not clear it"
+    );
+
+    let served = instance
+        .surface_caps(surface, AdapterId(1))
+        .expect("the refusal is keyed to an adapter, not to the instance");
+    assert!(
+        served.preferred_format().is_some(),
+        "a serving adapter offers a format, which is what makes the engine take it"
+    );
+
+    // Only `surface_caps` refuses. Documented on the injector, and asserted so
+    // that widening it later is a decision rather than an accident.
+    instance
+        .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
+        .expect("a device from a refused adapter still opens");
+    instance.destroy_surface(surface);
+}
+
 /// The out-of-date injection, from the seam's side: while the latch is set,
 /// **all three** of the calls a frame makes on a swapchain report
 /// [`SurfaceError::OutOfDate`], and only a reconfigure that actually rebuilt

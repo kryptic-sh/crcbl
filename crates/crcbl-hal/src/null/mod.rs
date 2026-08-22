@@ -186,6 +186,9 @@ pub struct NullInstance {
     /// a separately constructed one gets a fresh id and its surfaces are
     /// therefore foreign to this one's devices.
     id: u64,
+    /// How many adapters [`Instance::adapters`] reports. See
+    /// [`NullInstance::with_adapters`].
+    adapter_count: u32,
 }
 
 impl NullInstance {
@@ -197,6 +200,7 @@ impl NullInstance {
             caps,
             name: "null adapter".to_string(),
             id: next_owner_id(),
+            adapter_count: 1,
         }
     }
 
@@ -271,6 +275,35 @@ impl NullInstance {
         self
     }
 
+    /// Reports `count` adapters instead of one, all with this instance's caps,
+    /// each named with its index once there is more than one to tell apart.
+    ///
+    /// The switch on the seam's **adapter selection** loop, which needs more
+    /// than one adapter before it is a loop at all. `crcbl/src/engine.rs`'s
+    /// `start_device` walks the list asking each adapter for
+    /// [`SurfaceCaps`] and takes the first that answers, because
+    /// `crates/crcbl/tests/windowed_e2e.rs` found a discrete RADV GPU that
+    /// enumerates first under Xvfb and cannot present to the window at all
+    /// while the software rasteriser behind it can. With one adapter that walk
+    /// has one outcome, so neither "the first refused and the second served"
+    /// nor "every one refused" could be driven from any backend here.
+    ///
+    /// Reporting more than one is only half of it: nothing here makes an
+    /// adapter *refuse*, so the refusal comes from
+    /// [`Recorder::refuse_surface_on`]. The adapters are otherwise identical —
+    /// same caps, same [`DeviceType::Cpu`] — because this backend has one set
+    /// of capabilities and an adapter here claiming to be a discrete GPU would
+    /// be telling every test that opened one something untrue.
+    ///
+    /// `count` may be `0`, which is a real state a real instance reaches — a
+    /// machine with no GPU, a browser with no WebGPU — and the one the engine
+    /// answers with "no adapter" before it walks anything.
+    #[must_use]
+    pub fn with_adapters(mut self, count: u32) -> Self {
+        self.adapter_count = count;
+        self
+    }
+
     /// Uses `recorder` instead of this instance's own, so a caller can keep a
     /// handle on the stream after the instance is boxed as `dyn Instance`.
     #[must_use]
@@ -313,16 +346,25 @@ impl Instance for NullInstance {
     }
 
     fn adapters(&self) -> Vec<AdapterInfo> {
-        vec![AdapterInfo {
-            id: AdapterId(0),
-            name: self.name.clone(),
-            vendor_id: 0,
-            device_id: 0,
-            device_type: DeviceType::Cpu,
-            driver: format!("crcbl-hal {}", env!("CARGO_PKG_VERSION")),
-            backend: BackendKind::Null,
-            caps: self.caps,
-        }]
+        (0..self.adapter_count)
+            .map(|index| AdapterInfo {
+                id: AdapterId(index),
+                // A lone adapter keeps the preset's plain name; a list suffixes
+                // the index, so a log line or an assertion can say *which* one
+                // was taken rather than only that one was.
+                name: if self.adapter_count == 1 {
+                    self.name.clone()
+                } else {
+                    format!("{} #{index}", self.name)
+                },
+                vendor_id: 0,
+                device_id: 0,
+                device_type: DeviceType::Cpu,
+                driver: format!("crcbl-hal {}", env!("CARGO_PKG_VERSION")),
+                backend: BackendKind::Null,
+                caps: self.caps,
+            })
+            .collect()
     }
 
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
@@ -354,10 +396,19 @@ impl Instance for NullInstance {
         surface: SurfaceHandle,
         adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError> {
-        if adapter != AdapterId(0) {
+        if adapter.0 >= self.adapter_count {
             return Err(HalError::NoSuchAdapter(adapter.0));
         }
         self.check_surface(surface)?;
+        // After the checks and outside their lock, as every other injection
+        // point in this backend is: `check_surface` takes the recorder's mutex
+        // and it is not reentrant.
+        if self.recorder.refuses_surface(adapter) {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Null,
+                what: "this adapter cannot present to this surface",
+            });
+        }
         Ok(SurfaceCaps {
             formats: SURFACE_FORMATS.to_vec(),
             present_modes: if self.implicit_acquire() {
@@ -377,7 +428,7 @@ impl Instance for NullInstance {
     }
 
     fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError> {
-        if desc.adapter != AdapterId(0) {
+        if desc.adapter.0 >= self.adapter_count {
             return Err(HalError::NoSuchAdapter(desc.adapter.0));
         }
         let missing = self.caps.missing(desc.required_features);
