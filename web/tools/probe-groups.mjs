@@ -531,6 +531,16 @@ export async function runProbeGroups({
       : got === want;
   const show = (value) =>
     Array.isArray(value) ? `[${value.join(', ')}]` : String(value);
+  /**
+   * How many scalars a mapped `Limits` is, `maxComputeWorkgroupSize`'s three
+   * included — which is why this counts values rather than keys. Both halves
+   * of this pair hold it against wasm's own `limitCount`.
+   */
+  const countScalars = (limits) =>
+    Object.values(limits).reduce(
+      (total, value) => total + (Array.isArray(value) ? value.length : 1),
+      0
+    );
   const wrongLimits = mappedFields
     .filter((field) => !sameLimit(wasmLimits[field], mappedLimits[field]))
     .map(
@@ -541,12 +551,7 @@ export async function runProbeGroups({
   // scalars it flattened `Limits` into, and the loop above walks the fields the
   // page mapped — so a seam that grew a limit neither side's table knows about
   // is a shorter walk that would otherwise pass on the fields it did reach.
-  // `maxComputeWorkgroupSize` is three scalars, which is why this counts values
-  // rather than keys.
-  const mappedScalars = Object.values(mappedLimits).reduce(
-    (total, value) => total + (Array.isArray(value) ? value.length : 1),
-    0
-  );
+  const mappedScalars = countScalars(mappedLimits);
   if (wasmCaps?.limitCount !== mappedScalars) {
     wrongLimits.unshift(
       `wasm reports ${wasmCaps?.limitCount} limit scalars, the page mapped ${mappedScalars}`
@@ -657,6 +662,7 @@ export async function runProbeGroups({
   const liveDevice = await evaluate(
     page,
     `(async () => {
+     const { halLimitsFor } = await import('/engine/gpu-replay.js');
      const adapter = await navigator.gpu.requestAdapter();
      const requiredLimits = {};
      for (const key in adapter.limits) {
@@ -675,6 +681,13 @@ export async function runProbeGroups({
        features: [...device.features].sort(),
        maxTextureDimension2D: device.limits.maxTextureDimension2D,
        adapterMaxTextureDimension2D: adapter.limits.maxTextureDimension2D,
+       // Mapped off the GPUDevice and never off the adapter it came from,
+       // which is the distinction the check below exists to hold. BigInts do
+       // not survive the wire back to this driver, as above.
+       mapped: Object.fromEntries(
+         Object.entries(halLimitsFor(device)).map(([key, value]) =>
+           [key, typeof value === 'bigint' ? Number(value) : value])
+       ),
      };
    })()`
   );
@@ -695,6 +708,57 @@ export async function runProbeGroups({
       deviceCaps?.maxImage2d > 0,
     `wasm got ${deviceCaps?.maxImage2d}, the device says` +
       ` maxTextureDimension2D ${liveDevice?.maxTextureDimension2D}`
+  );
+
+  // **AND THE SAME PAIR AGAIN, FOR THE DEVICE.** The check above holds one of
+  // the device's limits against a device; this holds every one of them — what
+  // the page maps off the `GPUDevice` it opened for itself, against what wasm
+  // ended up holding once the reply encoder wrote the device's `Limits` and
+  // `crcbl-webgpu` decoded them back into one.
+  //
+  // **The device had the blind spot the adapter used to have.**
+  // `__crcbl_web_gpu_probe_device_max_image_2d` was the only export carrying one
+  // of its limits, so a decode that transposed two fields on the *device* reply
+  // agreed with the browser on the one number that crossed and was invisible on
+  // every one that did not. The adapter's table cannot see that: `Reply::Device`
+  // is a different record, decoded separately.
+  //
+  // Held against `liveDevice.mapped` rather than against `device.limits`
+  // directly, for the reason the adapter's half gives: this is the wire's half
+  // of the pair, and a mapping fault belongs to the check that names it.
+  const deviceWasmLimits = deviceCaps?.limits ?? {};
+  const deviceMappedLimits = liveDevice?.mapped ?? {};
+  const deviceMappedFields = Object.keys(deviceMappedLimits);
+  const wrongDeviceLimits = deviceMappedFields
+    .filter(
+      (field) => !sameLimit(deviceWasmLimits[field], deviceMappedLimits[field])
+    )
+    .map(
+      (field) =>
+        `${field}: wasm has ${show(deviceWasmLimits[field])}, the page mapped ${show(deviceMappedLimits[field])}`
+    );
+  // The arity is part of this claim too, on the adapter half's terms and for
+  // its reason: a walk over fewer fields than exist would otherwise pass on the
+  // ones it did reach.
+  const deviceMappedScalars = countScalars(deviceMappedLimits);
+  if (deviceCaps?.limitCount !== deviceMappedScalars) {
+    wrongDeviceLimits.unshift(
+      `wasm reports ${deviceCaps?.limitCount} limit scalars for the device, the page mapped ${deviceMappedScalars}`
+    );
+  }
+  if (deviceMappedFields.length === 0) {
+    wrongDeviceLimits.unshift(
+      "the page mapped none of its own device's limits, so nothing was compared"
+    );
+  }
+  check(
+    'G',
+    'every limit the page mapped off its own device is the number wasm holds for the device',
+    wrongDeviceLimits.length === 0,
+    wrongDeviceLimits.length
+      ? wrongDeviceLimits.join('; ')
+      : `${deviceMappedScalars} scalars agree, on maxImage3d ${show(deviceWasmLimits.maxImage3d)}` +
+          ` and maxComputeWorkgroupSize ${show(deviceWasmLimits.maxComputeWorkgroupSize)}`
   );
 
   // **The device's capabilities are not the adapter's**, which is the claim a

@@ -31,7 +31,7 @@
 //! | [`__crcbl_web_gpu_probe_features_lo`](shim::__crcbl_web_gpu_probe_features_lo) | `() -> i32` | Low 32 bits of the granted adapter's [`Features`]. |
 //! | [`__crcbl_web_gpu_probe_features_hi`](shim::__crcbl_web_gpu_probe_features_hi) | `() -> i32` | High 32 bits of the same. |
 //! | [`__crcbl_web_gpu_probe_max_image_2d`](shim::__crcbl_web_gpu_probe_max_image_2d) | `() -> i32` | The granted adapter's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
-//! | [`__crcbl_web_gpu_probe_limit_count`](shim::__crcbl_web_gpu_probe_limit_count) | `() -> i32` | How many scalars the granted adapter's [`Limits`](crcbl_hal::Limits) flattens into, which is the length of the index order below. Answers the same before anything is granted. |
+//! | [`__crcbl_web_gpu_probe_limit_count`](shim::__crcbl_web_gpu_probe_limit_count) | `() -> i32` | How many scalars a [`Limits`](crcbl_hal::Limits) flattens into, which is the length of the index order below. **The one count for the adapter's rows and the device's alike**, since the flattening belongs to the struct and not to the reply that carried it, and it answers the same before anything is granted or opened. |
 //! | [`__crcbl_web_gpu_probe_limit_lo`](shim::__crcbl_web_gpu_probe_limit_lo) | `(i32) -> i32` | Low 32 bits of the granted adapter's limit scalar at `index`. `0` for an out-of-range index, and `0` is a legal value for every row. |
 //! | [`__crcbl_web_gpu_probe_limit_hi`](shim::__crcbl_web_gpu_probe_limit_hi) | `(i32) -> i32` | High 32 bits of the same scalar. Zero on every row the seam declares `u32` or `f32`. |
 //! | [`__crcbl_web_gpu_probe_device`](shim::__crcbl_web_gpu_probe_device) | `() -> i32` | Encode one device request for the adapter that was granted, and register its wait. `1`, or `0` if nothing has been granted yet, there was no room, or another channel is installed. |
@@ -41,6 +41,8 @@
 //! | [`__crcbl_web_gpu_probe_device_features_lo`](shim::__crcbl_web_gpu_probe_device_features_lo) | `() -> i32` | Low 32 bits of the **opened device's** [`Features`]. |
 //! | [`__crcbl_web_gpu_probe_device_features_hi`](shim::__crcbl_web_gpu_probe_device_features_hi) | `() -> i32` | High 32 bits of the same. |
 //! | [`__crcbl_web_gpu_probe_device_max_image_2d`](shim::__crcbl_web_gpu_probe_device_max_image_2d) | `() -> i32` | The opened device's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
+//! | [`__crcbl_web_gpu_probe_device_limit_lo`](shim::__crcbl_web_gpu_probe_device_limit_lo) | `(i32) -> i32` | Low 32 bits of the **opened device's** limit scalar at `index`, in the index order below and counted by [`__crcbl_web_gpu_probe_limit_count`](shim::__crcbl_web_gpu_probe_limit_count). `0` for an out-of-range index, and `0` is a legal value for every row. |
+//! | [`__crcbl_web_gpu_probe_device_limit_hi`](shim::__crcbl_web_gpu_probe_device_limit_hi) | `(i32) -> i32` | High 32 bits of the same scalar. Zero on every row the seam declares `u32` or `f32`. |
 //! | [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface) | `(i32) -> i32` | Encode one [`CreateSurface`](crate::Command::CreateSurface) against [`PROBE_SURFACE`], naming the canvas that `canvas_id` is the page's registry key for. `1`, or `0` if the probe is re-entered or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_buffer`](shim::__crcbl_web_gpu_probe_buffer) | `(i32) -> i32` | Encode one [`CreateBuffer`](crate::Command::CreateBuffer) against [`PROBE_BUFFER`], of `size` bytes. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_image`](shim::__crcbl_web_gpu_probe_image) | `(i32, i32, i32) -> i32` | Encode one [`CreateImage`](crate::Command::CreateImage) against [`PROBE_IMAGE`], of `width` by `height` texels with `mip_levels` levels. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
@@ -184,7 +186,8 @@
 //! | [`__crcbl_web_gpu_probe_parity_failures_ptr`](shim::__crcbl_web_gpu_probe_parity_failures_ptr) | `() -> i32` | Where the disagreements start, one per line. Empty on [`PARITY_MATCHED`]. |
 //! | [`__crcbl_web_gpu_probe_parity_failures_len`](shim::__crcbl_web_gpu_probe_parity_failures_len) | `() -> i32` | How long that text is, in UTF-8 bytes. |
 //!
-//! **The limit index order** the two `limit_` readers take is
+//! **The limit index order** the `limit_` readers take — the adapter's pair
+//! and the device's alike — is
 //! [`Limits`](crcbl_hal::Limits)' own field order, with
 //! `max_compute_workgroup_size` spending three consecutive indices on X, Y and
 //! Z. It is written out here because the JS side reads it back against this
@@ -10900,8 +10903,14 @@ pub mod shim {
     /// reader can reach.
     const LIMIT_COUNT: usize = 20;
 
-    /// The granted adapter's [`Limits`](crcbl_hal::Limits) flattened to one
-    /// scalar per index, in the order the [module docs](super#exports) name.
+    /// One [`Limits`](crcbl_hal::Limits) flattened to one scalar per index, in
+    /// the order the [module docs](super#exports) name.
+    ///
+    /// **The granted adapter's and the opened device's alike**: the flattening
+    /// belongs to the struct, not to the reply that carried it, so a second copy
+    /// for the device would be a second index order to keep in step with this
+    /// one — and the day they drifted the browser gate would read one table
+    /// through the other's order and say nothing.
     ///
     /// **Destructured with no `..` rest pattern on purpose.** A field added to
     /// `Limits` fails to compile here rather than going quietly unread by the
@@ -10978,12 +10987,16 @@ pub mod shim {
         })
     }
 
-    /// How many scalars [`__crcbl_web_gpu_probe_limit_lo`] indexes.
+    /// How many scalars [`__crcbl_web_gpu_probe_limit_lo`] indexes — and
+    /// [`__crcbl_web_gpu_probe_device_limit_lo`] with it.
     ///
-    /// A constant of the build rather than of the granted adapter: it answers
-    /// the same number before anything has been granted. A reader driving its
-    /// loop off this rather than off a count of its own is a reader that fails
-    /// loudly the day the seam grows a limit.
+    /// **One count, and there is deliberately no second.** It is a constant of
+    /// the build rather than of the granted adapter or the opened device: both
+    /// readers walk the one flattened table the [module docs](super#exports)
+    /// write out, so a device-side count could only ever answer this same
+    /// number, and this answers it before anything has been granted or opened. A reader driving its loop off this rather than
+    /// off a count of its own is a reader that fails loudly the day the seam
+    /// grows a limit.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_limit_count() -> u32 {
         u32::try_from(LIMIT_COUNT).unwrap_or(u32::MAX)
@@ -11328,11 +11341,64 @@ pub mod shim {
 
     /// The opened device's
     /// [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d) — the limit the
-    /// *device* was created with, which is the specification's default unless
-    /// something asked for more, and therefore not the adapter's ceiling.
+    /// *device* was created with, which is a different record from the
+    /// adapter's even when it holds the same number.
+    ///
+    /// **It does hold the same number, on this backend.** `requiredLimitsFor` in
+    /// `web/engine/gpu-replay.js` asks `requestDevice` for every member the
+    /// adapter reports, so the device opens at the adapter's ceiling rather than
+    /// at the specification's defaults — that file says so where it maps them,
+    /// and warns in the same breath that it is not a licence to read one off the
+    /// other, because the features still differ and any device opened with a
+    /// different descriptor differs on both. So this reads the device's own
+    /// decoded record; it is not a second look at the adapter's.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_probe_device_max_image_2d() -> u32 {
         opened_u32(|caps| caps.limits.max_image_2d)
+    }
+
+    /// The opened device's scalar at `index` in [`granted_limits`]' table, or
+    /// `0`.
+    ///
+    /// [`granted_limit`] for the device, and the same `0`: out of range as much
+    /// as nothing opened yet, on [`opened_u32`]'s terms and for its reason —
+    /// `0` is a legal value for every row, so this is not a failure code.
+    /// Allocates nothing.
+    fn opened_limit(index: i32) -> u64 {
+        let Ok(index) = usize::try_from(index) else {
+            return 0;
+        };
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.opened().map_or(0, |caps| {
+                granted_limits(caps.limits).get(index).copied().unwrap_or(0)
+            }),
+            Err(_) => 0,
+        })
+    }
+
+    /// Low 32 bits of the **opened device's** limit scalar at `index`.
+    ///
+    /// The index order is [`__crcbl_web_gpu_probe_limit_lo`]'s and the count is
+    /// the same [`__crcbl_web_gpu_probe_limit_count`], because both readers
+    /// flatten the same struct. **The numbers are not the same**: a device's
+    /// limits are the ones it was created with — the specification's default for
+    /// every member the request did not name — and not the adapter's ceiling.
+    /// `0` when no device has opened as much as for an out-of-range index, and
+    /// `0` is a legal value for every row rather than a failure code, so read
+    /// this only once [`__crcbl_web_gpu_probe_device_state`] has answered
+    /// [`DEVICE_OPENED`](super::DEVICE_OPENED).
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_limit_lo(index: i32) -> u32 {
+        opened_limit(index) as u32
+    }
+
+    /// High 32 bits of the same scalar, on the same terms. Zero on every row
+    /// the seam declares `u32` or `f32`, and split for
+    /// [`__crcbl_web_gpu_probe_device_features_hi`]'s reason: the whole of this
+    /// ABI is `(i32, …) -> i32`.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_limit_hi(index: i32) -> u32 {
+        (opened_limit(index) >> 32) as u32
     }
 
     /// Ask what a canvas surface will accept.
@@ -19886,7 +19952,7 @@ mod tests {
 
         assert_eq!(
             shims.len(),
-            159,
+            161,
             "`shim`'s export count moved; the `# Exports` table has to move with it"
         );
         let documented: BTreeSet<&str> = rows.iter().copied().collect();

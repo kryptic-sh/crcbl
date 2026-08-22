@@ -1001,8 +1001,12 @@ const joinF32 = (lo) => new Float32Array(new Uint32Array([lo >>> 0]).buffer)[0];
  * destructures `Limits` with no rest pattern, so a field added to the seam
  * cannot compile without a row there; and `__crcbl_web_gpu_probe_limit_count`
  * is what says whether the table below reaches as far as that one does, which
- * is why {@link readAdapterProbe} reports the count it read rather than
- * assuming this list is the whole of it.
+ * is why {@link readLimitTable} reports the count it read rather than assuming
+ * this list is the whole of it.
+ *
+ * One table for both replies, because wasm flattens one `crcbl_hal::Limits` the
+ * one way whichever reply carried it — see `granted_limits` in
+ * `crates/crcbl-webgpu/src/probe.rs`.
  *
  * @type {ReadonlyArray<{ field: string,
  *                        join: (lo: number, hi: number) => number,
@@ -1028,6 +1032,55 @@ const LIMIT_ROWS = [
   { field: 'optimalBufferCopyOffsetAlignment', join: joinU64 },
   { field: 'maxSamplerAnisotropy', join: joinF32 },
 ];
+
+/**
+ * `crcbl_hal::Limits` as an indexed pair of readers answers it, keyed by
+ * {@link LIMIT_ROWS}.
+ *
+ * **Two callers, one loop.** {@link readAdapterProbe} and
+ * {@link readDeviceProbe} ask different exports for numbers that are genuinely
+ * different — an adapter's limits are its ceilings, a device's are the ones it
+ * was created with — but the flattening they are decoding is the same one, so a
+ * second copy of this walk would be the place the two orders drift apart.
+ *
+ * Driven by `count`, which is wasm's own, rather than by {@link LIMIT_ROWS}'
+ * length: a seam that grew a limit then shows up as a table this file is short
+ * of, rather than as a loop that stopped early and looked complete.
+ *
+ * **Allocates nothing in wasm**, which is what lets it run after the `state`
+ * call that may have grown memory: every export it reaches for is a numeric
+ * getter.
+ *
+ * @param {number} count How many scalars wasm says it flattened.
+ * @param {(index: number) => number} lo The low half of the scalar at `index`.
+ * @param {(index: number) => number} hi The high half of the same scalar.
+ * @returns {Record<string, number | number[] | undefined>} Keyed by
+ *   {@link LIMIT_ROWS}, with `undefined` in any field wasm reported fewer
+ *   scalars than this file has rows for.
+ */
+function readLimitTable(count, lo, hi) {
+  /** @type {{ lo: number, hi: number }[]} */
+  const scalars = [];
+  for (let index = 0; index < count; index += 1) {
+    scalars.push({ lo: lo(index) >>> 0, hi: hi(index) >>> 0 });
+  }
+  let cursor = 0;
+  /** The next scalar, joined, or `undefined` if wasm reported fewer than that. */
+  const take = (join) => {
+    const scalar = scalars[cursor];
+    cursor += 1;
+    return scalar === undefined ? undefined : join(scalar.lo, scalar.hi);
+  };
+  /** @type {Record<string, number | number[] | undefined>} */
+  const limits = {};
+  for (const { field, join, arity } of LIMIT_ROWS) {
+    limits[field] =
+      arity === undefined
+        ? take(join)
+        : Array.from({ length: arity }, () => take(join));
+  }
+  return limits;
+}
 
 /**
  * Reads where the adapter probe has got to.
@@ -1079,38 +1132,16 @@ export function readAdapterProbe({ exports, memory }) {
   // carries it: it is the number every existing caller reads, and the table
   // arrived later.
   const limitCount = exports.__crcbl_web_gpu_probe_limit_count() >>> 0;
-  // Driven by wasm's own count rather than by `LIMIT_ROWS`' length, so
-  // that a seam which grew a limit shows up as a table this file is short of
-  // rather than as a loop that stopped early and looked complete.
-  /** @type {{ lo: number, hi: number }[]} */
-  const scalars = [];
-  for (let index = 0; index < limitCount; index += 1) {
-    scalars.push({
-      lo: exports.__crcbl_web_gpu_probe_limit_lo(index) >>> 0,
-      hi: exports.__crcbl_web_gpu_probe_limit_hi(index) >>> 0,
-    });
-  }
-  let cursor = 0;
-  /** The next scalar, joined, or `undefined` if wasm reported fewer than that. */
-  const take = (join) => {
-    const scalar = scalars[cursor];
-    cursor += 1;
-    return scalar === undefined ? undefined : join(scalar.lo, scalar.hi);
-  };
-  /** @type {Record<string, number | number[] | undefined>} */
-  const limits = {};
-  for (const { field, join, arity } of LIMIT_ROWS) {
-    limits[field] =
-      arity === undefined
-        ? take(join)
-        : Array.from({ length: arity }, () => take(join));
-  }
   const caps = {
     featuresLo: exports.__crcbl_web_gpu_probe_features_lo() >>> 0,
     featuresHi: exports.__crcbl_web_gpu_probe_features_hi() >>> 0,
     maxImage2d: exports.__crcbl_web_gpu_probe_max_image_2d() >>> 0,
     limitCount,
-    limits,
+    limits: readLimitTable(
+      limitCount,
+      (index) => exports.__crcbl_web_gpu_probe_limit_lo(index),
+      (index) => exports.__crcbl_web_gpu_probe_limit_hi(index)
+    ),
   };
   return { state, name: probeStateName(state), text, caps };
 }
@@ -1128,11 +1159,16 @@ export function readAdapterProbe({ exports, memory }) {
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
  * @returns {{ state: number, name: string, reason: string,
- *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number } }}
+ *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number,
+ *                    limitCount: number,
+ *                    limits: Record<string, number | number[] | undefined> } }}
  *   `reason` says why no device opened and is empty when one did. `caps` is the
  *   **device's** — not the adapter's — and is all zeros under every state but
  *   `OPENED`, where `0` is also a legal value, so read it only once the state
- *   says so.
+ *   says so. `caps.limits` is the whole of the device's `crcbl_hal::Limits`,
+ *   keyed by {@link LIMIT_ROWS}; `caps.limitCount` is how many scalars wasm said
+ *   it had, and is the same count the adapter's read reports because the
+ *   flattening is the same one.
  */
 export function readDeviceProbe({ exports, memory }) {
   // `state` first, `ptr` second, for `readAdapterProbe`'s reason: this is the
@@ -1147,10 +1183,17 @@ export function readDeviceProbe({ exports, memory }) {
   // adapter's numbers cannot: a page can open its own default device and read
   // `device.features` and `device.limits` off it, and both differ from the
   // adapter's on any machine whose adapter reports more than the floor.
+  const limitCount = exports.__crcbl_web_gpu_probe_limit_count() >>> 0;
   const caps = {
     featuresLo: exports.__crcbl_web_gpu_probe_device_features_lo() >>> 0,
     featuresHi: exports.__crcbl_web_gpu_probe_device_features_hi() >>> 0,
     maxImage2d: exports.__crcbl_web_gpu_probe_device_max_image_2d() >>> 0,
+    limitCount,
+    limits: readLimitTable(
+      limitCount,
+      (index) => exports.__crcbl_web_gpu_probe_device_limit_lo(index),
+      (index) => exports.__crcbl_web_gpu_probe_device_limit_hi(index)
+    ),
   };
   return { state, name: deviceStateName(state), reason, caps };
 }
