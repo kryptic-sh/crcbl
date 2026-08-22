@@ -476,6 +476,16 @@ pub struct RenderGraph<'a> {
     buffers: Vec<BufferNode>,
     passes: Vec<Pass<'a>>,
     default_queue: QueueHandle,
+    /// The first import that disagreed with an earlier import of the same
+    /// handle, held until [`RenderGraph::compile`] can return it.
+    ///
+    /// Recorded where it happens because that is the only place both
+    /// declarations are in hand, and answered from `compile` because that is
+    /// where this file reports a graph it will not execute — the importer's
+    /// signature says `ImageId`, not `Result<ImageId, _>`, and the subsystem
+    /// that imports second is rarely the one that can decide who is right. The
+    /// first conflict only: the rest of validation names one problem and stops.
+    import_conflict: Option<GraphError>,
 }
 
 impl fmt::Debug for RenderGraph<'_> {
@@ -484,6 +494,7 @@ impl fmt::Debug for RenderGraph<'_> {
             .field("images", &self.images)
             .field("buffers", &self.buffers)
             .field("passes", &self.passes)
+            .field("import_conflict", &self.import_conflict)
             .finish()
     }
 }
@@ -497,6 +508,7 @@ impl<'a> RenderGraph<'a> {
             buffers: Vec::new(),
             passes: Vec::new(),
             default_queue: queue,
+            import_conflict: None,
         }
     }
 
@@ -528,7 +540,52 @@ impl<'a> RenderGraph<'a> {
     }
 
     /// Brings an externally owned image into the graph.
+    ///
+    /// **One handle is one node.** Importing an image this graph already has
+    /// returns the id already issued for it rather than a second one, and that
+    /// is what makes two subsystems importing the same target — the base-colour
+    /// page a monitor feeds and a forward pass binds, an offscreen target two
+    /// renderers both draw into — the ordinary case it looks like. Two ids on
+    /// one image would carry *independent* state trackers, each starting from
+    /// its own declared [`initial`](ImportedImage::initial), so the graph would
+    /// see nothing to order between a write through one and a read through the
+    /// other and emit no barrier at all.
+    ///
+    /// The node keeps the **first** label. A later import naming it differently
+    /// is not an error — subsystems name the same image for their own reasons —
+    /// but every barrier record and [`CompiledGraph::dump`] line already names
+    /// it, and a label that depended on which subsystem imported last would
+    /// make the dump move under a caller reordering two unrelated imports.
+    ///
+    /// A repeat import whose declaration *disagrees* with the first is refused:
+    /// see [`GraphError::ImportDeclarationConflict`], which
+    /// [`compile`](Self::compile) returns.
     pub fn import_image(&mut self, label: impl Into<String>, imported: ImportedImage) -> ImageId {
+        // A linear scan rather than a map from handle to id: a frame has few
+        // resources — the same assumption the id conversion below makes — and a
+        // second structure to keep in step with `images` buys nothing at this
+        // size.
+        let existing = self
+            .images
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| match node.source {
+                ImageSource::Imported(existing) if existing.image == imported.image => {
+                    Some((index, existing))
+                }
+                _ => None,
+            });
+        if let Some((index, first)) = existing {
+            if let Some((field, first, second)) = image_import_conflict(&first, &imported) {
+                self.record_import_conflict(GraphError::ImportDeclarationConflict {
+                    resource: self.images[index].label.clone(),
+                    field,
+                    first,
+                    second,
+                });
+            }
+            return ImageId(u32::try_from(index).expect("a frame has few resources"));
+        }
         let id = ImageId(u32::try_from(self.images.len()).expect("a frame has few resources"));
         self.images.push(ImageNode {
             label: label.into(),
@@ -538,17 +595,54 @@ impl<'a> RenderGraph<'a> {
     }
 
     /// Brings an externally owned buffer into the graph.
+    ///
+    /// One handle is one node, exactly as [`import_image`](Self::import_image)
+    /// describes and for the same reason — a second id would be a second state
+    /// tracker, and a buffer written through one id and read through the other
+    /// would be a read-after-write the graph never barriered. The first label
+    /// wins, and a repeat import that disagrees is
+    /// [`GraphError::BufferImportDeclarationConflict`].
     pub fn import_buffer(
         &mut self,
         label: impl Into<String>,
         imported: ImportedBuffer,
     ) -> BufferId {
+        let existing =
+            self.buffers
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| match node.source {
+                    BufferSource::Imported(existing) if existing.buffer == imported.buffer => {
+                        Some((index, existing))
+                    }
+                    _ => None,
+                });
+        if let Some((index, first)) = existing {
+            if let Some((field, first, second)) = buffer_import_conflict(&first, &imported) {
+                self.record_import_conflict(GraphError::BufferImportDeclarationConflict {
+                    resource: self.buffers[index].label.clone(),
+                    field,
+                    first,
+                    second,
+                });
+            }
+            return BufferId(u32::try_from(index).expect("a frame has few resources"));
+        }
         let id = BufferId(u32::try_from(self.buffers.len()).expect("a frame has few resources"));
         self.buffers.push(BufferNode {
             label: label.into(),
             source: BufferSource::Imported(imported),
         });
         id
+    }
+
+    /// Keeps the first conflicting import for [`compile`](Self::compile) to
+    /// return. Later ones are dropped: the graph is already refused, and the
+    /// second declaration has to come back past `compile` once it is fixed.
+    fn record_import_conflict(&mut self, error: GraphError) {
+        if self.import_conflict.is_none() {
+            self.import_conflict = Some(error);
+        }
     }
 
     /// Starts declaring a render pass. Add it with
@@ -615,7 +709,8 @@ impl<'a> RenderGraph<'a> {
     ///
     /// [`GraphError`] for a graph that cannot be executed as written —
     /// conflicting accesses within one pass, a render pass with no attachments
-    /// or with attachments of different sizes, a transient nothing uses.
+    /// or with attachments of different sizes, a transient nothing uses, or two
+    /// imports of one handle that disagree about what they imported.
     pub fn compile(self, pool: &TransientPool) -> Result<CompiledGraph<'a>, GraphError> {
         compile(self, pool)
     }
@@ -1751,9 +1846,204 @@ pub enum GraphError {
         /// What the last graph to execute against this pool left it in.
         left: ResourceState,
     },
+    /// One image handle was imported twice with declarations that disagree.
+    ///
+    /// [`RenderGraph::import_image`] hands the second importer the id the first
+    /// one got, because one handle has to be one node with one state tracker
+    /// for the graph to barrier between two passes that reach it through
+    /// different ids. That leaves exactly one thing it cannot do quietly: two
+    /// declarations that are not the same declaration. Keeping the first would
+    /// be the graph ignoring the second — silently sampling through a view it
+    /// was not handed, or barriering out of a state the other importer says the
+    /// image is not in — so the frame is refused instead and the two importers
+    /// have to agree.
+    #[error(
+        "`{resource}` is imported more than once with different declarations: `{field}` is \
+         {first} in one and {second} in the other; one handle is one node with one state \
+         tracker, so the graph cannot honour both — import it once and share the id"
+    )]
+    ImportDeclarationConflict {
+        /// Resource label — the **first** import's, which is the one the node
+        /// kept.
+        resource: String,
+        /// Which field of [`ImportedImage`] disagreed.
+        field: ImportField,
+        /// What the first import declared it as, [`Debug`](fmt::Debug)-printed.
+        first: String,
+        /// What the later import declared it as.
+        second: String,
+    },
+    /// One buffer handle was imported twice with declarations that disagree.
+    ///
+    /// [`GraphError::ImportDeclarationConflict`] for a resource with no layout,
+    /// and a variant of its own for the same reason
+    /// [`GraphError::BufferImportStateMismatch`] is one: the message names the
+    /// resource kind, and a caller matching on the error is usually looking at
+    /// one kind of resource.
+    #[error(
+        "`{resource}` is imported more than once with different declarations: `{field}` is \
+         {first} in one and {second} in the other; one handle is one node with one state \
+         tracker, so the graph cannot honour both — import it once and share the id"
+    )]
+    BufferImportDeclarationConflict {
+        /// Resource label — the **first** import's, which is the one the node
+        /// kept.
+        resource: String,
+        /// Which field of [`ImportedBuffer`] disagreed.
+        field: ImportField,
+        /// What the first import declared it as, [`Debug`](fmt::Debug)-printed.
+        first: String,
+        /// What the later import declared it as.
+        second: String,
+    },
     /// The seam refused something at execution time.
     #[error(transparent)]
     Hal(#[from] HalError),
+}
+
+/// Which field of a repeated import declaration disagreed with the first one.
+///
+/// Carried by [`GraphError::ImportDeclarationConflict`] and
+/// [`GraphError::BufferImportDeclarationConflict`] so a caller can tell the
+/// kinds of disagreement apart without parsing a message: two subsystems
+/// disagreeing about the state an image arrives in is a synchronisation bug in
+/// one of them, and two disagreeing about which view they bind is usually one
+/// of them importing the wrong thing entirely.
+///
+/// It spells [`ImportedImage`]'s fields, of which an [`ImportedBuffer`] has
+/// only [`Initial`](Self::Initial) and [`FinalState`](Self::FinalState); the
+/// handle itself is absent because it is what the two declarations are matched
+/// on, so it cannot be what they differ in. [`Display`](fmt::Display) prints
+/// the field's name as it is spelled in the struct, so a message points at
+/// something a reader can go and look at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportField {
+    /// [`ImportedImage::view`].
+    View,
+    /// [`ImportedImage::format`].
+    Format,
+    /// [`ImportedImage::extent`].
+    Extent,
+    /// [`ImportedImage::initial`] or [`ImportedBuffer::initial`].
+    Initial,
+    /// [`ImportedImage::claim`].
+    Claim,
+    /// [`ImportedImage::final_state`] or [`ImportedBuffer::final_state`].
+    FinalState,
+}
+
+impl fmt::Display for ImportField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::View => "view",
+            Self::Format => "format",
+            Self::Extent => "extent",
+            Self::Initial => "initial",
+            Self::Claim => "claim",
+            Self::FinalState => "final_state",
+        })
+    }
+}
+
+/// The first field two declarations of one imported image disagree about.
+///
+/// First rather than all of them, because that is how the rest of this file
+/// reports: one problem named, and the fixed declaration comes back past
+/// `compile` anyway. Compares the values and formats only what it returns —
+/// deciding "same declaration" off the printed text would make two handles that
+/// happen to print alike into one.
+fn image_import_conflict(
+    first: &ImportedImage,
+    second: &ImportedImage,
+) -> Option<(ImportField, String, String)> {
+    // Binds nothing; it is here so that adding a field to `ImportedImage` stops
+    // compiling until this function has decided about it. A field the
+    // comparison forgets is a disagreement reported as agreement, which is the
+    // one failure this whole check exists to prevent — and the six blocks below
+    // look alike enough that a missing seventh would read as complete.
+    let ImportedImage {
+        image: _,
+        view: _,
+        format: _,
+        extent: _,
+        initial: _,
+        claim: _,
+        final_state: _,
+    } = first;
+    if first.view != second.view {
+        return Some((
+            ImportField::View,
+            format!("{:?}", first.view),
+            format!("{:?}", second.view),
+        ));
+    }
+    if first.format != second.format {
+        return Some((
+            ImportField::Format,
+            format!("{:?}", first.format),
+            format!("{:?}", second.format),
+        ));
+    }
+    if first.extent != second.extent {
+        return Some((
+            ImportField::Extent,
+            format!("{:?}", first.extent),
+            format!("{:?}", second.extent),
+        ));
+    }
+    if first.initial != second.initial {
+        return Some((
+            ImportField::Initial,
+            format!("{:?}", first.initial),
+            format!("{:?}", second.initial),
+        ));
+    }
+    if first.claim != second.claim {
+        return Some((
+            ImportField::Claim,
+            format!("{:?}", first.claim),
+            format!("{:?}", second.claim),
+        ));
+    }
+    if first.final_state != second.final_state {
+        return Some((
+            ImportField::FinalState,
+            format!("{:?}", first.final_state),
+            format!("{:?}", second.final_state),
+        ));
+    }
+    None
+}
+
+/// The first field two declarations of one imported buffer disagree about. See
+/// [`image_import_conflict`]; a buffer declaration is the two state fields and
+/// the handle they are about.
+fn buffer_import_conflict(
+    first: &ImportedBuffer,
+    second: &ImportedBuffer,
+) -> Option<(ImportField, String, String)> {
+    // See [`image_import_conflict`]: binds nothing, and stops compiling when
+    // `ImportedBuffer` grows a field this comparison has not decided about.
+    let ImportedBuffer {
+        buffer: _,
+        initial: _,
+        final_state: _,
+    } = first;
+    if first.initial != second.initial {
+        return Some((
+            ImportField::Initial,
+            format!("{:?}", first.initial),
+            format!("{:?}", second.initial),
+        ));
+    }
+    if first.final_state != second.final_state {
+        return Some((
+            ImportField::FinalState,
+            format!("{:?}", first.final_state),
+            format!("{:?}", second.final_state),
+        ));
+    }
+    None
 }
 
 /// Array layers a [`TransientImageDesc`] image has. The pool creates them
@@ -2076,8 +2366,15 @@ fn compile<'a>(
         buffers,
         passes,
         default_queue: _,
+        import_conflict,
     } = graph;
 
+    // First, because it is the earliest thing that went wrong: every check
+    // below runs against a node whose declaration is already known to have been
+    // contradicted, so any error they found would be about the wrong half.
+    if let Some(conflict) = import_conflict {
+        return Err(conflict);
+    }
     validate(&images, &buffers, &passes)?;
     validate_imports(&images, &buffers, pool)?;
 
@@ -2307,6 +2604,11 @@ fn compile<'a>(
     // above has just made them the same thing: every segment of an imported
     // image that is not already at `final_state` gets a trailing barrier into
     // it, so `final_state` is where the image is once this frame has run.
+    //
+    // One entry per handle rather than per import call, and one trailing
+    // barrier for the same reason: `RenderGraph::import_image` gives a repeat
+    // import the id the first one got, so there is no second node here to
+    // barrier the image somewhere else and then overwrite the ledger with it.
     let imported_image_end = images
         .iter()
         .filter_map(|node| match node.source {

@@ -14,6 +14,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`RenderGraph::import_image` and `import_buffer` now deduplicate on the
+  handle, and a repeat import that contradicts the first is a compile error.**
+  Each call used to push a node, so one `ImageHandle` imported twice in a frame
+  became two `ImageId`s with **independent state trackers** — a write through
+  one and a read through the other were two accesses to one image with no
+  barrier between them, because the reader's tracker was already sitting at its
+  own declared `initial` and the graph computed no transition.
+  `validate_imports` could not see it: it compares each declaration against the
+  pool's ledger of what the _previous_ executed graph left, so two declarations
+  that agree with last frame agree with each other. The repeat now returns the
+  id already issued and the node keeps the first label; a declaration differing
+  in any of `view`, `format`, `extent`, `initial`, `claim` or `final_state`
+  comes back from `compile` as `GraphError::ImportDeclarationConflict` (or
+  `BufferImportDeclarationConflict`), naming the field through the new public
+  `ImportField`. An identical re-import is legal and is the point — two
+  subsystems importing the same target is the ordinary case. Two new
+  `GraphError` variants, so an exhaustive `match` on it must add arms.
+
 ### Added
 
 - **`ForwardRenderer::base_color_page()` hands out the base-colour page** as the

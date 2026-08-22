@@ -5289,6 +5289,51 @@ version strings, which were read from Steamworks.NET's header mirror rather than
 Valve's login-gated zip. The plan mandates re-reading both from a real SDK
 before any declaration is trusted.
 
+## DECISION NEEDED — the browser golden gate is cancelled before it can answer (2026-08-22)
+
+**Measured, not suspected.** `gh run list --workflow Pages --limit 10` on
+2026-08-22 returned one run in progress and **nine consecutive `cancelled`
+runs** before it. Every one was killed by the next push. The Windows leg of
+`hold the browser's pixels against the goldens` has a measured 90-minute budget
+(the matrix entry says why: a Windows runner compiles this workspace twice, once
+to wasm and once for the host, and the first attempt was cancelled at 45m20s
+inside the _native_ comparator's build), so on any afternoon of ordinary commits
+it never reaches a verdict at all. The three-OS browser golden comparison is
+currently a gate that reports nothing.
+
+`pages.yml` sets `cancel-in-progress: true` at the workflow level, with the
+comment "a superseded deploy is worth cancelling; two of them racing to publish
+is not". That argument is right about the **deploy** and is being applied to the
+whole run, including three verification jobs that are not deploys and are not
+superseded by anything. Job-level `concurrency:` cannot rescue them —
+workflow-level cancellation kills the run outright, whatever a job declares.
+
+Worth noting before choosing: the deploy is **not** gated on the harness. On the
+run in flight, `deploy to GitHub Pages` completed successfully while the Windows
+leg was still going, so the site ships either way and what is lost is only the
+signal.
+
+- _Leave it._ Cheapest in runner minutes, and the gate does answer on a quiet
+  branch. The cost is that it answers least often exactly when the tree is
+  moving fastest, which is when a regression is most likely.
+- _`cancel-in-progress: false` on the whole workflow._ Every push queues a full
+  three-OS run and each one finishes. Correct final deploy either way — the
+  newest run publishes last. The cost is real: a burst of nine pushes becomes
+  nine queued 90-minute Windows legs.
+- _Split the verification jobs into their own workflow_ with
+  `cancel-in-progress: false`, leaving `pages.yml` as a fast deploy pipeline
+  that keeps cancelling. Costs one more workflow file and the two would drift
+  unless the shared setup is factored; the repo already has this shape in
+  `cron.yml` for the `miri` job.
+- _Move the harness to `cron.yml`._ Always finishes, costs the least, and turns
+  a per-push gate into a nightly one — a regression is then found by a scheduled
+  run rather than by the push that caused it, which is a different debugging
+  problem.
+
+The trade-off is runner minutes against how soon a browser-pixel regression is
+attributable to a commit. Nothing here is blocked on the answer; the gate has
+simply not been answering, and the record should not pretend otherwise.
+
 ## Findings the roadmap carried that nothing else did (2026-08-22)
 
 Folding `docs/plan/ROADMAP.md`'s three sample-findings sections and its
@@ -5357,20 +5402,6 @@ the first thing in this tree to put two cameras and two `ForwardRenderer`s in
 one graph. Four findings came out of that, none of them fixed, all of them in
 `crcbl-render` rather than the sample.
 
-- **`RenderGraph::import_image` does not deduplicate, and `validate_imports` is
-  structurally blind to it.** `import_image` pushes a node per call, so the same
-  `ImageHandle` imported twice yields two `ImageId`s with independent state
-  trackers and **no barrier between the two halves** — each believes it starts
-  at its declared `initial` state. `validate_imports` cannot catch it: it
-  compares each declaration against the pool's ledger of what the _previous_
-  executed graph left, so two declarations that agree with the last frame agree
-  with each other and both pass. `imported_image_end` lets whichever node was
-  declared last decide the final state. The `InitialClaim::Tracked` audit
-  therefore checks across frames and not within one. Verified by reading
-  `import_image` and `validate_imports` in `crates/crcbl-render/src/graph.rs`;
-  no test exercises a duplicate import today. A fix is a handle→`ImageId` map on
-  the graph returning the existing id, which also needs a rule for what happens
-  when the second declaration disagrees with the first.
 - **`ForwardRenderer::add_passes` does not declare the page it samples.** The
   base-colour page is bound through the material descriptor rather than imported
   into the graph, so a graph that also _writes_ that page — which is exactly
@@ -5378,11 +5409,16 @@ one graph. Four findings came out of that, none of them fixed, all of them in
   write and the draws that read it. `apps/lantern` gets a correct barrier only
   because its own `feed_monitor` imports the page and declares
   `ShaderRead → TransferDst → ShaderRead` around the copy; a caller that copied
-  into the page without importing it would get none. Twenty-four frames under
-  Vulkan synchronization validation report zero hazards, which says the barrier
-  the sample declares is doing the job, not that the renderer declared it — and
-  the copy and the draws that sample the page are in one submission, which is
-  the reach this machine's layer has (`run-vk-e2e.sh` prints
+  into the page without importing it would get none. **Import deduplication is
+  the enabler and has now landed**, so `add_passes` can import the page it
+  samples and receive the same `ImageId` `feed_monitor` holds — the edge the
+  graph needs in order to order the two. What is left is the `forward.rs` change
+  and the decision about whether every caller of `add_passes` should pay for an
+  import it may not need. Twenty-four frames under Vulkan synchronization
+  validation report zero hazards, which says the barrier the sample declares is
+  doing the job, not that the renderer declared it — and the copy and the draws
+  that sample the page are in one submission, which is the reach this machine's
+  layer has (`run-vk-e2e.sh` prints
   `record-time=yes one-submission=yes cross-submission=no` on radv), so that is
   the half the run actually checked.
 - **One `ForwardRenderer` cannot serve two views.** `add_passes` takes

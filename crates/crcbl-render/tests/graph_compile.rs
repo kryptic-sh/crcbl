@@ -25,7 +25,8 @@ use crcbl_hal::{
     ImageSubresourceRange, ImageUsage, Instance, QueueHandle, QueueKind, ResourceState,
 };
 use crcbl_render::graph::{
-    GraphBarriers, GraphError, ImageId, ImportedBuffer, ImportedImage, InitialClaim, RenderGraph,
+    GraphBarriers, GraphError, ImageId, ImportField, ImportedBuffer, ImportedImage, InitialClaim,
+    RenderGraph,
 };
 use crcbl_render::transient::{TransientBufferDesc, TransientImageDesc, TransientPool};
 
@@ -598,6 +599,255 @@ fn a_tracked_import_that_contradicts_the_last_frame_is_refused() {
     pool.destroy(harness.device.as_ref());
 }
 
+/// An image two subsystems import: they name it differently, they do not know
+/// about each other, and they hand the graph the same handle.
+///
+/// Declared `ShaderRead` at both ends because that is what an importer keeping
+/// a page across frames says — the ledger is empty on a first frame, so the
+/// declaration stands on its own.
+fn shared_page(harness: &Harness) -> ImportedImage {
+    ImportedImage {
+        initial: ResourceState::ShaderRead,
+        final_state: ResourceState::ShaderRead,
+        ..harness.tracked_target(Format::Bgra8UnormSrgb)
+    }
+}
+
+/// **One handle imported twice is one node with one state tracker**, so the
+/// pass that reads it is barriered against the pass that wrote it.
+///
+/// `import_image` used to push a node per call, which gave a handle imported
+/// twice two ids with *independent* trackers — each starting at its own
+/// declared [`ImportedImage::initial`], neither seeing what the other did. A
+/// write through one id and a read through the other were then two accesses to
+/// one `VkImage` with nothing between them: the reader's tracker was already in
+/// `ShaderRead`, so the graph computed no transition and emitted **no barrier
+/// at all**. That is a read-after-write with `write_barriers: 0` — the hazard
+/// class [`InitialClaim`] exists to close, arriving through a different door,
+/// and one nothing stopped a second subsystem from opening.
+///
+/// The observable is the reading pass's own barrier record: one image barrier
+/// on the id both importers hold, `ColorAttachment` → `ShaderRead`. Against the
+/// old behaviour that record is empty, and the recorded stream one call short.
+#[test]
+fn one_image_imported_twice_is_one_node_with_one_tracker() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let page = shared_page(&harness);
+
+    let mut graph = harness.graph();
+    let feed = graph.import_image("base-colour-page", page);
+    let sample = graph.import_image("material-page", page);
+    assert_eq!(
+        feed, sample,
+        "a repeat import of one handle is the id already issued for it"
+    );
+
+    graph
+        .add_render_pass("feed")
+        .clear_color(feed, [0.0; 4])
+        .execute(|ctx| {
+            ctx.encoder().draw(0..3, 0..1);
+        });
+    graph
+        .add_compute_pass("shade")
+        .read_image(sample)
+        .execute(|ctx| {
+            ctx.encoder().dispatch(1, 1, 1);
+        });
+
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    assert_eq!(compiled.passes().len(), 2);
+
+    let shade = compiled.passes()[1].barriers();
+    assert_eq!(
+        shade.images.len(),
+        1,
+        "the read has to be ordered after the write, and there is nothing else \
+         in the frame to barrier: {shade:?}"
+    );
+    assert_eq!(
+        shade.images[0].image, feed,
+        "and it names the one node both importers got"
+    );
+    assert_eq!(
+        shade.images[0].from,
+        ResourceState::ColorAttachment,
+        "the source scope is the feed pass's write; two trackers had nothing to name"
+    );
+    assert_eq!(shade.images[0].to, ResourceState::ShaderRead);
+
+    // The node keeps the first label, so the dump does not move when a caller
+    // reorders two unrelated imports.
+    let dump = compiled.dump();
+    assert!(dump.contains("base-colour-page"), "{dump}");
+    assert!(
+        !dump.contains("material-page"),
+        "the second import is the same node, not a second one: {dump}"
+    );
+
+    assert!(
+        compiled.final_barriers().is_empty(),
+        "the frame already ends in `final_state`, and there is no second node to \
+         return separately: {:?}",
+        compiled.final_barriers()
+    );
+
+    let expected = compiled.barrier_batches().len();
+    harness.record(|encoder| {
+        compiled
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("execution succeeded");
+    });
+    assert_eq!(
+        harness.recorded_barriers().len(),
+        expected,
+        "the stream the backend saw is the plan"
+    );
+    assert_eq!(
+        pool.imported_image_use(page.image),
+        Some(ResourceState::ShaderRead),
+        "one ledger entry for one handle, not one per import call"
+    );
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// **A repeat import that contradicts the first one is refused**, because
+/// keeping the first would be the graph ignoring a declaration.
+///
+/// Sharing the id is what makes two subsystems importing one target work at
+/// all, and it is only sound while the two are importing the *same* thing. A
+/// second declaration naming a different `final_state` is the importer saying
+/// the frame must leave the image somewhere else; there is one node and one
+/// trailing barrier, so obeying both is not available and silently obeying the
+/// first is how the loser finds out three frames later.
+///
+/// The second half — the identical re-import that must still compile — is what
+/// keeps this from passing against a `compile` that refused every repeat.
+#[test]
+fn two_imports_of_one_image_that_disagree_are_refused() {
+    let harness = Harness::open();
+    let pool = TransientPool::new();
+    let page = shared_page(&harness);
+
+    let shading_graph = |second: ImportedImage| {
+        let mut graph = harness.graph();
+        let feed = graph.import_image("base-colour-page", page);
+        let sample = graph.import_image("material-page", second);
+        assert_eq!(
+            feed, sample,
+            "the id is still the first one; `compile` is where the conflict is answered"
+        );
+        graph
+            .add_render_pass("feed")
+            .clear_color(feed, [0.0; 4])
+            .execute(|_| {});
+        graph
+            .add_compute_pass("shade")
+            .read_image(sample)
+            .execute(|_| {});
+        graph.compile(&pool)
+    };
+
+    let error = shading_graph(ImportedImage {
+        final_state: ResourceState::ColorAttachment,
+        ..page
+    })
+    .expect_err("one node cannot end the frame in two states");
+    assert!(
+        matches!(
+            error,
+            GraphError::ImportDeclarationConflict {
+                field: ImportField::FinalState,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let text = error.to_string();
+    for part in [
+        "base-colour-page",
+        "final_state",
+        "ShaderRead",
+        "ColorAttachment",
+    ] {
+        assert!(text.contains(part), "{part:?} missing from {text:?}");
+    }
+
+    // Every remaining field, one at a time, and each named rather than folded
+    // into one "these differ": which one disagrees is the whole difference
+    // between "the two are out of step about synchronisation" and "one of them
+    // imported the wrong thing". One case per field because the six comparisons
+    // in `image_import_conflict` are near-identical blocks, which is where a
+    // copy-paste puts the wrong field name on the right comparison — and every
+    // field has to appear here or the case that goes uncovered is the one
+    // reported as agreement.
+    let elsewhere = harness.tracked_target(Format::Bgra8UnormSrgb);
+    let differs = [
+        (
+            ImportField::View,
+            ImportedImage {
+                view: elsewhere.view,
+                ..page
+            },
+            "a second view is a second thing to bind, and only one is bound",
+        ),
+        (
+            ImportField::Format,
+            ImportedImage {
+                format: Format::Rgba8UnormSrgb,
+                ..page
+            },
+            "one image has one format, and the barrier's aspect follows it",
+        ),
+        (
+            ImportField::Extent,
+            ImportedImage {
+                extent: (7, 11),
+                ..page
+            },
+            "a subresource range is computed from the extent, so two extents barrier two regions",
+        ),
+        (
+            ImportField::Initial,
+            ImportedImage {
+                initial: ResourceState::TransferDst,
+                ..page
+            },
+            "the first barrier's source scope comes from `initial`, and there is one first barrier",
+        ),
+        (
+            ImportField::Claim,
+            ImportedImage {
+                claim: InitialClaim::Acquired,
+                ..page
+            },
+            "`Acquired` opts the import out of the ledger check; `Tracked` does not",
+        ),
+        (
+            ImportField::FinalState,
+            ImportedImage {
+                final_state: ResourceState::TransferSrc,
+                ..page
+            },
+            "one node cannot end the frame in two states",
+        ),
+    ];
+    for (field, second, why) in differs {
+        let error = shading_graph(second).expect_err(why);
+        assert!(
+            matches!(
+                error,
+                GraphError::ImportDeclarationConflict { field: named, .. } if named == field
+            ),
+            "expected a conflict named {field:?} ({why}), got {error:?}"
+        );
+    }
+
+    shading_graph(page).expect("an identical re-import is the ordinary case, and is legal");
+}
+
 /// **A swapchain image may declare `Undefined` on every frame, forever**, and
 /// that is the case the check must not break.
 ///
@@ -801,6 +1051,142 @@ fn a_buffer_import_that_contradicts_the_last_frame_is_refused() {
     });
     harness.recorder.assert_valid();
     pool.destroy(harness.device.as_ref());
+}
+
+/// **One buffer handle imported twice is one node with one state tracker**,
+/// exactly as an image is and with less to see when it is not.
+///
+/// A buffer has no layout, so the missing barrier leaves no wrong-layout
+/// fingerprint for a capture to show: the dispatch that writes the grid and the
+/// draw that reads it are simply unordered, and the numbers are whichever ones
+/// the driver got round to. Two ids on one handle produced exactly that — the
+/// reader's tracker sat at the declared `ShaderRead` and the graph computed no
+/// transition.
+///
+/// The observable is the reading pass's barrier record: one buffer barrier,
+/// `ShaderReadWrite` → `ShaderRead`. Against the old behaviour it is empty.
+#[test]
+fn one_buffer_imported_twice_is_one_node_with_one_tracker() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let grid = harness.owned_buffer();
+    let declared = ImportedBuffer {
+        buffer: grid,
+        initial: ResourceState::ShaderRead,
+        final_state: ResourceState::ShaderRead,
+    };
+
+    let mut graph = harness.graph();
+    let cluster = graph.import_buffer("light-grid", declared);
+    let shade = graph.import_buffer("froxels", declared);
+    assert_eq!(
+        cluster, shade,
+        "a repeat import of one handle is the id already issued for it"
+    );
+
+    graph
+        .add_compute_pass("light-cluster")
+        .use_buffer(cluster, ResourceState::ShaderReadWrite)
+        .execute(|ctx| {
+            ctx.encoder().dispatch(1, 1, 1);
+        });
+    graph
+        .add_compute_pass("shade")
+        .read_buffer(shade)
+        .execute(|ctx| {
+            ctx.encoder().dispatch(1, 1, 1);
+        });
+
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    let reading = compiled.passes()[1].barriers();
+    assert_eq!(
+        reading.buffers.len(),
+        1,
+        "the read has to be ordered after the dispatch that wrote it: {reading:?}"
+    );
+    assert_eq!(reading.buffers[0].buffer, cluster);
+    assert_eq!(
+        reading.buffers[0].from,
+        ResourceState::ShaderReadWrite,
+        "the source scope is the clustering dispatch; two trackers had nothing to name"
+    );
+    assert_eq!(reading.buffers[0].to, ResourceState::ShaderRead);
+
+    let expected = compiled.barrier_batches().len();
+    harness.record(|encoder| {
+        compiled
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("execution succeeded");
+    });
+    assert_eq!(
+        harness.recorded_barriers().len(),
+        expected,
+        "the stream the backend saw is the plan"
+    );
+    assert_eq!(
+        pool.imported_buffer_use(grid),
+        Some(ResourceState::ShaderRead),
+        "one ledger entry for one handle, not one per import call"
+    );
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// **A repeat buffer import that contradicts the first one is refused.** See
+/// [`two_imports_of_one_image_that_disagree_are_refused`]; a buffer declaration
+/// is the two state fields, so `initial` is the disagreement to check here —
+/// the one that decides what this frame's first barrier orders against.
+#[test]
+fn two_imports_of_one_buffer_that_disagree_are_refused() {
+    let harness = Harness::open();
+    let pool = TransientPool::new();
+    let grid = harness.owned_buffer();
+    let declared = ImportedBuffer {
+        buffer: grid,
+        initial: ResourceState::ShaderRead,
+        final_state: ResourceState::ShaderRead,
+    };
+
+    let clustering = |second: ImportedBuffer| {
+        let mut graph = harness.graph();
+        let cluster = graph.import_buffer("light-grid", declared);
+        let shade = graph.import_buffer("froxels", second);
+        assert_eq!(
+            cluster, shade,
+            "the id is still the first one; `compile` is where the conflict is answered"
+        );
+        graph
+            .add_compute_pass("light-cluster")
+            .use_buffer(cluster, ResourceState::ShaderReadWrite)
+            .execute(|_| {});
+        graph
+            .add_compute_pass("shade")
+            .read_buffer(shade)
+            .execute(|_| {});
+        graph.compile(&pool)
+    };
+
+    let error = clustering(ImportedBuffer {
+        initial: ResourceState::Undefined,
+        ..declared
+    })
+    .expect_err("one node cannot start the frame in two states");
+    assert!(
+        matches!(
+            error,
+            GraphError::BufferImportDeclarationConflict {
+                field: ImportField::Initial,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let text = error.to_string();
+    for part in ["light-grid", "initial", "ShaderRead", "Undefined"] {
+        assert!(text.contains(part), "{part:?} missing from {text:?}");
+    }
+
+    clustering(declared).expect("an identical re-import is the ordinary case, and is legal");
 }
 
 /// The buffer ledger is written by [`CompiledGraph::execute`], not by `compile`,
