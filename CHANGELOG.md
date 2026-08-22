@@ -36,6 +36,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`ForwardRenderer` declares the base-colour page it samples**, through the
+  new `ForwardRenderer::base_color_page_import()` and the public
+  `BASE_COLOR_PAGE_LABEL`. The page was bound through the material descriptor
+  and never imported, so a graph that also _wrote_ it had no declared ordering
+  between the write and the draws that read it — a render-to-texture view
+  copying into a page layer got a correct barrier only if the caller imported
+  the page itself and worked the states out by hand. The read is declared on all
+  three passes whose bind groups name it (`shadow`, `depth-prepass`, `forward`),
+  because a bound descriptor in the wrong layout is a validation error whether
+  or not a fragment stage samples it. A caller that never writes the page pays
+  one import node and three declarations that produce no barriers at all, since
+  `ShaderRead → ShaderRead` needs none.
+
 - **`ForwardRenderer::base_color_page()` hands out the base-colour page** as the
   `UploadedTexture` the renderer uploaded — the image and the view every
   material row samples through `GpuMaterial::base_color_texture`. It is what a

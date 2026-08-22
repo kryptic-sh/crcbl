@@ -223,6 +223,16 @@ const _: () = assert!(
 /// a format, which is why any is passed.
 const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).format;
 
+/// The format §3.2's base-colour page is created with.
+///
+/// **`Rgba8UnormSrgb`, and that is the colour-space decision** — the argument
+/// for it is at the `upload_texture_layers` call inside
+/// [`ForwardRenderer::with_scene`]. Named rather than spelled twice because
+/// [`ForwardRenderer::base_color_page_import`] has to declare the same format
+/// the image was created with, and a barrier naming a format the image is not in
+/// picks the wrong aspects.
+const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
+
 /// Which picture the colour pass draws instead of the shaded one.
 ///
 /// The engine's debug views, as one value rather than as three independent
@@ -728,6 +738,14 @@ pub struct ForwardRenderer {
     /// why this is [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) and not
     /// a bindless descriptor array.
     base_color_page: UploadedTexture,
+    /// The page's size in texels, as a width and a height.
+    ///
+    /// Square, because [`PageDesc`](crate::scene::PageDesc) carries one extent
+    /// for every layer. Kept rather than re-derived because
+    /// [`add_passes`](Self::add_passes) declares the page to the graph and an
+    /// [`ImportedImage`] names an extent — and the description it came from is
+    /// the caller's, read once at build.
+    base_color_page_extent: (u32, u32),
     /// The sampler the page is read through.
     base_color_sampler: SamplerHandle,
 
@@ -2141,7 +2159,7 @@ impl ForwardRenderer {
             device,
             queue,
             "material base colour",
-            Format::Rgba8UnormSrgb,
+            BASE_COLOR_PAGE_FORMAT,
             scene.page.extent(),
             scene.page.extent(),
             &page_layers,
@@ -3535,6 +3553,7 @@ impl ForwardRenderer {
                 .unwrap_or_else(|| unreachable!("the table was placed in the rollback above")),
             probe_volume: scene.probes.volume,
             base_color_page,
+            base_color_page_extent: (scene.page.extent(), scene.page.extent()),
             base_color_sampler,
             draws: rollback.draws.take().unwrap_or_else(|| {
                 unreachable!("draw generation was placed in the rollback above")
@@ -4824,13 +4843,33 @@ impl ForwardRenderer {
             },
         );
 
+        // §3.2's base-colour page, in every bind group of `mesh_layout` and so
+        // read by all three of the passes that draw geometry. Like the
+        // placeholder above it is already in `ShaderRead` and the graph has
+        // nothing to transition on a frame nothing writes it — **the
+        // declaration is for the frames something does**. A caller that copies a
+        // render-to-texture view into one of its layers imports the same handle,
+        // gets this same id back (`RenderGraph::import_image`), and the graph
+        // then has an edge to order its write against these reads. Without the
+        // declaration there is no such edge: the page is bound out of a
+        // descriptor the graph never hears about, and a copy scheduled anywhere
+        // but the tail of the frame leaves it in `TransferDst` for the passes
+        // that sample it.
+        let base_color_page =
+            graph.import_image(Self::BASE_COLOR_PAGE_LABEL, self.base_color_page_import());
+
         // What this frame draws, resolved by the `begin_frame` that opened it —
         // see [`crate::effects`]. Read once here so every conditional below is
         // about one value rather than about four reads of a field.
         let effects = self.frame_effects;
 
-        let (shadow_atlas, shadow_draws) =
-            self.add_shadow_pass(graph, pool, &tile_selection, occlusion_placeholder);
+        let (shadow_atlas, shadow_draws) = self.add_shadow_pass(
+            graph,
+            pool,
+            &tile_selection,
+            occlusion_placeholder,
+            base_color_page,
+        );
 
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
@@ -4988,7 +5027,12 @@ impl ForwardRenderer {
             // `VUID-vkCmdDrawIndexedIndirectCount-imageLayout-00344` names, and
             // the other backends read whatever the last writer left behind.
             .read_image(shadow_atlas)
-            .read_image(occlusion_placeholder);
+            .read_image(occlusion_placeholder)
+            // And the page, on the same terms: `mesh_layout` names it in every
+            // group, this pass's included. Nothing samples it here either, and
+            // declaring it is what lets the graph order a copy into a page layer
+            // against this pass — see `base_color_page_import`.
+            .read_image(base_color_page);
         // `read_draw_sources` declares the *camera's* statistics buffer, because
         // that is the one the arguments came out of; the prepass writes its own
         // instead, so both are declared and the graph barriers both.
@@ -5086,6 +5130,11 @@ impl ForwardRenderer {
             // placeholder, which is in that layout already and has nothing to
             // transition.
             .read_image(occlusion)
+            // **The page this pass's materials actually sample**, and the one
+            // pass of the three where that is literally true. Declared so the
+            // graph can order a caller's copy into a page layer against these
+            // draws — see `base_color_page_import`.
+            .read_image(base_color_page)
             // **The barrier out of the shadow pass's depth attachment.** The
             // atlas is in this pass's bind group at `SHADOW_ATLAS_BINDING`, and
             // without this declaration the graph leaves it in
@@ -5326,6 +5375,7 @@ impl ForwardRenderer {
         pool: &TransientPool,
         selection: &[BufferId],
         occlusion_placeholder: ImageId,
+        base_color_page: ImageId,
     ) -> (ImageId, u64) {
         let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
         let (atlas_width, atlas_height) = shadow::atlas_extent();
@@ -5444,7 +5494,11 @@ impl ForwardRenderer {
             // Likewise, and it is in every one of those groups too — see
             // `ForwardRenderer::ambient_occlusion_placeholder`. Nothing samples
             // it here either: the depth-only pipeline has no fragment stage.
-            .read_image(occlusion_placeholder);
+            .read_image(occlusion_placeholder)
+            // And §3.2's page, which `mesh_layout` names in every group — a
+            // cascade's included. See `ForwardRenderer::base_color_page_import`
+            // for what the declaration buys a caller that writes the page.
+            .read_image(base_color_page);
         // Each tile's mesh pass records the cut it descended to, into a buffer
         // of its own — see `ForwardRenderer::shadow_selection`. Empty where
         // there is no amplification stage to descend anything.
@@ -5543,10 +5597,14 @@ impl ForwardRenderer {
     /// **What a render-to-texture view copies into.** A second camera drawing
     /// into an image is only half of a monitor: the surface that *shows* it
     /// samples a page layer, and nothing above this crate can name the image
-    /// that layer lives in. Handing it out is what lets a caller import the page
-    /// into its own graph, declare a copy into one layer's subresource and leave
-    /// it back in [`ResourceState::ShaderRead`] before the pass that samples it
-    /// — which is the ordering the graph works out from the declaration.
+    /// that layer lives in.
+    ///
+    /// A caller that wants to *write* it wants
+    /// [`base_color_page_import`](Self::base_color_page_import) instead: the
+    /// graph can only order a copy against the draws that sample the page while
+    /// both are declared, and the two declarations have to agree field for
+    /// field. This one is the raw handles, for a caller that binds or reads them
+    /// outside a graph.
     ///
     /// It is created with
     /// [`ImageUsage::TRANSFER_DST`](crcbl_hal::ImageUsage::TRANSFER_DST),
@@ -5558,6 +5616,53 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn base_color_page(&self) -> UploadedTexture {
         self.base_color_page
+    }
+
+    /// What [`add_passes`](Self::add_passes) names the base-colour page in the
+    /// graph.
+    ///
+    /// [`RenderGraph::import_image`] keeps the label of whichever import ran
+    /// first, so a caller importing the page too passes this rather than a
+    /// string of its own — otherwise every barrier record and
+    /// [`dump`](crate::CompiledGraph::dump) line would name the page differently
+    /// depending on which subsystem got there first.
+    pub const BASE_COLOR_PAGE_LABEL: &'static str = "base-colour-page";
+
+    /// The base-colour page **as this renderer declares it to a graph**.
+    ///
+    /// [`add_passes`](Self::add_passes) imports exactly this value under
+    /// [`BASE_COLOR_PAGE_LABEL`](Self::BASE_COLOR_PAGE_LABEL) and declares a read
+    /// of it on every pass whose bind group names the page, so a caller that
+    /// writes the page — a render-to-texture view copied into one layer — gets
+    /// the graph to order its write against those draws.
+    ///
+    /// **A caller that writes it imports this value rather than one of its
+    /// own.** [`RenderGraph::import_image`] hands the second importer the id the
+    /// first got, which is what puts the write and the reads on one state
+    /// tracker, and it does that only while the two declarations agree in every
+    /// field — a disagreement is [`GraphError::ImportDeclarationConflict`] at
+    /// [`compile`](RenderGraph::compile). Reading the declaration off the
+    /// renderer that owns the page is what makes them one answer instead of two
+    /// constants that have to be kept equal by hand.
+    ///
+    /// [`InitialClaim::Tracked`] with [`ResourceState::ShaderRead`] both ways:
+    /// [`crate::texture`] leaves an uploaded page in that state, and the
+    /// trailing barrier the `final_state` asks for puts it back there at the end
+    /// of every frame — so the pool's ledger and this declaration are the same
+    /// answer, which is what `Tracked` has the graph check.
+    ///
+    /// [`GraphError::ImportDeclarationConflict`]: crate::graph::GraphError::ImportDeclarationConflict
+    #[must_use]
+    pub const fn base_color_page_import(&self) -> ImportedImage {
+        ImportedImage {
+            image: self.base_color_page.image,
+            view: self.base_color_page.view,
+            format: BASE_COLOR_PAGE_FORMAT,
+            extent: self.base_color_page_extent,
+            initial: ResourceState::ShaderRead,
+            claim: InitialClaim::Tracked,
+            final_state: ResourceState::ShaderRead,
+        }
     }
 
     /// The model matrix for a cube spinning at `seconds` into the run.

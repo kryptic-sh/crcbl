@@ -28,9 +28,8 @@ use crcbl::hal::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{
-    EffectOverride, EffectRequest, ForwardRenderer, ImportedImage, InitialClaim, MAX_TIMED_PASSES,
-    MenuRenderer, PassTimers, RenderEffects, RenderGraph, TransientImageDesc, TransientPool,
-    UiRenderer, UploadedTexture,
+    EffectOverride, EffectRequest, ForwardRenderer, ImportedImage, MAX_TIMED_PASSES, MenuRenderer,
+    PassTimers, RenderEffects, RenderGraph, TransientImageDesc, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -734,7 +733,7 @@ impl Gpu {
         // materials sample. The monitor renderer has a page of its own and
         // nothing writes it: nothing in the monitor's view samples that layer,
         // because `room::Seen` keeps the screen out of that view entirely.
-        let page = self.renderer.base_color_page();
+        let page = self.renderer.base_color_page_import();
         let compiled = {
             let mut graph = RenderGraph::new(self.ctx.queue());
             let target = graph.import_image(
@@ -836,32 +835,25 @@ impl Gpu {
 ///
 /// # It is the tail of the frame, and the screen is one frame behind
 ///
-/// **Not an oversight — it is what makes the copy correct with no engine change
-/// to order it.** The surface that samples the monitor's layer is drawn by the
-/// main renderer's forward pass, and that pass binds the page out of a bind
-/// group built at start-up rather than declaring it to the graph. So the graph
-/// cannot be asked to put a barrier between the copy and the draw: an imported
-/// image is returned to its `final_state` by a *trailing* barrier at the end of
-/// the graph, and a copy declared before the forward pass would leave the page
-/// in `TransferDst` for the pass that samples it.
+/// **A decision, and it stays one.** What the screen shows is the previous
+/// frame's view of the room, which is what a monitor on a wall shows anyway; the
+/// goldens are blessed against it. Declaring the copy earlier would put this
+/// frame's view on the screen at the cost of the monitor renderer's whole pass
+/// list running before the room's, and nothing asks for that.
 ///
-/// Declared last, every access lines up: the forward pass reads the page in the
-/// state it is already in, the barrier into `TransferDst` in front of this pass
-/// carries a source scope covering that read — so the write-after-read is
-/// ordered — and the trailing barrier puts it back in
-/// [`ResourceState::ShaderRead`] before anything else runs, including the next
-/// frame. What the screen therefore shows is the previous frame's view of the
-/// room, which is what a monitor on a wall shows anyway.
-///
-/// The alternative is a read of the page declared by `add_passes` itself, so the
-/// graph has the edge to order against. That is the better answer and it is an
-/// `crcbl-render` change with callers outside this sample;
-/// `docs/backlog.md` carries it.
+/// What is no longer load-bearing is the *ordering*.
+/// [`ForwardRenderer::add_passes`] now imports the page and declares a read of
+/// it on every pass that binds it, so the graph has the edge and works the
+/// barrier out from the declarations wherever this pass sits. This function
+/// imports the same handle and therefore gets the same [`ImageId`] and the same
+/// state tracker — see [`ForwardRenderer::base_color_page_import`], which is
+/// where the declaration the two share comes from, and which is why nothing here
+/// restates the page's format or extent.
 fn feed_monitor<'a>(
     graph: &mut RenderGraph<'a>,
     pool: &TransientPool,
     monitor: &'a mut ForwardRenderer,
-    page: UploadedTexture,
+    page: ImportedImage,
 ) {
     let (width, height) = room::MONITOR_EXTENT;
     // `TRANSFER_SRC` beside the attachment usage is the whole of what this
@@ -877,24 +869,15 @@ fn feed_monitor<'a>(
     );
     let _hdr = monitor.add_passes(graph, pool, view, room::MONITOR_EXTENT);
 
-    // `ShaderRead` because that is where `crcbl_render::texture` leaves a page
-    // it has uploaded, and where the trailing barrier below puts it back at the
-    // end of every frame that runs this. `InitialClaim::Tracked` is what makes
-    // that a checked claim rather than a comment: the pool's ledger holds what
-    // the last executed graph left, and a declaration that disagrees with it is
-    // refused at `compile` rather than drawn.
-    let page_id = graph.import_image(
-        "base-colour-page",
-        ImportedImage {
-            image: page.image,
-            view: page.view,
-            format: MONITOR_FORMAT,
-            extent: (room::PAGE_EXTENT, room::PAGE_EXTENT),
-            initial: ResourceState::ShaderRead,
-            claim: InitialClaim::Tracked,
-            final_state: ResourceState::ShaderRead,
-        },
-    );
+    // **The main renderer's own declaration, not a second one that agrees with
+    // it.** `add_passes` has already imported this handle, so this call returns
+    // the id it issued and the two accesses share one state tracker — which is
+    // what gives the copy below a barrier out of the passes that sampled the
+    // page. The graph refuses a repeat import that disagrees in any field
+    // (`GraphError::ImportDeclarationConflict`), so restating the format and the
+    // extent here would be two constants that must stay equal by hand and a
+    // frame that stops compiling the day they do not.
+    let page_id = graph.import_image(ForwardRenderer::BASE_COLOR_PAGE_LABEL, page);
     // One layer of the page, so the barrier covers the monitor's texels and not
     // the floor's check beside them.
     let layer = ImageSubresourceRange {

@@ -2722,3 +2722,156 @@ fn nothing_the_forward_renderer_lets_a_mesh_stage_write_is_host_visible() {
 
     renderer.destroy(device.as_ref());
 }
+
+/// **The forward renderer declares the base-colour page it samples**, so a
+/// caller that writes a page layer gets the graph to order its write against the
+/// draws that read it.
+///
+/// `ForwardRenderer::add_passes` used to bind the page through a descriptor
+/// built at start-up and never mention it to the graph. Everything still drew,
+/// because a page nothing writes never leaves `ShaderRead` — and that is exactly
+/// what made the gap invisible. A caller copying a render-to-texture view into
+/// one of its layers had **no declared ordering at all** between its copy and
+/// the passes sampling the page: the graph had never heard of the image the
+/// draws read, so there was nothing for it to put a barrier between.
+/// `apps/lantern` only escaped it by scheduling its copy at the very tail of the
+/// frame, which its own comments called the reason it worked.
+///
+/// The observable is the writing pass placed *first*, which is the arrangement
+/// that has no accidental answer. Against the old behaviour the copy still
+/// reaches its own layout — the import's `initial` alone produces that — and
+/// then **nothing else in the frame touches the page**: every geometry pass
+/// samples an image the graph left in `TransferDst`, and the only transition
+/// back to `ShaderRead` is the trailing one, after every draw has already run.
+/// With the declaration there is a second barrier in front of the first pass
+/// that binds the page, and no trailing one, because the frame now ends where
+/// the import says it must.
+#[test]
+fn the_forward_renderer_declares_the_page_its_materials_sample() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let format = Format::Rgba8UnormSrgb;
+    let mut renderer =
+        crcbl_render::ForwardRenderer::new(harness.device.as_ref(), harness.queue, format)
+            .expect("the null backend accepts every descriptor");
+    renderer
+        .begin_frame(
+            harness.device.as_ref(),
+            &crcbl_render::Camera::default(),
+            &crcbl_render::DirectionalLight::default(),
+            EXTENT,
+        )
+        .expect("the frame's uniforms are written");
+
+    let mut graph = RenderGraph::new(harness.queue);
+    let target = graph.import_image("swapchain", harness.target(format));
+    // The page as the renderer declares it — the whole point of handing that
+    // declaration out, and what makes this one node rather than two.
+    let page = graph.import_image(
+        crcbl_render::ForwardRenderer::BASE_COLOR_PAGE_LABEL,
+        renderer.base_color_page_import(),
+    );
+    // **Before the draws**, which is the arrangement the tail-of-the-frame copy
+    // in `apps/lantern` is not: nothing but a declared read can order this
+    // against the passes below.
+    graph
+        .add_copy_pass("feed-the-page")
+        .use_image(page, ResourceState::TransferDst)
+        .execute(|_| {});
+    renderer.add_passes(&mut graph, &pool, target, EXTENT);
+
+    let compiled = graph.compile(&pool).expect("a legal frame");
+
+    // Every barrier in the frame that names the page, with the pass it sits in
+    // front of. Collected rather than indexed, so this says "one, here" instead
+    // of asserting a pass number that moves whenever a pass is added.
+    let page_barriers: Vec<(&str, ResourceState, ResourceState)> = compiled
+        .passes()
+        .iter()
+        .flat_map(|pass| {
+            pass.barriers()
+                .images
+                .iter()
+                .filter(|barrier| barrier.image == page)
+                .map(|barrier| (pass.label(), barrier.from, barrier.to))
+        })
+        .collect();
+    assert_eq!(
+        page_barriers,
+        vec![
+            (
+                "feed-the-page",
+                ResourceState::ShaderRead,
+                ResourceState::TransferDst
+            ),
+            (
+                "shadow",
+                ResourceState::TransferDst,
+                ResourceState::ShaderRead
+            ),
+        ],
+        "the first is the copy reaching its own layout, which the import\'s \
+         `initial` alone produces and which the old behaviour had too. **The \
+         second is the change**: the copy left the page in `TransferDst`, so the \
+         first pass that binds it is where the graph has to bring it back — and \
+         one barrier serves all three, because the two after it find the page \
+         already readable"
+    );
+    assert!(
+        compiled
+            .final_barriers()
+            .images
+            .iter()
+            .all(|barrier| barrier.image != page),
+        "the frame's last access left the page in `ShaderRead`, which is what the \
+         import declared it must end in: {:?}",
+        compiled.final_barriers()
+    );
+
+    // Which passes actually declared the read — the barrier above can only show
+    // the first of them, and a declaration dropped from either of the other two
+    // is a bound descriptor the graph does not know about. The dump is the only
+    // place a compiled pass's access list is legible.
+    let dump = compiled.dump();
+    let mut declaring: Vec<&str> = Vec::new();
+    let mut current = "";
+    for line in dump.lines() {
+        if let Some(rest) = line.split(" pass \"").nth(1) {
+            current = rest.split('"').next().unwrap_or_default();
+        } else if line.trim_start().starts_with("image ")
+            // A barrier line names the resource too, and is the transition
+            // rather than the declaration that caused it.
+            && !line.contains("->")
+            && line.contains(crcbl_render::ForwardRenderer::BASE_COLOR_PAGE_LABEL)
+        {
+            declaring.push(current);
+        }
+    }
+    assert_eq!(
+        declaring,
+        vec!["feed-the-page", "shadow", "depth-prepass", "forward"],
+        "every pass whose bind group names the page declares it — the two \
+         depth-only ones because a bound descriptor in the wrong layout is a \
+         validation error whatever samples it, and the colour pass because it \
+         genuinely reads it: {dump}"
+    );
+
+    let expected = compiled.barrier_batches().len();
+    // Measured as a delta, unlike the tests above: this recorder also holds what
+    // building the renderer recorded — the page upload alone is two barriers per
+    // image — and a total would be counting those as the frame's.
+    let before = harness.recorded_barriers().len();
+    harness.record(|encoder| {
+        compiled
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("execution succeeded");
+    });
+    assert_eq!(
+        harness.recorded_barriers().len() - before,
+        expected,
+        "the stream the backend saw is the plan"
+    );
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+    renderer.destroy(harness.device.as_ref());
+}
