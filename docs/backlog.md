@@ -6156,16 +6156,25 @@ runs the workspace under nextest on **`aarch64-apple-darwin`**, and all forty of
 `crcbl-jobs`' tests pass there on every run (counted off `14c89de`'s CI log).
 Nobody needs to build it.
 
-What is genuinely still open is narrower and worth keeping. A weak-memory bug is
-**probabilistic**, so forty passing tests on aarch64 are weaker evidence than
-Miri's model rather than stronger — and only two of them are concurrent at all
-(`a_concurrent_producer_and_consumer_move_every_item_in_order` in `ring.rs`,
-`a_concurrent_reader_never_sees_half_of_a_state` in `mailbox.rs`). The rest are
-single-threaded and would pass under any ordering. So the honest statement is:
-the code executes on aarch64 continuously, and **two** tests there could in
-principle catch a reordering, neither of which was written to be adversarial
-about it. Making them so — iteration counts, interleaving pressure — is the
-slice, not adding a runner.
+This entry then claimed the two concurrent tests were not written to be
+adversarial and that making them so was the slice. **That was wrong too**, read
+2026-08-23: `a_concurrent_producer_and_consumer_move_every_item_in_order`
+(`ring.rs`) moves 20 000 items across a real thread boundary and asserts each
+arrives in order, and `a_concurrent_reader_never_sees_half_of_a_state`
+(`mailbox.rs`) publishes 20 000 two-word states and asserts no read is torn and
+none goes backwards. Both are already the shape that catches a reordering, both
+are bounded so a wedged primitive fails red instead of hanging, and both run on
+aarch64 every CI run. There is no test-writing slice here.
+
+**What is actually unproven is that they _can_ fail for this reason on that
+machine.** A weak-memory bug is probabilistic, and the red-check behind these
+orderings has only ever been run under Miri — where the model reports the race —
+never on aarch64, where x86's total-store-order argument does not apply and the
+hardware would have to be caught in the act. So the rule this project applies to
+every other guard has not been applied to these two on the target that matters:
+weaken a `Release` to `Relaxed`, push it to a branch, and see whether
+`build + test (macos-latest)` actually goes red. If it does not, the aarch64 leg
+is reassurance rather than evidence, and knowing which it is costs one CI run.
 
 **The pool's own gaps**, none of which is a defect:
 
