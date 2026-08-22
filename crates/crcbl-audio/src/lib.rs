@@ -340,21 +340,76 @@ mod tests {
         }
     }
 
+    /// **The buffer a source is handed is stereo, at the rate it was told.**
+    ///
+    /// The observations are made on the stream's polling thread and read back
+    /// here, rather than asserted where they are taken. A `fill` that panics
+    /// takes down that thread and nobody else: this test used to assert inside
+    /// `fill`, and with `assert_eq!(rate, 1)` written into it, it still passed —
+    /// three assertions wired to nothing, which is worse than none, because a
+    /// green light says somebody checked.
+    ///
+    /// So `fill` records and the deadline loop below is what fails: first that
+    /// a fill happened at all, then what it saw. The loop is
+    /// `the_null_stream_fills_its_source_until_it_is_dropped`'s, for the same
+    /// reason — a fixed sleep either decides the test on a loaded machine or
+    /// makes it slow on every other one.
     #[test]
     fn source_fill_receives_stereo_buffer() {
-        struct CheckSource;
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        use std::time::{Duration, Instant};
+
+        /// Generous enough that a loaded CI machine does not decide it, short
+        /// enough that a stream that never fills fails rather than hangs.
+        const DEADLINE: Duration = Duration::from_secs(5);
+        /// One poll of the stream's own block period.
+        const POLL: Duration = Duration::from_millis(1);
+
+        #[derive(Default)]
+        struct Seen {
+            fills: AtomicUsize,
+            rate: AtomicUsize,
+            len: AtomicUsize,
+        }
+
+        struct CheckSource(Arc<Seen>);
         impl AudioSource for CheckSource {
             fn fill(&self, buffer: &mut [AudioSample], rate: u32) {
-                assert_eq!(rate, 48_000);
-                assert!(!buffer.is_empty());
-                assert_eq!(buffer.len() % CHANNELS, 0);
+                self.0.rate.store(rate as usize, Relaxed);
+                self.0.len.store(buffer.len(), Relaxed);
+                // Last, so a reader that sees a non-zero count is looking at
+                // values this same call already stored.
+                self.0.fills.fetch_add(1, Relaxed);
             }
         }
-        let stream = AudioStream::open_null(CheckSource);
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        drop(stream);
-    }
 
+        let seen = Arc::new(Seen::default());
+        let stream = AudioStream::open_null(CheckSource(Arc::clone(&seen)));
+
+        let deadline = Instant::now() + DEADLINE;
+        while seen.fills.load(Relaxed) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the null stream never called its source, so nothing below was observed"
+            );
+            std::thread::sleep(POLL);
+        }
+        drop(stream);
+
+        assert_eq!(
+            seen.rate.load(Relaxed),
+            INTERNAL_SAMPLE_RATE as usize,
+            "the source was told a rate that is not the one the stream runs at"
+        );
+        let len = seen.len.load(Relaxed);
+        assert_ne!(len, 0, "the source was handed an empty buffer");
+        assert_eq!(
+            len % CHANNELS,
+            0,
+            "a {len}-sample buffer is not a whole number of {CHANNELS}-channel frames, so \
+             the playhead and the device disagree about where a frame starts"
+        );
+    }
     #[test]
     fn dc_source_accumulates_across_fills() {
         let source = DcSource::new(0.25);
