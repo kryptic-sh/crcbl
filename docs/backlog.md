@@ -5325,6 +5325,34 @@ is wasted work if it does. Nothing here is blocked either way.
 `forward.rs` and `engine.rs` have no such expiry and no one has looked for their
 seams; that is a gap in this entry, not a judgement that they are fine.
 
+## What the windowed-sample gate does not reach (2026-08-22)
+
+`tools/run-samples-windowed.sh` closes the "no sample has ever been run in a
+window" gap: each of the four sample games runs without `--headless` on
+`crcbl-vk` under Xvfb, and the summary line it prints on exit is the assertion —
+frames, shell, extent, effective mode. Red-checked by forcing `--headless`,
+which the shell assertion catches; note that the frame count and the extent both
+still matched, so that assertion is the only thing standing between this gate
+and a run that opened no window at all.
+
+What it does **not** reach, stated rather than left to be discovered:
+
+- **Windowed-only, `vk`-only, one pass.** No `--fullscreen`, no F11, no window
+  manager, no null backend. `run-x11-e2e.sh` covers those shapes for the
+  `sandbox` and for nothing else, so a sample whose fullscreen path broke would
+  still fail no job.
+- **Only the four sample games.** `bare`, `hud`, `lantern`, `quarry` and
+  `viewer` have no windowed gate.
+- **Never run on CI hardware.** Everything measured so far is local, under Xvfb,
+  where Mesa reports no DRI3, RADV refuses to present and the run falls back to
+  `llvmpipe`. The gate deliberately asserts nothing about which adapter is
+  chosen. Whether lavapipe on `ubuntu-latest` finishes four runs of 120 frames
+  inside the job's 30-minute budget is the one thing only a real CI run decides
+  — the sandbox does 120 frames at 1280x720 there today, so the budget looks
+  generous, but that is inference, not a measurement.
+- **A windowed present on the real adapter is still unreached by anything.** It
+  needs a real X server with DRI3, which no automated harness here has.
+
 ## What the deleted WebGPU plan left behind (2026-08-22)
 
 `docs/plan/ROADMAP.md`'s 530-line "Replacing `wgpu` with our own WebGPU path"

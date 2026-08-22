@@ -672,6 +672,57 @@ jobs:
       - name: Run the suite under Xvfb, with openbox managing
         run: CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-e2e.sh
 
+  # The only job that runs a *game* in a real window. Every other sample step on
+  # this board is `--headless`, which opens no window at all: the shell a sample
+  # picks, the surface it hands to `crcbl-hal`, the extent it comes up at and the
+  # mode it lands in are exactly the part `--headless` skips. `x11-e2e` covers
+  # that path for the **sandbox** and for nothing else, so until this job existed
+  # a regression in a sample's windowed present failed nothing.
+  #
+  # `tools/run-samples-windowed.sh` runs each sample without `--headless` on
+  # `crcbl-vk` against lavapipe, with validation on, and asserts the summary line
+  # it prints as it exits — the frames it was asked for, the `x11` shell, the
+  # extent and the *effective* mode. The loader probe is a hard failure when `CI`
+  # is set, for the reason `docs/plan/12-testing.md` gives: a silently-skipped
+  # e2e job is worse than no job.
+  #
+  # One pass, where `x11-e2e` runs two: nothing here asserts anything a window
+  # manager changes. A sample asks for its own size and gets it whether or not
+  # one is running.
+  samples-windowed:
+    name: samples windowed (Xvfb)
+    runs-on: ubuntu-latest
+    # Every sample binary and the engine behind them, compiled from cold.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      # The `x11-e2e` job's list, without the packages this gate has no use for:
+      # `openbox`, since there is no window-manager assertion here, and
+      # `libxcb-xtest0`, since nothing synthesizes input — XTEST is a *server*
+      # extension and the harness's peer client is not in this run.
+      # `libasound2-dev` stays, because `crcbl` re-exports `crcbl-audio` and so
+      # every sample binary links cpal and ALSA. The Vulkan packages are what the
+      # run is for, the validation layers included.
+      #
+      # Its own package list is its own cache entry — the action keys on the list
+      # — so this neither shares nor spoils `x11-e2e`'s.
+      - name: Install Xvfb, the X client libraries, the ALSA headers and Vulkan
+        timeout-minutes: 10
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: >-
+            xvfb libasound2-dev libxcb1 libxcb-randr0 libxcb-xinput0
+            libxkbcommon0 libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers
+            vulkan-validationlayers
+      - name: Run every sample in a window on Xvfb
+        run: tools/run-samples-windowed.sh
+
   # The only job that runs the Win32 backend end to end, and the P5C W4
   # deliverable. `docs/plan/ROADMAP.md`'s 2026-08-04 correction is the reason it
   # can exist at all: `windows-latest` is a desktop, so the shell is reachable
