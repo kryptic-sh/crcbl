@@ -9705,11 +9705,16 @@ green run over content that does not use the feature.
   lines tests. Each is a `crcbl-hal` null limitation rather than an engine one,
   and closing any of them is a small change to `crates/crcbl-hal/src/null/`:
   `SurfaceCaps::current_extent` is hardcoded `None`, so the "surface reports X
-  but the shell configured Y" path is unreachable; `NullInstance::adapters`
-  returns exactly one adapter, so "no adapter can serve this surface" is
-  unreachable; `wait_until_presented` always returns `Ok`, so the lapsed-timeout
-  path is unreachable; and **neither preset advertises `PRESENT_FEEDBACK`**, so
-  a device that claims it has to be hand-built in the test.
+  but the shell configured Y" path is unreachable — **though that one is worth
+  less than the list makes it look**: read at `crcbl/src/engine.rs`'s
+  `start_device`, the engine's whole handling of the disagreement is one
+  `log::info!` naming both sizes before it uses the shell's, so an injector
+  there buys a test of a log line rather than of a behaviour. Worth doing when
+  something branches on it, and not before; `NullInstance::adapters` returns
+  exactly one adapter, so "no adapter can serve this surface" is unreachable;
+  `wait_until_presented` always returns `Ok`, so the lapsed-timeout path is
+  unreachable; and **neither preset advertises `PRESENT_FEEDBACK`**, so a device
+  that claims it has to be hand-built in the test.
 
   **One of these has been closed, and it is the worked example for the rest.**
   `AcquiredFrame::suboptimal` is now `Recorder::report_suboptimal_acquires`,
