@@ -14422,9 +14422,17 @@ but nowhere else has run it.
 
 `web/engine/gpu-replay.js` maps a browser's `adapter.features` onto
 `crcbl_hal::Features` and reports what the browser said. That is right while
-there is no device — but it means `TIMESTAMP_QUERY` is reported on a browser
-that has it, while `crcbl-webgpu` has no `create_query_set` command and could
-not serve a query set at all.
+there is no device — but nothing intersects the result with what the stream can
+actually encode, so a feature the browser has and this backend cannot serve is
+reported as available.
+
+**The standing example is gone and no replacement has been found.**
+`TIMESTAMP_QUERY` used to be it, and it is not one any more:
+`crcbl-webgpu/src/command.rs` defines `Command::CreateQuerySet`, `probe.rs`
+calls `stream.create_query_set`, and `gpu-replay.js` has `createQuerySet`. So
+the mechanism is still missing while no feature is currently known to be
+misreported through it — which makes this prevention, and makes it cheap to get
+wrong again the next time a feature is mapped before its commands exist.
 
 **The mapped set must be intersected with what the stream can actually encode.**
 `crcbl-wgpu`'s own feature mapping did exactly that for query sets and is where
