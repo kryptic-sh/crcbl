@@ -140,6 +140,11 @@ pub mod command;
 pub mod device;
 pub mod hal;
 pub mod instance;
+/// The tests that hold `web/engine`'s hand-written halves of this format
+/// against [`tag`], the file that declares it. Test-only: it exists to be run,
+/// not to be called.
+#[cfg(test)]
+mod js_mirror;
 pub mod probe;
 pub mod reader;
 pub mod reply;

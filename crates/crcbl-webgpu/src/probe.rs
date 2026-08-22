@@ -15236,67 +15236,6 @@ mod tests {
         "PROBE_TIMESTAMP_QUERIES",
     ];
 
-    /// One `Object.freeze` table parsed out of [`GPU_PROBE_JS`]: its name, and
-    /// its entries in file order.
-    type JsTable = (&'static str, Vec<(&'static str, u32)>);
-
-    /// One of those tables and the Rust constants that must mirror it: the
-    /// table's name in `web/engine/gpu-probe.js`, the shared prefix of the
-    /// constants, and each constant's own name and value.
-    type MirrorTable = (&'static str, &'static str, Vec<(&'static str, u32)>);
-
-    /// Every `Object.freeze` table in [`GPU_PROBE_JS`], parsed.
-    ///
-    /// A line inside a table body this cannot read is a panic rather than a
-    /// skip, and the table count is held against the `Object.freeze` count in
-    /// the whole file: a parse that quietly matched less than it claims would
-    /// leave the mirror checked with a hole in it and the test still green.
-    fn js_state_tables() -> Vec<JsTable> {
-        let mut tables: Vec<JsTable> = Vec::new();
-        let mut inside = false;
-        for (index, line) in GPU_PROBE_JS.lines().enumerate() {
-            let number = index + 1;
-            if !inside {
-                if let Some(name) = line
-                    .strip_prefix("export const ")
-                    .and_then(|rest| rest.strip_suffix(" = Object.freeze({"))
-                {
-                    tables.push((name, Vec::new()));
-                    inside = true;
-                }
-                continue;
-            }
-            if line == "});" {
-                inside = false;
-                continue;
-            }
-            let (name, entries) = tables.last_mut().expect("a table is open");
-            let entry = line
-                .strip_prefix("  ")
-                .and_then(|rest| rest.strip_suffix(','))
-                .and_then(|rest| rest.split_once(": "))
-                .and_then(|(key, code)| code.parse::<u32>().ok().map(|code| (key, code)));
-            let Some(entry) = entry else {
-                panic!(
-                    "gpu-probe.js:{number}: `{name}` holds a line this test cannot read, so the \
-                     table would be checked with a hole in it: {line}"
-                );
-            };
-            entries.push(entry);
-        }
-        assert!(
-            !inside,
-            "gpu-probe.js ends inside an Object.freeze table, so its last table is short"
-        );
-        assert_eq!(
-            tables.len(),
-            GPU_PROBE_JS.matches("Object.freeze").count(),
-            "gpu-probe.js has Object.freeze tables this parse never reached, so they are \
-             mirrored by nothing"
-        );
-        tables
-    }
-
     /// Every state code this crate publishes, against the
     /// `web/engine/gpu-probe.js` table that must mirror it.
     ///
@@ -15304,7 +15243,7 @@ mod tests {
     /// prefix is written beside each table rather than taken to be its name:
     /// `CAPS_FAILURE`'s codes are `SURFACE_CAPS_FAILURE_*`, the one table whose
     /// two halves are not named alike.
-    fn mirror() -> Vec<MirrorTable> {
+    fn mirror() -> Vec<crate::js_mirror::MirrorTable> {
         use crate::tag::{
             PRESENT_MODE_FIFO, PRESENT_MODE_FIFO_RELAXED, PRESENT_MODE_IMMEDIATE,
             PRESENT_MODE_MAILBOX, SURFACE_CAPS_FAILURE_BACKEND,
@@ -15560,16 +15499,6 @@ mod tests {
         ]
     }
 
-    /// Every `pub const <NAME>: <ty> = …;` a module's own text declares at its
-    /// top level, in file order.
-    fn pub_const_names(src: &'static str, ty: &str) -> Vec<&'static str> {
-        let opening = format!(": {ty} = ");
-        src.lines()
-            .filter_map(|line| line.strip_prefix("pub const "))
-            .filter_map(|rest| rest.split_once(opening.as_str()).map(|(name, _)| name))
-            .collect()
-    }
-
     /// `web/engine/gpu-probe.js`'s tables and this crate's constants are two
     /// hand-written halves of one format, and nothing else compares them.
     ///
@@ -15579,91 +15508,15 @@ mod tests {
     /// with itself, so an added or retired table has to move them deliberately.
     #[test]
     fn gpu_probe_js_mirrors_every_state_code_this_crate_publishes() {
-        use std::collections::BTreeSet;
+        let (tables, codes) =
+            crate::js_mirror::check_frozen("gpu-probe.js", GPU_PROBE_JS, &mirror());
 
-        let tables = js_state_tables();
-        let mirror = mirror();
-        let js_codes: usize = tables.iter().map(|(_, entries)| entries.len()).sum();
-
-        let mut unclaimed: BTreeSet<(&str, &str)> = tables
-            .iter()
-            .flat_map(|(table, entries)| entries.iter().map(move |(key, _)| (*table, *key)))
-            .collect();
-
-        for (table, prefix, codes) in &mirror {
-            let entries = &tables
-                .iter()
-                .find(|(name, _)| name == table)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "gpu-probe.js declares no `{table}` table, so the {prefix}_* codes are \
-                         named nowhere in the page's half"
-                    )
-                })
-                .1;
-            for (name, code) in codes {
-                let key = name
-                    .strip_prefix(prefix)
-                    .and_then(|rest| rest.strip_prefix('_'))
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{name} is mirrored by gpu-probe.js's `{table}` table but is not \
-                             named `{prefix}_…`, so this test cannot say which entry is its own"
-                        )
-                    });
-                let js = entries
-                    .iter()
-                    .find(|(entry, _)| *entry == key)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "gpu-probe.js's `{table}` table has no `{key}`, so the browser has \
-                             no name for {name} = {code}"
-                        )
-                    })
-                    .1;
-                assert_eq!(
-                    *code, js,
-                    "gpu-probe.js has {table}.{key} = {js}, but {name} = {code}"
-                );
-                unclaimed.remove(&(*table, key));
-            }
-        }
-
-        let strays: Vec<String> = unclaimed
-            .iter()
-            .map(|(table, key)| format!("{table}.{key}"))
-            .collect();
-        assert!(
-            strays.is_empty(),
-            "gpu-probe.js names codes this crate publishes no constant for, so the browser \
-             believes in states wasm never sends: {}",
-            strays.join(", ")
-        );
-
-        // Last, so that a table or an entry that actually moved reports itself
-        // by name above rather than as a number that no longer matches.
         assert_eq!(
-            tables.len(),
-            mirror.len(),
-            "gpu-probe.js has {} tables and this test mirrors {}",
-            tables.len(),
-            mirror.len()
-        );
-        assert_eq!(
-            js_codes,
-            mirror
-                .iter()
-                .map(|(_, _, codes)| codes.len())
-                .sum::<usize>(),
-            "gpu-probe.js and this test's mirror hold different numbers of codes"
-        );
-        assert_eq!(
-            tables.len(),
-            20,
+            tables, 20,
             "gpu-probe.js's table count moved; the mirror above has to move with it"
         );
         assert_eq!(
-            js_codes, 116,
+            codes, 116,
             "gpu-probe.js's code count moved; the mirror above has to move with it"
         );
     }
@@ -15686,7 +15539,7 @@ mod tests {
             .iter()
             .flat_map(|(_, _, codes)| codes.iter().map(|(name, _)| *name))
             .collect();
-        let declared = pub_const_names(PROBE_RS, "u32");
+        let declared = crate::js_mirror::pub_const_names(PROBE_RS, "u32");
 
         for &name in NOT_MIRRORED {
             assert!(
@@ -15711,7 +15564,7 @@ mod tests {
             "probe.rs's state-code count moved; the mirror above has to move with it"
         );
 
-        for name in pub_const_names(TAG_RS, "u8") {
+        for name in crate::js_mirror::pub_const_names(TAG_RS, "u8") {
             if name.starts_with("PRESENT_MODE_") || name.starts_with("SURFACE_CAPS_FAILURE_") {
                 assert!(
                     mirrored.contains(&name),
