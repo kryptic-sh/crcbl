@@ -24,6 +24,13 @@
 //!   reordering is a fold between two codes that decodes to a valid command
 //!   meaning something else — the failure that file's own comments spend the
 //!   most words on.
+//! * **An inverted table** — `const IMAGE_FORMAT = []` filled at module load
+//!   from `gpu-reply.js`'s frozen `FORMAT`. The rows are not written out, so
+//!   there is nothing to compare row by row; [`check_inverted`] holds the
+//!   *inversion* instead — the import that binds the name, the loop's direction,
+//!   and that the codes it inverts leave no gap for a row to be `undefined` in.
+//!   The source table is already held against [`crate::tag`], which is what
+//!   makes this checkable without a second copy of the codes.
 //!
 //! # The bitflag tables are a fourth shape, and they mirror `crcbl-hal`
 //!
@@ -37,6 +44,19 @@
 //! with a capability nobody asked for and renders on. [`check_flags`] holds
 //! each table against its type, and the type's flag list is read back out of
 //! `crcbl-hal`'s own text for [`pub_const_names`]'s reason.
+//!
+//! # And a fifth shape, which is not a table at all
+//!
+//! A bitflag table says which bit is which; it says nothing about **how many
+//! bytes the field is**. The page reads four (`readFlags` → `readU32`) or eight
+//! (`readFeatures` → `readU64`), and [`crate::writer`] has to write the same
+//! number — a narrower write truncates the flag set *and* leaves every later
+//! field of the record decoded from the wrong offset, with no tag out of place
+//! to stop the stream.
+//! [`every_bitflags_field_crosses_the_wire_at_the_width_the_page_reads`] holds
+//! the two spellings against each other out of their own files, and the two
+//! byte-level tests beside it measure one record per width, so the widths that
+//! mirror asserts are widths something observed.
 //!
 //! # What holds the parse honest
 //!
@@ -87,6 +107,35 @@ pub(crate) fn lf(source: &'static str) -> &'static str {
     }
 }
 
+/// The same source again with every run of whitespace folded to one space, for
+/// the pins that span more than one line.
+///
+/// **Prettier decides where a call wraps, and a pin must not depend on that.**
+/// `readFlags('BindGroupLayoutEntry::visibility', SHADER_STAGES)` is one line in
+/// some records and three in others purely because of how long the field name
+/// is; a parse that could only read the one-line form would be a guard whose
+/// scope the formatter chooses. Folding first reads both as the same call — the
+/// same soft-wrap rule the markdown tests use.
+///
+/// Leaked for [`lf`]'s reason, and called once per test for the same one.
+fn collapsed(source: &'static str) -> &'static str {
+    String::leak(source.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Enough of `text` to recognise a call in a failure message, cut at a character
+/// boundary so the message itself cannot panic.
+fn head(text: &str) -> &str {
+    let mut end = text.len().min(HEAD_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// How much of a line [`head`] quotes: a call's opening and its first argument,
+/// which is what names the field, without the rest of the file behind it.
+const HEAD_BYTES: usize = 60;
+
 /// `web/engine/gpu-reply.js` — the page's half of the reply stream, for
 /// [`GPU_STREAM_JS`]'s reason.
 const GPU_REPLY_JS: &str = include_str!("../../../web/engine/gpu-reply.js");
@@ -105,6 +154,13 @@ const HAL_SHADER_RS: &str = include_str!("../../crcbl-hal/src/shader.rs");
 
 /// `crcbl-hal`'s `pipeline` module, for [`HAL_RESOURCE_RS`]'s reason.
 const HAL_PIPELINE_RS: &str = include_str!("../../crcbl-hal/src/pipeline.rs");
+
+/// [`crate::writer`]'s own text, for [`writer_flag_sites`].
+///
+/// [`TAG_RS`]'s reason applied to the encoder rather than to a table: the width
+/// a field crosses the wire at is a call, `put_u32` or `put_u64`, and nothing
+/// but the file that call is written in can say which one it is.
+const WEBGPU_WRITER_RS: &str = include_str!("writer.rs");
 
 // ── Reading the page's half ──────────────────────────────────────────────────
 
@@ -295,6 +351,44 @@ fn js_decls(file: &str, src: &'static str) -> Vec<(&'static str, JsDecl)> {
     }
 
     decls
+}
+
+/// The names one `web/engine` module imports from `module`, in file order.
+///
+/// [`js_decls`]'s discipline applied to the one line that is not a declaration
+/// and still binds a name: a line that mentions the module and is not a
+/// single-line named import is a panic. The import is what makes
+/// `gpu-stream.js`'s `FORMAT` *be* `gpu-reply.js`'s `FORMAT`, so an import this
+/// could not read would leave [`check_inverted`] holding a table against a name
+/// bound somewhere else entirely.
+fn imported_names(file: &str, src: &'static str, module: &str) -> Vec<&'static str> {
+    let mention = format!("from '{module}'");
+    let closing = format!(" }} from '{module}';");
+    let mut names: Vec<&'static str> = Vec::new();
+    let mut found = 0usize;
+    for (index, line) in src.lines().enumerate() {
+        if !line.contains(mention.as_str()) {
+            continue;
+        }
+        let list = line
+            .strip_prefix("import { ")
+            .and_then(|rest| rest.strip_suffix(closing.as_str()));
+        let Some(list) = list else {
+            panic!(
+                "{file}:{}: an import from {module} this test cannot read, so the tables it \
+                 binds are held against nothing: {line}",
+                index + 1
+            );
+        };
+        found += 1;
+        names.extend(list.split(',').map(str::trim));
+    }
+    assert_eq!(
+        found, 1,
+        "{file} has {found} single-line imports from {module}, and the tables it inverts are \
+         only that module's tables if it has exactly one"
+    );
+    names
 }
 
 /// Every `Object.freeze` table in a `web/engine` module, parsed.
@@ -538,6 +632,283 @@ fn screaming_snake(variant: &str) -> String {
     out
 }
 
+// ── The width a flag crosses the wire at ─────────────────────────────────────
+
+/// Every bitflags word [`crate::writer`] puts on the wire, as `writer.rs`
+/// spells it: the method, the expression, and the primitive that fixes the
+/// field's width.
+///
+/// Total over the lines that mention `bits()`, for [`js_decls`]'s reason — and
+/// that totality is the whole of the guard. A `bits()` word that reaches the
+/// buffer by any route other than a `put_*` call fails here by file, line and
+/// text, so `let bits = desc.usage.bits(); self.bytes.put_u8(bits);` is a panic
+/// rather than a narrowing nobody sees; and a field routed through a *new*
+/// helper that never says `bits()` drops a row out of this list, which the
+/// caller holds against a written-out mirror. A comment is the one recognised
+/// exception, because prose puts no bytes on the wire.
+fn writer_flag_sites() -> Vec<(&'static str, &'static str, &'static str)> {
+    let src = lf(WEBGPU_WRITER_RS);
+    let mut method = "";
+    let mut sites: Vec<(&'static str, &'static str, &'static str)> = Vec::new();
+    for (index, line) in src.lines().enumerate() {
+        let number = index + 1;
+        let text = line.trim();
+        if let Some(rest) = text
+            .strip_prefix("pub const fn ")
+            .or_else(|| text.strip_prefix("pub fn "))
+            .or_else(|| text.strip_prefix("const fn "))
+            .or_else(|| text.strip_prefix("fn "))
+            && let Some((name, _)) = rest.split_once('(')
+        {
+            method = name;
+        }
+        if !text.contains(".bits()") || text.starts_with("//") {
+            continue;
+        }
+        let site = text
+            .strip_suffix(".bits());")
+            .and_then(|rest| rest.rsplit_once('('))
+            .and_then(|(call, encoded)| {
+                let put = call.rsplit_once('.').map_or(call, |(_, put)| put);
+                put.starts_with("put_u").then_some((put, encoded))
+            });
+        let Some((put, encoded)) = site else {
+            panic!(
+                "writer.rs:{number}: a bits() word this test cannot read, so the width it \
+                 crosses the wire at is fixed by nothing: {text}"
+            );
+        };
+        assert!(
+            !method.is_empty(),
+            "writer.rs:{number} puts {encoded} on the wire outside any method this test found"
+        );
+        sites.push((method, encoded, put));
+    }
+    sites
+}
+
+/// Every bitflags read `gpu-stream.js` performs: the reader it goes through,
+/// the field name its decode error carries, and the table it decodes against —
+/// `None` for `readFeatures`, which answers a word rather than a list of names.
+///
+/// Read from a [`collapsed`] copy so a call prettier wrapped and one it left
+/// inline are the same call. Total for [`writer_flag_sites`]'s reason: a call
+/// this cannot read is a panic quoting it, and each reader's own definition is
+/// recognised *and counted*, so a parse that found the definitions and none of
+/// the calls cannot pass for one that found nothing to read.
+fn stream_flag_reads(
+    file: &str,
+    src: &'static str,
+) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
+    let text = collapsed(src);
+    let mut reads: Vec<(&'static str, &'static str, Option<&'static str>)> = Vec::new();
+    for (reader, declaration) in [("readFlags", "field, table)"), ("readFeatures", "field)")] {
+        let opening = format!("{reader}(");
+        let mut definitions = 0usize;
+        let mut rest = text;
+        while let Some(at) = rest.find(opening.as_str()) {
+            rest = &rest[at + opening.len()..];
+            let body = rest.trim_start();
+            let Some(after) = body.strip_prefix('\'') else {
+                assert!(
+                    body.starts_with(declaration),
+                    "{file}: a `{reader}` call this test cannot read, so the field it decodes \
+                     is held against nothing: {reader}({}",
+                    head(body)
+                );
+                definitions += 1;
+                continue;
+            };
+            let Some((field, tail)) = after.split_once('\'') else {
+                panic!(
+                    "{file}: a `{reader}` call whose field name never closes: {reader}('{}",
+                    head(after)
+                );
+            };
+            let table = if declaration.contains("table") {
+                let named = tail.strip_prefix(',').and_then(|rest| rest.split_once(')'));
+                let Some((name, _)) = named else {
+                    panic!(
+                        "{file}: `{reader}('{field}', …)` names a table this test cannot read: {}",
+                        head(tail)
+                    );
+                };
+                let name = name.trim();
+                assert!(
+                    !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                    "{file}: `{reader}('{field}', {name})` does not name a table this test can \
+                     hold against a crcbl_hal type"
+                );
+                Some(name)
+            } else {
+                assert!(
+                    tail.trim_start().starts_with(')'),
+                    "{file}: `{reader}('{field}', …)` was passed an argument this reader has no \
+                     room for: {}",
+                    head(tail)
+                );
+                None
+            };
+            reads.push((reader, field, table));
+        }
+        assert_eq!(
+            definitions, 1,
+            "{file} declares `{reader}` {definitions} times and this test expects one, so the \
+             calls it found are held against a reader that may not be the one they use"
+        );
+    }
+    reads
+}
+
+/// One bitflags word on the command stream, from the `put_*` that writes it to
+/// the `read*` that takes it back off the wire.
+///
+/// This is the row the encode width hangs on. [`check_flags`] holds each table's
+/// *bits*, and the page's `readFlags` is pinned to a `u32`; neither says how
+/// many bytes wasm actually wrote, so `put_u8(desc.usage.bits() as u8)` would
+/// truncate the field and leave the page reading a `u32` out of a stream that
+/// carries a byte — every later field of that record short, and the record
+/// after it decoded from the wrong offset.
+struct WireFlagField {
+    /// The [`crate::writer`] method that encodes it.
+    method: &'static str,
+    /// The expression that method writes, as `writer.rs` spells it.
+    encoded: &'static str,
+    /// The [`crate::bytes::ByteWriter`] primitive it goes through.
+    put: &'static str,
+    /// The field's name in `gpu-stream.js`, which is the name a decode error
+    /// there carries.
+    field: &'static str,
+    /// The `gpu-stream.js` reader that takes it back off the wire.
+    read: &'static str,
+    /// The `gpu-stream.js` table it decodes against, or `None` for
+    /// `readFeatures`, which answers a `BigInt`.
+    table: Option<&'static str>,
+    /// The field's width on the wire. Written out so the two spellings above are
+    /// checked to agree about it rather than assumed to.
+    bytes: usize,
+}
+
+/// The `put_*`/`read*` pairs sanctioned on this seam, with the width each is.
+///
+/// Two, and the pairing is the point: `put_u32` is read by `readFlags`, which
+/// [`FLAGS_READ_AS_U32`] pins to `readU32`, and `put_u64` by `readFeatures`,
+/// pinned to `readU64` by [`FEATURES_READ_AS_U64`]. A row that mixes them is
+/// refused before either file is parsed.
+const SANCTIONED_WIDTHS: &[(&str, &str, usize)] =
+    &[("put_u32", "readFlags", 4), ("put_u64", "readFeatures", 8)];
+
+/// Every bitflags word the command stream carries, written out once so both
+/// halves are held against the same list.
+///
+/// In `writer.rs` order, which is not `gpu-stream.js` order — the page decodes
+/// where its own record layout puts the field — so both directions are checked
+/// by name rather than by position.
+const WIRE_FLAG_FIELDS: &[WireFlagField] = &[
+    WireFlagField {
+        method: "put_subresource_range",
+        encoded: "range.aspect",
+        put: "put_u32",
+        field: "ImageSubresourceRange::aspect",
+        read: "readFlags",
+        table: Some("IMAGE_ASPECT"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "put_subresource_layers",
+        encoded: "layers.aspect",
+        put: "put_u32",
+        field: "ImageSubresourceLayers::aspect",
+        read: "readFlags",
+        table: Some("IMAGE_ASPECT"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "put_bind_group_layout_entry",
+        encoded: "entry.visibility",
+        put: "put_u32",
+        field: "BindGroupLayoutEntry::visibility",
+        read: "readFlags",
+        table: Some("SHADER_STAGES"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "put_bind_group_layout_entry",
+        encoded: "entry.flags",
+        put: "put_u32",
+        field: "BindGroupLayoutEntry::flags",
+        read: "readFlags",
+        table: Some("BINDING_FLAGS"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "put_color_target_state",
+        encoded: "target.write_mask",
+        put: "put_u32",
+        field: "ColorTargetState::write_mask",
+        read: "readFlags",
+        table: Some("COLOR_WRITES"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "create_buffer",
+        encoded: "desc.usage",
+        put: "put_u32",
+        field: "BufferDesc::usage",
+        read: "readFlags",
+        table: Some("BUFFER_USAGE"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "create_image",
+        encoded: "desc.usage",
+        put: "put_u32",
+        field: "ImageDesc::usage",
+        read: "readFlags",
+        table: Some("IMAGE_USAGE"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "create_pipeline_layout",
+        encoded: "range.stages",
+        put: "put_u32",
+        field: "PushConstantRange::stages",
+        read: "readFlags",
+        table: Some("SHADER_STAGES"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "push_constants",
+        encoded: "stages",
+        put: "put_u32",
+        field: "PushConstants::stages",
+        read: "readFlags",
+        table: Some("SHADER_STAGES"),
+        bytes: 4,
+    },
+    WireFlagField {
+        method: "request_device",
+        encoded: "desc.required_features",
+        put: "put_u64",
+        field: "DeviceDesc::required_features",
+        read: "readFeatures",
+        table: None,
+        bytes: 8,
+    },
+    WireFlagField {
+        method: "request_device",
+        encoded: "desc.optional_features",
+        put: "put_u64",
+        field: "DeviceDesc::optional_features",
+        read: "readFeatures",
+        table: None,
+        bytes: 8,
+    },
+];
+
 // ── The mirror ───────────────────────────────────────────────────────────────
 
 /// One constant widened for comparison against the page's half.
@@ -700,6 +1071,32 @@ fn stream_flag_mirrors() -> Vec<FlagMirror> {
     ]
 }
 
+/// One ordered table a `web/engine` module builds at load time by **inverting**
+/// a frozen table another module exports, rather than writing the rows out a
+/// second time.
+///
+/// The array is `[]` in the source and filled by a loop, so there are no rows to
+/// compare and [`check_file`]'s ordered-table guard cannot reach it. What makes
+/// the inversion right instead is three things, and [`check_inverted`] holds all
+/// three: the name really is the exported table's (an import binds it), the loop
+/// really inverts it code-first (`table[code] = name`, not the reverse), and the
+/// codes it inverts leave **no gap** — a gap is a row the page reads as
+/// `undefined`, and `readEnum` refuses a code [`crate::tag`] publishes rather
+/// than folding it onto a neighbour.
+///
+/// The source table is already held against `tag.rs` by [`check_frozen`], so
+/// holding the inversion against the source holds it against `tag.rs` too. That
+/// is the whole reason this is checkable without a second copy of the codes.
+struct InvertedMirror {
+    /// The array's name in the module that inverts.
+    table: &'static str,
+    /// The frozen table it inverts, as [`REPLY_MODULE`] exports it.
+    source: &'static str,
+}
+
+/// The module `gpu-stream.js` imports the tables it inverts from.
+const REPLY_MODULE: &str = "./gpu-reply.js";
+
 /// What one `web/engine` module's declarations must mirror.
 struct FileMirror {
     /// The file's name, for the failure messages.
@@ -721,9 +1118,9 @@ struct FileMirror {
     flags: Vec<FlagMirror>,
     /// `BigInt` masks: the JS name and the Rust expression's own text and value.
     masks: Vec<(&'static str, &'static str, u64)>,
-    /// Ordered tables that mirror something *other* than [`crate::tag`], with
-    /// the reason. Held from both directions, so one that stops existing fails.
-    foreign: &'static [(&'static str, &'static str)],
+    /// Ordered tables the module builds at load time by inverting a frozen table
+    /// another module exports, held by [`check_inverted`].
+    inverted: &'static [InvertedMirror],
     /// Expressions [`js_decls`] does not read, with the reason. Held from both
     /// directions too.
     opaque: &'static [(&'static str, &'static str)],
@@ -1015,19 +1412,19 @@ fn stream_mirror() -> FileMirror {
             "crcbl_hal::Features::all().bits()",
             crcbl_hal::Features::all().bits(),
         )],
-        foreign: &[
-            (
-                "IMAGE_FORMAT",
-                "gpu-reply.js's FORMAT table, inverted at module load",
-            ),
-            (
-                "SWAPCHAIN_PRESENT_MODE",
-                "gpu-reply.js's PRESENT_MODE table, inverted at module load",
-            ),
-            (
-                "SWAPCHAIN_COMPOSITE_ALPHA",
-                "gpu-reply.js's COMPOSITE_ALPHA table, inverted at module load",
-            ),
+        inverted: &[
+            InvertedMirror {
+                table: "IMAGE_FORMAT",
+                source: "FORMAT",
+            },
+            InvertedMirror {
+                table: "SWAPCHAIN_PRESENT_MODE",
+                source: "PRESENT_MODE",
+            },
+            InvertedMirror {
+                table: "SWAPCHAIN_COMPOSITE_ALPHA",
+                source: "COMPOSITE_ALPHA",
+            },
         ],
         opaque: &[],
     }
@@ -1071,7 +1468,7 @@ fn reply_mirror() -> FileMirror {
         )],
         flags: Vec::new(),
         masks: Vec::new(),
-        foreign: &[],
+        inverted: &[],
         opaque: &[],
     }
 }
@@ -1351,6 +1748,107 @@ fn check_flags(file: &str, decls: &[(&'static str, JsDecl)], mirrors: &[FlagMirr
     }
 }
 
+/// Hold each table a file builds by inverting one of [`REPLY_MODULE`]'s frozen
+/// tables against the table it inverts.
+///
+/// Four directions, matching [`check_flags`]'s, because the failures here are
+/// the same quiet kind — an inverted table that is wrong decodes a *valid*
+/// format, present mode or composite mode, just not the one on the wire:
+///
+/// * the array is no longer empty, so it is a second copy of the source rather
+///   than its inverse and the two can drift;
+/// * the name it inverts is no longer imported from that module, so it is bound
+///   to something else;
+/// * the loop no longer inverts code-first, so a code indexes a name by name;
+/// * the source's codes leave a gap or repeat one, so a row of the inverted
+///   table is `undefined` — the page refuses a code `tag.rs` publishes — or two
+///   names land in the same row and one is lost.
+fn check_inverted(
+    file: &str,
+    src: &'static str,
+    decls: &[(&'static str, JsDecl)],
+    inverted: &'static [InvertedMirror],
+) {
+    if inverted.is_empty() {
+        return;
+    }
+    let mut imported = imported_names(file, src, REPLY_MODULE);
+    let sources = freeze_tables("gpu-reply.js", lf(GPU_REPLY_JS));
+    let text = collapsed(src);
+
+    for InvertedMirror { table, source } in inverted {
+        let JsDecl::Ordered(rows) = find_decl(file, decls, table) else {
+            panic!(
+                "{file}'s `{table}` is not an array, so its positions are not the codes of \
+                 {REPLY_MODULE}'s `{source}`"
+            );
+        };
+        assert!(
+            rows.is_empty(),
+            "{file}'s `{table}` spells rows of its own, so it is a second copy of \
+             {REPLY_MODULE}'s `{source}` rather than its inverse and nothing holds the two in \
+             step: {}",
+            rows.join(", ")
+        );
+        assert!(
+            imported.contains(source),
+            "{file} no longer imports `{source}` from {REPLY_MODULE}, so the `{table}` it \
+             inverts is built from something else"
+        );
+
+        let inversion =
+            format!("for (const [name, code] of Object.entries({source})) {table}[code] = name;");
+        assert!(
+            text.contains(inversion.as_str()),
+            "{file} no longer fills `{table}` by inverting `{source}` code-first, so a code no \
+             longer indexes a name; this test looked for `{inversion}`"
+        );
+
+        let entries = &sources
+            .iter()
+            .find(|(name, _)| name == source)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{REPLY_MODULE} declares no `{source}` table, so {file}'s `{table}` inverts \
+                     nothing"
+                )
+            })
+            .1;
+        let mut by_code: Vec<(u32, &str)> =
+            entries.iter().map(|(key, code)| (*code, *key)).collect();
+        by_code.sort_unstable();
+        for pair in by_code.windows(2) {
+            let [(first_code, first), (second_code, second)] = pair else {
+                unreachable!("windows(2) yields pairs")
+            };
+            assert_ne!(
+                first_code, second_code,
+                "gpu-reply.js gives `{source}`'s {first} and {second} the same code \
+                 {first_code}, so inverting it puts both in {table}[{first_code}] and loses one"
+            );
+        }
+        for (index, (code, key)) in by_code.iter().enumerate() {
+            let position = widen("a table position", index);
+            assert_eq!(
+                *code, position,
+                "inverting gpu-reply.js's `{source}` puts {key} at {table}[{code}] and leaves \
+                 {table}[{position}] undefined, so the page refuses a code tag.rs publishes \
+                 rather than decoding it"
+            );
+        }
+    }
+
+    // Last, so a table that actually moved reports itself by name above. Both
+    // directions: an import nothing inverts is a table nothing compares.
+    let mut sources: Vec<&str> = inverted.iter().map(|entry| entry.source).collect();
+    sources.sort_unstable();
+    imported.sort_unstable();
+    assert_eq!(
+        imported, sources,
+        "{file} imports {imported:?} from {REPLY_MODULE} and this test inverts {sources:?}"
+    );
+}
+
 /// Hold one file's declarations against `mirror`, and answer the Rust constant
 /// names it claimed.
 ///
@@ -1465,11 +1963,9 @@ fn check_file(mirror: &FileMirror) -> BTreeSet<&'static str> {
         }
     }
 
-    for (name, mirrors) in mirror.foreign {
-        let JsDecl::Ordered(_) = find_decl(file, &decls, name) else {
-            panic!("{file}'s `{name}` is no longer an array, so it no longer mirrors {mirrors}");
-        };
-        unclaimed.remove(name);
+    check_inverted(file, mirror.src, &decls, mirror.inverted);
+    for InvertedMirror { table, .. } in mirror.inverted {
+        unclaimed.remove(table);
     }
 
     for (name, reason) in mirror.opaque {
@@ -1532,9 +2028,11 @@ fn gpu_stream_js_mirrors_every_command_tag_and_enum_code_tag_rs_declares() {
 }
 
 /// The `gpu-stream.js` helper every bitflag table is read through, and the width
-/// it is read at. `crcbl-hal` stores each of those types in a `u32` and
-/// [`crate::writer`] puts every one of their fields on the wire with `put_u32`,
-/// so this line is the premise the tables below are checked under.
+/// it is read at. `crcbl-hal` stores each of those types in a `u32`, and that
+/// [`crate::writer`] puts every one of their fields on the wire at the same
+/// width is the other half of the premise the tables below are checked under —
+/// held by [`every_bitflags_field_crosses_the_wire_at_the_width_the_page_reads`]
+/// rather than asserted here in prose.
 const FLAGS_READ_AS_U32: &str = "  readFlags(field, table) {\n    const bits = this.readU32();";
 
 /// The same for `crcbl_hal::Features`, which `crcbl-hal` stores in a `u64` and
@@ -1550,9 +2048,9 @@ const FEATURES_READ_AS_U64: &str = "  readFeatures(field) {\n    const bits = th
 ///
 /// [`check_flags`] runs inside [`check_file`], so a bit that disagrees fails the
 /// two tests above as well. What this one adds is the width the tables are read
-/// at and the totals, and the totals are what stop a table being quietly
-/// demoted back to [`FileMirror::foreign`], where nothing would compare its bits
-/// again.
+/// at and the totals, and the totals are what stop a table being quietly dropped
+/// from [`FileMirror::flags`] — where its bits would be compared with nothing
+/// and only [`check_file`]'s stray check would still name it.
 #[test]
 fn gpu_stream_js_mirrors_every_bit_of_the_crcbl_hal_flag_sets_it_restates() {
     let mirror = stream_mirror();
@@ -1609,6 +2107,292 @@ fn gpu_stream_js_mirrors_every_bit_of_the_crcbl_hal_flag_sets_it_restates() {
         mirror.masks.len(),
         1,
         "gpu-stream.js's mask count moved; the mirror above has to move with it"
+    );
+}
+
+/// **The width every bitflags field crosses the wire at**, from the `put_*` that
+/// writes it to the `read*` that takes it back off — the one property the tables
+/// above leave open.
+///
+/// [`check_flags`] holds each table's bits and
+/// [`FLAGS_READ_AS_U32`]/[`FEATURES_READ_AS_U64`] pin what the page reads, and
+/// all of that stays green if [`crate::writer`] writes the field narrower than
+/// the page reads it: the flag set is truncated on the wire, the page reads four
+/// bytes out of a record that carries one, and every later field of that record
+/// — and the record after it — decodes from the wrong offset. Nothing here is a
+/// tag, so the stream does not stop; it replays as a resource with a usage
+/// nobody asked for.
+///
+/// Both halves are read out of their own files, so this holds the two spellings
+/// against each other and against the width written beside them. The counts are
+/// pinned last, because a parse that found nothing agrees with every direction
+/// above.
+#[test]
+fn every_bitflags_field_crosses_the_wire_at_the_width_the_page_reads() {
+    let tables: Vec<&str> = stream_flag_mirrors()
+        .iter()
+        .map(|flags| flags.table)
+        .collect();
+    for field in WIRE_FLAG_FIELDS {
+        assert!(
+            SANCTIONED_WIDTHS.contains(&(field.put, field.read, field.bytes)),
+            "this test holds {} at {} bytes, written with {} and read with `{}`, which is not \
+             one of the pairs this seam has: {SANCTIONED_WIDTHS:?}",
+            field.field,
+            field.bytes,
+            field.put,
+            field.read
+        );
+        if let Some(table) = field.table {
+            assert!(
+                tables.contains(&table),
+                "gpu-stream.js decodes {} against `{table}`, which no FlagMirror holds against \
+                 a crcbl_hal type, so its bits are compared with nothing",
+                field.field
+            );
+        }
+    }
+
+    let encoded = writer_flag_sites();
+    for field in WIRE_FLAG_FIELDS {
+        let site = encoded
+            .iter()
+            .find(|(method, spelling, _)| *method == field.method && *spelling == field.encoded);
+        let Some((_, _, put)) = site else {
+            panic!(
+                "writer.rs's `{}` no longer puts {} on the wire, so gpu-stream.js's \
+                 `{}('{}')` reads a field nothing encodes",
+                field.method, field.encoded, field.read, field.field
+            );
+        };
+        assert_eq!(
+            *put, field.put,
+            "writer.rs's `{}` puts {} on the wire with {put}, but gpu-stream.js reads {} with \
+             `{}`, which takes {} bytes",
+            field.method, field.encoded, field.field, field.read, field.bytes
+        );
+    }
+    for (method, spelling, put) in &encoded {
+        assert!(
+            WIRE_FLAG_FIELDS
+                .iter()
+                .any(|field| field.method == *method && field.encoded == *spelling),
+            "writer.rs's `{method}` puts {spelling} on the wire with {put} and this test holds \
+             it against no gpu-stream.js read, so a bitflags field crosses the seam at a width \
+             nothing checks"
+        );
+    }
+
+    let decoded = stream_flag_reads("gpu-stream.js", lf(GPU_STREAM_JS));
+    for field in WIRE_FLAG_FIELDS {
+        let read = decoded.iter().find(|(_, name, _)| *name == field.field);
+        let Some((reader, _, table)) = read else {
+            panic!(
+                "gpu-stream.js reads no `{}`, so the {} writer.rs's `{}` puts on the wire \
+                 arrives as bytes the page decodes as something else",
+                field.field, field.encoded, field.method
+            );
+        };
+        assert_eq!(
+            *reader, field.read,
+            "gpu-stream.js reads {} through `{reader}`, but writer.rs writes it with {}",
+            field.field, field.put
+        );
+        assert_eq!(
+            *table, field.table,
+            "gpu-stream.js decodes {} against {table:?}, and this test holds it against {:?}",
+            field.field, field.table
+        );
+    }
+    for (reader, name, _) in &decoded {
+        assert!(
+            WIRE_FLAG_FIELDS.iter().any(|field| field.field == *name),
+            "gpu-stream.js reads {name} through `{reader}` and nothing in writer.rs encodes it, \
+             so the page reads a field wasm never wrote"
+        );
+    }
+
+    assert_eq!(
+        encoded.len(),
+        WIRE_FLAG_FIELDS.len(),
+        "writer.rs puts {} bitflags words on the wire and this test holds {}",
+        encoded.len(),
+        WIRE_FLAG_FIELDS.len()
+    );
+    assert_eq!(
+        decoded.len(),
+        WIRE_FLAG_FIELDS.len(),
+        "gpu-stream.js reads {} bitflags words and this test holds {}",
+        decoded.len(),
+        WIRE_FLAG_FIELDS.len()
+    );
+    assert_eq!(
+        WIRE_FLAG_FIELDS.len(),
+        11,
+        "the command stream's bitflags field count moved; the mirror above has to move with it"
+    );
+    assert_eq!(
+        WIRE_FLAG_FIELDS
+            .iter()
+            .filter(|field| field.read == "readFeatures")
+            .count(),
+        2,
+        "the command stream's sixty-four-bit flag field count moved; the mirror above has to \
+         move with it"
+    );
+}
+
+/// **The bytes themselves, for one field of each width** — the claim the mirror
+/// above makes about `put_u32` and `put_u64`, observed on a buffer rather than
+/// read off a call.
+///
+/// The mirror is textual, and totality is what it buys: every `bits()` word in
+/// `writer.rs` is classified, so a narrowing fails by file and line however it
+/// is spelled, and a field re-routed through a helper that never says `bits()`
+/// drops out of the list. What it cannot do is count bytes. This encodes one
+/// record per width and reads the field back the way `gpu-stream.js` would — a
+/// little-endian word at a known offset — so the widths the mirror asserts are
+/// widths something actually measured.
+///
+/// The label is absent and the handle is spelled out, which makes the whole
+/// record fixed-size: a field written narrower shortens it, and the comparison
+/// names the field.
+#[test]
+fn a_buffer_usage_word_crosses_the_wire_as_the_four_bytes_the_page_reads() {
+    use crcbl_hal::{BufferDesc, BufferHandle, BufferUsage, MemoryLocation};
+
+    let buffer: BufferHandle =
+        crcbl_core::Handle::from_bits(0x0000_0007_0000_0002).expect("a non-zero generation");
+    let usage = BufferUsage::STORAGE | BufferUsage::INDIRECT;
+    let size = 0x0102_0304_0506_0708_u64;
+    let memory = MemoryLocation::HostUpload;
+
+    let mut stream = crate::StreamWriter::new();
+    stream.create_buffer(
+        buffer,
+        &BufferDesc {
+            label: None,
+            size,
+            usage,
+            memory,
+        },
+    );
+
+    let mut expected = vec![crate::tag::CREATE_BUFFER_TAG];
+    expected.extend_from_slice(&buffer.to_bits().to_le_bytes());
+    expected.push(crate::tag::ABSENT);
+    expected.extend_from_slice(&size.to_le_bytes());
+    let usage_at = expected.len();
+    expected.extend_from_slice(&usage.bits().to_le_bytes());
+    expected.push(crate::tag::memory_location_code(memory));
+
+    let record = &stream.bytes()[crate::tag::HEADER_BYTES..];
+    assert_eq!(
+        record,
+        expected.as_slice(),
+        "BufferDesc::usage no longer occupies the four bytes gpu-stream.js reads it as, so the \
+         page's readFlags takes {usage:?} plus whatever follows it and reads every later field \
+         of the record from the wrong offset"
+    );
+    assert_eq!(
+        u32::from_le_bytes(
+            record[usage_at..usage_at + size_of::<u32>()]
+                .try_into()
+                .expect("four bytes")
+        ),
+        usage.bits(),
+        "BufferDesc::usage does not survive the trip as the u32 the page reads"
+    );
+}
+
+/// The same for `crcbl_hal::Features`, which is eight bytes wide and is the
+/// reason the page reads it as a `BigInt`.
+#[test]
+fn a_features_word_crosses_the_wire_as_the_eight_bytes_the_page_reads() {
+    use crcbl_hal::{AdapterId, DeviceDesc, Features};
+
+    let required = Features::all();
+    let optional = Features::empty();
+    let adapter = AdapterId(3);
+
+    let mut stream = crate::StreamWriter::new();
+    stream.request_device(&DeviceDesc {
+        label: None,
+        adapter,
+        required_features: required,
+        optional_features: optional,
+        compatible_surface: None,
+    });
+
+    let mut expected = vec![crate::tag::REQUEST_DEVICE_TAG];
+    expected.extend_from_slice(&adapter.0.to_le_bytes());
+    expected.push(crate::tag::ABSENT);
+    let features_at = expected.len();
+    expected.extend_from_slice(&required.bits().to_le_bytes());
+    expected.extend_from_slice(&optional.bits().to_le_bytes());
+    expected.extend_from_slice(&0_u64.to_le_bytes());
+
+    let record = &stream.bytes()[crate::tag::HEADER_BYTES..];
+    assert_eq!(
+        record,
+        expected.as_slice(),
+        "DeviceDesc::required_features no longer occupies the eight bytes gpu-stream.js reads \
+         it as, so the page's readFeatures takes {required:?} and the word after it"
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            record[features_at..features_at + size_of::<u64>()]
+                .try_into()
+                .expect("eight bytes")
+        ),
+        required.bits(),
+        "DeviceDesc::required_features does not survive the trip as the u64 the page reads"
+    );
+}
+
+/// **The three `gpu-stream.js` tables built by inverting a `gpu-reply.js` frozen
+/// table**, which are the last ordered tables in that file nothing compared.
+///
+/// [`check_inverted`] runs inside [`check_file`], so a broken inversion fails
+/// the tests above as well. What this one adds is the totals, and the totals are
+/// what stop a table being quietly dropped from the list — where it would go
+/// back to being an array nothing reads at all.
+#[test]
+fn gpu_stream_js_inverts_gpu_reply_js_tables_into_gapless_code_indexed_rows() {
+    let mirror = stream_mirror();
+    check_file(&mirror);
+
+    assert_eq!(
+        mirror
+            .inverted
+            .iter()
+            .map(|entry| (entry.table, entry.source))
+            .collect::<Vec<_>>(),
+        [
+            ("IMAGE_FORMAT", "FORMAT"),
+            ("SWAPCHAIN_PRESENT_MODE", "PRESENT_MODE"),
+            ("SWAPCHAIN_COMPOSITE_ALPHA", "COMPOSITE_ALPHA"),
+        ],
+        "the gpu-stream.js tables built by inverting a gpu-reply.js table moved; a table that \
+         left this list is one nothing compares the codes of any more"
+    );
+
+    let sources = freeze_tables("gpu-reply.js", lf(GPU_REPLY_JS));
+    let codes: usize = mirror
+        .inverted
+        .iter()
+        .map(|entry| {
+            sources
+                .iter()
+                .find(|(name, _)| *name == entry.source)
+                .expect("check_inverted found the source table")
+                .1
+                .len()
+        })
+        .sum();
+    assert_eq!(
+        codes, 37,
+        "the gpu-reply.js codes gpu-stream.js inverts moved; the mirror above has to move with it"
     );
 }
 
