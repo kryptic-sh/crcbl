@@ -198,7 +198,7 @@ impl GpuBackend {
     /// A completeness device rather than an identity — nothing should depend on
     /// a backend's ordinal — so it is private and compiled only for the test
     /// that reads it. **That narrows where the compile failure lands and does
-    /// not remove it:** a seventh variant breaks this `match` under
+    /// not remove it:** another variant breaks this `match` under
     /// `cargo test` and under `cargo clippy --all-targets`, which are two of
     /// the three gates every change to this workspace goes through and both run
     /// in CI. Left ungated it is dead code in a normal build, and `-D warnings`
@@ -215,8 +215,10 @@ impl GpuBackend {
     }
 
     /// The canonical names as an English list, for the message shown when a
-    /// name is not one of them: `vk`, `mtl`, `dx12`, `null`, `wgpu` or
-    /// `webgpu`.
+    /// name is not one of them — one per [`GpuBackend::ALL`], which is where
+    /// they live. Not spelled out again here: this doc used to, and went on
+    /// offering `wgpu` long after [`GpuBackend::from_name`] was changed to
+    /// refuse it.
     ///
     /// Built from [`ALL`](Self::ALL) rather than written out, because it was
     /// written out in two places and one of them named four backends of six.

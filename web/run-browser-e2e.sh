@@ -406,8 +406,8 @@ fi
 # The demo list is spelled out here as well as in the driver's `EXPECTATIONS`,
 # and the duplication is the point: these three are the demos whose clear colour
 # actually reaches the screen, so dropping `backdrop` from one of their rows has
-# to fail somewhere rather than shrink the gate. The other three cannot make the
-# claim at all and the driver says why per row. Renaming the check in the driver
+# to fail somewhere rather than shrink the gate. Every other demo in
+# `EXPECTATIONS` cannot make the claim at all, and the driver says why per row. Renaming the check in the driver
 # is meant to fail here and be renamed here too.
 case "$DEMO" in
     breakout | flappy | hud)

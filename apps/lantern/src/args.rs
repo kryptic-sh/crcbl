@@ -60,7 +60,7 @@ impl Default for Options {
 /// The `--help` text.
 ///
 /// One literal rather than a `concat!` of [`crcbl::args::COMMON_OPTIONS_HELP`]
-/// and this sample's own flags, exactly as the other four samples spell theirs:
+/// and this sample's own flags, exactly as every other sample spells its own:
 /// help text is read, not parsed, and the alignment is part of it.
 /// `the_shared_half_of_the_usage_text_is_the_engines_verbatim` is what stops the
 /// two copies drifting.

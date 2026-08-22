@@ -1,4 +1,4 @@
-//! Breakout's start-up, and the seven methods the engine's loop calls.
+//! Breakout's start-up, and the methods the engine's loop calls.
 //!
 //! # There is no loop in this file
 //!
@@ -247,7 +247,7 @@ impl Breakout {
 
 /// Breakout's half of the frame, and nothing else.
 ///
-/// Seven methods where there was a 400-line `frame()`. Everything the loop does
+/// A method apiece where there was a 400-line `frame()`. Everything the loop does
 /// around these — and it is most of what a frame does — is
 /// [`crcbl::engine::Loop`]'s now.
 impl HostedGame for Breakout {

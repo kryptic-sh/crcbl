@@ -38,8 +38,9 @@
 //! draws. `src/art.rs` carries the argument, and [`SceneStats`] is where the
 //! game reports the number it produces.
 //!
-//! Five spatial cues — the gun, an enemy coming apart, a gem, a level and the
-//! player's own end — through `crcbl-audio`'s grammar with the listener on the
+//! Spatial cues — the gun, an enemy coming apart, a gem, a potion, a level and
+//! the player's own end, which is what `audio::SOUND_COUNT` tallies — through
+//! `crcbl-audio`'s grammar with the listener on the
 //! player, which is the first sample whose listener moves; the longest run kept
 //! in `~/.config/horde` or the browser's Origin Private File System; and the
 //! browser entry point the demo site's shim drives.

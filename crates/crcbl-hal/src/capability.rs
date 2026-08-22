@@ -794,13 +794,14 @@ pub const WEBGPU_BIND_GROUPS_ARE_IMMUTABLE: &str = "WebGPU bind groups are immut
 /// records rather than executes, so it is not part of the parity model — see
 /// [`BackendKind::is_gpu`].
 pub const DIVERGENCES: &[Divergence] = &[
-    // --- fills: the worked example, and why there are three variants ---
+    // --- fills: the worked example, and why no row is left ---
     //
     // `BufferFillZero` on Dx12 is not here, and its absence is what the list is
     // for: the row left because the work landed. `crcbl_dx12`'s `fill_buffer`
     // copies out of a zeroed device-local resource, which is `wgpu-hal`'s dx12
-    // answer to the same call, so the backend that had every fill row now has
-    // only the two a *value* has to travel through.
+    // answer to the same call. The valued fills that were the rest of this
+    // section went with the verb's `value` on 2026-08-19 — see `BufferFillZero`
+    // — so the section is a heading over nothing, deliberately.
     // --- draws ---
     //
     // `DrawIndirectCount` on Metal is not here, and its absence is the second

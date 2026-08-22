@@ -17,7 +17,7 @@
 # crate knowledge. `crates/crcbl-vk/tests/vulkan-icd.sh` is the model for the
 # convention and sits where it does because *which manifest names a driver* is
 # `crcbl-vk`'s subject; how nextest spells its own totals is the subject of the
-# test runner, and the eight callers span seven crates.
+# test runner, and its callers span the apps and crates that have a harness.
 #
 # # Why this is a function and not the four lines it replaces
 #

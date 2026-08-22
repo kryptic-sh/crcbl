@@ -1014,7 +1014,7 @@ mod tests {
         );
     }
 
-    /// The help blocks are pasted into four usage strings, so what they claim
+    /// The help blocks are pasted into every sample's usage string, so what they claim
     /// has to match what `consume` accepts — a flag documented and not
     /// implemented is worse than one that is neither.
     #[test]

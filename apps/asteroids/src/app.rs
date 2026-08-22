@@ -1,4 +1,4 @@
-//! Asteroids' start-up, and the seven methods the engine's loop calls.
+//! Asteroids' start-up, and the methods the engine's loop calls.
 //!
 //! # There is no loop in this file
 //!
