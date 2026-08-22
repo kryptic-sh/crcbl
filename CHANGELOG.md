@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_hal::null::NullInstance::with_adapters` and
+  `Recorder::refuse_surface_on`** let a null instance list more than one adapter
+  and make a named one answer `HalError::Unsupported` for a surface — the
+  variant `crcbl-vk` returns for the same condition. Together they reach the
+  engine's surface-aware adapter walk, which until now no test could drive: the
+  case it exists for is a discrete GPU that enumerates first and cannot present
+  to the window while a software rasteriser behind it can.
+
 - **`crcbl_hal::null::Recorder::report_present_wait_timeouts` and
   `NullInstance::with_present_feedback`** make a null device claim
   `Features::PRESENT_FEEDBACK` and answer a present wait with

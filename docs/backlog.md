@@ -9713,18 +9713,17 @@ green run over content that does not use the feature.
 
 ### Owed by the capability work (P7)
 
-- **The null backend cannot express several device states, so the engine's
-  handling of them is untestable without a GPU.** Found while giving the log
-  lines tests. Each is a `crcbl-hal` null limitation rather than an engine one,
-  and closing any of them is a small change to `crates/crcbl-hal/src/null/`:
+- **What the null backend still cannot express, and what the engine therefore
+  cannot be tested on without a GPU.** Found while giving the log lines tests.
+  Each is a `crcbl-hal` null limitation rather than an engine one, and closing
+  one is a small change to `crates/crcbl-hal/src/null/`. What is left:
   `SurfaceCaps::current_extent` is hardcoded `None`, so the "surface reports X
   but the shell configured Y" path is unreachable — **though that one is worth
   less than the list makes it look**: read at `crcbl/src/engine.rs`'s
   `start_device`, the engine's whole handling of the disagreement is one
   `log::info!` naming both sizes before it uses the shell's, so an injector
   there buys a test of a log line rather than of a behaviour. Worth doing when
-  something branches on it, and not before; and `NullInstance::adapters` returns
-  exactly one adapter, so "no adapter can serve this surface" is unreachable.
+  something branches on it, and not before;. That is the only one left.
 
   **The closed ones are the worked examples for the rest.**
   `AcquiredFrame::suboptimal` is `Recorder::report_suboptimal_acquires`, and the
@@ -9741,7 +9740,25 @@ green run over content that does not use the feature.
   loop would hang instead of failing. The present wait runs out because nothing
   would ever clear a latch — no caller action makes a stalled compositor catch
   up — and because the seam calls the recovery part of the policy, which a latch
-  makes unobservable. Each injector still owed answers the same question first.
+  makes unobservable. The adapter walk answered it a third way and **latched**:
+  a pairing with no path to a display does not acquire one, and a count would be
+  spent by the very walk it steers, since `start_device` asks each adapter once
+  and the chosen one is asked again on every resize. Any injector still owed
+  answers the same question first.
+
+  **One arm of that walk is defensive code and stays unreachable,
+  deliberately.** `start_device`'s
+  `None => Unusable("no adapter can present to this window")` is not the
+  no-adapters case — an empty list returns `Unusable("no adapter")` before the
+  loop. `None` is reached only if _every_ adapter answered `Ok(caps)` whose
+  `preferred_format()` is `None`, and `SurfaceCaps::formats` obliges every
+  backend to offer at least one sRGB format, with `preferred_format` documenting
+  that `None` "means the backend should have failed earlier" and `crcbl-vk`
+  rejecting the `formats: []` encoding by name. So an injector for it would make
+  the reference backend break the rule it exists to police — the same argument
+  that kept a null present-wait timeout illegal until a null device could claim
+  `PRESENT_FEEDBACK`. Collapsing the arm is an engine change nobody has asked
+  for; leaving it unreachable is the honest state.
 
 - **The observed half of the pacing line is pinned to `Unknown` in every test.**
   `NullDevice::display_timing` returns `Unknown` unconditionally, and no driver
