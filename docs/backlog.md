@@ -1185,21 +1185,54 @@ uncovered is motion. Closing it needs a scripted-input path into gameplay, which
 neither sample has — `horde`'s `--prefill` is the only fixture of that kind in
 the tree, and it is what lets horde's golden picture a playing frame.
 
-### Nothing guards the Rust to JS state-code mirror
+### The other hand-kept Rust-to-JS mirrors have no guard
 
-`web/engine/gpu-probe.js` restates `crates/crcbl-webgpu/src/probe.rs`'s
-`pub const … : u32` state codes in twenty frozen tables, by hand. No test, gate
-or script compares them, so a code added on one side and forgotten on the other
-is silent — the browser reads a state it has no name for, or names one the
-engine never sends.
+`probe.rs`'s state codes are now checked against `web/engine/gpu-probe.js` by
+`gpu_probe_js_mirrors_every_state_code_this_crate_publishes` and its twin.
+**That is the small half of the problem.**
 
-All 111 codes were checked by hand on 2026-08-22, when twelve of those tables
-moved at once for the readback-failure work. The next person will not do that.
+`crates/crcbl-webgpu/src/tag.rs` declares 319 `pub const` wire codes; the guard
+reaches exactly five of them — the `PRESENT_MODE_*` and `SURFACE_CAPS_FAILURE_*`
+pairs that happen to appear in `gpu-probe.js`'s tables. The rest are the command
+tags, the reply tags and the enum code tables (`STENCIL_OP_*`, `DEVICE_TYPE_*`
+and their kind), and they are restated by hand in `web/engine/gpu-stream.js` and
+`web/engine/gpu-reply.js`, where **nothing compares them at all**. Same defect,
+much larger surface, and a wire tag that drifts is worse than a state code that
+does: the browser decodes the wrong command rather than merely failing to name a
+state.
 
-The fix is cheap and worth taking: a `#[test]` in `probe.rs` that pulls
-`gpu-probe.js` in with `include_str!`, parses the tables, and asserts each `X_Y`
-constant equals table `X`'s `Y`. It fails on the side that forgot, names the
-constant, and needs no browser.
+`probe.rs`'s `js_state_tables` parser is reusable if those two files use the
+same frozen-table shape. That was not checked.
+
+**One property to keep if it is reused.** The parser refuses a line it cannot
+read, naming the file line and the text, rather than skipping it, and asserts
+its table count against the file's own `Object.freeze` count. Both exist because
+a mirror guard's failure mode is matching less than it claims and passing.
+
+### `System<T>`'s internals are not observable, so a desync surfaces as a panic
+
+`crates/crcbl-ecs/tests/churn_soak.rs` catches a component row outliving its
+entity, but only through what the public API exposes — the row count, `get` on a
+live entity, `get` on a stale handle, and the dense-versus-live pairing. The
+lengths of `index_to_entity` and the size of `entity_to_index` are not
+reachable.
+
+Measured while red-checking the soak: breaking `System::detach`'s moved-entity
+fix-up, or its `index_to_entity.pop()`, does not fail an assertion. It panics
+inside `System::get` with
+`index out of bounds: the len is 4 but the index is 4`. The defect is caught,
+which is what matters, but by a crash in the code under test rather than by a
+test saying what is wrong.
+
+A direct observable needs a `#[cfg(test)]` accessor on `System<T>`. That was
+deliberately not added — widening the API for a test is the thing to avoid, and
+the indirect coverage does hold. Worth doing only if this bites someone.
+
+**Also measured, and the reason one assertion is not redundant:** the stale-key
+leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
+**only** by the end-of-run loop that re-queries every despawned handle. Every
+per-tick assertion stays green through it. Do not delete that loop as duplicated
+work.
 
 ### glTF reaches the renderer — what it still cannot open
 
@@ -9415,9 +9448,6 @@ in place.
   and `horde` each compare a real frame now, and `lumen` has one by its own
   route; `quarry` and `viewer` do not. Both are tools rather than demos, so the
   question is whether the plan's rule reaches them at all.
-- **The ECS churn soak with a leak assert does not exist.** The plan asks for it
-  by name. Nothing in `crcbl-ecs` spawns and despawns over many ticks and then
-  asserts nothing leaked. One seeded loop, no GPU.
 - **`crcbl-ui` owes a hit-test grid and has two points.**
   `button_hit_test_inside` and `button_hit_test_outside` exist; the sweep the
   plan names does not.
