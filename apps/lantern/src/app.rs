@@ -320,6 +320,22 @@ fn open_the_window<S: Shell + ?Sized>(
 /// the loop assembled in one place rather than one per path — a second copy is
 /// how the browser build would come to run a subtly different sample.
 fn assemble<S: Shell + ?Sized>(booted: Booted<S, Gpu>, options: &Options) -> Loop<S> {
+    // `--screenshot`, armed before the first frame because the frame it names is
+    // counted from this point. The flag forces `--headless` on, so the context
+    // behind this is always an offscreen ring — see
+    // [`crcbl::args::Common::screenshot`].
+    //
+    // The mutable binding lives inside the `cfg` rather than on the parameter: a
+    // browser build arms nothing, so a `mut` in the signature would be one the
+    // wasm32 target correctly reports as unused.
+    #[cfg(not(target_arch = "wasm32"))]
+    let booted = {
+        let mut booted = booted;
+        if let Some(request) = options.common.screenshot_request() {
+            booted.gpu.context_mut().set_screenshot(request);
+        }
+        booted
+    };
     // All three read before the bundle moves into the loop: what the flags asked
     // for, resolved into a request, and what this device permits.
     let paths = booted.gpu.paths();

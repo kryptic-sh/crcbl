@@ -14,6 +14,46 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`ForwardRenderer::base_color_page()` hands out the base-colour page** as the
+  `UploadedTexture` the renderer uploaded — the image and the view every
+  material row samples through `GpuMaterial::base_color_texture`. It is what a
+  render-to-texture view needs in order to land somewhere visible: nothing above
+  `crcbl-render` could name that image, so a caller had no way to import the
+  page into its own graph and declare a copy into one layer's subresource. The
+  page is created with `ImageUsage::TRANSFER_DST` already, because the upload
+  that filled it is a copy, so a per-frame copy into it needs no new usage flag.
+
+- **`apps/lantern` has an in-scene monitor**, drawn from a second camera into a
+  page layer the screen in the room samples. `room::View` is the two views,
+  `room::MONITOR_STACK` is what the monitor's view asks for — every effect
+  except the reflections — and `room::monitor_camera()` stands on the middle of
+  the screen's own face looking out along its normal, so the monitor cannot
+  appear in its own picture. The screen's picture is one frame behind: the copy
+  is added at the tail of the graph, after the passes that sample the page.
+
+- **`apps/lantern` answers `--screenshot <PATH>`**, writing the run's last
+  presented frame to a PNG and forcing `--headless`, as the other samples do.
+  lantern needs it for a reason of its own: the monitor is fed at the tail of
+  the frame's graph, so the only picture with a live screen in it is one this
+  binary presented — the golden suite's live-monitor arm runs the binary and
+  reads the file it leaves behind.
+
+### Changed
+
+- **`EffectRequest::camera` has a source in the tree.** The camera layer of the
+  four-layer toggle resolution order was a field nothing but a test wrote;
+  lantern's monitor is now its consumer, through a `ForwardRenderer` per view
+  each holding the request its own view asked for. This is not the render-stack
+  RON topic 18 describes — nothing in this workspace reads or writes RON — and
+  `crcbl_render::effects`' module table says so rather than claiming the row is
+  closed. `EffectRequest::video` remains unwired.
+
+- **`crcbl_lantern::room::place` takes a `room::View`** and places only the
+  objects that stand in that view, so the monitor's bezel and screen are absent
+  from the monitor's own renderer rather than merely outside its frustum.
+
 ### Breaking
 
 - **`apps/lumen` is renamed to `apps/lantern`.** Lumen is Unreal Engine 5's

@@ -5536,6 +5536,30 @@ impl ForwardRenderer {
         self.shadow_atlas
     }
 
+    /// The base-colour page every material row samples through
+    /// [`GpuMaterial::base_color_texture`](crcbl_shaders::mesh::GpuMaterial::base_color_texture),
+    /// as the image and the view [`crate::texture`] uploaded.
+    ///
+    /// **What a render-to-texture view copies into.** A second camera drawing
+    /// into an image is only half of a monitor: the surface that *shows* it
+    /// samples a page layer, and nothing above this crate can name the image
+    /// that layer lives in. Handing it out is what lets a caller import the page
+    /// into its own graph, declare a copy into one layer's subresource and leave
+    /// it back in [`ResourceState::ShaderRead`] before the pass that samples it
+    /// — which is the ordering the graph works out from the declaration.
+    ///
+    /// It is created with
+    /// [`ImageUsage::TRANSFER_DST`](crcbl_hal::ImageUsage::TRANSFER_DST),
+    /// because the upload that filled it is a copy, so a per-frame copy into it
+    /// needs no new usage flag. Its extent is
+    /// [`PageDesc::extent`](crate::scene::PageDesc::extent) squared and it has
+    /// one layer per [`SceneDesc::page`](crate::scene::SceneDesc::page) layer;
+    /// the description is the caller's, so the caller already knows both.
+    #[must_use]
+    pub const fn base_color_page(&self) -> UploadedTexture {
+        self.base_color_page
+    }
+
     /// The model matrix for a cube spinning at `seconds` into the run.
     ///
     /// Two axes at incommensurable rates, so the animation never repeats and

@@ -64,7 +64,7 @@ use std::borrow::Cow;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
     Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc,
-    InstancePoolError, Light, MeshDesc, PageDesc, PointLight, Projection, SceneDesc,
+    InstancePoolError, Light, MeshDesc, PageDesc, PointLight, Projection, RenderEffects, SceneDesc,
 };
 use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
 
@@ -253,20 +253,210 @@ pub const BRASS_AT: Vec3 = Vec3::new(
     BLOCK_MAX.z,
 );
 
+/// The same block's **far** face — the one only [`monitor_camera`] can see.
+///
+/// [`BRASS_AT`]'s opposite number, and the read point the monitor camera's own
+/// frame makes its claim at. The face's normal is `-Z` and [`sun`] comes from
+/// `+z`, so no sunlight reaches it at all; it is fully metallic, so it has no
+/// diffuse and no ambient either. What is left is the lamp's specular and the
+/// reflection pass's environment — which makes it the one surface in this room
+/// whose brightness is *mostly* [`RenderEffects::REFLECTIONS`], and therefore
+/// the place a camera stack that drops that effect is legible in pixels.
+///
+/// Its height is inside the band the monitor camera actually frames: that camera
+/// stands at [`MONITOR_EYE`] and looks along `+Z`, so the bottom of this face
+/// falls below its frustum — `the_monitor_camera_frames_the_brass_blocks_far_face`
+/// is what holds the point above that edge with no GPU.
+pub const BRASS_BACK: Vec3 = Vec3::new(
+    0.5 * (BLOCK_MIN.x + BLOCK_MAX.x),
+    0.7 * BLOCK_MAX.y,
+    BLOCK_MIN.z,
+);
+
+// ---------------------------------------------------------------------------
+// The monitor
+// ---------------------------------------------------------------------------
+
+/// The monitor's bezel: minimum corner, flush against the back wall.
+///
+/// A slab on [`SHELL`]'s terms rather than a decal, so the thing has a
+/// silhouette and a contact edge and the sun can put a shadow beside it. It
+/// stands clear of [`TINTED_PLASTER`] — the bounce claim's read point on this
+/// same wall — by more than that shadow's reach, which
+/// `the_monitor_stands_clear_of_every_read_point_on_its_own_wall` checks.
+const MONITOR_MIN: Vec3 = Vec3::new(-0.1, 0.65, -HALF_DEPTH);
+
+/// The bezel's maximum corner. Square, and 5 cm proud of the wall.
+const MONITOR_MAX: Vec3 = Vec3::new(1.7, 2.45, -HALF_DEPTH + 0.05);
+
+/// How far the screen stands in front of the bezel's own face, in metres.
+///
+/// A centimetre — a screen mounted on a frame, and far enough that no depth
+/// buffer this engine builds could confuse the two. It is not an epsilon
+/// against z-fighting: the screen is a single quad and the bezel is a slab, so
+/// nothing else lies in this plane at all.
+const SCREEN_PROUD: f32 = 0.01;
+
+/// The plane the screen lies in.
+pub const SCREEN_FACE_Z: f32 = MONITOR_MAX.z + SCREEN_PROUD;
+
+/// The screen's minimum corner. Square, inset inside the bezel.
+const SCREEN_MIN: Vec3 = Vec3::new(0.0, 0.75, SCREEN_FACE_Z);
+
+/// The screen's maximum corner.
+const SCREEN_MAX: Vec3 = Vec3::new(1.6, 2.35, SCREEN_FACE_Z);
+
+/// Where [`monitor_camera`] stands: the middle of the screen's own face.
+///
+/// **The monitor cannot be in its own view, and this is half of why.** The eye
+/// is *on* the screen, so the screen, the bezel and the wall behind them are all
+/// at or behind a near plane of [`MONITOR_NEAR`] and none of them can be drawn.
+/// The other half is [`place`], which never puts either of them in the monitor's
+/// renderer at all — the table it walks carries a column saying which views each
+/// object stands in. Two mechanisms rather than one because they
+/// answer different questions: this one is why the *picture* has no monitor in
+/// it, and that one is why a change of pose cannot put one back.
+pub const MONITOR_EYE: Vec3 = Vec3::new(
+    0.5 * (SCREEN_MIN.x + SCREEN_MAX.x),
+    0.5 * (SCREEN_MIN.y + SCREEN_MAX.y),
+    SCREEN_FACE_Z,
+);
+
+/// Which way the screen faces, and therefore which way its camera looks.
+///
+/// The screen's own outward normal. Written as the axis rather than as a second
+/// pose, so a monitor moved to another wall moves its camera with it.
+pub const MONITOR_NORMAL: Vec3 = Vec3::Z;
+
+/// [`monitor_camera`]'s near plane.
+///
+/// Larger than [`fixed_camera`]'s, and deliberately: it is the distance in front
+/// of the screen at which the monitor's view begins, so it is what keeps the
+/// bezel's own front face out of the picture even before [`place`] has removed
+/// it. A centimetre — smaller than the screen slab is thick.
+pub const MONITOR_NEAR: f32 = 0.01;
+
+/// The render-to-texture view's extent, in pixels a side.
+///
+/// Square because the page is: [`PageDesc`] carries one extent for every layer,
+/// so the layer the monitor is copied into is [`PAGE_EXTENT`] both ways and a
+/// view rendered at any other aspect would arrive stretched. The screen is
+/// square for the same reason, and [`monitor_camera`] therefore frames at 1:1.
+pub const MONITOR_EXTENT: (u32, u32) = (PAGE_EXTENT, PAGE_EXTENT);
+
+/// What the monitor's view **asks for**, as the camera-stack layer of
+/// `docs/plan/39-capabilities.md`'s resolution order.
+///
+/// Every effect except the reflections, which is
+/// `docs/plan/18-render-features.md`'s own example of what a render-to-texture
+/// camera does not want: a screen-space march in a view that is *about* to be
+/// pasted onto a surface standing in the same room is a frame's worth of work
+/// spent on the one thing the view cannot afford to be right about.
+///
+/// It is the camera's layer and not the programmatic one on purpose. The
+/// programmatic layer is what the pause menu and the `--no-*` flags drive, and a
+/// run that turned reflections on there gets them in the frame it can see; this
+/// is a property of the *view*, and the order is what keeps the two from being
+/// one switch.
+pub const MONITOR_STACK: RenderEffects =
+    RenderEffects::all().difference(RenderEffects::REFLECTIONS);
+
+/// The middle of the screen's face, in world space — where a claim about what
+/// the monitor is showing has to be aimed.
+pub const SCREEN_AT: Vec3 = MONITOR_EYE;
+
+/// Where a world point the monitor camera sees lands on the screen's face.
+///
+/// The composition the golden suite's monitor claim is made of: project `point`
+/// through [`monitor_camera`] to get the texel it occupies in the render target,
+/// then read that texel's position back off the screen quad, whose UVs run `0..1`
+/// across the screen's own corners. A claim built this way is a claim
+/// that *this* surface is showing *that* part of the room, which is the whole of
+/// what a render-to-texture monitor is; a block placed by hand in the middle of
+/// the screen would pass over any picture at all.
+///
+/// `None` when the point is behind the monitor camera or outside its frustum, so
+/// a caller that moved the room finds out rather than reading the wrong pixel.
+///
+/// `v` runs **down** the screen, which is a framebuffer's own order rather than
+/// this room's default for a quad. The builder's screen quad is the one place
+/// that is decided, and `the_screens_texture_runs_the_way_a_frame_does` is what
+/// holds it there.
+#[must_use]
+pub fn screen_point(point: Vec3) -> Option<Vec3> {
+    let camera = monitor_camera();
+    let clip = camera.view_projection(1.0) * point.extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !(-1.0..=1.0).contains(&ndc.x) || !(-1.0..=1.0).contains(&ndc.y) {
+        return None;
+    }
+    let u = (ndc.x + 1.0) * 0.5;
+    let v = (1.0 - ndc.y) * 0.5;
+    Some(Vec3::new(
+        SCREEN_MIN.x + u * (SCREEN_MAX.x - SCREEN_MIN.x),
+        SCREEN_MAX.y - v * (SCREEN_MAX.y - SCREEN_MIN.y),
+        SCREEN_FACE_Z,
+    ))
+}
+
+/// The camera the monitor shows, looking out of the screen along its own normal.
+///
+/// **Derived from the screen rather than posed**: the eye is the middle of the
+/// face and the target is a metre along [`MONITOR_NORMAL`], so a monitor moved
+/// or resized moves this with it and there is no second place to keep in step.
+/// [`MONITOR_EYE`] carries the argument for why that placement is also what stops
+/// the monitor showing itself.
+///
+/// The lens is [`fixed_camera`]'s, so what the screen shows is the same room
+/// through the same optics rather than a second framing a reader has to account
+/// for — at 1:1, because [`MONITOR_EXTENT`] is square.
+#[must_use]
+pub fn monitor_camera() -> Camera {
+    Camera {
+        eye: MONITOR_EYE,
+        target: MONITOR_EYE + MONITOR_NORMAL,
+        up: Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: FOV_Y,
+            near: MONITOR_NEAR,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The page
 // ---------------------------------------------------------------------------
 
 /// The base-colour page's extent, in texels a side.
 ///
-/// Four, so the floor's layer is a 4×4 pattern rather than a flat colour: the
-/// sampler has no mips and filters nearest, so what lands on the floor is
-/// sixteen crisp cells and a texture coordinate that never varied would be
-/// visible as one.
-pub const PAGE_EXTENT: u32 = 4;
+/// **The monitor's resolution, and therefore every layer's.** [`PageDesc`]
+/// carries one extent for the whole page, so the layer the render-to-texture
+/// camera is copied into decides how large the floor's check is stored as well —
+/// which costs a little memory and changes no picture, because [`FLOOR_CELLS`]
+/// is what the floor's pattern is actually made of and it is a count of cells
+/// rather than of texels.
+///
+/// A hundred and twenty-eight, which is what the screen is worth: the monitor
+/// covers about a fortieth of the golden's width at
+/// `apps/lantern/tests/golden.rs`'s blessed extent and about a seventh of the
+/// review extent's, so anything finer would be resolution the frame throws away
+/// and anything coarser would be visible as texels at review size.
+pub const PAGE_EXTENT: u32 = 128;
 
 /// Bytes in one layer: [`PAGE_EXTENT`]² RGBA texels.
 const PAGE_LAYER_BYTES: usize = (PAGE_EXTENT * PAGE_EXTENT) as usize * 4;
+
+/// Cells a side in the floor's check.
+///
+/// Four, so the floor's layer is a 4×4 pattern rather than a flat colour: the
+/// sampler has no mips and filters nearest, so what lands on the floor is
+/// sixteen crisp cells and a texture coordinate that never varied would be
+/// visible as one. A count of *cells* and not of texels, so [`PAGE_EXTENT`]
+/// moving for the monitor's sake leaves the floor the picture it already was.
+pub const FLOOR_CELLS: u32 = 4;
 
 /// The floor's layer: a two-tone check, light on light.
 ///
@@ -274,16 +464,18 @@ const PAGE_LAYER_BYTES: usize = (PAGE_EXTENT * PAGE_EXTENT) as usize * 4;
 /// what the occlusion bands are measured across, and a black-and-white check
 /// would put a larger step across those bands than either term does — the
 /// pattern would decide the measurement instead of the lighting.
-const FLOOR_TEXELS: [u8; PAGE_LAYER_BYTES] = checker(0xE8, 0xC4);
+fn floor_texels() -> Vec<u8> {
+    checker(0xE8, 0xC4)
+}
 
-/// A `PAGE_EXTENT`² RGBA check of two greys, `light` where the coordinates'
-/// parity is even.
-const fn checker(light: u8, dark: u8) -> [u8; PAGE_LAYER_BYTES] {
-    let mut texels = [0xFFu8; PAGE_LAYER_BYTES];
-    let mut index = 0;
-    while index < (PAGE_EXTENT * PAGE_EXTENT) as usize {
-        let x = index % PAGE_EXTENT as usize;
-        let y = index / PAGE_EXTENT as usize;
+/// A [`PAGE_EXTENT`]² RGBA check of [`FLOOR_CELLS`]² cells, `light` where the
+/// cell coordinates' parity is even.
+fn checker(light: u8, dark: u8) -> Vec<u8> {
+    let cell = (PAGE_EXTENT / FLOOR_CELLS).max(1);
+    let mut texels = vec![0xFFu8; PAGE_LAYER_BYTES];
+    for index in 0..(PAGE_EXTENT * PAGE_EXTENT) as usize {
+        let x = index % PAGE_EXTENT as usize / cell as usize;
+        let y = index / PAGE_EXTENT as usize / cell as usize;
         let value = if (x + y).is_multiple_of(2) {
             light
         } else {
@@ -293,7 +485,25 @@ const fn checker(light: u8, dark: u8) -> [u8; PAGE_LAYER_BYTES] {
         texels[index * 4 + 1] = value;
         texels[index * 4 + 2] = value;
         texels[index * 4 + 3] = 0xFF;
-        index += 1;
+    }
+    texels
+}
+
+/// What the monitor's layer is uploaded holding: black, in every texel.
+///
+/// **The off state has to be black and it has to be the upload.** The layer is
+/// overwritten every frame by the copy the monitor's camera feeds — see
+/// `crate::gpu` — so what is here is what the screen shows on a frame where that
+/// copy did not happen, and every harness in the tree that renders one view and
+/// not two is such a frame. Black multiplied by any amount of light is still
+/// black, so a screen nothing wrote reads as a screen that is off, and a claim
+/// that the monitor is showing something cannot be satisfied by a fill.
+///
+/// Opaque, because the page's alpha is a material's alpha.
+fn no_signal_texels() -> Vec<u8> {
+    let mut texels = vec![0x00u8; PAGE_LAYER_BYTES];
+    for texel in texels.chunks_exact_mut(4) {
+        texel[3] = 0xFF;
     }
     texels
 }
@@ -304,6 +514,14 @@ const UNTEXTURED_LAYER: u32 = PageDesc::UNTEXTURED_LAYER;
 /// The page layer [`FLOOR`] samples — the one [`room`] appends past the white
 /// one.
 const FLOOR_LAYER: u32 = 1;
+
+/// The page layer [`MONITOR`] samples, and the one the monitor camera's frame is
+/// copied into every frame.
+///
+/// Public because the copy is `crate::gpu`'s and the layer is this module's: a
+/// second constant naming the same index is the shape that lets a page grow a
+/// layer and a copy go on writing the one below it.
+pub const MONITOR_LAYER: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // The material rows
@@ -357,6 +575,15 @@ pub const MIRROR: usize = 3;
 /// nothing else varies between them.
 pub const ROUGH_METAL: usize = 4;
 
+/// The monitor screen's row: a dielectric sampling [`MONITOR_LAYER`].
+///
+/// The only row in this room whose texture is written **while the frame runs**
+/// rather than uploaded once, which is the whole of what makes the screen a
+/// monitor rather than a picture of one. Its base colour is near white so that
+/// what a reader sees is the layer and not a tint over it — but not `1.0`, for
+/// [`PLASTER`]'s reason.
+pub const MONITOR: usize = 5;
+
 /// How rough [`PLASTER`] is.
 const PLASTER_ROUGHNESS: f32 = 0.9;
 
@@ -395,6 +622,10 @@ pub(crate) const BOUNCE_COLOR: [f32; 4] = [0.72, 0.11, 0.09, 1.0];
 /// visible thing left when the diffuse and the ambient are both gone.
 const ROUGH_METAL_COLOR: [f32; 4] = [0.95, 0.78, 0.45, 1.0];
 
+/// [`MONITOR`]'s base colour: as near white as [`PLASTER_COLOR`]'s argument
+/// allows, so the frame the screen carries is what the picture shows.
+pub(crate) const MONITOR_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
+
 // ---------------------------------------------------------------------------
 // The meshes
 // ---------------------------------------------------------------------------
@@ -423,6 +654,11 @@ pub const PLINTH_MESH: usize = 6;
 pub const MIRROR_MESH: usize = 7;
 /// The rough metal block.
 pub const BLOCK_MESH: usize = 8;
+/// The monitor's bezel, flush against the back wall.
+pub const MONITOR_BEZEL_MESH: usize = 9;
+/// The monitor's screen, sitting on the bezel — the surface [`MONITOR_LAYER`]
+/// lands on.
+pub const MONITOR_SCREEN_MESH: usize = 10;
 
 /// Which way a quad faces along the axis its plane is perpendicular to.
 ///
@@ -464,9 +700,19 @@ impl MeshBuilder {
     /// **The one place the winding rule lives.** `0 1 2, 0 2 3` preserves the
     /// corner order, exactly as `crcbl_shaders::mesh::cube_indices` does.
     fn quad(&mut self, corners: [Vec3; 4], normal: Vec3) {
+        self.quad_uv(corners, normal, QUAD_UV);
+    }
+
+    /// [`MeshBuilder::quad`] with the texture coordinates written out.
+    ///
+    /// One surface in this room needs its own: [`QUAD_UV`] pairs `v = 0` with
+    /// the corner the quad methods emit first, which is the one at the minimum
+    /// `y` — right for a pattern, upside down for a **frame**, whose first row
+    /// is its top. See [`MeshBuilder::screen_quad`].
+    fn quad_uv(&mut self, corners: [Vec3; 4], normal: Vec3, uvs: [[f32; 2]; 4]) {
         let base = u32::try_from(self.vertices.len())
             .unwrap_or_else(|_| unreachable!("a room of a few hundred vertices"));
-        for (corner, uv) in corners.iter().zip(&QUAD_UV) {
+        for (corner, uv) in corners.iter().zip(&uvs) {
             self.positions.push([corner.x, corner.y, corner.z]);
             self.vertices.push(MeshVertex {
                 position: [corner.x, corner.y, corner.z, 1.0],
@@ -527,6 +773,28 @@ impl MeshBuilder {
                 Vec3::NEG_Z,
             ),
         }
+    }
+
+    /// The monitor's screen: a `+Z`-facing quad in the plane `z`, with `v`
+    /// running **down** the wall.
+    ///
+    /// The one place in this sample that cares which way up a texture is. Every
+    /// other layer of the page is a pattern that reads the same either way; this
+    /// one is a framebuffer copied straight out of a render target, and a frame
+    /// pasted on upside down is a perfectly plausible picture of a room.
+    ///
+    /// A single quad rather than a slab, unlike everything else here: the reason
+    /// [`SHELL`] gives for slabs is that the *sun* has to see a surface, and a
+    /// screen mounted flat on a bezel casts no shadow anybody could look for. It
+    /// stands [`SCREEN_PROUD`] in front of the bezel's own face, so it is
+    /// coplanar with nothing.
+    fn screen_quad(&mut self, z: f32, x: (f32, f32), y: (f32, f32)) {
+        let at = |x: f32, y: f32| Vec3::new(x, y, z);
+        self.quad_uv(
+            [at(x.0, y.0), at(x.1, y.0), at(x.1, y.1), at(x.0, y.1)],
+            Vec3::Z,
+            [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+        );
     }
 
     /// A closed box between `min` and `max`, every face pointing **out**.
@@ -635,10 +903,15 @@ fn shell_slab(label: &'static str, min: Vec3, max: Vec3) -> MeshDesc<'static> {
 #[must_use]
 pub fn room() -> SceneDesc<'static> {
     let mut page = PageDesc::opaque_white(PAGE_EXTENT);
-    let floor_layer = page.push_layer(&FLOOR_TEXELS[..]);
+    let floor_layer = page.push_layer(floor_texels());
     debug_assert_eq!(
         floor_layer, FLOOR_LAYER,
         "the floor's check is the layer past the white one"
+    );
+    let monitor_layer = page.push_layer(no_signal_texels());
+    debug_assert_eq!(
+        monitor_layer, MONITOR_LAYER,
+        "the monitor's frame is the layer past the floor's check"
     );
 
     // The floor and the ceiling cover the room's own footprint; the four walls
@@ -686,6 +959,16 @@ pub fn room() -> SceneDesc<'static> {
             mesh_of("plinth", |b| b.box_outward(PLINTH_MIN, PLINTH_MAX)),
             mesh_of("mirror panel", |b| b.box_outward(MIRROR_MIN, MIRROR_MAX)),
             mesh_of("metal block", |b| b.box_outward(BLOCK_MIN, BLOCK_MAX)),
+            mesh_of("monitor bezel", |b| {
+                b.box_outward(MONITOR_MIN, MONITOR_MAX);
+            }),
+            mesh_of("monitor screen", |b| {
+                b.screen_quad(
+                    SCREEN_FACE_Z,
+                    (SCREEN_MIN.x, SCREEN_MAX.x),
+                    (SCREEN_MIN.y, SCREEN_MAX.y),
+                );
+            }),
         ],
         materials: vec![
             // **First, so it is row 0** — the row `mesh::GpuInstance::default`
@@ -720,6 +1003,12 @@ pub fn room() -> SceneDesc<'static> {
                 base_color_texture: UNTEXTURED_LAYER,
                 metallic: BRASS_METALLIC,
                 roughness: BRASS_ROUGHNESS,
+                ..GpuMaterial::UNTINTED
+            },
+            GpuMaterial {
+                base_color: MONITOR_COLOR,
+                base_color_texture: MONITOR_LAYER,
+                roughness: PLASTER_ROUGHNESS,
                 ..GpuMaterial::UNTINTED
             },
         ],
@@ -760,19 +1049,88 @@ pub const CAPACITIES: Capacities = Capacities {
 /// needs the two runs to have placed things in the same order. One list, walked
 /// once, is what makes that true by construction rather than by two call sites
 /// agreeing.
-const OBJECTS: [(usize, usize); 9] = [
-    (FLOOR_MESH, FLOOR),
-    (CEILING_MESH, PLASTER),
-    (BACK_WALL_MESH, PLASTER),
-    (FRONT_WALL_MESH, PLASTER),
-    (WINDOW_WALL_MESH, PLASTER),
-    (BOUNCE_WALL_MESH, BOUNCE),
-    (PLINTH_MESH, PLASTER),
-    (MIRROR_MESH, MIRROR),
-    (BLOCK_MESH, ROUGH_METAL),
+const OBJECTS: [(usize, usize, Seen); 11] = [
+    (FLOOR_MESH, FLOOR, Seen::Everywhere),
+    (CEILING_MESH, PLASTER, Seen::Everywhere),
+    (BACK_WALL_MESH, PLASTER, Seen::Everywhere),
+    (FRONT_WALL_MESH, PLASTER, Seen::Everywhere),
+    (WINDOW_WALL_MESH, PLASTER, Seen::Everywhere),
+    (BOUNCE_WALL_MESH, BOUNCE, Seen::Everywhere),
+    (PLINTH_MESH, PLASTER, Seen::Everywhere),
+    (MIRROR_MESH, MIRROR, Seen::Everywhere),
+    (BLOCK_MESH, ROUGH_METAL, Seen::Everywhere),
+    (MONITOR_BEZEL_MESH, PLASTER, Seen::NotOnTheMonitor),
+    (MONITOR_SCREEN_MESH, MONITOR, Seen::NotOnTheMonitor),
 ];
 
-/// Puts every object of the room in `renderer`, and reports how many.
+/// Which of the room's two views an object stands in.
+///
+/// **The structural half of "a monitor that does not reflect itself".** The
+/// screen is a surface in the room the monitor's own camera is looking at, so a
+/// view that drew it would be showing the previous frame of itself, and the
+/// frame after that would be showing that — a feedback loop with no bound and
+/// no error message. What stops it is that the monitor's renderer is never given
+/// the instance: the exclusion is a column of the table objects are declared in,
+/// so an object added to the room has to say which views it is in, and the
+/// answer is checked by `the_monitor_is_absent_from_its_own_view` rather than
+/// implied by a pose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    /// In every view of the room.
+    Everywhere,
+    /// In the frame the player sees, and **not** in the monitor's own.
+    NotOnTheMonitor,
+}
+
+/// Which view of the room a renderer draws.
+///
+/// One renderer per view — see `crate::gpu` for why a second view is a second
+/// renderer rather than a second pass — and this is what each of them is given.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    /// The frame presented to the player, monitor included.
+    #[default]
+    Main,
+    /// The monitor's render-to-texture view, which the screen shows.
+    Monitor,
+}
+
+impl View {
+    /// Whether an object declared `seen` belongs in this view.
+    const fn draws(self, seen: Seen) -> bool {
+        !matches!((self, seen), (Self::Monitor, Seen::NotOnTheMonitor))
+    }
+
+    /// The camera-stack layer of the resolution order for this view — what its
+    /// renderer's [`EffectRequest::camera`](crcbl::render::EffectRequest::camera)
+    /// is set to.
+    ///
+    /// The main view asks for everything, which is what every frame the engine
+    /// drew before there were two of them asked for; the monitor asks for
+    /// [`MONITOR_STACK`].
+    #[must_use]
+    pub const fn stack(self) -> RenderEffects {
+        match self {
+            Self::Main => RenderEffects::all(),
+            Self::Monitor => MONITOR_STACK,
+        }
+    }
+
+    /// Where this view is seen from.
+    #[must_use]
+    pub fn camera(self) -> Camera {
+        match self {
+            Self::Main => fixed_camera(),
+            Self::Monitor => monitor_camera(),
+        }
+    }
+}
+
+/// Puts every object `view` draws in `renderer`, and reports how many.
+///
+/// [`View::Monitor`] leaves out the monitor itself: the table this walks carries
+/// a column saying which views each object stands in, which is where that
+/// exclusion is declared and why.
 ///
 /// The geometry is already at world scale and world position — every mesh above
 /// is built where it stands — so each transform is the identity. That is
@@ -787,15 +1145,20 @@ const OBJECTS: [(usize, usize); 9] = [
 /// cover the room, which is a mistake in this file rather than a condition a run
 /// can be in — but it is the caller that would have to report it, so it is
 /// returned rather than unwrapped.
-pub fn place(renderer: &mut ForwardRenderer) -> Result<usize, InstancePoolError> {
-    for (mesh, material) in OBJECTS {
+pub fn place(renderer: &mut ForwardRenderer, view: View) -> Result<usize, InstancePoolError> {
+    let mut placed = 0;
+    for (mesh, material, seen) in OBJECTS {
+        if !view.draws(seen) {
+            continue;
+        }
         renderer.add_instance(&InstanceDesc {
             mesh,
             material,
             transform: Mat4::IDENTITY,
         })?;
+        placed += 1;
     }
-    Ok(OBJECTS.len())
+    Ok(placed)
 }
 
 // ---------------------------------------------------------------------------
@@ -963,6 +1326,8 @@ mod tests {
                 PLINTH_MESH,
                 MIRROR_MESH,
                 BLOCK_MESH,
+                MONITOR_BEZEL_MESH,
+                MONITOR_SCREEN_MESH,
             ]
             .map(|mesh| labels[mesh]),
             [
@@ -975,6 +1340,8 @@ mod tests {
                 "plinth",
                 "mirror panel",
                 "metal block",
+                "monitor bezel",
+                "monitor screen",
             ],
             "an index that names the wrong entry places the wrong mesh, and the frame \
              still draws"
@@ -982,13 +1349,13 @@ mod tests {
 
         for (mesh, label) in labels.iter().enumerate() {
             assert!(
-                OBJECTS.iter().any(|(placed, _)| *placed == mesh),
+                OBJECTS.iter().any(|(placed, _, _)| *placed == mesh),
                 "{label} is resident and nothing places it"
             );
         }
         for row in 0..scene.materials.len() {
             assert!(
-                OBJECTS.iter().any(|(_, named)| *named == row),
+                OBJECTS.iter().any(|(_, named, _)| *named == row),
                 "material row {row} is declared and nothing shades through it"
             );
         }
@@ -1540,6 +1907,315 @@ mod tests {
         assert!(
             floor.chunks_exact(4).any(|texel| texel != &floor[..4]),
             "a flat floor layer would pass with no texture coordinate at all"
+        );
+        // The floor's pattern is a count of cells, so raising the page's extent
+        // for the monitor's sake leaves it the picture it was: every cell is one
+        // colour and there are `FLOOR_CELLS` of them across.
+        let cell = (PAGE_EXTENT / FLOOR_CELLS) as usize;
+        let texel_at = |x: usize, y: usize| {
+            let at = (y * PAGE_EXTENT as usize + x) * 4;
+            floor[at..at + 4].to_vec()
+        };
+        for corner in 0..cell {
+            assert_eq!(
+                texel_at(corner, corner),
+                texel_at(0, 0),
+                "a cell of the floor's check is not one colour, so the pattern has \
+                 {PAGE_EXTENT} cells across instead of {FLOOR_CELLS}"
+            );
+        }
+        assert_ne!(
+            texel_at(cell, 0),
+            texel_at(0, 0),
+            "the cell next door is the same colour, so the check is flat"
+        );
+
+        // **The monitor's layer is black when nothing has written it**, which is
+        // what makes "the screen is showing the room" a claim a fill cannot
+        // satisfy — see `no_signal_texels`.
+        let monitor = &page.layers()[MONITOR_LAYER as usize];
+        assert_eq!(monitor.len(), PAGE_LAYER_BYTES);
+        assert!(
+            monitor
+                .chunks_exact(4)
+                .all(|texel| texel[..3] == [0x00, 0x00, 0x00] && texel[3] == 0xFF),
+            "an off screen has to be opaque black, or a monitor that never received a \
+             frame reads as one that did"
+        );
+    }
+
+    /// **The screen's texture is the right way up**, which no other surface in
+    /// this room has an opinion about.
+    ///
+    /// A frame pasted on upside down is a perfectly plausible picture of a room,
+    /// and it is what [`QUAD_UV`] gives: that table pairs `v = 0` with the corner
+    /// at the minimum `y`, and a framebuffer's first row is its top. Checked here
+    /// rather than only in the golden suite because it is arithmetic and needs no
+    /// device — and because the golden that would catch it needs a GPU, a
+    /// backend pin and a binary run.
+    #[test]
+    fn the_screens_texture_runs_the_way_a_frame_does() {
+        let mut builder = MeshBuilder::default();
+        builder.screen_quad(
+            SCREEN_FACE_Z,
+            (SCREEN_MIN.x, SCREEN_MAX.x),
+            (SCREEN_MIN.y, SCREEN_MAX.y),
+        );
+        assert_eq!(builder.vertices.len(), 4, "the screen is one quad");
+        for vertex in &builder.vertices {
+            let top = (vertex.position[1] - SCREEN_MAX.y).abs() < 1e-6;
+            assert_eq!(
+                vertex.uv[1],
+                if top { 0.0 } else { 1.0 },
+                "the corner at y = {} carries v = {}, so the picture is upside down",
+                vertex.position[1],
+                vertex.uv[1],
+            );
+            let right = (vertex.position[0] - SCREEN_MAX.x).abs() < 1e-6;
+            assert_eq!(
+                vertex.uv[0],
+                if right { 1.0 } else { 0.0 },
+                "the corner at x = {} carries u = {}, so the picture is mirrored",
+                vertex.position[0],
+                vertex.uv[0],
+            );
+            assert_eq!(vertex.normal[2], 1.0, "the screen faces out of the wall");
+        }
+    }
+
+    /// **The monitor is not in its own view**, by two mechanisms, and this is the
+    /// one a change of pose cannot defeat.
+    ///
+    /// [`place`] is handed a [`View`] and walks one table, so the screen and its
+    /// bezel are declared [`Seen::NotOnTheMonitor`] once and the renderer that
+    /// draws the monitor's picture never receives the instance. The other
+    /// mechanism — the camera standing on the screen's own face — is the test
+    /// below; both are asserted because they answer different questions.
+    #[test]
+    fn the_monitor_is_absent_from_its_own_view() {
+        let monitor_meshes = [MONITOR_BEZEL_MESH, MONITOR_SCREEN_MESH];
+        for mesh in monitor_meshes {
+            let (_, _, seen) = OBJECTS
+                .iter()
+                .find(|(placed, _, _)| *placed == mesh)
+                .expect("every monitor mesh is placed somewhere");
+            assert_eq!(
+                *seen,
+                Seen::NotOnTheMonitor,
+                "mesh {mesh} is part of the monitor and its own camera would draw it"
+            );
+        }
+        for (mesh, _, seen) in OBJECTS {
+            assert_eq!(
+                seen == Seen::NotOnTheMonitor,
+                monitor_meshes.contains(&mesh),
+                "mesh {mesh} is held out of the monitor's view and is not part of the monitor"
+            );
+        }
+
+        let main = OBJECTS
+            .iter()
+            .filter(|(_, _, seen)| View::Main.draws(*seen))
+            .count();
+        let monitor = OBJECTS
+            .iter()
+            .filter(|(_, _, seen)| View::Monitor.draws(*seen))
+            .count();
+        assert_eq!(main, OBJECTS.len(), "the main view draws the whole room");
+        assert_eq!(
+            monitor,
+            OBJECTS.len() - monitor_meshes.len(),
+            "the monitor's view draws the room without the monitor in it"
+        );
+    }
+
+    /// **The monitor camera stands on the screen and looks away from it**, so
+    /// every surface of the monitor is at or behind its near plane.
+    ///
+    /// The geometric half of "a monitor that does not reflect itself". Worked out
+    /// from the corners rather than eyeballed: a pose that had drifted in front
+    /// of the screen would put the bezel in the picture and the picture on the
+    /// bezel, and the frame after that would be showing the frame before it.
+    #[test]
+    fn the_monitor_camera_looks_out_of_the_screen_it_stands_on() {
+        let camera = monitor_camera();
+        assert_eq!(camera.eye, MONITOR_EYE);
+        assert_eq!(camera.eye.z, SCREEN_FACE_Z);
+        assert!(
+            (camera.target - camera.eye)
+                .normalize()
+                .abs_diff_eq(MONITOR_NORMAL.normalize(), 1e-6),
+            "the camera does not look along the screen's own normal"
+        );
+        // Everything the monitor is made of is at or behind the eye, so the near
+        // plane cuts all of it away even before `place` has left it out.
+        for (min, max) in [(MONITOR_MIN, MONITOR_MAX), (SCREEN_MIN, SCREEN_MAX)] {
+            assert!(
+                max.z <= camera.eye.z,
+                "{min:?}..{max:?} reaches in front of the monitor camera"
+            );
+        }
+        const {
+            assert!(MONITOR_NEAR > 0.0);
+        }
+    }
+
+    /// [`BRASS_BACK`] is on the block's far face, out of the sun, and inside the
+    /// monitor camera's frustum.
+    ///
+    /// **The read point the camera-stack claim is made at**, and each of those
+    /// three is what makes it one. On the far face, so it is a surface only this
+    /// camera can see; out of the sun and fully metallic, so it has no direct
+    /// diffuse, no ambient and nothing but the lamp's specular left beside the
+    /// reflection pass's environment; and inside the frustum, because the camera
+    /// stands above it and a point below the frame is a claim about no pixel at
+    /// all.
+    #[test]
+    fn the_monitor_camera_frames_the_brass_blocks_far_face() {
+        assert_eq!(BRASS_BACK.z, BLOCK_MIN.z, "not on the block's far face");
+        const {
+            assert!(
+                BRASS_BACK.y > BLOCK_MIN.y && BRASS_BACK.y < BLOCK_MAX.y,
+                "the read point is off the block face it names"
+            );
+        }
+        // The face's normal is `-Z` and `sun().direction` points *towards* the
+        // light, so a non-positive dot product is a face the sun never reaches.
+        let facing = sun().direction.dot(Vec3::NEG_Z);
+        assert!(
+            facing <= 0.0,
+            "the block's far face takes {facing:.3} of the sun, so it is not the \
+             reflection-only surface this point is chosen for"
+        );
+        let on_screen =
+            screen_point(BRASS_BACK).expect("the monitor camera frames the block's far face");
+        assert!(
+            on_screen.x > SCREEN_MIN.x
+                && on_screen.x < SCREEN_MAX.x
+                && on_screen.y > SCREEN_MIN.y
+                && on_screen.y < SCREEN_MAX.y,
+            "{on_screen:?} is off the screen quad it was mapped onto"
+        );
+        // And the monitor camera is in front of that face, which is what makes
+        // the mapping above about a surface rather than about its back.
+        assert!(monitor_camera().eye.z < BRASS_BACK.z);
+    }
+
+    /// **The monitor's camera stack drops the reflections and nothing else.**
+    ///
+    /// One assertion per effect rather than one equality, because the failure
+    /// worth catching is a stack that dropped the wrong bit — which an equality
+    /// against a hand-written set would also catch, and which a set built the
+    /// same way as the value under test would not.
+    #[test]
+    fn the_monitors_camera_stack_drops_the_reflections_and_nothing_else() {
+        assert!(!MONITOR_STACK.contains(RenderEffects::REFLECTIONS));
+        assert!(MONITOR_STACK.contains(RenderEffects::SHADOWS));
+        assert!(MONITOR_STACK.contains(RenderEffects::AMBIENT_OCCLUSION));
+        assert_eq!(View::Monitor.stack(), MONITOR_STACK);
+        assert_eq!(
+            View::Main.stack(),
+            RenderEffects::all(),
+            "the frame the player sees asks for everything, as it always has"
+        );
+        assert_ne!(
+            View::Main.stack(),
+            View::Monitor.stack(),
+            "two views that ask for the same effects are not a consumer for the camera layer"
+        );
+    }
+
+    /// **The monitor stands clear of every read point on the wall it hangs on**,
+    /// including the shadow it throws along that wall.
+    ///
+    /// [`TINTED_PLASTER`] is the far half of the bounce claim and it is on this
+    /// same back wall. A monitor that shaded it — or whose own sunlit shadow
+    /// reached the block the golden averages over — would turn that claim into a
+    /// measurement of the monitor. The displacement is computed from [`sun`] and
+    /// from the monitor's own depth, so moving either moves this.
+    #[test]
+    fn the_monitor_stands_clear_of_every_read_point_on_its_own_wall() {
+        let depth = SCREEN_MAX.z - (-HALF_DEPTH);
+        assert!(depth > 0.0, "the monitor stands off the wall it hangs on");
+        let towards_light = sun().direction;
+        assert!(
+            towards_light.z > 0.0,
+            "the sun is on the near side of the back wall, so it casts this shadow \
+             along it"
+        );
+        // The wall point a corner of the monitor shadows is that corner minus the
+        // vector to the light, scaled to reach the wall.
+        let reach = depth / towards_light.z;
+        let shadow_max_x = MONITOR_MAX.x - reach * towards_light.x;
+        let shadow_min_y = MONITOR_MIN.y - reach * towards_light.y;
+        for point in [TINTED_PLASTER, UNTINTED_PLASTER] {
+            assert_eq!(point.z, -HALF_DEPTH, "not on the back wall");
+            // Outside the shadowed rectangle on **any** axis is outside it, so
+            // the clearance is the largest of the four distances out of it.
+            let clear = (point.x - shadow_max_x)
+                .max(MONITOR_MIN.x - point.x)
+                .max(shadow_min_y - point.y)
+                .max(point.y - MONITOR_MAX.y);
+            assert!(
+                clear > 0.3,
+                "{point:?} is only {clear:.3} m clear of the monitor and the shadow it \
+                 throws (x up to {shadow_max_x:.3}, y down to {shadow_min_y:.3})"
+            );
+        }
+    }
+
+    /// **The screen is in the fixed camera's frame, whole**, and covers enough of
+    /// it for a block to sit inside.
+    ///
+    /// The golden's monitor claim reads two blocks inside this rectangle, so a
+    /// screen that had drifted behind the block or off the edge would leave those
+    /// blocks measuring plaster. Checked at the goldens' own 4:3.
+    #[test]
+    fn the_fixed_camera_sees_the_whole_screen() {
+        let camera = fixed_camera();
+        let view_projection = camera.view_projection(4.0 / 3.0);
+        let ndc = |point: Vec3| {
+            let clip = view_projection * point.extend(1.0);
+            assert!(clip.w > 0.0, "{point:?} is behind the fixed camera");
+            (clip.x / clip.w, clip.y / clip.w)
+        };
+        let corners = [
+            Vec3::new(SCREEN_MIN.x, SCREEN_MIN.y, SCREEN_FACE_Z),
+            Vec3::new(SCREEN_MAX.x, SCREEN_MIN.y, SCREEN_FACE_Z),
+            Vec3::new(SCREEN_MAX.x, SCREEN_MAX.y, SCREEN_FACE_Z),
+            Vec3::new(SCREEN_MIN.x, SCREEN_MAX.y, SCREEN_FACE_Z),
+        ]
+        .map(ndc);
+        for (x, y) in corners {
+            assert!(
+                (-1.0..=1.0).contains(&x) && (-1.0..=1.0).contains(&y),
+                "a corner of the screen projects to ({x:.3}, {y:.3}), outside the frame"
+            );
+        }
+        let width = corners[1].0 - corners[0].0;
+        let height = corners[2].1 - corners[1].1;
+        assert!(
+            width > 0.1 && height > 0.1,
+            "the screen covers {width:.3} x {height:.3} of normalised device space, which \
+             is too little for a block to sit inside"
+        );
+        // Nothing standing on the floor cuts into it. The metal block is the
+        // tallest thing between the camera and this wall and it stands much
+        // nearer, so the comparison has to be in the frame rather than in world
+        // `y`: its whole silhouette is below the screen's lowest edge.
+        let mut block_top = f32::NEG_INFINITY;
+        for corner_x in [BLOCK_MIN.x, BLOCK_MAX.x] {
+            for corner_y in [BLOCK_MIN.y, BLOCK_MAX.y] {
+                for corner_z in [BLOCK_MIN.z, BLOCK_MAX.z] {
+                    block_top = block_top.max(ndc(Vec3::new(corner_x, corner_y, corner_z)).1);
+                }
+            }
+        }
+        let screen_bottom = corners[0].1.min(corners[1].1);
+        assert!(
+            block_top < screen_bottom,
+            "the metal block reaches {block_top:.3} in the frame and the screen starts at \
+             {screen_bottom:.3}, so it cuts into the screen's silhouette"
         );
     }
 }

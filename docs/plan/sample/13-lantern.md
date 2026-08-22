@@ -42,6 +42,9 @@ rather than something the plan asserts.
 - Free-fly camera, a fixed camera set for goldens, and a second
   render-to-texture camera driving an in-scene monitor — the per-camera toggle
   layer needs a consumer, and a monitor that does not reflect itself is it.
+  **Delivered**: `room::monitor_camera` stands on the screen's own face,
+  `room::MONITOR_STACK` drops the reflections, and the picture is copied into
+  the page layer the screen samples.
 - Path/effect control UI, and the same controls reachable from `[engine.video]`
   so the settings-screen path is exercised before P10 builds a screen.
 - Pages web demo. It runs `Rasterised` by construction, which is the point: the
@@ -131,14 +134,16 @@ left owed.
   the device permits — and an effect the device cannot draw reads `UNAVAILABLE`
   rather than `OFF`, so the panel never offers a tick that does nothing.
 
-  **This is one third of milestone 4's matrix, not the whole of it.** Every
+  **This is two thirds of milestone 4's matrix, not the whole of it.** Every
   effect is reachable from the programmatic layer, from the menu and from the
-  command line; the camera stack and `[engine.video]` still have no source in
-  this tree, so a toggle "exercising all three layers" is not something the
-  sample can yet do. No device here clamps an effect either, so the
-  `UNAVAILABLE` arm is covered by a unit test that constructs the device set —
-  `a_row_the_device_cannot_draw_reads_as_unavailable` — rather than by a machine
-  that reports one.
+  command line, and the camera stack has a source now — the in-scene monitor's
+  view asks for `room::MONITOR_STACK`, which is every effect but the
+  reflections, through a `ForwardRenderer` of its own. `[engine.video]` still
+  has no source in this tree, so a toggle "exercising all three layers" is not
+  something the sample can yet do. No device here clamps an effect either, so
+  the `UNAVAILABLE` arm is covered by a unit test that constructs the device set
+  — `a_row_the_device_cannot_draw_reads_as_unavailable` — rather than by a
+  machine that reports one.
 
 - **A golden frame with six structural claims in front of it**
   (`apps/lantern/tests/golden.rs`): the sun reaches the floor through the
@@ -187,10 +192,12 @@ which is the configuration a general solve would change most.
 ### Still owed at this milestone, and where
 
 Recorded in `docs/backlog.md` rather than here: ray tracing and the acceleration
-structures, the render-to-texture monitor camera, the camera-stack and
-`[engine.video]` layers of the toggle resolution order (the programmatic one is
-built and is what both the `--no-*` flags and the pause menu's rows drive), the
-Pages web demo, and a CI leg that runs the golden suite.
+structures, the `[engine.video]` layer of the toggle resolution order (the
+programmatic one is built and is what both the `--no-*` flags and the pause
+menu's rows drive, and the camera one is the in-scene monitor's), the Pages web
+demo, and a CI leg that runs the golden suite. The monitor itself left four
+findings in `crcbl-render` — duplicate imports, an undeclared page read, one
+view per renderer and one view per offscreen run — all of them in the backlog.
 
 ## Milestones
 

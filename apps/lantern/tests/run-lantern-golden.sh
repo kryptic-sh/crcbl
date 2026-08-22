@@ -14,6 +14,18 @@
 # claims in front of the golden are about where the frame is bright and dark
 # rather than about whether it drew.
 #
+# # Two goldens, and only one of them comes out of this process
+#
+# `tests/golden/room.png` is the room from the fixed camera through
+# `crcbl::screenshot::OffscreenSetup`, which renders **one** view — so the
+# monitor hanging on the back wall is a black screen in it, and that is honest
+# rather than a defect: nothing in that harness feeds the screen.
+#
+# `tests/golden/live.png` is the frame the **binary** presented, on the shape
+# every other sample's golden suite already uses: the second view and the copy
+# that puts a picture on that screen are recorded by the sample's own frame, so a
+# live screen only exists in a run the binary made.
+#
 # # Why the backend must be named
 #
 # Every backend draws this room identically by construction — that is the point

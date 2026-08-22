@@ -35,15 +35,26 @@
 //!
 //! | Layer | Source | Wired |
 //! | --- | --- | --- |
-//! | [`EffectRequest::camera`] | a render-stack RON | **no** — there is no render-stack RON, and one camera draws a frame |
+//! | [`EffectRequest::camera`] | the view's own render stack | yes — a renderer per view, each with its own request |
 //! | [`EffectRequest::video`] | `[engine.video]` | **no** — `crcbl_store::settings` reads that namespace and nothing builds a stack at startup |
 //! | [`EffectRequest::programmatic`] | game code | yes — [`ForwardRenderer::set_effect_request`] |
 //! | the device clamp | [`crcbl_hal::DeviceCaps`] | yes, and it removes nothing — see [`ForwardRenderer::device_effects`] |
 //!
-//! The two unwired rows are fields nothing but a test writes, and they are here
-//! rather than left out because the *order* is the thing being built: a
-//! resolution point missing two of its four inputs cannot be shown to apply them
-//! in the right order, and adding them later would move every caller.
+//! The camera row's source is **not** the render-stack RON topic 18 describes —
+//! nothing in this workspace reads or writes RON — it is a
+//! [`ForwardRenderer`](crate::ForwardRenderer) per view, each holding the
+//! request its own view asked for. That is enough to make the layer real,
+//! because what the layer means is "two views in one frame resolve to different
+//! effect sets", and a RON file would only be a second way to write the same
+//! field. `apps/lantern`'s in-scene monitor is the consumer: its
+//! render-to-texture camera draws the room without reflections while the frame
+//! it hangs in draws them, from one device, in one graph, through this one
+//! function.
+//!
+//! The remaining unwired row is a field nothing but a test writes, and it is
+//! here rather than left out because the *order* is the thing being built: a
+//! resolution point missing one of its four inputs cannot be shown to apply them
+//! in the right order, and adding it later would move every caller.
 //!
 //! [`ForwardRenderer::set_effect_request`]: crate::ForwardRenderer::set_effect_request
 //! [`ForwardRenderer::device_effects`]: crate::ForwardRenderer::device_effects
@@ -167,8 +178,10 @@ pub struct EffectRequest {
     /// reflections of their own, and that is a property of the camera rather
     /// than of the player's hardware.
     ///
-    /// **Nothing sets this today** — there is no render-stack RON and one camera
-    /// draws a frame. See this module's table.
+    /// **A renderer per view is what sets it**, rather than the render-stack RON
+    /// topic 18 describes — see this module's table for why that is the same
+    /// layer and not a substitute for it. `apps/lantern`'s monitor camera is the
+    /// consumer in this tree.
     pub camera: RenderEffects,
     /// What the **player** allows, from `[engine.video]`.
     ///

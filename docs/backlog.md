@@ -5289,6 +5289,58 @@ version strings, which were read from Steamworks.NET's header mirror rather than
 Valve's login-gated zip. The plan mandates re-reading both from a real SDK
 before any declaration is trusted.
 
+## What the render-to-texture monitor found (2026-08-22)
+
+`apps/lantern` now draws its in-scene monitor from a second view, which made it
+the first thing in this tree to put two cameras and two `ForwardRenderer`s in
+one graph. Four findings came out of that, none of them fixed, all of them in
+`crcbl-render` rather than the sample.
+
+- **`RenderGraph::import_image` does not deduplicate, and `validate_imports` is
+  structurally blind to it.** `import_image` pushes a node per call, so the same
+  `ImageHandle` imported twice yields two `ImageId`s with independent state
+  trackers and **no barrier between the two halves** — each believes it starts
+  at its declared `initial` state. `validate_imports` cannot catch it: it
+  compares each declaration against the pool's ledger of what the _previous_
+  executed graph left, so two declarations that agree with the last frame agree
+  with each other and both pass. `imported_image_end` lets whichever node was
+  declared last decide the final state. The `InitialClaim::Tracked` audit
+  therefore checks across frames and not within one. Verified by reading
+  `import_image` and `validate_imports` in `crates/crcbl-render/src/graph.rs`;
+  no test exercises a duplicate import today. A fix is a handle→`ImageId` map on
+  the graph returning the existing id, which also needs a rule for what happens
+  when the second declaration disagrees with the first.
+- **`ForwardRenderer::add_passes` does not declare the page it samples.** The
+  base-colour page is bound through the material descriptor rather than imported
+  into the graph, so a graph that also _writes_ that page — which is exactly
+  what a render-to-texture monitor does — has no declared ordering between the
+  write and the draws that read it. `apps/lantern` gets a correct barrier only
+  because its own `feed_monitor` imports the page and declares
+  `ShaderRead → TransferDst → ShaderRead` around the copy; a caller that copied
+  into the page without importing it would get none. Twenty-four frames under
+  Vulkan synchronization validation report zero hazards, which says the barrier
+  the sample declares is doing the job, not that the renderer declared it.
+- **One `ForwardRenderer` cannot serve two views.** `add_passes` takes
+  `&'a mut self` against the graph's lifetime, so two calls on one renderer do
+  not compile (`E0499`), and `begin_frame` writes one camera into the frame's
+  uniform slot and freezes one resolved effect set. A second view therefore
+  costs a whole second renderer: a second copy of the geometry and cluster
+  pools, the material table, the page and the instance ring, plus a second
+  shadow atlas. For lantern's eleven objects that is small; for a scene with a
+  real residency budget it is not. The answer is a view parameter inside
+  `crcbl-render` — per-view camera uniform and effect set over shared residency
+  — rather than a renderer per camera. Not attempted: it moves `begin_frame`'s
+  signature and every caller.
+- **`OffscreenSetup` renders one view per run.** The headless path opens one
+  offscreen ring at one extent, so the golden suite's monitor claims are made by
+  rendering the monitor's view _as if it were the frame_ at
+  `room::MONITOR_EXTENT` and reading it directly, rather than by reading the
+  monitor's texels out of a composed frame at the composed frame's resolution.
+  The composed claim is made separately against the screen quad — see
+  `the_screen_in_the_room_shows_the_room_and_matches_its_golden` — so nothing is
+  unchecked, but the two halves are two runs and a divergence between them would
+  read as a pixel difference rather than as a named failure.
+
 ## Owed
 
 The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six
@@ -12481,16 +12533,14 @@ room produced. `docs/plan/sample/13-lantern.md` carries the status.
   selector already exists and every device in the tree resolves to `Rasterised`
   because nothing builds a structure; lantern's panel says so on a row rather
   than implying a choice was made.
-- **The render-to-texture monitor camera**, and with it a consumer for the
-  camera-stack layer of the toggle resolution order. One camera per frame today.
 - **The rest of milestone 4's matrix.** The three effect rows are on the pause
   menu now, doing read-modify-write on the programmatic layer. What the charter
-  asks for beyond them — the side-by-side and A/B-flip comparison modes — needs
-  the monitor camera above. The `--help` half is closed: the three flags now
-  point at the SHADOWS, AO and REFLECTIONS rows and say what an `unavailable`
-  row means, and `the_help_names_every_effect_row_the_pause_menu_has` holds the
-  prose to `menu::EFFECT_ROWS`' own labels so a renamed row fails a test rather
-  than leaving the help describing a row nobody can find.
+  asks for beyond them — the side-by-side and A/B-flip comparison modes — is
+  still owed. The `--help` half is closed: the three flags now point at the
+  SHADOWS, AO and REFLECTIONS rows and say what an `unavailable` row means, and
+  `the_help_names_every_effect_row_the_pause_menu_has` holds the prose to
+  `menu::EFFECT_ROWS`' own labels so a renamed row fails a test rather than
+  leaving the help describing a row nobody can find.
 - **`UNAVAILABLE` has never run on hardware.** The effect rows report a
   device-clamped effect as unavailable rather than off, and a press on such a
   row is a deliberate no-op. Both are covered by a constructed device set only,
@@ -13107,17 +13157,22 @@ effect set, `EffectRequest` carries the three requested layers,
 `EffectRequest::resolve` applies the order, and `ForwardRenderer::begin_frame`
 resolves once per frame and freezes the answer. What follows is what that left.
 
-### Two of the four toggle layers have no source in the tree
+### One of the four toggle layers has no source in the tree
 
-`EffectRequest::camera` and `EffectRequest::video` are fields nothing but a test
-writes. They are present because the _order_ is what was built — a resolution
-point missing two of its inputs cannot be shown to apply them in the right order
-— and `crcbl_render::effects`' module docs carry a table saying which are wired.
+`EffectRequest::video` is a field nothing but a test writes. It is present
+because the _order_ is what was built — a resolution point missing one of its
+inputs cannot be shown to apply them in the right order — and
+`crcbl_render::effects`' module docs carry a table saying which are wired.
 
-- **Camera stack.** There is no render-stack RON. Nothing in the workspace reads
-  or writes RON at all, there is no `ron` dependency and no `.ron` file, and
-  `crcbl-render` has one camera per frame. The consumer topic 18 names is the
-  render-to-texture monitor camera, which is on lantern's owed list.
+`EffectRequest::camera` has a source as of `apps/lantern`'s in-scene monitor: a
+`ForwardRenderer` per view, each holding the request its own view asked for, and
+`room::MONITOR_STACK` is the monitor view's. It is **not** the render-stack RON
+topic 18 describes — nothing in this workspace reads or writes RON, there is no
+`ron` dependency and no `.ron` file — and that remains a real difference: a RON
+file would let a stack be authored without a recompile. Left as a separate
+question rather than folded into this one, because the layer it would feed now
+has a consumer either way.
+
 - **`[engine.video]`.** Closer, and the gap is smaller than it looks.
   `crcbl_store::settings::SettingsStack` implements the whole four-layer TOML
   resolution and `get_section::<T>("engine.video")` is one call. What is missing

@@ -212,6 +212,50 @@ const SHADOW_LIFT: f32 = 1.6;
 /// This is a claim about that term, not about the pixel.
 const AO_LIFT: f32 = 1.08;
 
+/// A point on the front wall, dead ahead of [`room::monitor_camera`].
+///
+/// The control half of the camera-stack claim: rough plaster in the room's
+/// ambient with the lamp on it, a dielectric whose `F0` leaves the reflection
+/// pass almost nothing to contribute. Measured on radv at
+/// [`MONITOR_REVIEW`]: 69.64 with the reflections in the monitor's stack and
+/// 69.55 without, which is a thousandth.
+const FRONT_WALL_AT: Vec3 = Vec3::new(0.8, 1.55, room::HALF_DEPTH);
+
+/// What a block reading "the reflection pass supplied all of this" is allowed to
+/// keep once that pass is gone, out of 255.
+///
+/// `crcbl_render::ssr`'s composite is the whole of what lights a conductor with
+/// no sun on it, so the honest answer is zero and the tolerance is for the
+/// rasteriser's edge pixels. Measured on radv: exactly 0.0 at
+/// [`room::BRASS_BACK`].
+const MONITOR_UNLIT: f32 = 1.0;
+
+/// How much brighter the part of the monitor's picture showing the ceiling has
+/// to be than the part showing the block's unlit far face.
+///
+/// **The claim that the screen is showing the room**, and the two blocks are
+/// placed by projecting two world points through the *monitor's* camera and
+/// reading where they land on the screen quad — see [`room::screen_point`]. A
+/// screen holding a flat fill fails it whatever the fill is, a screen nobody
+/// wrote is black and fails the floor below, and a picture pasted on upside down
+/// swaps the two and fails it the other way.
+///
+/// Measured on radv at [`LIVE_EXTENT`]: 58.8 against 4.0, which is fourteen
+/// times. **And measured with the camera layer taken out of
+/// `EffectRequest::resolve`**, where the monitor draws its reflections after all
+/// and the same pair reads 58.8 against 17.3 — three and a half times. This
+/// threshold sits between the two, so the composed frame carries the camera
+/// layer as well rather than merely showing that something was copied onto the
+/// screen.
+const MONITOR_CONTRAST: f32 = 6.0;
+
+/// A point on the ceiling the monitor's camera frames, and the bright half of
+/// the claim above.
+///
+/// The lamp hangs below it, so it is the brightest thing in that view — 159.7 on
+/// radv at [`MONITOR_REVIEW`], against the block's far face at 0.0.
+const MONITOR_BRIGHT_AT: Vec3 = Vec3::new(0.8, room::HEIGHT, 1.0);
+
 /// How far a control block is allowed to move, as a share of its own reading.
 ///
 /// Every claim above is paired with a block the same switch must **not** move,
@@ -262,6 +306,37 @@ fn below_features() -> Features {
     OffscreenSetup::OPTIONAL_FEATURES.difference(selecting)
 }
 
+/// One arm of a comparison: which view of the room, at which camera stack.
+///
+/// A struct rather than two arguments because the second is normally derived
+/// from the first — `Arm::of` is what every arm but one uses — and the one test
+/// that overrides it is holding two arms apart at *exactly* that layer, which is
+/// worth saying at the call site rather than passing as a bare flag set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Arm {
+    /// Which view: whose camera, and which objects are in it.
+    view: room::View,
+    /// The camera-stack layer of the resolution order this arm renders with.
+    stack: RenderEffects,
+}
+
+impl Arm {
+    /// The view as the room declares it — [`room::View::stack`] and its own
+    /// camera.
+    const fn of(view: room::View) -> Self {
+        Self {
+            view,
+            stack: view.stack(),
+        }
+    }
+
+    /// The same view with a different camera stack, which is what makes a pair
+    /// of frames a claim about that layer.
+    const fn with_stack(self, stack: RenderEffects) -> Self {
+        Self { stack, ..self }
+    }
+}
+
 /// Opens a device on the best path this adapter offers, builds the room on it,
 /// and reads one frame back.
 ///
@@ -269,8 +344,13 @@ fn below_features() -> Features {
 /// separates them: every claim below is about a frame, and a frame is the one
 /// thing that does not say which tail drew it.
 fn draw(extent: (u32, u32), effects: RenderEffects) -> (Image, String) {
-    let (image, paths, _) =
-        draw_with_probes(extent, effects, OffscreenSetup::OPTIONAL_FEATURES, false);
+    let (image, paths, _) = draw_with_probes(
+        extent,
+        effects,
+        OffscreenSetup::OPTIONAL_FEATURES,
+        false,
+        Arm::of(room::View::Main),
+    );
     (image, paths)
 }
 
@@ -291,7 +371,13 @@ fn draw_with(
     effects: RenderEffects,
     optional_features: Features,
 ) -> (Image, String, AdapterInfo) {
-    draw_with_probes(extent, effects, optional_features, false)
+    draw_with_probes(
+        extent,
+        effects,
+        optional_features,
+        false,
+        Arm::of(room::View::Main),
+    )
 }
 
 /// [`draw_with`] with every authored probe row replaced by [`GpuProbe::ZERO`]
@@ -301,6 +387,7 @@ fn draw_with_probes(
     effects: RenderEffects,
     optional_features: Features,
     zero_probes: bool,
+    arm: Arm,
 ) -> (Image, String, AdapterInfo) {
     // A logger before anything opens: without one, every line a backend emits on
     // the way to a device goes nowhere, and a failure inside `open` names the
@@ -313,9 +400,9 @@ fn draw_with_probes(
         optional_features,
         |device, queue, format| {
             Ok(ForwardScene {
-                camera: room::fixed_camera(),
+                camera: arm.view.camera(),
                 sun: room::sun(),
-                renderer: Box::new(build(device, queue, format, effects, zero_probes)?),
+                renderer: Box::new(build(device, queue, format, effects, zero_probes, arm)?),
             })
         },
     )
@@ -394,6 +481,7 @@ fn build(
     format: Format,
     effects: RenderEffects,
     zero_probes: bool,
+    arm: Arm,
 ) -> Result<ForwardRenderer, crcbl::screenshot::OffscreenError> {
     let mut scene = room::room();
     if zero_probes {
@@ -403,11 +491,16 @@ fn build(
     // The **programmatic** layer of topic 39's resolution order, which is the
     // one a test has any business driving — see `crcbl::render::effects`.
     renderer.set_effect_request(EffectRequest {
+        // The **camera** layer is the view's, and the **programmatic** one is
+        // this test's — see `crcbl::render::effects`. Two views resolving to two
+        // effect sets is the whole of what `room::View::stack` is for, so a test
+        // that wrote one layer for both would be exercising one of them.
+        camera: arm.stack,
         programmatic: EffectOverride::none()
             .force(RenderEffects::all().difference(effects), Some(false)),
         ..EffectRequest::default()
     });
-    if let Err(error) = room::place(&mut renderer) {
+    if let Err(error) = room::place(&mut renderer, arm.view) {
         renderer.destroy(device);
         return Err(crcbl::screenshot::OffscreenError::Hal(
             crcbl::hal::HalError::InvalidDescriptor(format!(
@@ -666,8 +759,13 @@ fn zero_probes_only_remove_the_ssr_and_rough_fallbacks() {
     let effects = RenderEffects::all();
     let (authored, _, authored_adapter) =
         draw_with(EXTENT, effects, OffscreenSetup::OPTIONAL_FEATURES);
-    let (zeroed, _, zeroed_adapter) =
-        draw_with_probes(EXTENT, effects, OffscreenSetup::OPTIONAL_FEATURES, true);
+    let (zeroed, _, zeroed_adapter) = draw_with_probes(
+        EXTENT,
+        effects,
+        OffscreenSetup::OPTIONAL_FEATURES,
+        true,
+        Arm::of(room::View::Main),
+    );
     assert_eq!(
         authored_adapter, zeroed_adapter,
         "the authored and zero-probe frames opened different adapters, so they are not a control"
@@ -965,6 +1063,305 @@ fn every_effect_toggles_and_the_frame_says_so() {
         "the SSR-miss point reads {missing_on:.1} with reflections and {missing_off:.1} without — \
          the probe fallback was not supplied by the reflection pass"
     );
+}
+
+/// The extent the monitor's own view is inspected at.
+///
+/// Square, because [`room::MONITOR_EXTENT`] is — the page carries one extent for
+/// every layer — and large enough that the block the claim below reads is a
+/// patch of the room rather than a handful of texels. Nothing is blessed at this
+/// size; the picture that *is* blessed is the room with the screen in it.
+const MONITOR_REVIEW: (u32, u32) = (768, 768);
+
+/// One frame of an arm, at `extent`, written where a reviewer can open it.
+fn arm_frame(
+    extent: (u32, u32),
+    effects: RenderEffects,
+    arm: Arm,
+    name: &str,
+) -> (Image, AdapterInfo) {
+    let (image, paths, adapter) = draw_with_probes(
+        extent,
+        effects,
+        OffscreenSetup::OPTIONAL_FEATURES,
+        false,
+        arm,
+    );
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(REVIEW_DIR);
+    std::fs::create_dir_all(&dir).expect("target/ is writable");
+    let path = dir.join(format!("{name}-{}x{}.png", extent.0, extent.1));
+    image.save_png(&path).expect("the review frame is writable");
+    eprintln!("lantern golden: {paths} {name} frame at {}", path.display());
+    (image, adapter)
+}
+
+/// **The camera stack is the only thing between the monitor's two frames**, and
+/// it is legible in pixels.
+///
+/// `docs/plan/39-capabilities.md`'s first layer, rendered twice: the same view of
+/// the same room on the same device at the same instant, with
+/// [`EffectRequest::camera`](crcbl::render::EffectRequest::camera) the one field
+/// that differs — [`room::MONITOR_STACK`] in the arm the sample ships, and every
+/// effect in the arm beside it. Everything below that layer is identical, so a
+/// difference between the two frames is the layer and can be nothing else.
+///
+/// **The read point is [`room::BRASS_BACK`]**, and its choice is the whole of
+/// what makes this a claim rather than a brightness comparison: the block's far
+/// face is fully metallic, so it has no diffuse albedo for the ambient to scale;
+/// it faces away from the sun, so it has no direct sun on it either; and only the
+/// monitor's camera can see it at all. What is left is the lamp's specular and
+/// the environment the reflection pass supplies, so dropping
+/// [`RenderEffects::REFLECTIONS`] from the stack takes most of it away.
+///
+/// The control is the sunlit floor in the same pair of frames, which the
+/// reflection pass contributes almost nothing to: a frame that merely went dark
+/// everywhere fails there.
+///
+/// **This test goes red if the camera layer is dropped from
+/// `EffectRequest::resolve`.** With `self.camera` out of that expression the two
+/// arms resolve to the same effect set, both frames are the same picture, and the
+/// ratio below is one.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
+fn the_camera_stack_is_the_only_thing_between_the_monitors_two_frames() {
+    let effects = RenderEffects::all();
+    let shipped = Arm::of(room::View::Monitor);
+    let reflecting = shipped.with_stack(RenderEffects::all());
+    assert_ne!(
+        shipped.stack, reflecting.stack,
+        "two arms that ask for the same effects are not a comparison"
+    );
+
+    let (dropped, dropped_adapter) =
+        arm_frame(MONITOR_REVIEW, effects, shipped, "monitor-camera-stack");
+    let (kept, kept_adapter) = arm_frame(
+        MONITOR_REVIEW,
+        effects,
+        reflecting,
+        "monitor-camera-reflections",
+    );
+    assert_eq!(
+        dropped_adapter, kept_adapter,
+        "the two arms opened different adapters, so they are not a comparison"
+    );
+
+    let camera = room::monitor_camera();
+    let block = (
+        BLOCK.0 * MONITOR_REVIEW.0 / EXTENT.0,
+        BLOCK.1 * MONITOR_REVIEW.1 / EXTENT.1,
+    );
+    let brass = project(&camera, MONITOR_REVIEW, room::BRASS_BACK);
+    let control = project(&camera, MONITOR_REVIEW, FRONT_WALL_AT);
+    let brass_dropped = brightness(&dropped, brass, block);
+    let brass_kept = brightness(&kept, brass, block);
+    let control_dropped = brightness(&dropped, control, block);
+    let control_kept = brightness(&kept, control, block);
+    eprintln!(
+        "lantern monitor: brass far face {brass_kept:.1} -> {brass_dropped:.1}, \
+         front wall {control_kept:.1} -> {control_dropped:.1}"
+    );
+    assert!(
+        brass_kept > LIT_FLOOR,
+        "the block's far face reads {brass_kept:.1} with the reflections in the monitor's \
+         stack — nothing drew, or the face is not where this claim is aimed"
+    );
+    assert!(
+        brass_dropped <= MONITOR_UNLIT,
+        "the block's far face reads {brass_dropped:.1} with reflections out of the \
+         monitor's camera stack — a conductor with no sun, no diffuse and no ambient has \
+         nothing else to be lit by, so the camera layer did not reach the frame"
+    );
+    assert!(
+        (control_dropped - control_kept).abs() < control_kept * UNCHANGED,
+        "the front wall moved from {control_kept:.1} to {control_dropped:.1} — a rough \
+         dielectric in full ambient has almost no reflection to lose, so this is the whole \
+         frame changing rather than the camera stack"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The live monitor: the frame the binary presented
+// ---------------------------------------------------------------------------
+
+/// The extent the live golden is blessed at.
+///
+/// `crcbl::engine::DEFAULT_WINDOW_SIZE` at scale 1, which is what a headless run
+/// renders at when `--size` says nothing — so the picture is the frame the
+/// default invocation produces rather than one a flag had to ask for. Larger
+/// than [`EXTENT`] because the subject is a screen a metre and a half across at
+/// the far end of an eight-metre room, and at 256 × 192 it is a smudge.
+const LIVE_EXTENT: (u32, u32) = (960, 720);
+
+/// How many frames the live run presents before the one that gets written.
+///
+/// **More than one, and that is load-bearing.** The monitor's view is drawn and
+/// copied onto the screen at the *tail* of each frame — `crcbl_lantern::gpu`'s
+/// `feed_monitor` says why — so the screen shows the previous frame's picture and
+/// a run of one frame would present a screen nothing had written yet. Sixteen is
+/// past start-up and several times round the offscreen ring, and the lamp's orbit
+/// is a pure function of the fixed-step clock, so the frame written is the same
+/// on every machine.
+const LIVE_FRAMES: u32 = 16;
+
+/// The backend the run must be pinned to, from the environment.
+fn required_backend() -> String {
+    std::env::var(crcbl::backend::BACKEND_ENV_VAR).unwrap_or_else(|_| {
+        panic!(
+            "{} is not set, so nothing would pin the backend and a fallback would pass. \
+             Run tests/run-lantern-golden.sh, which names one.",
+            crcbl::backend::BACKEND_ENV_VAR
+        )
+    })
+}
+
+/// Runs the real binary with `--screenshot` and hands back the file it wrote.
+///
+/// **The one picture in this suite that comes off the binary rather than out of
+/// this process**, and the monitor is why: `crcbl::screenshot::OffscreenSetup`
+/// draws one view, and the second view — the copy that puts a picture on the
+/// screen in the room — is recorded by `crcbl_lantern::gpu::Gpu::frame`. So the
+/// composed frame, with a live screen in it, only exists in a run this binary
+/// made. Every other sample's golden suite is already this shape;
+/// `apps/hud/tests/golden.rs` is the one this follows.
+///
+/// **The stale file is removed first**, and its absence is what makes the
+/// assertion below mean anything: a `--screenshot` that quietly did nothing would
+/// otherwise pass on the previous run's picture forever.
+fn live_frame(backend: &str) -> Image {
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("room-live.png");
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("could not clear {}: {error}", path.display()),
+    }
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lantern"))
+        .args([
+            "--backend",
+            backend,
+            "--frames",
+            &LIVE_FRAMES.to_string(),
+            // Not because a headless run needs saying — `--screenshot` turns it
+            // on — but because saying it is how this suite records that the
+            // picture is of the offscreen ring and not of a window.
+            "--headless",
+            "--no-debug-overlay",
+            "--screenshot",
+        ])
+        .arg(&path)
+        .output()
+        .expect("the lantern binary runs");
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "lantern exited {:?} on {backend}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+    // The run has to have presented the whole budget: a screen fed at the tail
+    // of a frame is a screen the *next* frame shows, so a run cut short is a run
+    // whose monitor is still black.
+    assert!(
+        stdout.contains(&format!("{LIVE_FRAMES} frames")),
+        "the summary does not say the run presented {LIVE_FRAMES} frames:\n{stdout}"
+    );
+    assert!(
+        path.exists(),
+        "lantern exited 0 and wrote no {} — `--screenshot` did nothing",
+        path.display()
+    );
+    // Which adapter drew it, out of the binary's own log — the line
+    // `tests/run-lantern-golden.sh` reads back.
+    let adapter = stderr
+        .lines()
+        .find(|line| line.contains(" adapter \""))
+        .unwrap_or_else(|| panic!("the run never said which adapter it opened:\n{stderr}"));
+    eprintln!("lantern golden: device on {}", adapter.trim());
+
+    let image = Image::load_png(&path).expect("the screenshot is a readable PNG");
+    assert_eq!(
+        (image.width(), image.height()),
+        LIVE_EXTENT,
+        "the binary wrote a {}x{} frame, which is not the extent the live golden was \
+         blessed at",
+        image.width(),
+        image.height()
+    );
+    image
+}
+
+/// **The screen in the room is showing the room**, in a frame the binary
+/// presented, against a golden of its own.
+///
+/// The charter's "a second render-to-texture camera driving an in-scene
+/// monitor", as the one thing a picture can say about it. The two blocks are
+/// **not** placed by hand in the middle of the screen: each is a world point
+/// projected through [`room::monitor_camera`] onto the screen quad by
+/// [`room::screen_point`], and then projected again through the fixed camera —
+/// so what is asserted is that *this* patch of the screen is showing *that* part
+/// of the room. A screen holding any flat fill fails the ratio, a screen nothing
+/// wrote is [`crcbl_lantern::room`]'s opaque black and fails the floor, and a
+/// frame pasted on upside down swaps the two and fails the ratio the other way.
+///
+/// The dark half is the block's far face, which is black in the monitor's picture
+/// for the reason
+/// [`the_camera_stack_is_the_only_thing_between_the_monitors_two_frames`]
+/// measures: the monitor's camera stack asks for no reflections, and a conductor
+/// out of the sun has nothing else. So this claim carries the camera layer into
+/// the composed frame as well — see [`MONITOR_CONTRAST`], whose threshold was
+/// set against a run with that layer removed rather than against the shipped one
+/// alone.
+///
+/// [`the_camera_stack_is_the_only_thing_between_the_monitors_two_frames`]: fn@the_camera_stack_is_the_only_thing_between_the_monitors_two_frames
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
+fn the_screen_in_the_room_shows_the_room_and_matches_its_golden() {
+    let backend = required_backend();
+    let image = live_frame(&backend);
+
+    let camera = room::fixed_camera();
+    // Smaller than [`BLOCK`]: the screen is a fraction of the frame and the two
+    // blocks sit inside it, so a block sized for the floor would take the bezel
+    // in with it.
+    let block = (BLOCK.0 * LIVE_EXTENT.0 / EXTENT.0 / 4).max(1);
+    let block = (block, block);
+    let at = |point: Vec3| {
+        let on_screen = room::screen_point(point)
+            .unwrap_or_else(|| panic!("{point:?} is not in the monitor's own view"));
+        project(&camera, LIVE_EXTENT, on_screen)
+    };
+
+    let bright = brightness(&image, at(MONITOR_BRIGHT_AT), block);
+    let dark = brightness(&image, at(room::BRASS_BACK), block);
+    eprintln!("lantern monitor: screen ceiling {bright:.1}, screen block face {dark:.1}");
+    assert!(
+        bright > LIT_FLOOR,
+        "the part of the screen showing the ceiling reads {bright:.1} — the monitor is \
+         black, so the render-to-texture view never reached the page"
+    );
+    assert!(
+        bright > dark * MONITOR_CONTRAST,
+        "the screen reads {bright:.1} where the monitor's camera puts the ceiling and \
+         {dark:.1} where it puts the block's unlit far face — a screen showing a flat fill \
+         reads the same in both, and one showing the picture upside down reads them the \
+         other way round"
+    );
+
+    check_live_golden(&image, &backend);
+}
+
+/// The live frame against its own checked-in golden.
+fn check_live_golden(image: &Image, backend: &str) {
+    let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/live.png");
+    Golden::new(reference)
+        .check(image)
+        .expect("the live golden is readable")
+        .into_result()
+        .unwrap_or_else(|mismatch| panic!("on {backend}: {mismatch}"));
 }
 
 /// One frame at [`REVIEW_EXTENT`], written where a reviewer can open it.

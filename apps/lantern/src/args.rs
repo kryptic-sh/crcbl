@@ -38,6 +38,17 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            // `with_screenshot` is what makes `--screenshot` a flag this binary
+            // has rather than an unknown argument: `crate::app::assemble` arms
+            // the request on the context, and a sample that had not done that
+            // must refuse the flag instead of writing nothing. lantern wants it
+            // for the reason every other sample does and one of its own — the
+            // in-scene monitor is fed at the tail of `crate::gpu::Gpu::frame`,
+            // so the only picture that has a live screen in it is one this
+            // binary presented.
+            #[cfg(not(target_arch = "wasm32"))]
+            common: Common::new(DEFAULT_TICK_HZ).with_screenshot(),
+            #[cfg(target_arch = "wasm32")]
             common: Common::new(DEFAULT_TICK_HZ),
             camera: CameraMode::default(),
             forced: Forced::default(),
@@ -85,6 +96,10 @@ OPTIONS:
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
+    --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
+                         Turns --headless on: the frame is read back off the
+                         offscreen ring, which is the only surface every backend
+                         can copy a presented image out of.
     --camera <C>         Which camera to start on: 'fixed' (the pose the goldens
                          are taken from, held still) or 'free' (fly it with
                          WASD, Space/Shift and the arrow keys). Default: fixed.
@@ -376,5 +391,34 @@ mod tests {
     fn the_shared_half_of_the_usage_text_is_the_engines_verbatim() {
         assert!(USAGE.contains(crcbl::args::COMMON_OPTIONS_HELP));
         assert!(USAGE.contains(crcbl::args::COMMON_TAIL_HELP));
+        assert!(
+            USAGE.contains(crcbl::args::SCREENSHOT_HELP),
+            "the --screenshot block has drifted from crcbl::args"
+        );
+    }
+
+    /// **`--screenshot` is a flag this binary answers**, and it forces headless.
+    ///
+    /// The golden suite's live-monitor arm runs this binary and reads the file
+    /// it leaves behind, so a run that accepted the flag and wrote nothing —
+    /// which is what a `Common` without `with_screenshot` produces — would be a
+    /// suite comparing the previous run's picture forever.
+    #[test]
+    fn the_screenshot_flag_is_accepted_and_names_a_file() {
+        let Invocation::Run(options) = run(&["--screenshot", "shot.png"]) else {
+            panic!("--screenshot is a run");
+        };
+        assert_eq!(
+            options.common.screenshot.as_deref(),
+            Some(std::path::Path::new("shot.png"))
+        );
+        assert!(
+            options.common.headless,
+            "--screenshot reads back off the offscreen ring, so it forces headless"
+        );
+        assert!(
+            options.common.screenshot_request().is_some(),
+            "the request the context is armed with has to exist"
+        );
     }
 }

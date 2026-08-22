@@ -20,8 +20,8 @@
 //!
 //! # What is not here, and where it is written down
 //!
-//! Ray tracing and the render-to-texture monitor camera are out of scope for
-//! this milestone and recorded in `docs/backlog.md`. One thing
+//! Ray tracing is out of scope for this milestone and recorded in
+//! `docs/backlog.md`. One thing
 //! is visible in the picture rather than merely absent from it: **a fully
 //! metallic surface has no ambient term, so a reflection is the whole of what
 //! lights it**. Both halves of `docs/plan/18-render-features.md`'s probe design
@@ -44,6 +44,30 @@
 //! module docs say the rest, the debug panel's `unbuilt` section says it on
 //! screen, and none of it is faked: a fixture whose job is showing what the
 //! renderer does must not flatter it.
+//!
+//! # The monitor, and the layer it is a consumer for
+//!
+//! **A second camera renders the room into the screen hanging on its back
+//! wall.** The charter asks for it as the consumer the per-camera toggle layer
+//! did not have: `crcbl_render::effects`' resolution order starts with a stack
+//! the *view* asked for, and a frame with one view in it can never show that
+//! layer doing anything. [`room::View`] is the two views, [`room::MONITOR_STACK`]
+//! is what the monitor's asks for — every effect except the reflections, which
+//! `docs/plan/18-render-features.md` names as the thing a render-to-texture
+//! camera does not want — and the debug panel's `paths` section prints what each
+//! of them resolved to.
+//!
+//! **The monitor does not reflect itself**, by two mechanisms that answer
+//! different questions. [`room::monitor_camera`] stands on the screen's own face
+//! and looks out along its normal, so the monitor is behind that camera's near
+//! plane; and [`room::place`] is given a [`room::View`], so the renderer that draws the
+//! monitor's picture is never handed the screen or its bezel at all. The second
+//! is what a change of pose cannot defeat.
+//!
+//! **The screen is one frame behind**, deliberately: `crate::gpu`'s
+//! `feed_monitor` records the second view and the copy that feeds the page at the
+//! *tail* of the frame, which is what lets the graph order the copy against the
+//! pass that samples it. That module's docs carry the argument.
 //!
 //! # Rule 11 does not apply
 //!
