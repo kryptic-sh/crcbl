@@ -1994,8 +1994,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readReadbackProbe({ exports, memory: exports.memory });
-           if (r.state === READBACK.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === READBACK.FAILED || r.state === READBACK.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== READBACK.READY) {
              // Not yet — queue another poll for the loop to replay, and wait.
@@ -2090,8 +2091,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readDrawProbe({ exports, memory: exports.memory });
-           if (r.state === DRAW.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === DRAW.FAILED || r.state === DRAW.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== DRAW.READY) {
              // Not yet — queue another poll for the loop to replay, and wait.
@@ -2186,8 +2188,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readComputeProbe({ exports, memory: exports.memory });
-           if (r.state === COMPUTE.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === COMPUTE.FAILED || r.state === COMPUTE.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== COMPUTE.READY) {
              // Not yet — queue another poll for the loop to replay, and wait.
@@ -2280,8 +2283,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readCopyChainProbe({ exports, memory: exports.memory });
-           if (r.state === COPYCHAIN.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === COPYCHAIN.FAILED || r.state === COPYCHAIN.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== COPYCHAIN.READY) {
              pollCopyChainProbe({ exports });
@@ -2384,8 +2388,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readFillProbe({ exports, memory: exports.memory });
-           if (r.state === FILL.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === FILL.FAILED || r.state === FILL.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== FILL.READY) {
              pollFillProbe({ exports });
@@ -2528,8 +2533,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readStencilProbe({ exports, memory: exports.memory });
-           if (r.state === STENCIL.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === STENCIL.FAILED || r.state === STENCIL.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== STENCIL.READY) {
              pollStencilProbe({ exports });
@@ -2696,8 +2702,13 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readMsaaProbe({ exports, memory: exports.memory });
-           if (r.state === MSAA.UNDECODABLE || r.state === MSAA.UNSUPPORTED) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (
+             r.state === MSAA.FAILED ||
+             r.state === MSAA.UNDECODABLE ||
+             r.state === MSAA.UNSUPPORTED
+           ) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== MSAA.READY) {
              pollMsaaProbe({ exports });
@@ -2862,8 +2873,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readOcclusionProbe({ exports, memory: exports.memory });
-           if (r.state === OCCLUSION.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === OCCLUSION.FAILED || r.state === OCCLUSION.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            const v = readOcclusionValues({ exports, memory: exports.memory });
            if (r.state !== OCCLUSION.READY ||
@@ -3176,8 +3188,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readPresentProbe({ exports, memory: exports.memory });
-           if (r.state === PRESENT.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === PRESENT.FAILED || r.state === PRESENT.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== PRESENT.READY) {
              // Not yet — queue another poll for the loop to replay, and wait.
@@ -3297,8 +3310,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readReconfigureProbe({ exports, memory: exports.memory });
-           if (r.state === RECONFIG.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === RECONFIG.FAILED || r.state === RECONFIG.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== RECONFIG.READY) {
              // Not yet — queue another poll for the loop to replay, and wait.
@@ -3398,8 +3412,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readIndirectProbe({ exports, memory: exports.memory });
-           if (r.state === INDIRECT.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === INDIRECT.FAILED || r.state === INDIRECT.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== INDIRECT.READY) {
              // Not yet — queue another poll for the loop to replay, and wait.
@@ -3503,8 +3518,9 @@ export async function runProbeGroups({
              await import('/engine/gpu-probe.js');
            const { exports, gpu } = globalThis.crcbl;
            const r = readDepthProbe({ exports, memory: exports.memory });
-           if (r.state === DEPTH.UNDECODABLE) {
-             return { done: true, state: r.name, error: gpu.replayer.takeError() };
+           if (r.state === DEPTH.FAILED || r.state === DEPTH.UNDECODABLE) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
            }
            if (r.state !== DEPTH.READY) {
              pollDepthProbe({ exports });

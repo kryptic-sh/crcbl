@@ -57,60 +57,89 @@
 //! | [`__crcbl_web_gpu_probe_surface_caps_format`](shim::__crcbl_web_gpu_probe_surface_caps_format) | `() -> i32` | The surface's [`preferred_format`](SurfaceCaps::preferred_format), as [`crate::tag::format_code`] spells it. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_present_modes`](shim::__crcbl_web_gpu_probe_surface_caps_present_modes) | `() -> i32` | One bit per mode offered, at `1 <<` its [`crate::tag::present_mode_code`]. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_has_extent`](shim::__crcbl_web_gpu_probe_surface_caps_has_extent) | `() -> i32` | `1` if the surface reported a [`current_extent`](SurfaceCaps::current_extent), `0` if it reported none. |
+//! | [`__crcbl_web_gpu_probe_readback`](shim::__crcbl_web_gpu_probe_readback) | `() -> i32` | Encode one frame — an image, its view, a host buffer, an encoder, a clear-only render pass, the copy, finish, submit, and a `request_readback` against [`PROBE_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_readback_poll`](shim::__crcbl_web_gpu_probe_readback_poll) | `() -> i32` | Poll the readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_readback_state`](shim::__crcbl_web_gpu_probe_readback_state) | `() -> i32` | Drain, and answer one of the `READBACK_*` codes. |
+//! | [`__crcbl_web_gpu_probe_readback_reason_ptr`](shim::__crcbl_web_gpu_probe_readback_reason_ptr) | `() -> i32` | Where the reason the readback stopped starts. Empty unless the state is [`READBACK_FAILED`] or [`READBACK_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_readback_reason_len`](shim::__crcbl_web_gpu_probe_readback_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_readback_bytes_ptr`](shim::__crcbl_web_gpu_probe_readback_bytes_ptr) | `() -> i32` | Where the cleared pixels start, once [`__crcbl_web_gpu_probe_readback_state`](shim::__crcbl_web_gpu_probe_readback_state) answers [`READBACK_READY`]. |
+//! | [`__crcbl_web_gpu_probe_readback_bytes_len`](shim::__crcbl_web_gpu_probe_readback_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the readback has not answered. |
 //! | [`__crcbl_web_gpu_probe_draw`](shim::__crcbl_web_gpu_probe_draw) | `() -> i32` | Encode one frame — a red-triangle pipeline, a pass that clears to [`PROBE_DRAW_CLEAR`] then binds and draws it, the copy, and a `request_readback` against [`PROBE_DRAW_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_draw_poll`](shim::__crcbl_web_gpu_probe_draw_poll) | `() -> i32` | Poll the draw's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_draw_state`](shim::__crcbl_web_gpu_probe_draw_state) | `() -> i32` | Drain, and answer one of the `DRAW_*` codes. |
+//! | [`__crcbl_web_gpu_probe_draw_reason_ptr`](shim::__crcbl_web_gpu_probe_draw_reason_ptr) | `() -> i32` | Where the reason the draw readback stopped starts. Empty unless the state is [`DRAW_FAILED`] or [`DRAW_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_draw_reason_len`](shim::__crcbl_web_gpu_probe_draw_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_draw_bytes_ptr`](shim::__crcbl_web_gpu_probe_draw_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_draw_state`](shim::__crcbl_web_gpu_probe_draw_state) answers [`DRAW_READY`]. |
 //! | [`__crcbl_web_gpu_probe_draw_bytes_len`](shim::__crcbl_web_gpu_probe_draw_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the draw has not answered. |
 //! | [`__crcbl_web_gpu_probe_compute`](shim::__crcbl_web_gpu_probe_compute) | `() -> i32` | Encode one frame — a compute pipeline that writes [`PROBE_DISPATCH_PATTERN`] into a storage buffer, a pass that binds and dispatches it, the copy to a host buffer, and a `request_readback` against [`PROBE_DISPATCH_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_compute_poll`](shim::__crcbl_web_gpu_probe_compute_poll) | `() -> i32` | Poll the dispatch's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_compute_state`](shim::__crcbl_web_gpu_probe_compute_state) | `() -> i32` | Drain, and answer one of the `COMPUTE_*` codes. |
+//! | [`__crcbl_web_gpu_probe_compute_reason_ptr`](shim::__crcbl_web_gpu_probe_compute_reason_ptr) | `() -> i32` | Where the reason the dispatch readback stopped starts. Empty unless the state is [`COMPUTE_FAILED`] or [`COMPUTE_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_compute_reason_len`](shim::__crcbl_web_gpu_probe_compute_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_compute_bytes_ptr`](shim::__crcbl_web_gpu_probe_compute_bytes_ptr) | `() -> i32` | Where the dispatched bytes start, once [`__crcbl_web_gpu_probe_compute_state`](shim::__crcbl_web_gpu_probe_compute_state) answers [`COMPUTE_READY`]. |
 //! | [`__crcbl_web_gpu_probe_compute_bytes_len`](shim::__crcbl_web_gpu_probe_compute_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the dispatch has not answered. |
 //! | [`__crcbl_web_gpu_probe_copychain`](shim::__crcbl_web_gpu_probe_copychain) | `() -> i32` | Encode one frame — a dispatch that fills a storage buffer with [`PROBE_COPYCHAIN_PATTERN`], a buffer→image copy into a texture, an image→image copy to a second texture, an image→buffer copy out to a host buffer, and a `request_readback` against [`PROBE_COPYCHAIN_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_copychain_poll`](shim::__crcbl_web_gpu_probe_copychain_poll) | `() -> i32` | Poll the copy chain's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_copychain_state`](shim::__crcbl_web_gpu_probe_copychain_state) | `() -> i32` | Drain, and answer one of the `COPYCHAIN_*` codes. |
+//! | [`__crcbl_web_gpu_probe_copychain_reason_ptr`](shim::__crcbl_web_gpu_probe_copychain_reason_ptr) | `() -> i32` | Where the reason the copy chain readback stopped starts. Empty unless the state is [`COPYCHAIN_FAILED`] or [`COPYCHAIN_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_copychain_reason_len`](shim::__crcbl_web_gpu_probe_copychain_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_copychain_bytes_ptr`](shim::__crcbl_web_gpu_probe_copychain_bytes_ptr) | `() -> i32` | Where the copied bytes start, once [`__crcbl_web_gpu_probe_copychain_state`](shim::__crcbl_web_gpu_probe_copychain_state) answers [`COPYCHAIN_READY`]. |
 //! | [`__crcbl_web_gpu_probe_copychain_bytes_len`](shim::__crcbl_web_gpu_probe_copychain_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the copy chain has not answered. |
 //! | [`__crcbl_web_gpu_probe_fill`](shim::__crcbl_web_gpu_probe_fill) | `() -> i32` | Encode one frame — a dispatch that fills a storage buffer with [`PROBE_FILL_PATTERN`], a `clear_buffer` over its first half, the copy to a host buffer, and a `request_readback` against [`PROBE_FILL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_fill_poll`](shim::__crcbl_web_gpu_probe_fill_poll) | `() -> i32` | Poll the fill probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) | `() -> i32` | Drain, and answer one of the `FILL_*` codes. |
+//! | [`__crcbl_web_gpu_probe_fill_reason_ptr`](shim::__crcbl_web_gpu_probe_fill_reason_ptr) | `() -> i32` | Where the reason the fill readback stopped starts. Empty unless the state is [`FILL_FAILED`] or [`FILL_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_fill_reason_len`](shim::__crcbl_web_gpu_probe_fill_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_fill_bytes_ptr`](shim::__crcbl_web_gpu_probe_fill_bytes_ptr) | `() -> i32` | Where the filled bytes start, once [`__crcbl_web_gpu_probe_fill_state`](shim::__crcbl_web_gpu_probe_fill_state) answers [`FILL_READY`]. |
 //! | [`__crcbl_web_gpu_probe_fill_bytes_len`](shim::__crcbl_web_gpu_probe_fill_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the fill probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_present`](shim::__crcbl_web_gpu_probe_present) | `(i32) -> i32` | Encode one frame — a surface on the canvas `canvas_id` names, an **sRGB** swapchain configured on it, the acquired frame, a pass that clears the acquired view to [`PROBE_PRESENT_COLOR`], the copy, submit, present, and a `request_readback` against [`PROBE_PRESENT_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_present_poll`](shim::__crcbl_web_gpu_probe_present_poll) | `() -> i32` | Poll the present probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) | `() -> i32` | Drain, and answer one of the `PRESENT_*` codes. |
+//! | [`__crcbl_web_gpu_probe_present_reason_ptr`](shim::__crcbl_web_gpu_probe_present_reason_ptr) | `() -> i32` | Where the reason the present readback stopped starts. Empty unless the state is [`PRESENT_FAILED`] or [`PRESENT_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_present_reason_len`](shim::__crcbl_web_gpu_probe_present_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_present_bytes_ptr`](shim::__crcbl_web_gpu_probe_present_bytes_ptr) | `() -> i32` | Where the presented bytes start, once [`__crcbl_web_gpu_probe_present_state`](shim::__crcbl_web_gpu_probe_present_state) answers [`PRESENT_READY`]. |
 //! | [`__crcbl_web_gpu_probe_present_bytes_len`](shim::__crcbl_web_gpu_probe_present_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the present probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_reconfigure`](shim::__crcbl_web_gpu_probe_reconfigure) | `(i32) -> i32` | Encode one frame — a surface on the canvas `canvas_id` names, a swapchain configured `Rgba8Unorm`, that swapchain reconfigured `Bgra8Unorm`, the acquired frame, a pass that clears it to [`PROBE_RECONFIG_COLOR`], the copy, submit, present, and a `request_readback` against [`PROBE_RECONFIG_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_reconfigure_poll`](shim::__crcbl_web_gpu_probe_reconfigure_poll) | `() -> i32` | Poll the reconfigure probe's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_reconfigure_state`](shim::__crcbl_web_gpu_probe_reconfigure_state) | `() -> i32` | Drain, and answer one of the `RECONFIG_*` codes. |
+//! | [`__crcbl_web_gpu_probe_reconfigure_reason_ptr`](shim::__crcbl_web_gpu_probe_reconfigure_reason_ptr) | `() -> i32` | Where the reason the reconfigure readback stopped starts. Empty unless the state is [`RECONFIG_FAILED`] or [`RECONFIG_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_reconfigure_reason_len`](shim::__crcbl_web_gpu_probe_reconfigure_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_reconfigure_bytes_ptr`](shim::__crcbl_web_gpu_probe_reconfigure_bytes_ptr) | `() -> i32` | Where the reconfigured bytes start, once [`__crcbl_web_gpu_probe_reconfigure_state`](shim::__crcbl_web_gpu_probe_reconfigure_state) answers [`RECONFIG_READY`]. |
 //! | [`__crcbl_web_gpu_probe_reconfigure_bytes_len`](shim::__crcbl_web_gpu_probe_reconfigure_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the reconfigure probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_indirect`](shim::__crcbl_web_gpu_probe_indirect) | `() -> i32` | Encode one frame — the draw probe's pipeline, a `write_buffer` filling an indirect-args buffer with [`PROBE_INDIRECT_ARGS_BYTES`] and an index buffer with [`PROBE_INDIRECT_INDEX_BYTES`], a pass that clears to [`PROBE_INDIRECT_CLEAR`] then binds the pipeline and index buffer and records a `drawIndexedIndirect`, the copy, and a `request_readback` against [`PROBE_INDIRECT_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_indirect_poll`](shim::__crcbl_web_gpu_probe_indirect_poll) | `() -> i32` | Poll the indirect draw's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_indirect_state`](shim::__crcbl_web_gpu_probe_indirect_state) | `() -> i32` | Drain, and answer one of the `INDIRECT_*` codes. |
+//! | [`__crcbl_web_gpu_probe_indirect_reason_ptr`](shim::__crcbl_web_gpu_probe_indirect_reason_ptr) | `() -> i32` | Where the reason the indirect draw readback stopped starts. Empty unless the state is [`INDIRECT_FAILED`] or [`INDIRECT_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_indirect_reason_len`](shim::__crcbl_web_gpu_probe_indirect_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_indirect_bytes_ptr`](shim::__crcbl_web_gpu_probe_indirect_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_indirect_state`](shim::__crcbl_web_gpu_probe_indirect_state) answers [`INDIRECT_READY`]. |
 //! | [`__crcbl_web_gpu_probe_indirect_bytes_len`](shim::__crcbl_web_gpu_probe_indirect_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the indirect draw has not answered. |
 //! | [`__crcbl_web_gpu_probe_depth`](shim::__crcbl_web_gpu_probe_depth) | `() -> i32` | Encode one frame — a [`Format::D32Float`] atlas and a view of it, a pass whose only attachment is that view cleared to [`PROBE_DEPTH_CLEAR`] and stored, an image→buffer copy of its [`ImageAspect::DEPTH`] plane, and a `request_readback` against [`PROBE_DEPTH_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_depth_poll`](shim::__crcbl_web_gpu_probe_depth_poll) | `() -> i32` | Poll the depth readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) | `() -> i32` | Drain, and answer one of the `DEPTH_*` codes. |
+//! | [`__crcbl_web_gpu_probe_depth_reason_ptr`](shim::__crcbl_web_gpu_probe_depth_reason_ptr) | `() -> i32` | Where the reason the depth readback stopped starts. Empty unless the state is [`DEPTH_FAILED`] or [`DEPTH_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_depth_reason_len`](shim::__crcbl_web_gpu_probe_depth_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_ptr`](shim::__crcbl_web_gpu_probe_depth_bytes_ptr) | `() -> i32` | Where the depth plane starts, once [`__crcbl_web_gpu_probe_depth_state`](shim::__crcbl_web_gpu_probe_depth_state) answers [`DEPTH_READY`]. |
 //! | [`__crcbl_web_gpu_probe_depth_bytes_len`](shim::__crcbl_web_gpu_probe_depth_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the depth probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_stencil`](shim::__crcbl_web_gpu_probe_stencil) | `() -> i32` | Encode one frame — an `Rgba8Unorm` target and a [`Format::D24UnormS8Uint`] one, a pipeline comparing the stencil plane [`CompareOp::Equal`] against whatever the pass last set, a pass that clears the plane to [`PROBE_STENCIL_CLEARED`] and draws twice with `set_stencil_reference` before each, the copy, and a `request_readback` against [`PROBE_STENCIL_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_stencil_poll`](shim::__crcbl_web_gpu_probe_stencil_poll) | `() -> i32` | Poll the stencil readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) | `() -> i32` | Drain, and answer one of the `STENCIL_*` codes. |
+//! | [`__crcbl_web_gpu_probe_stencil_reason_ptr`](shim::__crcbl_web_gpu_probe_stencil_reason_ptr) | `() -> i32` | Where the reason the stencil readback stopped starts. Empty unless the state is [`STENCIL_FAILED`] or [`STENCIL_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_stencil_reason_len`](shim::__crcbl_web_gpu_probe_stencil_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_stencil_bytes_ptr`](shim::__crcbl_web_gpu_probe_stencil_bytes_ptr) | `() -> i32` | Where the drawn pixels start, once [`__crcbl_web_gpu_probe_stencil_state`](shim::__crcbl_web_gpu_probe_stencil_state) answers [`STENCIL_READY`]. |
 //! | [`__crcbl_web_gpu_probe_stencil_bytes_len`](shim::__crcbl_web_gpu_probe_stencil_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the stencil probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_msaa_samples`](shim::__crcbl_web_gpu_probe_msaa_samples) | `() -> i32` | The opened device's [`Limits::max_sample_count`](crcbl_hal::Limits::max_sample_count) — what [`__crcbl_web_gpu_probe_msaa`](shim::__crcbl_web_gpu_probe_msaa) decides on. `0` if no device has opened. |
 //! | [`__crcbl_web_gpu_probe_msaa`](shim::__crcbl_web_gpu_probe_msaa) | `() -> i32` | Encode one frame — a [`PROBE_MSAA_SAMPLES`]-sample colour target and a single-sampled one, a buffer→image prime filling the second with [`PROBE_MSAA_POISON_BYTES`], a pass with **no draws** that clears the first to [`PROBE_MSAA_CLEAR_BYTES`] and names the second in [`ColorAttachment::resolve`], the copy, and a `request_readback` against [`PROBE_MSAA_READBACK`]. `1`, or `0` if no device has opened, the device reports fewer than [`PROBE_MSAA_SAMPLES`] samples, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_msaa_poll`](shim::__crcbl_web_gpu_probe_msaa_poll) | `() -> i32` | Poll the resolve's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_msaa_state`](shim::__crcbl_web_gpu_probe_msaa_state) | `() -> i32` | Drain, and answer one of the `MSAA_*` codes. |
+//! | [`__crcbl_web_gpu_probe_msaa_reason_ptr`](shim::__crcbl_web_gpu_probe_msaa_reason_ptr) | `() -> i32` | Where the reason the MSAA readback stopped starts. Empty unless the state is [`MSAA_FAILED`] or [`MSAA_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_msaa_reason_len`](shim::__crcbl_web_gpu_probe_msaa_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_msaa_bytes_ptr`](shim::__crcbl_web_gpu_probe_msaa_bytes_ptr) | `() -> i32` | Where the resolved texels start, once [`__crcbl_web_gpu_probe_msaa_state`](shim::__crcbl_web_gpu_probe_msaa_state) answers [`MSAA_READY`]. |
 //! | [`__crcbl_web_gpu_probe_msaa_bytes_len`](shim::__crcbl_web_gpu_probe_msaa_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the MSAA probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_occlusion`](shim::__crcbl_web_gpu_probe_occlusion) | `() -> i32` | Encode one frame — a [`PROBE_OCCLUSION_QUERIES`]-query [`QueryKind::Occlusion`] set, a `QUERY_RESOLVE` destination filled with [`PROBE_OCCLUSION_SENTINEL`], the reset and the resolve over it, the copy, a `request_readback` against [`PROBE_OCCLUSION_READBACK`], and a `query_results` ask reading the same queries the other way. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_occlusion_poll`](shim::__crcbl_web_gpu_probe_occlusion_poll) | `() -> i32` | Poll the occlusion readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_occlusion_state`](shim::__crcbl_web_gpu_probe_occlusion_state) | `() -> i32` | Drain, and answer one of the `OCCLUSION_*` codes. |
+//! | [`__crcbl_web_gpu_probe_occlusion_reason_ptr`](shim::__crcbl_web_gpu_probe_occlusion_reason_ptr) | `() -> i32` | Where the reason the occlusion readback stopped starts. Empty unless the state is [`OCCLUSION_FAILED`] or [`OCCLUSION_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_occlusion_reason_len`](shim::__crcbl_web_gpu_probe_occlusion_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_occlusion_bytes_ptr`](shim::__crcbl_web_gpu_probe_occlusion_bytes_ptr) | `() -> i32` | Where the resolved values start, once [`__crcbl_web_gpu_probe_occlusion_state`](shim::__crcbl_web_gpu_probe_occlusion_state) answers [`OCCLUSION_READY`]. |
 //! | [`__crcbl_web_gpu_probe_occlusion_bytes_len`](shim::__crcbl_web_gpu_probe_occlusion_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the occlusion probe has not answered. |
 //! | [`__crcbl_web_gpu_probe_occlusion_values_state`](shim::__crcbl_web_gpu_probe_occlusion_values_state) | `() -> i32` | Drain, and answer one of the `OCCLUSION_VALUES_*` codes — where the **direct read** has got to. |
@@ -486,6 +515,17 @@ pub const READBACK_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`PROBE_UNDECODABLE`]'s twin.
 pub const READBACK_UNDECODABLE: u32 = 5;
+/// The browser refused the readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_readback_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_readback_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const READBACK_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const DRAW_UNASKED: u32 = 0;
@@ -506,6 +546,17 @@ pub const DRAW_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`READBACK_UNDECODABLE`]'s twin.
 pub const DRAW_UNDECODABLE: u32 = 5;
+/// The browser refused the draw readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_draw_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_draw_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const DRAW_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const COMPUTE_UNASKED: u32 = 0;
@@ -528,6 +579,17 @@ pub const COMPUTE_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`READBACK_UNDECODABLE`]'s twin.
 pub const COMPUTE_UNDECODABLE: u32 = 5;
+/// The browser refused the dispatch readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_compute_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_compute_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const COMPUTE_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const COPYCHAIN_UNASKED: u32 = 0;
@@ -550,6 +612,17 @@ pub const COPYCHAIN_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`COMPUTE_UNDECODABLE`]'s twin.
 pub const COPYCHAIN_UNDECODABLE: u32 = 5;
+/// The browser refused the copy chain readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_copychain_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_copychain_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const COPYCHAIN_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const FILL_UNASKED: u32 = 0;
@@ -573,6 +646,17 @@ pub const FILL_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`COMPUTE_UNDECODABLE`]'s twin.
 pub const FILL_UNDECODABLE: u32 = 5;
+/// The browser refused the fill readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_fill_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_fill_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const FILL_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const PRESENT_UNASKED: u32 = 0;
@@ -598,6 +682,17 @@ pub const PRESENT_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`COMPUTE_UNDECODABLE`]'s twin.
 pub const PRESENT_UNDECODABLE: u32 = 5;
+/// The browser refused the present readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_present_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_present_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const PRESENT_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const RECONFIG_UNASKED: u32 = 0;
@@ -623,6 +718,17 @@ pub const RECONFIG_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`COMPUTE_UNDECODABLE`]'s twin.
 pub const RECONFIG_UNDECODABLE: u32 = 5;
+/// The browser refused the reconfigure readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_reconfigure_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_reconfigure_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const RECONFIG_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const INDIRECT_UNASKED: u32 = 0;
@@ -646,6 +752,17 @@ pub const INDIRECT_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const INDIRECT_UNDECODABLE: u32 = 5;
+/// The browser refused the indirect draw readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_indirect_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_indirect_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const INDIRECT_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const DEPTH_UNASKED: u32 = 0;
@@ -670,6 +787,17 @@ pub const DEPTH_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const DEPTH_UNDECODABLE: u32 = 5;
+/// The browser refused the depth readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_depth_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_depth_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const DEPTH_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const STENCIL_UNASKED: u32 = 0;
@@ -695,6 +823,17 @@ pub const STENCIL_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const STENCIL_UNDECODABLE: u32 = 5;
+/// The browser refused the stencil readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_stencil_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_stencil_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const STENCIL_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const MSAA_UNASKED: u32 = 0;
@@ -730,6 +869,17 @@ pub const MSAA_UNDECODABLE: u32 = 5;
 /// The one code here with no [`STENCIL_UNASKED`] counterpart, because it is the
 /// one probe whose fixture the device can refuse to supply.
 pub const MSAA_UNSUPPORTED: u32 = 6;
+/// The browser refused the MSAA readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_msaa_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_msaa_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const MSAA_FAILED: u32 = 7;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const OCCLUSION_UNASKED: u32 = 0;
@@ -755,6 +905,17 @@ pub const OCCLUSION_READY: u32 = 4;
 /// asked; the reason is the [`DecodeError`](crate::DecodeError).
 /// [`DRAW_UNDECODABLE`]'s twin.
 pub const OCCLUSION_UNDECODABLE: u32 = 5;
+/// The browser refused the occlusion readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_occlusion_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_occlusion_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const OCCLUSION_FAILED: u32 = 6;
 
 /// Nothing has asked for the values, or there is no channel to ask through.
 pub const OCCLUSION_VALUES_UNASKED: u32 = 0;
@@ -4598,6 +4759,15 @@ enum ReadbackProbe {
         /// The bytes read back — one `Rgba8Unorm` texel per four.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl ReadbackProbe {
@@ -4630,6 +4800,9 @@ impl ReadbackProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             // A reply of another shape naming this sequence is a replayer bug,
             // and it settles rather than waits: the sequence is answered and a
             // second answer is refused, so nothing else is coming. Reported as a
@@ -4676,6 +4849,15 @@ enum DrawProbe {
         /// drawn colour if the draw ran.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl DrawProbe {
@@ -4701,6 +4883,9 @@ impl DrawProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             // A reply of another shape naming this sequence settles rather than
             // waits, exactly as [`ReadbackProbe::absorb`] argues: leave it
             // `Pending` for the gate's deadline to catch.
@@ -4743,6 +4928,15 @@ enum ComputeProbe {
         /// if the dispatch ran.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl ComputeProbe {
@@ -4768,6 +4962,9 @@ impl ComputeProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             // A reply of another shape naming this sequence settles rather than
             // waits, exactly as [`DrawProbe::absorb`] argues.
             _ => Self::Pending,
@@ -4808,6 +5005,15 @@ enum CopyChainProbe {
         /// [`PROBE_COPYCHAIN_PATTERN`] if both copies ran.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl CopyChainProbe {
@@ -4833,6 +5039,9 @@ impl CopyChainProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -4871,6 +5080,15 @@ enum FillProbe {
         /// the second half still [`PROBE_FILL_PATTERN`].
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl FillProbe {
@@ -4896,6 +5114,9 @@ impl FillProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -4939,6 +5160,15 @@ enum PresentProbe {
         /// encoded the frame.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl PresentProbe {
@@ -4964,6 +5194,9 @@ impl PresentProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -5002,6 +5235,15 @@ enum ReconfigProbe {
         /// [`PROBE_RECONFIG_COLOR_BYTES`] if the reconfigure re-ran `configure`.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl ReconfigProbe {
@@ -5027,6 +5269,9 @@ impl ReconfigProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -5066,6 +5311,15 @@ enum IndirectProbe {
         /// drawn colour if the indirect draw ran.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl IndirectProbe {
@@ -5091,6 +5345,9 @@ impl IndirectProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -5131,6 +5388,15 @@ enum DepthProbe {
         /// [`PROBE_DEPTH_CLEAR`] if the depth copy ran.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl DepthProbe {
@@ -5156,6 +5422,9 @@ impl DepthProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -5193,6 +5462,15 @@ enum StencilProbe {
         /// [`PROBE_STENCIL_FIRST_BYTES`] if both references were applied.
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl StencilProbe {
@@ -5218,6 +5496,9 @@ impl StencilProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -5258,6 +5539,15 @@ enum MsaaProbe {
     /// [`max_sample_count`](crcbl_hal::Limits::max_sample_count) below
     /// [`PROBE_MSAA_SAMPLES`], so nothing was encoded and nothing will be.
     Unsupported,
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl MsaaProbe {
@@ -5283,6 +5573,9 @@ impl MsaaProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -5319,6 +5612,15 @@ enum OcclusionProbe {
         /// zero if the resolve overwrote [`PROBE_OCCLUSION_SENTINEL`].
         bytes: Vec<u8>,
     },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
 }
 
 impl OcclusionProbe {
@@ -5344,6 +5646,9 @@ impl OcclusionProbe {
                 bytes: data.clone(),
             },
             Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
             _ => Self::Pending,
         };
         true
@@ -5567,53 +5872,76 @@ struct Probe {
     /// string for [`reason`](Self::reason)'s reason.
     caps_reason: String,
     readback: ReadbackProbe,
-    /// A decode error the readback drain hit, for
-    /// [`READBACK_UNDECODABLE`]. Its own string for [`reason`](Self::reason)'s
-    /// reason.
+    /// Why the readback probe stopped: the browser's own words under
+    /// [`READBACK_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`READBACK_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     readback_reason: String,
     draw: DrawProbe,
-    /// A decode error the draw drain hit, for [`DRAW_UNDECODABLE`]. Its own
-    /// string for [`reason`](Self::reason)'s reason.
+    /// Why the draw probe stopped: the browser's own words under
+    /// [`DRAW_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`DRAW_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     draw_reason: String,
     compute: ComputeProbe,
-    /// A decode error the compute drain hit, for [`COMPUTE_UNDECODABLE`]. Its own
-    /// string for [`reason`](Self::reason)'s reason.
+    /// Why the dispatch probe stopped: the browser's own words under
+    /// [`COMPUTE_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`COMPUTE_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     compute_reason: String,
     copychain: CopyChainProbe,
-    /// A decode error the copy-chain drain hit, for [`COPYCHAIN_UNDECODABLE`]. Its
-    /// own string for [`reason`](Self::reason)'s reason.
+    /// Why the copy chain probe stopped: the browser's own words under
+    /// [`COPYCHAIN_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`COPYCHAIN_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     copychain_reason: String,
     fill: FillProbe,
-    /// A decode error the fill drain hit, for [`FILL_UNDECODABLE`]. Its own string
-    /// for [`reason`](Self::reason)'s reason.
+    /// Why the fill probe stopped: the browser's own words under
+    /// [`FILL_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`FILL_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     fill_reason: String,
     present: PresentProbe,
-    /// A decode error the present drain hit, for [`PRESENT_UNDECODABLE`]. Its own
-    /// string for [`reason`](Self::reason)'s reason.
+    /// Why the present probe stopped: the browser's own words under
+    /// [`PRESENT_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`PRESENT_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     present_reason: String,
     reconfig: ReconfigProbe,
-    /// A decode error the reconfigure drain hit, for [`RECONFIG_UNDECODABLE`]. Its
-    /// own string for [`reason`](Self::reason)'s reason.
+    /// Why the reconfigure probe stopped: the browser's own words under
+    /// [`RECONFIG_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`RECONFIG_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     reconfig_reason: String,
     indirect: IndirectProbe,
-    /// A decode error the indirect-draw drain hit, for [`INDIRECT_UNDECODABLE`].
-    /// Its own string for [`reason`](Self::reason)'s reason.
+    /// Why the indirect draw probe stopped: the browser's own words under
+    /// [`INDIRECT_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`INDIRECT_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     indirect_reason: String,
     depth: DepthProbe,
-    /// A decode error the depth drain hit, for [`DEPTH_UNDECODABLE`]. Its own
-    /// string for [`reason`](Self::reason)'s reason.
+    /// Why the depth probe stopped: the browser's own words under
+    /// [`DEPTH_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`DEPTH_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     depth_reason: String,
     stencil: StencilProbe,
-    /// A decode error the stencil drain hit, for [`STENCIL_UNDECODABLE`]. Its own
-    /// string for [`reason`](Self::reason)'s reason.
+    /// Why the stencil probe stopped: the browser's own words under
+    /// [`STENCIL_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`STENCIL_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     stencil_reason: String,
     msaa: MsaaProbe,
-    /// A decode error the MSAA drain hit, for [`MSAA_UNDECODABLE`]. Its own
-    /// string for [`reason`](Self::reason)'s reason.
+    /// Why the MSAA probe stopped: the browser's own words under
+    /// [`MSAA_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`MSAA_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     msaa_reason: String,
     occlusion: OcclusionProbe,
-    /// A decode error the occlusion drain hit, for [`OCCLUSION_UNDECODABLE`].
-    /// Its own string for [`reason`](Self::reason)'s reason.
+    /// Why the occlusion probe stopped: the browser's own words under
+    /// [`OCCLUSION_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
+    /// hit under [`OCCLUSION_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
     occlusion_reason: String,
     /// The direct-read half of the same exercise — see [`OcclusionValuesProbe`].
     /// It has no reason of its own: a decode error is one channel's, and
@@ -6308,6 +6636,10 @@ impl Probe {
             ReadbackProbe::Waiting { .. } => READBACK_WAITING,
             ReadbackProbe::Pending => READBACK_PENDING,
             ReadbackProbe::Ready { .. } => READBACK_READY,
+            ReadbackProbe::Failed { reason } => {
+                self.readback_reason.clone_from(reason);
+                READBACK_FAILED
+            }
         }
     }
 
@@ -6429,6 +6761,10 @@ impl Probe {
             DrawProbe::Waiting { .. } => DRAW_WAITING,
             DrawProbe::Pending => DRAW_PENDING,
             DrawProbe::Ready { .. } => DRAW_READY,
+            DrawProbe::Failed { reason } => {
+                self.draw_reason.clone_from(reason);
+                DRAW_FAILED
+            }
         }
     }
 
@@ -6566,6 +6902,10 @@ impl Probe {
             PresentProbe::Waiting { .. } => PRESENT_WAITING,
             PresentProbe::Pending => PRESENT_PENDING,
             PresentProbe::Ready { .. } => PRESENT_READY,
+            PresentProbe::Failed { reason } => {
+                self.present_reason.clone_from(reason);
+                PRESENT_FAILED
+            }
         }
     }
 
@@ -6703,6 +7043,10 @@ impl Probe {
             ReconfigProbe::Waiting { .. } => RECONFIG_WAITING,
             ReconfigProbe::Pending => RECONFIG_PENDING,
             ReconfigProbe::Ready { .. } => RECONFIG_READY,
+            ReconfigProbe::Failed { reason } => {
+                self.reconfig_reason.clone_from(reason);
+                RECONFIG_FAILED
+            }
         }
     }
 
@@ -6853,6 +7197,10 @@ impl Probe {
             IndirectProbe::Waiting { .. } => INDIRECT_WAITING,
             IndirectProbe::Pending => INDIRECT_PENDING,
             IndirectProbe::Ready { .. } => INDIRECT_READY,
+            IndirectProbe::Failed { reason } => {
+                self.indirect_reason.clone_from(reason);
+                INDIRECT_FAILED
+            }
         }
     }
 
@@ -6954,6 +7302,10 @@ impl Probe {
             DepthProbe::Waiting { .. } => DEPTH_WAITING,
             DepthProbe::Pending => DEPTH_PENDING,
             DepthProbe::Ready { .. } => DEPTH_READY,
+            DepthProbe::Failed { reason } => {
+                self.depth_reason.clone_from(reason);
+                DEPTH_FAILED
+            }
         }
     }
 
@@ -7085,6 +7437,10 @@ impl Probe {
             StencilProbe::Waiting { .. } => STENCIL_WAITING,
             StencilProbe::Pending => STENCIL_PENDING,
             StencilProbe::Ready { .. } => STENCIL_READY,
+            StencilProbe::Failed { reason } => {
+                self.stencil_reason.clone_from(reason);
+                STENCIL_FAILED
+            }
         }
     }
 
@@ -7224,6 +7580,10 @@ impl Probe {
             MsaaProbe::Waiting { .. } => MSAA_WAITING,
             MsaaProbe::Pending => MSAA_PENDING,
             MsaaProbe::Ready { .. } => MSAA_READY,
+            MsaaProbe::Failed { reason } => {
+                self.msaa_reason.clone_from(reason);
+                MSAA_FAILED
+            }
             MsaaProbe::Unsupported => MSAA_UNSUPPORTED,
         }
     }
@@ -7361,6 +7721,10 @@ impl Probe {
             OcclusionProbe::Waiting { .. } => OCCLUSION_WAITING,
             OcclusionProbe::Pending => OCCLUSION_PENDING,
             OcclusionProbe::Ready { .. } => OCCLUSION_READY,
+            OcclusionProbe::Failed { reason } => {
+                self.occlusion_reason.clone_from(reason);
+                OCCLUSION_FAILED
+            }
         }
     }
 
@@ -7750,6 +8114,10 @@ impl Probe {
             ComputeProbe::Waiting { .. } => COMPUTE_WAITING,
             ComputeProbe::Pending => COMPUTE_PENDING,
             ComputeProbe::Ready { .. } => COMPUTE_READY,
+            ComputeProbe::Failed { reason } => {
+                self.compute_reason.clone_from(reason);
+                COMPUTE_FAILED
+            }
         }
     }
 
@@ -7908,6 +8276,10 @@ impl Probe {
             CopyChainProbe::Waiting { .. } => COPYCHAIN_WAITING,
             CopyChainProbe::Pending => COPYCHAIN_PENDING,
             CopyChainProbe::Ready { .. } => COPYCHAIN_READY,
+            CopyChainProbe::Failed { reason } => {
+                self.copychain_reason.clone_from(reason);
+                COPYCHAIN_FAILED
+            }
         }
     }
 
@@ -8018,6 +8390,10 @@ impl Probe {
             FillProbe::Waiting { .. } => FILL_WAITING,
             FillProbe::Pending => FILL_PENDING,
             FillProbe::Ready { .. } => FILL_READY,
+            FillProbe::Failed { reason } => {
+                self.fill_reason.clone_from(reason);
+                FILL_FAILED
+            }
         }
     }
 
@@ -8701,6 +9077,28 @@ pub mod shim {
         })
     }
 
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_readback_state`] starts — the browser's words under
+    /// [`READBACK_FAILED`](super::READBACK_FAILED), the decode error under
+    /// [`READBACK_UNDECODABLE`](super::READBACK_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_readback_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.readback_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_readback_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.readback_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// A pointer into wasm memory to the bytes the readback came back with.
     ///
     /// Read [`__crcbl_web_gpu_probe_readback_bytes_len`] bytes from here, and
@@ -8770,6 +9168,28 @@ pub mod shim {
         PROBE.with(|probe| match probe.try_borrow_mut() {
             Ok(mut probe) => probe.draw_state(),
             Err(_) => super::DRAW_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_draw_state`] starts — the browser's words under
+    /// [`DRAW_FAILED`](super::DRAW_FAILED), the decode error under
+    /// [`DRAW_UNDECODABLE`](super::DRAW_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_draw_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.draw_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_draw_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.draw_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
         })
     }
 
@@ -8843,6 +9263,28 @@ pub mod shim {
         })
     }
 
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_compute_state`] starts — the browser's words under
+    /// [`COMPUTE_FAILED`](super::COMPUTE_FAILED), the decode error under
+    /// [`COMPUTE_UNDECODABLE`](super::COMPUTE_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_compute_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.compute_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_compute_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.compute_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// A pointer into wasm memory to the bytes the dispatch readback came back
     /// with.
     ///
@@ -8912,6 +9354,28 @@ pub mod shim {
         })
     }
 
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_copychain_state`] starts — the browser's words under
+    /// [`COPYCHAIN_FAILED`](super::COPYCHAIN_FAILED), the decode error under
+    /// [`COPYCHAIN_UNDECODABLE`](super::COPYCHAIN_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_copychain_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.copychain_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_copychain_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.copychain_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// A pointer into wasm memory to the bytes the copy chain's readback came back
     /// with.
     ///
@@ -8977,6 +9441,28 @@ pub mod shim {
         PROBE.with(|probe| match probe.try_borrow_mut() {
             Ok(mut probe) => probe.fill_state(),
             Err(_) => super::FILL_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_fill_state`] starts — the browser's words under
+    /// [`FILL_FAILED`](super::FILL_FAILED), the decode error under
+    /// [`FILL_UNDECODABLE`](super::FILL_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_fill_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.fill_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_fill_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.fill_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
         })
     }
 
@@ -9057,6 +9543,28 @@ pub mod shim {
         })
     }
 
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_present_state`] starts — the browser's words under
+    /// [`PRESENT_FAILED`](super::PRESENT_FAILED), the decode error under
+    /// [`PRESENT_UNDECODABLE`](super::PRESENT_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_present_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.present_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_present_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.present_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// A pointer into wasm memory to the bytes the present probe's readback came
     /// back with.
     ///
@@ -9126,6 +9634,28 @@ pub mod shim {
         PROBE.with(|probe| match probe.try_borrow_mut() {
             Ok(mut probe) => probe.reconfigure_state(),
             Err(_) => super::RECONFIG_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_reconfigure_state`] starts — the browser's words under
+    /// [`RECONFIG_FAILED`](super::RECONFIG_FAILED), the decode error under
+    /// [`RECONFIG_UNDECODABLE`](super::RECONFIG_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_reconfigure_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.reconfig_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_reconfigure_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.reconfig_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
         })
     }
 
@@ -9202,6 +9732,28 @@ pub mod shim {
         })
     }
 
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_indirect_state`] starts — the browser's words under
+    /// [`INDIRECT_FAILED`](super::INDIRECT_FAILED), the decode error under
+    /// [`INDIRECT_UNDECODABLE`](super::INDIRECT_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_indirect_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.indirect_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_indirect_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.indirect_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// A pointer into wasm memory to the bytes the indirect-draw readback came back
     /// with.
     ///
@@ -9260,6 +9812,28 @@ pub mod shim {
         })
     }
 
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_depth_state`] starts — the browser's words under
+    /// [`DEPTH_FAILED`](super::DEPTH_FAILED), the decode error under
+    /// [`DEPTH_UNDECODABLE`](super::DEPTH_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_depth_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.depth_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_depth_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.depth_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Where the depth plane's bytes start, once
     /// [`__crcbl_web_gpu_probe_depth_state`] answers [`super::DEPTH_READY`]. Null
     /// while it has not; the pointer is stable until the next drain.
@@ -9311,6 +9885,28 @@ pub mod shim {
         PROBE.with(|probe| match probe.try_borrow_mut() {
             Ok(mut probe) => probe.stencil_state(),
             Err(_) => super::STENCIL_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_stencil_state`] starts — the browser's words under
+    /// [`STENCIL_FAILED`](super::STENCIL_FAILED), the decode error under
+    /// [`STENCIL_UNDECODABLE`](super::STENCIL_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_stencil_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.stencil_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_stencil_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.stencil_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
         })
     }
 
@@ -9386,6 +9982,28 @@ pub mod shim {
         })
     }
 
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_msaa_state`] starts — the browser's words under
+    /// [`MSAA_FAILED`](super::MSAA_FAILED), the decode error under
+    /// [`MSAA_UNDECODABLE`](super::MSAA_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.msaa_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_msaa_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.msaa_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Where the resolve target's texels start, once
     /// [`__crcbl_web_gpu_probe_msaa_state`] answers [`super::MSAA_READY`]. Null
     /// while it has not; the pointer is stable until the next drain.
@@ -9438,6 +10056,28 @@ pub mod shim {
         PROBE.with(|probe| match probe.try_borrow_mut() {
             Ok(mut probe) => probe.occlusion_state(),
             Err(_) => super::OCCLUSION_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_occlusion_state`] starts — the browser's words under
+    /// [`OCCLUSION_FAILED`](super::OCCLUSION_FAILED), the decode error under
+    /// [`OCCLUSION_UNDECODABLE`](super::OCCLUSION_UNDECODABLE), and empty otherwise.
+    /// Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.occlusion_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_occlusion_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.occlusion_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
         })
     }
 
@@ -9674,31 +10314,39 @@ mod tests {
         __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_compute,
         __crcbl_web_gpu_probe_compute_bytes_len, __crcbl_web_gpu_probe_compute_bytes_ptr,
         __crcbl_web_gpu_probe_compute_pipeline, __crcbl_web_gpu_probe_compute_poll,
+        __crcbl_web_gpu_probe_compute_reason_len, __crcbl_web_gpu_probe_compute_reason_ptr,
         __crcbl_web_gpu_probe_compute_state, __crcbl_web_gpu_probe_copychain,
         __crcbl_web_gpu_probe_copychain_bytes_len, __crcbl_web_gpu_probe_copychain_bytes_ptr,
-        __crcbl_web_gpu_probe_copychain_poll, __crcbl_web_gpu_probe_copychain_state,
+        __crcbl_web_gpu_probe_copychain_poll, __crcbl_web_gpu_probe_copychain_reason_len,
+        __crcbl_web_gpu_probe_copychain_reason_ptr, __crcbl_web_gpu_probe_copychain_state,
         __crcbl_web_gpu_probe_depth, __crcbl_web_gpu_probe_depth_bytes_len,
         __crcbl_web_gpu_probe_depth_bytes_ptr, __crcbl_web_gpu_probe_depth_poll,
+        __crcbl_web_gpu_probe_depth_reason_len, __crcbl_web_gpu_probe_depth_reason_ptr,
         __crcbl_web_gpu_probe_depth_state, __crcbl_web_gpu_probe_device,
         __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
         __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
         __crcbl_web_gpu_probe_draw, __crcbl_web_gpu_probe_draw_bytes_len,
         __crcbl_web_gpu_probe_draw_bytes_ptr, __crcbl_web_gpu_probe_draw_poll,
+        __crcbl_web_gpu_probe_draw_reason_len, __crcbl_web_gpu_probe_draw_reason_ptr,
         __crcbl_web_gpu_probe_draw_state, __crcbl_web_gpu_probe_features_hi,
         __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_fill,
         __crcbl_web_gpu_probe_fill_bytes_len, __crcbl_web_gpu_probe_fill_bytes_ptr,
-        __crcbl_web_gpu_probe_fill_poll, __crcbl_web_gpu_probe_fill_state,
+        __crcbl_web_gpu_probe_fill_poll, __crcbl_web_gpu_probe_fill_reason_len,
+        __crcbl_web_gpu_probe_fill_reason_ptr, __crcbl_web_gpu_probe_fill_state,
         __crcbl_web_gpu_probe_graphics_pipeline, __crcbl_web_gpu_probe_image,
         __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_indirect,
         __crcbl_web_gpu_probe_indirect_bytes_len, __crcbl_web_gpu_probe_indirect_bytes_ptr,
-        __crcbl_web_gpu_probe_indirect_poll, __crcbl_web_gpu_probe_indirect_state,
+        __crcbl_web_gpu_probe_indirect_poll, __crcbl_web_gpu_probe_indirect_reason_len,
+        __crcbl_web_gpu_probe_indirect_reason_ptr, __crcbl_web_gpu_probe_indirect_state,
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_msaa,
         __crcbl_web_gpu_probe_msaa_bytes_len, __crcbl_web_gpu_probe_msaa_bytes_ptr,
-        __crcbl_web_gpu_probe_msaa_poll, __crcbl_web_gpu_probe_msaa_samples,
+        __crcbl_web_gpu_probe_msaa_poll, __crcbl_web_gpu_probe_msaa_reason_len,
+        __crcbl_web_gpu_probe_msaa_reason_ptr, __crcbl_web_gpu_probe_msaa_samples,
         __crcbl_web_gpu_probe_msaa_state, __crcbl_web_gpu_probe_occlusion,
         __crcbl_web_gpu_probe_occlusion_bytes_len, __crcbl_web_gpu_probe_occlusion_bytes_ptr,
-        __crcbl_web_gpu_probe_occlusion_poll, __crcbl_web_gpu_probe_occlusion_state,
+        __crcbl_web_gpu_probe_occlusion_poll, __crcbl_web_gpu_probe_occlusion_reason_len,
+        __crcbl_web_gpu_probe_occlusion_reason_ptr, __crcbl_web_gpu_probe_occlusion_state,
         __crcbl_web_gpu_probe_occlusion_values_len, __crcbl_web_gpu_probe_occlusion_values_ptr,
         __crcbl_web_gpu_probe_occlusion_values_state, __crcbl_web_gpu_probe_parity,
         __crcbl_web_gpu_probe_parity_checked, __crcbl_web_gpu_probe_parity_failures_len,
@@ -9706,16 +10354,21 @@ mod tests {
         __crcbl_web_gpu_probe_parity_report_len, __crcbl_web_gpu_probe_parity_report_ptr,
         __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_present,
         __crcbl_web_gpu_probe_present_bytes_len, __crcbl_web_gpu_probe_present_bytes_ptr,
-        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_state,
-        __crcbl_web_gpu_probe_reconfigure, __crcbl_web_gpu_probe_reconfigure_bytes_len,
-        __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
-        __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
-        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_stencil, __crcbl_web_gpu_probe_stencil_bytes_len,
-        __crcbl_web_gpu_probe_stencil_bytes_ptr, __crcbl_web_gpu_probe_stencil_poll,
-        __crcbl_web_gpu_probe_stencil_state, __crcbl_web_gpu_probe_surface,
-        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
-        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_reason_len,
+        __crcbl_web_gpu_probe_present_reason_ptr, __crcbl_web_gpu_probe_present_state,
+        __crcbl_web_gpu_probe_readback_reason_len, __crcbl_web_gpu_probe_readback_reason_ptr,
+        __crcbl_web_gpu_probe_readback_state, __crcbl_web_gpu_probe_reconfigure,
+        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
+        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_reason_len,
+        __crcbl_web_gpu_probe_reconfigure_reason_ptr, __crcbl_web_gpu_probe_reconfigure_state,
+        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_stencil,
+        __crcbl_web_gpu_probe_stencil_bytes_len, __crcbl_web_gpu_probe_stencil_bytes_ptr,
+        __crcbl_web_gpu_probe_stencil_poll, __crcbl_web_gpu_probe_stencil_reason_len,
+        __crcbl_web_gpu_probe_stencil_reason_ptr, __crcbl_web_gpu_probe_stencil_state,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -13642,6 +14295,899 @@ mod tests {
             failures.is_empty(),
             state == PARITY_MATCHED,
             "state {state} against failures {failures:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The twelve readback probes' failure arm
+    // -----------------------------------------------------------------------
+    //
+    // `absorb` is a pure function over `&[(u64, Reply)]`, so a browser refusing
+    // a map is an ordinary unit test here: no device, no canvas, no wasm. Three
+    // questions per probe, and the middle one is the one that matters —
+    // **every probe reads the same drained buffer**, so a probe that absorbed a
+    // failure naming another probe's sequence would report the wrong thing
+    // broken, and a copy-paste slip across twelve near-identical arms is
+    // exactly how that happens.
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the readback probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_readback_poll_carries_its_reason_into_failed() {
+        let mut probe = ReadbackProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            ReadbackProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the readback
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_readback_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = ReadbackProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, ReadbackProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackPending` for the poll's sequence still drops the readback probe
+    /// back to `Pending`, so the next frame polls again — the arm the failure
+    /// arm was added above.
+    #[test]
+    fn a_readback_pending_reply_drops_the_readback_back_to_pending() {
+        let mut probe = ReadbackProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, ReadbackProbe::Pending);
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the draw probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_draw_poll_carries_its_reason_into_failed() {
+        let mut probe = DrawProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_DRAW_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            DrawProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the draw
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_draw_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = DrawProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_DRAW_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, DrawProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the dispatch probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_dispatch_poll_carries_its_reason_into_failed() {
+        let mut probe = ComputeProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_DISPATCH_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            ComputeProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the dispatch
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_dispatch_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = ComputeProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_DISPATCH_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, ComputeProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the copy chain probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_copychain_poll_carries_its_reason_into_failed() {
+        let mut probe = CopyChainProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_COPYCHAIN_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            CopyChainProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the copy chain
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_copychain_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = CopyChainProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_COPYCHAIN_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, CopyChainProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackPending` for the poll's sequence still drops the copy chain probe
+    /// back to `Pending`, so the next frame polls again — the arm the failure
+    /// arm was added above.
+    #[test]
+    fn a_readback_pending_reply_drops_the_copychain_back_to_pending() {
+        let mut probe = CopyChainProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_COPYCHAIN_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, CopyChainProbe::Pending);
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the fill probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_fill_poll_carries_its_reason_into_failed() {
+        let mut probe = FillProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_FILL_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            FillProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the fill
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_fill_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = FillProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_FILL_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, FillProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackPending` for the poll's sequence still drops the fill probe
+    /// back to `Pending`, so the next frame polls again — the arm the failure
+    /// arm was added above.
+    #[test]
+    fn a_readback_pending_reply_drops_the_fill_back_to_pending() {
+        let mut probe = FillProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_FILL_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, FillProbe::Pending);
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the present probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_present_poll_carries_its_reason_into_failed() {
+        let mut probe = PresentProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_PRESENT_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            PresentProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the present
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_present_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = PresentProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_PRESENT_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, PresentProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the reconfigure probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_reconfigure_poll_carries_its_reason_into_failed() {
+        let mut probe = ReconfigProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_RECONFIG_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            ReconfigProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the reconfigure
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_reconfigure_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = ReconfigProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_RECONFIG_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, ReconfigProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the indirect draw probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_indirect_poll_carries_its_reason_into_failed() {
+        let mut probe = IndirectProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_INDIRECT_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            IndirectProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the indirect draw
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_indirect_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = IndirectProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_INDIRECT_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, IndirectProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the depth probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_depth_poll_carries_its_reason_into_failed() {
+        let mut probe = DepthProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_DEPTH_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            DepthProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the depth
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_depth_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = DepthProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_DEPTH_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, DepthProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackPending` for the poll's sequence still drops the depth probe
+    /// back to `Pending`, so the next frame polls again — the arm the failure
+    /// arm was added above.
+    #[test]
+    fn a_readback_pending_reply_drops_the_depth_back_to_pending() {
+        let mut probe = DepthProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_DEPTH_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, DepthProbe::Pending);
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the stencil probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_stencil_poll_carries_its_reason_into_failed() {
+        let mut probe = StencilProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_STENCIL_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            StencilProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the stencil
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_stencil_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = StencilProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_STENCIL_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, StencilProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackPending` for the poll's sequence still drops the stencil probe
+    /// back to `Pending`, so the next frame polls again — the arm the failure
+    /// arm was added above.
+    #[test]
+    fn a_readback_pending_reply_drops_the_stencil_back_to_pending() {
+        let mut probe = StencilProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_STENCIL_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, StencilProbe::Pending);
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the MSAA probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_msaa_poll_carries_its_reason_into_failed() {
+        let mut probe = MsaaProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_MSAA_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            MsaaProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the MSAA
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_msaa_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = MsaaProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_MSAA_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, MsaaProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackPending` for the poll's sequence still drops the MSAA probe
+    /// back to `Pending`, so the next frame polls again — the arm the failure
+    /// arm was added above.
+    #[test]
+    fn a_readback_pending_reply_drops_the_msaa_back_to_pending() {
+        let mut probe = MsaaProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_MSAA_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, MsaaProbe::Pending);
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the occlusion probe in
+    /// `Failed` carrying the browser's words, instead of dropping it back to
+    /// `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_occlusion_poll_carries_its_reason_into_failed() {
+        let mut probe = OcclusionProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_OCCLUSION_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            OcclusionProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the occlusion
+    /// probe waiting: one channel carries every probe's replies, so absorbing a
+    /// failure that is not its own would report the wrong probe as broken.
+    #[test]
+    fn a_occlusion_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = OcclusionProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_OCCLUSION_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, OcclusionProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackPending` for the poll's sequence still drops the occlusion probe
+    /// back to `Pending`, so the next frame polls again — the arm the failure
+    /// arm was added above.
+    #[test]
+    fn a_readback_pending_reply_drops_the_occlusion_back_to_pending() {
+        let mut probe = OcclusionProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_OCCLUSION_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, OcclusionProbe::Pending);
+    }
+
+    // -----------------------------------------------------------------------
+    // The failure arm's other half: the state code and the reason exports
+    // -----------------------------------------------------------------------
+    //
+    // The `absorb` tests above prove the enum reaches `Failed`. These prove the
+    // ABI does: `Failed` is a state code JS can branch on and a reason JS can
+    // print, and without both halves the browser's words stop at the enum.
+
+    /// One probe's reason, read through its two exports the way JS reads it —
+    /// [`device_reason`]'s shape, taken as a pair of exports so the twelve
+    /// readback probes share it instead of repeating it twelve times.
+    fn export_reason(ptr: extern "C" fn() -> *const u8, len: extern "C" fn() -> u32) -> String {
+        let len = len() as usize;
+        let ptr = ptr();
+        if len == 0 {
+            return String::new();
+        }
+        assert!(!ptr.is_null(), "a probe answered a length with no pointer");
+        // SAFETY: `ptr` and `len` are this thread's reason `String`, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        String::from_utf8(bytes.to_vec()).expect("the probe's reason is a Rust String")
+    }
+
+    /// The readback probe's `Failed` reaches the ABI: the state export answers
+    /// [`READBACK_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_readback_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().readback = ReadbackProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_readback_state(), READBACK_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_readback_reason_ptr,
+                __crcbl_web_gpu_probe_readback_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The draw probe's `Failed` reaches the ABI: the state export answers
+    /// [`DRAW_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_draw_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().draw = DrawProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_draw_state(), DRAW_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_draw_reason_ptr,
+                __crcbl_web_gpu_probe_draw_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The dispatch probe's `Failed` reaches the ABI: the state export answers
+    /// [`COMPUTE_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_dispatch_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().compute = ComputeProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_compute_state(), COMPUTE_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_compute_reason_ptr,
+                __crcbl_web_gpu_probe_compute_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The copy chain probe's `Failed` reaches the ABI: the state export answers
+    /// [`COPYCHAIN_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_copychain_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().copychain = CopyChainProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_copychain_state(), COPYCHAIN_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_copychain_reason_ptr,
+                __crcbl_web_gpu_probe_copychain_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The fill probe's `Failed` reaches the ABI: the state export answers
+    /// [`FILL_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_fill_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().fill = FillProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_fill_state(), FILL_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_fill_reason_ptr,
+                __crcbl_web_gpu_probe_fill_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The present probe's `Failed` reaches the ABI: the state export answers
+    /// [`PRESENT_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_present_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().present = PresentProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_present_state(), PRESENT_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_present_reason_ptr,
+                __crcbl_web_gpu_probe_present_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The reconfigure probe's `Failed` reaches the ABI: the state export answers
+    /// [`RECONFIG_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_reconfigure_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().reconfig = ReconfigProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_reconfigure_state(), RECONFIG_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_reconfigure_reason_ptr,
+                __crcbl_web_gpu_probe_reconfigure_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The indirect draw probe's `Failed` reaches the ABI: the state export answers
+    /// [`INDIRECT_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_indirect_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().indirect = IndirectProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_indirect_state(), INDIRECT_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_indirect_reason_ptr,
+                __crcbl_web_gpu_probe_indirect_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The depth probe's `Failed` reaches the ABI: the state export answers
+    /// [`DEPTH_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_depth_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().depth = DepthProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_depth_state(), DEPTH_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_depth_reason_ptr,
+                __crcbl_web_gpu_probe_depth_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The stencil probe's `Failed` reaches the ABI: the state export answers
+    /// [`STENCIL_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_stencil_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().stencil = StencilProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_stencil_state(), STENCIL_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_stencil_reason_ptr,
+                __crcbl_web_gpu_probe_stencil_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The MSAA probe's `Failed` reaches the ABI: the state export answers
+    /// [`MSAA_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_msaa_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().msaa = MsaaProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_msaa_state(), MSAA_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_msaa_reason_ptr,
+                __crcbl_web_gpu_probe_msaa_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The occlusion probe's `Failed` reaches the ABI: the state export answers
+    /// [`OCCLUSION_FAILED`] and the reason exports carry the browser's own words.
+    #[test]
+    fn the_occlusion_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().occlusion = OcclusionProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(__crcbl_web_gpu_probe_occlusion_state(), OCCLUSION_FAILED);
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_occlusion_reason_ptr,
+                __crcbl_web_gpu_probe_occlusion_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
         );
     }
 }

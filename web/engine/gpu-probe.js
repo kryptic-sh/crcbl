@@ -94,6 +94,11 @@ export const CAPS = Object.freeze({
  * `PENDING` and `WAITING` both mean "poll again": `WAITING` is a poll out and
  * unanswered, `PENDING` is a poll answered "not yet". `READY` is the one that
  * carries bytes.
+ *
+ * `FAILED` is the browser refusing the map and saying why — a settled state,
+ * not a step, because a readback is answered exactly once. Read it before
+ * polling again: the reason exports carry the browser's own words, and
+ * treating it as "not yet" is what turns a named refusal into a timeout.
  */
 export const READBACK = Object.freeze({
   UNASKED: 0,
@@ -102,6 +107,7 @@ export const READBACK = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -120,6 +126,7 @@ export const DRAW = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -139,6 +146,7 @@ export const PRESENT = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -158,6 +166,7 @@ export const RECONFIG = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -177,6 +186,7 @@ export const INDIRECT = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -197,6 +207,7 @@ export const DEPTH = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -217,6 +228,7 @@ export const STENCIL = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -224,7 +236,8 @@ export const STENCIL = Object.freeze({
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
  * The MSAA probe is a readback at heart — its setup frame ends in the same
- * `request_readback` — so its codes mirror {@link READBACK} with one addition.
+ * `request_readback` — so its codes mirror {@link READBACK} with one addition,
+ * `UNSUPPORTED`, which pushes its `FAILED` to `7` rather than `6`.
  * `READY` carries the `Rgba8Unorm` texels of a single-sampled target a
  * multisampled pass resolved into, and whether they are the clear or the poison
  * the target was primed with is the whole evidence that the resolve ran: the one
@@ -244,6 +257,7 @@ export const MSAA = Object.freeze({
   READY: 4,
   UNDECODABLE: 5,
   UNSUPPORTED: 6,
+  FAILED: 7,
 });
 
 /**
@@ -265,6 +279,7 @@ export const OCCLUSION = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -324,6 +339,7 @@ export const COMPUTE = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -342,6 +358,7 @@ export const COPYCHAIN = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -360,6 +377,7 @@ export const FILL = Object.freeze({
   PENDING: 3,
   READY: 4,
   UNDECODABLE: 5,
+  FAILED: 6,
 });
 
 /**
@@ -1076,17 +1094,24 @@ export function pollReadbackProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readReadbackProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_readback_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_readback_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_readback_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_readback_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_readback_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: readbackStateName(state), bytes };
+  return { state, name: readbackStateName(state), reason, bytes };
 }
 
 /**
@@ -1146,17 +1171,24 @@ export function pollDrawProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readDrawProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_draw_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_draw_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_draw_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_draw_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_draw_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: drawStateName(state), bytes };
+  return { state, name: drawStateName(state), reason, bytes };
 }
 
 /**
@@ -1223,17 +1255,24 @@ export function pollPresentProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readPresentProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_present_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_present_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_present_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_present_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_present_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: presentStateName(state), bytes };
+  return { state, name: presentStateName(state), reason, bytes };
 }
 
 /**
@@ -1298,17 +1337,24 @@ export function pollReconfigureProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readReconfigureProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_reconfigure_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_reconfigure_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_reconfigure_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_reconfigure_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_reconfigure_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: reconfigureStateName(state), bytes };
+  return { state, name: reconfigureStateName(state), reason, bytes };
 }
 
 /**
@@ -1370,17 +1416,24 @@ export function pollIndirectProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readIndirectProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_indirect_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_indirect_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_indirect_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_indirect_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_indirect_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: indirectStateName(state), bytes };
+  return { state, name: indirectStateName(state), reason, bytes };
 }
 
 /**
@@ -1439,17 +1492,24 @@ export function pollDepthProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readDepthProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_depth_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_depth_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_depth_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_depth_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_depth_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: depthStateName(state), bytes };
+  return { state, name: depthStateName(state), reason, bytes };
 }
 
 /**
@@ -1512,17 +1572,24 @@ export function pollStencilProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readStencilProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_stencil_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_stencil_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_stencil_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_stencil_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_stencil_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: stencilStateName(state), bytes };
+  return { state, name: stencilStateName(state), reason, bytes };
 }
 
 /**
@@ -1599,17 +1666,24 @@ export function pollMsaaProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readMsaaProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_msaa_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_msaa_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_msaa_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_msaa_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_msaa_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: msaaStateName(state), bytes };
+  return { state, name: msaaStateName(state), reason, bytes };
 }
 
 /**
@@ -1689,17 +1763,24 @@ export function pollOcclusionProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readOcclusionProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_occlusion_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_occlusion_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_occlusion_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_occlusion_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_occlusion_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: occlusionStateName(state), bytes };
+  return { state, name: occlusionStateName(state), reason, bytes };
 }
 
 /**
@@ -1858,17 +1939,24 @@ export function pollComputeProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readComputeProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_compute_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_compute_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_compute_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_compute_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_compute_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: computeStateName(state), bytes };
+  return { state, name: computeStateName(state), reason, bytes };
 }
 
 /**
@@ -1928,17 +2016,24 @@ export function pollCopyChainProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readCopyChainProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_copychain_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_copychain_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_copychain_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_copychain_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_copychain_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: copyChainStateName(state), bytes };
+  return { state, name: copyChainStateName(state), reason, bytes };
 }
 
 /**
@@ -1996,17 +2091,24 @@ export function pollFillProbe({ exports }) {
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ state: number, name: string, bytes: Uint8Array }}
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
  */
 export function readFillProbe({ exports, memory }) {
   const state = exports.__crcbl_web_gpu_probe_fill_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_fill_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_fill_reason_len()
+  );
   const ptr = exports.__crcbl_web_gpu_probe_fill_bytes_ptr();
   const len = exports.__crcbl_web_gpu_probe_fill_bytes_len() >>> 0;
   const bytes =
     len === 0
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
-  return { state, name: fillStateName(state), bytes };
+  return { state, name: fillStateName(state), reason, bytes };
 }
 
 /**
