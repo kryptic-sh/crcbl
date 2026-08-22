@@ -5610,6 +5610,34 @@ export class Replayer {
     this.#debugGroups.length = 0;
   }
 
+  // WHY THE THREE DEBUG COMMANDS GET NO PROBE GROUP, and probably never will.
+  //
+  // `web/tools/probe-groups.mjs` gates this replayer command by command against
+  // a real `GPUDevice`, and every group there works the same way: encode a
+  // frame, read something back, and hold the bytes against a value only the
+  // command under test could have produced. `BeginDebugLabel`, `EndDebugLabel`
+  // and `InsertDebugMarker` cannot be gated that way, because WebGPU gives a
+  // page no way to observe them at all. `pushDebugGroup`, `popDebugGroup` and
+  // `insertDebugMarker` return nothing, change no resource, and are readable
+  // only inside a native capture tool attached to the browser process — there
+  // is no query, no error and no pixel that differs between a frame that
+  // recorded them and one that did not.
+  //
+  // So a group here would encode the three calls and then assert the frame
+  // still submitted, which is the shape this repository keeps deleting: a check
+  // that passes identically whether the commands were replayed or dropped on
+  // the floor. What IS checkable is which scope each call lands on and what the
+  // malformed cases do, and that is already covered without a browser:
+  // `web/tools/gpu-replay.mjs` replays all three against a stub device whose
+  // encoder and pass objects record their own `pushDebugGroup`,
+  // `popDebugGroup` and `insertDebugMarker` calls, so a push that went to the
+  // wrong object — the unbalanced group that would cost a real `finish()` — and
+  // every error-queue arm below fail there by name.
+  //
+  // If that changes — a WebGPU extension that reports recorded markers back, or
+  // a headless capture the harness can read — a group belongs here and this
+  // comment is what should be deleted.
+
   /**
    * The scope a debug op records onto: the innermost open one.
    *

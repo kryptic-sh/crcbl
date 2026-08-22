@@ -1512,21 +1512,29 @@ whether `crcbl-webgpu` names the adapter it opened is unchecked.
 lines come from `contentscript.js` / `inpage.js` — a MetaMask content script
 injected into the page. Unrelated to crcbl.
 
-### No browser probe exercises debug markers or indirect dispatch
+### The debug markers have no browser probe, and probably never can
 
-`insert_debug_marker`, `end_debug_label` and `dispatch_indirect` are wired and
+`begin_debug_label`, `end_debug_label` and `insert_debug_marker` are wired and
 covered by the node replayer's stubs, but **nothing drives them against a real
-browser** — `web/probe/` has no group for either.
+browser**, and this is not a gap waiting on effort. WebGPU gives a page no way
+to observe them: the three calls return nothing, change no resource, and are
+readable only inside a native capture tool attached to the browser process. A
+probe group would therefore encode them and then assert the frame still
+submitted — a check that passes identically whether they were replayed or
+dropped.
 
-`DispatchIndirect` is the one worth a group and it is testable end to end: write
-the three workgroup counts with `WriteBuffer`, dispatch off them, and read back
-a storage buffer sized by those counts, so a wrong count is visible rather than
-inferred. The debug ops produce no readable state and can only be seen in a
-capture tool, so they may never be probe-able — say that rather than pretending
-a group would prove something.
+**The reasoning now lives in the code**, in a block comment above
+`Replayer#debugScope` in `web/engine/gpu-replay.js`, which is where a reader
+asking "why is there no group for these?" arrives. It also names what _is_
+checked without a browser: `web/tools/gpu-replay.mjs` replays all three against
+a stub device whose encoder, render pass and compute pass objects each record
+their own debug calls, so a push landing on the wrong object — the unbalanced
+group that costs a real `finish()` — fails there by name. Delete that comment,
+and this entry, if a WebGPU extension ever reports recorded markers back.
 
-Note adding a group changes the check count `run-probe-e2e.sh` asserts (55
-today), which is why the wiring slice deliberately left the probe alone.
+The `dispatch_indirect` half of this entry **shipped** as probe group AG, which
+reads the three workgroup counts back per axis rather than asserting a dispatch
+happened.
 
 ### The sRGB encode is still unproven on dx12's and Metal's presented path
 

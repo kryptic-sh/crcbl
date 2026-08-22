@@ -2247,6 +2247,170 @@ export async function runProbeGroups({
           `${compute.error ? ` — ${compute.error}` : ''}`
   );
 
+  // **THE INDIRECT-DISPATCH GATE, AND THE ONLY THING ANYWHERE THAT RUNS
+  // `dispatchWorkgroupsIndirect` IN A BROWSER.** Group U proves a dispatch ran;
+  // this proves a dispatch ran *with the workgroup counts a buffer named*. wasm
+  // records the same compute frame with three differences: an args buffer filled
+  // by `queue.writeBuffer`, a `dispatchWorkgroupsIndirect` reading it at a
+  // non-zero offset, and a shader that tallies which workgroup indices ran
+  // instead of writing one flat pattern. One invocation per workgroup, so the
+  // tally IS the workgroup grid: the first slot counts every workgroup, and one
+  // tally region per axis after it holds a mark at index `i` if a workgroup with
+  // that index on that axis ran.
+  //
+  // WHY A WRONG COUNT FAILS RATHER THAN GOING UNNOTICED. The counts are not all
+  // ones and no two are equal, and the bytes at the START of the args buffer are
+  // a `1, 1, 1` decoy — so a replayer that dropped the offset dispatches one
+  // workgroup, successfully, and reads back a tally of one. The slots past each
+  // axis's count are asserted still zero, so dispatching MORE than was asked for
+  // fails too, and the counter is asserted against the product, so three right
+  // maxima reached by a wrong grid fail as well. A frame where the dispatch
+  // never happened reads back all zeros. `gpu-replay.mjs` cannot reach any of
+  // this: only a real device runs a compute shader off a real buffer.
+  group('AG — a compute dispatch reads its workgroup counts out of a buffer');
+
+  // `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_DISPATCH_INDIRECT_*`, spelled
+  // out here rather than imported: this half is the independent statement of
+  // what the bytes must be, and `js_mirror` holds the state codes.
+  const PROBE_DISPATCH_INDIRECT_WORDS = 64;
+  const PROBE_DISPATCH_INDIRECT_COUNTS = [5, 3, 2];
+  const PROBE_DISPATCH_INDIRECT_AXIS_SLOTS = 16;
+  // The counter, then the X, Y and Z tally regions.
+  const PROBE_DISPATCH_INDIRECT_BASES = [1, 17, 33];
+  const PROBE_DISPATCH_INDIRECT_MARK = 0xc0ffee;
+  // Where the real counts sit in the args buffer, and where the decoy the
+  // dispatch must NOT read sits.
+  const PROBE_DISPATCH_INDIRECT_ARGS_OFFSET = 16;
+  const PROBE_DISPATCH_INDIRECT_DECOY_OFFSET = 0;
+  const PROBE_DISPATCH_INDIRECT_WORKGROUPS =
+    PROBE_DISPATCH_INDIRECT_COUNTS.reduce((a, b) => a * b, 1);
+
+  const dispatchIndirectStart = await evaluate(
+    page,
+    `(async () => {
+     const { startDispatchIndirectProbe } = await import('/engine/gpu-probe.js');
+     const { exports } = globalThis.crcbl;
+     return { started: startDispatchIndirectProbe({ exports }) };
+   })()`
+  );
+  // Poll across frames exactly as group U does: the page's rAF loop replays the
+  // poll and delivers its reply between these evaluations, and each evaluation
+  // drains what has arrived, then queues another poll while the map is still
+  // resolving.
+  const dispatchIndirect = dispatchIndirectStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+           const {
+             readDispatchIndirectProbe,
+             pollDispatchIndirectProbe,
+             DISPATCH_INDIRECT,
+           } = await import('/engine/gpu-probe.js');
+           const { exports, gpu } = globalThis.crcbl;
+           const r = readDispatchIndirectProbe({ exports, memory: exports.memory });
+           if (
+             r.state === DISPATCH_INDIRECT.FAILED ||
+             r.state === DISPATCH_INDIRECT.UNDECODABLE
+           ) {
+             const error = gpu.replayer.takeError();
+             return { done: true, state: r.name, error: r.reason || error };
+           }
+           if (r.state !== DISPATCH_INDIRECT.READY) {
+             // Not yet — queue another poll for the loop to replay, and wait.
+             pollDispatchIndirectProbe({ exports });
+             return null;
+           }
+           // Ready: read the tally here rather than shipping every word out.
+           const word = (at) =>
+             (r.bytes[at * 4] |
+               (r.bytes[at * 4 + 1] << 8) |
+               (r.bytes[at * 4 + 2] << 16) |
+               (r.bytes[at * 4 + 3] << 24)) >>> 0;
+           const mark = ${PROBE_DISPATCH_INDIRECT_MARK};
+           const axisSlots = ${PROBE_DISPATCH_INDIRECT_AXIS_SLOTS};
+           const bases = ${JSON.stringify(PROBE_DISPATCH_INDIRECT_BASES)};
+           const words = Math.floor(r.bytes.length / 4);
+           // Per axis: how many slots from the region's start carry the mark,
+           // and the first slot past them that is not still zero. A dispatch of
+           // more workgroups than were asked for shows up as the second.
+           const counts = [];
+           const strays = [];
+           for (const base of bases) {
+             let count = 0;
+             while (count < axisSlots && word(base + count) === mark) count += 1;
+             counts.push(count);
+             let stray = -1;
+             for (let i = count; i < axisSlots && stray < 0; i += 1) {
+               if (word(base + i) !== 0) stray = i;
+             }
+             strays.push(stray);
+           }
+           // And the slots past the last region, which nothing should touch.
+           let tail = -1;
+           const after = bases[bases.length - 1] + axisSlots;
+           for (let i = after; i < words && tail < 0; i += 1) {
+             if (word(i) !== 0) tail = i;
+           }
+           return {
+             done: true,
+             state: r.name,
+             len: r.bytes.length,
+             total: word(0),
+             counts,
+             strays,
+             tail,
+             error: gpu.replayer.takeError(),
+           };
+         })()`
+        )
+      )
+    : null;
+  check(
+    'AG',
+    'wasm encoded the indirect-dispatch setup frame — pipeline, args write, pass, bind, dispatch_indirect, copy, request',
+    dispatchIndirectStart?.started === true,
+    dispatchIndirectStart?.started
+      ? 'the indirect-dispatch-and-read frame is on the stream'
+      : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'AG',
+    'the browser ran the number of workgroups the args buffer named, not the 1×1×1 decoy at its start',
+    dispatchIndirect?.done === true &&
+      dispatchIndirect.len === PROBE_DISPATCH_INDIRECT_WORDS * 4 &&
+      dispatchIndirect.total === PROBE_DISPATCH_INDIRECT_WORKGROUPS,
+    dispatchIndirect?.done !== true
+      ? `no indirect-dispatch readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : dispatchIndirect.total === PROBE_DISPATCH_INDIRECT_WORKGROUPS &&
+          dispatchIndirect.len === PROBE_DISPATCH_INDIRECT_WORDS * 4
+        ? `${dispatchIndirect.total} workgroups ran, the product of ` +
+          `[${PROBE_DISPATCH_INDIRECT_COUNTS.join(', ')}] at args offset ` +
+          `${PROBE_DISPATCH_INDIRECT_ARGS_OFFSET} and not the 1 the decoy at ` +
+          `offset ${PROBE_DISPATCH_INDIRECT_DECOY_OFFSET} asks for`
+        : `state ${dispatchIndirect.state}, ${dispatchIndirect.len ?? 0} bytes ` +
+          `(expected ${PROBE_DISPATCH_INDIRECT_WORDS * 4}), counter read ` +
+          `${dispatchIndirect.total}, expected ${PROBE_DISPATCH_INDIRECT_WORKGROUPS}` +
+          `${dispatchIndirect.error ? ` — ${dispatchIndirect.error}` : ''}`
+  );
+  check(
+    'AG',
+    'the per-axis tally spells the three workgroup counts the args buffer named, and nothing past them',
+    dispatchIndirect?.done === true &&
+      JSON.stringify(dispatchIndirect.counts) ===
+        JSON.stringify(PROBE_DISPATCH_INDIRECT_COUNTS) &&
+      JSON.stringify(dispatchIndirect.strays) ===
+        JSON.stringify([-1, -1, -1]) &&
+      dispatchIndirect.tail === -1,
+    dispatchIndirect?.done !== true
+      ? `no indirect-dispatch readback in ${TIMEOUT_MS} ms — the map never resolved or the reply never reached wasm`
+      : `read [${(dispatchIndirect.counts ?? []).join(', ')}] against ` +
+          `[${PROBE_DISPATCH_INDIRECT_COUNTS.join(', ')}]; ` +
+          `first marked slot past each count ${JSON.stringify(dispatchIndirect.strays)} ` +
+          `(−1 is none), first non-zero slot past the last region ${dispatchIndirect.tail}` +
+          `${dispatchIndirect.error ? ` — ${dispatchIndirect.error}` : ''}`
+  );
+
   // **THE COPY-CHAIN GATE, AND THE FIRST THAT PROVES A BUFFER→IMAGE AND AN
   // IMAGE→IMAGE COPY RAN.** wasm records a dispatch that fills a storage buffer
   // with red (`0xFF0000FF` per texel), a `pipeline_barrier` transitioning that

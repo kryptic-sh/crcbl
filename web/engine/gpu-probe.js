@@ -343,6 +343,29 @@ export const COMPUTE = Object.freeze({
 });
 
 /**
+ * The `DISPATCH_INDIRECT_*` codes
+ * `__crcbl_web_gpu_probe_dispatch_indirect_state` answers, from
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * The indirect-dispatch probe is a readback at heart — its setup frame ends in
+ * the same `request_readback` — so its codes mirror {@link READBACK} exactly.
+ * `READY` carries the tally the dispatched workgroups wrote: a counter of how
+ * many ran, then one region per axis in which the slots up to that axis's count
+ * are marked and the rest are still zero. The gate reads the three workgroup
+ * counts back out of it, so a dispatch that used the wrong counts — `1x1x1`
+ * above all — is a different readback rather than a missing one.
+ */
+export const DISPATCH_INDIRECT = Object.freeze({
+  UNASKED: 0,
+  REQUESTED: 1,
+  WAITING: 2,
+  PENDING: 3,
+  READY: 4,
+  UNDECODABLE: 5,
+  FAILED: 6,
+});
+
+/**
  * The `COPYCHAIN_*` codes `__crcbl_web_gpu_probe_copychain_state` answers, from
  * `crates/crcbl-webgpu/src/probe.rs`.
  *
@@ -1957,6 +1980,87 @@ export function readComputeProbe({ exports, memory }) {
       ? new Uint8Array(0)
       : new Uint8Array(memory.buffer, ptr, len).slice();
   return { state, name: computeStateName(state), reason, bytes };
+}
+
+/**
+ * The same state-name helper again, for the indirect-dispatch codes. Its own
+ * function for {@link readbackStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function dispatchIndirectStateName(state) {
+  const found = Object.entries(DISPATCH_INDIRECT).find(
+    ([, code]) => code === state
+  );
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * Ask wasm to run a compute dispatch whose **workgroup counts come out of a
+ * buffer**, and start reading its tally back on the device it opened.
+ *
+ * {@link startComputeProbe}'s indirect sibling: the same frame with
+ * `dispatchWorkgroups(x, y, z)` replaced by a `queue.writeBuffer` that fills an
+ * indirect-args buffer and a `dispatchWorkgroupsIndirect` reading it at a
+ * non-zero offset. {@link pollDispatchIndirectProbe} drives the poll and
+ * {@link readDispatchIndirectProbe} reads the tally when it lands. Its answer is
+ * *data* and it needs a **device**, so `false` before one has opened is ordering
+ * rather than failure — wait for {@link readDeviceProbe} to say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded the setup frame. `false` is no device
+ *   yet, the probe being re-entered, or another channel being installed.
+ */
+export function startDispatchIndirectProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_dispatch_indirect() === 1;
+}
+
+/**
+ * Poll the indirect dispatch's in-flight readback once.
+ *
+ * A no-op — `false` — while a previous poll is unanswered or the bytes are
+ * already in, so the gate can call it every frame. See
+ * `__crcbl_web_gpu_probe_dispatch_indirect_poll`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether a poll was encoded this frame.
+ */
+export function pollDispatchIndirectProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_dispatch_indirect_poll() === 1;
+}
+
+/**
+ * Read where the indirect dispatch's readback has got to, and its tally once it
+ * is `READY`.
+ *
+ * {@link readComputeProbe}'s indirect sibling, and `state` first for its reason
+ * — draining allocates and may detach a view built before it, so the
+ * `Uint8Array` is built after the state call and copied out with `slice`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, reason: string, bytes: Uint8Array }}
+ *   `reason` is the browser's own words under `FAILED`, the decode error
+ *   under `UNDECODABLE`, and empty otherwise.
+ */
+export function readDispatchIndirectProbe({ exports, memory }) {
+  const state = exports.__crcbl_web_gpu_probe_dispatch_indirect_state() >>> 0;
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_dispatch_indirect_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_dispatch_indirect_reason_len()
+  );
+  const ptr = exports.__crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr();
+  const len = exports.__crcbl_web_gpu_probe_dispatch_indirect_bytes_len() >>> 0;
+  const bytes =
+    len === 0
+      ? new Uint8Array(0)
+      : new Uint8Array(memory.buffer, ptr, len).slice();
+  return { state, name: dispatchIndirectStateName(state), reason, bytes };
 }
 
 /**

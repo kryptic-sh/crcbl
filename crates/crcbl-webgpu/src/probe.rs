@@ -78,6 +78,13 @@
 //! | [`__crcbl_web_gpu_probe_compute_reason_len`](shim::__crcbl_web_gpu_probe_compute_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
 //! | [`__crcbl_web_gpu_probe_compute_bytes_ptr`](shim::__crcbl_web_gpu_probe_compute_bytes_ptr) | `() -> i32` | Where the dispatched bytes start, once [`__crcbl_web_gpu_probe_compute_state`](shim::__crcbl_web_gpu_probe_compute_state) answers [`COMPUTE_READY`]. |
 //! | [`__crcbl_web_gpu_probe_compute_bytes_len`](shim::__crcbl_web_gpu_probe_compute_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the dispatch has not answered. |
+//! | [`__crcbl_web_gpu_probe_dispatch_indirect`](shim::__crcbl_web_gpu_probe_dispatch_indirect) | `() -> i32` | Encode one frame — the dispatch probe's frame with the workgroup counts read out of a buffer: a `write_buffer` fills the args with a `1, 1, 1` decoy and the real [`PROBE_DISPATCH_INDIRECT_COUNTS`] at [`PROBE_DISPATCH_INDIRECT_ARGS_OFFSET`], and a compute pass dispatches off them. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_dispatch_indirect_poll`](shim::__crcbl_web_gpu_probe_dispatch_indirect_poll) | `() -> i32` | Poll the indirect dispatch's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
+//! | [`__crcbl_web_gpu_probe_dispatch_indirect_state`](shim::__crcbl_web_gpu_probe_dispatch_indirect_state) | `() -> i32` | Drain, and answer one of the `DISPATCH_INDIRECT_*` codes. |
+//! | [`__crcbl_web_gpu_probe_dispatch_indirect_reason_ptr`](shim::__crcbl_web_gpu_probe_dispatch_indirect_reason_ptr) | `() -> i32` | Where the reason the indirect dispatch's readback stopped starts. Empty unless the state is [`DISPATCH_INDIRECT_FAILED`] or [`DISPATCH_INDIRECT_UNDECODABLE`]. |
+//! | [`__crcbl_web_gpu_probe_dispatch_indirect_reason_len`](shim::__crcbl_web_gpu_probe_dispatch_indirect_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr`](shim::__crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr) | `() -> i32` | Where the workgroup tally starts, once [`__crcbl_web_gpu_probe_dispatch_indirect_state`](shim::__crcbl_web_gpu_probe_dispatch_indirect_state) answers [`DISPATCH_INDIRECT_READY`]. |
+//! | [`__crcbl_web_gpu_probe_dispatch_indirect_bytes_len`](shim::__crcbl_web_gpu_probe_dispatch_indirect_bytes_len) | `() -> i32` | How many bytes there are, or `0` if the indirect dispatch has not answered. |
 //! | [`__crcbl_web_gpu_probe_copychain`](shim::__crcbl_web_gpu_probe_copychain) | `() -> i32` | Encode one frame — a dispatch that fills a storage buffer with [`PROBE_COPYCHAIN_PATTERN`], a buffer→image copy into a texture, an image→image copy to a second texture, an image→buffer copy out to a host buffer, and a `request_readback` against [`PROBE_COPYCHAIN_READBACK`]. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_copychain_poll`](shim::__crcbl_web_gpu_probe_copychain_poll) | `() -> i32` | Poll the copy chain's readback once. `1` when a poll is on the stream, `0` when there is nothing to poll for. |
 //! | [`__crcbl_web_gpu_probe_copychain_state`](shim::__crcbl_web_gpu_probe_copychain_state) | `() -> i32` | Drain, and answer one of the `COPYCHAIN_*` codes. |
@@ -590,6 +597,44 @@ pub const COMPUTE_UNDECODABLE: u32 = 5;
 /// to the gate's deadline — which is what used to turn a named refusal into
 /// a timeout.
 pub const COMPUTE_FAILED: u32 = 6;
+
+/// Nothing has been asked, or there is no channel to ask through.
+pub const DISPATCH_INDIRECT_UNASKED: u32 = 0;
+/// The setup frame — the storage buffer, the host buffer, the indirect-args
+/// buffer, the pipeline's four resources, the
+/// [`write_buffer`](crate::StreamWriter::write_buffer) that fills the args, a
+/// compute pass that binds and dispatches *off that buffer*, the copy, the
+/// submit and the request — is on the stream, and no poll has been issued.
+pub const DISPATCH_INDIRECT_REQUESTED: u32 = 1;
+/// A [`poll_readback`](crate::StreamWriter::poll_readback) is out and its reply
+/// has not arrived.
+pub const DISPATCH_INDIRECT_WAITING: u32 = 2;
+/// The last poll was answered [`Pending`](crcbl_hal::ReadbackState::Pending):
+/// the map has not resolved yet, so the next frame polls again.
+pub const DISPATCH_INDIRECT_PENDING: u32 = 3;
+/// The bytes are in.
+/// [`shim::__crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_dispatch_indirect_bytes_len`] carry them —
+/// [`PROBE_DISPATCH_INDIRECT_SLOTS`] `u32`s holding the tally described at
+/// [`PROBE_DISPATCH_INDIRECT_WGSL`], which the gate reads the three workgroup
+/// counts back out of and holds against
+/// [`PROBE_DISPATCH_INDIRECT_COUNTS`].
+pub const DISPATCH_INDIRECT_READY: u32 = 4;
+/// The committed reply buffer would not decode, or answered a command nobody
+/// asked; the reason is the [`DecodeError`](crate::DecodeError).
+/// [`COMPUTE_UNDECODABLE`]'s twin.
+pub const DISPATCH_INDIRECT_UNDECODABLE: u32 = 5;
+/// The browser refused the indirect dispatch's readback and said why: a
+/// [`Reply::ReadbackFailed`] named this probe's poll. The reason is the
+/// browser's own words, carried by
+/// [`shim::__crcbl_web_gpu_probe_dispatch_indirect_reason_ptr`] and
+/// [`shim::__crcbl_web_gpu_probe_dispatch_indirect_reason_len`].
+///
+/// **A settled code, not a step.** A readback is answered exactly once, so
+/// nothing further is coming and the probe stops here instead of polling on
+/// to the gate's deadline — which is what used to turn a named refusal into
+/// a timeout.
+pub const DISPATCH_INDIRECT_FAILED: u32 = 6;
 
 /// Nothing has been asked, or there is no channel to ask through.
 pub const COPYCHAIN_UNASKED: u32 = 0;
@@ -4632,6 +4677,336 @@ pub const PROBE_OCCLUSION_READBACK: ReadbackHandle = match ReadbackHandle::from_
     None => panic!("generation 11 is not zero"),
 };
 
+// The indirect-dispatch probe (group AG): the dispatch probe's frame with the
+// workgroup counts moved OFF the command and INTO a buffer. Instead of
+// `dispatch(1, 1, 1)` it fills an indirect-args buffer with `write_buffer` and
+// records a `dispatch_indirect` reading it, so what comes back says which
+// counts the browser actually used rather than only that something ran. Every
+// handle it names is `13 << 32` — a generation past the timestamp probe's
+// `12 << 32` — so its live resources never land in another probe's slot in the
+// shared page. It creates *three* buffers (storage, host readback, indirect
+// args), which the one type that carries several here distinguishes by index;
+// every other resource is a different type, so a shared `13 << 32` is distinct
+// by kind.
+//
+// **Named `PROBE_DISPATCH_INDIRECT_*`.** `PROBE_INDIRECT_*` is the indirect
+// *draw* probe (group Z), which is the graphics half of the same idea; this is
+// the compute half and takes the prefix that says so.
+
+/// The three workgroup counts the args buffer names and the dispatch must use.
+///
+/// **Not all ones, and all three different.** A driver or a replayer that
+/// ignored the buffer and dispatched `1×1×1` is the failure this probe exists to
+/// catch, so `1×1×1` has to be a *wrong* answer; three different counts also
+/// make a transposed or broadcast pair of axes wrong rather than
+/// indistinguishable. Each is well under
+/// [`PROBE_DISPATCH_INDIRECT_AXIS_SLOTS`], so every workgroup's tally mark lands
+/// inside its own axis's region.
+pub const PROBE_DISPATCH_INDIRECT_COUNTS: [u32; 3] = [5, 3, 2];
+
+/// The slot every workgroup increments, so the readback carries how many ran —
+/// the product of [`PROBE_DISPATCH_INDIRECT_COUNTS`], which is what pins the
+/// three counts to one grid rather than to their three maxima.
+pub const PROBE_DISPATCH_INDIRECT_TOTAL_SLOT: u32 = 0;
+
+/// How many slots each axis's tally region holds.
+///
+/// The region is longer than the count it records on purpose: the slots past the
+/// count stay at their zero-initialised value, and the gate asserts they do. That
+/// is what makes a dispatch of *more* workgroups than were asked for a failure
+/// and not just a longer run of marks.
+pub const PROBE_DISPATCH_INDIRECT_AXIS_SLOTS: u32 = 16;
+
+/// Where the X, Y and Z tally regions start. Workgroup `(x, y, z)` marks
+/// `PROBE_DISPATCH_INDIRECT_BASES[0] + x` and its two siblings.
+///
+/// The X region opens on the slot after
+/// [`PROBE_DISPATCH_INDIRECT_TOTAL_SLOT`] and each region follows the last by
+/// [`PROBE_DISPATCH_INDIRECT_AXIS_SLOTS`]; the values are spelled out rather
+/// than derived because the WGSL below spells them out too — it is a string, so
+/// it cannot read a constant — and this file's
+/// `the_indirect_dispatch_shader_marks_the_slots_the_layout_names` test is what
+/// holds the two halves and the derivation to each other.
+pub const PROBE_DISPATCH_INDIRECT_BASES: [u32; 3] = [1, 17, 33];
+
+/// The number of `u32` slots the storage buffer holds: the total counter, the
+/// three axis tallies, and a tail past the last of them that must come back
+/// zero. `64 * 4 = 256` bytes, a tightly-packed buffer→buffer copy.
+pub const PROBE_DISPATCH_INDIRECT_SLOTS: u32 = 64;
+
+/// The 32-bit value a workgroup writes into each of its three tally slots — a
+/// value a zero-initialised buffer cannot hold, so a mark is proof a workgroup
+/// with that index ran.
+pub const PROBE_DISPATCH_INDIRECT_MARK: u32 = 0x00C0_FFEE;
+
+/// [`PROBE_DISPATCH_INDIRECT_MARK`] as the four little-endian bytes a slot holds
+/// it as — what the gate checks a marked slot against.
+pub const PROBE_DISPATCH_INDIRECT_MARK_BYTES: [u8; 4] = PROBE_DISPATCH_INDIRECT_MARK.to_le_bytes();
+
+/// Where in the args buffer the real workgroup counts live, and the offset
+/// [`dispatch_indirect`](crate::StreamWriter::dispatch_indirect) is given.
+///
+/// **Deliberately not zero, and what sits at zero is deliberately `1, 1, 1`.**
+/// A replayer that dropped the offset would read the decoy at the start of the
+/// buffer and dispatch one workgroup — the exact failure the tally makes
+/// visible — instead of reading past the end and erroring in a way that would
+/// have been noticed anyway. A multiple of four, which is what WebGPU requires
+/// of `dispatchWorkgroupsIndirect`'s offset.
+pub const PROBE_DISPATCH_INDIRECT_ARGS_OFFSET: u64 = 16;
+
+/// The args buffer's contents: a `1, 1, 1` decoy at offset 0, then the real
+/// `VkDispatchIndirectCommand` — `workgroupCountX`, `Y`, `Z` — at
+/// [`PROBE_DISPATCH_INDIRECT_ARGS_OFFSET`], as the little-endian bytes WebGPU's
+/// `dispatchWorkgroupsIndirect` reads.
+///
+/// The trailing word pads the write to a length `queue.writeBuffer` accepts, as
+/// [`PROBE_INDIRECT_INDEX_BYTES`]'s fourth index does.
+pub const PROBE_DISPATCH_INDIRECT_ARGS_BYTES: [u8; 32] = [
+    1, 0, 0, 0, // decoy workgroupCountX = 1
+    1, 0, 0, 0, // decoy workgroupCountY = 1
+    1, 0, 0, 0, // decoy workgroupCountZ = 1
+    0, 0, 0, 0, // decoy padding
+    5, 0, 0, 0, // workgroupCountX = PROBE_DISPATCH_INDIRECT_COUNTS[0]
+    3, 0, 0, 0, // workgroupCountY = PROBE_DISPATCH_INDIRECT_COUNTS[1]
+    2, 0, 0, 0, // workgroupCountZ = PROBE_DISPATCH_INDIRECT_COUNTS[2]
+    0, 0, 0, 0, // padding
+];
+
+/// The compute WGSL: one invocation per workgroup, tallying which workgroup
+/// indices ran.
+///
+/// **`@workgroup_size(1)` and `@builtin(workgroup_id)`**, so that what the shader
+/// records is the workgroup grid itself and nothing about an invocation grid on
+/// top of it. Each workgroup increments the counter at
+/// [`PROBE_DISPATCH_INDIRECT_TOTAL_SLOT`] and writes
+/// [`PROBE_DISPATCH_INDIRECT_MARK`] into one slot of each axis region —
+/// `x` marks [`PROBE_DISPATCH_INDIRECT_BASES`]`[0] + x`, and `y` and `z` theirs.
+/// Reading the marks back gives the three counts the browser dispatched, and the
+/// counter gives their product.
+///
+/// **`array<atomic<u32>>` and never a plain `array<u32>`**: every workgroup with
+/// the same `x` writes the same X slot, so the writes genuinely race. The value
+/// written is the same from every one of them, but a non-atomic racing write is
+/// undefined in WGSL's memory model whatever the value, and an atomic store
+/// costs nothing here. `main` is the entry point
+/// [`PROBE_DISPATCH_INDIRECT_PIPELINE_DESC`] names.
+pub const PROBE_DISPATCH_INDIRECT_WGSL: &str = concat!(
+    "@group(0) @binding(0) var<storage, read_write> out: array<atomic<u32>>; ",
+    "@compute @workgroup_size(1) fn main(@builtin(workgroup_id) wid: vec3<u32>) { ",
+    "atomicAdd(&out[0u], 1u); ",
+    "atomicStore(&out[1u + wid.x], 0xc0ffeeu); ",
+    "atomicStore(&out[17u + wid.y], 0xc0ffeeu); ",
+    "atomicStore(&out[33u + wid.z], 0xc0ffeeu); }"
+);
+
+/// The storage buffer the dispatched workgroups tally into and the copy reads.
+/// `13 << 32`, index `0`.
+pub const PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER: BufferHandle =
+    match BufferHandle::from_bits(13 << 32) {
+        Some(buffer) => buffer,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The storage buffer's descriptor: [`PROBE_DISPATCH_INDIRECT_SLOTS`] `u32`s,
+/// [`BufferUsage::STORAGE`] (the shader's `read_write` binding) and
+/// [`BufferUsage::TRANSFER_SRC`] (it is copied from), device-local.
+#[must_use]
+pub const fn probe_dispatch_indirect_storage_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu indirect dispatch storage buffer"),
+        size: (PROBE_DISPATCH_INDIRECT_SLOTS as u64) * 4,
+        usage: BufferUsage::STORAGE.union(BufferUsage::TRANSFER_SRC),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The host buffer the tally is copied into and read back from. `13 << 32`,
+/// index `1`.
+pub const PROBE_DISPATCH_INDIRECT_HOST_BUFFER: BufferHandle =
+    match BufferHandle::from_bits((13 << 32) | 1) {
+        Some(buffer) => buffer,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The host buffer's descriptor — the readback buffer's shape
+/// ([`MemoryLocation::HostReadback`], [`BufferUsage::TRANSFER_DST`]) at
+/// [`PROBE_DISPATCH_INDIRECT_SLOTS`] `u32`s, mirroring
+/// [`probe_dispatch_host_buffer_desc`].
+#[must_use]
+pub const fn probe_dispatch_indirect_host_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu indirect dispatch host buffer"),
+        size: (PROBE_DISPATCH_INDIRECT_SLOTS as u64) * 4,
+        usage: BufferUsage::TRANSFER_DST,
+        memory: MemoryLocation::HostReadback,
+    }
+}
+
+/// The indirect-args buffer `write_buffer` fills and `dispatch_indirect` reads.
+/// `13 << 32`, index `2`.
+pub const PROBE_DISPATCH_INDIRECT_ARGS_BUFFER: BufferHandle =
+    match BufferHandle::from_bits((13 << 32) | 2) {
+        Some(buffer) => buffer,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The args buffer — [`PROBE_DISPATCH_INDIRECT_ARGS_BYTES`] on the device,
+/// [`BufferUsage::INDIRECT`] so it can back the dispatch and
+/// [`BufferUsage::TRANSFER_DST`] so `queue.writeBuffer` can fill it.
+#[must_use]
+pub const fn probe_dispatch_indirect_args_buffer_desc() -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu indirect dispatch args buffer"),
+        size: PROBE_DISPATCH_INDIRECT_ARGS_BYTES.len() as u64,
+        usage: BufferUsage::INDIRECT.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
+
+/// The shader-module handle the indirect dispatch's pipeline names. `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_SHADER_MODULE: ShaderModuleHandle =
+    match ShaderModuleHandle::from_bits(13 << 32) {
+        Some(module) => module,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The shader module the indirect dispatch's frame creates. WGSL only, on
+/// [`PROBE_DISPATCH_SHADER_MODULE_DESC`]'s terms.
+pub const PROBE_DISPATCH_INDIRECT_SHADER_MODULE_DESC: ShaderModuleDesc<'static> =
+    ShaderModuleDesc {
+        label: Some("crcbl-webgpu indirect dispatch shader"),
+        spirv: &[],
+        wgsl: Some(PROBE_DISPATCH_INDIRECT_WGSL),
+        msl: None,
+        dxil: &[],
+    };
+
+/// The bind-group-layout handle the indirect dispatch's pipeline is built
+/// against. `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits(13 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The one binding the shader declares: a `read_write` storage buffer at
+/// `@group(0) @binding(0)`, visible to compute —
+/// [`PROBE_DISPATCH_BIND_GROUP_LAYOUT_ENTRIES`]'s shape, on this probe's own
+/// buffer.
+pub const PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 1] =
+    PROBE_DISPATCH_BIND_GROUP_LAYOUT_ENTRIES;
+
+/// The bind-group layout the indirect dispatch's frame creates just before the
+/// group.
+pub const PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> =
+    BindGroupLayoutDesc {
+        label: Some("crcbl-webgpu indirect dispatch layout"),
+        entries: &PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT_ENTRIES,
+    };
+
+/// The bind-group handle the indirect dispatch binds at slot 0. `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_BIND_GROUP: BindGroupHandle =
+    match BindGroupHandle::from_bits(13 << 32) {
+        Some(group) => group,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The one assignment the bind group carries: the whole of
+/// [`PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER`] at binding 0.
+pub const PROBE_DISPATCH_INDIRECT_BIND_GROUP_ENTRIES: [BindGroupEntry; 1] = [BindGroupEntry {
+    binding: 0,
+    array_index: 0,
+    resource: BindingResource::whole_buffer(PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER),
+}];
+
+/// The descriptor the indirect dispatch's `create_bind_group` asks with.
+pub const PROBE_DISPATCH_INDIRECT_BIND_GROUP_DESC: BindGroupDesc<'static> = BindGroupDesc {
+    label: Some("crcbl-webgpu indirect dispatch bind group"),
+    layout: PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT,
+    entries: &PROBE_DISPATCH_INDIRECT_BIND_GROUP_ENTRIES,
+    variable_count: None,
+};
+
+/// The pipeline-layout handle the indirect dispatch's pipeline is built against.
+/// `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT: PipelineLayoutHandle =
+    match PipelineLayoutHandle::from_bits(13 << 32) {
+        Some(layout) => layout,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The one bind-group layout
+/// [`PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT_DESC`] names.
+pub const PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS: [BindGroupLayoutHandle; 1] =
+    [PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT];
+
+/// The pipeline layout the indirect dispatch's frame creates — the one
+/// bind-group layout above, no push constants.
+pub const PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT_DESC: PipelineLayoutDesc<'static> =
+    PipelineLayoutDesc {
+        label: Some("crcbl-webgpu indirect dispatch pipeline layout"),
+        bind_group_layouts: &PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT_BIND_GROUP_LAYOUTS,
+        push_constants: None,
+    };
+
+/// The compute-pipeline handle the indirect dispatch binds. `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_PIPELINE: ComputePipelineHandle =
+    match ComputePipelineHandle::from_bits(13 << 32) {
+        Some(pipeline) => pipeline,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The pipeline the indirect dispatch binds and runs.
+///
+/// **`workgroup_size` is `[1, 1, 1]`, matching the module's
+/// `@workgroup_size(1)`.** The replayer drops the field — WebGPU reads the real
+/// value from the module — so it is chosen to agree with the shader, exactly as
+/// [`PROBE_DISPATCH_PIPELINE_DESC`] does.
+pub const PROBE_DISPATCH_INDIRECT_PIPELINE_DESC: ComputePipelineDesc<'static> =
+    ComputePipelineDesc {
+        label: Some("crcbl-webgpu indirect dispatch pipeline"),
+        layout: PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT,
+        compute: ShaderEntry {
+            module: PROBE_DISPATCH_INDIRECT_SHADER_MODULE,
+            entry_point: "main",
+        },
+        workgroup_size: [1, 1, 1],
+    };
+
+/// The queue the indirect dispatch names in its command encoder. `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_QUEUE: QueueHandle = match QueueHandle::from_bits(13 << 32) {
+    Some(queue) => queue,
+    None => panic!("generation 13 is not zero"),
+};
+
+/// The command buffer the indirect dispatch finishes its encoder into.
+/// `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_COMMAND_BUFFER: CommandBufferHandle =
+    match CommandBufferHandle::from_bits(13 << 32) {
+        Some(command_buffer) => command_buffer,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The in-flight readback the indirect dispatch requests and polls. `13 << 32`.
+pub const PROBE_DISPATCH_INDIRECT_READBACK: ReadbackHandle =
+    match ReadbackHandle::from_bits(13 << 32) {
+        Some(readback) => readback,
+        None => panic!("generation 13 is not zero"),
+    };
+
+/// The buffer→buffer copy that moves the tally into the host buffer — the whole
+/// of it, from offset 0 to offset 0.
+#[must_use]
+pub const fn probe_dispatch_indirect_copy() -> BufferCopy {
+    BufferCopy {
+        src: PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER,
+        src_offset: 0,
+        dst: PROBE_DISPATCH_INDIRECT_HOST_BUFFER,
+        dst_offset: 0,
+        size: (PROBE_DISPATCH_INDIRECT_SLOTS as u64) * 4,
+    }
+}
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -4967,6 +5342,85 @@ impl ComputeProbe {
             },
             // A reply of another shape naming this sequence settles rather than
             // waits, exactly as [`DrawProbe::absorb`] argues.
+            _ => Self::Pending,
+        };
+        true
+    }
+}
+
+/// One indirect-dispatch-and-read-back, from the frame that dispatched off a
+/// buffer to the bytes read back — [`ComputeProbe`]'s state machine again, on
+/// the indirect path.
+///
+/// The frame it encodes differs only in where the workgroup counts come from: an
+/// args buffer filled by [`write_buffer`](crate::StreamWriter::write_buffer) and
+/// read by [`dispatch_indirect`](crate::StreamWriter::dispatch_indirect), rather
+/// than three numbers on the command. Both end in the same `request_readback`
+/// and are answered by the same replies, so the transitions mirror
+/// [`ComputeProbe`]'s exactly.
+///
+/// **Not [`Eq`]**, because [`Ready`](Self::Ready) holds the bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum DispatchIndirectProbe {
+    /// Nothing has been asked, or the channel had no room.
+    #[default]
+    Unasked,
+    /// The setup frame is on the stream; no poll is out yet.
+    Requested,
+    /// A poll is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`PollReadback`](crate::Command::PollReadback), which
+        /// the reply will name.
+        sequence: u64,
+    },
+    /// The last poll answered pending; the map has not resolved, so the next
+    /// frame polls again.
+    Pending,
+    /// The bytes are in.
+    Ready {
+        /// The bytes read back — [`PROBE_DISPATCH_INDIRECT_SLOTS`] `u32`s
+        /// holding the tally [`PROBE_DISPATCH_INDIRECT_WGSL`] describes.
+        bytes: Vec<u8>,
+    },
+    /// The browser refused the readback, and said why.
+    ///
+    /// A settled state rather than a step: a readback is answered exactly
+    /// once, so there is nothing left for a later frame to poll for.
+    Failed {
+        /// What the browser or the replayer said, as
+        /// [`Reply::ReadbackFailed`] carried it.
+        reason: String,
+    },
+}
+
+impl DispatchIndirectProbe {
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there — [`ComputeProbe::absorb`]'s logic, on this probe's sequence.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::ReadbackReady { data, .. } => Self::Ready {
+                bytes: data.clone(),
+            },
+            Reply::ReadbackPending { .. } => Self::Pending,
+            Reply::ReadbackFailed { reason, .. } => Self::Failed {
+                reason: reason.clone(),
+            },
+            // A reply of another shape naming this sequence settles rather than
+            // waits, exactly as [`ComputeProbe::absorb`] argues.
             _ => Self::Pending,
         };
         true
@@ -5889,6 +6343,12 @@ struct Probe {
     /// hit under [`COMPUTE_UNDECODABLE`]. Its own string for
     /// [`reason`](Self::reason)'s reason.
     compute_reason: String,
+    dispatch_indirect: DispatchIndirectProbe,
+    /// Why the indirect dispatch probe stopped: the browser's own words under
+    /// [`DISPATCH_INDIRECT_FAILED`], or the [`DecodeError`](crate::DecodeError)
+    /// the drain hit under [`DISPATCH_INDIRECT_UNDECODABLE`]. Its own string for
+    /// [`reason`](Self::reason)'s reason.
+    dispatch_indirect_reason: String,
     copychain: CopyChainProbe,
     /// Why the copy chain probe stopped: the browser's own words under
     /// [`COPYCHAIN_FAILED`], or the [`DecodeError`](crate::DecodeError) the drain
@@ -5971,6 +6431,8 @@ impl Probe {
             draw_reason: String::new(),
             compute: ComputeProbe::Unasked,
             compute_reason: String::new(),
+            dispatch_indirect: DispatchIndirectProbe::Unasked,
+            dispatch_indirect_reason: String::new(),
             copychain: CopyChainProbe::Unasked,
             copychain_reason: String::new(),
             fill: FillProbe::Unasked,
@@ -6408,6 +6870,7 @@ impl Probe {
                 self.readback.absorb(&replies);
                 self.draw.absorb(&replies);
                 self.compute.absorb(&replies);
+                self.dispatch_indirect.absorb(&replies);
                 self.copychain.absorb(&replies);
                 self.fill.absorb(&replies);
                 self.present.absorb(&replies);
@@ -8130,6 +8593,171 @@ impl Probe {
         }
     }
 
+    /// Encode the indirect-dispatch setup frame:
+    /// [`request_compute`](Self::request_compute)'s frame with the workgroup
+    /// counts moved off the command and into a buffer.
+    ///
+    /// **One frame, many commands, no reply.** It records the storage buffer, the
+    /// host buffer and the args buffer ([`BufferUsage::INDIRECT`]), the pipeline's
+    /// four resources, then **fills the args with
+    /// [`write_buffer`](crate::StreamWriter::write_buffer)** —
+    /// [`PROBE_DISPATCH_INDIRECT_ARGS_BYTES`], whose real counts sit at
+    /// [`PROBE_DISPATCH_INDIRECT_ARGS_OFFSET`] behind a `1, 1, 1` decoy. A command
+    /// encoder, a compute pass that binds [`PROBE_DISPATCH_INDIRECT_PIPELINE`],
+    /// binds the storage buffer's group and records
+    /// [`dispatch_indirect`](crate::StreamWriter::dispatch_indirect) reading the
+    /// args at that offset. The buffer→buffer copy, the finish, the submit, and
+    /// the `request_readback` under [`PROBE_DISPATCH_INDIRECT_READBACK`] close it.
+    ///
+    /// The write is recorded before the encoder so `queue.writeBuffer` is ordered
+    /// on the queue ahead of the submit that reads the buffer, as
+    /// [`request_indirect`](Self::request_indirect) does.
+    ///
+    /// None is answered — every handle is caller-allocated — so it is
+    /// [`encode`](StreamChannel::encode); the poll is what is awaited.
+    ///
+    /// `false` until a device has opened, [`request_draw`](Self::request_draw)'s
+    /// ordering rule — every command here is a device method.
+    fn request_dispatch_indirect(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let encoded = channel
+            .encode(|stream| {
+                stream.create_buffer(
+                    PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER,
+                    &probe_dispatch_indirect_storage_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_DISPATCH_INDIRECT_HOST_BUFFER,
+                    &probe_dispatch_indirect_host_buffer_desc(),
+                );
+                stream.create_buffer(
+                    PROBE_DISPATCH_INDIRECT_ARGS_BUFFER,
+                    &probe_dispatch_indirect_args_buffer_desc(),
+                );
+                stream.create_shader_module(
+                    PROBE_DISPATCH_INDIRECT_SHADER_MODULE,
+                    &PROBE_DISPATCH_INDIRECT_SHADER_MODULE_DESC,
+                );
+                stream.create_bind_group_layout(
+                    PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT,
+                    &PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT_DESC,
+                );
+                stream.create_bind_group(
+                    PROBE_DISPATCH_INDIRECT_BIND_GROUP,
+                    &PROBE_DISPATCH_INDIRECT_BIND_GROUP_DESC,
+                );
+                stream.create_pipeline_layout(
+                    PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT,
+                    &PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT_DESC,
+                );
+                stream.create_compute_pipeline(
+                    PROBE_DISPATCH_INDIRECT_PIPELINE,
+                    &PROBE_DISPATCH_INDIRECT_PIPELINE_DESC,
+                );
+                stream.write_buffer(
+                    PROBE_DISPATCH_INDIRECT_ARGS_BUFFER,
+                    0,
+                    &PROBE_DISPATCH_INDIRECT_ARGS_BYTES,
+                );
+                stream.create_command_encoder(&CommandEncoderDesc {
+                    label: Some("crcbl-webgpu indirect dispatch encoder"),
+                    queue: PROBE_DISPATCH_INDIRECT_QUEUE,
+                });
+                stream.begin_compute_pass(&ComputePassDesc {
+                    label: Some("crcbl-webgpu indirect dispatch pass"),
+                    timestamp_writes: None,
+                });
+                stream.bind_compute_pipeline(PROBE_DISPATCH_INDIRECT_PIPELINE);
+                stream.bind_group(
+                    0,
+                    PROBE_DISPATCH_INDIRECT_BIND_GROUP,
+                    &[],
+                    PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT,
+                );
+                stream.dispatch_indirect(
+                    PROBE_DISPATCH_INDIRECT_ARGS_BUFFER,
+                    PROBE_DISPATCH_INDIRECT_ARGS_OFFSET,
+                );
+                stream.end_compute_pass();
+                stream.copy_buffer_to_buffer(&probe_dispatch_indirect_copy());
+                stream.finish(PROBE_DISPATCH_INDIRECT_COMMAND_BUFFER);
+                stream.submit(&SubmitInfo::new(&[PROBE_DISPATCH_INDIRECT_COMMAND_BUFFER]));
+                stream.request_readback(
+                    PROBE_DISPATCH_INDIRECT_READBACK,
+                    &ReadbackDesc {
+                        label: Some("crcbl-webgpu indirect dispatch readback"),
+                        buffer: PROBE_DISPATCH_INDIRECT_HOST_BUFFER,
+                        offset: 0,
+                        size: probe_dispatch_indirect_host_buffer_desc().size,
+                        after: None,
+                    },
+                )
+            })
+            .is_some();
+        if encoded {
+            self.dispatch_indirect = DispatchIndirectProbe::Requested;
+            self.dispatch_indirect_reason.clear();
+        }
+        encoded
+    }
+
+    /// Encode one [`poll_readback`](crate::StreamWriter::poll_readback) for the
+    /// indirect dispatch's readback and register its wait, unless it is already
+    /// waiting or ready — [`poll_compute`](Self::poll_compute)'s protocol on this
+    /// probe's handle.
+    fn poll_dispatch_indirect(&mut self) -> bool {
+        if !matches!(
+            self.dispatch_indirect,
+            DispatchIndirectProbe::Requested | DispatchIndirectProbe::Pending
+        ) {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(sequence) =
+            channel.encode_awaited(|stream| stream.poll_readback(PROBE_DISPATCH_INDIRECT_READBACK))
+        else {
+            return false;
+        };
+        self.dispatch_indirect = DispatchIndirectProbe::Waiting { sequence };
+        true
+    }
+
+    /// Drain, absorb, and report where the indirect dispatch's readback has got
+    /// to.
+    fn dispatch_indirect_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.dispatch_indirect_reason = error.to_string();
+            return DISPATCH_INDIRECT_UNDECODABLE;
+        }
+        match &self.dispatch_indirect {
+            DispatchIndirectProbe::Unasked => DISPATCH_INDIRECT_UNASKED,
+            DispatchIndirectProbe::Requested => DISPATCH_INDIRECT_REQUESTED,
+            DispatchIndirectProbe::Waiting { .. } => DISPATCH_INDIRECT_WAITING,
+            DispatchIndirectProbe::Pending => DISPATCH_INDIRECT_PENDING,
+            DispatchIndirectProbe::Ready { .. } => DISPATCH_INDIRECT_READY,
+            DispatchIndirectProbe::Failed { reason } => {
+                self.dispatch_indirect_reason.clone_from(reason);
+                DISPATCH_INDIRECT_FAILED
+            }
+        }
+    }
+
+    /// The bytes the indirect dispatch's readback came back with, or an empty
+    /// slice if it has not.
+    fn dispatch_indirect_bytes(&self) -> &[u8] {
+        match &self.dispatch_indirect {
+            DispatchIndirectProbe::Ready { bytes } => bytes,
+            _ => &[],
+        }
+    }
+
     /// Encode the copy-chain setup frame: a dispatch that fills a storage buffer
     /// with the red pattern, then the buffer→image, image→image and image→buffer
     /// copies that carry it through two textures to a host buffer, read back.
@@ -9311,6 +9939,106 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to run a compute dispatch whose **workgroup counts come out
+    /// of a buffer**, and start reading its tally back on the device it opened.
+    ///
+    /// `1` when the setup frame — the three buffers, the pipeline's four
+    /// resources, the `write_buffer` that fills the args, an encoder, a compute
+    /// pass that binds and dispatches indirectly, the copy, finish, submit and
+    /// `request_readback` — is on the stream; `0` when no device has opened yet,
+    /// the probe is re-entered, or another channel is installed.
+    ///
+    /// **This is the only observation of `dispatchWorkgroupsIndirect` in a real
+    /// browser anywhere.** What comes back is a tally of which workgroup indices
+    /// ran on each axis, so it says *which counts were used* and not merely that
+    /// something was dispatched: a dispatch of
+    /// [`PROBE_DISPATCH_INDIRECT_COUNTS`](super::PROBE_DISPATCH_INDIRECT_COUNTS)
+    /// and a dispatch of `1×1×1` — what reading the decoy at the start of the
+    /// args buffer would produce — read back differently.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_dispatch_indirect() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_dispatch_indirect()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Poll the indirect dispatch's in-flight readback, once, on the reply
+    /// channel.
+    ///
+    /// `1` when a [`poll_readback`](crate::StreamWriter::poll_readback) is on the
+    /// stream with its wait registered; `0` when there is nothing to poll for. A
+    /// no-op until the previous poll is answered, so the gate can call it blindly
+    /// each frame.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_dispatch_indirect_poll() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.poll_dispatch_indirect()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the replies and report where the indirect dispatch's readback has
+    /// got to — one of the `DISPATCH_INDIRECT_*` codes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_dispatch_indirect_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.dispatch_indirect_state(),
+            Err(_) => super::DISPATCH_INDIRECT_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_dispatch_indirect_state`] starts — the browser's
+    /// words under
+    /// [`DISPATCH_INDIRECT_FAILED`](super::DISPATCH_INDIRECT_FAILED), the decode
+    /// error under
+    /// [`DISPATCH_INDIRECT_UNDECODABLE`](super::DISPATCH_INDIRECT_UNDECODABLE),
+    /// and empty otherwise. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_dispatch_indirect_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.dispatch_indirect_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_dispatch_indirect_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.dispatch_indirect_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// A pointer into wasm memory to the tally the indirect dispatch's readback
+    /// came back with.
+    ///
+    /// Read [`__crcbl_web_gpu_probe_dispatch_indirect_bytes_len`] bytes from
+    /// here, and only once
+    /// [`__crcbl_web_gpu_probe_dispatch_indirect_state`] has answered
+    /// [`DISPATCH_INDIRECT_READY`](super::DISPATCH_INDIRECT_READY): before that
+    /// the length is `0` and this points at an empty buffer. Nothing here grows
+    /// wasm memory, so the pointer is stable until the next drain.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.dispatch_indirect_bytes().as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How many bytes [`__crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr`]
+    /// points at — the readback's length, or `0` if it has not answered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_dispatch_indirect_bytes_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.dispatch_indirect_bytes().len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Ask the page to run the copy chain — a dispatch that fills a storage
     /// buffer red, a buffer→image copy into a texture, an image→image copy to a
     /// second texture, and an image→buffer copy out to a host buffer — and start
@@ -10326,49 +11054,54 @@ mod tests {
         __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
         __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
-        __crcbl_web_gpu_probe_draw, __crcbl_web_gpu_probe_draw_bytes_len,
-        __crcbl_web_gpu_probe_draw_bytes_ptr, __crcbl_web_gpu_probe_draw_poll,
-        __crcbl_web_gpu_probe_draw_reason_len, __crcbl_web_gpu_probe_draw_reason_ptr,
-        __crcbl_web_gpu_probe_draw_state, __crcbl_web_gpu_probe_features_hi,
-        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_fill,
-        __crcbl_web_gpu_probe_fill_bytes_len, __crcbl_web_gpu_probe_fill_bytes_ptr,
-        __crcbl_web_gpu_probe_fill_poll, __crcbl_web_gpu_probe_fill_reason_len,
-        __crcbl_web_gpu_probe_fill_reason_ptr, __crcbl_web_gpu_probe_fill_state,
-        __crcbl_web_gpu_probe_graphics_pipeline, __crcbl_web_gpu_probe_image,
-        __crcbl_web_gpu_probe_image_view, __crcbl_web_gpu_probe_indirect,
-        __crcbl_web_gpu_probe_indirect_bytes_len, __crcbl_web_gpu_probe_indirect_bytes_ptr,
-        __crcbl_web_gpu_probe_indirect_poll, __crcbl_web_gpu_probe_indirect_reason_len,
-        __crcbl_web_gpu_probe_indirect_reason_ptr, __crcbl_web_gpu_probe_indirect_state,
-        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_msaa,
-        __crcbl_web_gpu_probe_msaa_bytes_len, __crcbl_web_gpu_probe_msaa_bytes_ptr,
-        __crcbl_web_gpu_probe_msaa_poll, __crcbl_web_gpu_probe_msaa_reason_len,
-        __crcbl_web_gpu_probe_msaa_reason_ptr, __crcbl_web_gpu_probe_msaa_samples,
-        __crcbl_web_gpu_probe_msaa_state, __crcbl_web_gpu_probe_occlusion,
-        __crcbl_web_gpu_probe_occlusion_bytes_len, __crcbl_web_gpu_probe_occlusion_bytes_ptr,
-        __crcbl_web_gpu_probe_occlusion_poll, __crcbl_web_gpu_probe_occlusion_reason_len,
-        __crcbl_web_gpu_probe_occlusion_reason_ptr, __crcbl_web_gpu_probe_occlusion_state,
-        __crcbl_web_gpu_probe_occlusion_values_len, __crcbl_web_gpu_probe_occlusion_values_ptr,
-        __crcbl_web_gpu_probe_occlusion_values_state, __crcbl_web_gpu_probe_parity,
-        __crcbl_web_gpu_probe_parity_checked, __crcbl_web_gpu_probe_parity_failures_len,
-        __crcbl_web_gpu_probe_parity_failures_ptr, __crcbl_web_gpu_probe_parity_held,
-        __crcbl_web_gpu_probe_parity_report_len, __crcbl_web_gpu_probe_parity_report_ptr,
-        __crcbl_web_gpu_probe_pipeline_layout, __crcbl_web_gpu_probe_present,
-        __crcbl_web_gpu_probe_present_bytes_len, __crcbl_web_gpu_probe_present_bytes_ptr,
-        __crcbl_web_gpu_probe_present_poll, __crcbl_web_gpu_probe_present_reason_len,
-        __crcbl_web_gpu_probe_present_reason_ptr, __crcbl_web_gpu_probe_present_state,
-        __crcbl_web_gpu_probe_readback_reason_len, __crcbl_web_gpu_probe_readback_reason_ptr,
-        __crcbl_web_gpu_probe_readback_state, __crcbl_web_gpu_probe_reconfigure,
-        __crcbl_web_gpu_probe_reconfigure_bytes_len, __crcbl_web_gpu_probe_reconfigure_bytes_ptr,
-        __crcbl_web_gpu_probe_reconfigure_poll, __crcbl_web_gpu_probe_reconfigure_reason_len,
-        __crcbl_web_gpu_probe_reconfigure_reason_ptr, __crcbl_web_gpu_probe_reconfigure_state,
-        __crcbl_web_gpu_probe_sampler, __crcbl_web_gpu_probe_shader_module,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_stencil,
-        __crcbl_web_gpu_probe_stencil_bytes_len, __crcbl_web_gpu_probe_stencil_bytes_ptr,
-        __crcbl_web_gpu_probe_stencil_poll, __crcbl_web_gpu_probe_stencil_reason_len,
-        __crcbl_web_gpu_probe_stencil_reason_ptr, __crcbl_web_gpu_probe_stencil_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_dispatch_indirect, __crcbl_web_gpu_probe_dispatch_indirect_bytes_len,
+        __crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr,
+        __crcbl_web_gpu_probe_dispatch_indirect_poll,
+        __crcbl_web_gpu_probe_dispatch_indirect_reason_len,
+        __crcbl_web_gpu_probe_dispatch_indirect_reason_ptr,
+        __crcbl_web_gpu_probe_dispatch_indirect_state, __crcbl_web_gpu_probe_draw,
+        __crcbl_web_gpu_probe_draw_bytes_len, __crcbl_web_gpu_probe_draw_bytes_ptr,
+        __crcbl_web_gpu_probe_draw_poll, __crcbl_web_gpu_probe_draw_reason_len,
+        __crcbl_web_gpu_probe_draw_reason_ptr, __crcbl_web_gpu_probe_draw_state,
+        __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
+        __crcbl_web_gpu_probe_fill, __crcbl_web_gpu_probe_fill_bytes_len,
+        __crcbl_web_gpu_probe_fill_bytes_ptr, __crcbl_web_gpu_probe_fill_poll,
+        __crcbl_web_gpu_probe_fill_reason_len, __crcbl_web_gpu_probe_fill_reason_ptr,
+        __crcbl_web_gpu_probe_fill_state, __crcbl_web_gpu_probe_graphics_pipeline,
+        __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
+        __crcbl_web_gpu_probe_indirect, __crcbl_web_gpu_probe_indirect_bytes_len,
+        __crcbl_web_gpu_probe_indirect_bytes_ptr, __crcbl_web_gpu_probe_indirect_poll,
+        __crcbl_web_gpu_probe_indirect_reason_len, __crcbl_web_gpu_probe_indirect_reason_ptr,
+        __crcbl_web_gpu_probe_indirect_state, __crcbl_web_gpu_probe_max_image_2d,
+        __crcbl_web_gpu_probe_msaa, __crcbl_web_gpu_probe_msaa_bytes_len,
+        __crcbl_web_gpu_probe_msaa_bytes_ptr, __crcbl_web_gpu_probe_msaa_poll,
+        __crcbl_web_gpu_probe_msaa_reason_len, __crcbl_web_gpu_probe_msaa_reason_ptr,
+        __crcbl_web_gpu_probe_msaa_samples, __crcbl_web_gpu_probe_msaa_state,
+        __crcbl_web_gpu_probe_occlusion, __crcbl_web_gpu_probe_occlusion_bytes_len,
+        __crcbl_web_gpu_probe_occlusion_bytes_ptr, __crcbl_web_gpu_probe_occlusion_poll,
+        __crcbl_web_gpu_probe_occlusion_reason_len, __crcbl_web_gpu_probe_occlusion_reason_ptr,
+        __crcbl_web_gpu_probe_occlusion_state, __crcbl_web_gpu_probe_occlusion_values_len,
+        __crcbl_web_gpu_probe_occlusion_values_ptr, __crcbl_web_gpu_probe_occlusion_values_state,
+        __crcbl_web_gpu_probe_parity, __crcbl_web_gpu_probe_parity_checked,
+        __crcbl_web_gpu_probe_parity_failures_len, __crcbl_web_gpu_probe_parity_failures_ptr,
+        __crcbl_web_gpu_probe_parity_held, __crcbl_web_gpu_probe_parity_report_len,
+        __crcbl_web_gpu_probe_parity_report_ptr, __crcbl_web_gpu_probe_pipeline_layout,
+        __crcbl_web_gpu_probe_present, __crcbl_web_gpu_probe_present_bytes_len,
+        __crcbl_web_gpu_probe_present_bytes_ptr, __crcbl_web_gpu_probe_present_poll,
+        __crcbl_web_gpu_probe_present_reason_len, __crcbl_web_gpu_probe_present_reason_ptr,
+        __crcbl_web_gpu_probe_present_state, __crcbl_web_gpu_probe_readback_reason_len,
+        __crcbl_web_gpu_probe_readback_reason_ptr, __crcbl_web_gpu_probe_readback_state,
+        __crcbl_web_gpu_probe_reconfigure, __crcbl_web_gpu_probe_reconfigure_bytes_len,
+        __crcbl_web_gpu_probe_reconfigure_bytes_ptr, __crcbl_web_gpu_probe_reconfigure_poll,
+        __crcbl_web_gpu_probe_reconfigure_reason_len, __crcbl_web_gpu_probe_reconfigure_reason_ptr,
+        __crcbl_web_gpu_probe_reconfigure_state, __crcbl_web_gpu_probe_sampler,
+        __crcbl_web_gpu_probe_shader_module, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_stencil, __crcbl_web_gpu_probe_stencil_bytes_len,
+        __crcbl_web_gpu_probe_stencil_bytes_ptr, __crcbl_web_gpu_probe_stencil_poll,
+        __crcbl_web_gpu_probe_stencil_reason_len, __crcbl_web_gpu_probe_stencil_reason_ptr,
+        __crcbl_web_gpu_probe_stencil_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -12476,6 +13209,413 @@ mod tests {
         assert_eq!(compute, ComputeProbe::Waiting { sequence: 7 });
     }
 
+    /// The indirect dispatch probe's bytes, read the way JS reads them.
+    fn dispatch_indirect_bytes() -> Vec<u8> {
+        let len = __crcbl_web_gpu_probe_dispatch_indirect_bytes_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_dispatch_indirect_bytes_ptr();
+        if len == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !ptr.is_null(),
+            "the indirect dispatch answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::dispatch_indirect`
+        // bytes, which nothing between the two calls above can have moved —
+        // neither export allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        bytes.to_vec()
+    }
+
+    /// One little-endian `u32` out of a byte array, for reading the args buffer
+    /// back the way the browser reads it.
+    fn le_u32(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    /// **Every indirect-dispatch handle is generation thirteen**, a generation
+    /// past every other probe: the frame has three buffers, the pipeline's four
+    /// resources, a command buffer, a queue and a readback all live at once, and
+    /// none of them may land in the slot another probe files its own resources
+    /// under in the shared page. The three buffers are the one case that shares a
+    /// type, so they differ by index within generation 13.
+    #[test]
+    fn the_indirect_dispatch_handles_are_a_generation_past_every_other_probe() {
+        for bits in [
+            PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER.to_bits(),
+            PROBE_DISPATCH_INDIRECT_HOST_BUFFER.to_bits(),
+            PROBE_DISPATCH_INDIRECT_ARGS_BUFFER.to_bits(),
+            PROBE_DISPATCH_INDIRECT_SHADER_MODULE.to_bits(),
+            PROBE_DISPATCH_INDIRECT_BIND_GROUP_LAYOUT.to_bits(),
+            PROBE_DISPATCH_INDIRECT_BIND_GROUP.to_bits(),
+            PROBE_DISPATCH_INDIRECT_PIPELINE_LAYOUT.to_bits(),
+            PROBE_DISPATCH_INDIRECT_PIPELINE.to_bits(),
+            PROBE_DISPATCH_INDIRECT_COMMAND_BUFFER.to_bits(),
+            PROBE_DISPATCH_INDIRECT_QUEUE.to_bits(),
+            PROBE_DISPATCH_INDIRECT_READBACK.to_bits(),
+        ] {
+            assert_eq!(
+                bits >> 32,
+                13,
+                "every indirect-dispatch handle is generation thirteen"
+            );
+        }
+        // The three buffers share a kind, so no two of them may share bits.
+        let buffers = [
+            PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER.to_bits(),
+            PROBE_DISPATCH_INDIRECT_HOST_BUFFER.to_bits(),
+            PROBE_DISPATCH_INDIRECT_ARGS_BUFFER.to_bits(),
+        ];
+        for (at, bits) in buffers.iter().enumerate() {
+            assert!(
+                !buffers[at + 1..].contains(bits),
+                "two indirect-dispatch buffers share handle bits"
+            );
+        }
+        // A generation clear of the direct dispatch probe, whose frame builds the
+        // same kinds of resource.
+        assert_ne!(
+            PROBE_DISPATCH_INDIRECT_STORAGE_BUFFER.to_bits(),
+            PROBE_DISPATCH_STORAGE_BUFFER.to_bits()
+        );
+        assert_ne!(
+            PROBE_DISPATCH_INDIRECT_PIPELINE.to_bits(),
+            PROBE_DISPATCH_PIPELINE.to_bits()
+        );
+        assert_ne!(
+            PROBE_DISPATCH_INDIRECT_READBACK.to_bits(),
+            PROBE_DISPATCH_READBACK.to_bits()
+        );
+    }
+
+    /// **The tally regions fit inside the buffer the frame creates**, and the
+    /// counts fit inside their regions. Both are the layout's preconditions: a
+    /// region running past the buffer would put a workgroup's mark where WGSL's
+    /// bounds behaviour decides what happens, and a count past its region would
+    /// put it in the next axis's tally, where the gate would read it as that
+    /// axis's.
+    #[test]
+    fn the_workgroup_tally_regions_fit_inside_the_buffer_the_frame_creates() {
+        assert_eq!(
+            PROBE_DISPATCH_INDIRECT_BASES,
+            [
+                PROBE_DISPATCH_INDIRECT_TOTAL_SLOT + 1,
+                PROBE_DISPATCH_INDIRECT_TOTAL_SLOT + 1 + PROBE_DISPATCH_INDIRECT_AXIS_SLOTS,
+                PROBE_DISPATCH_INDIRECT_TOTAL_SLOT + 1 + PROBE_DISPATCH_INDIRECT_AXIS_SLOTS * 2,
+            ],
+            "the tally regions are the counter followed by one region per axis"
+        );
+        assert!(
+            PROBE_DISPATCH_INDIRECT_BASES[2] + PROBE_DISPATCH_INDIRECT_AXIS_SLOTS
+                <= PROBE_DISPATCH_INDIRECT_SLOTS,
+            "the three tally regions and the counter run past the storage buffer"
+        );
+        for count in PROBE_DISPATCH_INDIRECT_COUNTS {
+            assert!(
+                count <= PROBE_DISPATCH_INDIRECT_AXIS_SLOTS,
+                "workgroup count {count} does not fit in one tally region"
+            );
+        }
+        assert_eq!(
+            probe_dispatch_indirect_storage_buffer_desc().size,
+            probe_dispatch_indirect_copy().size,
+            "the copy carries the whole tally"
+        );
+    }
+
+    /// **The args buffer says what the gate expects, at the offset the dispatch
+    /// names — and something else at the offset it does not.**
+    ///
+    /// The decoy is the point: it is a legal `1, 1, 1` dispatch, so a replayer
+    /// that dropped the offset runs *successfully* and reads back a tally of one
+    /// workgroup. Without it, dropping the offset would read three zeros, and a
+    /// zero workgroup count is a validation error the browser would report — a
+    /// different failure, caught by different means, that says nothing about
+    /// whether the offset crossed.
+    #[test]
+    fn the_indirect_args_carry_the_counts_at_the_offset_the_dispatch_names() {
+        let bytes = &PROBE_DISPATCH_INDIRECT_ARGS_BYTES;
+        let at = PROBE_DISPATCH_INDIRECT_ARGS_OFFSET as usize;
+        assert_eq!(
+            [
+                le_u32(bytes, at),
+                le_u32(bytes, at + 4),
+                le_u32(bytes, at + 8)
+            ],
+            PROBE_DISPATCH_INDIRECT_COUNTS,
+            "the args at the dispatch's offset are the counts the gate checks for"
+        );
+        assert_eq!(
+            [le_u32(bytes, 0), le_u32(bytes, 4), le_u32(bytes, 8)],
+            [1, 1, 1],
+            "the decoy at the buffer's start is the 1x1x1 a dropped offset would run"
+        );
+        assert_ne!(
+            PROBE_DISPATCH_INDIRECT_COUNTS,
+            [1, 1, 1],
+            "counts of all ones would make the decoy indistinguishable from the real args"
+        );
+        assert_eq!(
+            PROBE_DISPATCH_INDIRECT_ARGS_OFFSET % 4,
+            0,
+            "WebGPU requires dispatchWorkgroupsIndirect's offset to be a multiple of four"
+        );
+        assert!(
+            at + 12 <= bytes.len(),
+            "the three counts run past the end of the args buffer"
+        );
+    }
+
+    /// **The shader marks the slots the layout constants name.** The WGSL is a
+    /// string, so nothing but this holds its indices to the constants the gate
+    /// reads the tally back with — and a mark landing one region over is a wrong
+    /// count read as a right one.
+    #[test]
+    fn the_indirect_dispatch_shader_marks_the_slots_the_layout_names() {
+        for (name, expected) in [
+            (
+                "the counter",
+                format!("atomicAdd(&out[{PROBE_DISPATCH_INDIRECT_TOTAL_SLOT}u], 1u)"),
+            ),
+            (
+                "the x tally",
+                format!("out[{}u + wid.x]", PROBE_DISPATCH_INDIRECT_BASES[0]),
+            ),
+            (
+                "the y tally",
+                format!("out[{}u + wid.y]", PROBE_DISPATCH_INDIRECT_BASES[1]),
+            ),
+            (
+                "the z tally",
+                format!("out[{}u + wid.z]", PROBE_DISPATCH_INDIRECT_BASES[2]),
+            ),
+            ("the mark", format!("{PROBE_DISPATCH_INDIRECT_MARK:#x}u")),
+        ] {
+            assert!(
+                PROBE_DISPATCH_INDIRECT_WGSL.contains(&expected),
+                "{name}: the shader does not write `{expected}`, so the tally it \
+                 leaves is not the one the gate reads"
+            );
+        }
+        // One invocation per workgroup, so `workgroup_id` IS the grid the args
+        // buffer asked for and the tally is a tally of workgroups.
+        assert!(PROBE_DISPATCH_INDIRECT_WGSL.contains("@workgroup_size(1)"));
+        assert!(PROBE_DISPATCH_INDIRECT_WGSL.contains("@builtin(workgroup_id)"));
+        // Every workgroup sharing an axis index writes the same slot, so the
+        // writes race and must be atomic whatever value they carry.
+        assert!(PROBE_DISPATCH_INDIRECT_WGSL.contains("array<atomic<u32>>"));
+        assert_eq!(
+            PROBE_DISPATCH_INDIRECT_PIPELINE_DESC.workgroup_size,
+            [1, 1, 1],
+            "the descriptor's workgroup size disagrees with the module's"
+        );
+    }
+
+    /// The indirect-dispatch half: **one export, a whole frame** that fills an
+    /// args buffer, dispatches off it and copies the tally out. The three buffers
+    /// and the pipeline's four resources come first, then the `WriteBuffer`, then
+    /// the encoder and a compute pass that binds the pipeline, binds the storage
+    /// group and records a `DispatchIndirect` before the buffer→buffer copy, the
+    /// finish, the submit and the `request_readback` the poll chases.
+    #[test]
+    fn the_dispatch_indirect_export_encodes_the_args_write_and_the_indirect_dispatch() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_dispatch_indirect(), 1);
+        let commands = take_frame();
+        let names: Vec<&str> = commands.iter().map(Command::name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateBuffer",
+                "CreateShaderModule",
+                "CreateBindGroupLayout",
+                "CreateBindGroup",
+                "CreatePipelineLayout",
+                "CreateComputePipeline",
+                "WriteBuffer",
+                "CreateCommandEncoder",
+                "BeginComputePass",
+                "BindComputePipeline",
+                "BindGroup",
+                "DispatchIndirect",
+                "EndComputePass",
+                "CopyBufferToBuffer",
+                "Finish",
+                "Submit",
+                "RequestReadback",
+            ],
+            "the frame fills the args, then binds, dispatches indirectly and reads back"
+        );
+        // The args write goes out ahead of the encoder, so `queue.writeBuffer` is
+        // ordered on the queue before the submit that reads the buffer.
+        assert!(commands.contains(&Command::WriteBuffer {
+            buffer: PROBE_DISPATCH_INDIRECT_ARGS_BUFFER,
+            offset: 0,
+            data: PROBE_DISPATCH_INDIRECT_ARGS_BYTES.to_vec(),
+        }));
+        // And the dispatch reads them at the offset the decoy sits before, which
+        // is the whole reason the offset is not zero.
+        assert!(commands.contains(&Command::DispatchIndirect {
+            buffer: PROBE_DISPATCH_INDIRECT_ARGS_BUFFER,
+            offset: PROBE_DISPATCH_INDIRECT_ARGS_OFFSET,
+        }));
+        // No direct dispatch anywhere in the frame: a `Dispatch` beside the
+        // indirect one would write the tally whatever the buffer said.
+        assert!(!names.contains(&"Dispatch"));
+    }
+
+    /// **Nothing waits on the setup frame**: every command in it is caller-
+    /// allocated and answered by nothing, so the wait belongs to the poll, not
+    /// here.
+    #[test]
+    fn the_dispatch_indirect_setup_frame_registers_no_wait_because_the_poll_is_awaited() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_dispatch_indirect(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(
+            __crcbl_web_gpu_probe_dispatch_indirect_state(),
+            DISPATCH_INDIRECT_REQUESTED
+        );
+    }
+
+    /// **A device has to have opened first**, the readback probe's ordering rule:
+    /// every command the frame carries is a device method.
+    #[test]
+    fn a_dispatch_indirect_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_dispatch_indirect(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+        assert_eq!(
+            __crcbl_web_gpu_probe_dispatch_indirect_state(),
+            DISPATCH_INDIRECT_UNASKED
+        );
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_dispatch_indirect(), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// The whole indirect-dispatch exchange through the exports alone: request,
+    /// poll, and a `ReadbackReady` carrying the tally a correct dispatch leaves —
+    /// which reaches the bytes exports. This is the browser gate's path with the
+    /// replayer replaced by a `ReplyWriter`, as a `cargo test` has no
+    /// `navigator.gpu`.
+    #[test]
+    fn the_dispatch_indirect_readback_reaches_the_bytes_exports_as_the_workgroup_tally() {
+        // `open_device` spends sequences 0 and 1, so the setup frame starts at 2
+        // and the poll follows it — read the length off the frame rather than
+        // hard-wiring it.
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_dispatch_indirect(), 1);
+        let setup = take_frame();
+        let poll_sequence = 2 + setup.len() as u64;
+        assert_eq!(
+            __crcbl_web_gpu_probe_dispatch_indirect_state(),
+            DISPATCH_INDIRECT_REQUESTED
+        );
+
+        assert_eq!(__crcbl_web_gpu_probe_dispatch_indirect_poll(), 1);
+        assert_eq!(
+            __crcbl_web_gpu_probe_dispatch_indirect_state(),
+            DISPATCH_INDIRECT_WAITING
+        );
+        assert_eq!(
+            take_frame(),
+            vec![Command::PollReadback {
+                readback: PROBE_DISPATCH_INDIRECT_READBACK,
+            }]
+        );
+
+        // The tally the shader leaves when the browser dispatches the counts the
+        // args named: the product in the counter, and one mark per index used on
+        // each axis.
+        let mut written = vec![0u8; (PROBE_DISPATCH_INDIRECT_SLOTS as usize) * 4];
+        let workgroups: u32 = PROBE_DISPATCH_INDIRECT_COUNTS.iter().product();
+        written[..4].copy_from_slice(&workgroups.to_le_bytes());
+        for (axis, base) in PROBE_DISPATCH_INDIRECT_BASES.into_iter().enumerate() {
+            for index in 0..PROBE_DISPATCH_INDIRECT_COUNTS[axis] {
+                let at = ((base + index) as usize) * 4;
+                written[at..at + 4].copy_from_slice(&PROBE_DISPATCH_INDIRECT_MARK_BYTES);
+            }
+        }
+        let mut replies = ReplyWriter::new();
+        replies.readback_ready(poll_sequence, PROBE_DISPATCH_INDIRECT_READBACK, &written);
+        deliver(replies.bytes());
+
+        assert_eq!(
+            __crcbl_web_gpu_probe_dispatch_indirect_state(),
+            DISPATCH_INDIRECT_READY
+        );
+        let bytes = dispatch_indirect_bytes();
+        assert_eq!(bytes, written);
+        // The three counts, read back out of the tally the way the gate reads
+        // them: the last marked slot of each axis is that axis's count.
+        for (axis, base) in PROBE_DISPATCH_INDIRECT_BASES.into_iter().enumerate() {
+            let marked = (0..PROBE_DISPATCH_INDIRECT_AXIS_SLOTS)
+                .filter(|index| {
+                    le_u32(&bytes, ((base + index) as usize) * 4) == PROBE_DISPATCH_INDIRECT_MARK
+                })
+                .count();
+            assert_eq!(marked as u32, PROBE_DISPATCH_INDIRECT_COUNTS[axis]);
+        }
+        assert_eq!(le_u32(&bytes, 0), workgroups);
+        // A mark is a value a zero-initialised buffer cannot hold — the whole
+        // evidence the gate reads back from the browser.
+        assert_ne!(PROBE_DISPATCH_INDIRECT_MARK_BYTES, [0, 0, 0, 0]);
+    }
+
+    /// A `ReadbackPending` for the poll's sequence drops the indirect dispatch
+    /// back to `Pending`, so the next frame polls again —
+    /// [`DispatchIndirectProbe::absorb`]'s pending arm.
+    #[test]
+    fn a_readback_pending_reply_drops_the_indirect_dispatch_back_to_pending() {
+        let mut probe = DispatchIndirectProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackPending {
+                readback: PROBE_DISPATCH_INDIRECT_READBACK,
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, DispatchIndirectProbe::Pending);
+    }
+
+    /// A `ReadbackReady` for the poll's sequence carries the bytes into `Ready`.
+    #[test]
+    fn a_readback_ready_reply_carries_the_indirect_dispatch_bytes_into_ready() {
+        let mut probe = DispatchIndirectProbe::Waiting { sequence: 7 };
+        let bytes = PROBE_DISPATCH_INDIRECT_MARK_BYTES.to_vec();
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackReady {
+                readback: PROBE_DISPATCH_INDIRECT_READBACK,
+                data: bytes.clone(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(probe, DispatchIndirectProbe::Ready { bytes });
+    }
+
+    /// A reply for another sequence leaves the indirect dispatch waiting, exactly
+    /// as it leaves every other probe.
+    #[test]
+    fn an_indirect_dispatch_probe_ignores_a_reply_for_another_sequence() {
+        let mut probe = DispatchIndirectProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackReady {
+                readback: PROBE_DISPATCH_INDIRECT_READBACK,
+                data: vec![1, 2, 3, 4],
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, DispatchIndirectProbe::Waiting { sequence: 7 });
+    }
+
     /// The copy-chain probe's bytes, read the way JS reads them.
     fn copychain_bytes() -> Vec<u8> {
         let len = __crcbl_web_gpu_probe_copychain_bytes_len() as usize;
@@ -14299,7 +15439,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The twelve readback probes' failure arm
+    // Every readback probe's failure arm
     // -----------------------------------------------------------------------
     //
     // `absorb` is a pure function over `&[(u64, Reply)]`, so a browser refusing
@@ -14307,7 +15447,7 @@ mod tests {
     // questions per probe, and the middle one is the one that matters —
     // **every probe reads the same drained buffer**, so a probe that absorbed a
     // failure naming another probe's sequence would report the wrong thing
-    // broken, and a copy-paste slip across twelve near-identical arms is
+    // broken, and a copy-paste slip across so many near-identical arms is
     // exactly how that happens.
 
     /// A `ReadbackFailed` naming the poll's sequence ends the readback probe in
@@ -14450,6 +15590,49 @@ mod tests {
         )]);
         assert!(!advanced);
         assert_eq!(probe, ComputeProbe::Waiting { sequence: 7 });
+    }
+
+    /// A `ReadbackFailed` naming the poll's sequence ends the indirect dispatch
+    /// probe in `Failed` carrying the browser's words, instead of dropping it
+    /// back to `Pending` for the gate's deadline to diagnose as a timeout.
+    #[test]
+    fn a_readback_failure_for_the_indirect_dispatch_poll_carries_its_reason_into_failed() {
+        let mut probe = DispatchIndirectProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            7,
+            Reply::ReadbackFailed {
+                readback: PROBE_DISPATCH_INDIRECT_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(advanced);
+        assert_eq!(
+            probe,
+            DispatchIndirectProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            }
+        );
+    }
+
+    /// A `ReadbackFailed` naming **another** probe's sequence leaves the indirect
+    /// dispatch probe waiting: one channel carries every probe's replies, so
+    /// absorbing a failure that is not its own would report the wrong probe as
+    /// broken.
+    #[test]
+    fn an_indirect_dispatch_probe_ignores_a_readback_failure_for_another_sequence() {
+        let mut probe = DispatchIndirectProbe::Waiting { sequence: 7 };
+        let advanced = probe.absorb(&[(
+            8,
+            Reply::ReadbackFailed {
+                readback: PROBE_DISPATCH_INDIRECT_READBACK,
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            },
+        )]);
+        assert!(!advanced);
+        assert_eq!(probe, DispatchIndirectProbe::Waiting { sequence: 7 });
     }
 
     /// A `ReadbackFailed` naming the poll's sequence ends the copy chain probe in
@@ -14935,8 +16118,8 @@ mod tests {
     // print, and without both halves the browser's words stop at the enum.
 
     /// One probe's reason, read through its two exports the way JS reads it —
-    /// [`device_reason`]'s shape, taken as a pair of exports so the twelve
-    /// readback probes share it instead of repeating it twelve times.
+    /// [`device_reason`]'s shape, taken as a pair of exports so every readback
+    /// probe shares it instead of repeating it once per probe.
     fn export_reason(ptr: extern "C" fn() -> *const u8, len: extern "C" fn() -> u32) -> String {
         let len = len() as usize;
         let ptr = ptr();
@@ -15006,6 +16189,30 @@ mod tests {
             export_reason(
                 __crcbl_web_gpu_probe_compute_reason_ptr,
                 __crcbl_web_gpu_probe_compute_reason_len,
+            ),
+            "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+        );
+    }
+
+    /// The indirect dispatch probe's `Failed` reaches the ABI: the state export
+    /// answers [`DISPATCH_INDIRECT_FAILED`] and the reason exports carry the
+    /// browser's own words.
+    #[test]
+    fn the_indirect_dispatch_failure_reaches_the_state_and_reason_exports() {
+        PROBE.with(|probe| {
+            probe.borrow_mut().dispatch_indirect = DispatchIndirectProbe::Failed {
+                reason: "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
+                    .to_owned(),
+            };
+        });
+        assert_eq!(
+            __crcbl_web_gpu_probe_dispatch_indirect_state(),
+            DISPATCH_INDIRECT_FAILED
+        );
+        assert_eq!(
+            export_reason(
+                __crcbl_web_gpu_probe_dispatch_indirect_reason_ptr,
+                __crcbl_web_gpu_probe_dispatch_indirect_reason_len,
             ),
             "AbortError: Failed to execute 'mapAsync': the buffer was destroyed"
         );
@@ -15219,6 +16426,10 @@ mod tests {
         "PROBE_READBACK_SIZE",
         "PROBE_DISPATCH_PATTERN",
         "PROBE_DISPATCH_SLOTS",
+        "PROBE_DISPATCH_INDIRECT_TOTAL_SLOT",
+        "PROBE_DISPATCH_INDIRECT_AXIS_SLOTS",
+        "PROBE_DISPATCH_INDIRECT_SLOTS",
+        "PROBE_DISPATCH_INDIRECT_MARK",
         "PROBE_COPYCHAIN_PATTERN",
         "PROBE_COPYCHAIN_SIZE",
         "PROBE_COPYCHAIN_SLOTS",
@@ -15446,6 +16657,19 @@ mod tests {
                 ],
             ),
             (
+                "DISPATCH_INDIRECT",
+                "DISPATCH_INDIRECT",
+                codes![
+                    DISPATCH_INDIRECT_UNASKED,
+                    DISPATCH_INDIRECT_REQUESTED,
+                    DISPATCH_INDIRECT_WAITING,
+                    DISPATCH_INDIRECT_PENDING,
+                    DISPATCH_INDIRECT_READY,
+                    DISPATCH_INDIRECT_UNDECODABLE,
+                    DISPATCH_INDIRECT_FAILED
+                ],
+            ),
+            (
                 "COPYCHAIN",
                 "COPYCHAIN",
                 codes![
@@ -15515,11 +16739,11 @@ mod tests {
         );
 
         assert_eq!(
-            tables, 20,
+            tables, 21,
             "gpu-probe.js's table count moved; the mirror above has to move with it"
         );
         assert_eq!(
-            codes, 116,
+            codes, 123,
             "gpu-probe.js's code count moved; the mirror above has to move with it"
         );
     }
@@ -15563,7 +16787,7 @@ mod tests {
                 .iter()
                 .filter(|name| mirrored.contains(*name))
                 .count(),
-            111,
+            118,
             "probe.rs's state-code count moved; the mirror above has to move with it"
         );
 

@@ -11,7 +11,7 @@
 # zero checks ran** — `docs/plan/12-testing.md` names a silently-skipped e2e job
 # as a known trap and this is the guard against it.
 #
-# WHAT THIS IS THE ONLY GATE FOR. Groups G through AF in
+# WHAT THIS IS THE ONLY GATE FOR. Groups G through AG in
 # `web/tools/probe-groups.mjs` drive `crcbl-webgpu`'s command stream directly
 # rather than through the engine: the wasm→JS→wasm round trip and the device it
 # opens, a surface, the capability query held against what `navigator.gpu` tells
@@ -19,8 +19,8 @@
 # layout, a bind group, a shader module, a pipeline layout and both pipelines —
 # and from S onward the ones that read bytes back and compare their *values*: a
 # cleared texture, a drawn triangle, a compute shader's storage writes, a copy
-# chain, a sub-range fill, a presented canvas frame, a reconfigured swapchain and
-# an indirect draw. `web/run-browser-e2e.sh` proves the demos render through this
+# chain, a sub-range fill, a presented canvas frame, a reconfigured swapchain, an
+# indirect draw and a dispatch that reads its workgroup counts out of a buffer. `web/run-browser-e2e.sh` proves the demos render through this
 # backend; nothing but this proves the seam underneath them command by command.
 #
 # WHY IT IS A SEPARATE PAGE. The probe exports install their own command-stream
@@ -294,7 +294,7 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
@@ -533,6 +533,20 @@ TIMESTAMP_TRIP="$(grep -F 'the browser wrote both queries the pass named' "${OUT
 if [ -z "$TIMESTAMP_TRIP" ]; then
     echo "crcbl probe e2e: the driver never read a timed pass's two queries back;" >&2
     echo "                 crcbl-webgpu declares Capability::TimestampQuery and nothing tried it" >&2
+    exit 1
+fi
+
+# And the workgroup counts an indirect dispatch actually used, which is group AG
+# and is the only exercise `dispatch_indirect` has on this backend anywhere. It
+# is worth its own line because of what a wrong answer looks like: not an error
+# but a dispatch that ran — with the wrong extents. A GPU culling pass whose
+# indirect counts were read from the wrong offset still submits, still writes its
+# buffer, and quietly does a fraction of the work, which is why this group asserts
+# the counts it read and not merely that something was dispatched.
+INDIRECT_DISPATCH_TRIP="$(grep -F 'the per-axis tally spells the three workgroup counts the args buffer named' "${OUTPUT}.plain" || true)"
+if [ -z "$INDIRECT_DISPATCH_TRIP" ]; then
+    echo "crcbl probe e2e: the driver never read back which workgroup counts an indirect dispatch used;" >&2
+    echo "                 crcbl-webgpu's dispatch_indirect is ungated in a real browser" >&2
     exit 1
 fi
 
