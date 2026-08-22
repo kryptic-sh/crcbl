@@ -1627,10 +1627,11 @@ mod tests {
     /// pass whether the classification were right or wrong.
     const REVIEWED_BLOCKERS: &[(Capability, BackendKind, DivergenceKind)] = &[
         // `crcbl-dx12` is the whole of its own list: D3D12 expresses every
-        // capability here, and the two *valued* fills are the only rows anybody
-        // chose. `BufferFillZero` was a third and left the way a row is meant
-        // to: the backend fills to zero now, by copying out of a zeroed
-        // resource.
+        // capability here, so every row of its below is `Unwritten` rather than
+        // an `ApiAbsence` — mesh shading and the task stage are shader-model
+        // features nobody has written against, not ones the API lacks.
+        // `BufferFillZero` was another and left the way a row is meant to: the
+        // backend fills to zero now, by copying out of a zeroed resource.
         (
             Capability::MeshShading,
             BackendKind::Dx12,
@@ -1688,7 +1689,7 @@ mod tests {
         // pass descriptor, which is `timestampWrites`' own shape.
     ];
 
-    /// The two backends whose remaining work is parked rather than owed.
+    /// The backends whose remaining work is parked rather than owed.
     ///
     /// `crcbl-mtl` and `crcbl-dx12` were deferred on 2026-08-21 —
     /// `docs/plan/09-backends-metal-dx12.md` holds the state and
@@ -1708,7 +1709,7 @@ mod tests {
     ///
     /// **A failure here is the useful case.** A blocker on `crcbl-vk` or
     /// `crcbl-webgpu` is work somebody is meant to do, and it would otherwise
-    /// join five parked rows and read as more of the same. The second assertion
+    /// join the parked rows and read as more of the same. The second assertion
     /// is what stops the first going vacuous: with no blockers at all, "none of
     /// them is live" is true and says nothing, and the deferral note above has
     /// become the thing to delete.

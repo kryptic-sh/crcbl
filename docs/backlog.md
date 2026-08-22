@@ -10353,21 +10353,23 @@ that produces them is now documented in `docs/plan/12-testing.md`. Revisit if a
 collapse ever actually happens — at that point the floor has evidence behind it
 instead of a guess.
 
-### `NullDevice` reports an unreached timeline value as a satisfied wait
+### `GpuContext::retire_to` destroys a command buffer whether the wait was satisfied or not
 
-Left deliberately when the binary-semaphore refusal beside it was fixed, because
-this half is a modelling choice rather than an inconsistency. `wait_semaphores`
-answers `Ok(true)` for a wait on a value the timeline has not reached, and
-`a_host_signal_moves_a_timeline_forwards_and_only_forwards` asserts exactly that
-with its reason: "nothing is ever outstanding, so waits succeed immediately".
+`crcbl/src/engine.rs`'s `retire_to` calls `wait_semaphores(…, u64::MAX)?` and
+**discards the `bool`**, then destroys the command buffer on the next line. The
+seam states that `false` is a timeout rather than an error, so on a backend that
+returns one this frees a command buffer the GPU may still be reading.
 
-That reason is sound for a value a _submission_ would signal — this backend runs
-none. It is thinner for one `signal_semaphore` would, because the null device
-does track the value and could answer honestly. Whoever revisits it should
-decide which of the two a null device is for: a stand-in that never blocks, or
-an oracle a caller can check its own sequencing against. The second reading
-would have it answer `Ok(false)` below the signalled value, and that test would
-move with it.
+Benign today for two separate reasons, and neither is a guarantee: the timeout
+is `u64::MAX`, and the null device now reaches every value a submission
+signalled rather than reporting waits satisfied unconditionally. Neither rules
+out a driver that caps a wait and answers `false` early.
+
+`crcbl-render`'s `MeshPool::flush` is the contrast — it checks the same `bool`
+and raises `UploadTimedOut`. Found while making the null backend answer
+honestly; the fix is to decide what an engine that cannot retire should do
+(raise, or wait again), which is a decision and not a transcription, so it was
+not made in that change.
 
 ### `crcbl-dx12` has no timeline-semaphore test because it has no timeline semaphore
 
@@ -14728,13 +14730,22 @@ for the replayer, and only a group like AH answers for the wire.
 off argument structures differing only in `firstInstance`, landing a half-target
 apart — so **two mapped features are left without one**:
 
-- **`texture-compression-bc`.** The sharp version needs a BC block with known
-  decoded texels; the workspace has no BC encoder and adding one is not in
-  scope, but a single hand-written BC1 block is small and the format is exactly
-  specified, so this is a transcription job with a specification to check
-  against rather than a design problem. CI matters here: SwiftShader does not
-  report the feature, so the absent branch is what most runners would take and
-  the present branch would rest on the local hardware adapter.
+- **`texture-compression-bc`.** What actually blocked this was not the block:
+  the replayer derived `bytesPerRow` from a bytes-per-texel table with no BC
+  row, so a BC copy was refused before any texel could be compared. That is
+  fixed — `BLOCK_FOOTPRINT` in `web/engine/gpu-replay.js` converts both pitches
+  through the block extent — so what is left is the group itself. It needs a BC
+  block with known decoded texels; the workspace has no BC encoder and adding
+  one is not in scope, but a single hand-written BC1 block is small and the
+  format is exactly specified, so this is a transcription job with a
+  specification to check against rather than a design problem. **Assert only on
+  the endpoint texels.** A BC1 block's two endpoints decode by exact bit
+  replication, but its 1/3 and 2/3 interpolants are where vendors have always
+  differed by a step, so a block of `0xFFFF`/`0x0000` read at index 0 and index
+  1 is white and black on every decoder while indices 2 and 3 need a tolerance.
+  CI matters here: SwiftShader does not report the feature, so the absent branch
+  is what most runners would take and the present branch would rest on the local
+  hardware adapter.
 - **`timestamp-query`.** The cheapest to encode and the hardest to assert on.
   Browsers quantise timestamp values for privacy, so "non-zero" and "strictly
   increasing" are not safe claims without measuring first what this browser
