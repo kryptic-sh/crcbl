@@ -150,7 +150,20 @@ export function serve(root, options = {}) {
         origin: `http://localhost:${address.port}`,
         port: address.port,
         misses,
-        close: () => new Promise((done) => server.close(() => done(undefined))),
+        // **`close()` alone can hang forever, and did.** `server.close(cb)`
+        // stops the server accepting new connections and then waits for every
+        // existing one to end before calling back — so a browser holding a
+        // keep-alive socket to this server keeps the promise pending, and a
+        // caller that awaits it before killing the browser deadlocks. That is
+        // exactly what stalled the Windows leg of the render-harness gate for
+        // three hours a run: all eleven scenes had rendered, and the process
+        // simply never exited. `closeAllConnections()` ends the sockets first,
+        // so this resolves whatever the caller's teardown order is.
+        close: () =>
+          new Promise((done) => {
+            server.close(() => done(undefined));
+            server.closeAllConnections();
+          }),
       });
     });
   });

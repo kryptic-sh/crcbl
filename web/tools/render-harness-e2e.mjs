@@ -379,13 +379,48 @@ async function main() {
       );
     }
   } finally {
+    // **Order matters: the browser dies before the server is awaited.** Chromium
+    // holds a keep-alive socket to `server`, and `close()` does not resolve
+    // while a connection is open, so awaiting it first leaves `browser.stop()`
+    // unreachable and the process alive. `error-scope-bench.mjs` has always had
+    // this order; this file had it reversed, and that is what hung the Windows
+    // leg of this gate for three hours a run after all eleven scenes had
+    // already rendered. `serve.mjs`'s `close` now ends the sockets itself as
+    // well, so neither half depends on the other being right.
     if (page) page.close();
-    await server.close();
     browser.stop();
+    await server.close();
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(2);
-});
+/**
+ * How long the process may stay alive after `main` has finished.
+ *
+ * Teardown is a kill and a socket close; it takes well under a second. This is
+ * generous by two orders so that a slow but working exit is never cut short.
+ */
+const EXIT_DEADLINE_MS = 60_000;
+
+main()
+  .then(() => {
+    // **A watchdog that costs nothing when it is not needed.** The timer is
+    // `unref`'d, so it does not itself keep the process alive: if teardown left
+    // the event loop empty — the healthy path — node exits and this never
+    // fires. It fires only when something else is still holding the loop open,
+    // which is the state that stalled the Windows leg of this gate for three
+    // hours a run with every scene already rendered and every result already
+    // written. Whatever is holding it, the answer is not to wait: the work is
+    // done, so say so and go.
+    const watchdog = setTimeout(() => {
+      console.error(
+        'render-harness-e2e: teardown finished but something is still holding ' +
+          'the event loop open; exiting rather than hanging'
+      );
+      process.exit(process.exitCode ?? 0);
+    }, EXIT_DEADLINE_MS);
+    watchdog.unref();
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(2);
+  });
