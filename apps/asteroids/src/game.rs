@@ -1153,15 +1153,16 @@ fn place_ship(
 /// hand-written `Segment` this function used to build is gone.
 ///
 /// A bullet therefore has **no collider**. It is a query, not a body in the
-/// broadphase: giving it one would put the bullet's own shape at the far end of
-/// its own sweep, where it reports hitting itself at `t = 0` — the price flappy
-/// and breakout both pay — and would need a remove-and-re-insert per bullet per
-/// tick to avoid.
+/// broadphase: nothing in this game ever asks what a bullet is touching, so a
+/// collider would be an insert and a remove per bullet per tick buying nothing
+/// — and bullets would start stopping each other. Hitting itself is no longer
+/// part of that argument: [`PhysicsSystem::sweep_body`] holds the swept
+/// entity's own collider out of the candidate set.
 ///
-/// Nor is the ship — see [`check_ship`] — so the sweep needs no exclusion list
-/// and cannot report a shot hitting the hull it left. **Every collider in the
-/// world is a rock**, which is what makes the leak test's collider count an
-/// equality rather than a bound.
+/// Nor does the ship carry one — [`check_ship`] overlaps a free centre — so a
+/// shot cannot report hitting the hull it left. **Every collider in the world
+/// is a rock**, which is what makes the leak test's collider count an equality
+/// rather than a bound.
 fn sweep_bullets(logic: &mut GameLogic, world: &mut World, dt: f64) {
     if logic.bullets.is_empty() {
         return;
@@ -3303,10 +3304,21 @@ mod tests {
             DVec3::ZERO,
             RockSize::Small,
         );
-        for _ in 0..20 {
+        let shots = 20;
+        for _ in 0..shots {
             harness.tap(KeyCode::Space);
             harness.run_ticks(harness.ticks + 12, &[]);
         }
+        // The premise, asserted rather than assumed: the surviving lives below
+        // say nothing at all unless the shots were really taken. One tap, one
+        // bullet — twelve ticks clears the cooldown and the cap is never
+        // reached, so a shortfall here means firing broke, not that the ship
+        // was spared.
+        assert_eq!(
+            harness.game.bullets_fired(),
+            shots,
+            "the taps did not become shots, so this test proves nothing"
+        );
         assert_eq!(harness.game.lives, STARTING_LIVES, "the ship shot itself");
         assert_eq!(harness.game.score, 0);
     }
