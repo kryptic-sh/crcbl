@@ -185,6 +185,18 @@ jobs:
             --target aarch64-apple-darwin
           cargo doc --locked --all-features --no-deps -p crcbl-dx12 \
             --target x86_64-pc-windows-msvc
+          # `crcbl-shell` rides here for the same reason and needs
+          # `--document-private-items` on top: its Win32 and AppKit halves are
+          # almost entirely private, so the public pass above reads hardly any
+          # of them. Cleaned 2026-08-22 — 46 broken links on msvc and 82 on
+          # darwin, none of which any gate could see — and this is what stops
+          # them coming back. Not `--workspace`: `crcbl-mtl` and `crcbl-dx12`
+          # still have private-item rot of their own, and they are deferred, so
+          # widening this would pin a failure nobody is going to clear.
+          cargo doc --locked --all-features --no-deps -p crcbl-shell \
+            --document-private-items --target aarch64-apple-darwin
+          cargo doc --locked --all-features --no-deps -p crcbl-shell \
+            --document-private-items --target x86_64-pc-windows-msvc
 
   docs:
     name: rustdoc
@@ -210,21 +222,21 @@ jobs:
       # intra-doc links, which is what a workspace of cross-referencing crates
       # accumulates fastest.
       - run: cargo doc --workspace --all-features --no-deps --locked
-      # **And the same again with private items, for the two backends that get
-      # new work.** The step above documents the public surface, so a broken
-      # link on a private item is invisible to it — 39 of them had accumulated
-      # workspace-wide before anyone ran rustdoc this way, none of which CI could
-      # see. `crcbl-shell` alone holds 24 and is not covered here; that job is
-      # its own entry in `docs/backlog.md`.
+      # **And the same again with private items, now workspace-wide.** The step
+      # above documents the public surface, so a broken link on a private item
+      # is invisible to it, and they had accumulated everywhere: this ran on
+      # three named crates until 2026-08-22 because turning it on workspace-wide
+      # would have pinned failures nobody could clear that day. They are cleared
+      # — every crate and every app documents clean — so the list is gone and a
+      # crate cannot rot by not being named in it.
       #
-      # These two are, because they are where the work is going: a link that
-      # rots in `crcbl-vk` or `crcbl-webgpu` rots in the crate somebody is
-      # reading this month. Widen the list as crates are cleaned rather than
-      # turning it on workspace-wide and pinning 39 failures to a job nobody can
-      # make green today.
+      # **This is the Linux `cfg` and nothing else**, because the job runs on
+      # `ubuntu-latest`. The other targets are covered where their toolchains
+      # are already installed: `crcbl-shell` on darwin and msvc in the
+      # cross-target job, and the wasm-capable workspace in the `wasm32` one.
       - run:
-          cargo doc -p crcbl-vk -p crcbl-webgpu --all-features --no-deps
-          --locked --document-private-items
+          cargo doc --workspace --all-features --no-deps --locked
+          --document-private-items
 
   machete:
     name: cargo-machete (unused deps)
@@ -362,9 +374,19 @@ jobs:
       # absent on wasm *on purpose* so a browser build fails to compile rather
       # than failing at run time. The exclusions match the `cargo clippy` line
       # above: neither crate builds for this target at all.
+      #
+      # **`--document-private-items`, because that is where these live.** Every
+      # sample's `web.rs` and `crcbl-shell`'s Web backend are private modules,
+      # so the public pass read almost none of what this job exists to check.
+      # Three links to items that are `#[cfg(not(target_arch = "wasm32"))]` —
+      # `Instance::create_device`, `backend::open`,
+      # `OffscreenSetup::open_forward_with` — resolved on the host and only
+      # here, plus twelve inside `crcbl-shell`'s `web` module. All cleared
+      # 2026-08-22.
       - run: >-
           cargo doc --locked --all-features --no-deps --workspace --exclude
           crcbl-vk --exclude crcbl-cli --target wasm32-unknown-unknown
+          --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
 
