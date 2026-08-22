@@ -13337,9 +13337,24 @@ resolution at the contact than from the bias.
 - **The geometric normal's sign was measured on SPIR-V/radv only.** It is
   derived from the shading normal rather than hard-coded, which makes the other
   three targets correct by construction; none of them was run.
-- **One backend throughout.** vk on radv, cross-checked on lavapipe, which
-  improved slightly on both slices. wgpu, mtl and dx12 were not run;
-  `run-cross-backend-e2e.sh` was not run for either change.
+- **One backend at the time; the shadows are under a cross-backend compare
+  now.** Both slices were tuned on vk on radv and cross-checked on lavapipe,
+  which improved slightly on each. `wgpu` no longer exists, and mtl and dx12
+  were not run for either change. **That gap has since closed from the other
+  direction, re-read 2026-08-23**: `pages.yml` runs
+  `web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui` on Linux
+  and `--reference mtl` on macOS, and `spot_shadow` and `point_shadow` are both
+  in `apps/render-harness`'s `SCENES`, so every Pages run holds the browser's
+  shadows against a live native render rather than against a committed image.
+  The `ssr`/`ui` exception is the SwiftShader-against-lavapipe pairing, not the
+  shadows.
+
+  What that does **not** do is validate the bias: it compares two of our own
+  implementations against each other, so a constant that is wrong in the same
+  way on both agrees perfectly. The peter-panning above is exactly that kind of
+  quantity, and no cross-backend gate can see it. dx12 has no leg, and will not
+  get one while it is deferred.
+
 - **The dunes acne grading is visual**, backed by amplified difference maps. A
   radius-4 high-pass misses the cross-hatch entirely — its wavelength is tens of
   pixels — and a deficit-against-clean-reference measure conflates acne with
