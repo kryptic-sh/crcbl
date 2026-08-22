@@ -362,7 +362,12 @@ impl Windowed {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out after {WAIT:?} waiting for {what}"
+                "timed out after {WAIT:?} waiting for {what}; the shell reports the window \
+                 at {:?}",
+                self.shell
+                    .window_state(self.window)
+                    .ok()
+                    .and_then(|state| state.size()),
             );
             self.shell.wait_events(Some(Duration::from_millis(10)));
         }
@@ -897,12 +902,28 @@ fn a_resize_from_outside_forces_a_reconfigure_at_the_new_extent() {
     fixture.draw_and_present(&acquired);
 
     let xid = fixture.xid;
-    fixture.peer.resize(xid, RESIZED.width, RESIZED.height);
+    // **Asked again on every turn, because a `ConfigureRequest` is a request.**
+    // A window manager owns the geometry of what it manages, and ICCCM lets it
+    // grant, alter or ignore any single request; nothing acknowledges one that
+    // went nowhere, so a client that asks once and then waits cannot tell "not
+    // yet" from "never". `openbox` does honour this size — the sandbox suite's
+    // `a_resize_from_outside_is_reported_exactly_once` asserts the same 800x600
+    // arrives, exactly once — but a run under CI load reached this deadline
+    // with the window still at its original extent, which is the shape of a
+    // request that was dropped rather than one that was answered differently.
+    // Re-asking costs nothing and cannot confuse the result: a request for the
+    // size the window already has is one the manager grants by changing
+    // nothing.
     fixture.pump_until("the shell to report the resize", |fixture| {
-        fixture
+        if fixture
             .shell
             .window_state(fixture.window)
             .is_ok_and(|state| state.size() == Some(RESIZED))
+        {
+            return true;
+        }
+        fixture.peer.resize(xid, RESIZED.width, RESIZED.height);
+        false
     });
 
     // The seam's obligation 1: the shell's size is what a swapchain is
