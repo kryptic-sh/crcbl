@@ -6459,17 +6459,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   HUD lines. The browser gate's canvas capture is the closest thing there is,
   and it happens to fire while the pause menu is up — a human has now looked at
   it for both demos and it reads fine, but nothing asserts it.
-- **No test and no tool captures a native sample's pixels.** `breakout` and
-  `flappy` take `--headless --frames N` and print a summary; neither has a
-  screenshot path, so "the Vulkan build of the game draws the right picture" is
-  reachable only by running it on a desktop. The multi-sheet bug lived in the
-  shipped samples for that reason: the evidence that it is gone is
-  `every_batch_draws_its_own_instances_rather_than_the_first_batchs` exercising
-  the same `SpriteRenderer` on radv, plus both samples running 120 headless
-  frames with `CRCBL_VK_VALIDATION` and sync validation clean — **not** a
-  picture of either game. What it would take: a `--capture <path>` on the sample
-  front ends, reading the swapchain image back the way `vk_e2e.rs`'s
-  `render_sprites` does.
 - **Flappy's swept-sphere collision is exercised, not demonstrated.**
   `game::fatal` sweeps the bird's path with `PhysicsSystem::sweep_sphere`
   because that is the correct query, but at this game's speeds a point test at
@@ -6479,26 +6468,20 @@ The modular panel is built and all three samples switch it on with F3 (or
   bird (2.3 units, so under about 2.6 Hz), which is not a rate this game is
   coherent at. Closing it honestly means a faster consumer, not a contrived test
   here.
-- **No golden image covers the play field's framing, in either sample.** The
-  browser gate reads the canvas back and asserts it is neither blank nor still.
-  Flappy's `gpu::the_playable_band_is_on_screen_at_every_aspect_ratio` now puts
-  the world through the real view-projection at five aspect ratios, which is
-  stronger than the hand-written mapping it replaced, and is still not a pixel
-  check that would catch the framing drifting.
-- **The overlay has never been looked at.** Every test over it is draw-list
-  strings and rectangles; no golden image, and no human has confirmed the panel
-  is legible over a lit scene or a bright sprite background. The layout maths
+- **The debug overlay has never been looked at, and every golden turns it off on
+  purpose.** Its tests are draw-list strings and rectangles; the layout maths
   (value column past the longest label, panel inside the screen at two sizes) is
-  asserted; the _appearance_ is not.
-- **Nothing has looked at either sample's art come out of a GPU.** Every test
-  over it is `Sheet` data, sprite rectangles and layer membership; the pictures
-  in both retrofit reports were composited in software from the same sprite
-  lists, so they say the scenes are assembled correctly and nothing about the
-  shader, the sampler or the blend. `crcbl screenshot` cannot help — it renders
-  the sandbox cube through `ForwardRenderer`, which **neither** sample uses now.
-  Closing this means either a golden through the sprite pass with a sample's own
-  sheets, or an offscreen path the samples can drive. It is the same gap for
-  breakout as for flappy and is not worth two entries.
+  asserted and the _appearance_ is not. The six sample goldens cannot close it,
+  because `--no-debug-overlay` is part of every one of their invocations: the
+  overlay is on by default in a debug build and it draws frame times, so a
+  golden of a frame with `0.007 ms` written on it fails on the next machine.
+  Each `golden.rs` says so under "Why the debug overlay is off".
+
+  So closing this needs the overlay to be **deterministic under a flag** — a
+  pinned frame-time string, or a golden that masks the numeric region and
+  compares the panel around it — not another golden. Until then nobody has seen
+  the panel over a lit scene or a bright sprite background.
+
 - **Nobody has _looked_ at a fullscreen window.** The mechanism is gated end to
   end now — see _Display-mode coverage_ — but every assertion is a summary line
   or a compositor's tree, not a picture. That the frame is composed correctly at
@@ -6516,12 +6499,26 @@ The modular panel is built and all three samples switch it on with F3 (or
   `the_mode_is_right_whichever_order_the_resize_and_the_change_arrive_in` drive
   `__crcbl_web_fullscreen` directly, and `check-exports.mjs` confirms the symbol
   ships and that the shim calls it.
-- **Nothing has looked at the pause menu.** It is asserted as draw-list strings
-  — the `PAUSED` heading and the first hint line reaching the UI pass — and no
-  human or golden image has confirmed it is legible over either game's art, or
-  that the full-frame dim reads as a dim rather than as a bug. It is
-  deliberately the crudest possible version, behind `draw_pause_menu`, because
-  the next slice replaces it.
+- **Nothing has looked at `MenuKind::Paused` over live art.** The other menu
+  states are pixel-checked now: breakout's golden asserts the panel at `MENU_AT`
+  is `MENU_OVER_FIELD` times brighter than the field behind it, and asteroids'
+  asserts the title card drew over the drifting rocks at all. What none of them
+  reach is the pause scrim over a **playing** field — breakout's golden is taken
+  before the ball launches and flappy's and asteroids' on their title screens,
+  so the dim in those pictures lies over a resting scene.
+
+  `MenuKind::Paused` is therefore still asserted only as draw-list strings: the
+  heading and the first hint line reaching the UI pass. Nothing has confirmed
+  the full-frame dim reads as a dim rather than as a bug over moving art.
+
+  **horde is where this is cheapest to close**, and its `golden.rs` already
+  explains why: a default headless run never leaves its title screen, so that
+  golden is deliberately of a _prefilled_ run with the arena, the enemy field
+  and the props in it. A second capture of the same prefilled state with the
+  pause menu up would be the first picture of the scrim over live art. (The
+  entry this replaces named `draw_pause_menu`, which no longer exists — each
+  sample's `menu.rs` owns a `MenuKind` now.)
+
 - **The changelog starts mid-project.** `CHANGELOG.md` covers changes from
   2026-08-01 onward; everything before it is in `git log` only. Worth doing at
   the first tagged release, or not at all — there are no releases yet for a
