@@ -7289,13 +7289,25 @@ annotated.
   every wall — but it is the one place the animation and the movement disagree,
   and it is worth knowing before someone "fixes" it.
 
-- **Not measured, not reviewed: the windowed native path.** It is compiled and
-  never run — there is no display in this environment — so the follow camera,
-  the sprite pass, the three menus and the HUD layout have been checked by test,
-  by argument, and now by a **browser**: the gate's canvas capture at 26/26 is a
-  picture of the real game, and a human has looked at it. What has still never
-  been seen is the _native_ window, and the fullscreen toggle against a real
-  compositor is the same gap the other three samples carry.
+- **Not measured, not reviewed: the windowed native path.** The reason recorded
+  here used to be "there is no display in this environment", and that is wrong:
+  `crates/crcbl-shell/tests/run-x11-e2e.sh` brings up Xvfb — and, with
+  `CRCBL_E2E_X11_WM=openbox`, a window manager — and CI runs it. Its
+  `run_sandbox vk` passes already put a real `crcbl-vk` swapchain on a real X11
+  window, windowed and fullscreen, and toggle between them with F11. Measured
+  2026-08-22 by hand: `horde --frames 120` under that same Xvfb presents 120
+  frames through a `960x720 Bgra8UnormSrgb FIFO, 4 image(s)` swapchain and
+  exits 0.
+
+  So what is left is narrower than the entry claimed, and it is two things.
+  **Nothing gates it:** no test runs any _sample_ windowed, so the follow
+  camera, the sprite pass, the three menus and the HUD layout are still checked
+  only by test, by argument, and by the browser gate's canvas capture — a
+  regression in a sample's windowed present would not fail anything. **And Xvfb
+  is not a GPU:** it advertises no DRI3, so RADV refuses to present and the run
+  above fell back to `llvmpipe`. A windowed present on the real adapter needs a
+  real X server, which no automated harness here has. The same gap covers all
+  four samples.
 
 - **Every scale number was taken on an offscreen image ring, not a swapchain.**
   `--headless` gives `crcbl-vk` a `SurfaceTarget::Offscreen` rotation of images,
