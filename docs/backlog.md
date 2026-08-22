@@ -5530,6 +5530,19 @@ drops idle connections. That is a gap, not a task: the watchdog in `main()`
 bounds any recurrence to `EXIT_DEADLINE_MS` and names itself in the log, so if
 it comes back it says so cheaply. Nothing further is worth doing until it does.
 
+**Measured 2026-08-23, and it sharpens the choice.** The two seam-probe jobs
+(`probe the seam on Windows`, `probe the seam on macOS`) `needs: build`, and
+`build the demo site` took **12m25s** on run 32585681819 and **15m09s** on run
+32588129594 — the two most recent Pages runs that finished. The three
+browser-golden legs, which do not wait on it, were done inside three minutes of
+their own start on both. So the probe gate reports something like fifteen to
+twenty minutes after a push, and **any push cadence faster than that cancels it
+before it has run at all** — not occasionally, but every time. That happened
+repeatedly on 2026-08-23: group AI landed with its browser gate verified only
+locally, because each following push superseded the run that would have checked
+it on Windows and macOS. The golden legs are unaffected, which is why the
+workflow still looks like it is verifying things.
+
 **Still open, and it is the user's call**, because it is about runner minutes
 rather than correctness. `pages.yml` sets `cancel-in-progress: true` at the
 workflow level, with the comment "a superseded deploy is worth cancelling; two
