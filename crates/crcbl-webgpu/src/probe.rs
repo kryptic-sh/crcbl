@@ -16801,4 +16801,195 @@ mod tests {
             }
         }
     }
+
+    /// The attribute that turns a `shim` function into an export, at that
+    /// module's own indentation.
+    ///
+    /// [`exported_shims`] keys off it as well as off the signature, because
+    /// neither line means "export" alone: a `pub extern "C" fn` without it is a
+    /// function no page can reach, and the attribute without one is an export
+    /// this parse would have to guess the name of. The indentation is part of
+    /// both spellings so an item nested deeper cannot be read as one of them.
+    const SHIM_EXPORT_ATTR: &str = r#"    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]"#;
+
+    /// How a `shim` export's signature opens, at the same indentation and for
+    /// the same reason.
+    const SHIM_EXPORT_FN: &str = r#"    pub extern "C" fn "#;
+
+    /// The module doc heading the export table lives under, and the two lines
+    /// markdown spends on that table's head — the only lines in the section
+    /// that are not an export.
+    const EXPORTS_HEADING: &str = "//! # Exports";
+    const EXPORTS_HEADER_ROW: &str = "//! | Symbol | Signature (wasm) | Meaning |";
+    const EXPORTS_RULE_ROW: &str = "//! | --- | --- | --- |";
+
+    /// Every export the `shim` module writes out, read back out of this file's
+    /// own text in file order.
+    ///
+    /// Rust has no reflection, so what a module exports can only be read back
+    /// out of the module — [`PROBE_RS`]'s reason applied to items rather than to
+    /// constants.
+    ///
+    /// The pair is held from both sides so the parse cannot narrow quietly: an
+    /// attribute the line below does not complete, and a signature the line
+    /// above does not introduce, are each a panic naming the line rather than a
+    /// name silently dropped. **What this cannot see is an export a macro
+    /// expands into**, because neither line would be in this file's text to
+    /// read. There is none today — this file's only `macro_rules!` build the
+    /// state-code lists for the mirror above — but one written later would be
+    /// exported and undocumented with nothing here to say so.
+    fn exported_shims(src: &'static str) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = Vec::new();
+        let mut attribute: Option<usize> = None;
+        for (index, line) in src.lines().enumerate() {
+            let number = index + 1;
+            if line == SHIM_EXPORT_ATTR {
+                assert!(
+                    attribute.is_none(),
+                    "probe.rs:{number}: a second export attribute before any signature, so one \
+                     of the two exports would go unnamed"
+                );
+                attribute = Some(number);
+                continue;
+            }
+            let Some(rest) = line.strip_prefix(SHIM_EXPORT_FN) else {
+                if let Some(attribute) = attribute {
+                    panic!(
+                        "probe.rs:{attribute}: an export attribute the line below does not \
+                         complete, so this parse cannot name what it exports: {line}"
+                    );
+                }
+                continue;
+            };
+            assert!(
+                attribute.take().is_some(),
+                "probe.rs:{number}: a `pub extern \"C\" fn` with no export attribute above it, so \
+                 it is not exported on wasm32 at all: {line}"
+            );
+            let Some((name, _)) = rest.split_once('(') else {
+                panic!(
+                    "probe.rs:{number}: an export whose parameter list does not open on its own \
+                     line, so this parse cannot name it: {line}"
+                );
+            };
+            names.push(name);
+        }
+        assert!(
+            attribute.is_none(),
+            "probe.rs ends on an export attribute with no signature under it"
+        );
+        names
+    }
+
+    /// Every export the module doc's `# Exports` table names, in table order.
+    ///
+    /// A line of that section this cannot read is a panic rather than a skip —
+    /// [`crate::js_mirror`]'s rule and for its reason: a row whose shape changed
+    /// would otherwise leave the export it names looking undocumented while the
+    /// row sat right there. A row's label and its link target are held against
+    /// each other for the same reason, since a link pointing at a different
+    /// export sends the reader somewhere else with nothing to notice it.
+    fn documented_exports(src: &'static str) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = Vec::new();
+        let mut inside = false;
+        for (index, line) in src.lines().enumerate() {
+            let number = index + 1;
+            if line == EXPORTS_HEADING {
+                inside = true;
+                continue;
+            }
+            if !inside || line == EXPORTS_HEADER_ROW || line == EXPORTS_RULE_ROW {
+                continue;
+            }
+            if line.starts_with("//! # ") {
+                break;
+            }
+            let Some(row) = line.strip_prefix("//! | ") else {
+                continue;
+            };
+            let read = row
+                .strip_suffix(" |")
+                .and_then(|row| row.strip_prefix("[`"))
+                .and_then(|row| row.split_once("`](shim::"))
+                .and_then(|(label, rest)| {
+                    rest.split_once(") | ").map(|(target, _)| (label, target))
+                });
+            let Some((label, target)) = read else {
+                panic!(
+                    "probe.rs:{number}: a row of the `# Exports` table this parse cannot read, so \
+                     the export it names would read as undocumented: {line}"
+                );
+            };
+            assert_eq!(
+                label, target,
+                "probe.rs:{number}: an `# Exports` row labelled for one export and linked to \
+                 another"
+            );
+            names.push(label);
+        }
+        assert!(
+            inside,
+            "probe.rs's module doc has no `# Exports` heading, so this guard compares nothing"
+        );
+        names
+    }
+
+    /// The module doc's `# Exports` table and the `shim` module are two
+    /// hand-written lists of one set, and nothing else compares them. A shim
+    /// added without a row is an export a page can call and no reader can find;
+    /// a row left behind by a deleted shim points at a symbol that is not there
+    /// and takes `cargo doc` down with it. Both fail here by name, so one added
+    /// and one retired in the same change cannot cancel out.
+    ///
+    /// Read through [`crate::js_mirror::lf`] for that function's reason:
+    /// `.gitattributes` says `* text=auto`, so a Windows checkout hands
+    /// `include_str!` CRLF, and [`documented_exports`] requires a row to end in
+    /// the cell separator — which a stray `\r` would sit after.
+    ///
+    /// The export count is pinned first, so a parse that stopped matching fails
+    /// as a parse rather than passing as agreement, and so an export added or
+    /// retired moves it deliberately. The table's own length needs no second
+    /// pin: `shim` cannot declare one name twice and the rows are checked not
+    /// to, so two lists that agree in both directions are already the same
+    /// length, and a pin on it could not go red.
+    ///
+    /// Order is deliberately not held: the table groups the adapter's numbers
+    /// with the adapter and the device's with the device, while `shim` declares
+    /// them in the order the slices arrived.
+    #[test]
+    fn the_exports_table_names_every_shim_the_module_writes_out_and_no_others() {
+        use std::collections::BTreeSet;
+
+        let source = crate::js_mirror::lf(PROBE_RS);
+        let shims = exported_shims(source);
+        let rows = documented_exports(source);
+
+        assert_eq!(
+            shims.len(),
+            140,
+            "`shim`'s export count moved; the `# Exports` table has to move with it"
+        );
+        let documented: BTreeSet<&str> = rows.iter().copied().collect();
+        let exported: BTreeSet<&str> = shims.iter().copied().collect();
+        for name in &shims {
+            assert!(
+                documented.contains(name),
+                "`shim` exports {name}, which the module doc's `# Exports` table has no row for: \
+                 add one beside its neighbours, saying what the call does and what its answer \
+                 means, failure returns included"
+            );
+        }
+        for name in &rows {
+            assert!(
+                exported.contains(name),
+                "the module doc's `# Exports` table has a row for {name}, which `shim` no longer \
+                 exports: drop the row, or restore the export the page is being told to call"
+            );
+            assert_eq!(
+                rows.iter().filter(|other| *other == name).count(),
+                1,
+                "the module doc's `# Exports` table has more than one row for {name}"
+            );
+        }
+    }
 }
