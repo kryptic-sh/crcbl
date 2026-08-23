@@ -256,6 +256,49 @@ expect_pass() {
     echo "    left alone: $1"
 }
 
+# Assert that a red run turned **at least one** of several named checks red, and
+# that every one of them ran.
+#
+# For a sabotage whose damage has more than one place to surface. Corrupting the
+# main thread's stack is seen as the chunk's own array changing underneath it,
+# as a checksum that does not reproduce, or as an outright trap — the same
+# defect from three vantage points, and which one arrives first depends on where
+# the corruption lands rather than on the sabotage. Demanding a particular one
+# makes the gate depend on the module's layout, which is how CI met
+# `memory access out of bounds` on 2026-08-23 and failed over a check that had
+# stayed green only because the trap got there first.
+#
+# Requiring that all of them *ran* is what keeps this from being satisfied by
+# nothing: a check that stopped being printed would otherwise slip through.
+expect_any_fail() {
+    local reached=0 failed=0 name
+    for name in "$@"; do
+        if grep -qF "ok   $name" "$red_log" || grep -qF "FAIL $name" "$red_log"; then
+            reached=$((reached + 1))
+        else
+            echo "crcbl jobs e2e: $red_label never reached this check at all:" >&2
+            echo "                 $name" >&2
+            echo "               so nothing here is a verdict about it" >&2
+            cat "$red_log" >&2
+            exit 1
+        fi
+        if grep -qF "FAIL $name" "$red_log"; then
+            failed=$((failed + 1))
+            echo "    broke:      $name"
+        fi
+    done
+    if [ "$failed" -eq 0 ]; then
+        echo "crcbl jobs e2e: $red_label turned none of these $reached check(s) red:" >&2
+        for name in "$@"; do
+            echo "                 $name" >&2
+        done
+        echo "               so the sabotage was not observed anywhere and those" >&2
+        echo "               assertions are not gating what they claim to" >&2
+        cat "$red_log" >&2
+        exit 1
+    fi
+}
+
 # And that a check the red run does not decide **ran at all**.
 #
 # A trap is a consequence of the corruption rather than the observation, and
@@ -300,15 +343,24 @@ red_run() {
 }
 
 # A worker that never writes `__stack_pointer` runs on the main thread's stack.
-# The two threads then write over each other's frames, which the chunk's own
-# stack array sees — and the driver's frames go with them, so the run usually
-# traps as well. The trap is *reported* rather than required: it is a
-# consequence of the corruption, not the observation, and requiring it would
-# make this gate depend on where the corruption happened to land.
+# The two threads then write over each other's frames, and the damage surfaces
+# in whichever of three places reaches it first: the chunk's own stack array
+# changing underneath it, a checksum that does not reproduce, or a trap — the
+# driver's frames go with the rest, so the run often does not survive to make
+# the finer observation at all.
+#
+# **Which one it is depends on the module's layout, not on the sabotage.** On
+# 2026-08-23 CI trapped after one `par_for` call where this machine completes
+# four, and the stack-array check passed — green because the run died before it
+# could be wrong, over a build whose only change was in unrelated crates. So
+# what is demanded is that the corruption was seen *somewhere*, and that the
+# thread-local check is not where, which is what keeps this arm distinct from
+# the one below.
 red_run stack-pointer no-stack-pointer
-expect_fail 'no chunk found its stack array changed underneath it'
+expect_any_fail \
+    'no chunk found its stack array changed underneath it' \
+    'no run trapped'
 expect_pass "no thread found another thread's value in its own thread-local"
-expect_either 'no run trapped'
 
 # A worker that never calls `__wasm_init_tls` does not clobber a stack —
 # `__tls_base` is left at zero and every worker's thread-locals alias one
