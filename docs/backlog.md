@@ -59,24 +59,6 @@ Recommendation, not taken without the owner: 3, then 1, then 2 — and only afte
 an ECS benchmark scenario exists to measure against, for the reason the
 profiling plan gives about numbers that cannot be compared.
 
-### The stale `crcbl-wgpu` mentions the comment sweep could not reach
-
-The 2026-08-23 sweep took the present-tense `crcbl-wgpu` references out of 38
-files, and c3aae07 retargeted the three canvas refusal strings it could not
-touch. What is left:
-
-- **`bindless_probe.slang` and `mesh_cluster.slang`** each present `crcbl-wgpu`
-  as a live backend — the first says it "refuses too", the second that it "is
-  the web backend and the forward pass is what it draws". Both were edited and
-  reverted: `crcbl-shaders`' build script sha256s every committed `.slang`
-  against `spirv/manifest.txt` and fails the build with "the committed source
-  has changed without the manifest being regenerated", so a comment-only edit
-  needs `crates/crcbl-shaders/tools/compile-shaders.sh` and a manifest commit.
-  Worth doing on the next run of that script rather than on its own.
-- **The `Cargo.toml` comments were checked and are fine** — all six name the
-  2026-08-21 deletion as a past event. No work here; recorded so the next sweep
-  does not re-derive it.
-
 ### The phys bench's identity check is untimed, and `ColliderId::index` is why
 
 `crcbl bench --scenario phys` checks _which_ bodies each query answered — but
@@ -1126,9 +1108,9 @@ file rots.
 **What the deletion left behind is swept.** The three false justifications this
 entry named by name — `crcbl-mtl`'s and `crcbl`'s `Cargo.toml` comments and
 `parity_blockers`' own doc — are correct as of 2026-08-23, as is every other
-present-tense mention outside the two `.slang` files recorded under "The stale
-`crcbl-wgpu` mentions the comment sweep could not reach" above. What is left of
-the name is history, and correct as history.
+present-tense mention: the last two were the headers of `bindless_probe.slang`
+and `mesh_cluster.slang`, which needed a shader recompile to change at all. What
+is left of the name is history, and correct as history.
 
 **Nothing enforces that, and it is the gap worth knowing:**
 `tools/check-doc-citations.sh` resolves the paths a doc cites, not the names in
