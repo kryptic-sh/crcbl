@@ -20,6 +20,22 @@ emit ray tracing for the Metal target, so macOS, iOS and every browser run the
 rasterised path. Those are not edge platforms, so the raster twin is not a
 degraded fallback nobody looks at; it is the path most players will see.
 
+**Correction (2026-08-23): the arithmetic behind "expensive" has changed, and
+the conclusion has not.** `crcbl-dx12` was deferred on 2026-08-21 along with
+`crcbl-mtl` (see [09-backends-metal-dx12.md](09-backends-metal-dx12.md)), so of
+the two backends that can ray trace, one is parked. Every backend under active
+work — `crcbl-vk` and `crcbl-webgpu` — would run the rasterised path on every
+device except Vulkan hardware with `RAY_QUERY`. That makes the raster twin
+**more** clearly the right call, not less: it is no longer the path most players
+will see, it is very nearly the only path.
+
+What it does change is P7C's own justification, which this table does not carry
+and should not be read as carrying. A ray-traced path is a whole second lighting
+implementation reaching one of four backends while two of the other three are
+deferred, and whether that is worth building next is a scheduling question for
+the roadmap rather than a design question for this document. `docs/backlog.md`
+is where that decision belongs.
+
 | Effect              | `RayTraced`                         | `Rasterised`                                     |
 | ------------------- | ----------------------------------- | ------------------------------------------------ |
 | Global illumination | ray-traced GI                       | irradiance probes + baked/ambient                |
