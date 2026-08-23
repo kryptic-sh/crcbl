@@ -1940,6 +1940,16 @@ export function webgpuBindingLayoutFor(kind) {
  * withheld to match: a feature saying "anisotropy, see the limit for the cap"
  * beside a cap of 1 would be a contradiction.
  *
+ * **This is a floor, not a refusal, and the other half of that is
+ * {@link webgpuMaxAnisotropyFor}**, which passes an ask above `1` on to
+ * `createSampler` and lets the device clamp it. The pair is deliberate — a
+ * caller who respects this limit never asks for more, and one who ignores it
+ * gets what the device gives — but it only reads as deliberate from whichever
+ * of the two you happen to open, so each names the other. `docs/backlog.md`
+ * carries the decision that has not been taken: whether the seam should refuse
+ * above `1` instead, which would make anisotropic filtering permanently
+ * unreachable here.
+ *
  * @param {{ limits?: object, features?: ReadonlySet<string> }} source An
  *   adapter or a device.
  * @returns {HalLimits}

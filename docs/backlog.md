@@ -5624,10 +5624,16 @@ who ignores it gets whatever the device does.
 
 The alternative is refusing everything above 1, which would make the seam's
 anisotropic filtering permanently unreachable on WebGPU. That is why it was not
-done — but it is a decision worth confirming rather than one that should sit
-implicit in two files that do not reference each other. WebGPU has no query for
-the maximum a device supports, which is why the reported limit is 1: it is "no
-ceiling this backend can guarantee", not "more than one is refused".
+done, and it remains **a decision worth confirming** rather than one that sits
+implicit. WebGPU has no query for the maximum a device supports, which is why
+the reported limit is 1: it is "no ceiling this backend can guarantee", not
+"more than one is refused".
+
+**Corrected 2026-08-24:** this entry said the two halves live "in two files that
+do not reference each other". They are in one file, `web/engine/gpu-replay.js`,
+and `webgpuMaxAnisotropyFor` already linked to `halLimitsFor`; the reference was
+one-way, and `halLimitsFor` now links back. So what is left here is only the
+decision, not the implicitness.
 
 ### A `GPUSampler` reports nothing but its label, so no browser check can confirm one
 
