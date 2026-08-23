@@ -5861,10 +5861,14 @@ What it does **not** reach, stated rather than left to be discovered:
   still fail no job.
 - **`viewer` has no windowed gate**, and cannot get one as the repo stands: it
   takes a model path (`viewer model.glb`) and no `.glb` is committed anywhere
-  outside `target/`. Closing it means deciding where that model comes from —
-  committing a small one, or having the gate write one first through the same
-  builder `gltf_e2e` uses for its fixture, which is the cheaper of the two and
-  keeps a binary out of the tree. `sandbox` stays out on purpose:
+  outside `target/`. Closing it means deciding where that model comes from, and
+  neither option is free: committing a small `.glb` puts a blob in the tree that
+  nobody reviewing a change can read — the objection `crcbl-scene`'s
+  `gltf_fixture` module header already states — while generating one at gate
+  time means reaching a builder that does not exist outside tests. Both
+  spellings are `#[cfg(test)]`: `crcbl-scene`'s `gltf_fixture` and
+  `gltf_e2e.rs`'s own `quad_glb`, so the generate route means widening one of
+  them into a real API or writing a third copy. `sandbox` stays out on purpose:
   `run-x11-e2e.sh` already drives it windowed and asserts more of it.
 - **The adapter is still lavapipe, not a real one.** Under Xvfb Mesa reports no
   DRI3, RADV refuses to present and the run falls back to `llvmpipe` — locally
