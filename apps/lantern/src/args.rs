@@ -259,7 +259,13 @@ mod tests {
         let Invocation::Run(options) = run(&["--no-shadows", "--no-ao"]) else {
             panic!("two flags is a run");
         };
-        assert_eq!(options.effects, RenderEffects::REFLECTIONS);
+        assert_eq!(
+            options.effects,
+            RenderEffects::all()
+                .difference(RenderEffects::SHADOWS)
+                .difference(RenderEffects::AMBIENT_OCCLUSION),
+            "two flags compose, and neither touches an effect this sample has no flag for"
+        );
     }
 
     /// Every flag this sample adds parses, and reaches the field it names.

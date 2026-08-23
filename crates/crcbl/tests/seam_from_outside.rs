@@ -574,8 +574,8 @@ fn a_settings_file_switching_an_effect_off_is_a_frame_with_fewer_passes() {
     let (all_on, every_pass) = a_frame_opened_with(SettingsSource::None);
     assert_eq!(
         all_on,
-        RenderEffects::all(),
-        "a run with no settings at all has to be the every-effect frame, or the \
+        RenderEffects::DEFAULT_STACK,
+        "a run with no settings at all has to be the default-stack frame, or the \
          comparisons below are against the wrong control"
     );
 
@@ -605,7 +605,7 @@ fn a_settings_file_switching_an_effect_off_is_a_frame_with_fewer_passes() {
     let (effects, labels) = a_frame_opened_with(SettingsSource::Source(&storage));
     assert_eq!(
         effects,
-        RenderEffects::all().difference(RenderEffects::SHADOWS)
+        RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS)
     );
     assert!(
         labels.len() < every_pass.len(),
@@ -677,16 +677,21 @@ fn the_video_layer_clamps_downward_and_the_order_around_it_holds() {
         programmatic: EffectOverride::none().force(RenderEffects::SHADOWS, Some(true)),
         ..request
     };
+    // `DEFAULT_STACK` rather than `all`, and it is the camera layer that makes
+    // the difference: nothing here declares a render stack, so the view is
+    // asking for every effect that models the scene's own light transport and
+    // for no lens effect. What this arm is about is the *shadow* bit the file
+    // took away and the override put back.
     assert_eq!(
         forced.resolve(all),
-        all,
+        RenderEffects::DEFAULT_STACK,
         "the override is applied after the video clamp, so it can restore what it took"
     );
 
     // **And the device still clamps last and absolutely.**
     assert_eq!(
         forced.resolve(all.difference(RenderEffects::SHADOWS)),
-        all.difference(RenderEffects::SHADOWS),
+        RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
         "no toggle may conjure an effect the device has no way to draw"
     );
 

@@ -2976,6 +2976,39 @@ impl TransientImageDesc {
         }
     }
 
+    /// One level of `docs/plan/18-render-features.md`'s bloom chain:
+    /// `Rgba16Float`, rendered into and then sampled.
+    ///
+    /// [`scene_color`]'s description without the `TRANSFER_SRC` — nothing reads
+    /// a chain level back, and a usage flag naming a use nothing makes is a
+    /// claim about a resource rather than a fact about one.
+    ///
+    /// **`Rgba16Float` and not something narrower.** The chain carries the
+    /// scene's above-display range, which is the part of it that blooms at all;
+    /// an eight-bit level would clip exactly that before the tonemap saw it, and
+    /// a threshold-free bloom would then be a bloom of a picture the frame does
+    /// not contain.
+    ///
+    /// **One description per level, at that level's own extent**, because
+    /// `crcbl_render::bloom` builds its chain out of separate single-mip images
+    /// rather than one image with mips — that module's header gives the two
+    /// independent reasons, and both of them are about what a pass can attach.
+    /// Distinct extents are distinct descriptions, so the pool hands out a
+    /// distinct physical image for each and every pass gets a correct render
+    /// area.
+    ///
+    /// [`scene_color`]: TransientImageDesc::scene_color
+    #[must_use]
+    pub const fn bloom_mip(extent: (u32, u32)) -> Self {
+        Self {
+            extent,
+            format: Format::Rgba16Float,
+            usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::SAMPLED),
+            samples: 1,
+            mip_levels: 1,
+        }
+    }
+
     /// The depth buffer: `D32Float`, reversed-Z, written by the depth prepass
     /// and **sampled** by the screen-space occlusion pass.
     ///

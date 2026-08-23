@@ -269,6 +269,10 @@ pub mod triangle;
 /// The triangle `mesh_shader.slang` pulls, in the layout that shader declares.
 pub mod mesh_shader;
 
+/// The uniform block the three `bloom_*.slang` sources read, in the layout they
+/// declare — and the guard over the filter helpers they copy between them.
+pub mod bloom;
+
 /// The uniform block and the far-plane constant `ssao.slang` reads, in the
 /// layouts that shader declares.
 pub mod ssao;

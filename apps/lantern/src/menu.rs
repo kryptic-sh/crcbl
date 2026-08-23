@@ -355,9 +355,13 @@ mod tests {
             assert_eq!(fired, effect, "the {name} row fires the wrong effect");
 
             let off = toggled_effect(EffectRequest::default(), device, fired);
+            // `DEFAULT_STACK` and not `device`: the request's camera layer is
+            // the default one, which asks for every effect that models the
+            // scene's own light transport and for no lens effect. What this arm
+            // is about is the one bit the row moved.
             assert_eq!(
                 off.resolve(device),
-                device.difference(effect),
+                RenderEffects::DEFAULT_STACK.difference(effect),
                 "the {name} row took more than its own effect",
             );
             assert!(
@@ -367,7 +371,11 @@ mod tests {
             );
 
             let back_on = toggled_effect(off, device, fired);
-            assert_eq!(back_on.resolve(device), device, "{name} did not come back");
+            assert_eq!(
+                back_on.resolve(device),
+                RenderEffects::DEFAULT_STACK,
+                "{name} did not come back"
+            );
             assert!(panel(back_on).contains(&format!("{name}: ON")), "{name}");
         }
 
@@ -391,7 +399,7 @@ mod tests {
         // A view with no reflections in its stack, and a player whose quality
         // setting turned occlusion off.
         let request = EffectRequest {
-            camera: device.difference(RenderEffects::REFLECTIONS),
+            camera: RenderEffects::DEFAULT_STACK.difference(RenderEffects::REFLECTIONS),
             video: device.difference(RenderEffects::AMBIENT_OCCLUSION),
             ..EffectRequest::default()
         };

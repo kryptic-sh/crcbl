@@ -770,8 +770,9 @@ mod tests {
                 .expect("headless runs everywhere")
                 .paths
                 .effects,
-            RenderEffects::all(),
-            "a run that asked for nothing must draw every effect",
+            RenderEffects::DEFAULT_STACK,
+            "a run that asked for nothing must draw every effect this sample's stack asks \
+             for — see `room::View::stack`",
         );
 
         for (off, row) in [
@@ -784,7 +785,7 @@ mod tests {
             let summary = run(&options).expect("a frame with an effect off still runs");
             assert_eq!(
                 summary.paths.effects,
-                RenderEffects::all().difference(off),
+                RenderEffects::DEFAULT_STACK.difference(off),
                 "{off:?} did not reach the renderer",
             );
             assert_eq!(summary.paths.effects_row(), row, "{off:?}");
@@ -944,8 +945,8 @@ mod tests {
         engine.frame().expect("a frame");
         assert_eq!(
             engine.gpu().paths().effects,
-            RenderEffects::all(),
-            "a run that asked for nothing draws every effect",
+            RenderEffects::DEFAULT_STACK,
+            "a run that asked for nothing draws every effect this sample's stack asks for",
         );
 
         engine
@@ -960,7 +961,7 @@ mod tests {
         press_row(&mut engine, window, 4);
         assert_eq!(
             engine.gpu().paths().effects,
-            RenderEffects::all().difference(RenderEffects::SHADOWS),
+            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
             "the row did not reach the renderer, or took more than shadows",
         );
         assert_eq!(engine.gpu().paths().effects_row(), "ao ssr");
@@ -974,7 +975,7 @@ mod tests {
         // matrix is for: one keypress between a shadowed room and an unshadowed
         // one, with no restart in between.
         press_row(&mut engine, window, 0);
-        assert_eq!(engine.gpu().paths().effects, RenderEffects::all());
+        assert_eq!(engine.gpu().paths().effects, RenderEffects::DEFAULT_STACK);
         assert!(
             ui_text(&engine).iter().any(|text| text == "SHADOWS: ON"),
             "the row's label must show the value it went back to: {:?}",
@@ -986,7 +987,7 @@ mod tests {
         let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
         assert_eq!(
             summary.paths.effects,
-            RenderEffects::all().difference(RenderEffects::SHADOWS),
+            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
             "the summary reports the set the run ended on",
         );
     }

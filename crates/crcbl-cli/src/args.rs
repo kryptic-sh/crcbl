@@ -166,6 +166,8 @@ OPTIONS:
                            ao                  the inside of a box, ambient only
                            ssr                 a pyramid reflected in a smooth
                                                floor
+                           bloom               one very bright patch and its
+                                               halo
                            probes              a room lit by irradiance probes
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
@@ -1195,6 +1197,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::PointShadow,
         Scene::Ao,
         Scene::Ssr,
+        Scene::Bloom,
         Scene::Probes,
         Scene::Sprite,
         Scene::Ui,
@@ -1217,6 +1220,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::PointShadow => "point_shadow",
         Scene::Ao => "ao",
         Scene::Ssr => "ssr",
+        Scene::Bloom => "bloom",
         Scene::Probes => "probes",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",

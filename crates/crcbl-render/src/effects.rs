@@ -27,6 +27,11 @@
 //! * [`RenderEffects::REFLECTIONS`] off records neither reflection pass and
 //!   tonemaps the forward pass's own scene colour, which is bit-identical to the
 //!   frame before that pair existed.
+//! * [`RenderEffects::BLOOM`] off records no chain pass and takes no chain image
+//!   out of the transient pool, and the tonemap reads whichever image it would
+//!   have read before — bit-identical, on the reflection pair's terms exactly.
+//!   It is off in [`RenderEffects::DEFAULT_STACK`], so that is the frame every
+//!   view in this workspace draws until one asks otherwise.
 //!
 //! Topic 18 specifies the first two mechanisms in writing and refuses the
 //! alternatives; the third is that document's own words about the march.
@@ -87,7 +92,38 @@ bitflags::bitflags! {
         /// Screen-space reflections — the march and the blur that composites it
         /// into the scene colour.
         const REFLECTIONS = 1 << 2;
+        /// The bloom chain — the threshold-free downsample pyramid, the tent
+        /// upsample that walks it back down, and the composite that adds it to
+        /// the scene colour.
+        ///
+        /// One bit for a variable number of passes, because the chain's length
+        /// is a function of the target's extent rather than a choice — see
+        /// `crate::bloom`. It is also the first bit here that is **not** in
+        /// [`RenderEffects::DEFAULT_STACK`]; that constant says why.
+        const BLOOM = 1 << 3;
     }
+}
+
+impl RenderEffects {
+    /// What a view that has declared no render stack asks for.
+    ///
+    /// Every effect but [`BLOOM`](Self::BLOOM), and the line between them is not
+    /// arbitrary: shadows, ambient occlusion and reflections each approximate
+    /// light transport that is **physically present in the scene**, so a view
+    /// that says nothing about them is a view asking for the most correct
+    /// picture the device can draw. Bloom is a property of a **lens** — topic 18
+    /// files it under the post stack, whose contents that document says are
+    /// "data-driven per camera (RON: which passes, parameters)" — and a camera
+    /// that has been given no stack has been given no lens.
+    ///
+    /// So the default is the most correct picture and no lens, and a view that
+    /// wants the lens asks for it: through its own stack, or through
+    /// [`EffectOverride`], which is the layer that may move a decision upward.
+    ///
+    /// This is what [`EffectRequest::default`]'s
+    /// [`camera`](EffectRequest::camera) holds, and it is why adding the bloom
+    /// bit did not change a single frame the engine already drew.
+    pub const DEFAULT_STACK: Self = Self::all().difference(Self::BLOOM);
 }
 
 /// A programmatic override: which effects are forced on, and which off.
@@ -176,9 +212,10 @@ impl EffectOverride {
 /// be swapped at a call site and the frame would still compile and still draw a
 /// picture.
 ///
-/// [`Default`] is every effect wanted by the view, no quality clamp and no
-/// override — which resolves to whatever the device permits, and is what every
-/// frame the engine drew before this type existed did.
+/// [`Default`] is [`RenderEffects::DEFAULT_STACK`] wanted by the view, no
+/// quality clamp and no override — which resolves to whatever the device
+/// permits, and is what every frame the engine drew before this type existed
+/// did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectRequest {
     /// What this **view** needs, from its render stack.
@@ -214,9 +251,16 @@ pub struct EffectRequest {
 }
 
 impl Default for EffectRequest {
+    /// [`RenderEffects::DEFAULT_STACK`] for the view, no quality clamp and no
+    /// override.
+    ///
+    /// **The camera field is the default stack rather than
+    /// [`RenderEffects::all`]**, and that constant carries the argument: the
+    /// effects that model the scene's own light transport are what a view asks
+    /// for by saying nothing, and the lens effects are what it has to ask for.
     fn default() -> Self {
         Self {
-            camera: RenderEffects::all(),
+            camera: RenderEffects::DEFAULT_STACK,
             video: RenderEffects::all(),
             programmatic: EffectOverride::none(),
         }
@@ -263,9 +307,13 @@ mod tests {
         let shadows = RenderEffects::SHADOWS;
         let ao = RenderEffects::AMBIENT_OCCLUSION;
 
-        // The default is every effect: the frame the engine drew before there
-        // were toggles.
-        assert_eq!(EffectRequest::default().resolve(all), all);
+        // The default is `DEFAULT_STACK`: every effect that models the scene's
+        // own light transport, which is the frame the engine drew before there
+        // were toggles and before there was a lens effect to leave out of it.
+        assert_eq!(
+            EffectRequest::default().resolve(all),
+            RenderEffects::DEFAULT_STACK
+        );
 
         // 1. The camera's stack is the top: a view that does not ask for an
         //    effect does not get it, whatever the layers below say.
@@ -310,7 +358,10 @@ mod tests {
             programmatic: EffectOverride::none().force(shadows, Some(false)),
             ..EffectRequest::default()
         };
-        assert_eq!(forced_off.resolve(all), all.difference(shadows));
+        assert_eq!(
+            forced_off.resolve(all),
+            RenderEffects::DEFAULT_STACK.difference(shadows)
+        );
 
         // 4. The device clamps last and absolutely: an override forcing an
         //    effect on cannot conjure one the device has no way to draw.
@@ -319,6 +370,54 @@ mod tests {
             shadows,
             "the device clamp must be last, and must not be overridable upward"
         );
+    }
+
+    /// **The default stack is every effect but the lens one, and a view that
+    /// wants the lens can still get it.**
+    ///
+    /// Two claims, and the second is what keeps the first from being a way of
+    /// switching bloom off for good. The camera layer is a *request*, not a
+    /// clamp, so a view that declares its own stack — or a caller reaching for
+    /// [`EffectOverride`], the one layer that may move a decision upward — puts
+    /// the chain back in the frame. `crcbl::screenshot`'s bloom fixture is the
+    /// consumer that does exactly that.
+    ///
+    /// What it guards is the claim [`RenderEffects::DEFAULT_STACK`]'s docs make:
+    /// adding the bloom bit changed no frame this workspace already drew. A
+    /// default that quietly included it would have re-blessed every golden image
+    /// in the tree, and each of them would still have been a plausible picture.
+    #[test]
+    fn the_default_stack_is_every_effect_but_the_lens_and_a_view_can_still_ask() {
+        assert_eq!(
+            RenderEffects::DEFAULT_STACK,
+            RenderEffects::all().difference(RenderEffects::BLOOM),
+        );
+        assert!(
+            !EffectRequest::default()
+                .camera
+                .contains(RenderEffects::BLOOM)
+        );
+        assert!(
+            !EffectRequest::default()
+                .resolve(RenderEffects::all())
+                .contains(RenderEffects::BLOOM),
+            "a view that said nothing must not get a lens effect"
+        );
+
+        // The camera's own stack, which is the layer topic 18 puts the post
+        // stack in.
+        let declared = EffectRequest {
+            camera: RenderEffects::all(),
+            ..EffectRequest::default()
+        };
+        assert_eq!(declared.resolve(RenderEffects::all()), RenderEffects::all());
+
+        // And the override, for a caller with no stack of its own.
+        let forced = EffectRequest {
+            programmatic: EffectOverride::none().force(RenderEffects::BLOOM, Some(true)),
+            ..EffectRequest::default()
+        };
+        assert_eq!(forced.resolve(RenderEffects::all()), RenderEffects::all());
     }
 
     /// **An override's two halves cannot disagree**, because the setter is the
@@ -342,7 +441,7 @@ mod tests {
                 ..EffectRequest::default()
             }
             .resolve(RenderEffects::all()),
-            RenderEffects::all().difference(ssr),
+            RenderEffects::DEFAULT_STACK.difference(ssr),
             "the second force must stand alone, not be unioned with the first"
         );
 

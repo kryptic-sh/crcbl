@@ -892,6 +892,12 @@ dispatches them cannot disagree.
 
 - **Programmatic** is wired: `ForwardRenderer::set_effect_request`, and
   `apps/lantern`'s `--no-shadows` / `--no-ao` / `--no-reflections` drive it.
+  There is no `--no-bloom`, and there is nothing for one to turn off: bloom is
+  the one effect **not** in `RenderEffects::DEFAULT_STACK`, so a view that has
+  declared no render stack — which is every view in this workspace but the
+  `Scene::Bloom` fixture — is not drawing it to begin with. The reason is on
+  that constant: the other three approximate light transport present in the
+  scene, and a camera given no stack has been given no lens.
 - **Device** is wired to `DeviceCaps` and **removes nothing**, which is a fact
   about these three effects rather than an unfinished clamp — the AO section
   above says it of the occlusion pair in as many words, the reflection pair's
@@ -921,17 +927,17 @@ dispatches them cannot disagree.
 
 ## Delivery
 
-| Slice                                                                 | Phase                                                                            |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| HDR target + exposure/tonemap pass + FXAA                             | P7                                                                               |
-| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7                                                                               |
-| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs` |
-| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C                                                                              |
-| Ray-traced shadows + AO                                               | P7C                                                                              |
-| Ray-traced reflections                                                | P7C                                                                              |
-| Ray-traced global illumination                                        | P7C                                                                              |
-| Bloom chain                                                           | P10                                                                              |
-| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP                                                                         |
+| Slice                                                                 | Phase                                                                                   |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| HDR target + exposure/tonemap pass + FXAA                             | P7                                                                                      |
+| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7                                                                                      |
+| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`        |
+| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C                                                                                     |
+| Ray-traced shadows + AO                                               | P7C                                                                                     |
+| Ray-traced reflections                                                | P7C                                                                                     |
+| Ray-traced global illumination                                        | P7C                                                                                     |
+| Bloom chain                                                           | **Built 2026-08-23** (P10) — off unless a view asks; see `RenderEffects::DEFAULT_STACK` |
+| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP                                                                                |
 
 **P7B and P7C are new phases** carrying the raster twin and the ray-traced path
 respectively; the roadmap's phase table is authoritative for their ordering. The

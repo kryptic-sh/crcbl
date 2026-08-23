@@ -122,6 +122,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod bloom;
 pub mod button_skin;
 pub mod camera;
 pub mod cluster_pool;

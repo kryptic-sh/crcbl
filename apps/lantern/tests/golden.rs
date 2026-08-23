@@ -1250,7 +1250,13 @@ fn arm_frame(
 fn the_camera_stack_is_the_only_thing_between_the_monitors_two_frames() {
     let effects = RenderEffects::all();
     let shipped = Arm::of(room::View::Monitor);
-    let reflecting = shipped.with_stack(RenderEffects::all());
+    // `DEFAULT_STACK` and not `all()`: the monitor's stack is that constant with
+    // the reflections taken out — see `room::MONITOR_STACK` — so this is the one
+    // arm that puts them back and changes nothing else. `all()` here would also
+    // switch the bloom chain on, which no view in this sample asks for, and the
+    // control block below would then be measuring the whole frame getting
+    // brighter rather than the camera layer.
+    let reflecting = shipped.with_stack(RenderEffects::DEFAULT_STACK);
     assert_ne!(
         shipped.stack, reflecting.stack,
         "two arms that ask for the same effects are not a comparison"

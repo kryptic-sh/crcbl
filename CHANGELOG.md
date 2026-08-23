@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Bloom.** `docs/plan/18-render-features.md`'s P10 chain: a threshold-free
+  partial-Karis downsample pyramid, a 3×3 tent upsample added back down it, and
+  an additive composite, recorded between `ssr-blur` and `tonemap`.
+  `RenderEffects::BLOOM` is the toggle and `crcbl::settings`' `bloom` key is the
+  player's. **It is off unless a view asks for it**:
+  `RenderEffects::DEFAULT_STACK` — what `EffectRequest::default()`'s `camera`
+  now holds — is every effect but this one, because bloom is a property of a
+  lens rather than of the scene's light transport, and a camera given no render
+  stack has been given no lens. No frame the engine already drew has changed.
+  The chain's length comes from the target's extent — six levels at 1080p, none
+  at all below sixteen pixels on an axis — so `ForwardRenderer::MAX_PASSES`
+  carries a ceiling for it rather than a count. New shaders `bloom_down`,
+  `bloom_up` and `bloom_composite`; new fixture `Scene::Bloom` and the `bloom`
+  golden, whose check compares the floor beside the emitter against its mirror
+  on the other side of the frame, so a chain that returned its input or a
+  uniform blur cannot pass it.
+
 - **The server consumes client input.** `Server` holds the input frames that
   arrived since the last tick — each with the `TickId` its client stamped it
   with — and hands them to `GameModule::tick` as a `ClientInputs` view, in

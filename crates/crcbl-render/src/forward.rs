@@ -163,6 +163,7 @@ use crate::graph::{
 // Renamed on the way in, because [`crate::light_grid::Grid`] already holds the
 // bare name here and means the froxel grid — the collision [`crate::grid`]'s
 // header predicted.
+use crate::bloom::Bloom;
 use crate::grid::{Grid as GroundGrid, GridStyle};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError};
 use crate::light::{Light, sun_row};
@@ -565,8 +566,8 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
 /// atlas's, the depth prepass, the forward pass, the tonemap, the ground grid
-/// and the culling-statistics copy — plus [`Ssao::PASSES`] and [`Ssr::PASSES`]
-/// beside them.
+/// and the culling-statistics copy — plus [`Ssao::PASSES`], [`Ssr::PASSES`] and
+/// [`Bloom::MAX_PASSES`] beside them.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
@@ -581,7 +582,13 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// default and is not a [`RenderEffects`] bit: a caller that switches it on
 /// records one more pass, and a bound short of that would silently stop timing
 /// the last pass of every frame it drew.
-const RENDER_PASSES: u32 = 6 + Ssao::PASSES + Ssr::PASSES;
+///
+/// **The bloom term is a ceiling where the other two are counts**, because the
+/// chain's length is a function of the target's extent — see [`crate::bloom`] —
+/// and this constant is read before any extent is known. The frame that lands on
+/// it is a large one with bloom switched on; every smaller frame records fewer,
+/// exactly as a frame with a free shadow slot does.
+const RENDER_PASSES: u32 = 6 + Ssao::PASSES + Ssr::PASSES + Bloom::MAX_PASSES;
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
@@ -591,21 +598,29 @@ const RENDER_PASSES: u32 = 6 + Ssao::PASSES + Ssr::PASSES;
 /// call.
 const FULLSCREEN_DRAWS: u64 = 1;
 
-/// How many full-screen passes a frame drawing `effects` records: the tonemap,
-/// always, and each switched-on effect's pair beside it.
+/// How many full-screen passes a frame drawing `effects` at `extent` records:
+/// the tonemap, always, and each switched-on effect's passes beside it.
 ///
 /// **A function of the frame rather than a constant**, since
 /// `docs/plan/18-render-features.md`'s toggles: it was the tonemap alone, then
 /// five, and either written down is a number that stops matching the frame. The
 /// tonemap is the one that is not conditional — a frame has to reach the
 /// swapchain.
-const fn fullscreen_passes(effects: RenderEffects) -> u64 {
+///
+/// **`extent` is here because the bloom chain's length depends on it** — see
+/// [`crate::bloom`] — where the two pairs above are the same two passes at every
+/// size. A frame too small for even one chain level records none of them, which
+/// is the same arithmetic as the toggle being off.
+fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32)) -> u64 {
     let mut passes = 1;
     if effects.contains(RenderEffects::AMBIENT_OCCLUSION) {
         passes += Ssao::PASSES as u64;
     }
     if effects.contains(RenderEffects::REFLECTIONS) {
         passes += Ssr::PASSES as u64;
+    }
+    if effects.contains(RenderEffects::BLOOM) {
+        passes += u64::from(Bloom::passes_for(extent));
     }
     passes
 }
@@ -1136,6 +1151,8 @@ pub struct ForwardRenderer {
     /// `docs/plan/18-render-features.md`'s reflection march — see
     /// [`crate::ssr`].
     ssr: Ssr,
+    /// `docs/plan/18-render-features.md`'s bloom chain — see [`crate::bloom`].
+    bloom: Bloom,
 
     /// The three layers a caller supplies — see [`crate::effects`].
     effect_request: EffectRequest,
@@ -1227,6 +1244,9 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s reflection march, which owns one
     /// pipeline, one layout and a ring of blocks.
     ssr: Option<Ssr>,
+    /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
+    /// pipelines, two layouts, a sampler and a ring of blocks.
+    bloom: Option<Bloom>,
 }
 
 impl Rollback {
@@ -1268,6 +1288,9 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
+        }
+        if let Some(bloom) = self.bloom {
+            bloom.destroy(device);
         }
         if let Some(ssr) = self.ssr {
             ssr.destroy(device);
@@ -3537,6 +3560,18 @@ impl ForwardRenderer {
             Self::build_fullscreen,
         )?);
 
+        // --- the bloom chain ---
+        //
+        // Stored whole for the pair above's reason, and after them because
+        // `Rollback::run` releases in the reverse order of construction. It owns
+        // a **linear** sampler of its own; `Self::sampler` above is `Nearest` on
+        // purpose and `crate::bloom` says why the chain cannot share it.
+        rollback.bloom = Some(Bloom::new(
+            device,
+            instance_buffers.len(),
+            Self::build_fullscreen,
+        )?);
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -3684,12 +3719,17 @@ impl ForwardRenderer {
                 .ssr
                 .take()
                 .unwrap_or_else(|| unreachable!("the march was placed in the rollback above")),
-            // Every effect the view wants, no quality clamp and no override,
-            // which resolves to every effect this device permits — the frame
-            // every caller of this type drew before there were toggles.
+            bloom: rollback
+                .bloom
+                .take()
+                .unwrap_or_else(|| unreachable!("the chain was placed in the rollback above")),
+            // The default stack the view wants, no quality clamp and no
+            // override, which resolves to every effect this device permits but
+            // the lens one — the frame every caller of this type drew before
+            // there were toggles. See [`RenderEffects::DEFAULT_STACK`].
             effect_request: EffectRequest::default(),
             device_effects: RenderEffects::all(),
-            frame_effects: RenderEffects::all(),
+            frame_effects: RenderEffects::DEFAULT_STACK,
             // No frame has been recorded yet, on `recorded_draws`' terms.
             recorded_fullscreen: 0,
         })
@@ -4193,6 +4233,11 @@ impl ForwardRenderer {
                 probe_volume: self.probe_volume,
             },
         )?;
+        // The bloom chain's blocks, one row per step: each step needs the texel
+        // size of the image it reads, and the chain's shape is a function of the
+        // extent alone. Written whether or not the chain is in this frame, on
+        // the two blocks above's terms — a row nobody reads costs sixteen bytes.
+        self.bloom.begin_frame(device, self.frame, extent)?;
 
         // Every element the pool has ever handed out, not its live count: a
         // removed instance leaves a hole and the live ones above it still have
@@ -4917,6 +4962,42 @@ impl ForwardRenderer {
                 graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent)),
             )
         });
+        // The bloom chain's levels and the image its composite writes, and
+        // **all of them are conditional** on the pair above's terms exactly: a
+        // transient nothing reads or writes is a physical image taken out of the
+        // pool for a pass that does not exist.
+        //
+        // `None` covers two cases that are one case downstream — the toggle is
+        // off, or the target is too small for even one level of chain (see
+        // [`crate::bloom`]) — and in both the tonemap reads whatever it would
+        // have read before, which is what makes this effect's off-switch
+        // bit-identical.
+        //
+        // The levels are requested largest first, which is the order the
+        // downsample chain writes them in. The composite's target is the scene
+        // target's description exactly — it stands in for that image from here
+        // on, so a narrower one would tonemap a truncated frame — which makes it
+        // a fourth live request for that description on a frame that also
+        // reflects, and therefore a fourth distinct physical image out of the
+        // pool. See `TransientPool::image`.
+        let bloomed = effects
+            .contains(RenderEffects::BLOOM)
+            .then(|| crate::bloom::mips_for(extent))
+            .filter(|levels| *levels > 0)
+            .map(|levels| {
+                let mips: Vec<ImageId> = (1..=levels)
+                    .map(|level| {
+                        graph.create_image(
+                            format!("bloom-mip-{level}"),
+                            TransientImageDesc::bloom_mip(crate::bloom::mip_extent(extent, level)),
+                        )
+                    })
+                    .collect();
+                (
+                    mips,
+                    graph.create_image("bloom-color", TransientImageDesc::scene_color(extent)),
+                )
+            });
 
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
@@ -4968,7 +5049,7 @@ impl ForwardRenderer {
         // default — so what decides it is the field and not this frame's
         // effects.
         self.recorded_fullscreen =
-            fullscreen_passes(effects) + u64::from(self.ground_grid().is_some());
+            fullscreen_passes(effects, extent) + u64::from(self.ground_grid().is_some());
         self.recorded_draws = shadow_draws
             + 2 * bucket_draws.calls.len() as u64
             + self.recorded_fullscreen * FULLSCREEN_DRAWS;
@@ -5233,6 +5314,22 @@ impl ForwardRenderer {
                 composited
             }
             None => scene_color,
+        };
+
+        // `docs/plan/18-render-features.md`'s bloom chain, and it slots in
+        // exactly where the reflection composite left off: it reads whatever the
+        // tonemap was about to read, writes a new full-resolution image, and the
+        // tonemap reads that instead. A frame that does not add it hands the
+        // image on untouched and is bit-identical, which is this effect's whole
+        // off-switch — and the group the tonemap builds below is cached against
+        // its source view, so a toggle costs one cache miss and nothing else.
+        let tonemapped = match &bloomed {
+            Some((mips, composited)) => {
+                self.bloom
+                    .add_passes(graph, frame, extent, tonemapped, mips, *composited);
+                *composited
+            }
+            None => tonemapped,
         };
 
         // The tonemap group names a *graph-owned* view, so it can only be built
@@ -6464,6 +6561,7 @@ impl ForwardRenderer {
         if let Some(grid) = self.ground_grid {
             grid.destroy(device);
         }
+        self.bloom.destroy(device);
         self.ssr.destroy(device);
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
@@ -8753,7 +8851,7 @@ mod tests {
         // Derived from what the frame resolved rather than from a constant, so
         // this is still the every-effect frame's count and would follow a frame
         // that switched one off.
-        let fullscreen = fullscreen_passes(renderer.effects()) * FULLSCREEN_DRAWS;
+        let fullscreen = fullscreen_passes(renderer.effects(), TEST_EXTENT) * FULLSCREEN_DRAWS;
         assert!(
             counters.draws > fullscreen,
             "a frame that recorded only its full-screen passes drew no scene",
@@ -8825,7 +8923,7 @@ mod tests {
         let counters = renderer.counters();
         assert_eq!(
             counters.drawn,
-            Some(fullscreen_passes(renderer.effects()) * FULLSCREEN_DRAWS),
+            Some(fullscreen_passes(renderer.effects(), TEST_EXTENT) * FULLSCREEN_DRAWS),
             "the survivor count the null backend produced is zero, plus one instance per \
              full-screen pass — which is on both sides of the row",
         );
@@ -9992,18 +10090,19 @@ mod tests {
         renderer: &mut ForwardRenderer,
         imported: ImportedImage,
         pool: &crate::TransientPool,
+        extent: (u32, u32),
     ) -> Vec<String> {
         renderer
             .begin_frame(
                 device,
                 &Camera::default(),
                 &DirectionalLight::default(),
-                (64, 48),
+                extent,
             )
             .expect("write");
         let mut graph = crate::RenderGraph::new(queue);
         let target = graph.import_image("target", imported);
-        renderer.add_passes(&mut graph, pool, target, (64, 48));
+        renderer.add_passes(&mut graph, pool, target, extent);
         graph
             .compile(pool)
             .expect("a legal frame")
@@ -10039,8 +10138,24 @@ mod tests {
     /// The ground grid is switched on for **both** frames, because the widest
     /// frame is the one that has it: it is off by default and not a
     /// [`RenderEffects`] bit, so nothing else here would put its pass in.
+    ///
+    /// **And the frames are drawn at [`WIDEST_EXTENT`] rather than at
+    /// [`TEST_EXTENT`], with every effect forced on.** The bloom chain's length
+    /// is a function of the target's extent — see [`crate::bloom`] — so the
+    /// widest frame this renderer records is a *large* one, and a bound checked
+    /// against a 64×48 frame would sit six passes above what that frame runs and
+    /// this assertion would have to be a `<=`. It is an `==` on purpose: a bound
+    /// well over the widest frame buys query sets nothing writes, and only an
+    /// exact comparison notices.
+    ///
+    /// [`WIDEST_EXTENT`]: fn@the_pass_bound_is_the_widest_frame_the_renderer_records
     #[test]
     fn the_pass_bound_is_the_widest_frame_the_renderer_records() {
+        /// An extent whose bloom chain is the longest [`crate::bloom`] will
+        /// build: six halvings of 512 leave sixteen by eight, which is still at
+        /// or above that module's floor.
+        const WIDEST_EXTENT: (u32, u32) = (1024, 512);
+
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut renderer =
@@ -10048,10 +10163,22 @@ mod tests {
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
-        let imported = swapchain_image(device);
+        // The lens effect is not in the default camera stack, and the widest
+        // frame is the one that has it — the ground grid's argument exactly.
+        renderer.set_effect_request(EffectRequest {
+            programmatic: EffectOverride::none().force(RenderEffects::BLOOM, Some(true)),
+            ..EffectRequest::default()
+        });
+        let imported = swapchain_image_at(device, WIDEST_EXTENT);
         let mut pool = crate::TransientPool::new();
 
-        let bare = passes_in_a_frame(device, queue, &mut renderer, imported, &pool).len();
+        let bare =
+            passes_in_a_frame(device, queue, &mut renderer, imported, &pool, WIDEST_EXTENT).len();
+        assert_eq!(
+            crate::bloom::mips_for(WIDEST_EXTENT),
+            crate::bloom::MAX_MIPS,
+            "the widest frame has to be one whose chain is the longest one there is, or              the bound below is checked against a frame that could not reach it"
+        );
         assert!(
             bare < ForwardRenderer::MAX_PASSES as usize,
             "a frame with no shadowed light runs {bare} passes, which is already the \
@@ -10060,7 +10187,8 @@ mod tests {
         );
 
         renderer.set_lights(&[shadowable_spot(-1.0), shadowable_spot(1.0)]);
-        let widest = passes_in_a_frame(device, queue, &mut renderer, imported, &pool).len();
+        let widest =
+            passes_in_a_frame(device, queue, &mut renderer, imported, &pool, WIDEST_EXTENT).len();
         assert_eq!(
             renderer.shadow_lights.slots().iter().flatten().count(),
             shadow::LIGHT_SLOTS,
@@ -10116,12 +10244,22 @@ mod tests {
         let imported = swapchain_image(device);
         let mut pool = crate::TransientPool::new();
 
+        // `BLOOM` forced on and then `off` forced off, on
+        // [`frame_switching_off`]'s terms exactly: the default camera stack
+        // leaves the lens effect out — see [`RenderEffects::DEFAULT_STACK`] — so
+        // a control built on the default alone would have nothing for the bloom
+        // arm to remove. `force` clears the other side, so the arm whose `off`
+        // *is* `BLOOM` still resolves to off.
+        //
+        // [`frame_switching_off`]: fn@frame_switching_off
         let without = |renderer: &mut ForwardRenderer, off: RenderEffects| {
             renderer.set_effect_request(EffectRequest {
-                programmatic: EffectOverride::none().force(off, Some(false)),
+                programmatic: EffectOverride::none()
+                    .force(RenderEffects::BLOOM, Some(true))
+                    .force(off, Some(false)),
                 ..EffectRequest::default()
             });
-            passes_in_a_frame(device, queue, renderer, imported, &pool)
+            passes_in_a_frame(device, queue, renderer, imported, &pool, TEST_EXTENT)
         };
 
         let all_on = without(&mut renderer, RenderEffects::empty());
@@ -10136,17 +10274,33 @@ mod tests {
             "the spot must actually hold a slot, or the shadow arm below is only about cascades"
         );
 
-        // **Neither pair leaves anything behind it**, and for the same reason:
-        // nothing reads what it would have written. The occlusion pair's reader
-        // binds the 1×1 white placeholder instead — `mesh.slang` clamps its
-        // `Load` into it — and the reflection pair's reader tonemaps the forward
-        // pass's own colour.
+        // **None of the three leaves anything behind it**, and for the same
+        // reason: nothing reads what it would have written. The occlusion pair's
+        // reader binds the 1×1 white placeholder instead — `mesh.slang` clamps
+        // its `Load` into it — and the reflection pair's and the chain's readers
+        // both tonemap whatever image they would have read anyway.
+        //
+        // The chain's labels are written out rather than built from
+        // `crate::bloom`'s arithmetic, because a table generated from the code
+        // under test cannot fail: it is `TEST_EXTENT`'s two levels — two
+        // downsamples, the one upsample between them, and the composite — and if
+        // that extent moves this is the assertion that says so.
         for (off, gone) in [
             (
                 RenderEffects::AMBIENT_OCCLUSION,
                 ["ssao", "ssao-blur"].as_slice(),
             ),
             (RenderEffects::REFLECTIONS, ["ssr", "ssr-blur"].as_slice()),
+            (
+                RenderEffects::BLOOM,
+                [
+                    "bloom-down-1",
+                    "bloom-down-2",
+                    "bloom-up-1",
+                    "bloom-composite",
+                ]
+                .as_slice(),
+            ),
         ] {
             let labels = without(&mut renderer, off);
             assert_eq!(
@@ -10219,7 +10373,7 @@ mod tests {
         let imported = swapchain_image(device);
         let mut pool = crate::TransientPool::new();
 
-        let off = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        let off = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
         assert!(
             renderer.ground_grid().is_none(),
             "a renderer nobody asked has no grid"
@@ -10233,7 +10387,7 @@ mod tests {
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
         assert_eq!(renderer.ground_grid(), Some(&GridStyle::default()));
-        let on = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        let on = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
 
         let mut expected = off.clone();
         // The statistics copy is added after every render pass and stays last —
@@ -10254,7 +10408,7 @@ mod tests {
             .expect("switching off builds nothing");
         assert!(renderer.ground_grid().is_none());
         assert_eq!(
-            passes_in_a_frame(device, queue, &mut renderer, imported, &pool),
+            passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT),
             off,
             "switching the grid off has to remove its pass, not just stop reporting it"
         );
@@ -10456,13 +10610,13 @@ mod tests {
         let imported = swapchain_image(device);
         let mut pool = crate::TransientPool::new();
 
-        passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
         let off = renderer.counters();
 
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
-        passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
         let on = renderer.counters();
 
         assert_eq!(
@@ -10507,8 +10661,17 @@ mod tests {
         // A shadowed light beside the cascades, so the atlas pass has draws to
         // lose rather than being empty either way.
         renderer.set_lights(&[shadowable_spot(-1.0)]);
+        // **`BLOOM` forced on, then `off` forced off.** The default camera
+        // stack leaves the lens effect out — see
+        // [`RenderEffects::DEFAULT_STACK`] — so a control frame built on the
+        // default alone would be measuring three effects and calling it four,
+        // and the bloom arm below would be switching off something already off.
+        // `force` clears the other side, so an arm whose `off` *is* `BLOOM`
+        // still resolves to off.
         renderer.set_effect_request(EffectRequest {
-            programmatic: EffectOverride::none().force(off, Some(false)),
+            programmatic: EffectOverride::none()
+                .force(RenderEffects::BLOOM, Some(true))
+                .force(off, Some(false)),
             ..EffectRequest::default()
         });
 
@@ -10564,7 +10727,7 @@ mod tests {
         );
         assert_eq!(
             control.instances,
-            instances + fullscreen_passes(RenderEffects::all()) * FULLSCREEN_DRAWS,
+            instances + fullscreen_passes(RenderEffects::all(), TEST_EXTENT) * FULLSCREEN_DRAWS,
             "the control frame submits one triangle per full-screen pass"
         );
 
@@ -10573,6 +10736,12 @@ mod tests {
         for (off, fewer) in [
             (RenderEffects::AMBIENT_OCCLUSION, u64::from(Ssao::PASSES)),
             (RenderEffects::REFLECTIONS, u64::from(Ssr::PASSES)),
+            // Not a constant, unlike the two above: the chain's length is a
+            // function of the extent, and this is what it is at `TEST_EXTENT`.
+            (
+                RenderEffects::BLOOM,
+                u64::from(Bloom::passes_for(TEST_EXTENT)),
+            ),
         ] {
             let (counters, instances, atlas) = frame_switching_off(off);
             assert_eq!(
@@ -10583,7 +10752,8 @@ mod tests {
             assert_eq!(
                 counters.instances,
                 instances
-                    + fullscreen_passes(RenderEffects::all().difference(off)) * FULLSCREEN_DRAWS,
+                    + fullscreen_passes(RenderEffects::all().difference(off), TEST_EXTENT)
+                        * FULLSCREEN_DRAWS,
                 "{off:?}: and must not report as submitted a triangle it never submitted"
             );
             assert_eq!(
@@ -10792,20 +10962,32 @@ mod tests {
         out
     }
 
+    /// The extent every helper frame in this module is drawn at.
+    ///
+    /// Named since the bloom chain, whose length is a function of it — see
+    /// [`crate::bloom`] — so a test comparing a pass count against
+    /// [`fullscreen_passes`] has to ask about the same size the frame was drawn
+    /// at. Small on purpose: two chain levels is enough for every arm here, and
+    /// [`the_pass_bound_is_the_widest_frame_the_renderer_records`] is the one
+    /// test that needs a frame large enough for six.
+    ///
+    /// [`the_pass_bound_is_the_widest_frame_the_renderer_records`]: fn@the_pass_bound_is_the_widest_frame_the_renderer_records
+    const TEST_EXTENT: (u32, u32) = (64, 48);
+
     fn frame(device: &dyn Device, renderer: &mut ForwardRenderer, queue: QueueHandle) -> Frame {
         renderer
             .begin_frame(
                 device,
                 &Camera::default(),
                 &DirectionalLight::default(),
-                (64, 48),
+                TEST_EXTENT,
             )
             .expect("write");
         let imported = swapchain_image(device);
         let mut graph = crate::RenderGraph::new(queue);
         let target = graph.import_image("target", imported);
         let mut pool = crate::TransientPool::new();
-        renderer.add_passes(&mut graph, &pool, target, (64, 48));
+        renderer.add_passes(&mut graph, &pool, target, TEST_EXTENT);
         let compiled = graph.compile(&pool).expect("a legal frame");
         let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
             label: Some("forward frame"),
@@ -10822,14 +11004,24 @@ mod tests {
         }
     }
 
-    /// A stand-in for the acquired swapchain image the frame normally ends in.
+    /// A stand-in for the acquired swapchain image the frame normally ends in,
+    /// at [`TEST_EXTENT`].
     fn swapchain_image(device: &dyn Device) -> ImportedImage {
+        swapchain_image_at(device, TEST_EXTENT)
+    }
+
+    /// The same, at an extent of the caller's choosing.
+    ///
+    /// A frame's attachments must all be one size — the graph refuses a pass
+    /// whose colour target and depth disagree — so a test drawing at anything
+    /// but [`TEST_EXTENT`] has to import a target of that size too.
+    fn swapchain_image_at(device: &dyn Device, extent: (u32, u32)) -> ImportedImage {
         let format = Format::Rgba8UnormSrgb;
         let image = device
             .create_image(&crcbl_hal::ImageDesc {
                 label: Some("fake swapchain image"),
                 image_type: crcbl_hal::ImageType::D2,
-                extent: crcbl_hal::Extent3d::d2(64, 48),
+                extent: crcbl_hal::Extent3d::d2(extent.0, extent.1),
                 format,
                 mip_levels: 1,
                 samples: 1,
@@ -10845,7 +11037,7 @@ mod tests {
                 range: crcbl_hal::ImageSubresourceRange::all(format),
             })
             .expect("a view");
-        ForwardRenderer::present_target(image, view, format, (64, 48))
+        ForwardRenderer::present_target(image, view, format, extent)
     }
 
     /// The spin is a rotation: no scale, no shear, so the cube neither grows

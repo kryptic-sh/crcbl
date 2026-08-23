@@ -261,6 +261,34 @@ pub enum Scene {
     /// twenty-fifth — and `ssr_sun` for why the sun has no X component, which is
     /// what makes the two bands beside the reflection its controls.
     Ssr,
+    /// `docs/plan/18-render-features.md`'s **bloom chain**: a flat floor with
+    /// one small, very bright patch on it, looked straight down at.
+    ///
+    /// **The only frame in the tree with content above the display range that is
+    /// not spread over the whole picture**, and that is the whole of what a
+    /// threshold-free chain needs to show itself. The patch is one material row
+    /// away from the floor it sits on — the same mesh, the same plane, the same
+    /// normal, the same sun — differing only in a base-colour factor of
+    /// [`BLOOM_EMITTER_GAIN`], so it is HDR-bright while nothing else in the
+    /// frame is and it lights nothing around it.
+    ///
+    /// **It sits off the frame's centre on the `+X` side**, which is what gives
+    /// `tests/render_e2e.rs` its control: the camera looks straight down and the
+    /// sun points straight down, so the point at `-x` mirroring a point at `+x`
+    /// is the same distance from the eye, carries the same normal and takes
+    /// exactly the same direct light, ambient and occlusion. Proximity to the
+    /// patch is the only term left that can separate them, and proximity is what
+    /// a bloom is.
+    ///
+    /// It is a scene of its own rather than a bright object added to
+    /// [`Scene::Spot`], for [`Scene::Ao`]'s third reason: **the sun points
+    /// straight down**, so no shadow and no falloff can be mistaken for a halo.
+    /// A patch bright because a light is near it would light its neighbourhood
+    /// too, and the ratio would be measuring the falloff.
+    ///
+    /// See `bloom_camera` for the framing and `BLOOM_BAND_AT` for where the
+    /// bands sit.
+    Bloom,
     /// `docs/plan/18-render-features.md`'s **irradiance probes**: the inside of
     /// a room, looked straight down into, lit by the probe grid and by nothing
     /// else at all.
@@ -741,6 +769,145 @@ fn ao_sun() -> crcbl_render::DirectionalLight {
     crcbl_render::DirectionalLight {
         direction: glam::Vec3::Y,
         ..dimmed_sun(0.01, 1.0)
+    }
+}
+
+/// How far above the floor [`Scene::Bloom`]'s camera stands, in world units.
+///
+/// Sets the scale of the picture, on [`AO_CAMERA_UP`]'s terms: with the 60°
+/// vertical field of view `bloom_camera` uses, the frame's short half-axis on the
+/// floor is `BLOOM_CAMERA_UP * tan(30°)` — so this is what decides how many
+/// pixels the emitter is across and how far the halo has to reach before a band
+/// can be measured in it.
+///
+/// Chosen so the patch is about a sixth of the frame's height: small enough that
+/// the chain's coarse levels spread it well past its own edge, large enough that
+/// it is not one texel of the smallest level.
+const BLOOM_CAMERA_UP: f32 = 2.6;
+
+/// How far along `+X` [`Scene::Bloom`] puts its emitter, in world units.
+///
+/// **Off centre, and that is the fixture.** The mirror of a band beside the
+/// patch is a band the same distance from the frame's centre on the other side,
+/// which under this camera and this sun differs from it in proximity to the
+/// patch and in nothing else. A patch at the origin would have no such mirror:
+/// every control would be further from the eye than the band it controls.
+const BLOOM_EMITTER_AT: f32 = 0.75;
+
+/// How wide [`Scene::Bloom`]'s emitter is, in world units.
+///
+/// Half a unit — a `0.25` half-width, so with [`BLOOM_CAMERA_UP`]'s framing it
+/// is about a thirty-second of the frame's width and its `+X` edge lands at
+/// `BLOOM_EMITTER_AT + 0.25`.
+const BLOOM_EMITTER_SIZE: f32 = 0.5;
+
+/// How thick [`Scene::Bloom`]'s emitter is, in world units.
+///
+/// **A slab lying on the floor rather than a box standing on it**, and thin
+/// enough to occlude nothing: the occlusion pass gathers within
+/// `crcbl_render`'s own world-space radius, and a lip this shallow darkens no
+/// pixel a band is measured in. A box would put its own ambient occlusion
+/// exactly where the halo is, which is a term working against the measurement
+/// for no gain — the patch is here to be bright, not to be an object.
+const BLOOM_EMITTER_THICKNESS: f32 = 0.02;
+
+/// The base-colour factor [`Scene::Bloom`]'s emitter shades through.
+///
+/// **Far above one, which is the point.** `GpuMaterial::base_color` is a linear
+/// multiplier into the vertex albedo and nothing clamps it, so this is how a
+/// surface in this engine is made brighter than the display without inventing an
+/// emissive term or putting a light where it would spill onto the floor. The
+/// tonemap flattens it to white; the chain, which runs before the tonemap, sees
+/// the whole of it.
+const BLOOM_EMITTER_GAIN: f32 = 120.0;
+
+/// [`Scene::Bloom`]'s emitter row, in the description `bloom_scene` builds.
+///
+/// The demo scene's three rows and this one after them, so the three every other
+/// fixture names keep the indices they have always had.
+const BLOOM_EMITTER: usize = 3;
+
+/// [`Scene::Bloom`]'s scene: the engine's own, with the emitter row appended.
+///
+/// A description of its own for [`Scene::Probes`]' reason — this is the only
+/// fixture that needs a material the demo scene does not have — and the *only*
+/// thing that differs is that one row.
+fn bloom_scene() -> crate::render::scene::SceneDesc<'static> {
+    let mut scene = crate::render::scene::demo();
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        base_color: [
+            BLOOM_EMITTER_GAIN,
+            BLOOM_EMITTER_GAIN,
+            BLOOM_EMITTER_GAIN,
+            1.0,
+        ],
+        ..crate::shaders::mesh::GpuMaterial::UNTINTED
+    });
+    debug_assert_eq!(
+        scene.materials.len() - 1,
+        BLOOM_EMITTER,
+        "the emitter row is the one past the demo scene's three"
+    );
+    scene
+}
+
+/// [`Scene::Bloom`]'s emitter: the cube flattened into a slab and laid on the
+/// floor at [`BLOOM_EMITTER_AT`].
+///
+/// The cube spans half a unit either side of its origin, so the lift is half the
+/// thickness and the slab's underside is the floor plane exactly.
+fn bloom_emitter() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(
+        BLOOM_EMITTER_AT,
+        0.5 * BLOOM_EMITTER_THICKNESS,
+        0.0,
+    )) * glam::Mat4::from_scale(glam::Vec3::new(
+        BLOOM_EMITTER_SIZE,
+        BLOOM_EMITTER_THICKNESS,
+        BLOOM_EMITTER_SIZE,
+    ))
+}
+
+/// The camera [`Scene::Bloom`] is drawn with: straight down at the floor.
+///
+/// [`ao_camera`]'s arrangement and [`ao_camera`]'s reason: with the view
+/// direction along `Y` and the floor's normal along `Y`, two points the same
+/// distance from the frame's centre are the same distance from the eye and carry
+/// the same normal, so a directional sun gives them the same direct light. The
+/// halo is then the only thing that can tell them apart.
+///
+/// `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the floor's
+/// `+Z` axis at the top of the frame, exactly as `ao_camera` and `spot_camera`
+/// do.
+fn bloom_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, BLOOM_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::Bloom`] runs under: **straight down**, and turned down to a
+/// mid-tone.
+///
+/// * **Straight down** — every point of a flat floor then takes exactly the same
+///   direct light, which is what makes a band and its mirror controls for each
+///   other. Under the default sun's tilt the two sides of the frame would differ
+///   in `N·L` and the ratio would be measuring the light rather than the halo.
+///   `crcbl_render::shadow` picks a second up vector for this direction, so the
+///   cascades are built rather than degenerate — [`ao_sun`] leans on the same
+///   fact.
+/// * **A mid-tone floor** — the halo is *added* to whatever the floor already
+///   shows, so a floor near white would clip the measurement away and a black one
+///   would make "brighter than the floor" a statement about an unpainted frame.
+fn bloom_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::Y,
+        ..dimmed_sun(0.2, 1.0)
     }
 }
 
@@ -1789,6 +1956,36 @@ impl SceneState {
                 Self::Forward {
                     camera: ssr_camera(),
                     light: ssr_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::Bloom => {
+                // The floor every other overhead fixture stands on, and the
+                // emitter laid on it — see `bloom_emitter`. Nothing else is in
+                // frame, for `Scene::Spot`'s reason: what this frame is about is
+                // one bright patch and the flat floor its halo spreads over.
+                //
+                // **The cube is placed as the floor rather than parked**, which
+                // is why there is no `place_cube` call: it is still the first
+                // insertion and still holds the pool slot every other scene
+                // gives it.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &bloom_scene())?;
+                // **The one fixture that asks for the lens.**
+                // `RenderEffects::DEFAULT_STACK` leaves bloom out — a view that
+                // has declared no render stack has declared no lens — so this is
+                // the camera-stack layer being exercised as topic 18 describes
+                // it, and it is what keeps every other golden in the tree
+                // untouched by this slice.
+                renderer.set_effect_request(EffectRequest {
+                    camera: RenderEffects::all(),
+                    ..EffectRequest::default()
+                });
+                place(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, spot_floor());
+                place(&mut renderer, DEMO_CUBE, BLOOM_EMITTER, bloom_emitter());
+                Self::Forward {
+                    camera: bloom_camera(),
+                    light: bloom_sun(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -3474,7 +3671,27 @@ mod tests {
         // which is six tiles, and the light region holds six — so the most
         // influential one is shadowed and the other two light without occluding.
         let lights_passes = forward_passes(1);
-        let expected: [(Scene, &[(&str, &str)]); 10] = [
+        // **The one fixture whose camera stack asks for the lens**, and the only
+        // row here whose length is a function of the frame's size:
+        // `crcbl_render::bloom` derives the chain from the extent, and a 16×16
+        // target has room for exactly one level — so one downsample and the
+        // composite that ends it.
+        //
+        // Spliced in front of the tonemap rather than written out from scratch,
+        // because *where* it goes is the claim: the chain reads the image the
+        // tonemap would have read and hands it a different one, so a chain
+        // scheduled after the tonemap would resolve the frame without the halo in
+        // it and still draw a picture.
+        let mut bloom_passes = forward_passes(0);
+        let before_tonemap = bloom_passes
+            .iter()
+            .position(|(_, label)| *label == "tonemap")
+            .expect("every forward frame ends in a tonemap");
+        bloom_passes.splice(
+            before_tonemap..before_tonemap,
+            [("render", "bloom-down-1"), ("render", "bloom-composite")],
+        );
+        let expected: [(Scene, &[(&str, &str)]); 11] = [
             (Scene::Cube, &cube_passes),
             // Not the cube scene's passes: `Scene::Lights` is the cube scene
             // with a longer light list, the clustering dispatch is one per
@@ -3511,6 +3728,11 @@ mod tests {
             // atlas tile and no cull of its own. The `ssr` pass itself is in
             // every row here — it is not a scene's to opt into.
             (Scene::Ssr, &cube_passes),
+            // The only row that is not one of the two lists above: every other
+            // fixture draws `RenderEffects::DEFAULT_STACK`, which leaves the
+            // lens effect out — see that constant, and see `Scene::Bloom` for
+            // why this one asks for it.
+            (Scene::Bloom, &bloom_passes),
             // Unlike the other forward scenes, `Scene::Probes` explicitly
             // refuses the reflection pair: its absolute Rust-mirror assertion
             // measures diffuse irradiance alone, and rough probe specular would

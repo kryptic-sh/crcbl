@@ -19,6 +19,48 @@ msl-sha256 = 2520731669f0a5c4b634d835db9d2068155d28a0a095a8f81165735a6326222a
 dxil = computeMain:dxil/bindless_probe.computeMain.dxil:fbd18c9982b39dc41929ba54f56f40ef9937196693c742aefe1f0d7f95fb0460
 entry-points = computeMain:glcompute
 
+[bloom_composite]
+source = shaders/bloom_composite.slang
+source-sha256 = fe1037214254dfa41fdf1064d487d2a83b1cb486792ac007f1b4a00e2a6ba801
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/bloom_composite.spv
+spirv-sha256 = 967186e0d80b9b233577fa3b5d11c474416aaa8029b98f084e1c85323694a8e4
+wgsl = wgsl/bloom_composite.wgsl
+wgsl-sha256 = 2c8782d5d73e60e6faca8bcc5335ac5102b962c2f6f1b32f9c655bec756d0afb
+msl = msl/bloom_composite.metal
+msl-sha256 = fb667571ef57198ac797c7d0f79456b3637c21eb1ade89d189f319c4201ece37
+dxil = vertexMain:dxil/bloom_composite.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/bloom_composite.fragmentMain.dxil:acdadeee9bfad56c86b9f0e97ae9ac95a12ed968501b5c0b9609680a2eff9274
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[bloom_down]
+source = shaders/bloom_down.slang
+source-sha256 = 233a8e8837996af9d40721fd914109757e6e49580bd03d031b4fb8ed27d69ecb
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/bloom_down.spv
+spirv-sha256 = 267429e90a54fe021ef04ca4e7923ad9c4d0313a4a81366fffb8ec70c39d94c9
+wgsl = wgsl/bloom_down.wgsl
+wgsl-sha256 = 6fd5610ab439f8611cd1a5dfe247dead09ad1f4bf43dcc03c250fd3d9fb47e86
+msl = msl/bloom_down.metal
+msl-sha256 = 2590b3773731535601de64d426c64e3810f14e7e89e1b66c34af16dd814ca240
+dxil = vertexMain:dxil/bloom_down.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/bloom_down.fragmentMain.dxil:5db16b02885a8d9093dc70a8d8dba8aa60b167ebbd302f54e417f62678ed1516
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[bloom_up]
+source = shaders/bloom_up.slang
+source-sha256 = b5e44c81f86d2ab95c924a96d212ad5bcbc4120cb7cf600ae739f3d85076921c
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/bloom_up.spv
+spirv-sha256 = 60d168d0c035353ba693dcf79f6c08447eea0732efb8f9dc81eaa76e47c2df80
+wgsl = wgsl/bloom_up.wgsl
+wgsl-sha256 = a5ff77536e3f084873bbf292b607282a61ffa297bd763d6ce9983eb57eaaef02
+msl = msl/bloom_up.metal
+msl-sha256 = 91ca1e0adb4afc10311d360e9b905b15ce3c5007f55e173fc3ace29f63654755
+dxil = vertexMain:dxil/bloom_up.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/bloom_up.fragmentMain.dxil:563875e060ebeca25394db807f35c7c1e5b267636f7f10e087c12d5fc4ac1206
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [clear_counters]
 source = shaders/clear_counters.slang
 source-sha256 = c49d76e2b98396fad6a4b903d6c26aa141901c2ec6ccef397e37c02cda2106f9

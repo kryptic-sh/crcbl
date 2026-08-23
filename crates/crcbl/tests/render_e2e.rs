@@ -1327,6 +1327,207 @@ fn row_channel(image: &Image, at: (u32, u32), half: u32, index: usize) -> f32 {
     total / count as f32
 }
 
+/// The anti-vacuity floor for [`Scene::Bloom`].
+///
+/// The frame is one flat floor, one small bright patch and the halo between
+/// them, and the halo is a smooth gradient — so most of this count is the
+/// gradient itself. Set below what the frame this was blessed from measures,
+/// which the harness prints, so a smoother chain does not walk into it. What it
+/// separates is "the box drew nothing": a frame of clear colour, or one flat
+/// floor with no patch on it.
+const MIN_COLORS_BLOOM: usize = 128;
+
+/// How many pixels of the frame one world unit of [`Scene::Bloom`]'s floor is.
+///
+/// [`AO_PIXELS_PER_UNIT`]'s arithmetic with that scene's camera height swapped
+/// for `screenshot`'s `BLOOM_CAMERA_UP`: the frame's short half-axis covers
+/// `up * tan(30°)` of floor and a pixel is that over half the frame's height.
+const BLOOM_PIXELS_PER_UNIT: f32 = (EXTENT.1 as f32 / 2.0) / (2.6 * 0.577_350_3);
+
+/// Where a point on [`Scene::Bloom`]'s floor lands in the frame.
+///
+/// [`ao_pixel`]'s flip for [`ao_pixel`]'s reason: the camera looks down `-Y` with
+/// `+Z` up, so world `+X` is the frame's left and world `+Z` is its top.
+fn bloom_pixel(x: f32, z: f32) -> (u32, u32) {
+    let column = EXTENT.0 as f32 / 2.0 - x * BLOOM_PIXELS_PER_UNIT;
+    let row = EXTENT.1 as f32 / 2.0 - z * BLOOM_PIXELS_PER_UNIT;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every band below is inside the frame, which the block reader asserts"
+    )]
+    (column as u32, row as u32)
+}
+
+/// Where [`Scene::Bloom`] puts its emitter along `+X`, in world units.
+///
+/// `screenshot`'s `BLOOM_EMITTER_AT`, restated because this suite reads that
+/// module's fixtures through its public [`Scene`] and not through its private
+/// constants — [`AO_PIXELS_PER_UNIT`] restates that scene's camera height for
+/// the same reason.
+const BLOOM_EMITTER_ON_X: f32 = 0.75;
+
+/// The half-extent of each band [`Scene::Bloom`] is measured over, in pixels.
+///
+/// Narrow, and it has to be: the emitter's `+X` edge is at
+/// `BLOOM_EMITTER_AT + BLOOM_EMITTER_SIZE / 2` — about thirteen pixels inside
+/// [`BLOOM_BAND_AT`] at this scale — so a block wide enough to reach it would be
+/// measuring the patch instead of the halo beside it.
+const BLOOM_BAND: (u32, u32) = (4, 4);
+
+/// How far from the frame's centre every band sits, in world units.
+///
+/// **One number for all four, and that is what the claim rests on**, on
+/// [`AO_BAND_AT`]'s terms exactly: the camera looks straight down and the sun
+/// points straight down, so four points the same distance from the axis on the
+/// same flat floor are the same distance from the eye, carry the same normal and
+/// receive exactly the same direct light and ambient. One of the four is a fifth
+/// of a unit off the emitter's edge and the other three are more than a unit from
+/// it; proximity to the emitter is the only term left that can separate them.
+///
+/// Far enough past `screenshot`'s `BLOOM_EMITTER_AT` plus half its
+/// `BLOOM_EMITTER_SIZE` that no pixel of the band is a pixel of the patch, and
+/// near enough that the band is inside the halo rather than past it.
+const BLOOM_BAND_AT: f32 = 1.2;
+
+/// How much brighter the floor beside the emitter must be than the same floor on
+/// the other side of the frame.
+///
+/// A ratio rather than a difference, on [`AO_RATIO`]'s terms and with that
+/// constant's sRGB caveat: these bands are read after the encode, which is very
+/// nearly a `0.42` power, so a term that doubles in linear light moves by about a
+/// third here.
+///
+/// **What it separates is the list this fixture exists for.** Every one of these
+/// draws a plausible picture and would be blessed without comment:
+///
+/// * A chain that handed its input back unchanged, or a composite that added
+///   nothing, leaves every band equal and lands at exactly `1.00`.
+/// * A chain that wrote a constant — the classic "the pass ran and produced
+///   something" failure — adds the same term everywhere and moves the ratio
+///   *towards* `1.00`, never away from it.
+/// * A global scale, an exposure change or a tonemap edit moves both bands
+///   together and cannot move a ratio at all.
+///
+/// The number itself is a floor under what the frame this was blessed from
+/// measures, with margin, and far over the single-digit drift
+/// `crcbl_golden::Tolerance::RASTERISER` was measured for. The harness prints
+/// both bands on every run.
+const BLOOM_RATIO: f32 = 1.20;
+
+/// How bright the control bands must be, on the frame's own 0–255 scale.
+///
+/// [`AO_LIT_FLOOR`]'s job — a ratio between two numbers near zero says nothing —
+/// but an **absolute** level rather than a step above the clear, because this
+/// frame has no clear in it: the floor fills it edge to edge, so the corner the
+/// other fixtures read as "nothing drew here" is floor too. Well under what the
+/// frame this was set against measures, which the harness prints on every run.
+const BLOOM_LIT_FLOOR: f32 = 60.0;
+
+/// How much brighter the emitter must be than the floor around it.
+///
+/// The other half of the anti-vacuity check, and the half that needs no absolute
+/// number: a frame that drew nothing, and a frame of one flat colour, both put
+/// the patch and the floor at the same level and fail this whatever that level
+/// is. It is also what says the *source* of the halo is in the frame — a chain
+/// haloing something that is not there would be a strange defect, and this is
+/// what would name it.
+///
+/// The patch is clipped to white by the tonemap, so the measured ratio is the
+/// floor's level against 255 and this has enormous margin. That is the point of
+/// `screenshot`'s `BLOOM_EMITTER_GAIN`: a threshold-free chain blooms in
+/// proportion to brightness, so the fixture's subject has to be unmistakably
+/// above the display range.
+const BLOOM_EMITTER_RATIO: f32 = 1.5;
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_bloom_scene_haloes_its_emitter_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Bloom,
+        "bloom",
+        EXTENT,
+        MIN_COLORS_BLOOM,
+        the_halo_is_beside_the_emitter_and_not_beside_its_mirror,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_bloom_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Bloom,
+        "bloom",
+        MIN_COLORS_BLOOM,
+        the_halo_is_beside_the_emitter_and_not_beside_its_mirror,
+    );
+}
+
+/// [`Scene::Bloom`]'s claim: **the floor beside the bright patch is lit by it,
+/// and the same floor elsewhere in the frame is not.**
+///
+/// **The golden cannot make this claim and no golden ever could.** A chain that
+/// returned its input untouched draws a perfectly plausible frame — a flat floor
+/// with a white square on it, which is what this scene looks like — and it would
+/// be blessed without comment. So would one whose composite added a constant, or
+/// one that scaled the whole image. Every assertion here is a ratio between bands
+/// of *the same frame*, which no uniform change can move.
+///
+/// Four bands, all [`BLOOM_BAND_AT`] from the frame's centre on the same flat
+/// floor:
+///
+/// * `+X`, a fifth of a unit off the emitter's edge — inside the halo.
+/// * `-X`, its mirror: the same distance from the eye, the same normal, the same
+///   directional sun, and nearly two units of floor away from the patch.
+/// * `+Z` and `-Z`, the same distance from the axis along the other one, and both
+///   more than a unit from the patch.
+///
+/// **The four share a distance from the eye, and that is what a vignette cannot
+/// survive.** Anything that brightens or darkens with distance from the frame's
+/// centre moves all four together and satisfies none of the ratios. The `-X`
+/// mirror is what a chain whose taps are flipped in one axis fails: such a chain
+/// haloes the wrong side, and the assertion is then false in the direction that
+/// reads as "the halo is on the left".
+fn the_halo_is_beside_the_emitter_and_not_beside_its_mirror(image: &Image) {
+    let band = |x: f32, z: f32| block_brightness(image, bloom_pixel(x, z), BLOOM_BAND);
+    let halo = band(BLOOM_BAND_AT, 0.0);
+    let away = [
+        ("-X", band(-BLOOM_BAND_AT, 0.0)),
+        ("+Z", band(0.0, BLOOM_BAND_AT)),
+        ("-Z", band(0.0, -BLOOM_BAND_AT)),
+    ];
+    eprintln!(
+        "crcbl render e2e: bloom — beside the emitter {halo:.1}, floor away from it {:.1}, \
+         {:.1} and {:.1}",
+        away[0].1, away[1].1, away[2].1,
+    );
+    for (axis, plain) in away {
+        assert!(
+            plain * BLOOM_RATIO < halo,
+            "the floor beside the emitter must be unmistakably brighter than the floor the \
+             same distance out along {axis}, which is the same floor under the same light: \
+             {halo:.1} against {plain:.1} — that is not a halo"
+        );
+    }
+    // The controls are lit *floor* and the emitter is unmistakably brighter than
+    // it. Without both, the ratios above are satisfiable by a frame in which
+    // nothing drew — see [`BLOOM_LIT_FLOOR`] and [`BLOOM_EMITTER_RATIO`].
+    let patch = block_brightness(image, bloom_pixel(BLOOM_EMITTER_ON_X, 0.0), BLOOM_BAND);
+    eprintln!("crcbl render e2e: bloom — the emitter itself {patch:.1}");
+    for (axis, plain) in away {
+        assert!(
+            plain > BLOOM_LIT_FLOOR,
+            "the {axis} band measures {plain:.1}, so there is no lit floor here for a halo \
+             to be a halo on"
+        );
+        assert!(
+            patch > plain * BLOOM_EMITTER_RATIO,
+            "the emitter measures {patch:.1} against {plain:.1} of floor {axis} of it, so \
+             there is nothing bright in this frame for the halo to have come from"
+        );
+    }
+}
+
 /// The anti-vacuity floor for [`Scene::Probes`].
 ///
 /// The fixture deliberately has broad flat regions, so colour count only rejects

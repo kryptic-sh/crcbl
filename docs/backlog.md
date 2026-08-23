@@ -770,6 +770,33 @@ hand; that is the right cost for this, not a standing gate.
 form the tree can confirm — say, always with its module path. That is a writing
 convention, and worth proposing only if this rots again.
 
+### What bloom's slice left open (2026-08-23)
+
+The chain is built, gated by a golden and a within-frame ratio, and green on
+radv and lavapipe. Three things it did not settle:
+
+- **Nothing gates the Karis average except the golden.** The whole point of the
+  partial-Karis weighting is that it kills a firefly — a single blown-out texel
+  that would otherwise strobe as the chain downsamples — and `Scene::Bloom`'s
+  emitter is a smooth 32×32 block, so removing the weighting _raises_ the halo
+  ratio slightly instead of failing it. Measured: the `inspect` ratio goes 1.357
+  → 1.377 with the weighting gone, while the golden goes red (12 levels, 5.5% of
+  pixels over tolerance). So the guard is real but it is the picture, not the
+  claim. A fixture with a genuine one-pixel firefly is what would gate the
+  claim, and it is not written.
+- **Whether bloom should ever join `RenderEffects::DEFAULT_STACK`.** It is
+  deliberately outside it, so no frame the engine already drew changed and no
+  golden needed re-blessing — including the WARP, Metal and browser references
+  that cannot be blessed from this machine at all. The argument is on the
+  constant: the other three effects model light transport present in the scene,
+  bloom is a lens. If it should be on by default instead, that is a re-bless of
+  every forward golden in the tree on four backends, and its own slice.
+- **`apps/lantern` cannot show the effect it now ships.** It has no `--no-bloom`
+  flag and no menu row, and its stack is `DEFAULT_STACK`, so the lighting
+  fixture draws no bloom. Giving it the flag is small; giving it a golden with
+  bloom in it is the re-bless above in miniature and would want the firefly
+  fixture first.
+
 ### Two of the four teardown reporters only warn, and both are deferred
 
 All four backends now say what a caller never destroyed. `crcbl-vk`,

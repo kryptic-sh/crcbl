@@ -431,7 +431,7 @@ pub const MONITOR_EXTENT: (u32, u32) = (PAGE_EXTENT, PAGE_EXTENT);
 /// What the monitor's view **asks for**, as the camera-stack layer of
 /// `docs/plan/39-capabilities.md`'s resolution order.
 ///
-/// Every effect except the reflections, which is
+/// [`View::stack`]'s set less the reflections, which are
 /// `docs/plan/18-render-features.md`'s own example of what a render-to-texture
 /// camera does not want: a screen-space march in a view that is *about* to be
 /// pasted onto a surface standing in the same room is a frame's worth of work
@@ -443,7 +443,7 @@ pub const MONITOR_EXTENT: (u32, u32) = (PAGE_EXTENT, PAGE_EXTENT);
 /// is a property of the *view*, and the order is what keeps the two from being
 /// one switch.
 pub const MONITOR_STACK: RenderEffects =
-    RenderEffects::all().difference(RenderEffects::REFLECTIONS);
+    RenderEffects::DEFAULT_STACK.difference(RenderEffects::REFLECTIONS);
 
 /// The middle of the screen's face, in world space — where a claim about what
 /// the monitor is showing has to be aimed.
@@ -1190,13 +1190,22 @@ impl View {
     /// renderer's [`EffectRequest::camera`](crcbl::render::EffectRequest::camera)
     /// is set to.
     ///
-    /// The main view asks for everything, which is what every frame the engine
-    /// drew before there were two of them asked for; the monitor asks for
-    /// [`MONITOR_STACK`].
+    /// The main view asks for
+    /// [`RenderEffects::DEFAULT_STACK`](crcbl::render::RenderEffects::DEFAULT_STACK)
+    /// — every effect that models the room's own light transport, which is what
+    /// every frame the engine drew before there were two of them asked for; the
+    /// monitor asks for [`MONITOR_STACK`].
+    ///
+    /// **Not [`RenderEffects::all`](crcbl::render::RenderEffects::all)**, since
+    /// topic 18's bloom slice put a lens effect in that set. This sample is the
+    /// *lighting* acceptance fixture — its charter is the two lighting paths and
+    /// the effects that approximate light transport — so what it asks for is the
+    /// stack that models the room, and a lens is something a future run would
+    /// have to ask for by name.
     #[must_use]
     pub const fn stack(self) -> RenderEffects {
         match self {
-            Self::Main => RenderEffects::all(),
+            Self::Main => RenderEffects::DEFAULT_STACK,
             Self::Monitor => MONITOR_STACK,
         }
     }
@@ -2766,10 +2775,15 @@ mod tests {
         assert!(MONITOR_STACK.contains(RenderEffects::SHADOWS));
         assert!(MONITOR_STACK.contains(RenderEffects::AMBIENT_OCCLUSION));
         assert_eq!(View::Monitor.stack(), MONITOR_STACK);
+        assert!(
+            !MONITOR_STACK.contains(RenderEffects::BLOOM),
+            "the lens effect is not in this sample's stack at all — see `View::stack`"
+        );
         assert_eq!(
             View::Main.stack(),
-            RenderEffects::all(),
-            "the frame the player sees asks for everything, as it always has"
+            RenderEffects::DEFAULT_STACK,
+            "the frame the player sees asks for every effect that models the room's own \
+             light transport, as it always has"
         );
         assert_ne!(
             View::Main.stack(),
