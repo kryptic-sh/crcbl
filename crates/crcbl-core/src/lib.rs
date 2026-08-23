@@ -22,6 +22,10 @@
 //! * [`rand`] — deterministic values from an index, for simulations that
 //!   replay. Deliberately not a generator; see the module docs for why every
 //!   sample independently arrived at the same shape.
+//! * [`stats`] — [`percentile_of`](stats::percentile_of) and
+//!   [`MIN_PERCENTILE_SAMPLES`](stats::MIN_PERCENTILE_SAMPLES), the nearest-rank
+//!   arithmetic the debug panel's budget row and `crcbl bench` both report
+//!   through. No mean, on purpose; see the module docs.
 //! * [`mod@trace`] — [`Span`](trace::Span) and [`counter`](trace::counter), the CPU
 //!   half of the profiler: scoped spans with static names, nesting freely and
 //!   carrying the thread they ran on, plus named `u64` counters. Compiled into
@@ -37,6 +41,7 @@ pub mod handle;
 pub mod input;
 pub mod log;
 pub mod rand;
+pub mod stats;
 pub mod surface;
 pub mod time;
 pub mod trace;
