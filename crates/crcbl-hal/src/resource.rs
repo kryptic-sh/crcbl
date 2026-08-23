@@ -12,7 +12,7 @@
 //!
 //! Handles are 8 bytes, `Copy`, `Hash`, and generational: destroying a resource
 //! invalidates every outstanding handle to it, and a stale one produces
-//! [`HalError::InvalidHandle`](crate::HalError::InvalidHandle) rather than
+//! [`HalError::InvalidHandle`] rather than
 //! aliasing whatever moved into the slot. See `crcbl-core`'s handle module for
 //! the representation argument.
 //!
@@ -200,7 +200,7 @@ pub struct BufferDesc<'a> {
     /// Size in bytes.
     ///
     /// **Must be non-zero**, and every backend answers
-    /// [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor) for a
+    /// [`HalError::InvalidDescriptor`] for a
     /// zero — said here because a rule with no named answer is one a backend
     /// can hold differently without being wrong, which is how `crcbl-webgpu`
     /// came to serve it while the other four refused it.

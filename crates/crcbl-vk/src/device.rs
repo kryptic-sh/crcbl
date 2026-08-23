@@ -1965,77 +1965,26 @@ impl Device for VkDevice {
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
-        if desc.extent.width == 0 || desc.extent.height == 0 || desc.extent.depth_or_layers == 0 {
-            return Err(HalError::InvalidDescriptor(format!(
-                "ImageDesc::extent {:?} has a zero dimension",
-                desc.extent
-            )));
-        }
+        // Every rule that does not need a Vulkan question asked — a zero or
+        // over-large extent, the array-layer and mip-chain ceilings, a sample
+        // count that is not a power of two the device serves, an empty usage.
+        // They used to be spelled out here, one of three hand-maintained copies
+        // of the seam's set, and had drifted: `mip_levels == 0` was checked by
+        // the null backend and not by this one, so a zero reached
+        // `vkCreateImage` as `VUID-VkImageCreateInfo-mipLevels-00947` rather
+        // than as the descriptor error the seam promises.
         let limits = self.inner.caps.limits;
+        desc.check(&limits)?;
         let is_3d = matches!(desc.image_type, crcbl_hal::ImageType::D3);
-        // A 3D image is bounded by `max_image_3d` on every axis; a 1D/2D one by
-        // `max_image_2d` on width and height and by `max_image_array_layers` on
-        // its layer count. Only the 2D extent used to be checked at all, so a
-        // volume's depth and an array's layer count reached the driver as VUID
-        // failures rather than as the descriptor error the seam promises.
-        if is_3d {
-            let longest = desc
-                .extent
-                .width
-                .max(desc.extent.height)
-                .max(desc.extent.depth_or_layers);
-            if longest > limits.max_image_3d {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "ImageDesc::extent {:?} exceeds max_image_3d {}",
-                    desc.extent, limits.max_image_3d
-                )));
-            }
-        } else {
-            if desc.extent.width > limits.max_image_2d || desc.extent.height > limits.max_image_2d {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "ImageDesc::extent {:?} exceeds max_image_2d {}",
-                    desc.extent, limits.max_image_2d
-                )));
-            }
-            if desc.extent.depth_or_layers > limits.max_image_array_layers {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "ImageDesc::extent {:?} asks for more array layers than \
-                     max_image_array_layers {}",
-                    desc.extent, limits.max_image_array_layers
-                )));
-            }
-        }
-        // `depth_or_layers` mips for a volume and does not for an array, which
-        // is why the image type is a parameter.
-        let full_chain = desc.extent.full_mip_levels(desc.image_type);
-        if desc.mip_levels > full_chain {
-            return Err(HalError::InvalidDescriptor(format!(
-                "ImageDesc::mip_levels is {} but {:?} has only {full_chain} levels",
-                desc.mip_levels, desc.extent
-            )));
-        }
-        // Through `conv::sample_count`, which exists precisely to reject a
-        // non-power-of-two: `from_raw(3)` decodes as `TYPE_1 | TYPE_2`, so a
-        // caller asking for three samples reached the driver as a two-bit mask
-        // rather than as an error. `create_graphics_pipeline_impl` always used
-        // it; this did not.
-        let Some(samples) = conv::sample_count(desc.samples.max(1)) else {
+        // `conv::sample_count` is still what turns the number into a Vulkan
+        // flag; the check above is what guarantees it can. A `None` here would
+        // now be a disagreement between the two, not a caller bug.
+        let Some(samples) = conv::sample_count(desc.samples) else {
             return Err(HalError::InvalidDescriptor(format!(
                 "ImageDesc::samples is {}, which is not a power of two in 1..=64",
                 desc.samples
             )));
         };
-        if desc.samples > limits.max_sample_count.max(1) {
-            return Err(HalError::InvalidDescriptor(format!(
-                "ImageDesc::samples is {} but this device supports at most {}",
-                desc.samples, limits.max_sample_count
-            )));
-        }
-        if desc.usage.is_empty() {
-            return Err(HalError::InvalidDescriptor(
-                "ImageDesc::usage is empty, so the image could never be used".to_string(),
-            ));
-        }
         // **Ask the device whether it can serve this format at all**, which
         // nothing here did. `vkCreateImage` is not required to fail for a
         // format/usage pair the implementation does not support — radv returns
@@ -2096,7 +2045,9 @@ impl Device for VkDevice {
             .image_type(conv::image_type(desc.image_type))
             .format(conv::format(desc.format))
             .extent(extent)
-            .mip_levels(desc.mip_levels.max(1))
+            // No `.max(1)`: the clamp that used to be here is what let a zero
+            // mip count through silently, and `ImageDesc::check` now refuses one.
+            .mip_levels(desc.mip_levels)
             .array_layers(if is_3d {
                 1
             } else {

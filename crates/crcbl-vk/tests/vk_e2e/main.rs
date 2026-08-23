@@ -69,6 +69,7 @@ mod mesh_shader;
 mod pipeline;
 mod queries;
 mod recording;
+mod resources;
 mod retire;
 mod seam_obligations;
 mod swapchain;

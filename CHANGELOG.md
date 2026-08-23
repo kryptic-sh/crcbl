@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` refuses an image with zero mip levels**, which it silently
+  accepted and then clamped to one on the way to `vkCreateImage`. The seam and
+  the null backend have always called a zero a caller bug; this backend kept its
+  own copy of the image rules and that copy had drifted, so a zero reached the
+  driver as `VUID-VkImageCreateInfo-mipLevels-00947` — reported by the
+  validation layer and not necessarily by a release driver. `create_image` now
+  calls `ImageDesc::check`, the shared version of the rules, instead of
+  restating them; the format/type/usage support query stays, being the one
+  Vulkan has to be asked. Callers passing at least one mip level see no change.
+
 - **`crcbl-webgpu` holds a buffer binding to its slot's range ceiling and to the
   memory a shader may write.** Both rules turn on the slot's `BindingKind`,
   which lives in the bind group layout, so the device now records the buffer

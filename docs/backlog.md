@@ -6076,28 +6076,38 @@ confirmed; the rest of this file assumes them.
   Preserves sample rule 7 and demonstrates the matchmaker and rating curve; only
   the transport is absent.
 
-## Three backends keep their own copy of the image rules (2026-08-24)
+## Two deferred backends keep their own copy of the image rules (2026-08-24)
 
-`ImageDesc::check` now lives on the seam (`crcbl-hal/src/resource.rs`), lifted
-verbatim out of the null backend — the reference the others are compared
-against, so the messages had to stay exact — and called by the null backend and
-by `crcbl-webgpu`. `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` each still carry a
-hand-written copy of the same rules in their own `create_image`, with their own
-wording (`crcbl-vk/src/device.rs` opens with "ImageDesc::extent {:?} has a zero
-dimension" where the seam says "image extent must be non-zero in every
-dimension").
+`ImageDesc::check` lives on the seam (`crcbl-hal/src/resource.rs`), lifted
+verbatim out of the null backend, and is now called by the null backend, by
+`crcbl-webgpu` and by `crcbl-vk`. `crcbl-mtl` (`device.rs`) and `crcbl-dx12`
+(`validate.rs`) still carry their own, with their own wording.
 
-Consolidating them is the obvious next step and was deliberately not done here.
-The cost is not the call: it is that each of those three has tests asserting its
-own sentences, and `crcbl-mtl` and `crcbl-dx12` cannot be run on this machine,
-so the wording change lands as a CI round trip per backend. Doing it well means
-one backend per slice, its own tests updated in the same change, and the
-agnostic suite asserting the shared wording afterwards.
+**The audit that consolidating `crcbl-vk` forced is the point of this entry**,
+because the copies had in fact drifted, in different directions:
 
-**What each copy might not have** was not audited — this entry is about the
-duplication, not about a specific missing rule. Checking whether the three
-copies agree with the seam's set, rule for rule, is itself worth a slice: two
-copies is already the bug, and three have had every opportunity to drift.
+- **`crcbl-vk` did not check `mip_levels == 0` at all** and clamped it with
+  `.max(1)` on the way to `vkCreateImage`. Fixed, and covered by
+  `an_image_descriptor_the_seam_refuses_never_reaches_the_driver` in
+  `crates/crcbl-vk/tests/vk_e2e/resources.rs`.
+- **`crcbl-mtl` silently clamps a zero to one** —
+  `let mip_levels = desc.mip_levels.max(1);` in its `create_image`. That is
+  worse than an absent check: the caller asked for something the seam calls a
+  bug and got a working image, so nothing will ever tell them.
+- **`crcbl-dx12` does not check it either.** Its `validate.rs` checks
+  `samples > 1 && mip_levels > 1` and nothing about zero.
+
+Both are DEFERRED, so these are records rather than tasks. Consolidating them
+means changing the wording their own tests assert, on two backends this machine
+cannot run — one CI round trip each — so it is one slice per backend when work
+resumes.
+
+**Until then there is no agnostic test for the image rules**, and that is the
+real cost. One asserting the shared wording would redden `crcbl-mtl` and
+`crcbl-dx12`; one asserting only `InvalidDescriptor` would still redden them on
+the mip case, because neither refuses it. So the rules are covered against the
+null backend, `crcbl-webgpu` and `crcbl-vk` separately, and the suite that
+exists to stop exactly this kind of divergence cannot yet be pointed at them.
 
 ## The WSI swapchain-format check has no e2e, and WebGPU has no check (2026-08-24)
 
