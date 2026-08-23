@@ -77,3 +77,42 @@ crcbl_validation_saw_nothing() {
     echo "           in a log." >&2
     return 1
 }
+
+# `crcbl_validation_layer_checked <log> <what>` — runs with
+# `CRCBL_VK_VALIDATION_PROVOKE=1` only.
+#
+# **The question `crcbl_validation_saw_nothing` cannot ask.** That one is
+# satisfied by a layer which loads, announces itself and checks nothing: a
+# message submitted through `vkSubmitDebugUtilsMessageEXT` is delivered whatever
+# the layer's checks are set to, so `CRCBL_VK_VALIDATION_SELF_TEST` proves the
+# report path and not the checking. Measured on layer 1.4.357: with
+# `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` the self-test message still
+# arrives and a real specification violation produces nothing at all.
+#
+# So a run that sets `CRCBL_VK_VALIDATION_PROVOKE=1` has `crcbl-vk` record one
+# out-of-bounds `vkCmdCopyBuffer` at its first present — never submitted — and
+# this reads the log for what only a **core check** emits.
+#
+# It greps for the layer's own complaint and never for `crcbl-vk`'s
+# `CRCBL_VK_VALIDATION_PROVOKE records …` line, which deliberately names neither
+# the entry point nor the VUIDs: a grep a harness's own log line can answer is
+# the green light wired to nothing this exists to remove. The digits of the
+# `VUID-vkCmdCopyBuffer-size-*` pair belong to the layer build and are not named
+# here for the same reason they are not named in `crcbl-vk` — 1.4.357 reports
+# `-00115` and `-00116` where an older comment expected `-00225`.
+#
+# Prints the diagnosis and returns 1; the caller decides what else belongs on
+# the way out, and usually has the failing run's whole output to show.
+crcbl_validation_layer_checked() {
+    local log="$1" what="$2"
+    grep -qE 'crcbl_vk::debug\] vk validation: VUID-vkCmdCopyBuffer-size-' "$log" && return 0
+    echo "crcbl e2e: ${what} ran with CRCBL_VK_VALIDATION_PROVOKE=1 and the layer" >&2
+    echo "           reported nothing about the deliberate out-of-bounds copy" >&2
+    echo "           crcbl-vk recorded at its first present. Only a core check" >&2
+    echo "           emits that, so this layer is loaded and checking nothing —" >&2
+    echo "           which is the state every other validation pass here reads as" >&2
+    echo "           success. Check VK_KHRONOS_VALIDATION_VALIDATE_CORE and the" >&2
+    echo "           layer's settings file; a debug build is also required, and" >&2
+    echo "           a release one says so in the log." >&2
+    return 1
+}

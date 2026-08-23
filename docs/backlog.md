@@ -146,29 +146,6 @@ refused at `VkInstance::open` rather than passing having checked nothing, which
 - **`ValidationSink::CAPACITY` bounds what the drain can hand back.** Past it
   only the counters grow. Not practical while the first error stops the run, but
   it is a cap rather than "every error forever".
-- **No harness sets `CRCBL_VK_VALIDATION_PROVOKE` yet.** `crcbl-vk` now records
-  a deliberate out-of-bounds `vkCmdCopyBuffer` at the first successful
-  `VkDevice::present` when that variable is set — a core-check violation from
-  inside a running frame loop, which is what a submitted self-test message could
-  never be — and `validation_gate.rs`'s
-  `the_provocation_fires_at_the_first_present_and_the_layer_answers` proves it
-  fires. The four shell gates that run a **binary** under the layer
-  (`tools/run-samples-windowed.sh`, `run-x11-e2e.sh`, `run-wayland-e2e.sh`, and
-  `run-vk-e2e.sh`'s sandbox pass) still set only
-  `CRCBL_VK_VALIDATION_SELF_TEST`, so none of them fails yet on a layer that
-  loads and checks nothing. The pass each one needs: set the variable, and
-  require **the layer's own `CopyBuffer` complaint** in the log — never
-  `crcbl-vk`'s own `CRCBL_VK_VALIDATION_PROVOKE records …` line, which
-  deliberately names neither the entry point nor the VUIDs, because a grep its
-  own log line answers is exactly the green light wired to nothing this closes.
-  Measured 2026-08-23 on layer 1.4.357, sandbox `--headless --backend vk`: with
-  `CRCBL_VK_VALIDATION=1 CRCBL_VK_VALIDATION_PROVOKE=1` the log carries
-  `VUID-vkCmdCopyBuffer-size-00115`/`-00116` on radv **and** on lavapipe (the
-  command buffer is dropped unsubmitted, so neither driver executes it and both
-  runs still exit 0); adding `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` removes
-  both lines while `crcbl-vk: validation enabled (` is still printed and the
-  self-test's submitted message still arrives. That pair is the hole, before and
-  after.
 - **The provocation is a one-shot at the first present.** It is one frame
   further into the run than the self-test was and no further, so a layer that
   stopped checking at frame 2 — or a messenger that went quiet then — still

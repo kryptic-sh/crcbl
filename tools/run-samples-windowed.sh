@@ -277,6 +277,7 @@ self_test_validation() {
     local failed=0
     (
         export CRCBL_VK_VALIDATION_SELF_TEST=1
+        export CRCBL_VK_VALIDATION_PROVOKE=1
         run_sample "$@"
     ) >"$refusal" 2>&1 || failed=1
 
@@ -311,7 +312,18 @@ self_test_validation() {
         log_tail
         exit 1
     fi
-    echo "crcbl e2e: ${sample} went red on the injected ${id}, so the validation check is live"
+    # **And whether the layer was checking at all** — a different question from
+    # everything above it, and the only one the injected message cannot answer:
+    # a submitted message is delivered whatever the layer's checks are set to.
+    # `CRCBL_VK_VALIDATION_PROVOKE=1` is exported beside the self-test, so this
+    # is graded off the same run and costs no extra binary.
+    if ! crcbl_validation_layer_checked "$log" "${sample}"; then
+        cat "$refusal" >&2
+        log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: ${sample} went red on the injected ${id} and the layer answered a"
+    echo "           provoked violation, so the validation check is live and checking"
 }
 
 # See the equivalent block in `run-x11-e2e.sh` for why the loader probe is a

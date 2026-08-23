@@ -34,8 +34,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `CRCBL_VK_VALIDATION_FATAL=1` the resulting error rides the ordinary
   `Device::take_error` path and ends the run. **Off by default on every
   profile**, and `#[cfg(debug_assertions)]` besides — a release build logs that
-  it heard the request and cannot honour it. No shell harness sets it yet;
-  `docs/backlog.md` says what each would need.
+  it heard the request and cannot honour it. Every gate that runs a binary under
+  the layer sets it: `tools/run-samples-windowed.sh`, `run-x11-e2e.sh` and
+  `run-wayland-e2e.sh` grade it beside their existing self-test pass, at no
+  extra run, and `crcbl-cli`'s scaffold suite gets its own run because the
+  self-test's fatal error would otherwise end that one before the first present.
+  `run-vk-e2e.sh` asks the same question through the `crcbl-vk` suite it already
+  runs.
 
 - **A binary run can prove its own validation check is able to fail.**
   `CRCBL_VK_VALIDATION_SELF_TEST=1` asks a **debug** build of `crcbl-vk` to put

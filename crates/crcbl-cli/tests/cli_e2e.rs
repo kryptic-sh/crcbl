@@ -174,9 +174,9 @@ fn assert_validation_clean(what: &str, backend: &str, output: &Output) {
 /// child that exited 0 anyway.
 ///
 /// What it does *not* settle is that the layer would have caught a real
-/// violation — that is `crcbl-vk`'s own `validation_gate` suite's question,
-/// against a deliberate one. This settles that a message the layer emits is
-/// heard, and that the hearing is fatal.
+/// violation: a message put through `vkSubmitDebugUtilsMessageEXT` is delivered
+/// whatever the layer's checks are set to. That is
+/// [`self_test_the_layer_is_checking`]'s question, and it needs its own run.
 fn self_test_the_validation_gate(crcbl: &str, project: &Path, target: &Path, backend: &str) {
     if backend != "vk" {
         return;
@@ -210,6 +210,59 @@ fn self_test_the_validation_gate(crcbl: &str, project: &Path, target: &Path, bac
         "the injected message reached the log but not in the shape \
          validation_complaints matches, so the scan above is reading past real \
          complaints too:\n{log}"
+    );
+}
+
+/// The pass that proves the layer is **checking**, not merely loaded.
+///
+/// Everything above is satisfied by a layer that loads, prints its line and
+/// validates nothing — measured on 1.4.357 with
+/// `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false`. So this asks
+/// `CRCBL_VK_VALIDATION_PROVOKE=1` for one deliberate out-of-bounds
+/// `vkCmdCopyBuffer`, recorded and destroyed without ever being submitted, at
+/// the scaffold's first present; only a core check reports it.
+///
+/// **Its own run rather than the self-test's**, which is not tidiness: with
+/// `CRCBL_VK_VALIDATION_FATAL=1` set on both, the injected message kills the
+/// child at the first frame's `acquire`, which is before any present has
+/// happened — so the provocation would never fire and this would assert on a
+/// run that never reached it. Two frames for the same reason from the other
+/// end: the error is recorded during the first present, and the second
+/// `acquire` is what drains it.
+///
+/// The layer's own complaint, never `crcbl-vk`'s `CRCBL_VK_VALIDATION_PROVOKE
+/// records …` line — that line deliberately names neither the entry point nor
+/// the VUIDs, because a grep the run's own output can answer proves nothing.
+/// The digits of the `VUID-vkCmdCopyBuffer-size-*` pair belong to the layer
+/// build and are not named here either.
+fn self_test_the_layer_is_checking(crcbl: &str, project: &Path, target: &Path, backend: &str) {
+    if backend != "vk" {
+        return;
+    }
+    let provoked = validating(
+        Command::new(crcbl)
+            .current_dir(project)
+            .env("CARGO_TARGET_DIR", target),
+    )
+    .env("CRCBL_VK_VALIDATION_PROVOKE", "1")
+    .args(["run", "--headless", "--"])
+    .args(["--frames", "2", "--backend", backend, "--size", "320x240"])
+    .output()
+    .expect("crcbl run (provocation): could not start");
+    let log = String::from_utf8_lossy(&provoked.stderr);
+    assert!(
+        log.contains("vk validation: VUID-vkCmdCopyBuffer-size-"),
+        "the scaffold ran with CRCBL_VK_VALIDATION_PROVOKE=1 and the layer said \
+         nothing about the deliberate out-of-bounds copy crcbl-vk recorded at \
+         its first present. Only a core check emits that, so this layer is \
+         loaded and checking nothing — the state every other validation \
+         assertion here reads as success:\n{log}"
+    );
+    assert!(
+        !provoked.status.success(),
+        "the layer reported the provoked violation and the scaffold survived it \
+         with CRCBL_VK_VALIDATION_FATAL=1 set, so a real violation would not \
+         fail it either:\n{log}"
     );
 }
 
@@ -331,8 +384,10 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
         "the scaffold ignored --size; the summary reports its extent:\n{output}"
     );
 
-    // 5b. And the pass that gives 5's validation check teeth.
+    // 5b. And the two passes that give 5's validation check teeth: that it can
+    //     fail at all, and that the layer grading it is checking anything.
     self_test_the_validation_gate(crcbl, &project, &target, &backend);
+    self_test_the_layer_is_checking(crcbl, &project, &target, &backend);
 
     // 6. And the same loop with a window on it, when there is a compositor to
     //    put one on. This is the half `--headless` cannot reach: opening a

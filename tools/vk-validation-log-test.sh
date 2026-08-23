@@ -131,6 +131,42 @@ check_contains "and says why the scan cannot be trusted" "panic escaped the" "$E
 run_check "${WORK}/error.log" "quarry"
 check_contains "the caller's label is used" "complained about quarry" "$ERR"
 
+# --- 8. the layer answered a provoked violation ------------------------------
+COMPLAINT='[   0.0560s ERROR crcbl_vk::debug] vk validation: VUID-vkCmdCopyBuffer-size-00115: vkCmdCopyBuffer(): pRegions[0].size (4096) is greater than the source buffer size (64) minus srcOffset (0).'
+{
+    echo "$ENABLED"
+    echo '[   0.0551s INFO  crcbl_vk::device] crcbl-vk: CRCBL_VK_VALIDATION_PROVOKE records a deliberate 4096-byte copy between two 64-byte buffers'
+    echo "$COMPLAINT"
+} >"${WORK}/provoked.log"
+RC=0
+crcbl_validation_layer_checked "${WORK}/provoked.log" "the sandbox" 2>"$ERRLOG" || RC=$?
+check "a layer that answered the provocation is accepted" 0 "$RC"
+
+# --- 9. the layer is loaded and checking nothing -----------------------------
+# **The case this second question exists for**, and the one every other check
+# in this file calls clean: the layer loads, announces itself, and reports
+# nothing about a real specification violation. Measured with
+# `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` on layer 1.4.357.
+{
+    echo "$ENABLED"
+    echo '[   0.0551s INFO  crcbl_vk::device] crcbl-vk: CRCBL_VK_VALIDATION_PROVOKE records a deliberate 4096-byte copy between two 64-byte buffers'
+} >"${WORK}/checking-nothing.log"
+RC=0
+crcbl_validation_layer_checked "${WORK}/checking-nothing.log" "the sandbox" 2>"$ERRLOG" || RC=$?
+ERR="$(cat "$ERRLOG")"
+check "a layer that checked nothing is rejected" 1 "$RC"
+check_contains "and says so in those words" "loaded and checking nothing" "$ERR"
+# And the log it rejected passes the other question, which is the whole point.
+RC=0
+crcbl_validation_saw_nothing "${WORK}/checking-nothing.log" "the sandbox" 2>"$ERRLOG" || RC=$?
+check "...while the complaint scan calls that same log clean" 0 "$RC"
+
+# --- 10. crcbl-vk's own line cannot answer the grep --------------------------
+# The provocation's info line deliberately names neither the entry point nor
+# the VUIDs. If it ever did, case 9 would pass on our own output.
+check_contains "the provocation's own line is in the rejected log" \
+    "CRCBL_VK_VALIDATION_PROVOKE records" "$(cat "${WORK}/checking-nothing.log")"
+
 if [ "$FAILURES" -ne 0 ]; then
     echo "crcbl vk-validation-log test: ${FAILURES} assertion(s) failed" >&2
     exit 1
