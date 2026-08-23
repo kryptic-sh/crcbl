@@ -435,6 +435,26 @@ pub(crate) fn messenger_create_info<'a>(
         .user_data(user_data)
 }
 
+/// Says — at the module the messenger's own messages come from — that the
+/// messenger is live.
+///
+/// The **target** is the point of putting this here rather than beside the
+/// `vkCreateDebugUtilsMessengerEXT` call that earns it.
+/// [`ValidationReport::assert_clean`] is unreachable from a shell script, so the
+/// harnesses that set [`VALIDATION_ENV_VAR`] and then run a *binary* — the ones
+/// with no Rust fixture to assert from — grep their run's log instead: no error
+/// line from this module, *and* this line present, which is the same pair of
+/// questions `assert_clean` asks. Emitted from `crcbl_vk::instance` it would
+/// answer to a different [`crcbl_core::log`] filter directive from the errors it
+/// vouches for, and `CRCBL_LOG=…,crcbl_vk::debug=off` would then leave the
+/// harness looking at a clean log and a reassuring line — the exact green light
+/// wired to nothing those greps replaced.
+pub(crate) fn announce_messenger() {
+    crcbl_core::log::info!(
+        "crcbl-vk: validation enabled ({VALIDATION_LAYER}), messages go through the debug messenger"
+    );
+}
+
 /// Leaks a sink's inner allocation into a raw pointer for `pUserData`.
 ///
 /// The instance reclaims it with [`drop_messenger_user_data`] after destroying

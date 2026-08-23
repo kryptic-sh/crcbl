@@ -618,6 +618,20 @@ impl VkInstance {
             }
             None => vk::DebugUtilsMessengerEXT::null(),
         };
+        if messenger != vk::DebugUtilsMessengerEXT::null() {
+            // **The half of `ValidationReport::assert_clean` a shell script can
+            // read.** A harness that greps a run's log for validation errors is
+            // vacuous unless the callback was wired, and until this line existed
+            // the log said nothing either way: the layer being absent produces a
+            // warning, a messenger that failed to be created produces another,
+            // and a run where everything worked produced neither. Every gate
+            // reading this log — `tools/run-samples-windowed.sh` and the two
+            // shell e2e harnesses — asserts this line is present before it
+            // believes the absence of errors below it. `debug` emits it rather
+            // than this module so that one log filter governs the line and the
+            // errors it vouches for; see `announce_messenger`.
+            debug::announce_messenger();
+        }
 
         let surface_ext =
             has_extension(khr::surface::NAME).then(|| khr::surface::Instance::new(&entry, &raw));

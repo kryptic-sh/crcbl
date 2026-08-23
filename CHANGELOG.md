@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-vk` says out loud when validation is on, and the harnesses that run a
+  binary now fail on what it reports.** A run with `CRCBL_VK_VALIDATION=1` logs
+  `crcbl-vk: validation enabled (VK_LAYER_KHRONOS_validation), …` at info from
+  `crcbl_vk::debug`, emitted only once the debug messenger really exists. That
+  line is the half of `ValidationReport::assert_clean` a shell script can read:
+  `tools/run-samples-windowed.sh` and both shell e2e harnesses now refuse a
+  clean log that does not carry it, and fail on any error or warning the
+  messenger produced. Before this, eight sites set the variable and no run could
+  fail because of it.
 - **`crcbl::session::Loopback::impaired`** builds the single-player pair with
   both directions behind `crcbl_net`'s `ConditionSimulator`, so a game can be
   played over a link with loss, latency, jitter or reordering on it and the run

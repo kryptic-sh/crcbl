@@ -3,6 +3,50 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The validation gate reaches three harnesses; CI's seven sites are still open
+
+`crcbl-vk` now announces its messenger and `tools/run-samples-windowed.sh`,
+`run-x11-e2e.sh` and `run-wayland-e2e.sh` fail on what the layer reports.
+`crates/crcbl/tests/windowed_e2e.rs` was already covered — every one of its
+tests ends in `Windowed::finish()`, which calls
+`ValidationReport::assert_clean`. What is left:
+
+- **Seven `CRCBL_VK_VALIDATION=1` sites in `.github/workflows/ci.yml` still
+  cannot fail on a validation error.** Verified 2026-08-24: six are direct
+  `cargo run --locked --quiet --package {breakout,bare,asteroids,flappy,horde,hud} -- --headless --backend vk`
+  steps and the seventh is `cargo test --locked --quiet --package viewer`; none
+  runs a harness script, and `apps/viewer` names neither `validation_report` nor
+  `assert_clean`. Options, in order of preference: **a change at the `crcbl`
+  seam** so a binary's own exit code reflects the report —
+  `crcbl::args::run_front_end` is the one place every sample front end passes
+  through, it would cover six of the seven with no new file and no duplicated
+  shell, and it would make every run of a sample fail on a violation rather than
+  only CI's; a shared `tools/run-headless-validated.sh <package> [args…]`
+  invoked once per step; or an opt-in fatal-on-validation-error variable inside
+  `crcbl-vk`, which is what the validation layer's own
+  `debug_action=VK_DBG_LAYER_ACTION_BREAK` does and would need one `env:` line
+  per step. Inline greps in six `run:` blocks were **considered and declined** —
+  duplicated shell in a YAML file that has already taken two wrong-anchor edits.
+- **Nothing proves the layer is awake during a _sample_ run.** The greps fail on
+  a missing layer, a missing messenger, a lost message and a `CRCBL_LOG` filter
+  that silences `crcbl_vk::debug` — that last one takes the "validation enabled"
+  line with it, which is why the line is emitted from `debug` and not from
+  `instance`. What they do not catch is a layer that loads, creates a messenger,
+  prints the line and then checks nothing
+  (`VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` is enough).
+  `crates/crcbl-vk/tests/vk_e2e/validation_gate.rs` closes this for the vk suite
+  by committing a deliberate violation; there is no equivalent for a binary run.
+  `vkSubmitDebugUtilsMessageEXT` works cleanly as an injection route through the
+  real callback — it was the red-check mechanism for this slice — so a
+  debug-build-only injection hook is the obvious shape if this is worth closing.
+- **Not verified on CI's runners.** Everything above was measured on radv on an
+  RX 7900 XTX and on llvmpipe under Xvfb and sway. Across nine samples and nine
+  sandbox passes on both drivers the layer emitted zero errors and zero
+  warnings, so the worry that a performance warning would redden the gate is not
+  borne out here — but the layer build differs on CI (`validation_gate.rs`
+  records `cross-submission=no` locally against `yes` there), so a CI leg could
+  emit a warning this machine does not.
+
 ### Breakout over an impaired link: two breaks, and only one is the buffer
 
 `crcbl::session::Loopback::impaired` and `apps/breakout`'s `ImpairedRun` make a

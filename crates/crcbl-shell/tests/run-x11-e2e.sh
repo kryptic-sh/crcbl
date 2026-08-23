@@ -175,6 +175,59 @@ assert_nothing_left_alive() {
     exit 1
 }
 
+# `assert_validation_saw_nothing <log> <what>` — vk runs only.
+#
+# **`CRCBL_VK_VALIDATION=1` is set on every run below and used to prove
+# nothing.** A validation error reaches `crcbl_core::log::error!` in
+# `crcbl-vk`'s `debug` module and the process still exits 0, so each run
+# advertised that it was validating and no run could fail because of it. This is
+# the shell's copy of `ValidationReport::assert_clean`, which the vk and
+# windowed e2e suites reach from Rust and nothing above the seam could.
+#
+# Both of `assert_clean`'s halves, because the second is worthless without the
+# first: a log with no validation errors in it is exactly what a run with no
+# messenger produces. `crcbl-vk` prints the "validation enabled" line only once
+# the debug messenger really exists, so its absence means the layer was missing,
+# `VK_EXT_debug_utils` was, or the messenger failed to be created — every one of
+# which turns the grep below into a green light wired to nothing.
+#
+# Errors **and** warnings, which is where `assert_clean` draws the line and what
+# `docs/plan/02-vulkan-backend.md`'s P1 exit criterion says. The messenger only
+# ever subscribes to those two severities, so there is no informational chatter
+# to filter out here. The pattern names the level, the module and the callback's
+# own `vk <kind>:` prefix — the teardown leak warning above comes from
+# `crcbl_vk::device` and is a different question, asked separately.
+assert_validation_saw_nothing() {
+    local log="$1" what="$2" complaints
+    if ! grep -qF 'crcbl-vk: validation enabled (' "$log"; then
+        echo "crcbl e2e: ${what} ran with CRCBL_VK_VALIDATION=1 and never loaded the layer," >&2
+        echo "           so a clean log here proves nothing. Install" >&2
+        echo "           VK_LAYER_KHRONOS_validation (Arch: vulkan-validation-layers," >&2
+        echo "           Debian/Ubuntu: vulkan-validationlayers) — crcbl-vk warns by name" >&2
+        echo "           when it is missing, and the warning is in the log above." >&2
+        cat "$log" >&2
+        log_tail
+        exit 1
+    fi
+    if grep -qF 'a panic escaped the Vulkan debug messenger callback' "$log"; then
+        echo "crcbl e2e: ${what} lost validation messages — a panic escaped the messenger" >&2
+        echo "           callback, so the check below cannot see what the layer said." >&2
+        cat "$log" >&2
+        log_tail
+        exit 1
+    fi
+    complaints="$(grep -E '(ERROR|WARN) +crcbl_vk::debug] vk ' "$log" || true)"
+    [ -z "$complaints" ] && return 0
+    echo "crcbl e2e: the validation layer complained about ${what}:" >&2
+    while IFS= read -r line; do
+        echo "               $line" >&2
+    done <<<"$complaints"
+    echo "           Those are specification violations this run committed. Fix them" >&2
+    echo "           where they were recorded rather than leaving the line in a log." >&2
+    log_tail
+    exit 1
+}
+
 run_sandbox() {
     local backend="$1"
     local mode="${2:-windowed}"
@@ -230,8 +283,16 @@ run_sandbox() {
         exit 1
     fi
     assert_nothing_left_alive "$SANDBOX_LOG" "the sandbox"
+    # The null backend opens no Vulkan instance, so it has no layer to have been
+    # watching and nothing to assert about one — and the summary line says which
+    # of the two runs this was rather than claiming the check on both.
+    local validated=""
+    if [ "$backend" = "vk" ]; then
+        assert_validation_saw_nothing "$SANDBOX_LOG" "the sandbox"
+        validated=", validation silent"
+    fi
 
-    echo "crcbl e2e: $how on x11/$backend, nothing left alive"
+    echo "crcbl e2e: $how on x11/$backend, nothing left alive${validated}"
 }
 
 # The X11 half of the `F11` pass — see `run_sandbox_toggle` in
@@ -375,7 +436,12 @@ run_sandbox_toggle() {
     wait "$keys_pid" || true
     rm -f "$keys_in"
     assert_nothing_left_alive "$SANDBOX_LOG" "the sandbox, after F11"
-    echo "crcbl e2e: $how, and the summary read 'at ${want_extent}, ${want_mode}' on x11/$backend, nothing left alive"
+    local validated=""
+    if [ "$backend" = "vk" ]; then
+        assert_validation_saw_nothing "$SANDBOX_LOG" "the sandbox, after F11"
+        validated=", validation silent"
+    fi
+    echo "crcbl e2e: $how, and the summary read 'at ${want_extent}, ${want_mode}' on x11/$backend, nothing left alive${validated}"
 }
 
 # See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a
