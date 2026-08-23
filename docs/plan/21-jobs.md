@@ -203,13 +203,23 @@ retrofit disaster. P5B, not P8, is where threads actually switched on — the
 2026-08-03 correction moved it and the crate shipped there — with horde's
 numbers as before/after proof.
 
-**The Web Worker spawner is the one piece of this that is genuinely still
-missing.** `crcbl_jobs::spawn` is `#[cfg]`-split: native gets a real thread
-spawner, and `wasm32` gets `Inline`, which runs every task on the calling
-thread. That is the honest degradation this document's wasm section asks for
-rather than a stub reporting success — but it does mean a browser build has no
-parallelism at all today, and `default_spawner` is where a worker backend would
-arrive.
+~~The Web Worker spawner is the one piece of this that is genuinely still
+missing.~~ **Landed 2026-08-23.** `crcbl_jobs::spawn` is still `#[cfg]`-split —
+native gets `Threads` — but `wasm32` now gets `crcbl_jobs::workers::Workers`
+rather than `Inline`. It cannot start a thread itself, because no wasm module
+can; it **queues** each request and a page drains the queue through the
+`__crcbl_web_jobs_*` exports, which keeps the engine's exports-plus-polling ABI
+intact rather than adding the first import to a browser artifact.
+
+Two things about it decide how the rest of this document reads. `Workers`
+answers `Spawn::threaded` **false** until a page announces itself, so an
+artifact loaded by a page with no shim degrades exactly as `Inline` did — which
+is every page today, because **nothing implements the shim yet**. And `Pool`
+itself cannot be driven from the browser's main thread at all: `par_for` and
+`pool::work` both take a `std::sync::Mutex` and wait on a `Condvar`, which lower
+to `Atomics.wait` and throw there. The topology this document settled — the game
+worker owns the pool, the main thread forwards and presents — is therefore the
+only arrangement that runs, not the preferred one.
 
 ## Risks
 

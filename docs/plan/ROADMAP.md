@@ -140,9 +140,11 @@ viewer is `sample/05-viewer.md`'s own milestones.
 fifth game**, and none of it has a phase row of its own because it was pulled
 forward out of P7, P9 and P14. What landed:
 
-- **`crcbl-jobs`** (P5B's crate) — a work-stealing `Pool`, `Threads`/`Inline`
-  spawners, mailboxes, a ring and `par_for`. `apps/horde` steers its crowd on it
-  and takes `--workers`. The Web Worker backend is the part still missing.
+- **`crcbl-jobs`** (P5B's crate) — a work-stealing `Pool`, the `Threads`,
+  `Inline` and `Workers` spawners, mailboxes, a ring and `par_for`. `apps/horde`
+  steers its crowd on it and takes `--workers`. The Web Worker backend landed
+  2026-08-23; what is still missing is a **page** that implements its shim, so
+  every browser build degrades through `threaded()` answering false.
 - **`crcbl-scene`** — glTF import, QEM edge-collapse simplification, meshlet
   build and a cluster DAG, with runtime cut selection in `crcbl-shaders`. This
   is most of topic 25, and `crcbl lod` ships it as a subcommand.
@@ -369,9 +371,11 @@ was intended.
 - **`crcbl-cli`** (`new`, `run`, `build`, `screenshot`, `replay`, `crpix`,
   `lod`) and **`apps/sandbox`**, which draws a reversed-Z lit spinning cube
   through the graph into an HDR target on both Wayland and X11.
-- **`crcbl-jobs`**: the work-stealing `Pool`, the `Spawn` seam with `Threads`
-  and `Inline`, mailboxes, a ring and `par_for`. No Web Worker backend yet —
-  `Threads` is `cfg(not(target_arch = "wasm32"))`.
+- **`crcbl-jobs`**: the work-stealing `Pool`, the `Spawn` seam with `Threads`,
+  `Inline` and `Workers`, mailboxes, a ring and `par_for`. `Threads` is
+  `cfg(not(target_arch = "wasm32"))` and `Workers` is its opposite; the browser
+  backend queues spawn requests for a page to drain, and no page drains them
+  yet.
 - **`crcbl-scene`**: glTF import and validation, QEM edge-collapse
   simplification, meshlet build, the cluster DAG and LOD resolve.
 - **`crcbl-assets`**: `AssetSource`, `DirSource` and `AssetRegistry`. Hot reload
