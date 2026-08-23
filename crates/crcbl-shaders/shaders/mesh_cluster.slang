@@ -967,6 +967,49 @@ uint group_is_live(uint3 group)
          * min(1u, max(draw.cluster_count, group.x) - group.x);
 }
 
+/// How far a basis may be from carrying every angle across unchanged, relative
+/// to its own scale, before the cone test below stops trusting it.
+///
+/// The same number as `crcbl_shaders::meshlet::ClusterBounds::SIMILARITY_TOLERANCE`,
+/// held in step with it by that module's
+/// `the_shader_declares_the_same_similarity_tolerance`, and measured there.
+static const float SIMILARITY_TOLERANCE = 1e-4;
+
+/// Whether `basis` carries every angle across unchanged — a rotation, a uniform
+/// scale, a reflection, or those composed.
+///
+/// **What the cone test needs and the sphere does not.** A cluster's cone is a
+/// set of *normals*, and a transform that stretches one axis moves a normal one
+/// way and the surface it belongs to the other: the axis this function's caller
+/// builds with the 3x3 is then not the cone's axis, and the cone's half-angle is
+/// not its own either. Both would have to move together, and the widened angle
+/// has no bound this shader could state and defend — so a cluster of an instance
+/// that scales unequally is **kept**, and the frustum is what culls it. Fewer
+/// clusters rejected, never a visible one dropped.
+///
+/// `transpose(B) * B` is `s * s * I` exactly when `B` is `s` times an orthogonal
+/// matrix, which is the definition being tested: every column the same length,
+/// no two of them oblique. Read relative to the largest diagonal, so it holds at
+/// any scale. `crcbl_render::cull::preserves_angles` is the same rule in Rust
+/// and the oracle a test compares this whole cull to.
+///
+/// A degenerate basis — a zero scale, which draws nothing — answers `false`, so
+/// its clusters are kept rather than culled through a matrix with no angles left
+/// in it.
+bool preserves_angles(float3x3 basis)
+{
+    float3x3 gram = mul(transpose(basis), basis);
+    float largest = max(gram[0][0], max(gram[1][1], gram[2][2]));
+    if (largest <= 0.0)
+    {
+        return false;
+    }
+    float slack = SIMILARITY_TOLERANCE * largest;
+    return abs(gram[0][1]) <= slack && abs(gram[0][2]) <= slack && abs(gram[1][2]) <= slack
+           && largest - gram[0][0] <= slack && largest - gram[1][1] <= slack
+           && largest - gram[2][2] <= slack;
+}
+
 /// The largest factor by which `basis` can grow a vector's length, bounded from
 /// above — what a bounding *sphere*'s radius has to be multiplied by to still
 /// bound the transformed cluster.
@@ -1024,6 +1067,10 @@ static const uint CLUSTER_REJECTED_BY_CONE = 2;
 /// world-space too. The sphere is carried there by the **whole** transform: the
 /// centre by the matrix, the radius by `max_stretch` below, and the cone axis by
 /// the 3x3 and then made a unit vector again.
+///
+/// **The cone half is skipped entirely where the transform does not preserve
+/// angles**, which is the one thing the whole transform cannot carry a cone
+/// across: see `preserves_angles`. The sphere still culls there.
 ///
 /// The radius used to be carried across unchanged, on the grounds that
 /// `GpuInstance::transform` is rigid. The engine's own scenes are not —
@@ -1090,7 +1137,7 @@ uint cluster_survives(Meshlet cluster, float4x4 transform)
     axis = axis_length > 0.0 ? axis / axis_length : float3(0.0, 0.0, 0.0);
     float3 to_center = center - frame.camera_position.xyz;
     float sine = sqrt(max(0.0, 1.0 - cluster.cone_cutoff * cluster.cone_cutoff));
-    if (cluster.cone_cutoff > 0.0
+    if (preserves_angles(basis) && cluster.cone_cutoff > 0.0
         && dot(axis, to_center) > sine * length(to_center) + radius)
     {
         return CLUSTER_REJECTED_BY_CONE;

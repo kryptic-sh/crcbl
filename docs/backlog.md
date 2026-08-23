@@ -12269,25 +12269,37 @@ recorded in `docs/plan/18-render-features.md`. What is left:
   last-writer-wins and the file is not a stable baseline. That is why the
   bit-identical check above compared captured output rather than re-blessing.
 
-## The cull has not learned what the shading learned (2026-08-23)
+## What a scaled instance still costs the mesh path (2026-08-23)
 
 `GpuInstance::transform`'s "must be rigid" claim is gone: both mesh shaders take
 a normal through `normal_basis`, the cofactor matrix, so any affine transform
-shades correctly. Two places downstream still read a scaled instance as if it
-were not scaled, and both are in the mesh path where the shading was.
+shades correctly, and the cone cull no longer drops clusters that face the
+camera. What is left is one performance gap and one level-of-detail gap.
 
-- **`cluster_survives` carries a cluster's cone axis through the bare 3×3**
-  (`crates/crcbl-shaders/shaders/mesh_cluster.slang`) and renormalises it. A
-  cone axis is an averaged _normal_, so it needs the same cofactor matrix the
-  vertex stage now uses — and that is only half the fix: a non-uniform scale
-  also widens the cone, so `cone_cutoff` has to be relaxed conservatively or the
-  test starts rejecting clusters that hold a front-facing triangle. Dropped
-  geometry, not mis-lit geometry, which is why `crcbl_scene::gltf_render` still
-  reports a `scale` skip and says this is what it is about. Closing it means
-  moving `crcbl_render::cull::cluster_survives_cull` — the Rust oracle a test
-  compares the rule to — in the same step, and deriving the widened half-angle
-  rather than guessing it. The radius half of the same function is already
-  handled, by `max_stretch`.
+- **A non-similarity instance gets no cone cull at all.** The unsafe half is
+  fixed — `cluster_survives` and `crcbl_render::cull::cluster_cull_verdict` both
+  skip the cone test unless the transform preserves angles, so a scaled instance
+  can no longer lose a cluster that faces the camera. What is left is
+  performance: those instances are culled by the bounding sphere alone.
+
+  Closing _that_ needs a bound on how far a cone opens under a linear map, and
+  the tempting one is wrong to ship without a proof. `tan θ' ≤ κ tan θ` with
+  `κ = σ_max/σ_min` is exact when the cone axis lies along a singular direction
+  and was not shown to hold in general; the bound that _is_ provable —
+  `tan θ' ≤ κ sin θ / (cos θ − κ sin θ)` — degenerates to "no cull" for the
+  angles real clusters have, and does not reduce to `θ' = θ` at `κ = 1`, so it
+  would have taken culling away from rigid instances too. Whoever picks this up:
+  derive the bound, then bound `κ` itself in the shader, where today only
+  `σ_max` is available (`max_stretch`) and `σ_max³/|det|` is the cheap
+  over-estimate. `crcbl_scene::gltf_render`'s `scale` skip should stop warning
+  about missing geometry once that lands.
+
+  **Coverage:** the fix is exercised by the oracle's own test and by the text
+  test holding the shader's `SIMILARITY_TOLERANCE` to `crcbl-shaders`'. No GPU
+  test drives a non-similarity instance through the amplification stage, because
+  every scaled instance in the tree is an axis-aligned scale on axis-aligned
+  normals, where the old rule was already right.
+
 - **`select_level` judges a scaled instance at its mesh-space size**
   (`crates/crcbl-shaders/shaders/draw_gen.slang`). A group's radius and its
   error are distances in the mesh's own space while the centre goes through the

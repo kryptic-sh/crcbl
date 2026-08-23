@@ -311,6 +311,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A non-uniformly scaled instance no longer loses clusters that face the
+  camera.** The mesh path's per-cluster back-face cull carried a cluster's cone
+  axis through the instance's bare 3×3 — the transform a tangent takes — so a
+  rotation composed with a non-uniform scale could put the axis it read more
+  than 50° from where the surface actually faces, and the cluster was rejected
+  while facing the camera. The cone test is now skipped for any instance whose
+  transform does not preserve angles, in `mesh_cluster.slang` and in
+  `crcbl_render::cull`'s oracle alike; the bounding sphere still culls there. No
+  behaviour changes for a rotation, a uniform scale, or the two composed.
+
 - **A window survives a compositor withdrawing a global.** Wayland's
   `global_remove` was handled for `wl_output` and `wl_seat` only, so every
   singleton — `wl_compositor`, `xdg_wm_base`, the viewporter, the decoration and

@@ -293,7 +293,14 @@ pub enum ClusterVerdict {
 /// goes through the matrix, the radius is multiplied by the largest factor the
 /// 3×3 can stretch a length by, and the cone axis is the 3×3 applied to it and
 /// then made a unit vector again — which is the world-space form of the rule for
-/// any transform that preserves angles, and conservative for one that does not.
+/// any transform that preserves angles, and **wrong** for one that does not, so
+/// the cone half is skipped there. A cone is a set of *normals*, and a
+/// non-uniform scale moves a normal one way and the surface it belongs to the
+/// other: neither the axis nor the half angle survives, and the widened angle
+/// has no bound this code could state and defend. The sphere still culls, so
+/// what a scaled instance costs is a cluster kept, never one dropped.
+/// [`ClusterBounds::SIMILARITY_TOLERANCE`] is where the number that decides it
+/// lives.
 /// This used to take the radius across unchanged and lean on
 /// [`GpuInstance::transform`] being rigid; the engine's own scenes are not —
 /// `crcbl::screenshot`'s trough is the open box scaled by `6 × 2 × 1.6` — and an
@@ -359,13 +366,49 @@ pub fn cluster_cull_verdict(
     let sine = (1.0 - bounds.cone_cutoff * bounds.cone_cutoff)
         .max(0.0)
         .sqrt();
-    let faces_away =
-        bounds.cone_cutoff > 0.0 && axis.dot(to_center) > sine.mul_add(to_center.length(), radius);
+    let faces_away = preserves_angles(basis)
+        && bounds.cone_cutoff > 0.0
+        && axis.dot(to_center) > sine.mul_add(to_center.length(), radius);
     if faces_away {
         ClusterVerdict::RejectedByCone
     } else {
         ClusterVerdict::Kept
     }
+}
+
+/// Whether `basis` carries every angle across unchanged — a rotation, a uniform
+/// scale, a reflection, or those composed.
+///
+/// **What the cone test needs and the radius does not.** A cluster's cone is a
+/// set of *normals*, and a transform that stretches one axis moves a normal one
+/// way and the surface it belongs to the other: the cone's axis is no longer the
+/// image of the axis under the 3×3, and its half-angle is no longer its own.
+/// Both would have to move together, and the widened angle has no bound this
+/// code could state and defend — so a cluster of a non-similarity instance is
+/// **kept**, and the frustum is what culls it. Fewer clusters rejected, never a
+/// visible one dropped. `docs/backlog.md` carries what a tighter answer needs.
+///
+/// `BᵀB` is `s²I` exactly when `basis` is `s` times an orthogonal matrix, which
+/// is the definition being tested: every column has the same length and no two
+/// are oblique. Tested relative to the largest diagonal, so it holds at any
+/// scale, against [`ClusterBounds::SIMILARITY_TOLERANCE`] — which carries the
+/// measurements behind the number, and which `mesh_cluster.slang`'s own
+/// `preserves_angles` reads too.
+///
+/// A degenerate basis — a zero scale, which draws nothing — answers `false`, so
+/// its clusters are kept rather than culled by a rule that has no angles left to
+/// read.
+fn preserves_angles(basis: Mat3) -> bool {
+    let gram = basis.transpose() * basis;
+    let diagonal = [gram.x_axis.x, gram.y_axis.y, gram.z_axis.z];
+    let largest = diagonal.iter().copied().fold(0.0f32, f32::max);
+    if largest <= 0.0 {
+        return false;
+    }
+    let slack = ClusterBounds::SIMILARITY_TOLERANCE * largest;
+    let off_diagonal = [gram.x_axis.y, gram.x_axis.z, gram.y_axis.z];
+    off_diagonal.iter().all(|value| value.abs() <= slack)
+        && diagonal.iter().all(|value| (largest - value) <= slack)
 }
 
 /// The largest factor by which `basis` can grow a vector's length, bounded from
@@ -1192,6 +1235,108 @@ mod tests {
                 fov_y: core::f32::consts::FRAC_PI_3,
                 near: 0.01,
             },
+        }
+    }
+
+    /// **A non-uniformly scaled instance does not lose clusters that face the
+    /// camera**, which is what the cone test did to them.
+    ///
+    /// The cone axis is an averaged *normal*, and the rule carries it across
+    /// with the bare 3×3 — the transform a tangent takes. Under a rotation with
+    /// a non-uniform scale the two are a long way apart: the case below has them
+    /// 56° apart, which is enough to put the camera in front of the surface and
+    /// behind the axis the test reads. Silent, and geometry rather than shading:
+    /// the cluster is never drawn.
+    ///
+    /// The three assertions are one each: the cluster really does face the
+    /// camera, the old rule really would have rejected it — without which the
+    /// third asserts nothing — and it survives now.
+    ///
+    /// [`preserves_angles`] is what makes the difference, so the second half of
+    /// this test is the other side of that gate: the *same* geometry under a
+    /// uniform scale, genuinely facing away, is still rejected by the cone. A
+    /// fix that simply stopped culling would pass the first half and fail here.
+    #[test]
+    fn a_scaled_instance_keeps_a_cluster_whose_surface_faces_the_camera() {
+        let turn = glam::Quat::from_axis_angle(Vec3::new(0.3, 0.8, 0.5).normalize(), 0.7);
+        let cone_axis = Vec3::new(0.9, 0.8, 0.9).normalize();
+        let bounds = ClusterBounds {
+            center: [0.0, 0.0, 0.0],
+            radius: 0.5,
+            cone_axis: cone_axis.to_array(),
+            cone_cutoff: 20.0f32.to_radians().cos(),
+        };
+
+        // Both cases are rejected by the old rule; only one of them deserves
+        // it. `view_degrees` is the angle between the surface's true facing
+        // direction and the direction the camera looks along.
+        for (case, scale, view_degrees, faces_camera, kept) in [
+            (
+                "a non-uniform scale",
+                Vec3::new(6.0, 2.0, 1.6),
+                100.0f32,
+                true,
+                true,
+            ),
+            (
+                "the same shape uniformly scaled",
+                Vec3::splat(6.0),
+                0.0f32,
+                false,
+                false,
+            ),
+        ] {
+            let transform = Mat4::from_quat(turn) * Mat4::from_scale(scale);
+            let basis = Mat3::from_mat4(transform);
+            // Where the surface actually faces: a normal goes through the
+            // cofactor matrix, which is what `mesh.slang` shades with.
+            let cofactor = basis.inverse().transpose() * basis.determinant();
+            let facing = (cofactor * cone_axis).normalize();
+            let read = (basis * cone_axis).normalize();
+            assert_eq!(
+                facing.dot(read) < 0.9,
+                faces_camera,
+                "{case}: the two axes differ exactly where the scale is non-uniform",
+            );
+
+            // The direction the camera looks along, tilted off the surface's
+            // true facing direction towards the one the old rule reads. Past 90°
+            // every normal in the cone is on the camera's side; at 0° none is.
+            let sideways = (read - facing * facing.dot(read)).normalize_or_zero();
+            let view = facing * view_degrees.to_radians().cos()
+                + sideways * view_degrees.to_radians().sin();
+            let eye = Vec3::from_array(bounds.center) - view * 100.0;
+            let camera = Camera {
+                eye,
+                target: Vec3::from_array(bounds.center),
+                up: Vec3::Y,
+                projection: Projection::Perspective {
+                    fov_y: core::f32::consts::FRAC_PI_3,
+                    near: 0.01,
+                },
+            };
+            let frustum = Frustum::from_view_projection(camera.view_projection(1.0));
+            let to_center = Vec3::from_array(bounds.center) - eye;
+
+            assert_eq!(
+                facing.dot(to_center) < 0.0,
+                faces_camera,
+                "{case}: which side of the surface the camera is on",
+            );
+            let sine = (1.0 - bounds.cone_cutoff * bounds.cone_cutoff).sqrt();
+            let rejected_by_the_old_rule = read.dot(to_center)
+                > sine.mul_add(to_center.length(), bounds.radius * max_stretch(basis));
+            assert!(
+                rejected_by_the_old_rule,
+                "{case}: the old rule rejected both of these, which is the point",
+            );
+
+            assert_eq!(
+                cluster_cull_verdict(&frustum, eye, transform, &bounds) == ClusterVerdict::Kept,
+                kept,
+                "{case}: a cluster facing the camera must survive, and one facing away \
+                 under a transform the cone can be trusted through must not",
+            );
         }
     }
 

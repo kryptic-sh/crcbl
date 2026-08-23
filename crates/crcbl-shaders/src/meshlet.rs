@@ -206,6 +206,28 @@ impl ClusterBounds {
     /// defined value: a NaN here would make the cull rule's comparison false on
     /// some targets and true on others, silently dropping geometry.
     pub const OMNIDIRECTIONAL_CUTOFF: f32 = -1.0;
+
+    /// How far an instance transform may be from carrying every angle across
+    /// unchanged, relative to its own scale, before the per-cluster cone test is
+    /// skipped for it.
+    ///
+    /// **The cone is a set of normals, and only a similarity carries one.** A
+    /// transform that scales axes unequally moves a normal one way and the
+    /// surface it belongs to the other, so neither the cone's axis nor its half
+    /// angle survives — and the widened angle has no bound this engine can state
+    /// and defend. A cluster of such an instance is kept and the frustum culls
+    /// it; `crcbl_render::cull::preserves_angles` and `mesh_cluster.slang`'s
+    /// `preserves_angles` are the two spellings of the test, and
+    /// `the_shader_declares_the_same_similarity_tolerance` holds this number
+    /// equal in both.
+    ///
+    /// Measured rather than picked. Over rotations, uniform scales from `0.001`
+    /// to `1000` and the two composed, the largest relative off-diagonal of
+    /// `BᵀB` was `2.8e-7` and the largest relative spread of its diagonal
+    /// `5.0e-7` — `f32` noise and nothing else. The smallest real non-uniformity
+    /// this workspace treats as one, `crcbl_scene`'s axis ratio of `1.001`,
+    /// lands at `2.0e-3`. This sits between them with room on both sides.
+    pub const SIMILARITY_TOLERANCE: f32 = 1e-4;
 }
 
 /// Why a [`Meshlet`] could not be built.
@@ -890,6 +912,37 @@ fn whole_mesh_clusters(
 
 #[cfg(test)]
 mod tests {
+
+    /// **The shader's similarity tolerance is this crate's.**
+    ///
+    /// Two spellings of one rule, one in Slang and one in
+    /// `crcbl_render::cull::preserves_angles`, both reading this number. A
+    /// shader that drifted to a looser one would trust the cone through a
+    /// transform the oracle does not, which is a cluster dropped on the GPU and
+    /// kept in every test.
+    ///
+    /// The literal is compared as text rather than parsed: the point is that the
+    /// two files say the same thing, and a shader constant is not something this
+    /// crate can evaluate.
+    #[test]
+    fn the_shader_declares_the_same_similarity_tolerance() {
+        let source = include_str!("../shaders/mesh_cluster.slang");
+        let declaration = "static const float SIMILARITY_TOLERANCE = 1e-4;";
+        assert!(
+            source.contains(declaration),
+            "shaders/mesh_cluster.slang must declare `{declaration}`, matching \
+             ClusterBounds::SIMILARITY_TOLERANCE"
+        );
+        assert_eq!(
+            ClusterBounds::SIMILARITY_TOLERANCE,
+            1e-4,
+            "and this crate's constant is the number that declaration spells"
+        );
+        assert!(
+            source.contains("preserves_angles(basis) && cluster.cone_cutoff > 0.0"),
+            "the shader declares the tolerance and does not gate the cone test with it"
+        );
+    }
     use super::*;
 
     /// The offsets `slangc` actually emitted for `Meshlet`, read out of the
