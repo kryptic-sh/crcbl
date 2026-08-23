@@ -62,6 +62,14 @@ subject is 3D lighting and pixel art in front of it would be showing the wrong
 system. Rule 4's debug panel and rule 12's path reporting both apply, and a
 lighting fixture without them is not a fixture.
 
+**Exempt from sample rules 2 and 10** (client/server authority, gameplay through
+`GameModule`), on the same ground the viewer is: both rules exist so a _game_'s
+state lives on the server and its logic lives in module code, and there is no
+game state here. The room's geometry is fixed, the lights follow the clock, and
+the camera is the viewer's own. So this crate opens no `World`, registers no
+system and implements no `GameModule`, and their absence is the charter's answer
+rather than an oversight.
+
 ## Status: milestone 1a, and the blocker is gone (2026-08-14)
 
 **`apps/lantern` exists and renders the charter's room.** The blocker this

@@ -4,6 +4,13 @@
 //! [`GeometryPath`](crcbl::hal::GeometryPath), with the cluster hierarchy made
 //! visible. Not a game: the geometry is the content.
 //!
+//! **No `World`, no system, no `GameModule`**, and their absence is the
+//! charter's answer rather than an oversight: sample rules 2 and 10 exist so a
+//! *game*'s state lives on the server and its logic in module code, and there
+//! is no game state here — one face, one instance, a camera and a debug view
+//! selector. `docs/plan/sample/14-quarry.md`'s non-goals say so, on the ground
+//! `apps/viewer` is exempt on.
+//!
 //! Where `apps/lantern` proves the two lighting paths agree, this proves the
 //! three geometry paths do — and it is the only place the QEM generator's
 //! output is *looked at* rather than measured, because an error metric can be

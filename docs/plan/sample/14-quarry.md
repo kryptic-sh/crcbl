@@ -54,6 +54,14 @@ subject is 3D geometry density. Rules 4 and 12 apply in full — this is the
 sample where path reporting matters most, since three paths is the widest
 selector in the engine.
 
+**Exempt from sample rules 2 and 10** (client/server authority, gameplay through
+`GameModule`), on the same ground the viewer is: both rules exist so a _game_'s
+state lives on the server and its logic lives in module code, and this fixture
+has no game state to place anywhere. One face, one instance, a camera and a
+debug view selector — nothing simulates. So this crate opens no `World`,
+registers no system and implements no `GameModule`, and their absence is the
+charter's answer rather than an oversight.
+
 ## Milestones
 
 1. Meshlet bake + `MeshShader` path rendering the scene (topic 3 §3.5 proof).

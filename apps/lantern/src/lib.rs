@@ -6,6 +6,12 @@
 //! [`docs/plan/sample/13-lantern.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/13-lantern.md)
 //! is the charter, and its non-goals are a hard cap.
 //!
+//! **No `World`, no system, no `GameModule`**, and their absence is the
+//! charter's answer rather than an oversight: sample rules 2 and 10 exist so a
+//! *game*'s state lives on the server and its logic in module code, and there is
+//! none here — the room is fixed, the lights follow the clock, the camera is the
+//! viewer's. Same ground `apps/viewer` is exempt on.
+//!
 //! # What is here at milestone 1a
 //!
 //! The room the charter's Scope names — a window the sun comes through, a
