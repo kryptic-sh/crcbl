@@ -1593,6 +1593,26 @@ thereby proven on Windows/D3D12-backed Dawn or macOS/Metal-backed Dawn.
   nine of eleven scenes need more storage buffers per stage than a software
   adapter offers until the draw-args reduction lands, so on a GPU-less runner
   expect the two 2D scenes until then.
+- ~~`web/run-render-harness-e2e.sh` is RED on this machine.~~ **It is not red;
+  it was invoked without the argument CI gives it.** `ssr` and `ui` failing on a
+  software rasteriser is the _settled, reviewed_ outcome recorded further down
+  this file: the `render-harness` job's Linux and Windows legs pass
+  `--expect-fail ssr,ui`, widening `Tolerance::RASTERISER` for them was
+  **declined** because it would have quietly weakened all eleven scenes to
+  excuse two, and `web/tools/render-harness-verdict.mjs` fails the job the
+  moment either starts matching or anything else stops. Run the way CI runs it,
+  `bash web/run-render-harness-e2e.sh --expect-fail ssr,ui` exits **0** here:
+  `9 scene(s) drew the golden picture in a browser; ssr ui are excused here, and this run would have failed had any of them passed`.
+
+  Kept because the mistake is worth not repeating: a bare invocation of this
+  script reports `FAILED 9/11` and reads exactly like a regression, and the
+  numbers it prints (`ssr` 25 611 differing pixels, `ui` 3 872) are the expected
+  ones rather than evidence of drift. **Do not go looking at those diffs as if
+  they were unexplained, and do not widen a tolerance to make them green** —
+  that is the decision that was already taken and declined. The macOS leg
+  carries no excuse list and gates all eleven, which is what keeps this a
+  rasteriser limit rather than a backend defect.
+
 - **The demo gates (`web/run-browser-e2e.sh`) need a display on Linux via
   Xvfb**; on Windows and macOS headless Chrome should not, but the script wires
   Xvfb unconditionally for Linux and will need a per-OS branch. Both scripts are
@@ -6448,43 +6468,73 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   covered is a host that announces itself and then cannot deliver — the queue
   grows and nothing complains.
 
-- **A page implements the worker shim now; no _demo_ does, and wiring them is
-  blocked on a decision rather than on effort.** `web/jobs/host.js` is the host
-  half — announce, drain, allocate a stack and a TLS block, start one `Worker`
-  per request — and `web/jobs/worker.js` is the bring-up. `web/run-jobs-e2e.sh`
-  drives them in Chromium. The demos' artifacts are still the single-threaded
-  ones, nothing in `web/engine/` calls any of this, and `Spawn::threaded()`
-  answers false on the site.
+- **Only horde is driven on the threaded site, and the other six demos are built
+  for it and loaded by nothing.** `web/build.sh --threads` assembles every
+  sample into `target/site-threaded/` with the worker-capable artifact and
+  `wasm-loader-threads.js` beside it, because leaving six of them out would mean
+  a second `DEMOS` list; only horde has a pass on the job pool, so only horde
+  has anything to assert. All six were checked by hand once, 2026-08-23 — each
+  reaches "Playing." on the threaded site in Chromium, which is what the three
+  shared-buffer fixes in the shared shim (`web/engine/wasm.js`, `demo.js`,
+  `gpu-stream.js`) buy them — but **nothing re-checks it**, so a regression
+  there is found by whoever next runs `./web/build.sh --threads --serve` and
+  clicks through. Widening `run-horde-threads-e2e.sh` to boot each of them would
+  cost a browser launch per demo and assert only "it plays", which
+  `run-browser-e2e.sh` already does far better on the published artifacts.
 
-  **What wiring the demos would cost, and why it was left.** A threaded demo
-  needs a loader that constructs the shared memory, and
-  `web/tools/wasm-loader.js` is _copied into the site_ as each demo's
-  `<lib>.js`, so changing it changes the published site's bytes;
-  `web/engine/demo.js` is copied too. So there is no way to wire the shared demo
-  path without either changing what `bash web/build.sh` produces or keeping a
-  second copy of the loader and the boot sequence for a threaded site — and a
-  second copy of `demo.js` is exactly the duplication that file exists to have
-  removed. Which of those two to pay is the first question, and it belongs to
-  whoever owns the published site.
+- **`Options::default()` in `apps/horde` reads a process-global, which is a
+  surprise where a reader does not expect one.** `crcbl::impl_web_pending!`
+  opens a browser game with `<Options>::default()` and a page has no other way
+  in, so `__crcbl_horde_prefill` parks the count in `args::REQUESTED_PREFILL`
+  and the `Default` impl reads it back. Nothing native writes it, and `parse`
+  overwrites the field from the command line, so no native behaviour depends on
+  it — but a `Default` that is not a constant is the kind of thing a later
+  reader will "simplify". The alternative was an argument on
+  `WebPending::request`, which is a signature in `crates/crcbl` every sample
+  would have to follow; declined for this slice's write set, and worth
+  revisiting if a second sample ever needs to be configured from a page.
 
-  **And there would be nothing to assert.** A sample's browser ABI reports a
-  status code, an error string and a log queue; none of them can say which
-  thread ran a chunk. `apps/horde`'s `steer_enemies` is the one sample consumer
-  of `Pool::par_for`, and a run with workers and a run without produce the same
-  frames by construction — that is the determinism rule, not a defect. Proving
-  "a sample's sim runs off the main thread" therefore needs an observable in
-  `apps/horde`'s own `__crcbl_horde_*` surface (a thread count, or the pool's
-  worker count), which is an export shipped to every visitor. `web/jobs/` drives
-  `crates/crcbl-jobs/examples/web_worker_gate.rs` instead, precisely because an
-  example cannot reach a site artifact by any route.
+- **`game::STEER_THREADS` only grows, and can undercount but never overcount.**
+  It is a process-global that is never reset, so a pool dropped and rebuilt
+  contributes its threads to the total — which is what
+  `__crcbl_horde_sim_threads`'s "has this ever left the calling thread" question
+  wants and is wrong for any question about _now_. `STEER_COUNTED`, the
+  thread-local flag that stops a thread being counted twice, is also what makes
+  a build with broken TLS report one thread however many ran; that is the safe
+  direction (the gate goes red) and it is the reason the counter is a flag
+  rather than the stack-address scheme `web_worker_gate.rs` needs. Not covered
+  by any native test: both statics are shared by every test in the binary and
+  `cargo test` runs them in parallel, so any assertion on them races. The
+  browser gate is the only thing that reads them.
 
-- **The browser gate exists, and covers one engine on one platform.**
-  `web/run-jobs-e2e.sh` runs `web/jobs/` in headless Chromium and asserts a
-  chunk ran on a thread that is not the driver, on its own stack and with its
-  own thread-locals — plus the four things node cannot reach (a `Worker` taking
-  a cloned `WebAssembly.Module`, the shared memory existing at all, the main
-  thread driving the pool, and a non-threaded artifact being refused workers).
-  Measured on **Chromium 151, Linux, this machine only**.
+- **The threaded loader's `setInterval` drain never stops.** `Spawn::spawn`
+  queues and returns, and a pool's workers are spawned inside `boot()` — long
+  after the loader has handed its exports back — so `wasm-loader-threads.js`
+  polls `__crcbl_web_jobs_pending` every 16 ms for the life of the page. One
+  integer call per tick, and `globalThis.crcblWorkers.stop()` clears it, but
+  nothing calls that: the demo's own teardown is in `web/engine/demo.js`, which
+  knows nothing about workers. Harmless on a gate that closes the tab; worth a
+  hook if a threaded site ever becomes something a person leaves open.
+
+- **The threaded loader announces four workers and the number is a guess.**
+  `DEFAULT_WORKERS` in `web/tools/wasm-loader-threads.js`, overridable with
+  `?workers=N`. It is deliberately not `navigator.hardwareConcurrency` — on this
+  machine that is 32, and a pool sized to it is 31 `Worker`s each holding the
+  megabyte of stack `workers::WORKER_STACK_BYTES` leaks on purpose — but nothing
+  has measured what horde's steering pass actually wants, or where the browser
+  starts refusing to start workers.
+
+- **Both browser gates cover one engine on one platform.** `web/run-jobs-e2e.sh`
+  runs `web/jobs/` in headless Chromium and asserts a chunk ran on a thread that
+  is not the driver, on its own stack and with its own thread-locals — plus the
+  four things node cannot reach (a `Worker` taking a cloned
+  `WebAssembly.Module`, the shared memory existing at all, the main thread
+  driving the pool, and a non-threaded artifact being refused workers).
+  `web/run-horde-threads-e2e.sh` runs the horde demo on the threaded site, under
+  Xvfb because it needs a WebGPU device, and asserts
+  `__crcbl_horde_sim_threads() >= 2`. Measured on **Chromium 151, Linux, this
+  machine only**: horde steered on four threads with a pool of three workers,
+  and on one thread with a pool of none on the published artifact.
 
   Not covered, stated as gaps rather than excused: **Firefox and WebKit** — the
   structured clone of a `WebAssembly.Module` into a `Worker` and the
@@ -6496,16 +6546,17 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   (`CRCBL_CHROMIUM`), so the Firefox answer is cheap and worth having before
   anyone relies on the backend.
 
-- **`check-exports.mjs` does not see `web/jobs/`, so the browser gate's own
-  symbol names are gated only by itself.** The tool scans `web/engine` (its
-  `JS_SHARED`) plus the demo's own `main.js` for `.__crcbl_…` uses and fails
-  when one is missing from the artifact. `web/jobs/host.js` and
-  `web/jobs/worker.js` call six of the eight `__crcbl_web_jobs_*` exports and
-  are outside that scan. A typo there fails the browser gate loudly and
-  immediately, so nothing is silently uncovered — but adding `web/jobs` to
-  `JS_SHARED` would also make every demo artifact assert the jobs ABI it already
-  exports, which is a strictly larger check for one line. Left out to keep this
-  slice's diff to what it needed; considered, not declined.
+- **`check-exports.mjs` still does not see `web/jobs/main.js`.** The tool scans
+  `web/engine` (its `JS_SHARED`) plus the demo's own `main.js` for `.__crcbl_…`
+  uses and fails when one is missing from the artifact. The host half moved into
+  `web/engine/` when the demo loader started needing it, so the
+  `__crcbl_web_jobs_*` symbols `jobs.js` and `jobs-worker.js` call are now
+  asserted against every demo artifact — the "strictly larger check" this entry
+  used to propose, taken for free. `web/jobs/main.js` calls two more of them
+  (`__crcbl_web_jobs_host_ready` directly, for its `force-host-ready` red
+  switch, and `__crcbl_web_jobs_pending`) and is still outside the scan; a typo
+  there fails the browser gate loudly and immediately, so nothing is silently
+  uncovered.
 
 - **Neither `web_worker_gate.wasm` has `check-exports.mjs` over it, and
   `--gate-only` is where that becomes visible.** `check-exports.mjs --threads`
@@ -6524,8 +6575,10 @@ thing to give — horde works around it by handing `Pool::with_workers` an
 - **`crcbl_jobs::workers`'s module docs still name only the node gate.** The
   last line of that module's header says "`web/tools/worker-gate.mjs` is that
   sequence, run against a real artifact"; `web/run-jobs-e2e.sh` is now that
-  sequence in a browser and should be named beside it. Not done here because
-  this slice's write set was `web/` only.
+  sequence in a browser and `web/run-horde-threads-e2e.sh` is a real sample
+  running on it, and both should be named beside it. Its "a browser has no demo
+  driving this" framing is out of date for the same reason. Not done here or in
+  the slice before it, both times because the write set excluded `crates/`.
 
 - **`--export=__heap_base` is passed, asserted by nothing, and used by
   nothing.** The backend allocates worker stacks and TLS blocks from Rust's own

@@ -72,7 +72,7 @@ mod menu;
 pub mod web;
 
 pub use app::{HordeError, Loop, PendingLoop, Summary, run};
-pub use args::{Invocation, Options, USAGE, parse};
+pub use args::{Invocation, Options, USAGE, parse, request_prefill};
 pub use art::{ACTOR_HALF_EXTENT, BOLT_HALF_EXTENT, GROUND, Scene, SceneStats, TEXELS_PER_UNIT};
 pub use game::{
     ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_DAMAGE, BOLT_LIFE, BOLT_RADIUS, BOLT_SPEED, BoltView,
@@ -83,8 +83,8 @@ pub use game::{
     SEPARATION_STRENGTH, SPAWN_INTERVAL_MIN, SPAWN_INTERVAL_START, SPAWN_RAMP_SECONDS, SPAWN_RING,
     Setup, Stats, UPGRADE_CHOICES, Upgrade, VIEW_HALF_HEIGHT, VITALITY_HP, WEAPON_RANGE,
     clamp_axis, clamp_to_arena, drops_potion, hash_unit, max_enemy_radius, scatter_props,
-    separation_query_radius, spawn_interval, spawn_jitter, spawn_kind, spawn_offset, upgrade_offer,
-    xp_for_next_level,
+    separation_query_radius, spawn_interval, spawn_jitter, spawn_kind, spawn_offset, steer_threads,
+    steer_workers, upgrade_offer, xp_for_next_level,
 };
 pub use gpu::{camera_centre, view_half_width};
 pub use menu::{HordeAction, MenuKind, Menus, RESTART_ID, action_from_id, choose_id};

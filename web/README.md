@@ -8,29 +8,32 @@ framework that owns policy — and it applies here for the same reason.
 
 ## Layout
 
-| Path                      | What it is                                                                 |
-| ------------------------- | -------------------------------------------------------------------------- |
-| `pages/*.html`            | one content file per page: its metadata, its prose, its includes           |
-| `templates/layout.html`   | the chrome every page is rendered into                                     |
-| `templates/demo-*.html`   | the blocks every demo shares — the window, the loop's keys, the log note   |
-| `tools/build-pages.mjs`   | fills the layout from `pages/`, expands the includes                       |
-| `style.css`               | one stylesheet for the site                                                |
-| `favicon.svg`             | the site icon, declared by the layout                                      |
-| `engine/demo.js`          | the boot sequence and the frame loop, shared by every demo                 |
-| `engine/wasm.js`          | reading/writing wasm memory, and the detached-view rule                    |
-| `engine/shell.js`         | canvas, DPI/resize, focus, fullscreen, keyboard, pointer → `__crcbl_web_*` |
-| `engine/storage.js`       | asset pre-load over `fetch()`, OPFS restore and drain                      |
-| `engine/audio.js`         | main-thread half of the AudioWorklet feed                                  |
-| `engine/audio-worklet.js` | the `AudioWorkletProcessor` itself                                         |
-| `engine/log.js`           | drains the engine's log queue into the console                             |
-| `demos/<name>/main.js`    | that sample's `__crcbl_<name>_*` symbols and its two status strings        |
-| `jobs/host.js`            | the host half of `crcbl_jobs::workers` — announce, drain, start workers    |
-| `jobs/worker.js`          | the worker half: instantiate, stack, TLS, enter                            |
-| `jobs/main.js`            | the page that drives them, and the checks it publishes                     |
-| `tools/serve.mjs`         | the static server, and the COOP/COEP pair that buys `SharedArrayBuffer`    |
-| `tools/check-exports.mjs` | the JS↔wasm symbol contract check                                          |
-| `tools/smoke.mjs`         | runs the artifact's boot sequence under node                               |
-| `build.sh`                | assembles `target/site/`                                                   |
+| Path                           | What it is                                                                 |
+| ------------------------------ | -------------------------------------------------------------------------- |
+| `pages/*.html`                 | one content file per page: its metadata, its prose, its includes           |
+| `templates/layout.html`        | the chrome every page is rendered into                                     |
+| `templates/demo-*.html`        | the blocks every demo shares — the window, the loop's keys, the log note   |
+| `tools/build-pages.mjs`        | fills the layout from `pages/`, expands the includes                       |
+| `style.css`                    | one stylesheet for the site                                                |
+| `favicon.svg`                  | the site icon, declared by the layout                                      |
+| `engine/demo.js`               | the boot sequence and the frame loop, shared by every demo                 |
+| `engine/wasm.js`               | reading/writing wasm memory, and the detached-view rule                    |
+| `engine/shell.js`              | canvas, DPI/resize, focus, fullscreen, keyboard, pointer → `__crcbl_web_*` |
+| `engine/storage.js`            | asset pre-load over `fetch()`, OPFS restore and drain                      |
+| `engine/audio.js`              | main-thread half of the AudioWorklet feed                                  |
+| `engine/audio-worklet.js`      | the `AudioWorkletProcessor` itself                                         |
+| `engine/log.js`                | drains the engine's log queue into the console                             |
+| `demos/<name>/main.js`         | that sample's `__crcbl_<name>_*` symbols and its two status strings        |
+| `engine/jobs.js`               | the host half of `crcbl_jobs::workers` — announce, drain, start workers    |
+| `engine/jobs-worker.js`        | the worker half: instantiate, stack, TLS, enter                            |
+| `engine/wasm-memory.js`        | decodes whether a module's `env.memory` import is **shared**               |
+| `jobs/main.js`                 | the page that drives the spawn ABI, and the checks it publishes            |
+| `tools/serve.mjs`              | the static server, and the COOP/COEP pair that buys `SharedArrayBuffer`    |
+| `tools/check-exports.mjs`      | the JS↔wasm symbol contract check                                          |
+| `tools/smoke.mjs`              | runs the artifact's boot sequence under node                               |
+| `tools/wasm-loader.js`         | the `<lib>.js` every page imports as `init`, copied per demo               |
+| `tools/wasm-loader-threads.js` | the same, over an artifact that imports a shared memory                    |
+| `build.sh`                     | assembles `target/site/`, or `target/site-threaded/` with `--threads`      |
 
 ## Adding a demo
 
@@ -284,7 +287,52 @@ produced, and a gate that waited for an exception would pass the broken build.
 `web/jobs/` is pruned from `build.sh`'s copy rather than published beside
 `probe/` and `harness/`. That is a correctness requirement, not tidiness: the
 page loads an artifact importing a shared `env.memory`, which cannot exist on an
-origin that sends no COOP/COEP pair.
+origin that sends no COOP/COEP pair. `engine/jobs.js` and
+`engine/jobs-worker.js` are **not** pruned, and that is the same judgement made
+the other way: they are the host half of the spawn ABI, a demo's threaded loader
+needs the same code, and they refuse an artifact that owns its memory — so on
+the published site they load, decide no, and announce nothing.
+
+## Checking that a sample's sim runs off the main thread
+
+`run-horde-threads-e2e.sh` is the gate on the exit criterion the one above does
+not reach. `run-jobs-e2e.sh` proves the backend works in a browser, against a
+page with no engine on it; this one drives **the horde demo** — the page a
+visitor loads, the shim a visitor runs — on a threaded site:
+
+```sh
+./web/run-horde-threads-e2e.sh              # build both sites, then run
+./web/run-horde-threads-e2e.sh --no-build   # drive what is already built
+```
+
+`./web/build.sh --threads` assembles that site into `target/site-threaded/`: the
+same pages, the same `engine/`, the same `demos/<name>/main.js`, with the
+worker-capable artifact beside each demo and `tools/wasm-loader-threads.js` as
+its `<lib>.js`. `--threads --serve` will serve it, cross-origin isolated. It is
+never `target/site/`, which is the directory the Pages workflow uploads.
+
+The assertion is `__crcbl_horde_sim_threads() >= 2`, and it exists because
+nothing else can make the claim: `steer_enemies` is bit-identical at any worker
+count **by construction**, so a threaded run and an inline run draw the same
+frames and every other check in this repository passes either way. Two
+`__crcbl_horde_*` exports carry the evidence — the distinct threads that have
+run a steering chunk, and the pool's worker count — and a third,
+`__crcbl_horde_prefill`, is `--prefill` reachable from a page: `par_for` runs a
+single chunk inline whatever the pool holds, so a demo with a small field never
+leaves the main thread and the gate stages a crowd through the flag the scale
+measurement already uses.
+
+Three red checks, each breaking the criterion for a different reason and each
+leaving a different neighbour green: `?no-host-ready` (the page never announces,
+so the demo plays and steers entirely on its own thread), `--prefill 0` (no
+crowd, so horde waits at its title screen and steers nothing), and **the
+published site** — the artifacts `build.sh` builds, which must fail this gate
+and pass everything else. That last one is the red check and the standing proof
+that the published demos still degrade onto the inline path.
+
+It needs Xvfb and a WebGPU-capable Chromium, unlike `run-jobs-e2e.sh`: horde
+draws, and `__crcbl_horde_frame` polls the device request forever on a browser
+that has no adapter, so a run with no GPU never reaches a steering pass at all.
 
 `smoke.mjs` goes further and _runs_ the module: it instantiates the deployed
 artifact under node with every import stubbed to throw, and drives the
@@ -310,10 +358,13 @@ all runs here. What it cannot see, a black canvas included, is what
   the TLS and stack globals. **The backend behind `crcbl-jobs`'s `Spawn` seam
   exists now too** — `default_spawner` yields `Workers` on wasm — and
   `web/jobs/` is a page that drives it end to end in a real browser, gated by
-  `./web/run-jobs-e2e.sh`. **The demos are still not part of that**: the site's
-  artifacts are the single-threaded ones, nothing in `engine/` implements the
-  shim, and `Spawn::threaded()` answers `false` there, so every demo runs
-  exactly as it did. See `docs/backlog.md` for what wiring them would cost.
+  `./web/run-jobs-e2e.sh`. **The demos are wired to it now as well**, on the
+  threaded site only: `./web/build.sh --threads` assembles
+  `target/site-threaded/` and `./web/run-horde-threads-e2e.sh` drives horde on
+  it and asserts its steering pass ran on a Web Worker. **The published site is
+  unchanged in behaviour**: its artifacts import nothing, so `engine/jobs.js`
+  refuses them, `Spawn::threaded()` answers `false`, and every demo runs exactly
+  as it did — which that gate's third red check asserts rather than assumes.
 - **No pointer lock, no clipboard, no IME.** The Web shell backend clears those
   capability bits; there is nothing for a shim to wire.
 - **No service worker, no offline cache.** The site is static files.

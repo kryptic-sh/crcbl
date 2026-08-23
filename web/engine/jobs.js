@@ -5,9 +5,18 @@
 // that queue into real workers. This file is that page's half: {@link
 // WorkerHost.announce} for the announcement, {@link WorkerHost.take} for the
 // drain, {@link WorkerHost.start} for the workers. The five steps each worker
-// then runs are `web/jobs/worker.js`, and their order is not ours to choose —
-// it is the sequence `crates/crcbl-jobs/src/workers.rs`'s module docs specify,
-// with the reason each step has to come where it does.
+// then runs are `web/engine/jobs-worker.js`, and their order is not ours to
+// choose — it is the sequence `crates/crcbl-jobs/src/workers.rs`'s module docs
+// specify, with the reason each step has to come where it does.
+//
+// TWO PAGES DRIVE THIS, WHICH IS WHY IT LIVES BESIDE THE ENGINE SHIM AND NOT
+// BESIDE ITS GATE. `web/jobs/` is the worker backend's own gate, on a page with
+// no engine and no canvas, and `web/tools/wasm-loader-threads.js` is a demo's
+// loader on a threaded site — one artifact that only ever fails and one that is
+// a whole game, needing the same announce/drain/start. Being published with the
+// rest of `web/engine/` costs the demo site nothing: an artifact that owns its
+// memory is refused below, so on the published origin this file loads, decides
+// no, and never announces.
 //
 // `web/tools/worker-gate.mjs` is the same sequence under `node:worker_threads`.
 // This is not a port of it: what node cannot show is whether a browser `Worker`
@@ -38,16 +47,17 @@
 //   as it found it — `threaded()` false, `parallelism()` one, every spawn
 //   refused — which is the degradation `crcbl_jobs::Inline` already had.
 
-import { importedMemoryLimits } from '../tools/wasm-memory.mjs';
+import { importedMemoryLimits } from './wasm-memory.js';
 
 /**
  * The worker bring-up script, beside this file wherever the site put it.
  *
  * A `Worker` needs a URL, and `import.meta.url` is the only thing that knows
- * where this module was served from — the gate lays the two out together and a
- * demo site would have to as well.
+ * where this module was served from — both sites that carry this file lay the
+ * two out together, which is what makes one path serve a page under `/jobs/`
+ * and a demo under `/demos/<name>/`.
  */
-const WORKER_URL = new URL('./worker.js', import.meta.url);
+const WORKER_URL = new URL('./jobs-worker.js', import.meta.url);
 
 /**
  * A UTF-8 string out of the module's memory.
@@ -131,7 +141,7 @@ export class WorkerHost {
    *
    * The bytes are read rather than streamed because the *shared* flag on a
    * memory import is not in `WebAssembly.Module.imports()` — only the binary
-   * says it, which is what `web/tools/wasm-memory.mjs` decodes. That is also why
+   * says it, which is what `web/engine/wasm-memory.js` decodes. That is also why
    * this is not `web/tools/wasm-loader.js`: the site loader instantiates with an
    * empty import object on purpose, and a threaded artifact needs a memory it
    * cannot construct without reading the limits first.

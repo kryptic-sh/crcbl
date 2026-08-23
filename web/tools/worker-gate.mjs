@@ -64,7 +64,7 @@
 import { readFile } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 
-import { importedMemoryLimits } from './wasm-memory.mjs';
+import { importedMemoryLimits } from '../engine/wasm-memory.js';
 
 /** How long to keep driving `par_for` while waiting for a worker to steal. */
 const DEADLINE_MS = 20_000;

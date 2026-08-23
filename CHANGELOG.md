@@ -41,11 +41,49 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   `web/build.sh --threads --gate-only` builds just the artifact the browser run
   drives, so it costs one `-Z build-std` example rather than seven demo builds.
-  **`bash web/build.sh` is byte-for-byte unchanged** — `web/jobs` is pruned from
-  its copy, because a page loading an artifact that imports a shared
-  `env.memory` could only fail on an origin that sends no COOP/COEP pair, which
-  is every GitHub Pages origin. The demos themselves are still single-threaded
-  and unchanged.
+  Nothing threaded is published: `web/jobs` is pruned from the site copy,
+  because a page loading an artifact that imports a shared `env.memory` could
+  only fail on an origin that sends no COOP/COEP pair, which is every GitHub
+  Pages origin. The host half lives at `web/engine/jobs.js` and the bring-up at
+  `web/engine/jobs-worker.js`, beside the rest of the shim, because the entry
+  below needs the same code from a demo's loader.
+
+- **A sample's simulation runs off the main thread in a browser, and
+  `web/run-horde-threads-e2e.sh` is the gate that says so.** This is the claim
+  the entry above cannot make: that page has no engine on it. This one drives
+  `demos/horde/` — the page a visitor loads and the shim a visitor runs — on a
+  threaded site, and asserts that horde's steering pass ran chunks on a Web
+  Worker.
+
+  **`apps/horde` grew the three exports that make it observable.**
+  `__crcbl_horde_sim_threads` counts the distinct threads that have run a
+  `steer_enemies` chunk and `__crcbl_horde_sim_workers` reports the pool's
+  worker count — the same evidence
+  `steering_is_bit_identical_however_many_workers_run_it` takes from its probe
+  pass. They exist because nothing else in the sample's ABI can distinguish the
+  two runs: `steer_enemies` is bit-identical at any worker count **by
+  construction**, so a threaded run and an inline one draw the same frames and
+  every other check passes either way. `__crcbl_horde_prefill` is the third, and
+  it is `--prefill` reachable from a page (`?prefill=N`), through `assemble`'s
+  own `stage_field` call: `Pool::par_for` runs a single chunk inline whatever
+  the pool holds, and `STEER_CHUNK` is 64 enemies, so a demo with a small field
+  never leaves the main thread whatever the workers are doing.
+
+  **`web/build.sh --threads` now assembles a whole site** into
+  `target/site-threaded/` — the same pages, the same `web/engine/`, the same
+  `web/demos/<name>/main.js`, with the worker-capable artifact beside each demo
+  and the new `web/tools/wasm-loader-threads.js` as its `<lib>.js`, which
+  constructs the shared memory, announces through `WorkerHost` and drains the
+  spawn queue. `--threads --serve` serves it cross-origin isolated. It is never
+  `target/site/`, the directory the Pages workflow uploads.
+
+  **Three red checks, and the third is also the compatibility proof.**
+  `?no-host-ready` leaves the announcement out, so the demo plays and steers
+  entirely on its own thread; `--prefill 0` leaves horde at its title screen, so
+  nothing is steered at all; and the third runs the same gate against **the
+  published site**, which must fail the thread assertion and pass everything
+  else. Measured: on the threaded site horde steers on four threads with a pool
+  of three workers, and on the published site on one with a pool of none.
 
 - **`crcbl_lantern::room::spot` puts a spot light in lantern's room**, and
   `room::lights` is the one list both of the sample's views and its golden suite
@@ -172,6 +210,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   probe's answer, so a device without the feature cannot report as covered.
 
 ### Changed
+
+- **The demo shim copies three buffers it used to hand a browser API directly,
+  because a shared `WebAssembly.Memory` is refused where a plain one is not.**
+  `readUtf8` in `web/engine/wasm.js`, the entropy seed in `web/engine/demo.js`
+  and the command stream's label decode in `web/engine/gpu-stream.js` each built
+  a view over `memory.buffer` and passed it to `TextDecoder.decode`,
+  `crypto.getRandomValues` or `TextDecoder.decode` again — every one of which
+  throws `The provided ArrayBufferView value must not be shared`. Measured
+  against a threaded horde: the demo died on its first log line, then on its
+  entropy seed, then reported its first `DeviceDesc::label` as invalid UTF-8,
+  because that decode's `catch` reported the `TypeError` as the only failure it
+  used to have. The published build is unaffected in behaviour and pays three
+  small copies.
 
 - **The shadow atlas's light region holds seven tiles rather than six, so a
   scene can shadow a point light and a spot at the same time.**

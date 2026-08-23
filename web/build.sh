@@ -8,8 +8,9 @@
 #
 #   ./web/build.sh                 # build everything into target/site
 #   ./web/build.sh --serve         # …and serve it on http://localhost:8000
-#   ./web/build.sh --threads       # build the worker-capable artifacts instead
-#   ./web/build.sh --threads --gate-only   # …only the worker-backend gate one
+#   ./web/build.sh --threads       # build the worker-capable site instead
+#   ./web/build.sh --threads --serve       # …and serve it, cross-origin isolated
+#   ./web/build.sh --threads --gate-only   # …only the worker-backend gate artifact
 #
 # Serving matters: ES modules and `WebAssembly.instantiateStreaming` do not work
 # from `file://`, and OPFS needs a secure context, which `localhost` is.
@@ -32,6 +33,11 @@ TARGET=wasm32-unknown-unknown
 # a floating channel a broken promise.
 NIGHTLY=nightly-2026-07-02
 THREADED_DIR="${THREADED_TARGET_DIR:-$REPO/target/wasm-threaded}"
+# The site `--threads` assembles, and it is deliberately NOT `$SITE`: the Pages
+# workflow builds `target/site` and uploads exactly that directory, so a
+# threaded artifact reaching the deploy would have to be written there. Nothing
+# below ever does.
+THREADED_SITE="${THREADED_SITE_DIR:-$REPO/target/site-threaded}"
 # The ceiling the shared memory declares. A shared memory must have one, and
 # `web/tools/check-exports.mjs --threads` instantiates against the limits it
 # reads out of the artifact rather than repeating this number.
@@ -61,6 +67,56 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# THE PART BOTH SITES SHARE: the pages and every static file under `web/`.
+#
+# A function rather than a second copy, because the prune list below is the one
+# thing here that decides what is published, and two copies of it is one copy
+# that will be missing an entry. The two callers differ only in which artifact
+# and which loader they lay beside each demo afterwards.
+#
+# $1 is the site directory, which is emptied first.
+assemble_static() {
+  local site="$1"
+  echo "==> assembling $site"
+  rm -rf "$site"
+  mkdir -p "$site"
+  # The rendered half: every page is `templates/layout.html` filled from a file
+  # in `pages/`, so the header, the demo bar and the footer live in one place.
+  echo "==> rendering pages"
+  node "$REPO/web/tools/build-pages.mjs" "$site"
+
+  # The static half: everything in `web/` except the build tooling and the
+  # template sources, which are inputs rather than output.
+  #
+  # `-name '*.sh'` rather than naming each script: this list silently gained
+  # `run-browser-e2e.sh` when the browser gate landed, and shipped it to the
+  # demo site. A prune that has to be extended by hand every time a script is
+  # added is one that will be wrong again.
+  # `./jobs` is pruned with the build tooling rather than published with
+  # `./probe` and `./harness`, and it is the one directory here whose absence is
+  # a *correctness* requirement instead of tidiness: that page loads an artifact
+  # that imports a shared `env.memory`, which cannot exist on an origin sending
+  # no COOP/COEP pair. Published, it would be a page on the demo site that can
+  # only fail. `web/run-jobs-e2e.sh` assembles its own site for it.
+  #
+  # `web/engine/jobs.js` and `web/engine/jobs-worker.js` are NOT pruned, and
+  # that is the same judgement made the other way: they are the host half of the
+  # spawn ABI, they refuse an artifact that owns its memory, and every published
+  # artifact is one — so on the demo site they load, decide no, and announce
+  # nothing.
+  (cd "$REPO/web" && find . \
+    -path ./tools -prune -o \
+    -path ./jobs -prune -o \
+    -path ./pages -prune -o \
+    -path ./templates -prune -o \
+    -name '*.sh' -prune -o \
+    -name README.md -prune -o \
+    -type f -print) | while read -r file; do
+    mkdir -p "$site/$(dirname "$file")"
+    cp "$REPO/web/$file" "$site/$file"
+  done
+}
 
 # `--gate-only` narrows the threaded build to the one artifact
 # `web/run-jobs-e2e.sh` drives, so a browser run does not pay for seven
@@ -101,13 +157,23 @@ profile_flag=()
 # `target/$TARGET/`, so the two artifacts coexist; one directory holding both
 # would rebuild everything on every alternation, because the flags differ.
 #
-# NOTHING IS PUBLISHED BY THIS MODE. The artifact imports `env.memory`, and
-# neither of the two things that instantiate a site artifact can satisfy that:
-# `web/tools/wasm-loader.js` passes an empty import object on purpose, and
+# NOTHING THIS MODE PRODUCES IS PUBLISHED. It writes a site of its own to
+# `$THREADED_SITE`, and the Pages workflow builds `$SITE` and uploads exactly
+# that directory — so the two never meet. The artifact imports `env.memory`, and
+# neither of the two things that instantiate a *published* artifact can satisfy
+# that: `web/tools/wasm-loader.js` passes an empty import object on purpose, and
 # `web/tools/smoke.mjs` synthesises a stub memory of a single page. Each is a
-# `LinkError` on a threaded module rather than a threaded demo. What this mode
-# produces is the artifact the worker backend needs, gated symbol by symbol by
-# `web/tools/check-exports.mjs --threads`.
+# `LinkError` on a threaded module rather than a threaded demo, which is why
+# neither runs below. What replaces them is `web/tools/wasm-loader-threads.js`,
+# which constructs the shared memory the module wants, and
+# `web/tools/check-exports.mjs --threads`, which gates the surface symbol by
+# symbol.
+#
+# THE SITE IT ASSEMBLES IS THE DEMO SITE, not a second copy of it: the same
+# pages, the same `web/engine/`, the same `web/demos/<name>/main.js`. Only the
+# artifact beside each demo and the `<lib>.js` that instantiates it differ, which
+# is what makes `web/run-horde-threads-e2e.sh` a gate on the demo path rather
+# than on a page written to pass it.
 #
 # IT ALSO RUNS THE BACKEND. `crcbl-jobs`'s `Workers` spawner queues each spawn
 # for a host to drain; `crates/crcbl-jobs/examples/web_worker_gate.rs` is a
@@ -127,8 +193,8 @@ profile_flag=()
 # `web/tools/serve.mjs` does send both, which is what makes this testable
 # locally at all. See `docs/backlog.md`.
 if [ "$THREADS" = "1" ]; then
-  if [ "$SERVE" = "1" ]; then
-    echo "crcbl web build: --threads builds artifacts only; there is no site to --serve" >&2
+  if [ "$SERVE" = "1" ] && [ "$GATE_ONLY" = "1" ]; then
+    echo "crcbl web build: --gate-only builds one artifact; there is no site to --serve" >&2
     exit 2
   fi
 
@@ -221,6 +287,26 @@ if [ "$THREADS" = "1" ]; then
     echo "    $lib.wasm"
   done
   echo "    examples/web_worker_gate.wasm"
+
+  if [ "$GATE_ONLY" = "0" ]; then
+    assemble_static "$THREADED_SITE"
+    for row in "${DEMOS[@]}"; do
+      IFS=: read -r crate lib dest <<<"$row"
+      echo "==> publishing $lib.wasm (threaded) to $dest"
+      mkdir -p "$THREADED_SITE/$dest"
+      cp "$THREADED_DIR/$TARGET/$PROFILE/$lib.wasm" \
+        "$THREADED_SITE/$dest/${lib}_bg.wasm"
+      # The threaded loader, under the name every page already imports. See its
+      # header for why it is a second file and not a branch in the other one.
+      cp "$REPO/web/tools/wasm-loader-threads.js" "$THREADED_SITE/$dest/$lib.js"
+    done
+    echo "==> $THREADED_SITE"
+    find "$THREADED_SITE" -type f | sed "s|$THREADED_SITE/|    |" | sort
+
+    if [ "$SERVE" = "1" ]; then
+      exec node "$REPO/web/tools/serve.mjs" "$THREADED_SITE" --port "${PORT:-8000}"
+    fi
+  fi
   exit 0
 fi
 
@@ -246,38 +332,7 @@ fi
 # pages `import init from` — with `web/tools/wasm-loader.js`, which is what the
 # copy below does. That file documents the contract it preserves.
 
-echo "==> assembling $SITE"
-rm -rf "$SITE"
-mkdir -p "$SITE"
-# The rendered half: every page is `templates/layout.html` filled from a file
-# in `pages/`, so the header, the demo bar and the footer live in one place.
-echo "==> rendering pages"
-node "$REPO/web/tools/build-pages.mjs" "$SITE"
-
-# The static half: everything in `web/` except the build tooling and the
-# template sources, which are inputs rather than output.
-#
-# `-name '*.sh'` rather than naming each script: this list silently gained
-# `run-browser-e2e.sh` when the browser gate landed, and shipped it to the
-# demo site. A prune that has to be extended by hand every time a script is
-# added is one that will be wrong again.
-# `./jobs` is pruned with the build tooling rather than published with `./probe`
-# and `./harness`, and it is the one directory here whose absence is a
-# *correctness* requirement instead of tidiness: that page loads an artifact
-# that imports a shared `env.memory`, which cannot exist on an origin sending no
-# COOP/COEP pair. Published, it would be a page on the demo site that can only
-# fail. `web/run-jobs-e2e.sh` assembles its own site for it.
-(cd "$REPO/web" && find . \
-  -path ./tools -prune -o \
-  -path ./jobs -prune -o \
-  -path ./pages -prune -o \
-  -path ./templates -prune -o \
-  -name '*.sh' -prune -o \
-  -name README.md -prune -o \
-  -type f -print) | while read -r file; do
-  mkdir -p "$SITE/$(dirname "$file")"
-  cp "$REPO/web/$file" "$SITE/$file"
-done
+assemble_static "$SITE"
 
 # THERE IS NO BACKEND CHOICE HERE ANY MORE, AND THAT IS THE POINT.
 #

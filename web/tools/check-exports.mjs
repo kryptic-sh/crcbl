@@ -58,7 +58,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { importedMemoryLimits } from './wasm-memory.mjs';
+import { importedMemoryLimits } from '../engine/wasm-memory.js';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -213,7 +213,7 @@ async function workerSurface(module, bytes, imports, exportList) {
     failures.push(
       'the import section does not decode: `env.memory` is in the JS view of the\n' +
         '    imports but not in the bytes this check reads. That is a bug in\n' +
-        '    `importedMemoryLimits` in `web/tools/wasm-memory.mjs`, not in the\n' +
+        '    `importedMemoryLimits` in `web/engine/wasm-memory.js`, not in the\n' +
         '    artifact.'
     );
   } else if (!limits.shared) {

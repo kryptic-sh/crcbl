@@ -14,6 +14,8 @@
 //! to say: a seed, an enemy cap, a prefill for the scale measurement, and the
 //! `--wall-clock` escape hatch that lets a headless run read the real clock.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crcbl::args::{Common, Consumed};
 
 /// The `--help` text.
@@ -76,6 +78,32 @@ OPTIONS:
                          debug build, hidden in a release build'
     -h, --help           Print this help";
 
+/// How many enemies a game opened from [`Options::default`] stages before its
+/// first tick.
+///
+/// **This is the browser's `--prefill`, and it is a static because a page has no
+/// other way in.** `crcbl::impl_web_pending!` opens the game with
+/// `<Options>::default()` and nothing crosses into wasm except through an
+/// export, so `crate::web`'s `__crcbl_horde_prefill` parks the number here and
+/// [`Options::default`] reads it back. A native run parses `--prefill` onto the
+/// options it is already holding and never touches this.
+///
+/// `Relaxed` because the value carries nothing with it and is written on the
+/// same thread that later reads it: the browser's main thread, before it calls
+/// `boot`.
+static REQUESTED_PREFILL: AtomicUsize = AtomicUsize::new(0);
+
+/// Asks that the next game built from [`Options::default`] stage `count`
+/// enemies.
+///
+/// Read once, when the options are taken, so it has to be set before the game is
+/// built. `crate::web`'s `__crcbl_horde_prefill` is what enforces that ordering
+/// for a page — it refuses once start-up has gone past the point where this
+/// would be read — and it is the reason this exists.
+pub fn request_prefill(count: usize) {
+    REQUESTED_PREFILL.store(count, Ordering::Relaxed);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     /// The flags every sample has.
@@ -110,7 +138,10 @@ impl Default for Options {
             common: Common::new(crate::game::DEFAULT_TICK_HZ),
             seed: crate::game::DEFAULT_SEED,
             max_enemies: crate::game::DEFAULT_MAX_ENEMIES,
-            prefill: 0,
+            // Zero unless a page asked otherwise — see [`REQUESTED_PREFILL`].
+            // A command line sets `prefill` on the options this returns, so
+            // `parse` overwrites whatever lands here.
+            prefill: REQUESTED_PREFILL.load(Ordering::Relaxed),
             wall_clock: false,
             workers: None,
             choose: None,

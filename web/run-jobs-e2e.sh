@@ -136,15 +136,20 @@ done
 # prunes `web/jobs` from its copy for that reason.
 echo "==> assembling $SITE"
 rm -rf "$SITE"
-mkdir -p "$SITE/jobs" "$SITE/tools"
-for file in index.html main.js host.js worker.js; do
+mkdir -p "$SITE/jobs" "$SITE/engine"
+for file in index.html main.js; do
     cp "$REPO/web/jobs/$file" "$SITE/jobs/$file"
 done
-# The import-section decoder, at the path `web/jobs/host.js` imports it by. One
-# copy, shared with `check-exports.mjs` and `worker-gate.mjs`: whether a memory
-# import is *shared* is not in `WebAssembly.Module.imports()`, so this decoder is
-# the only thing anywhere that can answer it.
-cp "$REPO/web/tools/wasm-memory.mjs" "$SITE/tools/wasm-memory.mjs"
+# The host half of the spawn ABI, the worker bring-up it starts, and the
+# import-section decoder it reads limits with — at the paths `web/jobs/main.js`
+# imports them by. They live under `web/engine/` because a demo's threaded
+# loader needs the same three, and one copy of an announce that must not be made
+# on faith is the whole point; whether a memory import is *shared* is not in
+# `WebAssembly.Module.imports()`, so that decoder is the only thing anywhere that
+# can answer it, and `check-exports.mjs` and `worker-gate.mjs` share it too.
+for file in jobs.js jobs-worker.js wasm-memory.js; do
+    cp "$REPO/web/engine/$file" "$SITE/engine/$file"
+done
 # `_bg.wasm`, the same suffix `web/build.sh` publishes a demo artifact under, so
 # the two layouts read the same way.
 cp "$THREADED_WASM" "$SITE/jobs/web_worker_gate_bg.wasm"

@@ -79,8 +79,9 @@
 //! client-side facade: it resolves input into an `Intent`, advances the server
 //! and the client by exactly one tick period, and reads back what to draw.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -2583,11 +2584,21 @@ fn thaw_field(logic: &mut GameLogic, world: &mut World) {
 /// both halves, and the second one is the design's `--threads 1` versus
 /// `--threads N` gate that `--workers` exists to drive.
 ///
-/// A pool with no workers — the browser, today — runs every chunk on the
-/// calling thread in ascending order, which is the serial loop this replaced
-/// with one extra `Vec` write per enemy. There is no `cfg` here and there is
-/// none in `crate::web` either; `crcbl_jobs::default_spawner` answers it.
+/// A pool with no workers runs every chunk on the calling thread in ascending
+/// order, which is the serial loop this replaced with one extra `Vec` write per
+/// enemy. That is what a browser gets from a page which cannot start workers —
+/// every published demo — and what `--workers 0` asks for on a machine that
+/// can. A page that *can* start them announces itself and this pass splits
+/// there too; `crate::web`'s `__crcbl_horde_sim_threads` is how a browser says
+/// which happened. There is no `cfg` here and there is none in `crate::web`
+/// either; `crcbl_jobs::default_spawner` answers it.
 fn steer_enemies(logic: &mut GameLogic, world: &mut World, pool: &mut Pool) {
+    // Before the early return, so the count describes the pool this game built
+    // rather than only the ticks that had a crowd to split.
+    STEER_WORKERS.store(
+        u32::try_from(pool.workers()).unwrap_or(u32::MAX),
+        Ordering::Relaxed,
+    );
     if logic.enemies.is_empty() {
         return;
     }
@@ -2618,6 +2629,7 @@ fn steer_enemies(logic: &mut GameLogic, world: &mut World, pool: &mut Pool) {
             let crowd = &enemies;
             let by_entity = &by_entity;
             pool.par_for(&mut velocities, STEER_CHUNK, |start, out| {
+                count_steer_thread();
                 STEER_SCRATCH.with_borrow_mut(|(scratch, neighbours)| {
                     for (offset, velocity) in out.iter_mut().enumerate() {
                         let me = &crowd[start + offset];
@@ -2690,6 +2702,76 @@ thread_local! {
     /// on this thread left, and nothing reads it.
     static STEER_SCRATCH: RefCell<(QueryScratch, Vec<Entity>)> =
         RefCell::new((QueryScratch::new(), Vec::new()));
+
+    /// Whether this thread has already been added to [`STEER_THREADS`].
+    ///
+    /// One flag per thread rather than a set of thread ids, because the only
+    /// question asked of it is "have I been counted", and a `HashSet` behind a
+    /// lock would be an allocation and a contended lock inside the pass whose
+    /// documented claim is that it allocates nothing.
+    static STEER_COUNTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Distinct threads that have run a [`steer_enemies`] chunk since the process
+/// started.
+///
+/// **The observable behind `__crcbl_horde_sim_threads`**, and the only thing in
+/// this sample that can tell a browser run driving worker threads from one
+/// running every chunk inline — the two produce identical frames by
+/// construction, which is [`steer_enemies`]'s determinism claim rather than an
+/// accident. It is the same evidence
+/// `steering_is_bit_identical_however_many_workers_run_it` takes from its probe
+/// pass: more than one thread ran a chunk.
+///
+/// It only ever grows, and it is never reset: a pool that is dropped and rebuilt
+/// contributes its threads to the total, which is what a "has this ever run off
+/// the calling thread" question wants.
+///
+/// **A thread that cannot read its own thread-local is missed rather than
+/// double-counted.** [`STEER_COUNTED`] is what stops a thread being added
+/// twice, so a build whose TLS was set up wrong — every thread aliasing one
+/// block — reports *one* thread however many ran. That is the safe direction:
+/// this number can be too small and never too large, so nothing built on it
+/// passes because the evidence broke.
+static STEER_THREADS: AtomicU32 = AtomicU32::new(0);
+
+/// How many workers the pool that last ran [`steer_enemies`] has.
+///
+/// The observable behind `__crcbl_horde_sim_workers`, and the other half of the
+/// browser's question: zero says the run degraded onto the inline path, which is
+/// what every published demo gets, and a non-zero count with
+/// [`STEER_THREADS`] still at one says the workers exist and took nothing.
+static STEER_WORKERS: AtomicU32 = AtomicU32::new(0);
+
+/// Counts the calling thread in [`STEER_THREADS`], once.
+///
+/// Called at the top of every [`steer_enemies`] chunk: one thread-local read and
+/// a branch, and an atomic increment on each thread's first chunk only.
+fn count_steer_thread() {
+    STEER_COUNTED.with(|counted| {
+        if !counted.replace(true) {
+            STEER_THREADS.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// How many distinct threads have run a steering chunk.
+///
+/// The counter `STEER_THREADS` holds, which is where the reasoning is. Public
+/// because `crate::web` exports it as `__crcbl_horde_sim_threads`, which is the
+/// only way a browser can be asked the question at all.
+#[must_use]
+pub fn steer_threads() -> u32 {
+    STEER_THREADS.load(Ordering::Relaxed)
+}
+
+/// How many workers the pool that last ran the steering pass has.
+///
+/// The counter `STEER_WORKERS` holds. Public for [`steer_threads`]'s reason:
+/// `crate::web` exports it as `__crcbl_horde_sim_workers`.
+#[must_use]
+pub fn steer_workers() -> u32 {
+    STEER_WORKERS.load(Ordering::Relaxed)
 }
 
 /// How hard `me` is pushed away from `them`, as a weight in `[0, 1]` along the

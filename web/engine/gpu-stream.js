@@ -863,7 +863,12 @@ class ByteReader {
    * @returns {string}
    */
   readString(field) {
-    const bytes = this.readBytes(this.#readLen(field, MAX_FIELD_BYTES));
+    // `slice`, because `decode` refuses a view onto a `SharedArrayBuffer` and
+    // the browser's threaded build hands this reader exactly that. Without it a
+    // threaded demo reports its first `DeviceDesc::label` as invalid UTF-8 —
+    // measured — because the `TypeError` lands in the `catch` below and is
+    // reported as the only failure this decode used to have.
+    const bytes = this.readBytes(this.#readLen(field, MAX_FIELD_BYTES)).slice();
     try {
       return this.#utf8.decode(bytes);
     } catch {

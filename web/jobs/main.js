@@ -2,11 +2,19 @@
 // whether Rust actually ran on a second thread.
 //
 // It loads `crates/crcbl-jobs/examples/web_worker_gate.rs`, built by
-// `web/build.sh --threads`. An example rather than a demo because it is the only
-// artifact in the repository that can be *observed* from outside: a sample's
-// browser ABI reports a status code and a log, neither of which can say which
-// thread ran a chunk, and adding an export to a sample to find out would be an
-// export shipped to every visitor. Its `gate_*` exports exist for exactly this.
+// `web/build.sh --threads`. An example rather than a demo, because what it has
+// to expose is the backend's own internals — a stack address per chunk, a
+// thread-local holding a frame pointer, a checksum only a corrupted run gets
+// wrong — and an example cannot reach a site artifact by any route.
+//
+// THIS IS NOT THE GATE ON A SAMPLE, AND THE TWO ARE DIFFERENT CLAIMS.
+// `web/run-horde-threads-e2e.sh` drives the horde demo on a threaded site and
+// asserts `__crcbl_horde_sim_threads() >= 2`: a real game's real pass, split
+// across real workers, through the loader and the shim a visitor uses. What it
+// cannot do is fail *usefully* — a game that stopped rendering, an asset that
+// did not arrive and a worker that never started all read as "no second thread".
+// This page has no engine, no canvas and no assets, so when it goes red the
+// thing that broke is the spawn ABI.
 //
 // WHAT MAKES THIS A BROWSER GATE RATHER THAN A SECOND COPY OF THE NODE ONE.
 // `web/tools/worker-gate.mjs` brings the same sequence up under
@@ -46,7 +54,7 @@
 // Each must make the run go red, and go red *differently*; `web/run-jobs-e2e.sh`
 // runs all four and checks which assertions each one broke.
 
-import { WorkerHost } from './host.js';
+import { WorkerHost } from '../engine/jobs.js';
 
 /** The artifact, laid out beside this page by `web/run-jobs-e2e.sh`. */
 const ARTIFACT = './web_worker_gate_bg.wasm';

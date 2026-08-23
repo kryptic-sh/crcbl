@@ -51,6 +51,15 @@ export function writeBytes(memory, ptr, bytes) {
 /**
  * Decodes `len` bytes at `ptr` as UTF-8. Empty for a null pointer.
  *
+ * **The copy is not optional.** `TextDecoder.decode` refuses a view onto a
+ * `SharedArrayBuffer` — `The provided ArrayBufferView value must not be shared`
+ * — and a threaded artifact's memory is nothing else, so decoding the view
+ * directly turns every log line on such a build into a `TypeError`. Measured in
+ * Chromium against `web/build.sh --threads`'s horde: the demo died on its first
+ * `drainLog`. A `slice` of a few dozen bytes against a decode is not a cost
+ * worth branching on, so it is unconditional and the non-threaded path pays it
+ * too.
+ *
  * @param {WebAssembly.Memory} memory
  * @param {number} ptr
  * @param {number} len
@@ -58,7 +67,7 @@ export function writeBytes(memory, ptr, bytes) {
  */
 export function readUtf8(memory, ptr, len) {
   if (ptr === 0 || len === 0) return '';
-  return decoder.decode(new Uint8Array(memory.buffer, ptr, len));
+  return decoder.decode(new Uint8Array(memory.buffer, ptr, len).slice());
 }
 
 /**

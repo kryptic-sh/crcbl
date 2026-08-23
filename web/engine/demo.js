@@ -67,6 +67,15 @@ const ASSET_BASE = 'assets/';
 const CANVAS_ID = 1;
 
 /**
+ * How many bytes of host entropy `__crcbl_web_seed_entropy` consumes.
+ *
+ * The size of the buffer `__crcbl_web_seed_entropy_ptr` hands back, which is
+ * fixed by `crcbl_rand`'s `SEED_INPUT`; writing fewer leaves the tail of a
+ * previous seed in place and writing more overruns it.
+ */
+const SEED_BYTES = 32;
+
+/**
  * This sample's slice of the engine ABI, with every symbol spelled out.
  *
  * @typedef {object} SampleApi
@@ -240,11 +249,20 @@ export function bootDemo(spec) {
     // engine's `Server`, whose first act is drawing a resume token, and on
     // wasm32 that draw fails closed until the host seeds the CSPRNG. So this
     // must land before `boot()`, or `Server::new` errors and the boot gate is
-    // red. Take the buffer pointer and write 32 fresh secure bytes into it in
-    // one shot — nothing between the two can `memory.grow()` and detach the
-    // view — then commit, which seeds the stream and zeroes the buffer.
+    // red. Take the buffer pointer and write a whole `SEED_BYTES` of fresh
+    // secure bytes into it in one shot — nothing between the two can
+    // `memory.grow()` and detach the view — then commit, which seeds the stream
+    // and zeroes the buffer.
+    //
+    // Drawn into a buffer of this page's own and then copied in, rather than
+    // drawn straight into wasm memory: `crypto.getRandomValues` refuses a view
+    // onto a `SharedArrayBuffer`, which is what a threaded artifact's memory is,
+    // and `set` does not. The write is still the one shot the paragraph above
+    // asks for — nothing between the pointer and the `set` can grow memory.
     const seedPtr = exports.__crcbl_web_seed_entropy_ptr();
-    crypto.getRandomValues(new Uint8Array(memory.buffer, seedPtr, 32));
+    const seed = new Uint8Array(SEED_BYTES);
+    crypto.getRandomValues(seed);
+    new Uint8Array(memory.buffer, seedPtr, seed.length).set(seed);
     exports.__crcbl_web_seed_entropy();
 
     say('Opening a GPU device…');
