@@ -685,7 +685,23 @@ impl Device for WebGpuDevice {
 
     // --- resources ---
 
+    /// Refuses a zero-size buffer, which is the seam's rule rather than
+    /// WebGPU's.
+    ///
+    /// `BufferDesc::size` is documented "must be non-zero" and the null, Vulkan,
+    /// Metal and D3D12 backends all answer
+    /// [`HalError::InvalidDescriptor`]
+    /// for it. This backend answered `Ok` and encoded the command, so the one
+    /// rule the seam states about this field held on four implementations and
+    /// not on the fifth. Nothing downstream would have caught it either: the
+    /// stream refuses malformed streams, not invalid descriptors, and a
+    /// zero-size `GPUBuffer` is something a browser will make.
     fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<BufferHandle, HalError> {
+        if desc.size == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "BufferDesc::size must be non-zero".to_string(),
+            ));
+        }
         let handle: BufferHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_buffer(handle, desc)));

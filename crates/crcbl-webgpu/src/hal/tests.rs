@@ -472,6 +472,82 @@ fn a_device_request_for_an_unknown_adapter_is_refused_up_front() {
     );
 }
 
+/// A zero-size buffer is refused here, and nothing is encoded for it.
+///
+/// **The seam's rule that this backend alone did not keep.**
+/// `BufferDesc::size` is documented "must be non-zero"; the null, Vulkan, Metal
+/// and D3D12 backends each answer [`HalError::InvalidDescriptor`], and this one
+/// allocated a handle, encoded a `CreateBuffer` and answered `Ok`. Nothing
+/// downstream would have caught it — the stream refuses malformed streams, not
+/// invalid descriptors.
+///
+/// The four native backends are held to the same rule by
+/// `a_zero_size_buffer_is_refused_by_every_backend` in
+/// `crates/crcbl/tests/hal_seam_e2e.rs`, which cannot reach this one: that suite
+/// is a native binary and `CRCBL_GPU` names no browser. This is the WebGPU half,
+/// and it is the half that was wrong.
+///
+/// **Both halves are the check.** A refusal alone is satisfiable by a backend
+/// that refuses everything, so the encoder is asserted silent: a rejected
+/// descriptor must not have put a command on the wire for a handle the caller
+/// never received. A legal size beside it keeps the check a floor rather than a
+/// refusal of small buffers.
+#[test]
+fn a_zero_size_buffer_is_refused_without_encoding_anything() {
+    let (channel, device) = device_on_fresh_channel();
+
+    for memory in [
+        MemoryLocation::DeviceLocal,
+        MemoryLocation::HostUpload,
+        MemoryLocation::HostReadback,
+    ] {
+        let error = device
+            .create_buffer(&BufferDesc {
+                size: 0,
+                memory,
+                ..buffer_desc()
+            })
+            .err()
+            .unwrap_or_else(|| {
+                panic!("a zero-size buffer in {memory:?} must be refused, not served")
+            });
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{memory:?}: a zero size is a caller bug named in the descriptor, not an \
+             unsupported feature: {error}"
+        );
+    }
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    assert!(
+        names(&channel).is_empty(),
+        "a refused descriptor must not reach the wire: the replayer would make a \
+         buffer for a handle this call never handed back, and got {:?}",
+        names(&channel)
+    );
+
+    // The smallest legal size still works, and does encode.
+    device
+        .create_buffer(&BufferDesc {
+            size: 1,
+            ..buffer_desc()
+        })
+        .expect("one byte is a legal buffer");
+    assert_eq!(
+        names(&channel),
+        vec!["CreateBuffer"],
+        "one byte must still reach the replayer, or the check above is refusing \
+         every buffer and this test would not know"
+    );
+}
+
 // ── (d) a recorded frame's command stream ──────────────────────────────────
 
 #[test]

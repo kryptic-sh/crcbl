@@ -5689,6 +5689,24 @@ seam's intent. What is needed is a decision about where each belongs — the
 descriptor's constructor, a debug assertion in the HAL, or explicitly the
 backend's — not more prose.
 
+**There is now a worked precedent for that decision, and it was found by
+checking this entry's own example.** `BufferDesc::size` is the rule this entry
+cites as the one that _is_ stated, and on 2026-08-24 it turned out to be stated
+and not kept: null, Vulkan, Metal and D3D12 each refused a zero with
+`HalError::InvalidDescriptor` and `crcbl-webgpu` served it, allocating a handle
+and encoding a `CreateBuffer`. So a documented seam rule with no named answer
+and no test had already diverged on a live backend, which is the concrete
+version of what this entry warns about.
+
+The shape that closed it, and the one the three above should copy: **the check
+lives in each backend**, the seam's doc **names the error** rather than only the
+rule, and **two tests** hold everyone to it — the agnostic seam suite for the
+four native backends, and `crcbl-webgpu`'s own `hal::tests` for the browser one,
+because the seam suite is a native binary and `CRCBL_GPU` names no browser. That
+last split is the part worth carrying forward: an agnostic suite that reaches
+four of five backends cannot be the only guard for a rule the fifth is the most
+likely to break.
+
 ### The sweep for test-restated isolation defaults is finished, and three candidates were declined
 
 Every sample was reviewed on 2026-08-16 for the shape horde's `Setup` had: a

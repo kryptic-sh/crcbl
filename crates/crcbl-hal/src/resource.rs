@@ -197,7 +197,18 @@ pub struct BufferDesc<'a> {
     /// so there is no type-erased "any resource" parameter anywhere in the
     /// seam, and so an unnamed object is a visibly missing field.
     pub label: Option<&'a str>,
-    /// Size in bytes. Must be non-zero.
+    /// Size in bytes.
+    ///
+    /// **Must be non-zero**, and every backend answers
+    /// [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor) for a
+    /// zero — said here because a rule with no named answer is one a backend
+    /// can hold differently without being wrong, which is how `crcbl-webgpu`
+    /// came to serve it while the other four refused it.
+    /// `a_zero_size_buffer_is_refused_instead_of_served` in
+    /// `crates/crcbl/tests/hal_seam_e2e.rs` holds the four native backends to
+    /// it, and `a_zero_size_buffer_is_refused_without_encoding_anything` in
+    /// `crcbl-webgpu`'s `hal::tests` holds the browser one, which that suite
+    /// cannot reach.
     pub size: u64,
     /// Permitted uses.
     pub usage: BufferUsage,

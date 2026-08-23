@@ -1914,6 +1914,81 @@ fn a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking() {
     drop(device);
 }
 
+/// `BufferDesc::size` says "must be non-zero", and every backend has to mean it.
+///
+/// **The shape of a rule four implementations kept and one did not.** The null,
+/// Vulkan, Metal and D3D12 backends each refuse a zero with
+/// [`HalError::InvalidDescriptor`]; `crcbl-webgpu` allocated a handle, encoded
+/// the command and answered `Ok`, so the same descriptor was a caller bug on
+/// four backends and a zero-size `GPUBuffer` on the fifth. Nothing caught it
+/// because nothing asked: the seam stated the rule in a doc comment and no test
+/// anywhere held anyone to it.
+///
+/// That is the argument for this living here rather than in each backend's own
+/// suite. A per-backend copy is exactly what the four that were right already
+/// had, in the sense that each one's check was its own idea; the one that was
+/// wrong had no copy to be wrong in.
+///
+/// **This suite reaches four of the five, and not the one that was wrong.** It
+/// is a native binary and `CRCBL_GPU` names `vk`, `dx12` or `mtl` — there is no
+/// browser to pin — so `crcbl-webgpu` is held to the same rule by
+/// `a_zero_size_buffer_is_refused_without_encoding_anything` in its own
+/// `hal::tests`, which is where every WebGPU seam obligation is asserted. Named
+/// here because a test called "every backend" that reached four of them would
+/// be the same kind of overclaim as the rule this closes.
+///
+/// The error *variant* is asserted and its message is not: a caller distinguishes
+/// "my descriptor is invalid" from "this backend cannot do it" by the variant,
+/// and the sentence is each backend's to phrase.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_zero_size_buffer_is_refused_instead_of_served() {
+    let instance = instance();
+    let adapter = select_adapter(instance.as_ref());
+    let device = open_headless_device(instance.as_ref(), adapter.id);
+
+    // Every memory location, because the refusal must not depend on which heap
+    // was asked for — a backend that checked inside one arm would pass a test
+    // that only tried the other.
+    for memory in [
+        MemoryLocation::DeviceLocal,
+        MemoryLocation::HostUpload,
+        MemoryLocation::HostReadback,
+    ] {
+        let error = device
+            .create_buffer(&BufferDesc {
+                label: Some("zero"),
+                size: 0,
+                usage: BufferUsage::TRANSFER_DST,
+                memory,
+            })
+            .err()
+            .unwrap_or_else(|| {
+                panic!("a zero-size buffer in {memory:?} must be refused, not served")
+            });
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{memory:?}: a zero size is a caller bug named in the descriptor, not an \
+             unsupported feature: {error}"
+        );
+    }
+
+    // And the smallest legal size still works, so the check above is a floor
+    // rather than a refusal of small buffers.
+    let one = device
+        .create_buffer(&BufferDesc {
+            label: Some("one byte"),
+            size: 1,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("one byte is a legal buffer");
+    device.destroy_buffer(one);
+
+    assert_no_out_of_band_error(device.as_ref());
+    drop(device);
+}
+
 /// Destroying a readback whose bytes never landed is legal and reports nothing.
 ///
 /// **The shape of a bug that reached a user.** On WebGPU `destroy_readback` is

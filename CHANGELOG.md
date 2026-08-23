@@ -14,6 +14,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **`crcbl-webgpu` refuses a zero-size buffer, which the seam has always said it
+  must.** `BufferDesc::size` is documented "must be non-zero", and the null,
+  Vulkan, Metal and D3D12 backends each answered `HalError::InvalidDescriptor`
+  for a zero. The WebGPU backend allocated a handle, encoded a `CreateBuffer`
+  and answered `Ok` — so the same descriptor was a caller bug on four backends
+  and a zero-size `GPUBuffer` on the fifth, and nothing downstream would have
+  caught it because the stream refuses malformed streams, not invalid
+  descriptors. Callers who already respected the documented rule see no change.
+  Two tests now hold every backend to it:
+  `a_zero_size_buffer_is_refused_instead_of_served` in the agnostic seam suite
+  for the four native backends, and
+  `a_zero_size_buffer_is_refused_without_encoding_anything` in `crcbl-webgpu`'s
+  own `hal::tests` for the browser one, which that suite cannot reach.
+
 ### Changed
 
 - **A depth-test-only pass no longer stores its depth attachment on Vulkan.**
