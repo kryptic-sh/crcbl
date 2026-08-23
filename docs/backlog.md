@@ -6590,12 +6590,12 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   whatever Chrome the image ships, so the two engine questions below — Firefox's
   and WebKit's structured clone of a `WebAssembly.Module`, and their
   `Atomics.wait` main-thread rule — are as untried as they were.
-- **`jobs-worker-e2e`'s timeout is a ceiling, not a budget.** Nothing has
-  measured a cold `-Z build-std` wasm32 build on a runner. With warm target
-  directories on this machine the jobs gate takes 22 s end to end and the horde
-  gate — which rebuilds every demo crate against that std — takes 151 s, and
-  neither says anything about the first run. Read the first green run and
-  tighten it.
+- **`jobs-worker-e2e` is measured, on one runner and one commit.** The first
+  run, with a cold `Swatinem/rust-cache`, took 5.0 min end to end on
+  `ubuntu-latest`: 48 s for the jobs gate, 223 s for horde's, the rest toolchain
+  and browser setup. Locally with warm target directories the same two are 22 s
+  and 151 s. One sample of each, so the timeout is headroom rather than a
+  budget.
 
 ## The private-item doc gate only ever runs on Linux
 

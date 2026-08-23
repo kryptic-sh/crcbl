@@ -416,11 +416,11 @@ jobs:
   # nowhere else. It brings up its own Xvfb; the step below only installs one.
   jobs-worker-e2e:
     name: threaded wasm gates (linux)
-    # A cold run compiles std for wasm32, then every demo crate against it,
-    # before either browser starts. Nobody has measured that on a runner — this
-    # is a ceiling, and the first green run is what should replace it with a
-    # budget.
-    timeout-minutes: 45
+    # Measured on the first (cold-cache) run: five minutes end to end — 48 s
+    # for the jobs gate and 223 s for horde's, the rest setup. This is headroom
+    # over that, not a budget: what it is really guarding is a `-Z build-std`
+    # that stops making progress.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
