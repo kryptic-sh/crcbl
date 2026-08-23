@@ -32,6 +32,18 @@ work in progress. **`parity_blockers()` therefore cannot reach empty**, and
 is what says so rather than letting a non-zero count read as work somebody is
 about to pick up.
 
+Read that test for what it actually asserts, because it is stronger than "the
+count is not zero": **every remaining blocker is on a deferred backend, so
+neither `crcbl-vk` nor `crcbl-webgpu` has one.** The two backends carrying a
+shipping platform are at parity as the model defines it, and the residue is
+parked work on the two that are not. The test also carries a vacuity guard — it
+fails if the blocker set empties, because at that point its first assertion
+would be true and meaningless and this note would be the thing to delete.
+`the_parity_blockers_are_exactly_the_reviewed_list` is the other half: the set
+cannot change without somebody editing `REVIEWED_BLOCKERS` by hand, which is
+what stops a row leaving because a kind was widened rather than because the work
+landed.
+
 Effort goes to `crcbl-vk` and `crcbl-webgpu`, the two backends carrying a
 shipping platform each — Linux and Windows through Vulkan, the browser through
 WebGPU.
