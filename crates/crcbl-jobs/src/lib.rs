@@ -78,8 +78,11 @@
 //! `bottom`, leaves every test passing here and is a data race under Miri.
 //! Miri is therefore the only thing standing between a wrong ordering and an
 //! aarch64 or wasm user, and **a change to any of these atomics has to be run
-//! under it locally before it is believed** — `cargo miri test -p crcbl-jobs`
-//! interprets this crate in about twenty seconds. The CI job is weekly
+//! under it locally before it is believed** —
+//! `cargo miri test --tests -p crcbl-jobs` interprets this crate in about a
+//! minute. **`--tests` is not optional**: without it cargo also builds this
+//! crate's `web_worker_gate` example, which is a `cdylib`, and miri's target
+//! cannot produce one — the run dies before interpreting anything. The CI job is weekly
 //! (`.github/workflows/cron.yml`), so waiting for it is waiting up to a week to
 //! find out.
 //!

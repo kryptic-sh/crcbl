@@ -396,6 +396,52 @@ jobs:
   # no std sources to compile without it. The nightly is pinned in
   # `web/build.sh`; the two spellings have to move together.
   #
+  # **The one miri run that is per-PR**, and the reason is that this crate's
+  # unsafe is *concurrent* rather than merely aliasing. `crcbl-jobs`' mailbox,
+  # ring and deque hand slots between threads through atomic words, and on
+  # x86-64 a `Release` store and a `Relaxed` one compile to the same
+  # instruction — so weakening one is invisible to every other check in this
+  # file. That is measured rather than argued: a deliberate `Release`→`Relaxed`
+  # and `AcqRel`→`Relaxed` pair went **green** on the aarch64 `build + test
+  # (macos-latest)` leg, with both concurrent stress tests logged as passing.
+  # Miri reports it as a data race, and nothing else here can.
+  #
+  # The rest of the census stays weekly in `cron.yml`, which is where the
+  # reasoning about which crates are worth interpreting lives. What moved is the
+  # crate the value is concentrated in, because a weekly job is a job nobody is
+  # watching: that one was silently red from 2026-08-17 to 2026-08-23, for two
+  # different reasons stacked on top of each other, and only a deliberate
+  # `gh workflow run` found either.
+  #
+  # `--tests` for the reason `cron.yml` gives at length: without it cargo builds
+  # this crate's `cdylib` example, which miri's target cannot produce.
+  miri-jobs:
+    name: miri (crcbl-jobs)
+    runs-on: ubuntu-latest
+    # About a minute of interpretation locally; the rest is `cargo miri setup`
+    # and a cold compile of std for miri's target.
+    timeout-minutes: 20
+    env:
+      # `rust-toolchain.toml` pins an exact stable and claims authority over
+      # rustup; miri only exists on nightly, so the channel is overridden here.
+      RUSTUP_TOOLCHAIN: nightly
+      # No `-Zmiri-deterministic-floats`: that flag is `crcbl-audio`'s, and
+      # nothing in this crate touches a transcendental.
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: miri
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri-jobs
+      - run: cargo miri setup
+      - name: Interpret the job system's concurrent unsafe
+        run: cargo miri test --tests -p crcbl-jobs
+
   # Two gates, one toolchain, one `-Z build-std` output — which is why they
   # share a job rather than having one each: rebuilding std for wasm32 is the
   # expensive half and a second job would pay it again.
