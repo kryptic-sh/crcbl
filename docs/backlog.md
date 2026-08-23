@@ -6651,10 +6651,12 @@ two independent causes had stacked up before anybody looked:
 - **A test that is seconds natively and hours interpreted.**
   `crates/crcbl-ecs/tests/churn_soak.rs` landed on 2026-08-22 — thousands of
   ticks of spawn/despawn churn against hash maps — and under miri it **did not
-  finish in fifty minutes** on the machine it was measured on, against a job
-  whose whole budget is an hour. It now carries `#![cfg(not(miri))]`, which
-  costs nothing this job is for: `crcbl-ecs` contains no `unsafe` at all, so
-  there was nothing there for the interpreter to find.
+  finish in fifty minutes** on the machine it was measured on. Confirmed on the
+  runner: the 2026-08-23 manual `gh workflow run` reached **`cancelled` at the
+  job's 60-minute timeout**, having got past both failures above and then
+  stalled there. It now carries `#![cfg(not(miri))]`, which costs nothing this
+  job is for: `crcbl-ecs` contains no `unsafe` at all, so there was nothing
+  there for the interpreter to find.
 
 All three are fixed and `cargo miri test --tests -p crcbl-jobs` now runs **per
 commit** in `ci.yml`, because that is the crate the value is concentrated in —
