@@ -1834,6 +1834,160 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
     headless.finish();
 }
 
+/// How much larger than its authored size the scaled descent draws the patch.
+///
+/// A power of two, so `eye / DUNES_DESCENT_STRETCH` is exact in `f32` and the
+/// oracle below is an equality rather than a tolerance.
+const DUNES_DESCENT_STRETCH: f32 = 4.0;
+
+/// Where the scaled descent is read from, and the budget it is read under.
+///
+/// Chosen by sweeping the host rule over `{34, 128, 200, 400, 800, 1600}` units
+/// back and `{1, 8, 32, 128}` pixels, not by picking a plausible pair: at 400
+/// and 32 the two answers this test has to tell apart are both *mixed* cuts —
+/// 16 clusters over levels 3-5 if the groups are judged at the mesh's own size,
+/// 28 over levels 2-4 if they are judged at the size the instance draws. A pair
+/// where either side collapsed to one level would make the comparison a
+/// statement about saturation instead.
+const DUNES_DESCENT_BACK: f32 = 400.0;
+/// See [`DUNES_DESCENT_BACK`].
+const DUNES_DESCENT_BUDGET: f32 = 32.0;
+
+/// **The per-cluster descent judges a scaled instance at the size it draws**,
+/// against the host rule, cluster for cluster.
+///
+/// `draw_gen.slang`'s `select_level` carries a group's radius and its error
+/// through `max_stretch` of the instance's 3x3 before judging them, and the
+/// amplification stage descends the same groups from the same
+/// `group_state` — so the fix reaches the mesh path by inheritance rather than
+/// by its own code, and inheritance is the kind of claim that stops being true
+/// silently. `crates/crcbl/tests/mesh_e2e/lod.rs` asserts it for the *uniform*
+/// cut; this is the per-cluster one, which is the granularity a device with an
+/// amplification stage actually draws.
+///
+/// **The oracle is the equivalence, not a second rule.** A uniform scale of `s`
+/// about the origin puts every group's centre at `s * center` and every
+/// mesh-space length at `s * length`, so the projection is unchanged if the eye
+/// moves to `eye / s` — which makes `ClusterDag::cut` at `eye / s` the answer,
+/// evaluated by the reference implementation the crack-free tests already run
+/// over this artifact.
+///
+/// Three assertions, and the middle one is what the old behaviour fails:
+///
+/// * **The cut is the host rule's answer at `eye / s`**, cluster for cluster.
+/// * **And it is not the host rule's answer at `eye`** — the cut a shader that
+///   judged mesh-space lengths at the mesh's own size would have chosen. Both
+///   are mixed cuts here, so this separates two real answers rather than an
+///   answer from a collapse.
+/// * **And it is still a crack-free cover**, because a cut that changed level
+///   without changing which groups expanded together is a torn surface, and
+///   scaling both lengths by one factor is exactly the way to get that wrong
+///   one length at a time.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_gpu_descends_a_scaled_instance_at_the_size_it_draws() {
+    let headless = Headless::open_for_mesh_with(
+        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+    );
+    if !headless.device.caps().supports(Features::TASK_SHADER) {
+        eprintln!(
+            "vk e2e: no TASK_SHADER on this device; the scaled DAG descent cannot run. radv \
+             and lavapipe both report it, and `docs/backlog.md` is where a driver that does \
+             not belongs"
+        );
+        headless.finish();
+        return;
+    }
+
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    place_cube(&mut renderer);
+    assert!(
+        renderer.culls_clusters(),
+        "the descent runs in the amplification stage, and this device reports none"
+    );
+    // The patch at `DUNES_DESCENT_STRETCH` times its authored size, and at the
+    // origin: a scale about the origin is what makes the `eye / s` oracle below
+    // the same judgement rather than an approximation of it.
+    place(
+        &mut renderer,
+        crcbl_render::scene::DEMO_DUNES,
+        crcbl_render::scene::DEMO_UNTINTED,
+        glam::Mat4::from_scale(glam::Vec3::splat(DUNES_DESCENT_STRETCH)),
+    );
+
+    let camera = crcbl_render::Camera {
+        eye: glam::Vec3::new(0.0, 4.0, -DUNES_DESCENT_BACK),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Y,
+        projection: crcbl_render::Projection::default(),
+    };
+    renderer.set_lod_error_budget(DUNES_DESCENT_BUDGET);
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let [pixels_per_unit, expand, hold] = renderer.lod_params();
+    let drawn = selected_clusters(&headless, &renderer);
+
+    // One frame from a fresh renderer, so the hysteresis band is not in play:
+    // the state starts at the zeroes `DrawGen` wrote and a group with no history
+    // expands exactly when it is over the expand budget.
+    let dag = crcbl_shaders::cluster_dag::dunes_dag();
+    let fresh = vec![false; dag.group_count()];
+    let budgets = crcbl_shaders::cluster_select::LodBudgets { expand, hold };
+    let cut_at = |eye: glam::Vec3| {
+        dag.cut_from(&dag.expand(eye.to_array(), pixels_per_unit, budgets, &fresh))
+    };
+    let want = cut_at(camera.eye / DUNES_DESCENT_STRETCH);
+    let mesh_space = cut_at(camera.eye);
+
+    let levels = |cut: &[crcbl_shaders::cluster_dag::ClusterAt]| {
+        cut.iter()
+            .map(|at| at.level)
+            .collect::<std::collections::BTreeSet<usize>>()
+    };
+    eprintln!(
+        "vk e2e: dunes at {DUNES_DESCENT_STRETCH}x from {DUNES_DESCENT_BACK} units back — \
+         {} cluster(s) over levels {:?}; the host rule at eye/{DUNES_DESCENT_STRETCH} says {} \
+         over {:?}, and at the mesh's own size {} over {:?}. {pixels_per_unit} px/unit, \
+         budgets {expand}/{hold}",
+        drawn.len(),
+        levels(&drawn),
+        want.len(),
+        levels(&want),
+        mesh_space.len(),
+        levels(&mesh_space),
+    );
+
+    assert_eq!(
+        drawn, want,
+        "the amplification stage chose a different cut from the host rule at \
+         eye/{DUNES_DESCENT_STRETCH}"
+    );
+    assert_ne!(
+        want, mesh_space,
+        "the two answers this test separates are the same at this camera and budget, so it \
+         would pass against a descent that ignored the instance's scale entirely — re-sweep \
+         DUNES_DESCENT_BACK and DUNES_DESCENT_BUDGET"
+    );
+    assert!(
+        levels(&want).len() > 1 && levels(&mesh_space).len() > 1,
+        "one of the two cuts collapsed to a single level, so the comparison above is a \
+         statement about saturation rather than about the rule"
+    );
+    let interfaces = dag
+        .check_cover(&drawn)
+        .unwrap_or_else(|fault| panic!("the scaled instance's cut is not a cover: {fault}"));
+    eprintln!("vk e2e: dunes at {DUNES_DESCENT_STRETCH}x — {interfaces} interface edge(s)");
+
+    pool.destroy(headless.device.as_ref());
+    renderer.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
 /// **The shadow cascades descend to a coarser cut than the colour pass**, from
 /// one frame, read out of both passes' own buffers.
 ///

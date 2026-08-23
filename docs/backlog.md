@@ -12371,6 +12371,14 @@ camera. What is left is one performance gap and one level-of-detail gap.
     be what closes it.
   - **Only a uniform scale.** Every new test scales uniformly, where the bound
     is exact; the over-estimate branch on a shear is untested end to end.
+  - The **mesh path** is covered now, not only the uniform cut: `crcbl-vk`'s
+    `the_gpu_descends_a_scaled_instance_at_the_size_it_draws` reads the
+    amplification stage's own cut for a 4x instance and holds it to
+    `ClusterDag::cut` at `eye/4`, and asserts that answer differs from the cut
+    at the mesh's own size — 28 clusters over levels 2-4 against 16 over 3-5,
+    both mixed, at 400 units back under a 32-pixel budget swept for that
+    property. Shown red by reverting the shader fix: the stage then chose 19
+    clusters over levels 3-5.
   - **The device oracle leans on an f32 identity.** The scaled instance's
     expected level is `ClusterDag::uniform_level(eye / 4)`, which is the same
     judgement only in exact arithmetic; the stretch is a power of two so it held
