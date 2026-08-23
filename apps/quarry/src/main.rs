@@ -49,7 +49,8 @@ fn main() -> ExitCode {
     crcbl::args::run_front_end("quarry", USAGE, invocation, run, |summary| {
         format!(
             "quarry: {} frames, {} ticks on the {} shell at {}x{}, {} \
-             (camera {}, {:?} / {:?} / {:?}, {} triangles at a {}px budget, {}, {:?})",
+             (camera {}, {:?} / {:?} / {:?}, effects {}, {} triangles at a {}px budget, {}, \
+             {:?})",
             summary.frames,
             summary.ticks,
             summary.backend,
@@ -64,6 +65,9 @@ fn main() -> ExitCode {
             summary.paths.geometry,
             summary.paths.binding,
             summary.paths.lighting,
+            // And which of topic 18's effects were in those frames, resolved —
+            // the observable for this sample's own `[engine.video]` wiring.
+            summary.paths.effects.row(),
             // And the charter's "triangle count ... at a stated camera
             // position, recorded — including how much of the reduction is
             // instance culling and how much is cluster culling".

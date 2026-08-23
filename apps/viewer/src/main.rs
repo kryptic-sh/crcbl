@@ -24,7 +24,7 @@ fn main() -> ExitCode {
         |summary| {
             format!(
                 "viewer: {} frames, {} events on the {} shell at {}x{}, {} \
-                 ({} instances, {} skipped, {:?})",
+                 ({} instances, {} skipped, effects {}, {:?})",
                 summary.frames,
                 summary.events,
                 summary.backend,
@@ -35,6 +35,10 @@ fn main() -> ExitCode {
                 summary.mode,
                 summary.instances,
                 summary.skipped,
+                // And which of topic 18's effects were in those frames,
+                // resolved — the observable for this sample's own
+                // `[engine.video]` wiring.
+                summary.effects.row(),
                 summary.exit,
             )
         },

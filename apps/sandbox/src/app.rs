@@ -67,6 +67,7 @@ use crcbl::engine::{
     RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
+use crcbl::render::RenderEffects;
 use crcbl::shell::{DisplayMode, LogicalSize, ShellBackend as Backend, open, open_backend};
 use crcbl::ui::draw_list::DrawList;
 
@@ -257,6 +258,14 @@ pub struct Summary {
     /// the run last asked for. A summary that reported the request would say
     /// "borderless" for every compositor that refused.
     pub mode: DisplayMode,
+    /// Which of topic 18's effects the frames were drawn through, **resolved**.
+    ///
+    /// Read back off the renderer rather than copied from the request the
+    /// context handed it — see [`Gpu::effects`](crate::gpu::Gpu::effects). It is
+    /// the only observable this sample has for its own
+    /// `renderer.set_effect_request(ctx.effect_request())`: without it that line
+    /// could be deleted and every test here would stay green.
+    pub effects: RenderEffects,
 }
 
 /// Anything that can stop the sandbox before it starts.
@@ -298,13 +307,28 @@ pub struct Sandbox {
     /// The outcome of the probe, once it has run — `Ok` with the time the
     /// device took, `Err` with the formatted error.
     unpresented: Option<Result<Duration, String>>,
+    /// What the frames are being drawn with, re-read each
+    /// [`HostedGame::draw`] off the renderer.
+    ///
+    /// Every frame rather than once at start-up, so the field is about the
+    /// frames rather than about a value copied before any of them ran.
+    effects: RenderEffects,
 }
 
 impl Sandbox {
     /// A sandbox starting from the command line's pacing, frame limit and
-    /// `--wait-unpresented` probe.
+    /// `--wait-unpresented` probe, drawing `effects`.
+    ///
+    /// `effects` is the resolved set the device and the player's settings left
+    /// standing, read off the renderer by the caller — a run that stops before
+    /// its first frame still reports what it would have drawn.
     #[must_use]
-    pub fn new(pacing: Pacing, limit: FrameLimit, wait_unpresented: bool) -> Self {
+    pub fn new(
+        pacing: Pacing,
+        limit: FrameLimit,
+        wait_unpresented: bool,
+        effects: RenderEffects,
+    ) -> Self {
         Self {
             pacing,
             applied: pacing,
@@ -313,6 +337,7 @@ impl Sandbox {
             shown: None,
             wait_unpresented,
             unpresented: None,
+            effects,
         }
     }
 }
@@ -405,6 +430,11 @@ pub fn with_shell<S: Shell + ?Sized>(
         options.camera.projection(),
     )?;
 
+    // Read before the GPU moves into the loop, and off the renderer rather than
+    // from the request: the device clamps last, so this is what the frames will
+    // actually be drawn with.
+    let effects = gpu.effects();
+
     Ok(Loop::new(
         Booted {
             shell,
@@ -413,7 +443,12 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
-        Sandbox::new(options.pacing, options.limit, options.wait_unpresented),
+        Sandbox::new(
+            options.pacing,
+            options.limit,
+            options.wait_unpresented,
+            effects,
+        ),
         LoopConfig {
             tick_hz: options.tick_hz,
             frames: options.frame_budget(),
@@ -536,11 +571,14 @@ impl HostedGame for Sandbox {
         self.pending_limit.take()
     }
 
-    fn draw(&mut self, _gpu: &mut Gpu, _draw_list: &mut DrawList, frame: FrameInfo) {
+    fn draw(&mut self, gpu: &mut Gpu, _draw_list: &mut DrawList, frame: FrameInfo) {
         // `alpha` is read after the tick loop, never before: before, the
         // accumulator may still hold whole ticks. `FrameInfo` is handed over
         // after `run_ticks` for exactly that reason.
         render(frame.alpha);
+        // Re-read rather than kept: the device clamps last, so what the summary
+        // reports comes back off the renderer.
+        self.effects = gpu.effects();
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -553,17 +591,19 @@ impl HostedGame for Sandbox {
             exit: run.exit,
             paused: run.paused,
             mode: run.mode,
+            effects: self.effects,
         }
     }
 
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
-            "sandbox: {} frames, {} ticks on the {} shell at {}x{} ({:?})",
+            "sandbox: {} frames, {} ticks on the {} shell at {}x{}, effects {} ({:?})",
             summary.frames,
             summary.ticks,
             summary.backend,
             summary.extent.0,
             summary.extent.1,
+            summary.effects.row(),
             summary.exit,
         );
     }

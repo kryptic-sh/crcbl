@@ -43,7 +43,7 @@ use crcbl::hal::{
 use crcbl::prelude::*;
 use crcbl::render::{
     CullStats, DebugView, DirectionalLight, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer,
-    PassTimers, RenderGraph, TransientPool, UiRenderer,
+    PassTimers, RenderEffects, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -150,17 +150,28 @@ pub struct Paths {
     pub lighting: LightingPath,
     /// What the run asked to be held down.
     pub forced: Forced,
+    /// Which of topic 18's effects the frame draws, **resolved** — what came
+    /// out of the four layers rather than what the player's file asked for.
+    ///
+    /// Read back off the renderer for that reason: a request the device clamped
+    /// would otherwise report as granted. It is also this sample's only
+    /// observable for its own `renderer.set_effect_request(ctx.effect_request())`
+    /// — without it that line could be deleted and every test here would stay
+    /// green.
+    pub effects: RenderEffects,
 }
 
 impl Paths {
-    /// What the device opened as, beside what the run asked for.
+    /// What the device opened as, beside what the run asked for and what its
+    /// frames resolved to.
     #[must_use]
-    pub const fn of(caps: &DeviceCaps, forced: Forced) -> Self {
+    pub const fn of(caps: &DeviceCaps, forced: Forced, effects: RenderEffects) -> Self {
         Self {
             geometry: caps.geometry_path(),
             binding: caps.binding_model(),
             lighting: caps.lighting_path(),
             forced,
+            effects,
         }
     }
 
@@ -205,6 +216,7 @@ impl crcbl::ui::DebugModule for Paths {
         );
         section.row_str("lighting", &format!("{:?}", self.lighting));
         section.row_str("ray tracing", Self::ray_tracing_note());
+        section.row_str("effects", &self.effects.row());
     }
 }
 
@@ -424,12 +436,16 @@ impl Gpu {
         renderer.set_effect_request(ctx.effect_request());
         set_debug_view(&mut renderer, view);
 
-        let paths = Paths::of(&caps, forced);
+        // Resolved rather than requested: the device clamps last, so what the
+        // panel and the summary report has to come back off the renderer.
+        let paths = Paths::of(&caps, forced, renderer.resolved_effects());
         crcbl::log::info!(
-            "quarry: {:?} / {:?} / {:?}, {triangles} triangles at a {lod_budget}px budget",
+            "quarry: {:?} / {:?} / {:?}, effects {}, {triangles} triangles at a {lod_budget}px \
+             budget",
             paths.geometry,
             paths.binding,
             paths.lighting,
+            paths.effects.row(),
         );
 
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
@@ -881,6 +897,7 @@ mod tests {
             binding: BindingModel::ArrayPages,
             lighting: LightingPath::Rasterised,
             forced: Forced::default(),
+            effects: RenderEffects::DEFAULT_STACK,
         };
         let run_chose = Paths {
             forced: Forced {
@@ -918,5 +935,114 @@ mod tests {
             plain.iter().any(|(label, _)| label == "ray tracing"),
             "the panel must say why RayTraced never appears: {plain:?}"
         );
+    }
+
+    /// A settings store holding one `settings.toml`.
+    fn settings_file(toml: &str) -> crcbl::store::MemoryStorage {
+        use crcbl::store::StorageSource;
+
+        let storage = crcbl::store::MemoryStorage::new();
+        storage
+            .write(
+                std::path::Path::new(crcbl::store::settings::SETTINGS_FILE),
+                toml.as_bytes(),
+            )
+            .expect("memory storage accepts every write");
+        storage
+    }
+
+    /// The effects one whole start-up resolves to, with `settings` standing in
+    /// for the player's file.
+    ///
+    /// The whole path, through [`Gpu::from_context`] rather than around it: a
+    /// helper that resolved an [`EffectRequest`](crcbl::render::EffectRequest)
+    /// by hand would prove the resolution order works and nothing at all about
+    /// whether this sample hands the context's request to its renderer.
+    ///
+    /// `tests/device/harness.rs` cannot stand in for it: that harness opens
+    /// under [`SettingsSource::None`](crcbl::engine::SettingsSource::None) and
+    /// builds a renderer of its own rather than going through this one, which is
+    /// deliberate — no developer's home directory may reach a measured run.
+    fn effects_opened_with(settings: crcbl::engine::SettingsSource<'_>) -> RenderEffects {
+        use crcbl::backend::GpuBackend;
+        use crcbl::engine::{Clock, open_window, wait_for_configure};
+        use crcbl::shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let clock = Clock::new(true);
+        let window = open_window(
+            &mut shell,
+            &clock,
+            &WindowDesc {
+                title: "quarry",
+                app_id: "sh.kryptic.crcbl.quarry",
+                ..WindowDesc::default()
+            },
+        )
+        .expect("headless always creates a window");
+        let mut events = 0;
+        let extent =
+            wait_for_configure(&mut shell, window, &mut events).expect("headless configures");
+
+        let ctx = GpuContext::open(
+            &shell,
+            window,
+            extent,
+            &GpuContextDesc {
+                // The null backend, so this needs no driver and no window
+                // system — and the sample's own label and feature set, so it is
+                // this sample's start-up being asked.
+                backend: Some(GpuBackend::Null),
+                settings,
+                ..desc(GpuOptions::default(), Forced::default())
+            },
+        )
+        .expect("the null backend opens everywhere");
+
+        let gpu = Gpu::from_context(ctx, Forced::default(), 1.0, DebugView::Shaded)
+            .expect("the null device builds quarry's renderer");
+        let effects = gpu.paths().effects;
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+        effects
+    }
+
+    /// **The player's `[engine.video]` clamp reaches the frames this sample
+    /// draws**, and the panel and the summary say so.
+    ///
+    /// The guard for one line: `renderer.set_effect_request(ctx.effect_request())`
+    /// in [`Gpu::from_context`]. Deleting it leaves the renderer on
+    /// [`EffectRequest::default`](crcbl::render::EffectRequest), whose `video`
+    /// layer is [`RenderEffects::all`] — which is *also* what a run with no
+    /// settings file resolves to, so the control below cannot catch it and only
+    /// a run with a real clamp in front of it can.
+    ///
+    /// One arm per effect, because a file that switched them all off resolves
+    /// to the empty set however few of the keys were wired.
+    #[test]
+    fn the_players_video_clamp_reaches_the_frame() {
+        use crcbl::engine::SettingsSource;
+
+        let all_on = effects_opened_with(SettingsSource::None);
+        assert_eq!(
+            all_on,
+            RenderEffects::DEFAULT_STACK,
+            "a run with no settings at all draws the default stack, or the comparisons below \
+             are against the wrong control",
+        );
+
+        for (key, off) in [
+            ("shadows", RenderEffects::SHADOWS),
+            ("ambient_occlusion", RenderEffects::AMBIENT_OCCLUSION),
+            ("reflections", RenderEffects::REFLECTIONS),
+        ] {
+            let storage = settings_file(&format!("[engine.video]\n{key} = false\n"));
+            let effects = effects_opened_with(SettingsSource::Source(&storage));
+            assert_eq!(
+                effects,
+                RenderEffects::DEFAULT_STACK.difference(off),
+                "`{key} = false` did not reach the renderer this sample draws with",
+            );
+        }
     }
 }

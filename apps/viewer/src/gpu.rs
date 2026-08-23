@@ -43,8 +43,8 @@ use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool, UiRenderer, grid::GridStyle,
-    scene::InstanceDesc,
+    MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderEffects, TransientPool, UiRenderer,
+    grid::GridStyle, scene::InstanceDesc,
 };
 use crcbl::shell::{Shell, WindowId};
 use crcbl::ui::draw_list::DrawList;
@@ -168,7 +168,30 @@ impl Gpu {
         instances: &[InstanceDesc],
         grid_extent: f32,
     ) -> Result<Self, GpuError> {
-        let ctx = GpuContext::open(shell, window, extent, &desc(gpu))?;
+        Self::from_context(
+            GpuContext::open(shell, window, extent, &desc(gpu))?,
+            scene,
+            instances,
+            grid_extent,
+        )
+    }
+
+    /// Builds the renderer and the two UI passes on an already-open context.
+    ///
+    /// Split from [`Gpu::open`] the way every other sample splits one out: the
+    /// context is where the player's `[engine.video]` settings are read, so a
+    /// test that wants to say what they are has to be able to hand one over.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the renderer refused the description, the grid or an
+    /// instance, or if any HAL call fails.
+    fn from_context(
+        ctx: GpuContext,
+        scene: &crcbl::render::scene::SceneDesc<'_>,
+        instances: &[InstanceDesc],
+        grid_extent: f32,
+    ) -> Result<Self, GpuError> {
         let format = ctx.format();
         let mut renderer =
             match ForwardRenderer::with_scene(ctx.device(), ctx.queue(), format, scene) {
@@ -422,6 +445,19 @@ impl Gpu {
     #[must_use]
     pub const fn exposure(&self) -> f32 {
         self.renderer.exposure()
+    }
+
+    /// Which of topic 18's effects a frame begun now would draw — the
+    /// **resolved** set, read back off the renderer.
+    ///
+    /// Resolved rather than requested, which is why it is asked of the renderer
+    /// rather than of the context: the device clamps last and absolutely, so a
+    /// request it pared down would otherwise report as granted. [`Gpu::reload`]
+    /// carries the request across a document change, so this answers for the
+    /// live renderer whichever document is on screen.
+    #[must_use]
+    pub fn effects(&self) -> RenderEffects {
+        self.renderer.resolved_effects()
     }
 
     /// The extent the swapchain is currently configured at.
@@ -1308,6 +1344,136 @@ mod tests {
                 covered > total / 50,
                 "only {covered} of {total} texels are the {} face, so it is not on screen",
                 face.name,
+            );
+        }
+    }
+
+    /// A settings store holding one `settings.toml`.
+    fn settings_file(toml: &str) -> crcbl::store::MemoryStorage {
+        use crcbl::store::StorageSource;
+
+        let storage = crcbl::store::MemoryStorage::new();
+        storage
+            .write(
+                std::path::Path::new(crcbl::store::settings::SETTINGS_FILE),
+                toml.as_bytes(),
+            )
+            .expect("memory storage accepts every write");
+        storage
+    }
+
+    /// The effects one whole start-up resolves to, with `settings` standing in
+    /// for the player's file — and the effects the same [`Gpu`] resolves to
+    /// after a [`reload`](Gpu::reload) has replaced its renderer.
+    ///
+    /// The whole path, through [`Gpu::from_context`] rather than around it: a
+    /// helper that resolved an [`EffectRequest`](crcbl::render::EffectRequest)
+    /// by hand would prove the resolution order works and nothing at all about
+    /// whether this application hands the context's request to its renderer.
+    ///
+    /// Both answers out of one open, because there are two lines to guard and
+    /// the second only exists once the first has run: `open`'s
+    /// `set_effect_request(ctx.effect_request())` and `reload`'s
+    /// `set_effect_request(self.renderer.effect_request())`, which is what
+    /// carries the player's clamp onto the renderer built for the new document.
+    ///
+    /// `scene::demo()` rather than a converted document, because the subject is
+    /// the wiring and not the glTF: `Gpu::from_context` treats every scene the
+    /// same, and a document read off disk would put a temporary directory
+    /// between this test and what it is asking about.
+    fn effects_opened_with(
+        settings: crcbl::engine::SettingsSource<'_>,
+    ) -> (RenderEffects, RenderEffects) {
+        use crcbl::engine::{Clock, open_window, wait_for_configure};
+        use crcbl::shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let clock = Clock::new(true);
+        let window = open_window(
+            &mut shell,
+            &clock,
+            &WindowDesc {
+                title: "viewer",
+                app_id: "sh.kryptic.crcbl.viewer",
+                ..WindowDesc::default()
+            },
+        )
+        .expect("headless always creates a window");
+        let mut events = 0;
+        let extent =
+            wait_for_configure(&mut shell, window, &mut events).expect("headless configures");
+
+        let ctx = GpuContext::open(
+            &shell,
+            window,
+            extent,
+            &GpuContextDesc {
+                // The null backend, so this needs no driver and no window
+                // system — and the application's own label and feature set, so
+                // it is this application's start-up being asked.
+                backend: Some(GpuBackend::Null),
+                settings,
+                ..desc(GpuOptions::default())
+            },
+        )
+        .expect("the null backend opens everywhere");
+
+        let mut gpu = Gpu::from_context(ctx, &crcbl::render::scene::demo(), &[], 1.0)
+            .expect("the null device builds the viewer's renderer");
+        let opened = gpu.effects();
+        gpu.reload(&crcbl::render::scene::demo(), &[], 1.0)
+            .expect("the null device builds the replacement renderer");
+        let reloaded = gpu.effects();
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+        (opened, reloaded)
+    }
+
+    /// **The player's `[engine.video]` clamp reaches the frames this
+    /// application draws, and survives a re-export**, which is what the summary
+    /// reports.
+    ///
+    /// The guard for two lines:
+    /// `renderer.set_effect_request(ctx.effect_request())` in
+    /// [`Gpu::from_context`], and
+    /// `next.set_effect_request(self.renderer.effect_request())` in
+    /// [`Gpu::reload`]. Deleting either leaves that renderer on
+    /// [`EffectRequest::default`](crcbl::render::EffectRequest), whose `video`
+    /// layer is [`RenderEffects::all`] — which is *also* what a run with no
+    /// settings file resolves to, so the control below cannot catch it and only
+    /// a run with a real clamp in front of it can.
+    ///
+    /// One arm per effect, because a file that switched them all off resolves
+    /// to the empty set however few of the keys were wired.
+    #[test]
+    fn the_players_video_clamp_reaches_the_frame_and_survives_a_reload() {
+        use crcbl::engine::SettingsSource;
+
+        let (all_on, all_on_reloaded) = effects_opened_with(SettingsSource::None);
+        assert_eq!(
+            all_on,
+            RenderEffects::DEFAULT_STACK,
+            "a run with no settings at all draws the default stack, or the comparisons below \
+             are against the wrong control",
+        );
+        assert_eq!(all_on_reloaded, all_on);
+
+        for (key, off) in [
+            ("shadows", RenderEffects::SHADOWS),
+            ("ambient_occlusion", RenderEffects::AMBIENT_OCCLUSION),
+            ("reflections", RenderEffects::REFLECTIONS),
+        ] {
+            let storage = settings_file(&format!("[engine.video]\n{key} = false\n"));
+            let (opened, reloaded) = effects_opened_with(SettingsSource::Source(&storage));
+            let want = RenderEffects::DEFAULT_STACK.difference(off);
+            assert_eq!(
+                opened, want,
+                "`{key} = false` did not reach the renderer this application draws with",
+            );
+            assert_eq!(
+                reloaded, want,
+                "`{key} = false` did not survive the re-export — a reload must not quietly \
+                 restore an effect the player's settings took away",
             );
         }
     }

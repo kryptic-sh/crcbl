@@ -733,7 +733,7 @@ impl HostedGame for Quarry {
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
             "quarry: {} frames, {} ticks on the {} shell at {}x{} ({:?}), {:?} / {:?} / {:?}, \
-             {} triangles at a {}px budget, {}",
+             effects {}, {} triangles at a {}px budget, {}",
             summary.frames,
             summary.ticks,
             summary.backend,
@@ -743,6 +743,7 @@ impl HostedGame for Quarry {
             summary.paths.geometry,
             summary.paths.binding,
             summary.paths.lighting,
+            summary.paths.effects.row(),
             summary.triangles,
             summary.lod_budget,
             cull_row(summary.cull),
@@ -974,6 +975,7 @@ mod tests {
                 binding: BindingModel::Bindless,
                 lighting: LightingPath::Rasterised,
                 forced: crate::gpu::Forced::default(),
+                effects: crcbl::render::RenderEffects::DEFAULT_STACK,
             },
             1000,
             1.0,

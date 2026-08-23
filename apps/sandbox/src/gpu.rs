@@ -164,6 +164,21 @@ pub struct Gpu {
     last_dump: String,
 }
 
+/// What this sample asks the engine for.
+///
+/// One value rather than a literal at the call site, for the reason every other
+/// sample gives its own `desc`: the label is what
+/// [`SettingsSource::Platform`](crcbl::engine::SettingsSource::Platform) reads
+/// the player's `[engine.video]` section out of, and a second spelling of it is
+/// a second answer to "whose settings is this". This sample's own tests are the
+/// second caller — see `the_players_video_clamp_reaches_the_frame`.
+fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
+    GpuContextDesc {
+        label: "sandbox",
+        ..GpuContextDesc::from(gpu)
+    }
+}
+
 impl Gpu {
     /// Opens the join and builds the forward renderer on top of it.
     ///
@@ -181,16 +196,25 @@ impl Gpu {
         gpu: GpuOptions,
         projection: crcbl::render::Projection,
     ) -> Result<Self, GpuError> {
-        let ctx = GpuContext::open(
-            shell,
-            window,
-            extent,
-            &GpuContextDesc {
-                label: "sandbox",
-                ..GpuContextDesc::from(gpu)
-            },
-        )?;
+        Self::from_context(
+            GpuContext::open(shell, window, extent, &desc(gpu))?,
+            projection,
+        )
+    }
 
+    /// Builds the renderer and the two UI passes on an already-open context.
+    ///
+    /// Split from [`Gpu::open`] for the reason every other sample splits one
+    /// out: the context is where the player's settings are read, so a test that
+    /// wants to say what they are has to be able to hand one over.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if any HAL call fails.
+    fn from_context(
+        ctx: GpuContext,
+        projection: crcbl::render::Projection,
+    ) -> Result<Self, GpuError> {
         // Milestones 3–5. Built after the swapchain because the tonemap
         // pipeline has to name the colour format the pass will render to.
         let mut renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), ctx.format())?;
@@ -254,6 +278,18 @@ impl Gpu {
     #[must_use]
     pub const fn extent(&self) -> (u32, u32) {
         self.ctx.extent()
+    }
+
+    /// Which of topic 18's effects a frame begun now would draw — the
+    /// **resolved** set, read back off the renderer.
+    ///
+    /// Resolved rather than requested, which is the whole reason it is asked of
+    /// the renderer: the device clamps last and absolutely, so a request it
+    /// pared down would otherwise report as granted. The summary line is the
+    /// consumer.
+    #[must_use]
+    pub fn effects(&self) -> crcbl::render::RenderEffects {
+        self.renderer.resolved_effects()
     }
 
     /// The format the swapchain was created with. Test-only.
@@ -566,5 +602,114 @@ impl crcbl::engine::GpuSurface for Gpu {
 
     fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
         Self::resize(self, extent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crcbl::backend::GpuBackend;
+    use crcbl::engine::{Clock, SettingsSource, open_window, wait_for_configure};
+    use crcbl::render::RenderEffects;
+    use crcbl::shell::{HeadlessShell, WindowDesc};
+    use crcbl::store::settings::SETTINGS_FILE;
+    use crcbl::store::{MemoryStorage, StorageSource};
+
+    /// A settings store holding one `settings.toml`.
+    fn settings_file(toml: &str) -> MemoryStorage {
+        let storage = MemoryStorage::new();
+        storage
+            .write(std::path::Path::new(SETTINGS_FILE), toml.as_bytes())
+            .expect("memory storage accepts every write");
+        storage
+    }
+
+    /// The effects one whole start-up resolves to, with `settings` standing in
+    /// for the player's file.
+    ///
+    /// The whole path, through [`Gpu::from_context`] rather than around it: a
+    /// helper that resolved an [`EffectRequest`](crcbl::render::EffectRequest)
+    /// by hand would prove the resolution order works and nothing at all about
+    /// whether this sample hands the context's request to its renderer.
+    fn effects_opened_with(settings: SettingsSource<'_>) -> RenderEffects {
+        let mut shell = HeadlessShell::new();
+        let clock = Clock::new(true);
+        let window = open_window(
+            &mut shell,
+            &clock,
+            &WindowDesc {
+                title: "sandbox",
+                app_id: "sh.kryptic.crcbl.sandbox",
+                ..WindowDesc::default()
+            },
+        )
+        .expect("headless always creates a window");
+        let mut events = 0;
+        let extent =
+            wait_for_configure(&mut shell, window, &mut events).expect("headless configures");
+
+        let ctx = GpuContext::open(
+            &shell,
+            window,
+            extent,
+            &GpuContextDesc {
+                // The null backend, so this needs no driver and no window
+                // system — and the sample's own label and feature set, so it is
+                // this sample's start-up being asked.
+                backend: Some(GpuBackend::Null),
+                settings,
+                ..desc(GpuOptions::default())
+            },
+        )
+        .expect("the null backend opens everywhere");
+
+        let gpu = Gpu::from_context(ctx, crcbl::render::Projection::default())
+            .expect("the null device builds the sandbox's renderer");
+        let effects = gpu.effects();
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+        effects
+    }
+
+    /// **The player's `[engine.video]` clamp reaches the frames this sample
+    /// draws**, and the summary says so.
+    ///
+    /// The guard for one line: `renderer.set_effect_request(ctx.effect_request())`
+    /// in [`Gpu::from_context`]. Deleting it leaves the renderer on
+    /// [`EffectRequest::default`](crcbl::render::EffectRequest), whose `video`
+    /// layer is [`RenderEffects::all`] — which is *also* what a run with no
+    /// settings file resolves to, so the control below cannot catch it and only
+    /// a run with a real clamp in front of it can.
+    ///
+    /// One arm per effect, because a file that switched them all off resolves
+    /// to the empty set however few of the keys were wired.
+    #[test]
+    fn the_players_video_clamp_reaches_the_frame() {
+        let all_on = effects_opened_with(SettingsSource::None);
+        assert_eq!(
+            all_on,
+            RenderEffects::DEFAULT_STACK,
+            "a run with no settings at all draws this sample's default stack, or the \
+             comparisons below are against the wrong control",
+        );
+
+        for (key, off) in [
+            ("shadows", RenderEffects::SHADOWS),
+            ("ambient_occlusion", RenderEffects::AMBIENT_OCCLUSION),
+            ("reflections", RenderEffects::REFLECTIONS),
+        ] {
+            let storage = settings_file(&format!("[engine.video]\n{key} = false\n"));
+            let effects = effects_opened_with(SettingsSource::Source(&storage));
+            assert_eq!(
+                effects,
+                RenderEffects::DEFAULT_STACK.difference(off),
+                "`{key} = false` did not reach the renderer this sample draws with",
+            );
+            assert_eq!(
+                effects.row(),
+                RenderEffects::DEFAULT_STACK.difference(off).row()
+            );
+        }
     }
 }

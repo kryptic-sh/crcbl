@@ -191,33 +191,20 @@ impl Paths {
 
     /// The effect set as the panel and the summary spell it: `shadows ao ssr`,
     /// with a switched-off one dropped, and `none` where they all are.
+    ///
+    /// [`RenderEffects::row`] does the spelling, for every sample that reports
+    /// one. The hand-written table this used to hold named every effect but
+    /// [`RenderEffects::BLOOM`], so a frame drawn with bloom reported a row with
+    /// no bloom in it.
     #[must_use]
     pub fn effects_row(&self) -> String {
-        Self::row_for(self.effects)
+        self.effects.row()
     }
 
     /// The same spelling for the monitor's own view.
     #[must_use]
     pub fn monitor_row(&self) -> String {
-        Self::row_for(self.monitor_effects)
-    }
-
-    /// One effect set, spelled.
-    fn row_for(effects: RenderEffects) -> String {
-        let on: Vec<&str> = [
-            (RenderEffects::SHADOWS, "shadows"),
-            (RenderEffects::AMBIENT_OCCLUSION, "ao"),
-            (RenderEffects::REFLECTIONS, "ssr"),
-        ]
-        .into_iter()
-        .filter(|(feature, _)| effects.contains(*feature))
-        .map(|(_, name)| name)
-        .collect();
-        if on.is_empty() {
-            "none".to_string()
-        } else {
-            on.join(" ")
-        }
+        self.monitor_effects.row()
     }
 
     /// Why [`LightingPath::RayTraced`] never appears, in one line for the panel.

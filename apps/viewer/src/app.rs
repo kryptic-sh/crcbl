@@ -49,8 +49,8 @@ use crcbl::engine::{
     open_shell, open_window, requested_window_size, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::render::OrbitCamera;
 use crcbl::render::cull::Aabb;
+use crcbl::render::{OrbitCamera, RenderEffects};
 use crcbl::scene::gltf_render::Skip;
 use crcbl::shell::DisplayMode;
 use crcbl::ui::{DebugModule, DebugSection, draw_list::DrawList};
@@ -168,6 +168,18 @@ pub struct Summary {
     /// warning level by the conversion itself; the count is here so a run over
     /// a directory of models can be graded without reading the log.
     pub skipped: usize,
+    /// Which of topic 18's effects the frames were drawn through, **resolved**.
+    ///
+    /// Read back off the renderer rather than copied from the request the
+    /// context handed it — see [`Gpu::effects`](crate::gpu::Gpu::effects). It is
+    /// this sample's only observable for its own
+    /// `renderer.set_effect_request(ctx.effect_request())`, and for
+    /// [`Gpu::reload`](crate::gpu::Gpu::reload) carrying that request across a
+    /// document change: without it either line could be deleted and every test
+    /// here would stay green. `crate::gpu`'s
+    /// `the_players_video_clamp_reaches_the_frame_and_survives_a_reload` is
+    /// what reads it.
+    pub effects: RenderEffects,
 }
 
 /// What can stop the viewer: the file, or everything below it.
@@ -347,6 +359,13 @@ pub struct Viewer {
     reloads: u64,
     instances: usize,
     skipped: usize,
+    /// What the frames are being drawn with, re-read each [`Viewer::draw`] off
+    /// the renderer.
+    ///
+    /// Every frame rather than once at start-up, because a reload replaces the
+    /// renderer: a value copied before the first document was swapped would go
+    /// on reporting the request the *previous* one held.
+    effects: RenderEffects,
 }
 
 /// The loop the viewer runs in.
@@ -440,6 +459,9 @@ pub fn with_shell<S: Shell + ?Sized>(
     // Read before the GPU is handed to the loop, and off the renderer rather
     // than from a constant: the default exposure is the renderer's to choose.
     let exposure = gpu.exposure();
+    // The same, for the effect set: the device clamps last, so what a run that
+    // never reached a frame would have drawn comes back off the renderer.
+    let effects = gpu.effects();
 
     Ok(Loop::new(
         Booted {
@@ -471,6 +493,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
+            effects,
         },
         options.common.loop_config(),
     ))
@@ -764,6 +787,10 @@ impl HostedGame for Viewer {
         // field is the state and pushing it is idempotent.
         gpu.set_normals_view(self.normals);
         gpu.set_camera(self.orbit.camera());
+        // Re-read rather than kept: the device clamps last, and a reload builds
+        // a second renderer — so what the summary reports comes back off
+        // whichever one this frame is being drawn with.
+        self.effects = gpu.effects();
         // Every frame rather than only on a step, so the row cannot disagree
         // with the frame after anything else moves the exposure.
         self.listing.set_exposure(self.exposure);
@@ -791,12 +818,14 @@ impl HostedGame for Viewer {
             exit: run.exit,
             instances: self.instances,
             skipped: self.skipped,
+            effects: self.effects,
         }
     }
 
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
-            "viewer: {} frames, {} events on the {} shell at {}x{} ({} instances, {} skipped, {:?})",
+            "viewer: {} frames, {} events on the {} shell at {}x{} ({} instances, {} skipped, \
+             effects {}, {:?})",
             summary.frames,
             summary.events,
             summary.backend,
@@ -804,6 +833,7 @@ impl HostedGame for Viewer {
             summary.extent.1,
             summary.instances,
             summary.skipped,
+            summary.effects.row(),
             summary.exit,
         );
     }

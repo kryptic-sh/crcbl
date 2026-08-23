@@ -124,6 +124,46 @@ impl RenderEffects {
     /// [`camera`](EffectRequest::camera) holds, and it is why adding the bloom
     /// bit did not change a single frame the engine already drew.
     pub const DEFAULT_STACK: Self = Self::all().difference(Self::BLOOM);
+
+    /// Every effect and the one word a report spells it with, in bit order.
+    ///
+    /// **The length is the flag count, not a number written here**, so a fifth
+    /// bit added to [`RenderEffects`] and left out of this table is a `cargo
+    /// build` error rather than a row that silently stops mentioning it. That
+    /// was the failure this table replaced: a hand-written list in
+    /// `apps/lantern` that named every effect but [`BLOOM`](Self::BLOOM), in a
+    /// sample whose summary line claimed to say what its frames drew.
+    ///
+    /// The length cannot see a table that reaches it by naming one bit twice —
+    /// `every_effect_is_named_exactly_once_and_the_row_prints_them` is what
+    /// does.
+    const NAMES: [(Self, &'static str); Self::all().bits().count_ones() as usize] = [
+        (Self::SHADOWS, "shadows"),
+        (Self::AMBIENT_OCCLUSION, "ao"),
+        (Self::REFLECTIONS, "ssr"),
+        (Self::BLOOM, "bloom"),
+    ];
+
+    /// This set as a debug panel row and a headless summary line spell it:
+    /// `shadows ao ssr`, with a switched-off effect dropped, and `none` where
+    /// they all are.
+    ///
+    /// One spelling for every sample, because every sample reports this and a
+    /// second copy of the table is where one of them comes to disagree about
+    /// what a frame drew.
+    #[must_use]
+    pub fn row(self) -> String {
+        let on: Vec<&str> = Self::NAMES
+            .into_iter()
+            .filter(|(effect, _)| self.contains(*effect))
+            .map(|(_, name)| name)
+            .collect();
+        if on.is_empty() {
+            "none".to_string()
+        } else {
+            on.join(" ")
+        }
+    }
 }
 
 /// A programmatic override: which effects are forced on, and which off.
@@ -448,5 +488,54 @@ mod tests {
         let released = over.force(ssr, None);
         assert_eq!(released.state(ssr), None);
         assert!(released.is_empty());
+    }
+
+    /// **Every effect bit has a word, and [`RenderEffects::row`] prints every
+    /// one of them.**
+    ///
+    /// The guard for the shape this table replaced. `RenderEffects::NAMES` is
+    /// as long as the type has bits, so a new effect left unnamed does not
+    /// compile — what that length cannot see is a table that reaches it by
+    /// naming one bit twice, which is what the first half here asserts. The
+    /// count is taken from `bitflags`' own declared list rather than from a
+    /// number written down, so it moves when the flags do.
+    ///
+    /// The second half is the part that matters to a reader of a summary line:
+    /// a name in the table that `row` never emits is an effect that is on and
+    /// unmentioned, which reads exactly like an effect that is off.
+    #[test]
+    fn every_effect_is_named_exactly_once_and_the_row_prints_them() {
+        assert_eq!(
+            RenderEffects::NAMES.len(),
+            RenderEffects::all().iter_names().count(),
+            "the table has to name every flag `bitflags` declares, once each",
+        );
+
+        let mut named = RenderEffects::empty();
+        for (effect, word) in RenderEffects::NAMES {
+            assert!(
+                effect.bits().is_power_of_two(),
+                "{word} names {effect:?}, which is not a single effect",
+            );
+            assert!(!named.intersects(effect), "{effect:?} is named twice");
+            named = named.union(effect);
+        }
+        assert_eq!(named, RenderEffects::all());
+
+        let row = RenderEffects::all().row();
+        let words: Vec<&str> = row.split(' ').collect();
+        assert_eq!(words.len(), RenderEffects::NAMES.len(), "{row:?}");
+        for (effect, word) in RenderEffects::NAMES {
+            assert!(
+                words.contains(&word),
+                "{effect:?} is on and unmentioned in {row:?}"
+            );
+        }
+
+        // The spelling every sample's summary line and debug panel already
+        // print, which this must not have moved.
+        assert_eq!(RenderEffects::DEFAULT_STACK.row(), "shadows ao ssr");
+        assert_eq!(RenderEffects::empty().row(), "none");
+        assert_eq!(RenderEffects::BLOOM.row(), "bloom");
     }
 }

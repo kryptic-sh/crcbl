@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every sample reports the effects its frames were actually drawn through.**
+  `RenderEffects::row` is the one spelling — `shadows ao ssr`, `none` for an
+  empty set — and `viewer`, `quarry` and `sandbox` now carry it on their summary
+  line beside `lantern`, which already did. `Summary::effects` on viewer and
+  sandbox, `Paths::effects` and a new `effects` debug-panel row on quarry. It is
+  read back off the `ForwardRenderer`, so a request the device clamped does not
+  report as granted. Each of the three has a unit test that fails if the line
+  handing the player's `[engine.video]` settings to the renderer is deleted —
+  which nothing checked before.
+
 - **A Vulkan validation error can fail a run, not just log one.**
   `CRCBL_VK_VALIDATION_FATAL=1` makes `crcbl-vk` answer the seam's existing
   out-of-band channel — `Device::take_error`, which the engine already drains at
@@ -502,6 +512,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`lantern`'s effect rows named every effect but bloom.** The row came from a
+  hand-written table of three in `apps/lantern`, so a frame drawn with the bloom
+  chain reported a row with no bloom in it. It now goes through
+  `RenderEffects::row`, whose name table is as long as the type has bits — an
+  effect added and left unnamed is a compile error rather than a row that
+  quietly stops mentioning it.
 - **breakout's session handshake waits for the client, not only the server.**
   The server considers itself connected the moment it reads the hello; the
   client only when the result reaches it back, and until then it holds no
@@ -651,6 +667,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- `quarry`'s `gpu::Paths::of` takes the resolved effect set as a third argument
+  and `Paths` carries it as a public field; `sandbox`'s `app::Sandbox::new`
+  takes it as a fourth.
 - **`percentile_of` and `MIN_PERCENTILE_SAMPLES` moved to `crcbl_core::stats`.**
   They were private to `crcbl_ui::budget`, and `crcbl bench` asks the same
   question of different numbers. `crcbl_ui::budget::MIN_PERCENTILE_SAMPLES` is

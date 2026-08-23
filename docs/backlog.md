@@ -245,19 +245,32 @@ leaves behind is smaller than it was:
   and no last-N ring, and nothing on any platform spawns an input thread. Worth
   knowing that `crcbl_jobs::default_spawner` has exactly one caller in the tree
   and it is `apps/horde`'s steering pool.
-- **No sample's `[engine.video]` wiring is observed by anything.** Every sample
-  that builds a `ForwardRenderer` — `lantern`, `viewer`, `quarry`, `sandbox`,
-  and that is all of them; the rest draw sprites through a renderer with no
-  effects to clamp — hands it `ctx.effect_request()` at open, and `viewer`'s
-  `reload` carries the request across a document change. The layers underneath
-  are covered (`crcbl::settings`'s reader, `EffectRequest::resolve`'s order
-  table, lantern's `the_players_video_clamp_reaches_both_views`), but each
-  sample's own line either compiles into its `Gpu::open` or does not, and
-  deleting it fails no test. `apps/quarry`'s device harness cannot see it
-  either: it opens under `SettingsSource::None` and builds its own renderer
-  rather than going through the app's. Closing this needs an observable a sample
-  prints — the resolved effect set in its summary line, say — which is surface
-  none of them has today.
+- **`lantern`'s `video` argument is the one half of this still unguarded.** Its
+  `Gpu::from_context` passes `ctx.video_effects()` into
+  `request_for(room::View::Main, video, effects)`. Deleting the whole
+  `set_effect_request` call reds
+  `app::tests::an_effect_flag_reaches_the_frame_and_the_summary`, but replacing
+  `video` with `RenderEffects::all()` reds nothing —
+  `gpu::tests::the_players_video_clamp_reaches_both_views` calls `request_for`
+  directly and never opens a `GpuContext`. The shape of the fix is the
+  `effects_opened_with(SettingsSource)` helper `viewer`, `quarry` and `sandbox`
+  now have, pointed at lantern's own `Gpu::from_context`. Established by reading
+  both tests, not by sabotage.
+- **Coverage gap: `apps/quarry/tests/device/harness.rs` observes none of this.**
+  It opens under `SettingsSource::None` and builds its own `ForwardRenderer`
+  rather than going through `Gpu::from_context`, deliberately, so no developer's
+  home directory reaches a measured run. The unit guard in
+  `apps/quarry/src/gpu.rs` is the only cover for that sample's wiring.
+- **Considered and declined: a `Display` impl for `RenderEffects`.** `bitflags`
+  leaves the slot free, but its own parser convention
+  (`SHADOWS | AMBIENT_OCCLUSION`) is what a reader would expect from `Display`,
+  and this spelling has no `FromStr` to round-trip with. An inherent, named
+  `row()` says which spelling it is at the call site.
+- **Cost note:** `quarry`'s `the_players_video_clamp_reaches_the_frame` opens
+  four devices, each coarsening the `CELLS`-wide face into a cluster DAG — the
+  slowest unit test in that crate at roughly eight seconds. A cheaper fixture
+  face would fix it, at the price of not asking about the face the sample
+  actually renders.
 
 - **`GameModule` in `apps/lantern` and `apps/quarry`.** Neither implements it
   and neither claims an exemption for it, while `apps/viewer`'s absence is
