@@ -66,9 +66,9 @@ first reading of it assumed.
 - **So sync validation stays off on those four harnesses**, and the reason is
   the second bullet rather than the first. Revisit when CI's runner image
   carries a layer that has the acquire-read modelling of 1.4.357.
-  `crates/crcbl-cli/tests/run-cli-e2e.sh` asks for neither validation nor sync
-  validation while its CI step sets `CRCBL_CLI_E2E_BACKEND: vk`; that is a
-  separate gap and untouched.
+  `crates/crcbl-cli/tests/run-cli-e2e.sh` is a fifth harness in the same
+  position: it asks for validation and makes it fatal, and deliberately does not
+  ask for sync validation, for the reason in the second bullet.
 
 ### Where the Vulkan validation gate is still a no-op
 

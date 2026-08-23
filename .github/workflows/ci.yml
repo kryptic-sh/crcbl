@@ -1354,13 +1354,19 @@ jobs:
       # `crcbl-shell`'s `sway-session.sh`; without sway installed it says so and
       # fails, because in CI a skipped pass is the trap
       # `docs/plan/12-testing.md` names.
-      - name: Install sway, the ALSA headers, the Vulkan loader and lavapipe
+      #
+      # `vulkan-validationlayers` because the suite now sets
+      # `CRCBL_VK_VALIDATION_FATAL=1` on the scaffolded run, and `crcbl-vk`
+      # refuses to open at all when it is asked to make validation fatal and the
+      # layer is absent — a run whose errors cannot stop it looks exactly like a
+      # run that had none.
+      - name: Install sway, the ALSA headers, the Vulkan loader, lavapipe and the validation layer
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
         with:
           packages: >-
             sway libasound2-dev libwayland-client0 libvulkan1
-            mesa-vulkan-drivers
+            mesa-vulkan-drivers vulkan-validationlayers
       # Scaffolds into a temporary directory, builds it with its own
       # `CARGO_TARGET_DIR`, checks `rustfmt` and `clippy` on the generated
       # source, runs the template's own unit tests, runs
@@ -1371,6 +1377,10 @@ jobs:
       # question — does the template's render graph run against a driver at all
       # — which any driver answers. `mesa-vulkan-drivers` is the only one
       # installed above, so today that is lavapipe either way.
+      #
+      # The suite asks the layer about both runs and fails on what it says. It
+      # also proves that check can fail, by running the scaffold a third time
+      # with an injected validation error and requiring the child to die.
       - name: Run the scaffold suite
         env:
           CRCBL_CLI_E2E_BACKEND: vk

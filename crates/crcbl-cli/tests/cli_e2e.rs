@@ -80,6 +80,139 @@ fn gpu_backend() -> String {
     std::env::var("CRCBL_CLI_E2E_BACKEND").unwrap_or_else(|_| "null".to_string())
 }
 
+/// Puts a scaffolded run in front of the validation layer, and makes what the
+/// layer says matter.
+///
+/// Three variables, none of which the template knows about — this is the
+/// harness asking the engine underneath it to be strict:
+///
+/// * `CRCBL_LOG=info` so the messenger's own lines reach the child's stderr at
+///   all. Everything below reads that stream, and the default filter is not
+///   this test's to assume.
+/// * `CRCBL_VK_VALIDATION=1` so the layer is requested even from a release
+///   build, rather than relying on this being a debug one.
+/// * `CRCBL_VK_VALIDATION_FATAL=1` so a specification violation reaches
+///   [`crcbl_hal::Device::take_error`] and the child *exits non-zero*. Without
+///   it a violating run logs and exits 0, which is what every scaffold run did
+///   until now: advertised as validating, unable to fail.
+///
+/// Inert on the null backend, which opens no Vulkan instance, so this is set
+/// unconditionally rather than behind a branch on `CRCBL_CLI_E2E_BACKEND`.
+fn validating(command: &mut Command) -> &mut Command {
+    command
+        .env("CRCBL_LOG", "info")
+        .env("CRCBL_VK_VALIDATION", "1")
+        .env("CRCBL_VK_VALIDATION_FATAL", "1")
+}
+
+/// The complaint lines the debug messenger wrote, in order.
+///
+/// The level *and* the module *and* the callback's own `vk <kind>:` prefix,
+/// which is what keeps `crcbl_vk::device`'s teardown warning — a different
+/// question, asked elsewhere — out of this one. Errors and warnings both, which
+/// is where `crcbl-vk`'s own `ValidationReport::assert_clean` draws the line;
+/// the messenger subscribes to no other severity, so there is nothing else to
+/// filter out.
+fn validation_complaints(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter(|line| {
+            line.contains("crcbl_vk::debug] vk ")
+                && (line.contains("ERROR") || line.contains("WARN"))
+        })
+        .collect()
+}
+
+/// Fails when the layer said anything about a run, or was never there to say it.
+///
+/// The second half is not pedantry. A log with no validation errors in it is
+/// exactly what a run with no messenger produces, so on its own the complaint
+/// scan is a green light wired to nothing; `crcbl-vk` prints the "validation
+/// enabled" line only once the messenger really exists. The three shell e2e
+/// harnesses carry this same pair of questions against the logs of the samples
+/// they run.
+///
+/// Skipped on the null backend, which has no layer to load.
+fn assert_validation_clean(what: &str, backend: &str, output: &Output) {
+    if backend != "vk" {
+        return;
+    }
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        log.contains("crcbl-vk: validation enabled ("),
+        "{what}: ran with CRCBL_VK_VALIDATION=1 and never loaded the layer, so a \
+         clean log here proves nothing. Install VK_LAYER_KHRONOS_validation \
+         (Arch: vulkan-validation-layers, Debian/Ubuntu: vulkan-validationlayers) \
+         — crcbl-vk warns by name when it is missing:\n{log}"
+    );
+    assert!(
+        !log.contains("a panic escaped the Vulkan debug messenger callback"),
+        "{what}: lost validation messages — a panic escaped the messenger \
+         callback, so the scan below cannot see what the layer said:\n{log}"
+    );
+    let complaints = validation_complaints(&log);
+    assert!(
+        complaints.is_empty(),
+        "{what}: the validation layer complained about the scaffolded run:\n{}",
+        complaints.join("\n")
+    );
+}
+
+/// The pass that proves [`assert_validation_clean`] can fail.
+///
+/// Both of its questions are answered by *absence* — no complaint lines, and
+/// one line that has to be there — and an absence is what a run that never
+/// reached the layer produces too. So this runs the scaffold once more with
+/// `CRCBL_VK_VALIDATION_SELF_TEST=1`, which asks a debug `crcbl-vk` to put one
+/// synthetic `ERROR` through `vkSubmitDebugUtilsMessageEXT` as the instance
+/// opens. Everything downstream of the callback is then the real path: the sink
+/// records it, `CRCBL_VK_VALIDATION_FATAL=1` turns it into a
+/// `Device::take_error`, the engine drains that at the top of the first frame,
+/// and the child dies.
+///
+/// Both halves are asserted, because either alone is satisfiable by the wrong
+/// thing: a child that failed for an unrelated reason, or a log line from a
+/// child that exited 0 anyway.
+///
+/// What it does *not* settle is that the layer would have caught a real
+/// violation — that is `crcbl-vk`'s own `validation_gate` suite's question,
+/// against a deliberate one. This settles that a message the layer emits is
+/// heard, and that the hearing is fatal.
+fn self_test_the_validation_gate(crcbl: &str, project: &Path, target: &Path, backend: &str) {
+    if backend != "vk" {
+        return;
+    }
+    let injected = validating(
+        Command::new(crcbl)
+            .current_dir(project)
+            .env("CARGO_TARGET_DIR", target),
+    )
+    .env("CRCBL_VK_VALIDATION_SELF_TEST", "1")
+    .args(["run", "--headless", "--"])
+    .args(["--frames", "1", "--backend", backend, "--size", "320x240"])
+    .output()
+    .expect("crcbl run (self-test): could not start");
+    let log = String::from_utf8_lossy(&injected.stderr);
+    assert!(
+        log.contains("CRCBL-VALIDATION-SELF-TEST"),
+        "the injected validation message never reached the scaffold's log, so \
+         the checks that read that log are reading nothing. A release build \
+         cannot be asked for the injection and says so; this one was built by \
+         `crcbl run`, which builds debug:\n{log}"
+    );
+    assert!(
+        !injected.status.success(),
+        "the scaffold survived an injected validation ERROR with \
+         CRCBL_VK_VALIDATION_FATAL=1 set, so a real violation would not fail it \
+         either:\n{log}"
+    );
+    assert!(
+        !validation_complaints(&log).is_empty(),
+        "the injected message reached the log but not in the shape \
+         validation_complaints matches, so the scan above is reading past real \
+         complaints too:\n{log}"
+    );
+}
+
 /// The size `templates/main.rs.tmpl` asks its window to open at.
 ///
 /// Named here rather than read out of the template: the point of the windowed
@@ -175,12 +308,15 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
     let backend = gpu_backend();
     let ran = run(
         "crcbl run --headless",
-        Command::new(crcbl)
-            .current_dir(&project)
-            .env("CARGO_TARGET_DIR", &target)
-            .args(["run", "--headless", "--"])
-            .args(["--frames", "30", "--backend", &backend, "--size", "320x240"]),
+        validating(
+            Command::new(crcbl)
+                .current_dir(&project)
+                .env("CARGO_TARGET_DIR", &target),
+        )
+        .args(["run", "--headless", "--"])
+        .args(["--frames", "30", "--backend", &backend, "--size", "320x240"]),
     );
+    assert_validation_clean("crcbl run --headless", &backend, &ran);
     let output = String::from_utf8_lossy(&ran.stdout).into_owned();
     assert!(
         output.contains("mygame: 30 frames"),
@@ -195,6 +331,9 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
         "the scaffold ignored --size; the summary reports its extent:\n{output}"
     );
 
+    // 5b. And the pass that gives 5's validation check teeth.
+    self_test_the_validation_gate(crcbl, &project, &target, &backend);
+
     // 6. And the same loop with a window on it, when there is a compositor to
     //    put one on. This is the half `--headless` cannot reach: opening a
     //    real surface, joining it to the device, and getting a swapchain at the
@@ -205,16 +344,20 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
     if windowed_pass() {
         let ran = run(
             "crcbl run (windowed)",
-            Command::new(crcbl)
-                .current_dir(&project)
-                .env("CARGO_TARGET_DIR", &target)
-                // The compositor the harness started, not whatever the
-                // developer is logged into: a silent fallback to another
-                // backend would report success for a window nobody asserted on.
-                .env("CRCBL_SHELL", "wayland")
-                .args(["run", "--"])
-                .args(["--frames", "60", "--backend", &backend]),
+            validating(
+                Command::new(crcbl)
+                    .current_dir(&project)
+                    .env("CARGO_TARGET_DIR", &target)
+                    // The compositor the harness started, not whatever the
+                    // developer is logged into: a silent fallback to another
+                    // backend would report success for a window nobody asserted
+                    // on.
+                    .env("CRCBL_SHELL", "wayland"),
+            )
+            .args(["run", "--"])
+            .args(["--frames", "60", "--backend", &backend]),
         );
+        assert_validation_clean("crcbl run (windowed)", &backend, &ran);
         let output = String::from_utf8_lossy(&ran.stdout).into_owned();
         assert!(
             output.contains("mygame: 60 frames"),

@@ -18,6 +18,13 @@
 # a driver installed) to put the template's render graph in front of a real one
 # instead; CI does exactly that against lavapipe.
 #
+# On `vk` the suite also puts the scaffolded run under the validation layer and
+# makes what the layer says fatal, then proves that check can fail by running
+# the scaffold once more with an injected validation error. That needs
+# `VK_LAYER_KHRONOS_validation` installed (Arch: vulkan-validation-layers,
+# Debian/Ubuntu: vulkan-validationlayers) — `crcbl-vk` refuses to open without
+# it rather than running unvalidated.
+#
 # **When sway is installed it also runs the generated project windowed**, on a
 # private headless compositor started by `crcbl-shell`'s `sway-session.sh`. That
 # is the half `--headless` cannot reach — a real surface, joined to the device,
