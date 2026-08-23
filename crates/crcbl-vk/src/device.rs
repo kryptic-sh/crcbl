@@ -1034,6 +1034,17 @@ impl DeviceInner {
         lookup(&state.buffers, "buffer", handle, self).map(|entry| entry.raw)
     }
 
+    /// Resolves a buffer handle, returning its size too — `write_descriptors`
+    /// needs it to resolve a whole-buffer binding into the length it actually
+    /// covers before checking it against the slot's range limit.
+    pub(crate) fn buffer_raw_and_size(
+        &self,
+        state: &DeviceState,
+        handle: BufferHandle,
+    ) -> Result<(vk::Buffer, u64), HalError> {
+        lookup(&state.buffers, "buffer", handle, self).map(|entry| (entry.raw, entry.size))
+    }
+
     /// Resolves an image handle, returning its format too — the encoder needs
     /// it to fill in an aspect mask the caller left empty.
     pub(crate) fn image_raw(

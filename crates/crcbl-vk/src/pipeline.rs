@@ -1210,7 +1210,37 @@ fn write_descriptors(
                         entry.binding, slot.kind
                     )));
                 }
-                let raw = inner.buffer_raw(state, buffer)?;
+                // Same story for the two range limits: a binding longer than
+                // the slot allows is
+                // `VUID-VkWriteDescriptorSet-descriptorType-00332` (uniform) or
+                // `-00333` (storage), which validation layers report and a
+                // release driver does not. `WHOLE_BUFFER` is resolved into what
+                // it actually covers first — it is the commoner spelling, and
+                // it carries no number to compare.
+                let (raw, length) = inner.buffer_raw_and_size(state, buffer)?;
+                let ceiling = match slot.kind {
+                    BindingKind::UniformBuffer { .. } => {
+                        Some(inner.caps.limits.max_uniform_buffer_range)
+                    }
+                    BindingKind::StorageBuffer { .. } => {
+                        Some(inner.caps.limits.max_storage_buffer_range)
+                    }
+                    _ => None,
+                };
+                let bound = if size == BindingResource::WHOLE_BUFFER {
+                    length.saturating_sub(offset)
+                } else {
+                    size
+                };
+                if let Some(ceiling) = ceiling
+                    && bound > ceiling
+                {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "binding {} is given {bound} bytes of a buffer, over this device's \
+                         {ceiling}-byte limit for {:?}",
+                        entry.binding, slot.kind
+                    )));
+                }
                 plan.push((buffers.len(), true, entry.binding, entry.array_index, ty));
                 buffers.push(vk::DescriptorBufferInfo {
                     buffer: raw,

@@ -269,3 +269,123 @@ fn samplers_honour_the_seams_defaults_and_its_limits() {
 
     headless.finish();
 }
+
+/// A uniform binding longer than `max_uniform_buffer_range`, against a driver.
+///
+/// Binding more of a buffer than the slot's range limit allows is
+/// `VUID-VkWriteDescriptorSet-descriptorType-00332`, which the validation layer
+/// reports and a release driver does not — so the seam refuses it first, and
+/// this is that refusal arriving from a real device's own reported limit rather
+/// than from a limit the null backend chose.
+///
+/// # What this machine can and cannot reach
+///
+/// The over-long *explicit* range runs everywhere: the seam refuses before
+/// `vkUpdateDescriptorSets` is called, so the buffer need only be big enough to
+/// exist. The `WHOLE_BUFFER` spelling needs a buffer past the ceiling, and
+/// whether one can be allocated is the driver's business — RADV reports
+/// `maxUniformBufferRange` as 4 GiB−1, over `maxBufferSize`, so no such buffer
+/// exists on it. That arm therefore runs only where the ceiling is small enough
+/// to pass, and says which happened. `crcbl-hal`'s null backend covers both
+/// spellings unconditionally, since it can report any limit it likes.
+///
+/// The storage ceiling has no test here at all, for the same reason and more
+/// so: drivers report it at or near 4 GiB. That also means this test cannot
+/// tell the two limits apart — RADV reports both as 4 GiB−1, so reading the
+/// storage limit for a uniform slot passes here and is caught by the null
+/// backend's test, where the two differ.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_uniform_binding_over_the_range_limit_is_refused() {
+    let headless = Headless::open_for_triangle();
+    let device = headless.device.as_ref();
+    let limits = device.caps().limits;
+    let ceiling = limits.max_uniform_buffer_range;
+
+    let layout = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("one uniform"),
+            entries: &[crcbl_hal::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crcbl_hal::ShaderStages::VERTEX,
+                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            }],
+        })
+        .expect("a single uniform binding");
+    let buffer_of = |size| {
+        device
+            .create_buffer(&crcbl_hal::BufferDesc {
+                label: Some("uniform range"),
+                size,
+                usage: crcbl_hal::BufferUsage::UNIFORM,
+                memory: crcbl_hal::MemoryLocation::DeviceLocal,
+            })
+            .expect("a uniform buffer")
+    };
+    let group_of = |buffer, offset, size| {
+        device.create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: None,
+            layout,
+            entries: &[crcbl_hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                },
+            }],
+            variable_count: None,
+        })
+    };
+    let refused = |error: crcbl_hal::HalError, case: &str| {
+        assert!(
+            matches!(error, crcbl_hal::HalError::InvalidDescriptor(_)),
+            "{case}: {error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("binding 0"), "{case}: {text}");
+        assert!(text.contains(&ceiling.to_string()), "{case}: {text}");
+    };
+
+    // An explicit range one byte over, which never reaches the driver.
+    let small = buffer_of(4096);
+    refused(
+        group_of(small, 0, ceiling + 1).expect_err("a range over the ceiling"),
+        "explicit size",
+    );
+    // …and the same buffer bound whole, which is under it.
+    let group = group_of(small, 0, crcbl_hal::BindingResource::WHOLE_BUFFER)
+        .expect("a whole small buffer is under the ceiling");
+    device.destroy_bind_group(group);
+
+    // The sentinel over the ceiling, where the hardware admits such a buffer.
+    let over_size = ceiling.saturating_add(1);
+    if over_size <= u64::from(u32::MAX) && over_size < (1 << 30) {
+        let over = buffer_of(over_size);
+        refused(
+            group_of(over, 0, crcbl_hal::BindingResource::WHOLE_BUFFER)
+                .expect_err("a whole buffer over the ceiling"),
+            "whole buffer",
+        );
+        // One aligned offset in, the rest of it fits again.
+        let offset = limits.min_uniform_buffer_offset_alignment.max(1);
+        let group = group_of(over, offset, crcbl_hal::BindingResource::WHOLE_BUFFER)
+            .expect("the rest of the buffer is under the ceiling");
+        device.destroy_bind_group(group);
+        device.destroy_buffer(over);
+        eprintln!("vk e2e: uniform ceiling {ceiling}, whole-buffer arm ran");
+    } else {
+        eprintln!(
+            "vk e2e: uniform ceiling {ceiling} is past what this driver will allocate; the \
+             whole-buffer arm did not run"
+        );
+    }
+
+    device.destroy_buffer(small);
+    device.destroy_bind_group_layout(layout);
+
+    headless.finish();
+}
