@@ -3,6 +3,92 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Three stale `crcbl-wgpu` mentions the comment sweep could not reach
+
+The 2026-08-23 sweep took the present-tense `crcbl-wgpu` references out of 38
+files. Three groups were left, deliberately:
+
+- **`bindless_probe.slang` and `mesh_cluster.slang`** each present `crcbl-wgpu`
+  as a live backend — the first says it "refuses too", the second that it "is
+  the web backend and the forward pass is what it draws". Both were edited and
+  reverted: `crcbl-shaders`' build script sha256s every committed `.slang`
+  against `spirv/manifest.txt` and fails the build with "the committed source
+  has changed without the manifest being regenerated", so a comment-only edit
+  needs `crates/crcbl-shaders/tools/compile-shaders.sh` and a manifest commit.
+  Worth doing on the next run of that script rather than on its own.
+- **Three error strings** — `crcbl-dx12`'s `instance.rs`, `crcbl-mtl`'s
+  `swapchain.rs` and `crcbl-vk`'s `instance.rs` all refuse a canvas surface with
+  some form of "a canvas is `crcbl-wgpu`'s target, not X's". These are output,
+  so they are outside a comment-only sweep, and at least one is asserted on. The
+  replacement is `crcbl-webgpu`, which is the crate that actually targets a
+  canvas now.
+- **The `Cargo.toml` comments were checked and are fine** — all six name the
+  2026-08-21 deletion as a past event. No work here; recorded so the next sweep
+  does not re-derive it.
+
+### The phys bench's identity check is untimed, and `ColliderId::index` is why
+
+`crcbl bench --scenario phys` checks _which_ bodies each query answered — but
+only in one untimed pass, not in every timed one. `ColliderId::index` is
+`pub(crate)` in `crcbl-phys`'s `world.rs` and `ColliderId` is not `Ord`, so
+outside the crate a result can only become a body index through a
+`HashMap<ColliderId, u64>`. A hash lookup per result inside the timed query
+phase would put a `HashMap` inside a number attributed to the broadphase, which
+is the one thing that scenario exists not to do. Every timed pass is still held
+to the result total and the per-query shape, so a pass that answered short or
+answered across the wrong queries fails; only "the same total, from different
+bodies" is unchecked per iteration.
+
+A public accessor — or `Ord`, so results could be sorted — turns the fold into a
+dense array index and moves the identity check into every pass. Small change,
+and `crcbl-phys` was outside the write set of the slice that found it.
+
+### The phys bench's refit phase cannot tell a refit from a rebuild
+
+`PhysicsWorld::set_sphere` refits in place when `Bvh::update_aabb` accepts the
+new bounds and silently invalidates the tree when it does not, so the
+`overlap_queries()` that follows may be a full rebuild. Nothing outside
+`crcbl-phys` can distinguish the two, which makes the reported refit timing
+honest — it is what a caller pays — but not diagnostic: a run cannot say whether
+it measured refitting or rebuilding, and a regression that flipped every update
+to a rebuild would show only as a slower number.
+
+A pair of counters on `BroadphaseStats` — refits accepted against tree
+invalidations — would make the roadmap's "refit cost" row answerable rather than
+merely measurable, and the bench would print them beside the timing the way the
+`jobs` scenario prints `Pool::stats`.
+
+### `crcbl-cli`'s `bench.rs` holds two scenarios and should split before a third
+
+The file is now about 1600 lines with `jobs` and `mod phys` in it, sharing only
+`timing`, `base_environment`, `profile`, `micros`, `nanos` and `PERCENTILES`.
+The seam is already visible in the shape of the file: `bench/mod.rs` for the
+shared reporting, `bench/jobs.rs` and `bench/phys.rs` for the scenarios. Doing
+it was outside the write set of the slice that added the second one. The third
+scenario should not land in this file.
+
+### The phys bench's default is a debug-build size, and its guard is quadratic
+
+`--bodies` defaults to 2000, far below the scale `docs/plan/ROADMAP.md` talks
+about, because the run's correctness guard is an `O(bodies²)` scan and the
+default has to finish in a couple of seconds in a checked build. At
+`--bodies 10000` that scan is ~100M predicate calls. Anyone sweeping upward
+should use `--release`.
+
+Considered and declined: giving the guard a cheaper independent reference, such
+as a uniform grid. A second spatial index checking the first is exactly the
+shape of check that agrees with the bug — the brute-force scan's whole value is
+that it shares no structure with the thing it checks. If the quadratic cost ever
+actually blocks a sweep, the honest fix is to check a sampled subset of queries
+exactly rather than to check every query approximately.
+
+**Not verified for this scenario:** any non-Linux target, and every number in
+its commit message and changelog entry is from a debug build. `cargo doc` never
+reaches the module at all — the `crcbl` binary sets `doc = false` in
+`crates/crcbl-cli/Cargo.toml` because it would collide with the umbrella
+library's docs — so its intra-doc links are unchecked by construction, for the
+whole CLI and not just this file.
+
 ### What the corner post's slice did not cover
 
 - **Only radv and lavapipe drew it.** `apps/lantern/tests/golden/room.png` and
