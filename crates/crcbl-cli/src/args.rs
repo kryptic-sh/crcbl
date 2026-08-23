@@ -258,7 +258,8 @@ SCENARIOS:
     phys    `crcbl_phys`'s broadphase at scale, on one thread: building a tree
             over N spheres, refitting it after every one of them moves a tick's
             worth, and then N sphere overlaps, one per body. The three phases
-            are timed and reported separately.
+            are timed and reported separately. `--ticks` repeats the movement
+            so the queries run against a tree the crowd has walked away from.
 
 OPTIONS (both scenarios):
         --scenario <NAME>    Which scenario to run. Required.
@@ -290,6 +291,15 @@ OPTIONS (phys):
                              slower query phase — the run reports the neighbours
                              it actually found, so the two numbers can be read
                              together.
+        --ticks <N>          Drift-and-refit steps run before the query phase,
+                             each one tick's worth of movement. Default: 1. This
+                             is the ageing control: a refit never re-picks a
+                             leaf's place, so a crowd that has walked for N
+                             ticks is queried through a tree still fitted to
+                             where it started. The refit line times the last
+                             step alone, so it is one tick's cost at every N;
+                             the crowd also spreads as it walks, so read the
+                             query line against the neighbour count beside it.
 
 A flag that belongs to one scenario is refused on the other rather than
 ignored.";
@@ -582,6 +592,7 @@ const SCENARIO_FLAGS: &[(&str, BenchScenario)] = &[
     ("--chunk", BenchScenario::Jobs),
     ("--bodies", BenchScenario::Phys),
     ("--extent", BenchScenario::Phys),
+    ("--ticks", BenchScenario::Phys),
 ];
 
 /// The scenario `name` selects, or `None` if no scenario answers to it.
@@ -646,6 +657,17 @@ pub const DEFAULT_BENCH_BODIES: usize = 2_000;
 /// `--bodies` alone means something; a run that cares sets both.
 pub const DEFAULT_BENCH_EXTENT: usize = 48;
 
+/// Drift-and-refit steps the `phys` scenario runs before its query phase when
+/// `--ticks` is not given.
+///
+/// One, because that is the run the scenario reported before the flag existed
+/// and a default that moved would silently reprice every number already
+/// recorded against it. It is the *uninteresting* value: the tree a one-tick
+/// run queries is as tight as the build left it, and `docs/backlog.md`'s
+/// question — what a refit-only tree costs once its elements have travelled —
+/// only has an answer above it.
+pub const DEFAULT_BENCH_TICKS: usize = 1;
+
 /// `crcbl bench`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BenchArgs {
@@ -666,6 +688,10 @@ pub struct BenchArgs {
     /// units. Never zero: an arena of no extent stacks the whole crowd on one
     /// point, which the parser refuses.
     pub extent: usize,
+    /// Drift-and-refit steps the `phys` scenario ages its crowd through before
+    /// querying it. Never zero, which would leave the refit phase timing a
+    /// crowd that had not moved.
+    pub ticks: usize,
     /// Timed calls. Never zero, for the same reason.
     pub iterations: usize,
     /// Untimed calls first, excluded from everything reported.
@@ -1261,6 +1287,7 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
         chunk: DEFAULT_BENCH_CHUNK,
         bodies: DEFAULT_BENCH_BODIES,
         extent: DEFAULT_BENCH_EXTENT,
+        ticks: DEFAULT_BENCH_TICKS,
         iterations: DEFAULT_BENCH_ITERATIONS,
         warmup: DEFAULT_BENCH_WARMUP,
         json: false,
@@ -1327,6 +1354,13 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
                 Ok(value) => {
                     parsed.extent = value;
                     given.push("--extent");
+                }
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--ticks") => match count(&mut args, "--ticks") {
+                Ok(value) => {
+                    parsed.ticks = value;
+                    given.push("--ticks");
                 }
                 Err(message) => return Invocation::BadUsage(message),
             },
@@ -1404,6 +1438,12 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
             "an arena of no extent stacks the whole crowd on one point, so every query \
              answers with every body",
         ),
+        (
+            parsed.ticks,
+            "--ticks",
+            "a crowd that never moves gives the refit phase nothing to refit, so its \
+             timing would be the cost of setting every body back where it already was",
+        ),
     ] {
         if value == 0 {
             return Invocation::BadUsage(format!("`{flag}` cannot be zero: {why}"));
@@ -1413,7 +1453,7 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Bench(parsed))
 }
 
-/// The next argument as a count, for the five numbers `bench` takes.
+/// The next argument as a count, for the numbers `bench` takes.
 ///
 /// Separate from [`index`] because the two say different things when they
 /// refuse: an index is a position in a file's node list and a count is a size,
@@ -2192,6 +2232,10 @@ mod tests {
         assert_eq!(args.scenario, BenchScenario::Phys);
         assert_eq!(args.bodies, DEFAULT_BENCH_BODIES);
         assert_eq!(args.extent, DEFAULT_BENCH_EXTENT);
+        // One tick, which is the run the scenario reported before `--ticks`
+        // existed: every number already recorded against a default invocation
+        // is a number this default still produces.
+        assert_eq!(args.ticks, DEFAULT_BENCH_TICKS);
         // Shared with `jobs` rather than twinned, so a sweep of one scenario's
         // sample count is a sweep of the other's.
         assert_eq!(args.iterations, DEFAULT_BENCH_ITERATIONS);
@@ -2205,6 +2249,8 @@ mod tests {
             "500",
             "--extent",
             "12",
+            "--ticks",
+            "64",
             "--iterations",
             "3",
             "--warmup",
@@ -2212,7 +2258,7 @@ mod tests {
         ]) else {
             panic!("expected bench");
         };
-        assert_eq!((args.bodies, args.extent), (500, 12));
+        assert_eq!((args.bodies, args.extent, args.ticks), (500, 12, 64));
         assert_eq!((args.iterations, args.warmup), (3, 0));
 
         // The help quotes each default as a literal, so it is pinned to the
@@ -2228,7 +2274,11 @@ mod tests {
             .split_once("OPTIONS (phys):")
             .expect("the help has a phys section")
             .1;
-        for value in [DEFAULT_BENCH_BODIES, DEFAULT_BENCH_EXTENT] {
+        for value in [
+            DEFAULT_BENCH_BODIES,
+            DEFAULT_BENCH_EXTENT,
+            DEFAULT_BENCH_TICKS,
+        ] {
             assert!(
                 phys_options.contains(&format!("Default: {value}.")),
                 "`bench --help` does not name the default {value}:\n{phys_options}"
@@ -2239,7 +2289,9 @@ mod tests {
         for argv in [
             vec!["bench", "--scenario", "phys", "--bodies"],
             vec!["bench", "--scenario", "phys", "--extent"],
+            vec!["bench", "--scenario", "phys", "--ticks"],
             vec!["bench", "--scenario", "phys", "--bodies", "lots"],
+            vec!["bench", "--scenario", "phys", "--ticks", "many"],
         ] {
             assert!(
                 matches!(parse_args(&argv), Invocation::BadUsage(_)),
@@ -2280,8 +2332,8 @@ mod tests {
         }
     }
 
-    /// The three counts a zero makes meaningless, each refused naming its own
-    /// flag. `--workers 0` and `--warmup 0` are in the accepted list above.
+    /// Every count a zero makes meaningless, each refused naming its own flag.
+    /// `--workers 0` and `--warmup 0` are in the accepted list above.
     #[test]
     fn bench_refuses_the_counts_a_zero_would_empty() {
         for (scenario, flag) in [
@@ -2290,6 +2342,7 @@ mod tests {
             ("jobs", "--iterations"),
             ("phys", "--bodies"),
             ("phys", "--extent"),
+            ("phys", "--ticks"),
             ("phys", "--iterations"),
         ] {
             let Invocation::BadUsage(message) =

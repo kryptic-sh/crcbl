@@ -41,7 +41,8 @@
 //!   [`PhysicsWorld::set_sphere`], then the tree made current again. `set_sphere`
 //!   refits in place when it can and drops the tree when it cannot, in which
 //!   case the rebuild lands in this sample — which is the honest answer, because
-//!   it is what a caller pays.
+//!   it is what a caller pays. With `--ticks` above one the tick timed here is
+//!   the **last** of them; see below.
 //! * **query** — `bodies` sphere overlaps, one per body, at its own position:
 //!   the shape `apps/horde`'s separation pass runs, through
 //!   `OverlapQueries::overlap_sphere_into` with a [`QueryScratch`], which is
@@ -50,6 +51,47 @@
 //! **There is no threading here and that is deliberate**: a pool in the middle
 //! of the pass would measure the pool. `jobs` is the scenario that measures the
 //! pool, and P8 is what puts the two together.
+//!
+//! # Ageing, and what `--ticks` is for
+//!
+//! `Bvh::update_aabb` never re-picks a leaf's place in the tree: its own doc
+//! says so, and there is no containment test in it. It writes the new box into
+//! the leaf and recomputes every ancestor on the way to the root. So the tree's
+//! *shape* is whatever `Bvh::build` picked for where the crowd started, and it
+//! stays that shape however far the crowd walks — a body that crosses the arena
+//! refits exactly like one that barely moved, and pays for the trip in a looser
+//! tree rather than in a rebuild.
+//!
+//! `--ticks N` is what makes that measurable: the crowd takes `N` successive
+//! drift steps, the tree is refit after each one, and only then does the query
+//! phase run. One tick is the default and is the run this scenario reported
+//! before the flag existed — [`salt`] answers its own seed for zero, so the
+//! first step draws exactly the hand [`DRIFT_SEED`] has always dealt.
+//!
+//! **The refit sample is the last tick's, not the whole walk's.** Two reasons,
+//! and the second is the one that decided it:
+//!
+//! 1. A sample covering `N` ticks grows with `N`, so the number at
+//!    `--ticks 1000` could not be read against the number at `--ticks 1` — the
+//!    comparison the flag exists to make. One tick's cost is one tick's cost at
+//!    every `N`.
+//! 2. It is the *aged* tick, which is the one worth timing: refitting a tree
+//!    whose leaves have wandered is the cost the flag is asking about, and the
+//!    steps that got it there are the fixture, not the measurement.
+//!
+//! The steps before it are therefore untimed, and nothing prints a duration for
+//! them. What does print, and moves, is `refits` — `bodies × ticks` of them —
+//! so a run whose ageing steps were skipped cannot report the count of one that
+//! ran them.
+//!
+//! **The crowd spreads as it walks**, because the drift is a free random walk
+//! and nothing pushes it back inside the arena. That is visible rather than
+//! hidden: `answers` reports the neighbours actually found, and at large tick
+//! counts it falls — so the query line has to be read against it, exactly as it
+//! does across two `--extent` values. Reflecting off the arena walls would hold
+//! the density still and was rejected for one reason: it would move the bodies
+//! that start within a step of an edge, and `--ticks 1` would then stop being
+//! the run this scenario has always reported.
 //!
 //! # The answers are checked, and the check is in two halves
 //!
@@ -81,11 +123,14 @@
 //! checksum on every target, not just twice on this one. A heading angle would
 //! have been the natural way to move a body and is not used for exactly that
 //! reason; the drift is two independent values in `[-1, 1]` instead, which is
-//! not uniform over a circle and does not need to be.
+//! not uniform over a circle and does not need to be. A walk of many ticks
+//! keeps that property: each tick draws from [`salt`]`(DRIFT_SEED, tick)` and
+//! accumulates with an add, so the crowd's position after `N` ticks is the same
+//! on every target too.
 
 use std::time::Instant;
 
-use crcbl::core::rand::{hash_u64, hash_unit};
+use crcbl::core::rand::{hash_u64, hash_unit, salt};
 use crcbl::math::DVec3;
 use crcbl::phys::{
     BroadphaseStats, ColliderId, PhysicsWorld, QueryScratch, Sphere, sphere_overlaps_sphere,
@@ -104,7 +149,7 @@ use super::{base_environment, environment_line, nanos, timing};
 /// the machine and nothing else.
 const SEED: u64 = 0x6372_6362_6c5f_7068;
 
-/// The seed the one-tick drift comes from.
+/// The seed the drift comes from, before a tick number is salted into it.
 ///
 /// A second seed rather than a second index range into [`SEED`], so that
 /// changing how far bodies move cannot move where they started.
@@ -143,11 +188,14 @@ const SPEED: f64 = 3.2;
 /// `apps/horde` runs at 60 Hz, and the refit phase is one of its ticks.
 const TICK: f64 = 1.0 / 60.0;
 
-/// How far a body drifts between the build phase and the refit phase.
+/// How far a body drifts in one tick, at most, on each axis it moves along.
 ///
 /// Small on purpose: a refit's cost is a function of how much a leaf's box
 /// has to grow, and a body teleporting across the arena would measure a tree
-/// rebuild wearing a refit's name.
+/// rebuild wearing a refit's name. Distance is bought with `--ticks` — many
+/// small steps, the way a body actually travels — rather than by making the
+/// step large, which is the same displacement drawn from a distribution no
+/// simulation produces.
 const DRIFT: f64 = SPEED * TICK;
 
 /// The salt the per-result fold mixes a body index under.
@@ -218,15 +266,33 @@ fn place(index: usize, extent: usize) -> DVec3 {
     )
 }
 
-/// Body `index` after one tick's worth of movement from `resting`.
-fn drifted(index: usize, resting: DVec3) -> DVec3 {
-    let index = index as u64;
-    let offset = DVec3::new(
-        hash_unit(DRIFT_SEED, 2 * index) * 2.0 - 1.0,
-        0.0,
-        hash_unit(DRIFT_SEED, 2 * index + 1) * 2.0 - 1.0,
-    );
-    resting + offset * DRIFT
+/// Moves every body one tick's worth, in place.
+///
+/// `tick` is the step's position in the walk, counted from zero, and it is
+/// mixed in by [`salt`] rather than by indexing further into one stream:
+/// `salt(seed, 0)` is `seed`, so the first step of any walk draws exactly the
+/// hand [`DRIFT_SEED`] dealt when this scenario had no `--ticks` and only ever
+/// took one step.
+fn step(positions: &mut [DVec3], tick: usize) {
+    let seed = salt(DRIFT_SEED, tick as u64);
+    for (index, centre) in positions.iter_mut().enumerate() {
+        let index = index as u64;
+        let offset = DVec3::new(
+            hash_unit(seed, 2 * index) * 2.0 - 1.0,
+            0.0,
+            hash_unit(seed, 2 * index + 1) * 2.0 - 1.0,
+        );
+        *centre += offset * DRIFT;
+    }
+}
+
+/// Where the crowd stands after `ticks` steps away from `resting`.
+fn walk(resting: &[DVec3], ticks: usize) -> Vec<DVec3> {
+    let mut positions = resting.to_vec();
+    for tick in 0..ticks {
+        step(&mut positions, tick);
+    }
+    positions
 }
 
 /// What a body index contributes to the query it answers.
@@ -380,15 +446,20 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
     let resting: Vec<DVec3> = (0..args.bodies)
         .map(|index| place(index, args.extent))
         .collect();
-    let moved: Vec<DVec3> = resting
-        .iter()
-        .enumerate()
-        .map(|(index, &centre)| drifted(index, centre))
-        .collect();
+    // Where `--ticks` steps leave the crowd. This is what the query phase is
+    // run at and what the serial scan is taken over, so a wrong answer at the
+    // last tick fails the run exactly as a wrong answer at the first one does.
+    let moved = walk(&resting, args.ticks);
 
     let answers = verify(&resting, &moved)?;
 
     let mut ids: Vec<ColliderId> = Vec::with_capacity(args.bodies);
+    // The walk is replayed each iteration, into a buffer allocated once, because
+    // each iteration builds its own world and the ageing has to happen to *that*
+    // tree. Never read on a one-tick run, which is why the replay below is
+    // skipped whole rather than run zero times: the copy alone would walk the
+    // whole crowd through cache between the build timer and the refit timer.
+    let mut ageing: Vec<DVec3> = Vec::with_capacity(args.bodies);
     let mut build = Vec::with_capacity(args.iterations);
     let mut refit = Vec::with_capacity(args.iterations);
     let mut query = Vec::with_capacity(args.iterations);
@@ -416,7 +487,29 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
         world.overlap_queries();
         let built = nanos(started.elapsed());
 
+        // ── age ────────────────────────────────────────────────────────
+        // Every tick but the last, untimed: these steps are the fixture that
+        // walks the crowd away from the tree the build fitted to it, and a
+        // duration covering them would grow with `--ticks` and stop being
+        // comparable across two values of it. What says they ran is `refits`,
+        // which the report prints and which reaches `bodies × ticks` only if
+        // every step did its own pass of `set_sphere` calls.
+        if args.ticks > 1 {
+            ageing.clear();
+            ageing.extend_from_slice(&resting);
+            for tick in 0..args.ticks - 1 {
+                step(&mut ageing, tick);
+                if !set_all(&mut world, &ids, &ageing) {
+                    return Err(stale_id_failure());
+                }
+                world.overlap_queries();
+            }
+        }
+
         // ── refit ──────────────────────────────────────────────────────
+        // The last tick alone, so this is one tick's cost whatever `--ticks`
+        // is — and it is the tick against the most travelled tree, which is
+        // the one the flag exists to price.
         let started = Instant::now();
         let moved_all = set_all(&mut world, &ids, &moved);
         world.overlap_queries();
@@ -498,11 +591,17 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
 
 /// The untimed pass everything the timed loop does is held to.
 ///
-/// Builds the world once, moves every body once, and runs one query pass
-/// whose fold says *which* bodies answered — then checks that fold, and the
-/// tally beside it, against [`serial_answers`]. The tree's own shape is
+/// Builds the world once, puts every body where the walk left it, and runs one
+/// query pass whose fold says *which* bodies answered — then checks that fold,
+/// and the tally beside it, against [`serial_answers`]. The tree's own shape is
 /// checked too: a tree holding fewer elements than the crowd would answer
 /// quickly and consistently for a crowd that is not the one placed.
+///
+/// One jump to `moved` rather than the timed loop's tick-by-tick walk, because
+/// the two are not being claimed to cost the same — only to *answer* the same.
+/// Whether they do is not asserted here: the timed loop ages its own world one
+/// tick at a time and every one of its passes is held to this tally, so a walk
+/// that left a tree describing something else fails the run there.
 ///
 /// # Errors
 ///
@@ -570,8 +669,9 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
     let per_query = run.answers.results as f64 / queries as f64;
 
     let human = format!(
-        "{}: {} bodies of radius {} in a {} x {} arena, queried at radius {}, {} timed \
-         iterations of all three phases, {} warm-up\n\
+        "{}: {} bodies of radius {} in a {} x {} arena, queried at radius {}, drift-and-refit \
+         ticks {} with the last one timed, {} timed iterations of all three phases, {} \
+         warm-up\n\
          {}\n\
          {build_line}\n\
          {refit_line}\n\
@@ -579,8 +679,9 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
          answers: {} results over {queries} queries, {per_query:.2} per query — read the \
          query line against this, not against the body count\n\
          broadphase: {} elements, {} nodes, depth {}\n\
-         one iteration: {} refits, {} updates left for a rebuild, {} tree builds — the \
-         build phase is one of them, so a refit phase that rebuilt shows a second\n\
+         one iteration: {} refits — one per body per tick — {} updates left for a \
+         rebuild, {} tree builds; the build phase is one of them, so a refit phase that \
+         rebuilt shows a second\n\
          warm-up: {} iterations, {} results answered and then discarded\n\
          checksum: {}",
         args.scenario.name(),
@@ -589,6 +690,7 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
         args.extent,
         args.extent,
         QUERY_RADIUS,
+        args.ticks,
         args.iterations,
         args.warmup,
         environment_line(),
@@ -614,6 +716,7 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
                 Json::Object(vec![
                     ("bodies", Json::Number(args.bodies as i64)),
                     ("extent", Json::Number(args.extent as i64)),
+                    ("ticks", Json::Number(args.ticks as i64)),
                     ("body_radius", Json::Float(BODY_RADIUS as f32)),
                     ("query_radius", Json::Float(QUERY_RADIUS as f32)),
                     ("iterations", Json::Number(args.iterations as i64)),
@@ -676,8 +779,19 @@ mod tests {
     const DENSE: usize = 12;
     /// The sparse one, sixty-four times the area of [`DENSE`].
     const SPARSE: usize = 96;
+    /// The aged walk these tests compare a one-tick run against. Long enough
+    /// that the crowd's mean squared displacement is far outside the spread of
+    /// a single step, short enough that the whole module still runs in the
+    /// ordinary suite.
+    const TICKS: usize = 64;
 
-    fn args(bodies: usize, extent: usize, iterations: usize, warmup: usize) -> BenchArgs {
+    fn args(
+        bodies: usize,
+        extent: usize,
+        ticks: usize,
+        iterations: usize,
+        warmup: usize,
+    ) -> BenchArgs {
         BenchArgs {
             scenario: crate::args::BenchScenario::Phys,
             workers: None,
@@ -685,6 +799,7 @@ mod tests {
             chunk: 1,
             bodies,
             extent,
+            ticks,
             iterations,
             warmup,
             json: false,
@@ -790,11 +905,7 @@ mod tests {
     #[test]
     fn the_broadphase_finds_the_same_bodies_a_serial_scan_finds() {
         let resting: Vec<DVec3> = (0..BODIES).map(|index| place(index, DENSE)).collect();
-        let moved: Vec<DVec3> = resting
-            .iter()
-            .enumerate()
-            .map(|(index, &centre)| drifted(index, centre))
-            .collect();
+        let moved = walk(&resting, 1);
 
         let expected = serial_answers(&moved);
         assert!(
@@ -819,12 +930,12 @@ mod tests {
     /// a slower microsecond figure that looks like every other slow figure.
     ///
     /// One rebuild, because the build phase's `overlap_queries` is what
-    /// builds the tree; `bodies` refits, because `set_sphere` on a built tree
-    /// always refits; nothing left over, because an update only skips the
-    /// refit when there is no tree to refit.
+    /// builds the tree; `bodies` refits, because this run takes one tick and
+    /// `set_sphere` on a built tree always refits; nothing left over, because
+    /// an update only skips the refit when there is no tree to refit.
     #[test]
     fn the_reported_tree_is_the_timed_iterations_and_says_it_refit() {
-        let run = measure(&args(BODIES, DENSE, 2, 1)).expect("a run");
+        let run = measure(&args(BODIES, DENSE, 1, 2, 1)).expect("a run");
         assert_eq!(
             run.broadphase.elements, BODIES,
             "the reported tree must hold the whole crowd"
@@ -844,6 +955,121 @@ mod tests {
         );
     }
 
+    /// **One tick is exactly the step this scenario took before `--ticks`
+    /// existed.**
+    ///
+    /// The old formula, transcribed: two `hash_unit` draws from
+    /// [`DRIFT_SEED`] itself, scaled into `[-1, 1]` and applied at [`DRIFT`].
+    /// [`step`] reaches it through `salt(DRIFT_SEED, 0)`, which is an identity
+    /// this test is what pins — `salt` growing a mixing step would change every
+    /// number a default invocation has ever printed, and nothing else in the
+    /// workspace would notice.
+    #[test]
+    fn the_first_tick_is_the_step_this_scenario_always_took() {
+        let resting: Vec<DVec3> = (0..BODIES).map(|index| place(index, DENSE)).collect();
+        let moved = walk(&resting, 1);
+        for (index, (&start, &end)) in resting.iter().zip(&moved).enumerate() {
+            let index = index as u64;
+            let offset = DVec3::new(
+                hash_unit(DRIFT_SEED, 2 * index) * 2.0 - 1.0,
+                0.0,
+                hash_unit(DRIFT_SEED, 2 * index + 1) * 2.0 - 1.0,
+            );
+            assert_eq!(end, start + offset * DRIFT, "body {index}");
+        }
+    }
+
+    /// **A longer walk carries the crowd further, and every step is a fresh
+    /// hand.**
+    ///
+    /// Asserted on the crowd's total squared displacement, which is a
+    /// deterministic function of the seeds rather than a property of one body:
+    /// a random walk can bring an individual back where it began, so a
+    /// per-body assertion would be a coin toss. The first `--ticks` worth of
+    /// steps are a prefix of the second's, so this also says the later steps
+    /// draw from somewhere the first one did not — a walk that re-dealt
+    /// [`DRIFT_SEED`] every tick would move the crowd in a straight line and
+    /// land a much larger number, and one that ignored `tick` entirely would
+    /// land exactly [`TICKS`]² times this one.
+    #[test]
+    fn a_longer_walk_carries_the_crowd_further_from_where_it_was_fitted() {
+        let resting: Vec<DVec3> = (0..BODIES).map(|index| place(index, DENSE)).collect();
+        let travelled = |ticks: usize| -> f64 {
+            resting
+                .iter()
+                .zip(&walk(&resting, ticks))
+                .map(|(&start, &end)| (end - start).length_squared())
+                .sum()
+        };
+        let one = travelled(1);
+        let many = travelled(TICKS);
+        assert!(one > 0.0, "a one-tick walk moved nobody");
+        assert!(
+            many > one,
+            "{TICKS} ticks carried the crowd {many} where one carried it {one}"
+        );
+        // A straight line would reach `TICKS²` times the one-tick figure, and
+        // a walk that re-dealt one hand every tick is exactly that. This is a
+        // walk, so it must land well short of it.
+        let straight = one * (TICKS * TICKS) as f64;
+        assert!(
+            many < straight / 4.0,
+            "{many} is not a walk: {TICKS} ticks in a straight line reach {straight}"
+        );
+    }
+
+    /// **`--ticks` reaches the fixture, and the tree never re-picks a leaf.**
+    ///
+    /// The two halves of `docs/backlog.md`'s finding, as one measurement. That
+    /// the flag *did* something: the aged run queries a crowd somewhere else,
+    /// so its checksum differs, and its `refits` is one per body per tick
+    /// rather than one per body — a count no run that skipped the ageing steps
+    /// can reach. That the tree did *not* respond: `depth` and `nodes` are
+    /// identical to the one-tick run's, because `Bvh::update_aabb` rewrites
+    /// boxes and never topology, and `rebuilds` stays at the build phase's one.
+    /// Those are equalities rather than bounds — the topology is `Bvh::build`'s
+    /// answer for `resting`, and both runs place the same `resting`.
+    #[test]
+    fn ticks_age_the_crowd_and_the_tree_keeps_the_shape_the_build_gave_it() {
+        let one = measure(&args(BODIES, DENSE, 1, 2, 0)).expect("a run");
+        let aged = measure(&args(BODIES, DENSE, TICKS, 2, 0)).expect("a run");
+
+        assert_ne!(
+            one.answers.checksum, aged.answers.checksum,
+            "a walk of {TICKS} ticks that folds the one-tick checksum did not happen"
+        );
+        assert_eq!(one.broadphase.refits, BODIES as u64);
+        assert_eq!(
+            aged.broadphase.refits,
+            (BODIES * TICKS) as u64,
+            "every tick refits every body, so a skipped ageing step shows here"
+        );
+        assert_eq!(aged.broadphase.updates_without_refit, 0);
+        assert_eq!(
+            aged.broadphase.rebuilds, 1,
+            "the crowd walked away from the tree and nothing rebuilt it"
+        );
+        assert_eq!(
+            (one.broadphase.depth, one.broadphase.nodes),
+            (aged.broadphase.depth, aged.broadphase.nodes),
+            "a refit rewrote the tree's shape, which is not what a refit does"
+        );
+
+        // And the aged run is still exactly right: `measure` holds every pass,
+        // warm-up included, to a serial scan over the *final* positions, so
+        // reaching this line at all is the guard having passed at tick
+        // {TICKS} and not merely at tick one.
+        assert_eq!(
+            aged.answers,
+            serial_answers(&walk(
+                &(0..BODIES)
+                    .map(|index| place(index, DENSE))
+                    .collect::<Vec<_>>(),
+                TICKS,
+            ))
+        );
+    }
+
     /// **The density control changes the answers, and the timing follows.**
     ///
     /// The one fact `docs/backlog.md` says a scale number is meaningless
@@ -854,8 +1080,8 @@ mod tests {
     /// what a serial scan of its own crowd answers.
     #[test]
     fn the_same_crowd_in_a_smaller_arena_answers_more_per_query() {
-        let dense = measure(&args(BODIES, DENSE, 2, 0)).expect("a run");
-        let sparse = measure(&args(BODIES, SPARSE, 2, 0)).expect("a run");
+        let dense = measure(&args(BODIES, DENSE, 1, 2, 0)).expect("a run");
+        let sparse = measure(&args(BODIES, SPARSE, 1, 2, 0)).expect("a run");
 
         assert!(
             dense.answers.results > sparse.answers.results,
@@ -887,7 +1113,7 @@ mod tests {
     fn the_warm_up_runs_and_is_excluded_from_the_reported_totals() {
         let iterations = 4;
         let warmup = 3;
-        let warmed = measure(&args(BODIES, DENSE, iterations, warmup)).expect("a run");
+        let warmed = measure(&args(BODIES, DENSE, 1, iterations, warmup)).expect("a run");
         let per_pass = warmed.answers.results;
 
         assert_eq!(warmed.warmup_results, warmup as u64 * per_pass);
@@ -898,7 +1124,7 @@ mod tests {
 
         // No warm-up at all is a legal request, and then there is nothing to
         // exclude: the timed totals are the same and the warm-up's are zero.
-        let cold = measure(&args(BODIES, DENSE, iterations, 0)).expect("a run");
+        let cold = measure(&args(BODIES, DENSE, 1, iterations, 0)).expect("a run");
         assert_eq!(cold.warmup_results, 0);
         assert_eq!(cold.timed_results, warmed.timed_results);
         assert_eq!(
@@ -916,20 +1142,24 @@ mod tests {
     /// it is what makes two `--json` outputs comparable at all.
     #[test]
     fn two_runs_of_one_invocation_place_the_same_crowd() {
-        let first = measure(&args(BODIES, DENSE, 2, 1)).expect("a run");
-        let second = measure(&args(BODIES, DENSE, 2, 1)).expect("a run");
+        let first = measure(&args(BODIES, DENSE, 1, 2, 1)).expect("a run");
+        let second = measure(&args(BODIES, DENSE, 1, 2, 1)).expect("a run");
         assert_eq!(first.answers, second.answers);
         assert_eq!(first.warmup_results, second.warmup_results);
         assert_eq!(first.broadphase, second.broadphase);
 
         // And the crowd itself, so a placement that had drifted would fail
         // here rather than only through the checksum.
-        for index in 0..BODIES {
-            let centre = place(index, DENSE);
-            assert_eq!(centre, place(index, DENSE));
+        let resting: Vec<DVec3> = (0..BODIES).map(|index| place(index, DENSE)).collect();
+        assert_eq!(
+            resting,
+            (0..BODIES)
+                .map(|index| place(index, DENSE))
+                .collect::<Vec<_>>()
+        );
+        for (index, (&start, &end)) in resting.iter().zip(&walk(&resting, 1)).enumerate() {
             assert_ne!(
-                drifted(index, centre),
-                centre,
+                start, end,
                 "body {index} did not move, so the refit phase refits nothing"
             );
         }
@@ -940,7 +1170,7 @@ mod tests {
     /// anywhere.
     #[test]
     fn the_output_carries_three_distributions_and_the_answers_that_explain_them() {
-        let args = args(BODIES, DENSE, MIN_PERCENTILE_SAMPLES, 1);
+        let args = args(BODIES, DENSE, 1, MIN_PERCENTILE_SAMPLES, 1);
         let run = measure(&args).expect("a run");
         let outcome = report(&args, &run);
 

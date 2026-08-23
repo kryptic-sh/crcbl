@@ -71,6 +71,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   every run. The output also reports one iteration's refits, updates left for a
   rebuild, and tree builds, so a run says whether its refit phase refit.
 
+  `--ticks` ages the tree before the query phase: N drift-and-refit steps, the
+  last one timed, defaulting to 1 so an existing invocation reports what it
+  always did. It answers a question nobody had measured — a BVH that only ever
+  refits never re-picks a leaf, so at 2000 bodies the reported depth, node count
+  and build count are identical at 1 tick and at 100000, while the cost of a
+  query result rises 15-fold. The refit phase itself stays flat, so a game would
+  see this in its broadphase queries and never in its physics tick.
+
 - **`crcbl bench --scenario jobs`** times `crcbl_jobs::Pool::par_for` over a
   fixed synthetic workload and reports it as a distribution: p50, p95, p99 and
   max, never a mean, with the pool's own counters beside them and the

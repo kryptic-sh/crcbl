@@ -191,11 +191,13 @@ fn a_malformed_invocation_exits_two() {
         vec!["bench", "--scenario", "jobs", "--iterations", "lots"],
         vec!["bench", "--scenario", "phys", "--bodies", "0"],
         vec!["bench", "--scenario", "phys", "--extent", "0"],
+        vec!["bench", "--scenario", "phys", "--ticks", "0"],
         // A flag that belongs to the other scenario, either way round: it is
         // refused rather than ignored, because a run that quietly dropped a
         // density would still print a plausible distribution.
         vec!["bench", "--scenario", "phys", "--workers", "2"],
         vec!["bench", "--scenario", "jobs", "--extent", "12"],
+        vec!["bench", "--scenario", "jobs", "--ticks", "8"],
     ] {
         let output = crcbl(temporary.path(), &args);
         assert_eq!(code(&output), 2, "{args:?} should be exit 2");
@@ -1717,6 +1719,89 @@ fn bench_phys_answers_more_per_query_in_a_denser_arena() {
             .to_string()
     };
     assert_ne!(checksum(&dense), checksum(&sparse));
+}
+
+/// **`--ticks` ages the crowd, and the tree it is queried through keeps the
+/// shape the build gave it** — `docs/backlog.md`'s finding, end to end.
+///
+/// Two runs of one invocation apart from the tick count. What the flag changes
+/// is the crowd: the aged run folds a different checksum and reports one refit
+/// per body *per tick*, which is a count no run that parsed the flag and then
+/// ignored it can reach. What it does not change is the tree: `nodes` and
+/// `depth` are identical, because a refit rewrites boxes and never topology,
+/// and `rebuilds` stays at the build phase's one — the crowd walked away and
+/// nothing re-fitted it to where it went.
+///
+/// Nothing here asserts a duration. Whether the looser tree is *slower* is what
+/// a sweep answers, and a timing assertion is not a test.
+#[test]
+fn bench_phys_ticks_age_the_crowd_without_reshaping_the_tree() {
+    let temporary = TempDir::new("bench-phys-ticks");
+    let bodies = 300;
+    let run = |ticks: &str| {
+        let output = crcbl(
+            temporary.path(),
+            &[
+                "bench",
+                "--scenario",
+                "phys",
+                "--bodies",
+                &bodies.to_string(),
+                "--extent",
+                "16",
+                "--ticks",
+                ticks,
+                "--iterations",
+                "3",
+                "--warmup",
+                "1",
+                "--json",
+            ],
+        );
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout(&output)
+    };
+
+    let ticks = 64;
+    let fresh = run("1");
+    let aged = run(&ticks.to_string());
+
+    // The run says what it was asked for, so a reader of the JSON alone can
+    // tell the two apart.
+    assert_eq!(numbers(&fresh, "ticks"), vec![1]);
+    assert_eq!(numbers(&aged, "ticks"), vec![ticks]);
+
+    // Every tick refits every body: the observable that says the ageing steps
+    // ran rather than being parsed and dropped.
+    assert_eq!(numbers(&fresh, "refits"), vec![bodies]);
+    assert_eq!(numbers(&aged, "refits"), vec![bodies * ticks]);
+
+    // And the crowd really is somewhere else, which the checksum is the only
+    // field that can say.
+    let checksum = |json: &str| {
+        field_values(json, "checksum")
+            .next()
+            .expect("a checksum")
+            .to_string()
+    };
+    assert_ne!(checksum(&fresh), checksum(&aged));
+
+    // The tree kept the shape `Bvh::build` gave it for where the crowd
+    // started: same nodes, same depth, and no second build.
+    for key in ["elements", "nodes", "depth"] {
+        assert_eq!(
+            numbers(&fresh, key),
+            numbers(&aged, key),
+            "{key} moved, so something re-picked a leaf's place"
+        );
+    }
+    assert_eq!(numbers(&aged, "rebuilds"), vec![1]);
+    assert_eq!(numbers(&aged, "updates_without_refit"), vec![0]);
 }
 
 /// An unknown scenario is a bad invocation, and it names the ones that exist —
