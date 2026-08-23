@@ -3,6 +3,43 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### What P8 actually still owes, measured
+
+The roadmap's P8 row reads "Phys slice 3: batch queries at scale, sleeping and
+islands pressure; the ECS parallel schedule and the physics broadphase adopted
+onto `crcbl-jobs`". Checked against the tree on 2026-08-23, that is three
+different things in three different states, and only one of them is P8-sized
+work anybody can start.
+
+- **The broadphase on `crcbl-jobs` is demonstrated, at the app layer.**
+  `OverlapQueries` and `EntityOverlapQueries` carry `&self` forms taking a
+  caller-owned `QueryScratch`, and `apps/horde`'s `steer_enemies` spends its
+  exclusive borrow once, then queries the resulting view from inside
+  `Pool::par_for` with a thread-local scratch. That is the whole pattern the
+  plan describes, working, in a shipped sample.
+
+  What does **not** exist is an engine-level batch query that does it for a
+  caller — and it should not be built yet: horde is the only consumer, so
+  extracting it now would be a helper with one caller, shaped by a guess about
+  the second. Extract it when a second consumer arrives, and let that consumer's
+  needs pick the signature.
+
+- **Sleeping and islands are not P8's.** `crcbl-phys`' own module table puts
+  them at **L2** — "contact solver: sequential impulses, warm starting,
+  islands", marked Stretch — and `docs/plan/05-physics.md` says the L2 items
+  land in wave 2, driven by the ragdolls topic. Nothing in `crcbl-phys` mentions
+  either today. The roadmap row promises in P8 what the physics topic schedules
+  for wave 2; the physics topic is the one to believe, because it is the one
+  with the dependency argument in it.
+
+- **The ECS parallel schedule is the real remaining P8 work**, and it is blocked
+  on a decision rather than on effort — see the entry above.
+
+So P8 as written looks like a large slice and is mostly already answered. What
+it leaves is: pick an option for the ECS schedule, and give the `phys` bench
+something to compare a parallel adoption against — today it measures one thread,
+which is the right baseline and not yet a comparison.
+
 ### P8's ECS access declarations were never reserved, and P2 says they were
 
 `docs/plan/21-jobs.md`'s delivery table has a **P2** row reading "Seams
