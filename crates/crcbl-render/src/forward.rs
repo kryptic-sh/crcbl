@@ -10177,7 +10177,9 @@ mod tests {
         assert_eq!(
             crate::bloom::mips_for(WIDEST_EXTENT),
             crate::bloom::MAX_MIPS,
-            "the widest frame has to be one whose chain is the longest one there is, or              the bound below is checked against a frame that could not reach it"
+            "the widest frame has to be one whose chain is the longest one there \
+             is, or the bound below is checked against a frame that could not \
+             reach it"
         );
         assert!(
             bare < ForwardRenderer::MAX_PASSES as usize,

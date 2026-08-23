@@ -107,6 +107,14 @@ jobs:
       - name: The docs cite paths that exist
         run: ./tools/check-doc-citations.sh
 
+      # A string literal wrapped without its trailing `\` keeps the newline and
+      # the next line's indentation, so the message prints as a sentence with a
+      # hole in it. It compiles, `rustfmt` leaves it alone, clippy has no lint
+      # for it, and it is only ever read when the assertion carrying it fires.
+      # Three were in the tree at once before anyone looked.
+      - name: No string literal lost the backslash that joins its halves
+        run: ./tools/check-wrapped-strings.sh
+
   clippy:
     name: clippy (linux)
     runs-on: ubuntu-latest

@@ -46,37 +46,6 @@ CI run 32653884228's `SYNC-HAZARD-WRITE-AFTER-WRITE` on this machine down to
   `run-vk-e2e.sh`'s reach line agrees, printing `cross-submission=yes` under the
   old layer on this machine and `no` under the new one.
 
-### A wrapped string that lost its `\` reads as a sentence with a hole in it
-
-Three assertion and log messages in the tree carried a run of fourteen-odd
-literal spaces mid-sentence, because a wrapped string literal was written
-without the trailing `\` that joins the two halves. Rust keeps the newline and
-the following indentation, so the message a reader actually meets is
-`… so they are work that is              actually owed …`. It compiles, no
-formatter touches it, and it is only ever seen when the assertion fires — which
-is exactly when a message needs to be readable.
-
-Two are fixed (`crcbl-audio`'s channel-count warning and `crcbl-hal`'s
-`every_parity_blocker_is_on_a_deferred_backend`).
-**`crates/crcbl-render/src/forward.rs` still has one**, in the message beginning
-"the widest frame has to be one whose chain is the longest one there is" — left
-alone only because another agent held that file at the time.
-
-**Worth a gate, and here is the shape.** The pattern is a string literal with
-five or more consecutive spaces between two words:
-
-```python
-re.finditer(r'"[^"\n]*[a-z,;.]  {5,}[a-z][^"\n]*"', source)
-```
-
-Run over `git ls-files '*.rs'` that finds all three and nothing else in the
-current tree except deliberate embedded source — `crcbl-shaders/src/ssr.rs`'s
-Slang fragments, `crcbl-sprite/src/crpix.rs`'s fixture text and
-`crcbl-wl-scanner/src/emit.rs`'s generated code — so it needs the reviewed
-exception list this repo already uses elsewhere rather than a looser regex. Not
-written yet: it wants a `tools/` script and a `ci.yml` step, and `ci.yml` was
-held by another agent when this was found.
-
 ### What the validation gate still cannot see
 
 `crcbl-vk` announces its messenger; `tools/run-samples-windowed.sh`,
