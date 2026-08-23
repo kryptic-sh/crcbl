@@ -6610,6 +6610,51 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   and 151 s. One sample of each, so the timeout is headroom rather than a
   budget.
 
+## A weekly job that goes red is invisible, and it happened twice at once
+
+`cron.yml`'s miri job was failing from **2026-08-17 to 2026-08-23** and nothing
+said so. Its own comment already warns that "a job that runs once a week is a
+job nobody is watching" — written after `crcbl-audio` gaining `cpal` broke it in
+August and went unnoticed for the same reason. It happened again, and this time
+two independent causes had stacked up before anybody looked:
+
+- **A test that cannot run under miri.** `crcbl-core`'s
+  `the_environment_variable_is_what_turns_the_gate_on` re-executes the test
+  binary in a child process, which is the right way to test a process-global
+  without racing the other tests in the binary. Miri does not implement
+  `posix_spawn`, so it aborted the whole binary. Fixed by skipping it under miri
+  with a reason, so the run reports `1 ignored` rather than staying silent.
+- **A `cdylib` example.** `crcbl-jobs` gained `web_worker_gate` with the Web
+  Worker spawn backend on 2026-08-23, and `cargo miri test -p` builds every
+  example of every crate it is told about. Miri's target cannot produce a
+  `cdylib`, so the step died before interpreting anything. Fixed with `--tests`,
+  which was measured to select the identical set of test binaries.
+
+Both are fixed and `cargo miri test --tests -p crcbl-jobs` now runs **per
+commit** in `ci.yml`, because that is the crate the value is concentrated in —
+its unsafe is concurrent, and x86-64's total store order makes a weakened
+ordering invisible to everything else here.
+
+**What is still open is the other five crates**, which stay weekly for the
+reason `cron.yml` gives: interpreting the full list is minutes per PR. So the
+failure mode that produced this entry is unchanged for them — the job can go red
+and stay red until somebody types `gh workflow run cron.yml`. The options, none
+taken:
+
+- **Open an issue on failure.** A `if: failure()` step running `gh issue create`
+  turns a silent red into something with a notification behind it. Cheap, and it
+  needs a decision about issue noise and about a token with `issues: write`.
+- **Move the whole census per-PR.** Measured at about three and a half minutes
+  of interpretation on top of a cold compile, so it is not obviously too
+  expensive any more — `crcbl-core` 81 s, `crcbl-store` 58 s, `crcbl-ui` 17 s,
+  `crcbl-ecs` 6 s, `crcbl-hal` 2 s, from `cron.yml`'s own note. Against: those
+  five have no concurrent unsafe, so the per-commit value really is concentrated
+  where it has already been moved.
+- **Run the cron nightly instead of weekly.** Shortens the blind window without
+  answering the question, since nobody watches a nightly job either.
+- **Accept it** and treat "trigger it deliberately after anything lands near it"
+  as the rule, which is what the file says today and what did not happen twice.
+
 ## The private-item doc gate only ever runs on Linux
 
 `ci.yml`'s `rustdoc` job is `runs-on: ubuntu-latest`, so
