@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A page that opens a second GPU device no longer wedges on the first one's
+  last answer.** The engine's pump held any reply `putReplyStream` would not
+  take and offered it again next frame, which is right for the three reasons a
+  live channel refuses one and wrong for the fourth: when there is no channel
+  left, the run those replies answer is over, and the next `StreamChannel` the
+  page installs starts its sequence numbers at `0` again. The held reply then
+  named a command that channel never sent, `ReplyInbox::drain` refused the whole
+  buffer it arrived in — the real answers in it included — and whatever was
+  waiting on one of those waited for ever. `web/engine/gpu-transport.js` now
+  exports `replyChannelInstalled`, which is how `web/engine/demo.js`,
+  `web/probe/main.js` and `web/harness/main.js` tell "never" from "not now" and
+  drop replies nothing can receive. Reachable since the offscreen teardown began
+  asking `Device::take_error` on its way out, which puts a reply-bearing command
+  in the last frame before the channel goes: it timed out every second scene of
+  `web/run-render-harness-e2e.sh`, six of twelve, alternating by index.
+
 - **`crcbl-vk` refuses a writable storage binding of a host-visible buffer.**
   `BufferDesc::memory` has always said that a buffer a shader writes must be
   `MemoryLocation::DeviceLocal` — D3D12's upload and readback heaps refuse

@@ -31,7 +31,11 @@
 
 import init from './crcbl_render_harness.js';
 import { Replayer } from '../engine/gpu-replay.js';
-import { putReplyStream, takeCommandStream } from '../engine/gpu-transport.js';
+import {
+  putReplyStream,
+  replyChannelInstalled,
+  takeCommandStream,
+} from '../engine/gpu-transport.js';
 
 /** Mirrors the state codes in `apps/render-harness/src/lib.rs`. */
 const STATE = { IDLE: 0, RUNNING: 1, RENDERED: 2, FAILED: 3 };
@@ -191,11 +195,26 @@ async function main() {
       try {
         const carried = takeCommandStream(gpuStream);
         replayer.replay(carried);
-        if (
-          replayer.hasReplies &&
-          putReplyStream({ exports, memory, bytes: replayer.replies })
-        ) {
-          replayer.clear();
+        if (replayer.hasReplies) {
+          if (putReplyStream({ exports, memory, bytes: replayer.replies })) {
+            replayer.clear();
+          } else if (!replyChannelInstalled(gpuStream)) {
+            // THE CASE THIS GATE MEETS TWELVE TIMES A RUN, once per scene, and
+            // the one where holding the replies is the bug rather than
+            // dropping them. A `false` from `putReplyStream` is ordinarily "not
+            // now" — but with no channel behind it, it is "never": the scene
+            // that asked has torn its device down, `OffscreenSetup::finish`
+            // having encoded a last `TakeError` on the way out, and the answer
+            // to it arrives here one pump after the channel it belongs to is
+            // gone. The next scene installs a *fresh* channel whose sequence
+            // numbers start at 0, so a reply held across that boundary answers
+            // a command that channel never sent — and `ReplyInbox::drain`
+            // refuses the whole buffer it rides in, which is the buffer
+            // carrying that scene's own `SurfaceCaps` answer. The browser does
+            // not send that twice, so the scene waits on it for ever: it is
+            // exactly why every other scene used to time out.
+            replayer.clear();
+          }
         }
       } catch (error) {
         // A replay fault is the page being unable to execute an opcode the

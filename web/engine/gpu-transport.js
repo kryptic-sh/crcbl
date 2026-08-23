@@ -115,6 +115,37 @@ export function takeCommandStream({ exports, memory }) {
 }
 
 /**
+ * Whether there is a channel for replies to reach at all.
+ *
+ * The one thing a `false` from {@link putReplyStream} cannot say on its own,
+ * and the difference between "not now" and "never". Three of that `false`'s
+ * four causes are a channel that is there and busy, and the caller's answer to
+ * those is to hold the bytes and offer them again. The fourth is that there is
+ * no channel — and a channel that has gone is not one that comes back: the next
+ * one is a *fresh* `StreamChannel` whose sequence counter starts at `0` again,
+ * so bytes queued against the old one answer commands the new one never sent.
+ *
+ * **What that costs, when it happens.** `ReplyInbox::drain` in
+ * `crates/crcbl-webgpu/src/web.rs` refuses a reply naming a sequence nothing
+ * waits on — and refuses the *whole buffer* with it, so the stale answer takes
+ * that frame's real answers down too. The answers do not come again: the
+ * browser sent them once. That is a run wedged for good, and it is why a caller
+ * holding replies must ask this before deciding a `false` was "not now".
+ *
+ * A page that has not booted yet answers `false` here as well, and that costs
+ * nothing: a replayer that has replayed no commands has no replies to drop.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean}
+ */
+export function replyChannelInstalled({ exports }) {
+  // The same readiness test `putReplyStream` makes, and named here so a caller
+  // can make it without offering bytes first.
+  return exports.__crcbl_web_gpu_reply_capacity() !== 0;
+}
+
+/**
  * Hands a buffer of encoded replies to wasm, or reports that it would not take
  * them.
  *
@@ -132,7 +163,10 @@ export function takeCommandStream({ exports, memory }) {
  * - wasm refused the commit, which means the bytes were not delivered.
  *
  * Discarding them on a `false` would be the one unrecoverable bug this channel
- * can have: a dropped reply is a command that waits for ever.
+ * can have: a dropped reply is a command that waits for ever. **Except on the
+ * first of those four**, where the opposite is true and holding them is the
+ * bug — see {@link replyChannelInstalled}, which is how a caller tells that
+ * case from the other three.
  *
  * @param {object} options
  * @param {Record<string, Function>} options.exports

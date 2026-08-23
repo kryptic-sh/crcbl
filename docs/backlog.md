@@ -3,6 +3,49 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `OffscreenSetup::finish` cannot see a WebGPU device error
+
+`crcbl::screenshot::OffscreenSetup::finish` asks `Device::take_error` after the
+teardown and returns `OffscreenError::DeviceReported` when it answers. On
+`crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` that works. On `crcbl-webgpu` it
+cannot: `WebGpuDevice::take_error` has nothing queued, so it _encodes_ a
+`TakeError` command and answers `None`, and the browser's reply lands a frame
+later — by which time `finish` has already dropped the device and the instance
+on the next two lines. The answer is delivered to nobody.
+
+So the offscreen path's device-error guard is a green light wired to nothing on
+the browser backend: a scene whose every draw the device refused still reaches
+`State::Rendered` in `apps/render-harness`. The gate is not blind — the harness
+page drains the replayer's own error queue in `web/harness/main.js`'s `pump` and
+`web/tools/render-harness-e2e.mjs` fails a scene that reported any — but that is
+the JS side answering the question, not `finish`.
+
+Fixing it means `finish` cannot stay synchronous on this backend, or the last
+`take_error` has to be asked one pump earlier (before the swapchain and surface
+go) and read at the end. Not attempted. Verified by reading
+`crates/crcbl-webgpu/src/hal/device.rs::take_error` against
+`crates/crcbl/src/screenshot.rs::OffscreenSetup::finish`, and by the fact that
+the teardown frame carries exactly one `TakeError` whose reply the browser could
+not deliver.
+
+### A refused reply buffer is swallowed rather than reported
+
+`StreamChannel::drain_replies` returns `Result<_, DecodeError>` and every caller
+throws the `Err` away: `crates/crcbl-webgpu/src/hal/open.rs`'s
+`WebGpuInstanceOpen::poll` matches `if let Some(Ok(replies))`, and
+`crates/crcbl-webgpu/src/hal/device.rs` does the same in `pump` and in the
+readback poll. A `DecodeError::UnexpectedSequence` — which refuses the _whole_
+buffer, real answers included — therefore reaches nobody, and the probe waiting
+on one of those answers waits for ever.
+
+That is what made the stale-reply bug fixed alongside this entry cost 600 frames
+and print nothing: the failure was already detected, in the right place, with
+the sequence in hand, and then dropped on the floor. A decode error here is
+never transient — the two halves of the format are hand-written, so it is a bug
+in one of them — so the open future should resolve `Err` on it and the device
+pump should route it to `take_error`'s queue. Not done here: it changes what
+three poll paths return, and this task was the hang rather than the diagnosis.
+
 ### DECISION NEEDED — a read-only depth state that says it writes
 
 `crcbl-vk` no longer stores a read-only depth attachment: `conv::depth_store_op`

@@ -38,7 +38,11 @@
 import { attachShell } from './shell.js';
 import { startAudio } from './audio.js';
 import { Replayer } from './gpu-replay.js';
-import { putReplyStream, takeCommandStream } from './gpu-transport.js';
+import {
+  putReplyStream,
+  replyChannelInstalled,
+  takeCommandStream,
+} from './gpu-transport.js';
 import { drainLog, LOG_INFO } from './log.js';
 import {
   drainFetch,
@@ -364,15 +368,23 @@ export function bootDemo(spec) {
           gpuReplayed += 1;
           gpuLastFrame = carried;
         }
-        if (
-          replayer.hasReplies &&
-          putReplyStream({ exports, memory, bytes: replayer.replies })
-        ) {
-          // Cleared only once wasm has actually taken them. A `false` is "not
-          // now", and the same bytes are offered again next frame; dropping
-          // them is the one unrecoverable bug this channel can have.
-          replayer.clear();
-          gpuDelivered += 1;
+        if (replayer.hasReplies) {
+          if (putReplyStream({ exports, memory, bytes: replayer.replies })) {
+            // Cleared only once wasm has actually taken them. A `false` is "not
+            // now", and the same bytes are offered again next frame; dropping
+            // them is the one unrecoverable bug this channel can have.
+            replayer.clear();
+            gpuDelivered += 1;
+          } else if (!replyChannelInstalled(gpuStream)) {
+            // THE ONE CASE WHERE HOLDING THEM IS THE BUG INSTEAD. A `false`
+            // with no channel behind it is "never", not "not now": the run
+            // these answer is over, nothing waits on them, and the next channel
+            // this page installs starts its sequence numbers at 0 again — so
+            // offering them there answers commands it never sent, and
+            // `ReplyInbox::drain` refuses that whole buffer, taking its real
+            // answers with it.
+            replayer.clear();
+          }
         }
       } catch (error) {
         // LATCHED OFF, AND SAID ONCE, LOUDLY. A throw out of here is an opcode
