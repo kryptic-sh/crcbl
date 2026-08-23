@@ -643,6 +643,90 @@ fn a_device_without_mesh_shader_refuses_a_mesh_pipeline() {
     assert!(what.contains("MESH_SHADER"), "{what}");
 }
 
+/// A device that does not report [`Features::COMPUTE`] refuses a compute
+/// pipeline, and takes a graphics one from the same module and layout.
+///
+/// Neither [`NullInstance`] preset can reach this arm — both carry `COMPUTE` —
+/// so until this test the refusal was code no run had ever entered, and the bit
+/// existed only for a device nothing constructed. The graphics half is what
+/// makes it a *targeted* refusal rather than a device that fails at everything:
+/// a fixture broken in some unrelated way would satisfy the first assertion on
+/// its own.
+#[test]
+fn a_device_without_compute_refuses_a_compute_pipeline() {
+    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    caps.features.remove(Features::COMPUTE);
+    let instance = NullInstance::new(caps);
+    // `DeviceDesc::for_adapter` requires `COMPUTE` outright — it is one of the
+    // two flags the engine cannot work without — so the baseline has to be
+    // written out here rather than spread from it. That is also why neither
+    // preset can reach this arm: nothing in the engine opens such a device.
+    let device = instance
+        .create_device(&DeviceDesc {
+            required_features: Features::TIMELINE_SEMAPHORE,
+            optional_features: caps.features,
+            ..DeviceDesc::for_adapter(AdapterId(0))
+        })
+        .expect("a device with no compute still opens");
+    assert!(
+        !device.caps().supports(Features::COMPUTE),
+        "the fixture was meant to withhold COMPUTE"
+    );
+
+    let module = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("cull.slang"),
+            spirv: &SPIRV,
+            wgsl: None,
+            msl: None,
+            dxil: &[],
+        })
+        .expect("module");
+    let layout = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("cull"),
+            bind_group_layouts: &[],
+            push_constants: None,
+        })
+        .expect("pipeline layout");
+
+    let error = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            label: Some("cull"),
+            layout,
+            compute: ShaderEntry {
+                module,
+                entry_point: "cull_main",
+            },
+            workgroup_size: [64, 1, 1],
+        })
+        .expect_err("this device reports no COMPUTE");
+    let HalError::Unsupported { backend, what } = error else {
+        panic!("the refusal must name the capability, not be a generic failure");
+    };
+    assert_eq!(backend, BackendKind::Null);
+    assert!(what.contains("compute"), "{what}");
+
+    device
+        .create_graphics_pipeline(&GraphicsPipelineDesc {
+            label: Some("opaque"),
+            layout,
+            vertex: ShaderEntry {
+                module,
+                entry_point: "vs_main",
+            },
+            fragment: Some(ShaderEntry {
+                module,
+                entry_point: "fs_main",
+            }),
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            color_targets: &[ColorTargetState::opaque(Format::Rgba16Float)],
+        })
+        .expect("the refusal is the compute stage's, not the whole device's");
+}
+
 /// The two mesh stages are reported separately, so they are refused
 /// separately: a device with the mesh stage and no task stage takes a mesh
 /// pipeline and refuses one carrying a task entry point.
