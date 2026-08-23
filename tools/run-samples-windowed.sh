@@ -149,7 +149,31 @@ run_sample() {
         exit 1
     fi
 
-    echo "crcbl e2e: ${sample} presented ${SAMPLE_FRAMES} frames at ${want_extent} windowed on x11/vk"
+    # **What the sample was still holding when its device went away.**
+    # `crcbl-vk` warns at teardown for every object nobody destroyed, naming the
+    # kinds and formats, and a warning fails nothing — `run-vk-e2e.sh` reads the
+    # same line for the same reason. That gate covers the *suite*; this is the
+    # only place a **sample** is asked the question, because a sample's teardown
+    # runs only when a real run ends, which is what this script is. The browser
+    # gate's group I asks it of the same games on the WebGPU side.
+    #
+    # Zero lines, not a judgement call: a sample that must leave something alive
+    # has to say so here deliberately rather than inside a warning nobody reads.
+    local leaks
+    leaks="$(grep -F 'object(s) still alive at device teardown' "$log" || true)"
+    if [ -n "$leaks" ]; then
+        echo "crcbl e2e: ${sample} destroyed its device with objects still alive:" >&2
+        while IFS= read -r line; do
+            echo "               $line" >&2
+        done <<<"$leaks"
+        echo "           The sample's own teardown reporter wrote that. Destroy them" >&2
+        echo "           where they were made — the kinds and formats above are what" >&2
+        echo "           it saw — rather than leaving the line in a log." >&2
+        log_tail
+        exit 1
+    fi
+
+    echo "crcbl e2e: ${sample} presented ${SAMPLE_FRAMES} frames at ${want_extent} windowed on x11/vk, nothing left alive"
 }
 
 # See the equivalent block in `run-x11-e2e.sh` for why the loader probe is a
