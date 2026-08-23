@@ -20,7 +20,7 @@
 
 use crcbl_core::Handle;
 
-use crate::Format;
+use crate::{Format, HalError, Limits};
 
 /// Marker type for buffer handles. Uninhabited; only ever a type parameter.
 #[derive(Debug)]
@@ -418,6 +418,92 @@ pub struct ImageDesc<'a> {
     pub samples: u32,
     /// Permitted uses.
     pub usage: ImageUsage,
+}
+
+impl ImageDesc<'_> {
+    /// Refuses a descriptor no device could make an image from.
+    ///
+    /// Every rule here is one a driver reports badly or not at all: an
+    /// over-large extent surfaces as a creation failure naming no dimension, a
+    /// sample count that is not a power of two reaches an API where samples are
+    /// a *bitmask* and becomes a nonsense request rather than an error, and a
+    /// mip count past the chain the extent can hold is undefined on some and
+    /// clamped on others. So the seam states them, once, and a backend calls
+    /// this rather than keeping its own copy — three of them still do, and
+    /// `docs/backlog.md` carries that consolidation.
+    ///
+    /// The wording is `crcbl-hal`'s null backend's, which had the fullest set
+    /// and is the reference every other backend is compared against; moving it
+    /// here changed no message.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming the field and the limit it
+    /// passed.
+    pub fn check(&self, limits: &Limits) -> Result<(), HalError> {
+        let extent = self.extent;
+        if extent.width == 0 || extent.height == 0 || extent.depth_or_layers == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "image extent must be non-zero in every dimension".to_string(),
+            ));
+        }
+        // A 3D image is bounded by `max_image_3d` on **every** axis, including
+        // its depth; a 1D/2D one by `max_image_2d` on width and height and by
+        // `max_image_array_layers` on its layer count. Checking
+        // `max(width, height)` against `max_image_2d` for both left
+        // `max_image_3d` read by nothing and a volume's depth checked against
+        // nothing at all.
+        if self.image_type == ImageType::D3 {
+            let longest = extent.width.max(extent.height).max(extent.depth_or_layers);
+            if longest > limits.max_image_3d {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "3D image extent {extent:?} exceeds max_image_3d {}",
+                    limits.max_image_3d
+                )));
+            }
+        } else {
+            let longest = extent.width.max(extent.height);
+            if longest > limits.max_image_2d {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "image extent {longest} exceeds max_image_2d {}",
+                    limits.max_image_2d
+                )));
+            }
+            if extent.depth_or_layers > limits.max_image_array_layers {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "{} array layers exceeds max_image_array_layers {}",
+                    extent.depth_or_layers, limits.max_image_array_layers
+                )));
+            }
+        }
+        if self.mip_levels == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "image must have at least one mip level".to_string(),
+            ));
+        }
+        let full_chain = extent.full_mip_levels(self.image_type);
+        if self.mip_levels > full_chain {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} mip levels exceeds the {full_chain} a {extent:?} {:?} image can have",
+                self.mip_levels, self.image_type
+            )));
+        }
+        // A sample count is a bit in a mask on every API underneath, so `3`
+        // is not "three samples" — it is two bits set, which reaches a driver
+        // as a nonsense request rather than an error.
+        if !self.samples.is_power_of_two() || self.samples > limits.max_sample_count {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} samples is not a power of two in 1..={}",
+                self.samples, limits.max_sample_count
+            )));
+        }
+        if self.usage.is_empty() {
+            return Err(HalError::InvalidDescriptor(
+                "an image with no usage flags can never be used".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// How a view reinterprets its image's dimensionality.

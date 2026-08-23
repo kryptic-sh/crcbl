@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-webgpu` checks image and swapchain descriptors instead of encoding
+  them.** `create_image` ran no validation at all: a zero extent, an extent past
+  `max_image_2d`/`max_image_3d`, more array layers than the device allows, zero
+  mip levels, more mips than the extent can hold, a sample count that is not a
+  power of two, and an empty usage were each refused on the other backends and
+  encoded here. `create_swapchain` and `reconfigure_swapchain` took a zero
+  extent the same way, where the seam says an unconfigured or minimized window
+  means "do not create one yet" and every other backend answers in that
+  sentence. Both now refuse before anything reaches the wire, so the failure
+  names the descriptor rather than arriving a frame later as the browser's
+  wording about a texture or a canvas through `Device::take_error`.
+
 - **`crcbl-webgpu` runs three seam checks it used to run nowhere.**
   `BindGroupLayoutDesc::check_entries` and
   `ComputePipelineDesc::check_workgroup_size` are documented "every backend

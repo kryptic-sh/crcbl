@@ -1120,68 +1120,11 @@ impl Device for NullDevice {
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
-        let extent = desc.extent;
-        if extent.width == 0 || extent.height == 0 || extent.depth_or_layers == 0 {
-            return Err(HalError::InvalidDescriptor(
-                "image extent must be non-zero in every dimension".to_string(),
-            ));
-        }
-        let limits = self.caps.limits;
-        // A 3D image is bounded by `max_image_3d` on **every** axis, including
-        // its depth; a 1D/2D one by `max_image_2d` on width and height and by
-        // `max_image_array_layers` on its layer count. Checking
-        // `max(width, height)` against `max_image_2d` for both left
-        // `max_image_3d` read by nothing and a volume's depth checked against
-        // nothing at all.
-        if desc.image_type == ImageType::D3 {
-            let longest = extent.width.max(extent.height).max(extent.depth_or_layers);
-            if longest > limits.max_image_3d {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "3D image extent {extent:?} exceeds max_image_3d {}",
-                    limits.max_image_3d
-                )));
-            }
-        } else {
-            let longest = extent.width.max(extent.height);
-            if longest > limits.max_image_2d {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "image extent {longest} exceeds max_image_2d {}",
-                    limits.max_image_2d
-                )));
-            }
-            if extent.depth_or_layers > limits.max_image_array_layers {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "{} array layers exceeds max_image_array_layers {}",
-                    extent.depth_or_layers, limits.max_image_array_layers
-                )));
-            }
-        }
-        if desc.mip_levels == 0 {
-            return Err(HalError::InvalidDescriptor(
-                "image must have at least one mip level".to_string(),
-            ));
-        }
-        let full_chain = extent.full_mip_levels(desc.image_type);
-        if desc.mip_levels > full_chain {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{} mip levels exceeds the {full_chain} a {extent:?} {:?} image can have",
-                desc.mip_levels, desc.image_type
-            )));
-        }
-        // A sample count is a bit in a mask on every API underneath, so `3`
-        // is not "three samples" — it is two bits set, which reaches a driver
-        // as a nonsense request rather than an error.
-        if !desc.samples.is_power_of_two() || desc.samples > limits.max_sample_count {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{} samples is not a power of two in 1..={}",
-                desc.samples, limits.max_sample_count
-            )));
-        }
-        if desc.usage.is_empty() {
-            return Err(HalError::InvalidDescriptor(
-                "an image with no usage flags can never be used".to_string(),
-            ));
-        }
+        // Every rule this used to spell out inline is now `ImageDesc::check`,
+        // on the seam, so a backend that wants them does not copy them. The
+        // messages are the ones that were here; this backend is the reference
+        // the others are compared against, so they had to stay exact.
+        desc.check(&self.caps.limits)?;
         Ok(self.insert(ObjectKind::Image, desc.label, Detail::None))
     }
 

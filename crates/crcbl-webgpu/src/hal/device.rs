@@ -814,6 +814,11 @@ impl Device for WebGpuDevice {
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
+        // The seam's own image rules, which this backend ran none of. The
+        // replayer cannot stand in for them: `createTexture` throws, and what
+        // comes back is the browser's sentence about a texture, one frame late
+        // through `take_error`, rather than the seam's about a descriptor.
+        desc.check(&self.caps.limits)?;
         let handle: ImageHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_image(handle, desc)));
@@ -1293,6 +1298,7 @@ impl Device for WebGpuDevice {
     // --- presentation ---
 
     fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
+        check_swapchain_extent(desc)?;
         let handle: SwapchainHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_swapchain(handle, desc)));
@@ -1314,6 +1320,7 @@ impl Device for WebGpuDevice {
         swapchain: SwapchainHandle,
         desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
+        check_swapchain_extent(desc)?;
         self.channel
             .with(|channel| channel.encode(|stream| stream.reconfigure_swapchain(swapchain, desc)));
         let mut swapchains = self
@@ -1491,4 +1498,28 @@ impl Device for WebGpuDevice {
         // already handles.
         Ok(DisplayTiming::Unknown)
     }
+}
+
+/// Refuses a swapchain descriptor whose extent names no surface.
+///
+/// The seam is explicit that "a zero extent is a caller bug — an unconfigured
+/// or minimized window means 'do not create a swapchain yet', not 'pick
+/// something'", and every other backend answers it in the same sentence, which
+/// `crates/crcbl/tests/hal_seam_e2e.rs` holds them to. This backend answered
+/// `Ok` and encoded the descriptor; the replayer then reached
+/// `context.configure` or `createTexture` with a zero dimension and reported
+/// the browser's own wording about a canvas or a texture, a frame later,
+/// through `take_error`.
+///
+/// Both the create and the reconfigure path call this: a swapchain resized to
+/// zero is the minimize case, which is the one the rule is about.
+fn check_swapchain_extent(desc: &SwapchainDesc<'_>) -> Result<(), SurfaceError> {
+    if desc.extent.0 == 0 || desc.extent.1 == 0 {
+        return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+            "SwapchainDesc::extent is {:?}; an unconfigured or minimized window means 'do not \
+             create one yet' rather than 'pick something'",
+            desc.extent
+        ))));
+    }
+    Ok(())
 }

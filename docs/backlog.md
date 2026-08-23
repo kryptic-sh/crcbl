@@ -6097,6 +6097,29 @@ which is state this backend has deliberately not had. Worth doing only if a
 second obligation wants the same table; one caller's convenience does not pay
 for a mirror of the browser's own bookkeeping.
 
+## Three backends keep their own copy of the image rules (2026-08-24)
+
+`ImageDesc::check` now lives on the seam (`crcbl-hal/src/resource.rs`), lifted
+verbatim out of the null backend — the reference the others are compared
+against, so the messages had to stay exact — and called by the null backend and
+by `crcbl-webgpu`. `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` each still carry a
+hand-written copy of the same rules in their own `create_image`, with their own
+wording (`crcbl-vk/src/device.rs` opens with "ImageDesc::extent {:?} has a zero
+dimension" where the seam says "image extent must be non-zero in every
+dimension").
+
+Consolidating them is the obvious next step and was deliberately not done here.
+The cost is not the call: it is that each of those three has tests asserting its
+own sentences, and `crcbl-mtl` and `crcbl-dx12` cannot be run on this machine,
+so the wording change lands as a CI round trip per backend. Doing it well means
+one backend per slice, its own tests updated in the same change, and the
+agnostic suite asserting the shared wording afterwards.
+
+**What each copy might not have** was not audited — this entry is about the
+duplication, not about a specific missing rule. Checking whether the three
+copies agree with the seam's set, rule for rule, is itself worth a slice: two
+copies is already the bug, and three have had every opportunity to drift.
+
 ## The WSI swapchain-format check has no e2e, and WebGPU has no check (2026-08-24)
 
 `SwapchainDesc::format` "must be one of `SurfaceCaps::formats`" is now refused

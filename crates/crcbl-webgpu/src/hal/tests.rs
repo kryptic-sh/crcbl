@@ -15,10 +15,10 @@ use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, BindGroupLayoutDesc, BindGroupLayoutEntry, BindingFlags,
     BindingKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc, CompositeAlpha,
-    ComputePipelineDesc, Device, DeviceCaps, DeviceDesc, DeviceType, Features, Format, HalError,
-    Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
-    ReadbackState, ShaderEntry, ShaderModuleDesc, ShaderStages, SubmitInfo, SurfaceCaps,
-    SurfaceHandle, SwapchainDesc,
+    ComputePipelineDesc, Device, DeviceCaps, DeviceDesc, DeviceType, Extent3d, Features, Format,
+    HalError, ImageDesc, ImageType, ImageUsage, Instance, Limits, MemoryLocation, PendingDevice,
+    PresentMode, QueueKind, ReadbackDesc, ReadbackState, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc,
 };
 
 use crate::ReplyWriter;
@@ -707,6 +707,138 @@ fn the_seam_checks_this_backend_skipped_now_run_before_anything_is_encoded() {
         })
         .expect("WGSL is what this backend compiles");
     assert_eq!(names(&channel), vec!["CreateShaderModule"]);
+}
+
+/// `ImageDesc::check` and the swapchain extent rule, neither of which this
+/// backend used to run.
+///
+/// The image rules are the seam's, moved out of the null backend so a second
+/// caller could have them rather than a second copy of them; the extent rule is
+/// the one sentence every other backend already answers and
+/// `crates/crcbl/tests/hal_seam_e2e.rs` asserts — a suite that is a native
+/// binary and so cannot reach this backend, which is why the rule went
+/// unenforced here and why the test has to live in this file.
+///
+/// The replayer stands in for neither: `createTexture` and `context.configure`
+/// throw, and what comes back is the browser's sentence about a texture or a
+/// canvas, a frame late through `take_error`, rather than the seam's about a
+/// descriptor.
+#[test]
+fn image_and_swapchain_descriptors_are_checked_before_anything_is_encoded() {
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    let image = |mip_levels, samples, extent| ImageDesc {
+        label: Some("image"),
+        image_type: ImageType::D2,
+        extent,
+        format: Format::Rgba8UnormSrgb,
+        mip_levels,
+        samples,
+        usage: ImageUsage::SAMPLED,
+    };
+    let one = Extent3d {
+        width: 64,
+        height: 64,
+        depth_or_layers: 1,
+    };
+
+    for (case, desc) in [
+        ("a zero extent", image(1, 1, Extent3d { width: 0, ..one })),
+        ("no mip levels at all", image(0, 1, one)),
+        ("more mips than the extent holds", image(99, 1, one)),
+        (
+            "a sample count that is not a power of two",
+            image(1, 3, one),
+        ),
+    ] {
+        let (channel, device) = device_on_fresh_channel();
+        let error = device
+            .create_image(&desc)
+            .expect_err("{case} describes no image any device could make");
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{case}: {error}"
+        );
+        assert!(
+            names(&channel).is_empty(),
+            "{case} reached the wire: {:?}",
+            names(&channel)
+        );
+    }
+    // …and an ordinary image still encodes.
+    let (channel, device) = device_on_fresh_channel();
+    device
+        .create_image(&image(1, 1, one))
+        .expect("a 64x64 single-sampled image breaks no rule");
+    assert_eq!(names(&channel), vec!["CreateImage"]);
+
+    // The swapchain extent. The surface handle is never resolved — the check
+    // runs before the descriptor is encoded, which is the property under test —
+    // but it must be one a pool issued, since `from_bits` refuses a made-up
+    // pattern.
+    let handles = HandlePool::new();
+    let surface: SurfaceHandle = handles.alloc();
+    let swapchain = |extent| SwapchainDesc {
+        label: Some("swapchain"),
+        surface,
+        format: Format::Rgba8UnormSrgb,
+        extent,
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    for extent in [(0, 48), (64, 0), (0, 0)] {
+        let (channel, device) = device_on_fresh_channel();
+        let error = device
+            .create_swapchain(&swapchain(extent))
+            .expect_err("a zero extent means 'not yet', not 'guess a size'");
+        // The sentence every backend answers, which the agnostic suite matches
+        // on and this backend is not in.
+        assert!(
+            format!("{error}").contains("do not create one yet"),
+            "{extent:?}: {error}"
+        );
+        assert!(
+            names(&channel).is_empty(),
+            "{extent:?} reached the wire: {:?}",
+            names(&channel)
+        );
+
+        // And the reconfigure path, which is the one the rule is really about:
+        // a window minimised mid-run resizes its swapchain to zero.
+        let error = device
+            .reconfigure_swapchain(handles.alloc(), &swapchain(extent))
+            .expect_err("a minimised window means 'not yet' on this path too");
+        assert!(
+            format!("{error}").contains("do not create one yet"),
+            "{extent:?} on reconfigure: {error}"
+        );
+        assert!(
+            names(&channel).is_empty(),
+            "{extent:?} reached the wire on reconfigure: {:?}",
+            names(&channel)
+        );
+    }
+
+    // …and a swapchain with a real extent still encodes, on both paths.
+    let (channel, device) = device_on_fresh_channel();
+    let handle = device
+        .create_swapchain(&swapchain((64, 48)))
+        .expect("a 64x48 swapchain is a size a surface can have");
+    device
+        .reconfigure_swapchain(handle, &swapchain((32, 24)))
+        .expect("so is 32x24");
+    assert_eq!(
+        names(&channel),
+        vec!["CreateSwapchain", "ReconfigureSwapchain"]
+    );
 }
 
 // ── (d) a recorded frame's command stream ──────────────────────────────────
