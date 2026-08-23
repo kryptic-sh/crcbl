@@ -283,6 +283,62 @@ fn attach_shm_buffer(
 }
 
 // ---------------------------------------------------------------------------
+// Driving two clients in a known order
+// ---------------------------------------------------------------------------
+
+/// Blocks until the compositor has **processed** every request this connection
+/// has sent, and dispatches the events that came back.
+///
+/// [`Shell::pump`] reads whatever has arrived by the time it runs; it cannot
+/// say whether the compositor has yet acted on what was sent. The difference
+/// is the whole test wherever *two* clients are involved and the order between
+/// them is the thing under test — a `wl_data_offer.receive` on one connection
+/// only becomes a `wl_data_source.send` on the other once the compositor has
+/// processed it, and a test that pumped for a while instead would be asserting
+/// against the scheduler.
+///
+/// Used in that pairing: roundtrip the reader, so every `receive` it issued has
+/// been processed and every `send` they produced is queued on the writer's
+/// connection; then roundtrip the writer, so all of them are dispatched before
+/// its next [`Shell::pump`] acts on any of them.
+///
+/// What it dispatches is queued, not applied — the backend's own dispatcher
+/// fills its event sink and the next `pump` is where it acts, exactly as
+/// [`GlobalHotplug`]'s synthetic events do.
+///
+/// # Errors
+///
+/// [`ShellError::InvalidWindow`] for a stale handle, or
+/// [`ShellError::Backend`] if this is not a Wayland window, if
+/// libwayland-client cannot be loaded, or if the connection is gone.
+pub fn roundtrip(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError> {
+    let SurfaceTarget::Wayland { display, .. } = shell.surface_target(window)? else {
+        return Err(ShellError::Backend(
+            "not a Wayland window; this helper is only for the Wayland backend".to_string(),
+        ));
+    };
+    let lib = ffi::load().map_err(|detail| ShellError::Backend(detail.to_string()))?;
+    let display: *mut WlDisplay = display.as_ptr().cast();
+    // SAFETY: the display belongs to the shell and is live for as long as the
+    // shell is borrowed. The roundtrip runs on this thread, and everything it
+    // dispatches goes through the dispatcher the backend attached to its own
+    // proxies — which pushes into the sink and returns, taking no reference to
+    // the shell this call is holding.
+    if unsafe { (lib.display_roundtrip)(display) } < 0 {
+        return Err(ShellError::Backend("roundtrip failed".to_string()));
+    }
+    Ok(())
+}
+
+/// The most clipboard payloads one selection may have in flight at once.
+///
+/// The backend's bound, re-exported: the module that owns it is crate-private,
+/// and a test that spelled the number instead would go on passing against a cap
+/// that had moved. See `fd::Writes::MAX_PENDING_WRITES` for why there is one and
+/// why the **newest** request past it is the one refused.
+pub const MAX_PENDING_CLIPBOARD_WRITES: usize = super::fd::Writes::MAX_PENDING_WRITES;
+
+// ---------------------------------------------------------------------------
 // Virtual input devices
 // ---------------------------------------------------------------------------
 

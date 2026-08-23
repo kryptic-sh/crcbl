@@ -5612,11 +5612,23 @@ correction a later reader needs.
   and without the fix, `wait_events(Some(2s))` slept 2.002 s. The e2e test
   carries the round trip for that reason, and a reader who drops it will
   conclude the bug is unreachable.
-- **The `SourceSend` wiring is not covered end to end.** `fd::Writes`' cap is
-  unit-tested; that the clipboard path pushes through it rests on the compiler
-  and the existing e2e clipboard tests. A real one needs a second-connection
-  peer issuing more `wl_data_offer.receive` calls than the cap and never reading
-  — the Wayland harness has `DragSource` and no clipboard-reading peer.
+- **The `SourceSend` cap is covered end to end now**, by
+  `a_peer_asking_past_the_pending_write_cap_is_answered_with_nothing`: a second
+  `Session` issues `MAX_PENDING_CLIPBOARD_WRITES + 1` reads before either client
+  pumps, and the assertions are the bytes the peer gets back — every accepted
+  one whole, the refused one an empty `Bytes` (not `Empty`, not `Unavailable`)
+  arriving before any full one, and a paste after the storm whole again. What it
+  still does not reach: a peer asking hundreds past the cap, a storm mixing mime
+  types, this cap pressed together with `Offer::MAX_OFFER_MIMES` or
+  `Device::MAX_PENDING_OFFERS`, and X11's own outgoing-transfer bookkeeping in
+  `x11/xselection.rs`, which has no equivalent test at all.
+
+  Two premises hold that test up and both were shown load-bearing by sabotage:
+  the payload must exceed a pipe (64 KiB — a small one completes on the owner's
+  first pass and frees the slot, and the test then fails with the refused
+  request carrying bytes), and the two `roundtrip`s are what make the order
+  between the connections a fact rather than a race.
+
 - **The compositor half of a withdrawal is unexercised.** sway removes nothing
   but `wl_output` and `wl_seat`, so the e2e test pushes the two registry events
   into the decoded queue itself; the proxies, the rebind and the compositor's

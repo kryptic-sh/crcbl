@@ -21,7 +21,9 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crcbl_shell::wayland_test_support::{DragSource, GlobalHotplug, VirtualInput};
+use crcbl_shell::wayland_test_support::{
+    DragSource, GlobalHotplug, MAX_PENDING_CLIPBOARD_WRITES, VirtualInput,
+};
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalSize, Modifiers,
     MonitorInfo, PhysicalSize, PointerButton, PointerMode, ScrollDelta, Shell, ShellBackend,
@@ -2749,5 +2751,200 @@ fn claiming_the_clipboard_without_user_input_is_refused_by_name() {
         "expected a named refusal, got {refused:?}"
     );
 
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A peer that asks for the selection more times than this client will hold
+/// payloads for is **answered every time** — and the requests past the cap are
+/// answered with nothing.
+///
+/// `fd::Writes::push` refuses the *newest* payload once
+/// [`MAX_PENDING_CLIPBOARD_WRITES`] are in flight and drops its `Writing`,
+/// which closes the descriptor the compositor brokered. The peer reads
+/// end-of-file with no bytes before it.
+///
+/// **The empty answer is the correct behaviour, not a bug**, and the two
+/// alternatives are what make it so: a request left unanswered leaves the peer
+/// blocked on a pipe until its own timeout, and evicting an *older* payload
+/// instead would truncate a paste that was already arriving. What the cap
+/// exists for is that the peer decides how many times to ask, so answering
+/// faithfully multiplies this selection by another process's descriptor limit.
+///
+/// Which answer is which, and why each half is here:
+///
+/// * The first [`MAX_PENDING_CLIPBOARD_WRITES`] requests come back with every
+///   byte of the selection. Without that half, a test where *nothing* was
+///   delivered would pass just as well as one where the cap worked.
+/// * The one past the cap comes back `Bytes` and **empty** — deliberately not
+///   [`crcbl_shell::ClipboardContent::Empty`], which would mean the clipboard
+///   does not hold this format and would be the answer if the request had
+///   never become a `receive` at all, and not `Unavailable`, which would mean
+///   the transfer broke.
+/// * It comes back **first**, before any of the full ones. Its descriptor was
+///   closed at the instant it was refused, while the other payloads were one
+///   pipe-full into a selection that takes many. An empty answer arriving
+///   *after* a full one would be a request that reached the owner late and was
+///   accepted into a slot a finished payload had freed — an empty answer for a
+///   different reason.
+/// * And a paste issued after the storm drains comes back whole, so the cap is
+///   a refusal while the list is full rather than a source this broke.
+///
+/// The concurrency is the point, and it is why this is not a loop around
+/// [`paste_bytes`]: that asks once and waits, so it never has two payloads in
+/// flight. Here every `wl_data_offer.receive` is issued before either client
+/// is pumped again, and the two [`roundtrip`](crcbl_shell::wayland_test_support::roundtrip)s
+/// are what make the order between the two connections a fact rather than a race.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_peer_asking_past_the_pending_write_cap_is_answered_with_nothing() {
+    let mut session = Session::open();
+    let (window, input) = session.with_keyboard("crcbl e2e write cap");
+
+    // Bigger than a pipe, which is what keeps the payloads *pending*: one that
+    // fitted would be written whole on the owner's first pass, finish, and
+    // leave the list — freeing the slot this test needs filled. A Linux pipe
+    // holds 64 KiB, so this is eight pipe-fulls.
+    const PIPE_CAPACITY: usize = 64 * 1024;
+    let payload: String = core::iter::repeat_n("crcbl", 8 * PIPE_CAPACITY / 5 + 1).collect();
+    session
+        .shell
+        .clipboard_offer(window, &[crcbl_shell::ClipboardOffer::text(&payload)])
+        .expect("claiming the selection");
+    session.pump();
+
+    let mut peer = Session::open();
+    let peer_window = peer.mapped_peer_window("crcbl e2e write cap peer");
+    // Readable *before* the first request, so every one of them issues a
+    // `receive` on the spot. A request made while the clipboard is not readable
+    // is held instead — see
+    // `a_read_issued_before_the_clipboard_is_readable_is_held_not_answered_empty`
+    // — and a held read is one that never reaches the cap at all.
+    pump_pair(
+        &mut session,
+        &mut peer,
+        "the peer to be told what is on the clipboard",
+        |_, peer| peer.shell.clipboard_readable(peer_window),
+    );
+
+    session.slowest_pump = Duration::ZERO;
+    peer.slowest_pump = Duration::ZERO;
+
+    // One more than the cap, and every one of them issued before either client
+    // is pumped: this is the shape the bound is about — several payloads in
+    // flight at once — and a pump in this loop would let the peer drain a pipe.
+    let requests: Vec<crcbl_shell::ClipboardRequestId> = (0..=MAX_PENDING_CLIPBOARD_WRITES)
+        .map(|_| {
+            peer.shell
+                .clipboard_request(peer_window, crcbl_shell::MimeType::TextUtf8)
+                .expect("clipboard capability")
+        })
+        .collect();
+    assert_eq!(requests.len(), MAX_PENDING_CLIPBOARD_WRITES + 1);
+
+    // The compositor has now processed all of them, so every
+    // `wl_data_source.send` they produce is queued on the owner's connection…
+    crcbl_shell::wayland_test_support::roundtrip(&*peer.shell, peer_window)
+        .expect("peer roundtrip");
+    // …and the owner has dispatched all of them into its event sink, so the
+    // single pump below pushes every one through the cap in one batch. Without
+    // this pair the test would be waiting on the compositor's scheduling to
+    // deliver the last request before the peer starts draining, which is a race
+    // rather than a test.
+    crcbl_shell::wayland_test_support::roundtrip(&*session.shell, window).expect("owner roundtrip");
+    session.pump();
+
+    pump_pair(
+        &mut session,
+        &mut peer,
+        "every clipboard request to be answered",
+        |_, peer| {
+            requests
+                .iter()
+                .all(|request| peer.clipboard_answer(*request).is_some())
+        },
+    );
+
+    // Within the cap: the whole selection, every time.
+    for (index, request) in requests[..MAX_PENDING_CLIPBOARD_WRITES].iter().enumerate() {
+        let (mime, content) = peer.clipboard_answer(*request).expect("answered");
+        assert_eq!(
+            content.bytes().map(<[u8]>::len),
+            Some(payload.len()),
+            "request {index} is within the cap and must carry the whole selection, \
+             got {} of {} bytes",
+            content.bytes().map_or(0, <[u8]>::len),
+            payload.len()
+        );
+        assert!(
+            content.bytes() == Some(payload.as_bytes()),
+            "request {index} came back the right length and the wrong bytes"
+        );
+        assert!(mime.matches(crcbl_shell::MimeType::TextUtf8));
+    }
+
+    // Past it: an answer, and an empty one.
+    let refused = *requests.last().expect("one past the cap");
+    let (mime, content) = peer.clipboard_answer(refused).expect("answered");
+    assert!(
+        matches!(&content, crcbl_shell::ClipboardContent::Bytes(bytes) if bytes.is_empty()),
+        "the request past the cap is answered with a completed read of nothing — \
+         Empty would mean the clipboard does not hold this format, and Unavailable \
+         would mean the transfer broke; got {} carrying {} bytes",
+        content.name(),
+        content.bytes().map_or(0, <[u8]>::len)
+    );
+    assert!(
+        mime.matches(crcbl_shell::MimeType::TextUtf8),
+        "and it is answered on the format the peer asked for, which only a real \
+         `receive` against a live offer produces: a request that never got that \
+         far would have been answered Empty without one"
+    );
+
+    // The refusal closed its descriptor at push time, so its end-of-file was
+    // waiting before the peer read a byte; the payloads that were accepted take
+    // many pipe-fulls. So the empty answer is the *first* one, and one that
+    // arrived later would be a request accepted into a freed slot instead.
+    let arrivals: Vec<crcbl_shell::ClipboardRequestId> = peer
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::ClipboardData { request, .. } => Some(*request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        arrivals.first(),
+        Some(&refused),
+        "the refused request must answer before any accepted one; arrivals: {arrivals:?}, \
+         refused: {refused:?}"
+    );
+
+    // The cap refuses while the list is full. It does not damage the selection:
+    // with the storm drained, an ordinary paste is whole again.
+    let (_, after) = paste_bytes(
+        &mut peer,
+        Some(&mut session),
+        peer_window,
+        crcbl_shell::MimeType::TextUtf8,
+        "a paste after the storm cleared",
+    );
+    assert!(
+        after == payload.as_bytes(),
+        "the selection survived the refusal: got {} bytes of {}",
+        after.len(),
+        payload.len()
+    );
+
+    // And none of it was done by blocking the frame loop — a cap that answered
+    // by waiting for a slot would show up here rather than in the bytes.
+    assert!(
+        session.slowest_pump < SLOWEST_PUMP && peer.slowest_pump < SLOWEST_PUMP,
+        "no single pump may wait on the peer; ours {:?}, peer {:?}",
+        session.slowest_pump,
+        peer.slowest_pump
+    );
+
+    drop(input);
+    peer.shell.destroy_window(peer_window).expect("destroy");
     session.shell.destroy_window(window).expect("destroy");
 }
