@@ -6,7 +6,7 @@
 //
 // # Why this is a second file rather than a second entry point on `mesh.slang`
 //
-// **`mesh.slang` must keep emitting WGSL**, because `crcbl-wgpu` is the web
+// **`mesh.slang` must keep emitting WGSL**, because `crcbl-webgpu` is the web
 // backend and the forward pass is what it draws. WGSL has no mesh shaders at
 // all — Slang refuses `SetMeshOutputCounts` for that target by name, which is
 // what `mesh_shader.slang`'s header records — so a mesh entry point added to

@@ -96,11 +96,10 @@
 //
 // # No WGSL
 //
-// `crcbl-webgpu` refuses this capability: WebGPU has no binding arrays at all,
-// and `crcbl-wgpu` refuses too because a wgpu binding array's length is its
-// layout's fixed count rather than something a group chooses. Neither backend
-// can reach a dispatch of this shader, so a WGSL artifact would be bytes
-// nothing loads. `push_constant_raster.slang` omits the same target for an
+// `crcbl-webgpu` refuses this capability: WebGPU has no binding arrays at all.
+// It is the only backend that reads WGSL, so nothing can reach a dispatch of
+// this shader through that target and a WGSL artifact would be bytes nothing
+// loads. `push_constant_raster.slang` omits the same target for an
 // unrelated reason — WGSL has no push constants — so the two declarations read
 // alike and are not the same rule.
 

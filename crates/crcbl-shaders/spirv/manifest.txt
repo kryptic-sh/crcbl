@@ -10,12 +10,12 @@ dxil-model = 6_6
 
 [bindless_probe]
 source = shaders/bindless_probe.slang
-source-sha256 = 22f9ed7064cbd10a57ae206357db56c539e0a41f5d2ab542fff76441141baabf
+source-sha256 = aae1af326068fa49f84a9f89f900d7d48cf190b0d6c262e6dd0ba0b381acb0a7
 targets = spirv, msl, dxil
 spirv = spirv/bindless_probe.spv
 spirv-sha256 = 9814f370007e2d6e0959472072079c8326ea351f74ed36034c8d411e9e9b747a
 msl = msl/bindless_probe.metal
-msl-sha256 = 25b40367cecdf5445524b1e679ba6d3d01c39580cb40c6ce2358df42d52d0f14
+msl-sha256 = 2520731669f0a5c4b634d835db9d2068155d28a0a095a8f81165735a6326222a
 dxil = computeMain:dxil/bindless_probe.computeMain.dxil:fbd18c9982b39dc41929ba54f56f40ef9937196693c742aefe1f0d7f95fb0460
 entry-points = computeMain:glcompute
 
@@ -124,7 +124,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = 212b6260337c1634f481bb84ceb866ccc85a6fc2b9df961cb9ca0912821c1dbe
+source-sha256 = 802388dfb4f6f1a33c5f3a6591c48c18297b78218dd64a1372f9a2cc3561c3fd
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
 spirv-sha256 = 2e175a0f7a0e8de1aeda1be11b686631fde8b798f0583df8f65da931b6e6da1b
