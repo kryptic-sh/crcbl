@@ -61,14 +61,20 @@ work afterwards, and neither can start before it.
   and no last-N ring, and nothing on any platform spawns an input thread. Worth
   knowing that `crcbl_jobs::default_spawner` has exactly one caller in the tree
   and it is `apps/horde`'s steering pool.
-- **One line per sample, now that `apps/lantern` honours `[engine.video]`.**
-  `GpuContext` reads the player's settings while it opens and lantern passes the
-  layer through `request_for`, but it is the only sample that builds an
-  `EffectRequest` at all — every other one draws with the renderer's default, so
-  a player's settings file cannot move its frame. Whether that is a gap depends
-  on whether a sample with no shadows, AO or reflections in it should still
-  carry the wiring; the cheap version is `ctx.effect_request()` handed to the
-  renderer at open, which is one line each.
+- **No sample's `[engine.video]` wiring is observed by anything.** Every sample
+  that builds a `ForwardRenderer` — `lantern`, `viewer`, `quarry`, `sandbox`,
+  and that is all of them; the rest draw sprites through a renderer with no
+  effects to clamp — hands it `ctx.effect_request()` at open, and `viewer`'s
+  `reload` carries the request across a document change. The layers underneath
+  are covered (`crcbl::settings`'s reader, `EffectRequest::resolve`'s order
+  table, lantern's `the_players_video_clamp_reaches_both_views`), but each
+  sample's own line either compiles into its `Gpu::open` or does not, and
+  deleting it fails no test. `apps/quarry`'s device harness cannot see it
+  either: it opens under `SettingsSource::None` and builds its own renderer
+  rather than going through the app's. Closing this needs an observable a sample
+  prints — the resolved effect set in its summary line, say — which is surface
+  none of them has today.
+
 - **`GameModule` in `apps/lantern` and `apps/quarry`.** Neither implements it
   and neither claims an exemption for it, while `apps/viewer`'s absence is
   sanctioned in its own docs. Either they adopt it or they say why not — and

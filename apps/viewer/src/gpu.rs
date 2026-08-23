@@ -178,6 +178,11 @@ impl Gpu {
                     return Err(GpuError::Hal(error));
                 }
             };
+        // The player's `[engine.video]` clamp, which the context read while it
+        // opened. It only ever removes, so a run with no settings file draws
+        // what it drew before. `reload` carries the answer across a document
+        // change, beside the exposure and the wireframe.
+        renderer.set_effect_request(ctx.effect_request());
         // `docs/plan/sample/05-viewer.md` milestone 1's grid floor — see the
         // [module docs](self) for why it is a pass rather than a mesh.
         //
@@ -321,6 +326,10 @@ impl Gpu {
         }
 
         next.set_exposure(self.renderer.exposure());
+        // The three requested layers, not the resolved set: a reload must not
+        // quietly restore an effect the player's settings took away, and the
+        // renderer being replaced is the only thing that knows what they were.
+        next.set_effect_request(self.renderer.effect_request());
         // Through the renderer rather than through `Gpu::set_wireframe`, which
         // logs: a device that refused the view once has already said so, and a
         // line per re-export is a log nobody reads. The answer is what the

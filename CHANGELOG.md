@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A player's `[engine.video]` settings reach every sample that has effects to
+  clamp.** `lantern` already did; `viewer`, `quarry` and `sandbox` now hand
+  `GpuContext::effect_request` to their renderer as it opens, and `viewer`
+  carries the request across a document reload beside the exposure and the
+  wireframe. Nothing else in `apps/` builds a `ForwardRenderer`, so nothing else
+  has an effect a settings file could turn off. The layer only clamps downward:
+  a run with no settings file draws what it drew before.
+
 - **`crcbl-scene` has a `gltf-fixture` feature.** It compiles
   `crcbl_scene::gltf_fixture`'s triangle document and `.glb` container outside
   `cfg(test)` so another crate can build one — `BIN_CHUNK_BUFFER`,

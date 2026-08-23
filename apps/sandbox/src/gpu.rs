@@ -194,6 +194,12 @@ impl Gpu {
         // Milestones 3–5. Built after the swapchain because the tonemap
         // pipeline has to name the colour format the pass will render to.
         let mut renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), ctx.format())?;
+        // The player's `[engine.video]` clamp, which the context read while it
+        // opened. Only that layer: the camera layer belongs to a view and this
+        // sample draws one, and nothing here overrides an effect from code. It
+        // only ever removes, so a sample with no settings file draws exactly
+        // what it drew before.
+        renderer.set_effect_request(ctx.effect_request());
         // Milestone 3's subject, placed by the application like any other
         // object. The pool is empty and thousands wide, so this cannot fail.
         let cube = renderer

@@ -416,6 +416,12 @@ impl Gpu {
             )));
         }
         renderer.set_lod_error_budget(lod_budget);
+        // The player's `[engine.video]` clamp, which the context read while it
+        // opened. It only ever removes, so a run with no settings file draws
+        // what it drew before — and `tests/device/harness.rs` opens under
+        // `SettingsSource::None`, so no developer's home directory reaches the
+        // measured runs.
+        renderer.set_effect_request(ctx.effect_request());
         set_debug_view(&mut renderer, view);
 
         let paths = Paths::of(&caps, forced);
