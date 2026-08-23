@@ -42,9 +42,7 @@ use crcbl::engine::{
 use crcbl::hal::{CommandEncoderDesc, Format, ResourceState};
 use crcbl::prelude::*;
 use crcbl::render::{ImportedImage, InitialClaim, RenderGraph, TransientPool};
-use crcbl::shell::{
-    DisplayMode, LogicalSize, Shell, ShellBackend, WindowDesc, WindowId, open, open_backend,
-};
+use crcbl::shell::{DisplayMode, Shell, ShellBackend, WindowDesc, WindowId, open, open_backend};
 
 /// What a completed run did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,12 +138,11 @@ impl<S: Shell + ?Sized> Bare<S> {
             &WindowDesc {
                 title: "crcbl — bare",
                 app_id: "sh.kryptic.crcbl.bare",
-                // `--size` names pixels; the window request is logical at
-                // scale 1, which is exactly the extent the headless offscreen
-                // ring renders at.
-                size: options
-                    .size
-                    .map_or(LogicalSize::new(640.0, 480.0), |size| size.to_logical(1.0)),
+                // The engine's own fallback and its scale-1 rule, the same
+                // call every other sample makes: this hand-rolled the pair
+                // with a 640x480 fallback, so `bare` was the one binary whose
+                // window disagreed with the `--size` line in its own help.
+                size: crcbl::engine::requested_window_size(options.size),
                 // Asked for at creation rather than switched to afterwards, so
                 // `--fullscreen` does not show a decorated window first.
                 mode: options.display_mode(),

@@ -318,6 +318,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The `bare` sample opens at the size its help says.** It hand-rolled the
+  `--size` fallback with 640x480 instead of calling
+  `crcbl::engine::requested_window_size`, while pasting in the shared `OPTIONS:`
+  block whose `--size` line says the default is 960x720 — so the one sample
+  written to show the engine driven as a library was the one binary whose window
+  disagreed with its own help. It calls the engine's helper now, like every
+  other sample, and comes up at 960x720 windowed and headless alike.
+
 - **A non-uniformly scaled instance no longer loses clusters that face the
   camera.** The mesh path's per-cluster back-face cull carried a cluster's cone
   axis through the instance's bare 3×3 — the transform a tangent takes — so a
