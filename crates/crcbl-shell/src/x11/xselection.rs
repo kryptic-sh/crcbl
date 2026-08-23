@@ -202,6 +202,13 @@ impl X11Shell {
     ///
     /// The body of a single conversion, shared by the ordinary one-target
     /// request and by every pair of a [`MULTIPLE`](Self::answer_multiple).
+    ///
+    /// A conversion that would need an `INCR` transfer is refused once
+    /// [`selection::MAX_PENDING_WRITES`] of them are already running, because
+    /// each one is a copy of the payload the requestor decided to ask for.
+    /// Refusing is reported the way every other refusal here is — `false`, which
+    /// the ordinary path turns into a `SelectionNotify` naming no property and
+    /// the `MULTIPLE` path into a pair whose property atom is `None`.
     fn convert_target(&mut self, requestor: u32, target: u32, property: u32) -> bool {
         if target == self.conn.atoms.timestamp {
             // ICCCM: the answer is the timestamp we *acquired* the selection
@@ -241,6 +248,19 @@ impl X11Shell {
             self.conn
                 .set_property(requestor, property, target, 8, bytes);
             return true;
+        }
+
+        // The cap is checked *before* anything is written: an `INCR` header
+        // with no transfer behind it is a requestor waiting on chunks that
+        // never come, which is the failure this whole path exists to avoid. A
+        // refusal here is an answer, and the requestor can ask again once its
+        // other transfers have finished.
+        if self.writes.len() >= selection::MAX_PENDING_WRITES {
+            crcbl_core::log::warn!(
+                "a requestor has more INCR clipboard transfers open than this \
+                 client will feed at once; the newest was refused"
+            );
+            return false;
         }
 
         // `INCR`: the property is written with type `INCR` and a *size

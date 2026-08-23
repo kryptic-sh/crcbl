@@ -103,6 +103,25 @@ pub const TIMEOUT: Duration = Duration::from_secs(2);
 /// space it uses.
 pub const MAX_BYTES: usize = 64 << 20;
 
+/// The most `INCR` transfers one selection may be feeding at once.
+///
+/// Each holds a full copy of the offered bytes until the requestor has pulled
+/// the last chunk or [`TIMEOUT`] abandons it — and **the requestor decides how
+/// many to start**. One `ConvertSelection` costs a peer one request; a
+/// `MULTIPLE` whose `ATOM_PAIR` list repeats a single oversized target costs it
+/// one request for as many transfers as that list has pairs, and the list
+/// itself is bounded only by [`MAX_BYTES`]. Answering either faithfully
+/// multiplies this client's memory by a number another process picked. A real
+/// paste asks once per format.
+///
+/// Eight, the same number `wayland::fd::Writes::MAX_PENDING_WRITES` uses, so
+/// the two Linux backends refuse a storm at the same point. The **newest** is
+/// refused rather than the oldest evicted: the transfers already here are ones
+/// a peer is pulling, and abandoning one of those would truncate a paste that
+/// was arriving. The sibling bound is [`MAX_BYTES`], which bounds each payload
+/// rather than their number.
+pub const MAX_PENDING_WRITES: usize = 8;
+
 /// Where a read has got to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadState {

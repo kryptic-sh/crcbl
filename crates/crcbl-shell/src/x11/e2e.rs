@@ -128,6 +128,14 @@ fn load_test_lib() -> Option<TestLib> {
 /// [`burst`](Peer::burst).
 pub const MAX_EVENTS_PER_PUMP: usize = super::input::MAX_EVENTS_PER_PUMP;
 
+/// The most `INCR` clipboard transfers one selection may be feeding at once.
+///
+/// The backend's bound, re-exported: the module that owns it is crate-private,
+/// and a test that spelled the number instead would go on passing against a cap
+/// that had moved. See `selection::MAX_PENDING_WRITES` for why there is one and
+/// why the **newest** conversion past it is the one refused.
+pub const MAX_PENDING_CLIPBOARD_WRITES: usize = super::selection::MAX_PENDING_WRITES;
+
 /// One payload the peer is offering on the clipboard.
 struct Offer {
     target: u32,
@@ -143,6 +151,18 @@ struct Outgoing {
     offset: usize,
     chunk: usize,
     terminated: bool,
+}
+
+/// An `INCR` transfer this peer is pulling out of one of its own properties.
+///
+/// [`Incoming`] covers the one transfer an ordinary conversion starts. A
+/// `MULTIPLE` starts one per pair, all on this window at the same time, so
+/// those are tracked by property atom instead of by "the read that is
+/// outstanding".
+struct Pull {
+    property: u32,
+    bytes: Vec<u8>,
+    done: bool,
 }
 
 /// What [`Peer::read_clipboard`] has got to.
@@ -165,6 +185,9 @@ pub struct Peer {
     offers: Vec<Offer>,
     outgoing: Vec<Outgoing>,
     incoming: Incoming,
+    /// `INCR` transfers this peer is pulling, keyed by the property each one
+    /// arrives in. See [`Pull`].
+    pulls: Vec<Pull>,
     /// The most recent server timestamp any event has carried.
     ///
     /// X11 has no "what time is it" request, so the only way to hold a valid
@@ -265,6 +288,7 @@ impl Peer {
             offers: Vec::new(),
             outgoing: Vec::new(),
             incoming: Incoming::default(),
+            pulls: Vec::new(),
             last_time: 0,
             chunk: None,
         })
@@ -752,6 +776,46 @@ impl Peer {
         self.flush();
     }
 
+    /// Starts pulling the `INCR` transfer the owner left in property `name`.
+    ///
+    /// The counterpart to
+    /// [`read_clipboard_multiple`](Self::read_clipboard_multiple) for a batch
+    /// whose conversions were each too large for one `ChangeProperty`: the
+    /// property holds an `INCR` header rather than the data, and the transfer
+    /// only advances once the requestor deletes it. Several may run at once —
+    /// which is the whole reason these are keyed by property while
+    /// [`read_clipboard`](Self::read_clipboard) tracks a single outstanding
+    /// read.
+    ///
+    /// The header is deleted rather than read: its value is a size estimate and
+    /// appending it would corrupt the payload.
+    pub fn pull_incremental(&mut self, name: &str) {
+        let property = self.atom(name);
+        self.pulls.retain(|pull| pull.property != property);
+        self.pulls.push(Pull {
+            property,
+            bytes: Vec::new(),
+            done: false,
+        });
+        self.delete_property(property);
+        self.flush();
+    }
+
+    /// The bytes of a [`pull_incremental`](Self::pull_incremental) that has
+    /// reached its zero-length terminator.
+    ///
+    /// `None` while the transfer is still running, so a test polls this the way
+    /// it polls [`take_read`](Self::take_read).
+    #[must_use]
+    pub fn take_pull(&mut self, name: &str) -> Option<Vec<u8>> {
+        let property = self.atom(name);
+        let index = self
+            .pulls
+            .iter()
+            .position(|pull| pull.property == property && pull.done)?;
+        Some(self.pulls.remove(index).bytes)
+    }
+
     /// A property on this peer's own window, by name, as raw bytes.
     ///
     /// `None` for a property that is not there — which, after a `MULTIPLE`, is
@@ -934,6 +998,29 @@ impl Peer {
             return;
         };
         self.last_time = event.time;
+
+        // A `MULTIPLE` starts one transfer per pair, so these are matched on
+        // the property the chunk arrived in rather than on there being a single
+        // outstanding read. Checked first for the same reason: the branch below
+        // does not look at the property at all.
+        if event.state == NEW_VALUE
+            && let Some(index) = self
+                .pulls
+                .iter()
+                .position(|pull| pull.property == event.atom && !pull.done)
+        {
+            let bytes = self
+                .read_property(event.atom)
+                .map_or_else(Vec::new, |(_, bytes)| bytes);
+            self.delete_property(event.atom);
+            self.flush();
+            if bytes.is_empty() {
+                self.pulls[index].done = true;
+            } else {
+                self.pulls[index].bytes.extend_from_slice(&bytes);
+            }
+            return;
+        }
 
         if event.state == NEW_VALUE && self.incoming.active && self.incoming.incremental {
             let bytes = self

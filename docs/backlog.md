@@ -5620,14 +5620,35 @@ correction a later reader needs.
   arriving before any full one, and a paste after the storm whole again. What it
   still does not reach: a peer asking hundreds past the cap, a storm mixing mime
   types, this cap pressed together with `Offer::MAX_OFFER_MIMES` or
-  `Device::MAX_PENDING_OFFERS`, and X11's own outgoing-transfer bookkeeping in
-  `x11/xselection.rs`, which has no equivalent test at all.
+  `Device::MAX_PENDING_OFFERS`.
 
-  Two premises hold that test up and both were shown load-bearing by sabotage:
-  the payload must exceed a pipe (64 KiB — a small one completes on the owner's
-  first pass and frees the slot, and the test then fails with the refused
-  request carrying bytes), and the two `roundtrip`s are what make the order
-  between the connections a fact rather than a race.
+  **The same audit on the X11 side found a defect rather than a gap**, now
+  fixed: `convert_target` pushed an `INCR` transfer — a full copy of the offer —
+  onto `X11Shell::writes` with no cap, and one `MULTIPLE` request could start
+  one per `ATOM_PAIR`, a list bounded only by `MAX_BYTES`.
+  `selection::MAX_PENDING_WRITES` caps it at eight and
+  `a_requestor_asking_past_the_pending_write_cap_is_refused_rather_than_held`
+  drives cap + 1 pairs at a 300 KB offer. What that leaves:
+  - **`answer_multiple`'s pair list is still bounded only by `MAX_BYTES`**, so a
+    peer can force a 64 MiB `GetProperty` and its `Vec<u32>` copy per request.
+    Transient — freed when the call returns — and ICCCM says nothing about what
+    an owner should do with pairs past a cap, so capping it needs a policy
+    decision rather than a patch. Untested.
+  - The incoming `TARGETS` list is the same shape, and `choose_target` scans it
+    linearly per candidate.
+  - **The cap is global, not per requestor**, on both backends: one greedy peer
+    can hold all eight slots and get a well-behaved peer refused until the
+    timeout. The refusal is an answer, so a retry works; nothing tests the
+    retry.
+  - The plain (non-`MULTIPLE`) repetition is not driven — the harness peer
+    tracks one outstanding read — and the requestor-vanishes-mid-`INCR` reaping
+    path is read and reasoned rather than exercised.
+
+  Two premises hold the Wayland test up and both were shown load-bearing by
+  sabotage: the payload must exceed a pipe (64 KiB — a small one completes on
+  the owner's first pass and frees the slot, and the test then fails with the
+  refused request carrying bytes), and the two `roundtrip`s are what make the
+  order between the connections a fact rather than a race.
 
 - **The compositor half of a withdrawal is unexercised.** sway removes nothing
   but `wl_output` and `wl_seat`, so the e2e test pushes the two registry events

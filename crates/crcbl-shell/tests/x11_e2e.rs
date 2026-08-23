@@ -36,7 +36,7 @@
 
 use std::time::{Duration, Instant};
 
-use crcbl_shell::x11_test_support::{MAX_EVENTS_PER_PUMP, Peer};
+use crcbl_shell::x11_test_support::{MAX_EVENTS_PER_PUMP, MAX_PENDING_CLIPBOARD_WRITES, Peer};
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, CloseReply, CursorIcon, DisplayMode, KeyCode,
     LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
@@ -2019,6 +2019,152 @@ fn a_multiple_request_is_answered_pair_by_pair() {
         words[5], 0,
         "the refused pair's property is None, which is how a requestor learns \
          which of its targets it did not get: {words:?}",
+    );
+}
+
+/// **A requestor cannot make this client hold unboundedly many `INCR`
+/// transfers.**
+///
+/// Every conversion too large for one `ChangeProperty` costs the owner a full
+/// copy of the payload, held until the requestor has pulled the last chunk or
+/// the transfer idles out — and the *requestor* decides how many to start.
+/// `MULTIPLE` is the sharp form: one request, an `ATOM_PAIR` list the peer
+/// chose the length of, and one transfer per pair. Without a cap a single
+/// foreign client grows this process by (its list length) × (the payload) in
+/// one `pump`.
+///
+/// One pair past `MAX_PENDING_CLIPBOARD_WRITES`, all naming the same oversized
+/// target, and three things are asserted about what the *peer* reads back: the
+/// pairs within the cap keep their property atoms and deliver the whole
+/// selection, concurrently; the pair past it comes back with `None` for its
+/// property, which is where ICCCM puts a refusal; and its property is left
+/// absent rather than holding an `INCR` header with no transfer behind it,
+/// which would be a requestor waiting on chunks that never come.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_requestor_asking_past_the_pending_write_cap_is_refused_rather_than_held() {
+    let mut session = Session::open();
+    let window = session.window(&desc("write cap"));
+    session.peer.release_clipboard();
+    session.pump();
+
+    // Comfortably above the 256 KiB a single `ChangeProperty` carries on a
+    // server with the usual 64 KiB-word request limit, so every conversion
+    // below goes out as `INCR` and each one costs the owner a held copy. A
+    // payload that fitted would be written whole and leave nothing pending,
+    // which is the case the cap is not about.
+    let payload: String = core::iter::repeat_n("crcbl", 60_000).collect();
+    session
+        .shell
+        .clipboard_offer(window, &[ClipboardOffer::text(&payload)])
+        .expect("the clipboard is claimable");
+    session.pump();
+
+    let properties: Vec<String> = (0..=MAX_PENDING_CLIPBOARD_WRITES)
+        .map(|index| format!("PEER_INCR_{index}"))
+        .collect();
+    let pairs: Vec<(&str, &str)> = properties
+        .iter()
+        .map(|property| ("UTF8_STRING", property.as_str()))
+        .collect();
+    assert_eq!(pairs.len(), MAX_PENDING_CLIPBOARD_WRITES + 1);
+    session.peer.read_clipboard_multiple(&pairs);
+    session.pump_until("the MULTIPLE reply", |session| session.peer_answered());
+    let list = session
+        .peer
+        .take_read()
+        .expect("answered")
+        .expect("the pair list comes back");
+    let words: Vec<u32> = list
+        .chunks_exact(4)
+        .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
+        .collect();
+    assert_eq!(
+        words.len(),
+        2 * pairs.len(),
+        "one pair per target asked for: {words:?}",
+    );
+
+    for (index, property) in properties
+        .iter()
+        .enumerate()
+        .take(MAX_PENDING_CLIPBOARD_WRITES)
+    {
+        let atom = session.peer.atom(property);
+        assert_eq!(
+            words[index * 2 + 1],
+            atom,
+            "pair {index} is within the cap and must keep its property: {words:?}",
+        );
+    }
+
+    let refused = MAX_PENDING_CLIPBOARD_WRITES;
+    assert_eq!(
+        words[refused * 2 + 1],
+        0,
+        "the pair past the cap is refused in the place ICCCM puts a refusal — \
+         a None property atom the requestor reads back — rather than by \
+         silence: {words:?}",
+    );
+    assert_eq!(
+        session.peer.own_property(&properties[refused]),
+        None,
+        "and the refusal wrote nothing at all: an INCR header with no transfer \
+         behind it is a requestor waiting for chunks that never come",
+    );
+
+    // Within the cap: the whole selection, every time, and all of them in
+    // flight at once — which is also the only thing that proves the accepted
+    // transfers really did coexist rather than being answered one at a time.
+    for property in &properties[..MAX_PENDING_CLIPBOARD_WRITES] {
+        session.peer.pull_incremental(property);
+    }
+    let mut received: Vec<Option<Vec<u8>>> = vec![None; MAX_PENDING_CLIPBOARD_WRITES];
+    session.pump_until("every accepted INCR transfer to finish", |session| {
+        for (slot, property) in received.iter_mut().zip(&properties) {
+            if slot.is_none() {
+                *slot = session.peer.take_pull(property);
+            }
+        }
+        received.iter().all(Option::is_some)
+    });
+    for (index, bytes) in received.iter().enumerate() {
+        let bytes = bytes.as_ref().expect("just waited for every one of them");
+        assert_eq!(
+            bytes.len(),
+            payload.len(),
+            "transfer {index} is within the cap and must carry the whole \
+             selection, got {} of {} bytes",
+            bytes.len(),
+            payload.len(),
+        );
+        assert_eq!(
+            bytes.as_slice(),
+            payload.as_bytes(),
+            "transfer {index} came back the right length and the wrong bytes",
+        );
+    }
+
+    // The cap refuses while the list is full; it does not damage the selection.
+    // With the storm drained, an ordinary paste is whole again.
+    session.peer.read_clipboard("UTF8_STRING");
+    session.pump_until("a paste after the storm cleared", |session| {
+        session.peer_answered()
+    });
+    let after = session
+        .peer
+        .take_read()
+        .expect("answered")
+        .expect("the selection is still there");
+    assert_eq!(
+        after,
+        payload.as_bytes(),
+        "a refusal at the cap must not cost the selection its contents",
+    );
+    assert!(
+        session.slowest_pump < SLOWEST_PUMP,
+        "the frame loop never stalled feeding nine transfers: {:?}",
+        session.slowest_pump
     );
 }
 

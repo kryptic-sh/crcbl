@@ -318,6 +318,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A single X11 clipboard request can no longer make this client hold an
+  unbounded number of payload copies.** An oversized conversion starts an `INCR`
+  transfer that keeps a full copy of the offered bytes until the requestor pulls
+  the last chunk or the two-second timeout abandons it, and nothing bounded how
+  many could run: one `MULTIPLE` request whose `ATOM_PAIR` list repeats an
+  oversized target started one transfer per pair, and that list is bounded only
+  by the 64 MiB property cap — so one foreign client could ask for millions of
+  copies in one request. `selection::MAX_PENDING_WRITES` caps them at eight, the
+  same number the Wayland backend already used, and the refusal is an answer in
+  the place ICCCM puts one: a `SelectionNotify` naming no property on the
+  ordinary path, a `None` property atom on the `MULTIPLE` path. It is checked
+  before the `INCR` header is written, so a refused requestor is never left
+  waiting on chunks that will not come.
+
 - **A scaled instance now picks the level of detail for the size it is drawn
   at.** A cluster group's radius and its simplification error are lengths in the
   mesh's own space, and `draw_gen.slang`'s `select_level` put only the group's
