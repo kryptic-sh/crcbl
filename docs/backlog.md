@@ -11254,15 +11254,17 @@ Two findings that are **not** fixed:
   (breakout, flappy, asteroids, horde); sandbox is the only one that does not.
   Left alone because the retrofit was scoped to `apps/**` and the comment is in
   `crates/crcbl/src/engine.rs`.
-- **Debug row labels share one namespace across modules, and one collided.**
-  `crcbl-render`'s `FrameTimings` renders `timings: pending` while a timestamp
-  report is in flight, and asteroids' first draft used `pending` as the label
-  for its deferred-despawn count. Nothing detects that — the panel is a flat
-  list of `label: value` rows and a reader tells two `pending`s apart by which
-  section they are under. The asteroids row was renamed to `despawns`; the
-  general problem stands, and the place it bites first is a test that searches
-  the draw list by label text (`row_value` in each sample's `app.rs`), which
-  silently reads the wrong row rather than failing.
+- **Debug row labels still share one namespace across modules.** The panel is a
+  flat list of `label: value` rows and a reader tells two of the same label
+  apart by the section heading above them; nothing else does. What is fixed is
+  the half that was silent: `row_value`, in each of the six samples' `app.rs`,
+  now refuses a label the panel drew twice instead of reading whichever came
+  first — which immediately turned up a live one, the viewer drawing an
+  `instances` row in both its listing panel and its overlay section, with a test
+  reading across the two. That test scopes itself to the listing now. What
+  stands: the helper is six copies of one text (extracting it needs a new crate
+  or a change to `crcbl-ui`, since the samples are separate binaries), and a
+  panel with two same-named rows is still legible only by heading.
 
 ## `apps/hud` milestone 1: what was deliberately left out
 

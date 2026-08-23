@@ -652,10 +652,25 @@ mod tests {
 
     /// The value drawn immediately after the row labelled `label`.
     fn row_value(drawn: &[String], label: &str) -> String {
-        let at = drawn
+        let mut matches = drawn
             .iter()
-            .position(|text| text == label)
+            .enumerate()
+            .filter(|(_, text)| *text == label)
+            .map(|(at, _)| at);
+        let at = matches
+            .next()
             .unwrap_or_else(|| panic!("no {label} row in {drawn:?}"));
+        // Row labels share one namespace across every section of the panel, and
+        // two have collided already — `crcbl-render`'s frame timings draw a
+        // `pending` row, and this sample's first draft named one of its own the
+        // same. A reader tells them apart by the heading above them; a search
+        // through the flat draw list cannot, and would read whichever came
+        // first for ever after.
+        assert!(
+            matches.next().is_none(),
+            "more than one {label} row in {drawn:?}, so this reads whichever the panel \
+             happened to draw first"
+        );
         drawn
             .get(at + 1)
             .unwrap_or_else(|| panic!("no value after {label} in {drawn:?}"))

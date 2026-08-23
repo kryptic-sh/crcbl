@@ -1078,6 +1078,28 @@ mod tests {
             .collect()
     }
 
+    /// The text the **listing panel** drew, with the debug overlay's own rows
+    /// left out.
+    ///
+    /// The two panels share a draw list and a label namespace, and both carry an
+    /// `instances` row: the listing's is the document's count and the overlay's
+    /// is this viewer's. A test with both panels up and no scope reads whichever
+    /// the panel happened to draw first — which is what
+    /// [`row_value`]'s duplicate check refuses.
+    ///
+    /// The overlay's first heading is the split, and it is the loop's own
+    /// section rather than this sample's, so it is there whenever the overlay
+    /// is. With the overlay off the whole list is the listing's, which is what
+    /// the fallback says.
+    fn listing_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
+        let drawn = ui_text(engine);
+        let end = drawn
+            .iter()
+            .position(|text| text == "frame")
+            .unwrap_or(drawn.len());
+        drawn[..end].to_vec()
+    }
+
     /// One whole press of `key`: the press and the release the platform sends
     /// after it, then the frame that routes both.
     ///
@@ -1098,10 +1120,25 @@ mod tests {
 
     /// The value drawn immediately after the row labelled `label`.
     fn row_value(drawn: &[String], label: &str) -> String {
-        let at = drawn
+        let mut matches = drawn
             .iter()
-            .position(|text| text == label)
+            .enumerate()
+            .filter(|(_, text)| *text == label)
+            .map(|(at, _)| at);
+        let at = matches
+            .next()
             .unwrap_or_else(|| panic!("no {label} row in {drawn:?}"));
+        // Row labels share one namespace across every section of the panel, and
+        // two have collided already — `crcbl-render`'s frame timings draw a
+        // `pending` row, and this sample's first draft named one of its own the
+        // same. A reader tells them apart by the heading above them; a search
+        // through the flat draw list cannot, and would read whichever came
+        // first for ever after.
+        assert!(
+            matches.next().is_none(),
+            "more than one {label} row in {drawn:?}, so this reads whichever the panel \
+             happened to draw first"
+        );
         drawn
             .get(at + 1)
             .unwrap_or_else(|| panic!("no value after {label} in {drawn:?}"))
@@ -1904,7 +1941,7 @@ mod tests {
         assert_eq!(engine.game().instances, 1);
         let window = engine.window();
         tap(&mut engine, window, LISTING_KEY);
-        assert_eq!(row_value(&ui_text(&engine), "instances"), "1");
+        assert_eq!(row_value(&listing_text(&engine), "instances"), "1");
 
         // A second quad three metres along: a different instance count, a
         // different centre, and a different length on disk — so every number
@@ -1939,7 +1976,7 @@ mod tests {
             "the scene was swapped but the bounds are still the old document's",
         );
         assert_eq!(
-            row_value(&ui_text(&engine), "instances"),
+            row_value(&listing_text(&engine), "instances"),
             "2",
             "the listing panel is still describing the document that was replaced",
         );

@@ -610,14 +610,52 @@ mod tests {
     /// The value drawn immediately after `label`, which is how the panel lays a
     /// row out: label then value, in one draw list.
     fn row_value(drawn: &[String], label: &str) -> String {
-        let at = drawn
+        let mut matches = drawn
             .iter()
-            .position(|text| text == label)
+            .enumerate()
+            .filter(|(_, text)| *text == label)
+            .map(|(at, _)| at);
+        let at = matches
+            .next()
             .unwrap_or_else(|| panic!("no {label} row in {drawn:?}"));
+        // Row labels share one namespace across every section of the panel, and
+        // two have collided already — `crcbl-render`'s frame timings draw a
+        // `pending` row, and this sample's first draft named one of its own the
+        // same. A reader tells them apart by the heading above them; a search
+        // through the flat draw list cannot, and would read whichever came
+        // first for ever after.
+        assert!(
+            matches.next().is_none(),
+            "more than one {label} row in {drawn:?}, so this reads whichever the panel \
+             happened to draw first"
+        );
         drawn
             .get(at + 1)
             .unwrap_or_else(|| panic!("no value after {label} in {drawn:?}"))
             .clone()
+    }
+
+    /// **`row_value` refuses a label the panel drew twice**, rather than
+    /// reading whichever row came first.
+    ///
+    /// The six samples carry one text of that helper between them, so this test
+    /// lives where the collision actually happened: asteroids' first draft named
+    /// its deferred-despawn count `pending`, which is also what
+    /// `crcbl-render`'s frame timings draw while a timestamp report is in
+    /// flight. The row was renamed; the helper had no way to notice, and a test
+    /// asserting on the wrong section's number would have passed.
+    ///
+    /// A synthetic draw list rather than a panel that collides, because no
+    /// panel in the tree does today — which is exactly why the guard needs a
+    /// case of its own to be worth anything.
+    #[test]
+    #[should_panic(expected = "more than one pending row")]
+    fn a_label_drawn_twice_is_refused_rather_than_guessed() {
+        let drawn: Vec<String> = ["timings", "pending", "despawns", "pending", "3"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let _ = row_value(&drawn, "pending");
     }
 
     /// **The panel is exactly the modules this sample has.** No network section,
