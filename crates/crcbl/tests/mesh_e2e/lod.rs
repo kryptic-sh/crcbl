@@ -145,8 +145,8 @@ impl DunesHistory {
     }
 }
 
-/// The dunes level this frame's uniform cut selected, read out of the bucket
-/// that actually drew.
+/// The level of description mesh `mesh` this frame's uniform cut selected, read
+/// out of the bucket that actually drew.
 ///
 /// **The indirect arguments are the observable**, and there is no second buffer
 /// recording an intention: `draw_gen.slang` scatters the instance into the
@@ -154,11 +154,19 @@ impl DunesHistory {
 /// non-zero *is* the level. A selection that picked a level and then failed to
 /// route it would leave every bucket at zero and be reported here rather than
 /// drawn as an empty frame.
-fn selected_dunes_level(headless: &Headless, renderer: &ForwardRenderer) -> Option<usize> {
+///
+/// `pub(crate)` and taking the mesh rather than naming the dunes patch, because
+/// [`crate::two_dags`] asks it the same question of each of two DAGs — a second
+/// copy of the readback below is a second place a fix would have to land.
+pub(crate) fn selected_level(
+    headless: &Headless,
+    renderer: &ForwardRenderer,
+    mesh: usize,
+) -> Option<usize> {
     use crcbl::shaders::draw_gen::{DRAW_ARGS_SIZE, DrawIndexedArgs};
 
     let device = headless.device.as_ref();
-    let buckets = renderer.level_buckets(crcbl::render::scene::DEMO_DUNES);
+    let buckets = renderer.level_buckets(mesh);
     assert!(
         !buckets.is_empty(),
         "this device selects per cluster, so no bucket is a level"
@@ -299,7 +307,7 @@ fn the_uniform_cut_gets_coarser_as_the_dunes_patch_recedes() {
         let camera = dunes_camera_back(back);
         let [pixels_per_unit, budget, hold] =
             history.step(&headless, &mut renderer, &mut pool, &camera);
-        let level = selected_dunes_level(&headless, &renderer)
+        let level = selected_level(&headless, &renderer, crcbl::render::scene::DEMO_DUNES)
             .unwrap_or_else(|| panic!("no bucket drew the patch from {back} units back"));
         let want = history.level();
         eprintln!(
@@ -454,7 +462,7 @@ fn a_camera_drifting_across_a_level_boundary_stops_flickering() {
         for &back in path {
             let camera = dunes_camera_back(back);
             history.step(&headless, &mut renderer, &mut pool, &camera);
-            let level = selected_dunes_level(&headless, &renderer)
+            let level = selected_level(&headless, &renderer, crcbl::render::scene::DEMO_DUNES)
                 .unwrap_or_else(|| panic!("no bucket drew the patch from {back} units back"));
             assert_eq!(
                 level,

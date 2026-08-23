@@ -79,6 +79,7 @@ mod goldens;
 mod hdr;
 mod lod;
 mod resize;
+mod two_dags;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because
 // three other suites open the same device against the same offscreen ring and a

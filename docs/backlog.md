@@ -14909,49 +14909,42 @@ application that had sized its pools exactly right.
 
 Not covered, and not attempted: `Capacities::lights` has no description to be
 measured against — a caller sets lights per frame — and no test drives its
-overflow; and no non-default `Capacities` value has ever reached a real device,
-since every end-to-end run is still `scene::demo()`.
+overflow. A non-default `Capacities` **has** now reached a real allocator —
+`mesh_e2e`'s `both_dags_of_a_five_mesh_description_have_clusters_chosen` doubles
+`vertices` and `indices` — but doubled rather than measured, so the exact fit is
+still only `a_description_that_exactly_fits_its_capacities_is_built` on the null
+backend.
 
-### Coverage gap: no device has drawn a description with two DAGs
+### What a device drawing two DAGs still does not say
 
-Half closed. `forward`'s
-`a_second_dag_reaches_its_own_groups_and_not_the_first_s` builds a five-mesh
-description with **two** DAGs on the null backend's mesh path, places an
-instance of each with `add_instance`, and asserts the three things a second DAG
-is the only thing that exercises: one mesh id per description mesh with the
-second DAG's level 0 a whole hierarchy past the first's, `DrawGen::group_stride`
-summing both DAGs' groups rather than taking the first's, and every
-`ClusterSelect` record of the second DAG naming a group in the second half of
-the concatenated `level_groups` — the `first_group` offset handed to
-`ClusterDag::selection_records`, which is zero for one DAG and so invisible with
-one. Both halves were shown red by dropping the offset and by suppressing the
-concatenation.
+`crates/crcbl/tests/mesh_e2e/two_dags.rs` closed the gap this entry used to
+name. `both_dags_of_a_five_mesh_description_have_clusters_chosen` builds
+`scene::demo()` with its DAG appended a second time — five meshes, two
+hierarchies, `capacities.vertices`/`indices` doubled — makes it resident on the
+device the suite opens, places an instance of each patch, and reads
+`ForwardRenderer::cluster_selection` once per DAG over that DAG's own
+`cluster_range`: the two runs must be disjoint, every word must be a flag, and
+each run must come out of the frame with clusters chosen. On an RX 7900 XTX
+(RADV) the runs are independently sized, 84 and 86 of 259. Off the mesh path
+there is no such buffer, so the same claim goes through the uniform cut's bucket
+via `lod::selected_level` and no backend skips.
 
-**A real device now draws one non-`demo` description, and this entry said none
-did.** `crates/crcbl/tests/gltf_e2e.rs` imports a `.glb` through the real
-`DirSource`, converts it with `crcbl_scene::gltf_render::build_render_scene`,
-hands the result to `ForwardRenderer::with_scene` and draws — verified on an RX
-7900 XTX on 2026-08-19 via `crates/crcbl/tests/run-gltf-e2e.sh`: _"an imported
-glTF drew its own texture on vk"_. So "every run is still `scene::demo()`" is no
-longer true, and anyone closing the rest of this gap has a working precedent to
-copy rather than a blank page.
+What it still does not reach:
 
-**What that test does not cover is the shape this entry is really about.** Its
-document is a single textured quad — one mesh, one primitive, one material — so
-it exercises none of **two DAGs, a fifth mesh, or non-default `Capacities`**,
-and the null backend cannot tell a right frame from a wrong one. Closing that
-still means an end-to-end test building such a description and reading something
-back: `ForwardRenderer::cluster_selection` is the observable that already
-exists, and asserting both DAGs' runs have clusters chosen in them needs no new
-golden image.
-
-The cook slice added one description that is not `scene::demo()` and does reach
-a device object: `crcbl`'s
-`an_application_bakes_its_own_mesh_and_the_renderer_makes_it_resident` bakes a
-mesh's clusters through `crcbl::scene` and builds a one-mesh, one-row renderer —
-but on the **null** backend, and behind the `scene` feature, so a plain
-`cargo test` does not run it at all and only `--all-features` does. Nothing
-about the above is closed by it.
+- **Which groups the second DAG's records name.** The engine has one DAG, so the
+  second is a copy of it and the two cuts are alike by construction; records
+  wrongly naming the first DAG's groups would still produce a cut and the test
+  would stay green. `crcbl-render`'s
+  `a_second_dag_reaches_its_own_groups_and_not_the_first_s` is still the only
+  thing asserting the `first_group` offset, and it reads a recorder on a backend
+  that runs no shader.
+- **The picture.** No golden — two dune patches side by side is a frame nobody
+  has blessed — so this says both DAGs were selected _from_, not that either
+  shaded correctly.
+- **Two DAGs of different shapes.** Equal depth and equal group count, so an
+  offset that is right only for equal-sized runs would pass.
+- **Any device but this one.** The uniform branch was exercised by withholding
+  the mesh features from the same RADV adapter, not by another backend.
 
 ### The dependency call was made, and the split it declined
 
