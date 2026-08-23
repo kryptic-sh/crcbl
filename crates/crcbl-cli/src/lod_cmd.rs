@@ -34,13 +34,11 @@
 //! and still describe nothing — see [`check_has_triangles`].
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
 
-use crcbl_assets::DirSource;
-use crcbl_scene::{ClusterDag, GltfScene, LodOrigin, MeshLod, import_gltf, resolve_lod};
-use crcbl_store::web::canonical_key;
+use crcbl_scene::{ClusterDag, GltfScene, LodOrigin, MeshLod, resolve_lod};
 
 use crate::args::{LodAction, LodArgs};
+use crate::gltf_open::open;
 use crate::json::Json;
 use crate::report::{Failure, Outcome};
 
@@ -83,38 +81,6 @@ pub fn run(args: &LodArgs) -> Result<Outcome, Failure> {
         LodAction::Gen => generate(&scene, args),
         LodAction::Preview => unreachable!("refused above"),
     }
-}
-
-/// Imports the glTF the command line named.
-///
-/// The importer reads through [`crcbl_assets::AssetSource`], which addresses a
-/// *key under a root* rather than a path, so a path typed on a command line is
-/// split into the two: the directory becomes the root, the file name becomes the
-/// key. The key rules are the engine's own and are checked here rather than left
-/// to surface as `path escapes the storage root`, which is true and says nothing
-/// about the name that was actually the problem.
-fn open(file: &Path) -> Result<GltfScene, Failure> {
-    let Some(name) = file.file_name() else {
-        return Err(Failure::new(format!(
-            "{} does not name a file to read",
-            file.display()
-        )));
-    };
-    let key = canonical_key(Path::new(name)).map_err(|_| {
-        Failure::new(format!(
-            "`{}` is not a usable asset name: a key is ASCII letters, digits, `.`, `_` and \
-             `-`, because the same name has to resolve as a URL path in a browser",
-            name.to_string_lossy()
-        ))
-    })?;
-    let root = match file.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        // `crcbl lod stats model.glb`: the root is where the shell was run.
-        _ => PathBuf::from("."),
-    };
-
-    import_gltf(&DirSource::at(root), Path::new(&key))
-        .map_err(|error| Failure::new(format!("cannot import {}: {error}", file.display())))
 }
 
 /// ``<index> `<name>` `` for a node, or just the index when the file named

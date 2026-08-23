@@ -123,11 +123,13 @@ binary wants to be on `PATH`.
 
 The other commands: `build`, `screenshot` (offscreen render to a PNG), `replay`
 (dump a `.crpl` replay's metadata), `crpix` (PNG frames into one sprite sheet),
-`lod` (report or generate a glTF mesh's LOD chain), `bench` (one fixed workload,
-timed and reported as a distribution), `sim` (the determinism harness: N ticks
-of a seed-generated world, and its state hash) and `settings` (`get`, `set` and
-`list` over a game's `settings.toml`, so a player setting is scriptable and not
-only reachable from a settings screen). Every one of them takes `--json`.
+`lod` (report or generate a glTF mesh's LOD chain), `import` (run the glTF
+importer over one document and report what came out of it), `bench` (one fixed
+workload, timed and reported as a distribution), `sim` (the determinism harness:
+N ticks of a seed-generated world, and its state hash) and `settings` (`get`,
+`set` and `list` over a game's `settings.toml`, so a player setting is
+scriptable and not only reachable from a settings screen). Every one of them
+takes `--json`.
 
 ### The demo site
 

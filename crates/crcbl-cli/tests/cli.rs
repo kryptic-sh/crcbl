@@ -138,6 +138,7 @@ fn help_and_version_exit_zero() {
         "replay",
         "crpix",
         "lod",
+        "import",
         "bench",
         "sim",
         "settings",
@@ -183,6 +184,14 @@ fn a_malformed_invocation_exits_two() {
         vec!["lod", "stats", "a.gltf", "--primitive", "0"],
         vec!["lod", "stats", "a.gltf", "--node", "first"],
         vec!["lod", "stats", "a.gltf", "b.gltf"],
+        // `import` without a file, with two, with an option it does not have,
+        // and with the `--out <DIR>` topic 11 sketches and this tree cannot
+        // write. None of these reaches the importer either.
+        vec!["import"],
+        vec!["import", "a.gltf", "b.gltf"],
+        vec!["import", "a.gltf", "--frobnicate"],
+        vec!["import", "a.gltf", "--out", "cooked"],
+        vec!["import", "a.gltf", "-o", "cooked"],
         // `bench` without a scenario, with one that answers to nothing, and
         // with the counts a zero empties. None of these runs anything.
         vec!["bench"],
@@ -1462,6 +1471,158 @@ fn lod_preview_is_refused_as_missing_and_not_as_unknown() {
     assert!(json.starts_with(r#"{"ok":false,"command":"lod""#), "{json}");
     assert!(has_field(&json, "action", r#""preview""#), "{json}");
     assert!(json.contains("not implemented"), "{json}");
+}
+
+// ---------------------------------------------------------------------------
+// `crcbl import`
+// ---------------------------------------------------------------------------
+
+/// The counts in the human line, `name:value` each, in the order they appear.
+///
+/// Asserts it found the whole set: a probe that matched nothing would make
+/// every comparison against it vacuously true.
+fn human_counts(human: &str) -> Vec<(String, usize)> {
+    let counts: Vec<(String, usize)> = human
+        .split_whitespace()
+        .filter_map(|token| token.split_once(':'))
+        .map(|(name, value)| {
+            let count = value
+                .parse()
+                .unwrap_or_else(|_| panic!("`{name}` is not a count: {human}"));
+            (name.to_owned(), count)
+        })
+        .collect();
+    assert_eq!(counts.len(), 6, "six counts, not {counts:?}: {human}");
+    counts
+}
+
+/// A real document with geometry in it: the counts are the file's own, and the
+/// `--json` object carries exactly the numbers the human line does.
+///
+/// Two nodes draw a mesh each and a third draws nothing, so `nodes` and
+/// `instances` differ — a report that read one field for the other would agree
+/// with itself and disagree with this.
+#[test]
+fn import_reports_what_a_document_holds() {
+    let temporary = TempDir::new("import");
+    let base = grid(4);
+    let file = write_gltf(
+        temporary.path(),
+        "parts",
+        &[
+            node("hull", &base),
+            node("wing", &base),
+            LodNode {
+                name: "spare",
+                mesh: None,
+                lod_ids: None,
+            },
+        ],
+    );
+
+    let output = crcbl(temporary.path(), &["import", arg(&file)]);
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = stdout(&output);
+    assert!(
+        human.contains(&format!("imported {}", file.display())),
+        "{human}"
+    );
+    assert_eq!(
+        human_counts(&human),
+        vec![
+            ("meshes".to_owned(), 2),
+            ("primitives".to_owned(), 2),
+            ("materials".to_owned(), 0),
+            ("images".to_owned(), 0),
+            ("nodes".to_owned(), 3),
+            ("instances".to_owned(), 2),
+        ],
+        "{human}"
+    );
+
+    let output = crcbl(temporary.path(), &["import", arg(&file), "--json"]);
+    assert_eq!(code(&output), 0);
+    let json = stdout(&output);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+    assert!(
+        json.starts_with(r#"{"ok":true,"command":"import""#),
+        "{json}"
+    );
+    assert!(has_field(&json, "path", &json_string(&file)), "{json}");
+    for (name, value) in human_counts(&human) {
+        assert!(
+            has_field(&json, &name, &value.to_string()),
+            "the JSON and the human line disagree about {name}: {json}"
+        );
+    }
+}
+
+/// What the importer skipped arrives as a warning on stderr, because this verb
+/// installs the engine logger — the "report what was imported/skipped" half of
+/// `docs/plan/11-cli-headless.md`. A skip is not a failure: the run exits 0 and
+/// the image the file names is still counted.
+///
+/// Three different counts in one object, so the report cannot be reading one
+/// field for another.
+#[test]
+fn import_warns_about_what_it_skipped_and_still_counts_it() {
+    let temporary = TempDir::new("import-skip");
+    let file = temporary.path().join("absent.gltf");
+    std::fs::write(
+        &file,
+        r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"spare"}],"materials":[{},{},{}],
+"images":[{"name":"decal","uri":"decal.png"},{"name":"grime","uri":"grime.png"}]}"#,
+    )
+    .expect("the document is written");
+
+    let output = crcbl(temporary.path(), &["import", arg(&file), "--json"]);
+    assert_eq!(code(&output), 0, "a skip is not a failure");
+    let json = stdout(&output);
+    assert!(has_field(&json, "materials", "3"), "{json}");
+    assert!(has_field(&json, "images", "2"), "{json}");
+    assert!(has_field(&json, "nodes", "1"), "{json}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for image in ["decal", "grime"] {
+        assert!(
+            stderr.contains(image),
+            "the importer's skip warning did not reach the terminal: {stderr}"
+        );
+    }
+    assert!(stderr.contains("skipping image"), "{stderr}");
+}
+
+/// A file that is not glTF is a failed command — exit 1, naming the file — and
+/// not a bad invocation.
+#[test]
+fn import_refuses_a_file_that_is_not_gltf() {
+    let temporary = TempDir::new("import-broken");
+    let file = temporary.path().join("notes.gltf");
+    std::fs::write(&file, "this is not a glTF document").expect("the file is written");
+
+    let output = crcbl(temporary.path(), &["import", arg(&file), "--json"]);
+    assert_eq!(code(&output), 1, "a bad document is a failed command");
+    let json = stdout(&output);
+    assert!(
+        json.starts_with(r#"{"ok":false,"command":"import""#),
+        "{json}"
+    );
+    assert!(json.contains("notes.gltf"), "{json}");
+
+    // And a file that is not there at all fails the same way.
+    let output = crcbl(temporary.path(), &["import", "nowhere.gltf"]);
+    assert_eq!(code(&output), 1);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("nowhere.gltf"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// `crcbl bench` end to end: the distribution, the environment block the plan

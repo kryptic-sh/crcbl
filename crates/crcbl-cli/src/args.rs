@@ -73,6 +73,7 @@ COMMANDS:
     replay        Read a .crpl replay file and dump its metadata.
     crpix         Convert PNG frames into one .crpix sprite sheet.
     lod           Report or generate a glTF mesh's LOD chain.
+    import        Import a glTF and report what came out of it.
     bench         Run a fixed benchmark scenario and report its distribution.
     sim           Run the determinism harness and print its state hash.
     settings      Read or write a game's settings.toml.
@@ -241,6 +242,41 @@ OPTIONS:
         --force              (gen) Overwrite the output file if it exists.
         --json               Emit one JSON object instead of human output.
     -h, --help               Print this text.";
+
+/// `crcbl import --help`.
+pub const IMPORT_USAGE: &str = "\
+crcbl import — import a glTF and report what came out of it
+
+USAGE:
+    crcbl import <FILE> [OPTIONS]
+
+Runs the asset import pipeline over one document and prints what it holds: the
+meshes, the primitives across them, the materials, the images, every entry of
+the nodes array, and the instances — one per node that draws a mesh.
+
+FILE is a .gltf or .glb, and its file name has to be a legal asset key: ASCII
+letters, digits, `.`, `_` and `-`. That is the rule every asset this engine
+loads obeys, so that a tree which loads from a directory also loads over HTTP.
+
+WHAT WAS SKIPPED:
+    The importer reports its own skips as warnings on stderr — an extension it
+    does not support, an image whose URI will not resolve, a primitive that is
+    not a triangle list — and this verb installs the engine logger so they are
+    on the terminal beside the counts. CRCBL_LOG sets the level; the default
+    shows them.
+
+    A skip is not a failure. A document that imported with warnings exits 0, and
+    the counts include what was skipped: an image the file names but the
+    directory does not have is still an image the document declares.
+
+    This verb does not write a scene. `docs/plan/11-cli-headless.md` sketches
+    `--out <DIR>`, and there is nothing for it to write — the importer produces
+    an in-memory scene and this tree has no on-disk scene format — so `--out` is
+    refused by name rather than ignored.
+
+OPTIONS:
+        --json    Emit one JSON object instead of human output.
+    -h, --help    Print this text.";
 
 /// `crcbl bench --help`.
 pub const BENCH_USAGE: &str = "\
@@ -443,6 +479,8 @@ pub enum Command {
     Crpix(CrpixArgs),
     /// A glTF mesh's LOD chain, reported or generated.
     Lod(LodArgs),
+    /// One glTF document, imported and counted.
+    Import(ImportArgs),
     /// One fixed benchmark scenario, timed.
     Bench(BenchArgs),
     /// The determinism harness: N ticks of a seed-generated world, hashed.
@@ -466,6 +504,7 @@ impl Command {
             // that varied with an inner verb would make every consumer match on
             // a set of strings that grows with the CLI.
             Self::Lod(_) => "lod",
+            Self::Import(_) => "import",
             // The scenario is a field of its own, for the reason above.
             Self::Bench(_) => "bench",
             Self::Sim(_) => "sim",
@@ -484,6 +523,7 @@ impl Command {
             Self::Replay(args) => args.json,
             Self::Crpix(args) => args.json,
             Self::Lod(args) => args.json,
+            Self::Import(args) => args.json,
             Self::Bench(args) => args.json,
             Self::Sim(args) => args.json,
             Self::Settings(args) => args.json,
@@ -654,6 +694,21 @@ pub struct LodArgs {
     pub output: Option<PathBuf>,
     /// Overwrite an existing output file.
     pub force: bool,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
+/// `crcbl import`.
+///
+/// There is no output directory: `docs/plan/11-cli-headless.md` sketches
+/// `--out <dir>` and there is nothing for it to write, because the importer
+/// produces an in-memory scene and this tree has no on-disk scene format. See
+/// [`IMPORT_USAGE`], which says so where a user reads it, and `parse_import`,
+/// which refuses `--out` by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportArgs {
+    /// The glTF to read.
+    pub file: PathBuf,
     /// Machine-readable output.
     pub json: bool,
 }
@@ -943,6 +998,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("replay") => parse_replay(args),
         Some("crpix") => parse_crpix(args),
         Some("lod") => parse_lod(args),
+        Some("import") => parse_import(args),
         Some("bench") => parse_bench(args),
         Some("sim") => parse_sim(args),
         Some("settings") => parse_settings(args),
@@ -1494,6 +1550,51 @@ fn parse_lod(mut args: impl Iterator<Item = OsString>) -> Invocation {
     }
 
     Invocation::Command(Command::Lod(parsed))
+}
+
+fn parse_import(args: impl Iterator<Item = OsString>) -> Invocation {
+    let mut json = false;
+    let mut file = None;
+
+    // A `for` rather than the `while let` every other parser here uses: no arm
+    // of this one reads a value of its own, so nothing needs the iterator.
+    for arg in args {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(IMPORT_USAGE),
+            Some("--json") => json = true,
+            // Sketched by topic 11 and not built. Refused with the reason
+            // rather than as an unknown option: the difference between "not
+            // yet" and "typo", the same distinction `Target::Wasm`,
+            // [`LodAction::Preview`] and `sim`'s scene argument are parsed to
+            // make. The directory after it is never looked at, so the message
+            // is about `--out` and not about a second file.
+            Some("-o" | "--out" | "--output") => {
+                return bad(
+                    "`import` writes nothing, so it has no --out: the importer produces an \
+                     in-memory scene and this tree has no on-disk scene format to write it \
+                     to. `crcbl lod gen` is the one verb that writes a cooked artifact",
+                );
+            }
+            Some(other) if other.starts_with('-') => {
+                return Invocation::BadUsage(format!("`import` has no option `{other}`"));
+            }
+            // The glTF. A path, so any bytes a filesystem accepts — the *asset
+            // key* rules apply to the file name and are enforced by the command,
+            // where a refusal can explain itself.
+            Some(_) | None if file.is_none() => file = Some(PathBuf::from(arg)),
+            _ => {
+                return Invocation::BadUsage(format!(
+                    "`import` takes one file; `{}` is a second one",
+                    arg.to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    let Some(file) = file else {
+        return bad("`import` needs a glTF file");
+    };
+    Invocation::Command(Command::Import(ImportArgs { file, json }))
 }
 
 fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
@@ -2146,6 +2247,7 @@ mod tests {
             vec!["crpix", "a.png", "-o", "a.crpix", "--json"],
             vec!["lod", "stats", "a.gltf", "--json"],
             vec!["lod", "gen", "a.gltf", "-o", "a.dag", "--json"],
+            vec!["import", "a.gltf", "--json"],
             vec!["bench", "--scenario", "jobs", "--json"],
             vec!["bench", "--scenario", "phys", "--json"],
             vec!["sim", "--json"],
@@ -2371,6 +2473,97 @@ mod tests {
             vec!["lod", "gen", "a.gltf", "--help"],
         ] {
             assert_eq!(parse_args(&argv), Invocation::Help(LOD_USAGE), "{argv:?}");
+        }
+    }
+
+    /// The one positional reaches the struct, `--json` is the only option, and
+    /// the path is taken verbatim — the asset-key rules are the command's, so a
+    /// name the parser cannot judge still parses.
+    #[test]
+    fn import_takes_one_file_and_the_json_flag() {
+        let Command::Import(args) = command(&["import", "meshes/car.glb"]) else {
+            panic!("expected import");
+        };
+        assert_eq!(args.file, PathBuf::from("meshes/car.glb"));
+        assert!(!args.json);
+
+        // Either order: the flag is not positional.
+        for argv in [
+            vec!["import", "car.glb", "--json"],
+            vec!["import", "--json", "car.glb"],
+        ] {
+            let Command::Import(args) = command(&argv) else {
+                panic!("expected import for {argv:?}");
+            };
+            assert_eq!((args.file, args.json), (PathBuf::from("car.glb"), true));
+        }
+    }
+
+    #[test]
+    fn import_help_is_its_own_page() {
+        for argv in [vec!["import", "--help"], vec!["import", "-h"]] {
+            assert_eq!(
+                parse_args(&argv),
+                Invocation::Help(IMPORT_USAGE),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The file is required, a second one is refused, and an option `import`
+    /// does not have is refused as an option rather than swallowed as a path.
+    #[test]
+    fn import_refuses_a_malformed_invocation() {
+        let Invocation::BadUsage(message) = parse_args(&["import"]) else {
+            panic!("a missing file should be a bad invocation");
+        };
+        assert!(message.contains("needs a glTF file"), "{message}");
+
+        let Invocation::BadUsage(message) = parse_args(&["import", "a.gltf", "b.gltf"]) else {
+            panic!("two files should be a bad invocation");
+        };
+        assert!(message.contains("b.gltf"), "{message}");
+
+        let Invocation::BadUsage(message) = parse_args(&["import", "a.gltf", "--frobnicate"])
+        else {
+            panic!("an unknown option should be a bad invocation");
+        };
+        assert!(message.contains("--frobnicate"), "{message}");
+    }
+
+    /// `--out` is refused **with the reason**, not as an unknown option:
+    /// `docs/plan/11-cli-headless.md` sketches it and there is nothing for it to
+    /// write. The difference is what tells a reader "not built" from "typo".
+    #[test]
+    fn import_refuses_the_output_directory_it_cannot_write() {
+        for argv in [
+            vec!["import", "car.glb", "--out", "cooked/"],
+            vec!["import", "car.glb", "-o", "cooked/"],
+            vec!["import", "car.glb", "--output", "cooked/"],
+        ] {
+            let Invocation::BadUsage(message) = parse_args(&argv) else {
+                panic!("{argv:?} should be a bad invocation");
+            };
+            assert!(
+                message.contains("--out") && message.contains("no on-disk scene format"),
+                "{argv:?} must be refused by name and with the reason: {message}"
+            );
+            assert!(
+                !message.contains("cooked/"),
+                "the refusal is about --out, not about the directory after it: {message}"
+            );
+        }
+    }
+
+    /// The help says the two things a reader would otherwise have to find out by
+    /// running it: `--out` is refused, and what was skipped arrives as warnings.
+    #[test]
+    fn the_import_help_says_what_it_does_not_do() {
+        for value in ["--out", "warnings", "CRCBL_LOG"] {
+            assert!(
+                IMPORT_USAGE.contains(value),
+                "`import --help` does not name `{value}`:\n{IMPORT_USAGE}"
+            );
         }
     }
 

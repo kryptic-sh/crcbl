@@ -22,8 +22,8 @@ regression (same severity as a sample linking `crcbl-vk` directly).
 
 **What the binary parses today** — `crates/crcbl-cli/src/args.rs`'s `Command` is
 the list, and it is not the one this section describes: `new`, `run`, `build`,
-`screenshot`, `replay`, `crpix`, `lod`, `bench` and `sim`. Several of those are
-not sketched anywhere below and are worth naming here:
+`screenshot`, `replay`, `crpix`, `lod`, `import`, `bench`, `sim` and `settings`.
+Several of those are not sketched anywhere below and are worth naming here:
 
 - `crcbl replay <FILE> [--json]` — read a `.crpl` recording and report its
   metadata. Topic 22 owns it, and owns the subverbs it does not yet have.
@@ -37,9 +37,9 @@ not sketched anywhere below and are worth naming here:
   report its distribution beside the machine it ran on.
   `docs/plan/40-profiling.md` owns it.
 
-Everything below that is not in that list — `scene`, `import`, `phys`, `edit` —
-is unbuilt. They are kept as the specification they always were; the parser
-rejects those words today.
+Everything below that is not in that list — `scene`, `phys`, `edit` — is
+unbuilt. They are kept as the specification they always were; the parser rejects
+those words today.
 
 Project lifecycle:
 
@@ -63,8 +63,21 @@ Content pipeline (agent/CI workhorses):
   commands from args or stdin (newline-delimited, scriptable); every operation
   is the same `Command` type the GUI emits, so undo/redo and validation apply
   identically.
-- `crcbl import <gltf> [--out <dir>]` — run the asset import pipeline
-  standalone; report what was imported/skipped.
+- `crcbl import <gltf> [--json]` — **built.** Runs the asset import pipeline
+  over one document and reports what came out of it: meshes, the primitives
+  across them, materials, images, every entry of the `nodes` array, and the
+  instances — one per node that draws a mesh. What was _skipped_ is not a second
+  list: the importer already warns for every unsupported extension, unresolvable
+  image and non-triangle primitive through `crcbl_core::log`, and the verb
+  installs the stderr logger so those lines land beside the counts. A skip is
+  not a failure — the run exits 0 and the skipped item is still counted.
+
+  **`--out <dir>` is not built and is refused by name.** There is nothing for it
+  to write: the importer produces an in-memory `GltfScene`, this tree has no
+  on-disk scene format — the RON scene directory is still an open decision in
+  `docs/backlog.md` — and no binary scene container. An `--out` that wrote
+  nothing, or that invented a format, would be worse than the refusal.
+
 - `crcbl screenshot <scene> [--camera <name>] [--size WxH] -o out.png` —
   offscreen render (no window/swapchain: render graph → readback → PNG). This is
   the visual regression primitive for CI and the "did my scene edit work"
@@ -113,16 +126,16 @@ Editor session control:
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                                                                                                                                                                                                        | Roadmap phase |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| `crcbl-cli` scaffold: `new`, `run`, `build`                                                                                                                                                                                                  | **Built**     |
-| Offscreen render + `screenshot`                                                                                                                                                                                                              | **Built**     |
-| `replay` (metadata report), `crpix`, `lod stats`/`gen`                                                                                                                                                                                       | **Built**     |
-| `sim` — the determinism harness behind a verb: `--ticks`, `--tick-rate`, `--seed`, `--json`. **The scene argument and `--input script.ron` are not built** and are refused by name; there is no scene format and no RON reader in this tree. | **Built**     |
-| `settings get\|set\|list` — the player's `settings.toml` through `crcbl-store`'s stack, typed by TOML's own grammar. `crcbl save` is topic 14's and still unbuilt.                                                                           | **Built**     |
-| `import`                                                                                                                                                                                                                                     | P9            |
-| `scene` batch ops + `edit --serve` (editor command protocol)                                                                                                                                                                                 | P12           |
-| `phys --check`                                                                                                                                                                                                                               | P3–P11 grow   |
+| Slice                                                                                                                                                                                                                                                 | Roadmap phase |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `crcbl-cli` scaffold: `new`, `run`, `build`                                                                                                                                                                                                           | **Built**     |
+| Offscreen render + `screenshot`                                                                                                                                                                                                                       | **Built**     |
+| `replay` (metadata report), `crpix`, `lod stats`/`gen`                                                                                                                                                                                                | **Built**     |
+| `sim` — the determinism harness behind a verb: `--ticks`, `--tick-rate`, `--seed`, `--json`. **The scene argument and `--input script.ron` are not built** and are refused by name; there is no scene format and no RON reader in this tree.          | **Built**     |
+| `settings get\|set\|list` — the player's `settings.toml` through `crcbl-store`'s stack, typed by TOML's own grammar. `crcbl save` is topic 14's and still unbuilt.                                                                                    | **Built**     |
+| `import <gltf> [--json]` — the importer standalone, reporting the counts a bake produces. **`--out <dir>` is not built** and is refused by name: there is no on-disk scene format in this tree to write. Skips arrive as the importer's own warnings. | **Built**     |
+| `scene` batch ops + `edit --serve` (editor command protocol)                                                                                                                                                                                          | P12           |
+| `phys --check`                                                                                                                                                                                                                                        | P3–P11 grow   |
 
 ## Exit criteria (MVP)
 

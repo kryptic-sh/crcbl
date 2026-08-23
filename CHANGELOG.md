@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl import <gltf> [--json]` runs the glTF importer standalone.** It
+  reports what came out of one document — meshes, the primitives across them,
+  materials, images, every entry of the `nodes` array, and the instances, one
+  per node that draws a mesh — from a single list, so the human line and the
+  `--json` object cannot carry different numbers. What the importer _skipped_ is
+  not a second report: the verb installs the engine's stderr logger, so the
+  warnings `import_gltf` already emits for an unsupported extension, an image
+  whose URI will not resolve, or a primitive that is not a triangle list land
+  beside the counts. A skip is not a failure — the run exits 0 and the skipped
+  item is still counted. **`--out <dir>` is not built and is refused by name**,
+  with the reason: the importer produces an in-memory `GltfScene` and this tree
+  has no on-disk scene format to write one to.
+
 - **A player's `[engine.video]` settings now reach the frame.** `GpuContext`
   reads the player's `settings.toml` while it opens — `SettingsSource::Platform`
   by default, from the directory `GpuContextDesc::label` names, so a game gets

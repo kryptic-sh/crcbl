@@ -133,8 +133,11 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
 4. Scene-dir format: deterministic RON writer, chunk load/save, dirty-chunk
    tracking, roundtrip property tests.
 5. Watcher + reload paths (assets, shaders, per-chunk scene reload).
-6. `crcbl import` CLI wiring; `crcbl bake` (may land later, pre-Pages-demo of a
-   scene-heavy sample).
+6. `crcbl import` CLI wiring — the **report** is built
+   (`crcbl import <gltf> [--json]`, counts plus the importer's skip warnings);
+   what it does not do is write, because task 4 has not landed and there is no
+   scene directory to write into. `crcbl bake` (may land later, pre-Pages-demo
+   of a scene-heavy sample).
 7. Sandbox: load a real glTF scene (Sponza or similar) via a `.scn/` dir, fly
    through it at stage 3 performance targets.
 
@@ -249,8 +252,15 @@ format choice already covers them.
 > (`cluster_dag`) and LOD selection and resolution (`lod`, `lod_resolve`) — the
 > geometry pipeline topic 25 owns, reached from `crcbl lod`. What the list above
 > says is still absent is still absent: no GPU pool upload, no textures, no mip
-> generation, no RON scene format, no hot reload, no `crcbl import`, and skins
-> and animations are still deliberately unread.
+> generation, no RON scene format, no hot reload, and skins and animations are
+> still deliberately unread.
+>
+> **`crcbl import` landed on 2026-08-23**, as the reporting half alone:
+> `crcbl import <gltf> [--json]` runs `import_gltf` and prints what came out —
+> meshes, primitives, materials, images, nodes, instances — with the importer's
+> own skip warnings beside them. It writes nothing, and its `--out <dir>` is
+> refused by name for the reason the list above still gives: there is no on-disk
+> scene format in this tree to write one to.
 
 - **`import_gltf(&dyn AssetSource, &Path) -> Result<GltfScene, StorageError>`.**
   The document and every external `.bin` it names go through the seam, so a
