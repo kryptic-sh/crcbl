@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run every sample game in a real window, on a real GPU backend, and read back
-# what it says it did.
+# Run every sample in a real window, on a real GPU backend, and read back what
+# it says it did.
 #
 #   tools/run-samples-windowed.sh
 #
@@ -8,7 +8,7 @@
 #
 # CI runs each sample `--headless` against lavapipe, and the shell's own e2e
 # harnesses run the *sandbox* windowed against a real server. Nothing ran a
-# **game** windowed. Everything between a sample's `main` and a swapchain on an
+# **sample** windowed. Everything between a sample's `main` and a swapchain on an
 # X11 window — the shell it picks, the surface it hands to `crcbl-hal`, the
 # extent it opens at, the mode it ends up in — was covered for the sandbox and
 # for nobody else, and a regression in a sample's windowed present failed no
@@ -63,13 +63,24 @@ SAMPLE_FRAMES=120
 
 # Each sample and the window size it asks for, one line each so a sample that
 # changes its own default fails on its own rather than being covered by a
-# constant shared with the other three. These are measured from the runs, not
-# read off the `--size` help text.
+# constant shared with the others. These are measured from the runs, not read
+# off the `--size` help text — writing this list is what caught `bare` opening
+# at 640x480 while the shared `--size` line in its own help said 960x720.
+#
+# Every binary in `apps/` that opens a window, less two: `sandbox`, which
+# `run-x11-e2e.sh` already drives windowed and asserts far more of, and
+# `viewer`, which takes a model path and has no committed `.glb` to open — see
+# `docs/backlog.md` for what closing that needs. `render-harness` is a library
+# and `sim` is a headless determinism harness, so neither has a window to open.
 SAMPLES=(
     "asteroids 960x720"
+    "bare 960x720"
     "breakout 960x720"
     "flappy 960x720"
     "horde 960x720"
+    "hud 960x720"
+    "lantern 960x720"
+    "quarry 960x720"
 )
 
 # `run_sample <name> <WxH>`

@@ -5848,12 +5848,12 @@ Four things it does **not** reach:
 ## What the windowed-sample gate does not reach (2026-08-22)
 
 `tools/run-samples-windowed.sh` closes the "no sample has ever been run in a
-window" gap: each of the four sample games runs without `--headless` on
-`crcbl-vk` under Xvfb, and the summary line it prints on exit is the assertion —
-frames, shell, extent, effective mode. Red-checked by forcing `--headless`,
-which the shell assertion catches; note that the frame count and the extent both
-still matched, so that assertion is the only thing standing between this gate
-and a run that opened no window at all.
+window" gap: every windowed sample runs without `--headless` on `crcbl-vk` under
+Xvfb, and the summary line it prints on exit is the assertion — frames, shell,
+extent, effective mode. Red-checked by forcing `--headless`, which the shell
+assertion catches; note that the frame count and the extent both still matched,
+so that assertion is the only thing standing between this gate and a run that
+opened no window at all.
 
 What it does **not** reach, stated rather than left to be discovered:
 
@@ -5861,15 +5861,20 @@ What it does **not** reach, stated rather than left to be discovered:
   manager, no null backend. `run-x11-e2e.sh` covers those shapes for the
   `sandbox` and for nothing else, so a sample whose fullscreen path broke would
   still fail no job.
-- **Only the four sample games.** `bare`, `hud`, `lantern`, `quarry` and
-  `viewer` have no windowed gate.
-- **Never run on CI hardware.** Everything measured so far is local, under Xvfb,
-  where Mesa reports no DRI3, RADV refuses to present and the run falls back to
-  `llvmpipe`. The gate deliberately asserts nothing about which adapter is
-  chosen. Whether lavapipe on `ubuntu-latest` finishes four runs of 120 frames
-  inside the job's 30-minute budget is the one thing only a real CI run decides
-  — the sandbox does 120 frames at 1280x720 there today, so the budget looks
-  generous, but that is inference, not a measurement.
+- **`viewer` has no windowed gate**, and cannot get one as the repo stands: it
+  takes a model path (`viewer model.glb`) and no `.glb` is committed anywhere
+  outside `target/`. Closing it means deciding where that model comes from —
+  committing a small one, or having the gate write one first through the same
+  builder `gltf_e2e` uses for its fixture, which is the cheaper of the two and
+  keeps a binary out of the tree. `sandbox` stays out on purpose:
+  `run-x11-e2e.sh` already drives it windowed and asserts more of it.
+- **The adapter is still lavapipe, not a real one.** Under Xvfb Mesa reports no
+  DRI3, RADV refuses to present and the run falls back to `llvmpipe` — locally
+  and on CI alike — and the gate deliberately asserts nothing about which
+  adapter was chosen. Runtime is not the risk it looked like: with the binaries
+  already built, the whole eight-sample pass takes 12.6s of wall time against
+  `lvp_icd.json` locally, so what the job's 30-minute budget actually buys is
+  the cold compile.
 - **A windowed present on the real adapter is still unreached by anything.** It
   needs a real X server with DRI3, which no automated harness here has.
 
