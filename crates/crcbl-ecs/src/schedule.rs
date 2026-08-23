@@ -24,9 +24,18 @@ impl Hasher for ByteSink {
 
 /// An ordered sequence of systems run each tick.
 ///
-/// Systems are executed in insertion order. No automatic dependency inference
-/// is done — ordering is declared by the caller and conflicts are asserted in
-/// debug builds.
+/// Systems are executed in insertion order, one after another, on the calling
+/// thread. Ordering is declared by the caller and nothing infers or checks a
+/// dependency between two systems — this doc claimed a debug-build conflict
+/// assertion until 2026-08-23 and there has never been one.
+///
+/// There is nothing for such a check to look at yet. [`SystemTrait::tick`]
+/// takes `&mut self` and nothing else, so as far as the schedule can see every
+/// system touches only its own arrays and no pair of them can conflict. Two
+/// systems that really are coupled are coupled through state the schedule is
+/// not shown — a channel or a handle one of them captured — which is exactly
+/// the access a declaration would have to make visible before a parallel
+/// schedule could be built on it. `docs/backlog.md` records what that costs.
 pub struct Schedule {
     systems: Vec<Box<dyn SystemTrait>>,
 }

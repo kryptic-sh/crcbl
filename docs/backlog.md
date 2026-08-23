@@ -3,6 +3,62 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### P8's ECS access declarations were never reserved, and P2 says they were
+
+`docs/plan/21-jobs.md`'s delivery table has a **P2** row reading "Seams
+reserved: ECS access declarations, …" and calls it a "design constraint,
+near-zero code". Its P8 row, "ECS parallel schedule (startup DAG, debug access
+asserts)", is written as if it only has to consume that seam. Measured
+2026-08-23: **the seam does not exist.** `SystemTrait` in `crcbl-ecs`'s
+`system.rs` declares nothing about access, `crcbl-ecs` has no `debug_assert` in
+it at all, and `Schedule`'s own doc claimed a debug-build conflict assertion
+that was never written — cut in the same commit as this entry.
+
+**And there is nothing for a declaration to describe yet.** `SystemTrait::tick`
+takes `&mut self` and `dt`. Every impl in the workspace — `System<T>`,
+`crcbl-phys`'s `PhysicsSystem`, `apps/sim`'s — touches only its own arrays. So
+the conflict DAG the plan describes is _empty by construction_: no two systems
+can conflict through anything the schedule can see. Systems that genuinely are
+coupled couple through captured state (a channel, a handle) that the schedule is
+never shown, and a declaration mechanism has to make that visible before a DAG
+built from it means anything. Deriving a DAG from the current trait would
+produce "everything is independent", run everything concurrently, and be wrong
+for exactly the systems that matter.
+
+**What the parallel schedule actually costs, so P8 is not planned against the
+wrong number:**
+
+- `SystemTrait` must become `Send`, and so must `DebugDrawFn` (today
+  `Box<dyn FnMut(&DebugCtx)>`, with no bound). That is a breaking change to the
+  trait and to `System<T>`'s `T`. Cheaper than it sounds — there are seven
+  `impl … SystemTrait for` sites, in `crcbl-ecs`, `crcbl-phys` and `apps/sim`.
+- An access vocabulary has to be invented, because "own arrays = write,
+  cross-system queries = read" (21-jobs.md's phrasing) describes an ECS where
+  reads cross systems through the world. This one has no such path.
+- Determinism has to survive it. `hash_state` and the sim-hash harness are what
+  `crcbl-server` compares across machines, and a schedule whose completion order
+  varies must still feed that hash in a fixed order.
+
+**DECISION NEEDED — which of these P8 does.** They are not the same slice:
+
+1. **Declarations first, no parallelism.** Add the access vocabulary and the
+   debug assertions, leave `run` sequential. Closes the gap between the plan and
+   the code, and makes the later DAG honest. Lands nothing measurable.
+2. **Parallel run first, opt-in per system.** A system that declares itself
+   independent runs on the pool; everything else stays on the driver. Delivers a
+   measurable win on the systems that are already independent (which, today, is
+   all of them) without inventing a vocabulary for coupling that no code
+   exercises yet. Risk: "independent" is a promise nothing checks, which is the
+   shape of guard this project keeps rejecting elsewhere.
+3. **Neither yet — do the broadphase half of P8 first.**
+   `crcbl bench --scenario phys` now measures the broadphase, so that half has a
+   baseline and the ECS half does not. An ECS schedule with no benchmark behind
+   it cannot be shown to have helped.
+
+Recommendation, not taken without the owner: 3, then 1, then 2 — and only after
+an ECS benchmark scenario exists to measure against, for the reason the
+profiling plan gives about numbers that cannot be compared.
+
 ### The stale `crcbl-wgpu` mentions the comment sweep could not reach
 
 The 2026-08-23 sweep took the present-tense `crcbl-wgpu` references out of 38
