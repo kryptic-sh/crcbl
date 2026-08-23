@@ -16,6 +16,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl sim` runs the determinism harness.**
+  `crcbl sim [--ticks N] [--tick-rate HZ] [--seed SEED] [--json]` simulates a
+  headless server over a seed-generated world and prints
+  `hash:<hex> ticks:<n> final_tick:<n>` — the same input gives the same hash,
+  and a hash that moves between two runs of one build is the harness reporting
+  what it exists to catch. This replaces the `apps/sim` binary, which is
+  **deleted**: its tests are ported against the `crcbl` binary.
+  `docs/plan/11-cli-headless.md` sketches a scene argument and
+  `--input script.ron`, and **neither is built** — this tree has no scene format
+  and no RON reader — so both are refused by name rather than ignored.
+
+- **`crcbl settings get|set|list` reaches a player's `settings.toml`.** A
+  setting is scriptable now, not only reachable from a settings screen. The file
+  is `<config dir>/<app>/settings.toml`; `--app` names the game and defaults to
+  the project in the current directory, and `--config-dir` stands in for the
+  platform's config directory, which is what a test or a CI job that must not
+  touch a real `~/.config` needs, since `dirs` is not redirectable through the
+  environment everywhere. A value is typed by TOML's own grammar rather than by
+  a flag, and `--` ends the options so a value can start with `-`. Unlike a
+  game's start-up, which turns an unreadable settings file into an empty layer
+  and a log line, this verb **fails** on a file that will not parse: a `set` on
+  top of an empty layer would serialise the player's file away.
+
 - **`crcbl import <gltf> [--json]` runs the glTF importer standalone.** It
   reports what came out of one document — meshes, the primitives across them,
   materials, images, every entry of the `nodes` array, and the instances, one
@@ -345,6 +368,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   probe's answer, so a device without the feature cannot report as covered.
 
 ### Fixed
+
+- **A WebGPU frame gives back the handles it acquires.** `acquire_next_frame`
+  minted a fresh image and image-view handle every frame and never retired the
+  pair from the frame before, so a browser-side handle table grew for as long as
+  the application ran. The device now tracks the outstanding pair per swapchain
+  and retires it as the next acquire is encoded; reconfiguring or destroying the
+  swapchain retires it too.
+
+- **A WebGPU teardown reaches the page that has to replay it.** The command
+  stream is drained by JavaScript, so a device dropped on the wasm side freed
+  its channel before the page could read the destroy commands sitting in it —
+  the objects those commands named stayed alive in the browser. Dropping a
+  `WebGpuDevice` now retains the channel for one more drain, and
+  `__crcbl_web_gpu_stream_release` is what finally releases it.
 
 - **A single X11 clipboard request can no longer make this client hold an
   unbounded number of payload copies.** An oversized conversion starts an `INCR`
