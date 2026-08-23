@@ -44,6 +44,9 @@ struct Crtc {
     height: u16,
     mode: u32,
     output: Option<u32>,
+    /// The refresh of [`mode`](Self::mode), read out of the same screen-resources
+    /// reply the CRTC ids came from rather than out of one per CRTC.
+    refresh_millihertz: u32,
 }
 
 impl X11Shell {
@@ -90,7 +93,7 @@ impl X11Shell {
                 bounds,
                 work_area: work_area.map_or(bounds, |area| intersect(bounds, area)),
                 scale_factor: scale,
-                refresh_millihertz: self.conn.refresh_of(crtc.mode),
+                refresh_millihertz: crtc.refresh_millihertz,
                 is_primary,
             });
         }
@@ -147,6 +150,37 @@ impl X11Shell {
     }
 }
 
+/// The refresh rate of one RandR mode, in millihertz.
+///
+/// `dot_clock / (htotal × vtotal)` — the calculation that produces 59.94 rather
+/// than 60, which is the whole reason [`MonitorInfo::refresh_millihertz`] is an
+/// integer count of thousandths. Interlaced modes report the field rate, which
+/// is twice the frame rate, and double-scan modes draw each line twice for half
+/// of it; both conventions are what every tool implements and what a user
+/// comparing this against `xrandr` will see.
+///
+/// Zero for a mode with no timing — a total of zero would be a division by it,
+/// and [`MonitorInfo::refresh_millihertz`] already defines zero as "the backend
+/// cannot determine it".
+fn refresh_millihertz(info: &ffi::RandrModeInfo) -> u32 {
+    let total = u64::from(info.htotal) * u64::from(info.vtotal);
+    if total == 0 {
+        return 0;
+    }
+    /// `RR_Interlace`.
+    const INTERLACE: u32 = 1 << 4;
+    /// `RR_DoubleScan`.
+    const DOUBLE_SCAN: u32 = 1 << 5;
+    let mut millihertz = u64::from(info.dot_clock) * 1_000 / total;
+    if info.mode_flags & DOUBLE_SCAN != 0 {
+        millihertz /= 2;
+    }
+    if info.mode_flags & INTERLACE != 0 {
+        millihertz *= 2;
+    }
+    u32::try_from(millihertz).unwrap_or(0)
+}
+
 impl Conn {
     /// Every enabled CRTC, or `None` when RandR is unusable.
     ///
@@ -178,6 +212,26 @@ impl Conn {
                 Vec::new()
             };
             ((*resources).config_timestamp, ids)
+        };
+        // The mode table, out of the *same* reply. It used to be fetched again
+        // per CRTC — a synchronous round trip each, on connect and on every
+        // RandR change — for a table that arrives here whole and describes every
+        // mode on the screen.
+        //
+        // SAFETY: `resources` is still live, and
+        // `xcb_randr_get_screen_resources_current_modes` points at `num_modes`
+        // descriptors inside the same allocation.
+        let modes: Vec<(u32, u32)> = unsafe {
+            let count = usize::from((*resources).num_modes);
+            let modes = (randr.resources_modes)(resources);
+            if count == 0 || modes.is_null() {
+                Vec::new()
+            } else {
+                core::slice::from_raw_parts(modes, count)
+                    .iter()
+                    .map(|info| (info.id, refresh_millihertz(info)))
+                    .collect()
+            }
         };
         // SAFETY: freed exactly once.
         unsafe { ffi::free_reply(resources) };
@@ -218,6 +272,10 @@ impl Conn {
                     height: info.height,
                     mode: info.mode,
                     output,
+                    refresh_millihertz: modes
+                        .iter()
+                        .find(|(id, _)| *id == info.mode)
+                        .map_or(0, |(_, millihertz)| *millihertz),
                 }
             };
             // SAFETY: freed exactly once.
@@ -229,66 +287,6 @@ impl Conn {
             }
         }
         Some(crtcs)
-    }
-
-    /// The refresh rate of a mode, in millihertz.
-    ///
-    /// `dot_clock / (htotal × vtotal)` — the calculation that produces 59.94
-    /// rather than 60, which is the whole reason
-    /// [`MonitorInfo::refresh_millihertz`] is an integer count of thousandths.
-    /// Interlaced and double-scan modes halve and double it respectively, per
-    /// the RandR conventions every tool implements.
-    fn refresh_of(&self, mode: u32) -> u32 {
-        let Some(randr) = self.ext.randr else {
-            return 0;
-        };
-        if mode == 0 {
-            return 0;
-        }
-        // SAFETY: the connection and root are live.
-        let resources = unsafe {
-            let cookie = (randr.get_screen_resources_current)(self.raw(), self.root);
-            (randr.get_screen_resources_current_reply)(self.raw(), cookie, core::ptr::null_mut())
-        };
-        if resources.is_null() {
-            return 0;
-        }
-        // SAFETY: `resources` is a live reply, and the modes pointer names
-        // `num_modes` descriptors inside the same allocation.
-        let found = unsafe {
-            let count = usize::from((*resources).num_modes);
-            let modes = (randr.resources_modes)(resources);
-            if count == 0 || modes.is_null() {
-                None
-            } else {
-                core::slice::from_raw_parts(modes, count)
-                    .iter()
-                    .find(|info| info.id == mode)
-                    .copied()
-            }
-        };
-        // SAFETY: freed exactly once.
-        unsafe { ffi::free_reply(resources) };
-
-        let Some(info) = found else {
-            return 0;
-        };
-        let total = u64::from(info.htotal) * u64::from(info.vtotal);
-        if total == 0 {
-            return 0;
-        }
-        /// `RR_Interlace`.
-        const INTERLACE: u32 = 1 << 4;
-        /// `RR_DoubleScan`.
-        const DOUBLE_SCAN: u32 = 1 << 5;
-        let mut millihertz = u64::from(info.dot_clock) * 1_000 / total;
-        if info.mode_flags & DOUBLE_SCAN != 0 {
-            millihertz /= 2;
-        }
-        if info.mode_flags & INTERLACE != 0 {
-            millihertz *= 2;
-        }
-        u32::try_from(millihertz).unwrap_or(0)
     }
 
     /// An output's name, e.g. `"DP-2"`, or a placeholder.
@@ -423,5 +421,79 @@ mod tests {
         let bounds = PhysicalRect::new(-800, -100, 1600, 1200);
         let area = PhysicalRect::new(0, 0, 1920, 1080);
         assert_eq!(intersect(bounds, area), PhysicalRect::new(0, 0, 800, 1080));
+    }
+
+    /// A mode descriptor with the timing fields filled and the rest zero.
+    fn mode_with(dot_clock: u32, htotal: u16, vtotal: u16, mode_flags: u32) -> ffi::RandrModeInfo {
+        ffi::RandrModeInfo {
+            id: 1,
+            width: 1920,
+            height: 1080,
+            dot_clock,
+            hsync_start: 0,
+            hsync_end: 0,
+            htotal,
+            hskew: 0,
+            vsync_start: 0,
+            vsync_end: 0,
+            vtotal,
+            name_len: 0,
+            mode_flags,
+        }
+    }
+
+    /// The same with no flags, which is every mode a monitor here reports.
+    fn mode(dot_clock: u32, htotal: u16, vtotal: u16) -> ffi::RandrModeInfo {
+        mode_with(dot_clock, htotal, vtotal, 0)
+    }
+
+    /// **59.94 Hz, which is the reason this is millihertz at all.**
+    ///
+    /// The numbers are CTA-861's 1080p59.94 timing — a 148.352 MHz pixel clock
+    /// over a 2200 × 1125 total — and the answer is the one `xrandr` prints for
+    /// it. A rate rounded to whole hertz would report 60 and pace a frame loop
+    /// against a clock the display does not have.
+    #[test]
+    fn the_refresh_of_a_59_94_mode_is_not_60() {
+        assert_eq!(refresh_millihertz(&mode(148_352_000, 2200, 1125)), 59_940);
+        // And the mode it is 0.1% away from, so the test can tell them apart.
+        assert_eq!(refresh_millihertz(&mode(148_500_000, 2200, 1125)), 60_000);
+    }
+
+    /// Interlace reports the *field* rate and double-scan halves the frame rate,
+    /// which is what every tool that reads these flags does.
+    #[test]
+    fn interlace_doubles_the_rate_and_double_scan_halves_it() {
+        /// `RR_Interlace`.
+        const INTERLACE: u32 = 1 << 4;
+        /// `RR_DoubleScan`.
+        const DOUBLE_SCAN: u32 = 1 << 5;
+        let plain = refresh_millihertz(&mode(148_500_000, 2200, 1125));
+        assert_eq!(
+            refresh_millihertz(&mode_with(148_500_000, 2200, 1125, INTERLACE)),
+            plain * 2,
+        );
+        assert_eq!(
+            refresh_millihertz(&mode_with(148_500_000, 2200, 1125, DOUBLE_SCAN)),
+            plain / 2,
+        );
+        // Both at once is a mode nothing produces, and the two cancel rather
+        // than one of them being ignored.
+        assert_eq!(
+            refresh_millihertz(&mode_with(148_500_000, 2200, 1125, INTERLACE | DOUBLE_SCAN)),
+            plain,
+        );
+    }
+
+    /// A mode with no timing answers zero rather than dividing by it.
+    ///
+    /// `MonitorInfo::refresh_millihertz` defines zero as "the backend cannot
+    /// determine it", which is the honest answer for a descriptor carrying no
+    /// totals — and the arithmetic above would panic in a debug build.
+    #[test]
+    fn a_mode_with_no_timing_reports_zero() {
+        assert_eq!(refresh_millihertz(&mode(148_500_000, 0, 1125)), 0);
+        assert_eq!(refresh_millihertz(&mode(148_500_000, 2200, 0)), 0);
+        assert_eq!(refresh_millihertz(&mode(0, 2200, 1125)), 0);
     }
 }

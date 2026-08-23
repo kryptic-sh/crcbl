@@ -5630,17 +5630,23 @@ nothing.
   `kAudioDevicePropertyPreferredChannelLayout` on macOS, ALSA/PulseAudio channel
   maps on Linux) or a user-facing speaker-layout setting the mixer pans into.
   Nobody has asked for surround yet.
-- **X11 `refresh_of` re-issues a full screen-resources round trip per CRTC**
-  (`crates/crcbl-shell/src/x11/monitors.rs`) — six monitors cost twelve extra
-  synchronous round trips on connect and on every RandR change. The sibling
-  `read_crtcs` in the same file is written two-phase to avoid exactly this.
+- **X11 monitor enumeration is unexercised on any harness here.** The per-CRTC
+  screen-resources round trip is gone — `read_crtcs` harvests the mode table
+  from the reply it already holds, and the refresh arithmetic is a pure function
+  with tests — but under Xvfb the RandR path is never taken at all:
+  `enumerate_monitors` falls back to the single `screen` monitor with a zero
+  refresh, so nothing in `read_crtcs`, `read_output_name` or the mode lookup
+  runs in the x11 e2e. Exercising it needs an X server with a RandR provider
+  that reports CRTCs, which no harness here has.
 - **No ICCCM `MULTIPLE` target** (`crates/crcbl-shell/src/x11/xselection.rs`);
   the `TIMESTAMP` half of that finding is fixed. An undocumented omission,
   unlike the many deliberate ones in that file.
-- **Three `Limits` fields are written by backends and enforced by nothing** —
-  `max_uniform_buffer_range`, `max_storage_buffer_range`,
-  `optimal_buffer_copy_offset_alignment` (`crates/crcbl-hal/src/caps.rs`). Five
-  of the eight the review named are now enforced.
+- **`optimal_buffer_copy_offset_alignment` is read by nothing**
+  (`crates/crcbl-hal/src/caps.rs`), which is correct rather than a gap: it is a
+  preference, not a ceiling, and a copy that ignores it is slower and never
+  wrong. What would use it is a staging allocator that rounds each copy's offset
+  up to it; nothing does. The two range limits beside it are enforced now, in
+  the null backend and in `crcbl-vk`.
 - **`fp3232` divides the fraction by `u32::MAX` rather than `2^32`**
   (`crates/crcbl-shell/src/x11/input.rs`) — ~2.3e-10 relative error,
   unobservable, and the new test asserts to `1e-6` so it does not pin the
