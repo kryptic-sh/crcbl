@@ -1360,7 +1360,7 @@ jobs:
       # refuses to open at all when it is asked to make validation fatal and the
       # layer is absent — a run whose errors cannot stop it looks exactly like a
       # run that had none.
-      - name: Install sway, the ALSA headers, the Vulkan loader, lavapipe and the validation layer
+      - name: Install sway, the ALSA headers, lavapipe and the validation layer
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
         with:
