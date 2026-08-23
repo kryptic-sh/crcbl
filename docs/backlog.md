@@ -15614,23 +15614,27 @@ apart — so **two mapped features are left without one**:
 AI cost about as much as AH and bought the same kind of witness, so the pattern
 is proven; what is unanswered is only whether these two are worth it.
 
-### The probe gate's expected local failure is documented in the wrong file
+### The probe gate's expected local failure is now documented, not prevented
 
-`./web/run-probe-e2e.sh` passes 74/74 on SwiftShader under Xvfb. Run with
+`./web/run-probe-e2e.sh` passes 87/87 on SwiftShader under Xvfb. Run with
 `--adapter hardware` on this machine it exits 1 on **group X alone** — the
-presented-canvas-frame readback — and every other group, including AH, passes
-identically to the SwiftShader run.
+presented-canvas-frame readback, which comes back transparent black beside a
+device error reading "[Invalid Texture] is invalid due to a previous error" —
+for 86/87, with every other group including AH passing identically to the
+SwiftShader run. Both numbers are from runs on 2026-08-23.
 
-That is expected, not a regression: `web/run-browser-e2e.sh`'s header carries
-the table, and its `Xvfb` + `hardware` row reads "transparent black —
-_silently_". **The table is in the demo harness and the failure is in the probe
-harness**, so somebody running the probe gate on hardware for the first time
-finds a red group and no explanation anywhere they were looking.
+The first half of this is closed: the harness carries the row in its own header
+now and prints it when it sees the combination, before the run and again after a
+failure, so the reader's question is answered where the question arrives.
 
-Either the row belongs in `run-probe-e2e.sh`'s header too, or group X should
-refuse to run on that combination and say why rather than failing — the second
-is better, because a documented expected failure still trains a reader to ignore
-a red line. Neither is done.
+**What is still open is the better fix**: group X refusing to _run_ on that
+combination and saying why, rather than running and failing. A documented
+expected failure still trains a reader to ignore a red line. It is not done
+because the group runs in the page and the page cannot see that it is inside
+Xvfb — only the harness knows both halves, so either the harness has to tell the
+driver to hold that group back (there is no such switch; `--expect-fail` changes
+the verdict, not whether it runs) or the page needs the fact passed in.
+`--expect-fail X` is the honest interim, and the run now says so.
 
 **Every mapped feature is served today**, so nothing is currently misreported
 through either half. `TIMESTAMP_QUERY` used to be the standing example and is

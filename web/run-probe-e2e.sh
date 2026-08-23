@@ -58,6 +58,17 @@
 #     they submit nothing makes Z and AA pass in that same headless browser, which
 #     is how that was established rather than assumed.
 #
+#     XVFB PLUS A HARDWARE ADAPTER IS THE OTHER COMBINATION THAT CANNOT SERVE
+#     GROUP X, and it fails the opposite way round: the readback resolves, and
+#     what it hands back is transparent black, alongside a device error reading
+#     "[Invalid Texture] is invalid due to a previous error". Every other group,
+#     including AH, passes exactly as it does on SwiftShader — 86/87 on this
+#     repo's own RX 7900 XTX, against 87/87 on SwiftShader. `web/run-browser-e2e.sh`'s header
+#     has carried that row for the demo harness all along — the table was in one
+#     harness and the failure in the other, so anyone running this gate on
+#     hardware for the first time met a red group and no explanation anywhere
+#     they were looking. The run now says it when it sees the combination.
+#
 # WHAT A PLATFORM CANNOT SERVE, when it comes to that. `--expect-fail X,Y,Z,AA`
 # tells the driver those groups produce no verdict here. They still run, still
 # print and still count; only the verdict changes — and it changes in both
@@ -273,6 +284,35 @@ elif [ "${CRCBL_WEB_E2E_HEADED:-0}" = "1" ]; then
     echo "crcbl probe e2e: no Xvfb; CRCBL_WEB_E2E_HEADED=1, so the browser runs on this session's desktop"
 else
     echo "crcbl probe e2e: no display; the browser runs --headless=new"
+fi
+
+# The adapter the driver will resolve to, read the way the driver reads it: a
+# forwarded `--adapter` beats the environment. Only used to say something true
+# about this combination — the switch itself stays the driver's.
+ADAPTER_MODE="${CRCBL_WEB_E2E_ADAPTER:-auto}"
+PREV_ARG=""
+for arg in "$@"; do
+    case "$arg" in
+        --adapter=*) ADAPTER_MODE="${arg#--adapter=}" ;;
+    esac
+    if [ "$PREV_ARG" = "--adapter" ]; then
+        ADAPTER_MODE="$arg"
+    fi
+    PREV_ARG="$arg"
+done
+
+# See the header: inside Xvfb a hardware adapter presents a canvas nobody can
+# read back as anything but transparent black, so group X fails and the rest of
+# the run is unaffected. Said before the run rather than after it, because the
+# reader's question arrives the moment the group goes red.
+XVFB_HARDWARE=0
+if [ -n "${XVFB_PID:-}" ] && [ "$ADAPTER_MODE" = "hardware" ]; then
+    XVFB_HARDWARE=1
+    echo "crcbl probe e2e: --adapter hardware inside Xvfb — group X, the presented canvas"
+    echo "                 frame, reads transparent black on this combination and fails."
+    echo "                 Nothing else is affected; web/run-browser-e2e.sh's header has the"
+    echo "                 same row for the demo harness. Pass --expect-fail X to turn that"
+    echo "                 into a verdict, which also fails the run if it ever stops failing."
 fi
 
 set +e
@@ -641,6 +681,10 @@ if [ "$STATUS" -ne 0 ]; then
         echo "crcbl probe e2e: $RAN checks ran, nothing failed unexpectedly, and the --expect-fail list no longer describes them" >&2
     else
         echo "crcbl probe e2e: $RAN checks ran and at least one failed" >&2
+        if [ "$XVFB_HARDWARE" = "1" ]; then
+            echo "                 X alone failing is the expected shape here — see the Xvfb-plus-" >&2
+            echo "                 hardware note above. Any other letter is a real failure." >&2
+        fi
     fi
     exit "$STATUS"
 fi
