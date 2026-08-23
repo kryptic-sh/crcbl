@@ -314,10 +314,32 @@ pub struct WebGpuDevice {
     /// The out-of-band errors the browser has reported, and the ask in flight
     /// for more. Guarded for [`readbacks`](Self::readbacks)'s reason.
     errors: Mutex<ErrorQueue>,
-    /// The extent each live swapchain was configured at, keyed by handle bits.
-    /// WebGPU's acquire is synchronous and answers no size, so the frame's
-    /// extent is the one this device last configured.
-    swapchains: Mutex<HashMap<u64, (u32, u32)>>,
+    /// What this device remembers about each live swapchain, keyed by handle
+    /// bits. See [`SwapchainState`].
+    swapchains: Mutex<HashMap<u64, SwapchainState>>,
+}
+
+/// What a live swapchain leaves in this device between calls.
+///
+/// Both fields exist because the browser answers neither question: WebGPU's
+/// acquire is synchronous and reports no size, and `getCurrentTexture` hands
+/// back an object the replayer files under an id **this** side minted.
+#[derive(Clone, Copy, Debug)]
+struct SwapchainState {
+    /// The extent this device last configured the swapchain at.
+    extent: (u32, u32),
+    /// The pair the last [`acquire_next_frame`](Device::acquire_next_frame)
+    /// minted, which the replayer's image and image-view tables are still
+    /// holding.
+    ///
+    /// **The frame's texture expires on its own and its handle does not.** A
+    /// canvas texture is invalid once the task that acquired it returns, so
+    /// nothing here keeps a GPU allocation alive — but the replayer files it by
+    /// index in a `Map` that only a destroy removes from, and this side mints a
+    /// fresh index per frame. Left unsaid, a session grows those two tables by
+    /// one entry per rendered frame for as long as it runs. Remembering the
+    /// pair is what lets the next acquire retire it.
+    acquired: Option<(ImageHandle, ImageViewHandle)>,
 }
 
 impl WebGpuDevice {
@@ -1218,7 +1240,13 @@ impl Device for WebGpuDevice {
         self.swapchains
             .lock()
             .expect("the swapchain map was poisoned")
-            .insert(handle.to_bits(), desc.extent);
+            .insert(
+                handle.to_bits(),
+                SwapchainState {
+                    extent: desc.extent,
+                    acquired: None,
+                },
+            );
         Ok(handle)
     }
 
@@ -1229,20 +1257,51 @@ impl Device for WebGpuDevice {
     ) -> Result<(), SurfaceError> {
         self.channel
             .with(|channel| channel.encode(|stream| stream.reconfigure_swapchain(swapchain, desc)));
-        self.swapchains
+        let mut swapchains = self
+            .swapchains
             .lock()
-            .expect("the swapchain map was poisoned")
-            .insert(swapchain.to_bits(), desc.extent);
+            .expect("the swapchain map was poisoned");
+        let state = swapchains
+            .entry(swapchain.to_bits())
+            .or_insert(SwapchainState {
+                extent: desc.extent,
+                acquired: None,
+            });
+        state.extent = desc.extent;
+        // The pair a reconfigure leaves behind is the same one an acquire
+        // would: last frame's, already presented and already expired. Retiring
+        // it here rather than carrying it over keeps the rule one sentence long
+        // — the replayer holds at most one acquired pair per swapchain.
+        if let Some((image, view)) = state.acquired.take() {
+            self.channel.with(|channel| {
+                channel.encode(|stream| {
+                    stream.destroy_image_view(view);
+                    stream.destroy_image(image);
+                })
+            });
+        }
         Ok(())
     }
 
     fn destroy_swapchain(&self, swapchain: SwapchainHandle) {
-        self.channel
-            .with(|channel| channel.encode(|stream| stream.destroy_swapchain(swapchain)));
-        self.swapchains
+        let acquired = self
+            .swapchains
             .lock()
             .expect("the swapchain map was poisoned")
-            .remove(&swapchain.to_bits());
+            .remove(&swapchain.to_bits())
+            .and_then(|state| state.acquired);
+        self.channel.with(|channel| {
+            channel.encode(|stream| {
+                // Destroying the swapchain does not retire the frame it last
+                // handed out: the replayer files the texture and its view in
+                // tables of their own, and only their own destroys remove them.
+                if let Some((image, view)) = acquired {
+                    stream.destroy_image_view(view);
+                    stream.destroy_image(image);
+                }
+                stream.destroy_swapchain(swapchain);
+            })
+        });
     }
 
     /// Acquires the canvas's frame, and never reports it stale.
@@ -1308,16 +1367,32 @@ impl Device for WebGpuDevice {
         // implicit, so there is nothing for a caller to wait on or signal.
         let image: ImageHandle = self.pool.alloc();
         let view: ImageViewHandle = self.pool.alloc();
+        let (extent, stale) = {
+            let mut swapchains = self
+                .swapchains
+                .lock()
+                .expect("the swapchain map was poisoned");
+            match swapchains.get_mut(&swapchain.to_bits()) {
+                Some(state) => (state.extent, state.acquired.replace((image, view))),
+                // A handle this device never created, or one already destroyed.
+                // The acquire still goes on the stream — the replayer is the
+                // one that decides what an unknown swapchain is — and there is
+                // no remembered pair to retire.
+                None => ((0, 0), None),
+            }
+        };
         self.channel.with(|channel| {
-            channel.encode(|stream| stream.acquire_next_frame(swapchain, image, view))
+            channel.encode(|stream| {
+                // Last frame's pair, retired before this one is filed, so the
+                // replayer's tables hold one at a time instead of one per
+                // frame the session has ever drawn. See `SwapchainState`.
+                if let Some((image, view)) = stale {
+                    stream.destroy_image_view(view);
+                    stream.destroy_image(image);
+                }
+                stream.acquire_next_frame(swapchain, image, view)
+            })
         });
-        let extent = self
-            .swapchains
-            .lock()
-            .expect("the swapchain map was poisoned")
-            .get(&swapchain.to_bits())
-            .copied()
-            .unwrap_or((0, 0));
         Ok(AcquiredFrame {
             image,
             view,

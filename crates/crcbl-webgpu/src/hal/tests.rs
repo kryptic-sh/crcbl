@@ -1593,6 +1593,146 @@ fn the_shim_reports_the_canvas_size_it_just_wrote() {
     );
 }
 
+/// **A session's acquires leave one image and one view filed, not one pair per
+/// frame it has ever drawn.**
+///
+/// `getCurrentTexture` hands back a texture the canvas expires by itself, so
+/// nothing here was holding GPU memory — but the replayer files it by the index
+/// *this* side mints, in a `Map` only a destroy removes from, and this side
+/// minted a fresh index every frame. Measured in a browser before the fix, the
+/// image and image-view tables climbed by exactly one per rendered frame, in
+/// lock step with the replayed-command count, for as long as a demo ran.
+///
+/// The assertion is the arithmetic a table does: what an acquire files, minus
+/// what a destroy removes, over three frames.
+#[test]
+fn an_acquire_retires_the_pair_the_frame_before_it_took() {
+    let (channel, device) = device_on_fresh_channel();
+    let surface: SurfaceHandle = Handle::from_bits(1 << 32).expect("a real handle");
+    let swapchain = device
+        .create_swapchain(&canvas_swapchain_desc(surface, (640, 360)))
+        .expect("configuring a canvas needs no reply");
+
+    let frames: Vec<_> = (0..3)
+        .map(|_| {
+            device
+                .acquire_next_frame(swapchain)
+                .expect("an acquire needs no reply")
+        })
+        .collect();
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+
+    let destroyed_images: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            crate::Command::DestroyImage { image } => Some(*image),
+            _ => None,
+        })
+        .collect();
+    let destroyed_views: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            crate::Command::DestroyImageView { view } => Some(*view),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        destroyed_images,
+        frames[..2]
+            .iter()
+            .map(|frame| frame.image)
+            .collect::<Vec<_>>(),
+        "each acquire retires the image the one before it took, in order — and never the one \
+         it is handing to the caller"
+    );
+    assert_eq!(
+        destroyed_views,
+        frames[..2]
+            .iter()
+            .map(|frame| frame.view)
+            .collect::<Vec<_>>(),
+        "and its view, which is a second table with the same problem"
+    );
+
+    let acquires = commands
+        .iter()
+        .filter(|command| command.name() == "AcquireNextFrame")
+        .count();
+    assert_eq!(acquires, frames.len(), "one acquire per frame, all encoded");
+    assert_eq!(
+        acquires - destroyed_images.len(),
+        1,
+        "however many frames a session draws, the replayer is left holding one"
+    );
+}
+
+/// **Destroying the swapchain retires the frame it last handed out.**
+///
+/// The pair lives in tables of the replayer's own, which a `DestroySwapchain`
+/// does not touch: without this the last frame of every session stays filed for
+/// as long as the page does, and a page that opens and closes a canvas
+/// repeatedly accumulates one pair per open.
+#[test]
+fn destroying_a_swapchain_retires_its_last_acquired_pair() {
+    let (channel, device) = device_on_fresh_channel();
+    let surface: SurfaceHandle = Handle::from_bits(1 << 32).expect("a real handle");
+    let swapchain = device
+        .create_swapchain(&canvas_swapchain_desc(surface, (640, 360)))
+        .expect("configuring a canvas needs no reply");
+    let frame = device
+        .acquire_next_frame(swapchain)
+        .expect("an acquire needs no reply");
+
+    device.destroy_swapchain(swapchain);
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let tail: Vec<_> = commands
+        .iter()
+        .rev()
+        .take(3)
+        .map(crate::Command::name)
+        .collect();
+    assert_eq!(
+        tail,
+        ["DestroySwapchain", "DestroyImage", "DestroyImageView"],
+        "the frame's two handles are retired, and before the swapchain they came from"
+    );
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            crate::Command::DestroyImage { image } if *image == frame.image
+        )),
+        "the image retired is the one the last acquire handed out"
+    );
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            crate::Command::DestroyImageView { view } if *view == frame.view
+        )),
+        "and its view"
+    );
+
+    // A second acquire on a handle this device no longer knows still encodes,
+    // and has nothing to retire — the replayer decides what an unknown
+    // swapchain is, and a panic here would make a shutdown race fatal.
+    let after = device
+        .acquire_next_frame(swapchain)
+        .expect("an acquire needs no reply");
+    assert_eq!(
+        after.extent,
+        (0, 0),
+        "a swapchain this device has forgotten"
+    );
+}
+
 /// **The extent an acquired frame carries is the one the *last* configure
 /// carried**, never the one the swapchain was created at.
 ///
