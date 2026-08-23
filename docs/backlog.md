@@ -43,11 +43,12 @@ work afterwards, and neither can start before it.
 
 **What each corrected row leaves owed**, in the order a reader would meet them:
 
-- **`crcbl sim` and `crcbl save`/`settings` are unbuilt verbs.** The CLI parses
-  eight and none of them is these. `apps/sim` is the determinism harness and is
-  a separate binary; `crcbl-store`'s `save.rs` and `settings.rs` exist with no
-  CLI reaching them. Each is a small slice on its own, and `14-persistence.md`'s
-  exit criteria still assume both.
+- **`crcbl save` and `crcbl settings` are unbuilt verbs.** `crcbl-store`'s
+  `save.rs` and `settings.rs` exist with no CLI reaching them, and
+  `14-persistence.md`'s exit criteria assume both —
+  `save list|dump|diff|restore` and `settings get|set|list`. Each is a small
+  slice on its own. `crcbl sim` was the third of these and shipped on
+  2026-08-23.
 - **Profile rebind storage and glyph hints.** `ActionMap::rebind` mutates in
   memory and nothing serialises it; `crcbl-store` has no profile or binding type
   at all, and its only cross-session helper is the samples' high-score number.
@@ -141,7 +142,7 @@ that was never written — cut in the same commit as this entry.
 
 **And there is nothing for a declaration to describe yet.** `SystemTrait::tick`
 takes `&mut self` and `dt`. Every impl in the workspace — `System<T>`,
-`crcbl-phys`'s `PhysicsSystem`, `apps/sim`'s — touches only its own arrays. So
+`crcbl-phys`'s `PhysicsSystem`, `crcbl sim`'s — touches only its own arrays. So
 the conflict DAG the plan describes is _empty by construction_: no two systems
 can conflict through anything the schedule can see. Systems that genuinely are
 coupled couple through captured state (a channel, a handle) that the schedule is
@@ -156,7 +157,7 @@ wrong number:**
 - `SystemTrait` must become `Send`, and so must `DebugDrawFn` (today
   `Box<dyn FnMut(&DebugCtx)>`, with no bound). That is a breaking change to the
   trait and to `System<T>`'s `T`. Cheaper than it sounds — there are seven
-  `impl … SystemTrait for` sites, in `crcbl-ecs`, `crcbl-phys` and `apps/sim`.
+  `impl … SystemTrait for` sites, in `crcbl-ecs`, `crcbl-phys` and `crcbl-cli`.
 - An access vocabulary has to be invented, because "own arrays = write,
   cross-system queries = read" (21-jobs.md's phrasing) describes an ECS where
   reads cross systems through the world. This one has no such path.
@@ -5699,10 +5700,10 @@ trusting the review or a grep. The result is that **nothing above Low severity
 is still live.** Every Critical is fixed or dead — the QOA LMS sign inversion,
 the unsound `unsafe impl Send/Sync for Mixer` (now a `Mutex`, zero `unsafe`),
 the 62-byte save that aborted the process, the BVH pre-sort refit index,
-breakout's restart/per-frame-stepping/invisible-ball trio, `apps/sim`'s
-`--tick-rate 0` divide-by-zero. Many fixes carry a comment or a regression test
-naming the original defect, which is the strongest evidence the deletion loses
-nothing.
+breakout's restart/per-frame-stepping/invisible-ball trio, the determinism
+harness's `--tick-rate 0` divide-by-zero. Many fixes carry a comment or a
+regression test naming the original defect, which is the strongest evidence the
+deletion loses nothing.
 
 ### What is still live, all Low
 

@@ -99,7 +99,7 @@ pub const HEADLESS_FRAME_BUDGET: u64 = 120;
 
 /// The highest tick rate a `FrameClock` can express: `1e9 / hz` is the tick
 /// period in nanoseconds, and `hz > 1e9` truncates it to zero, which the
-/// clock asserts against after the GPU is already open. `apps/sim` guards its
+/// clock asserts against after the GPU is already open. `crcbl sim` guards its
 /// own flag with the same bound.
 pub const MAX_TICK_RATE: u32 = 1_000_000_000;
 

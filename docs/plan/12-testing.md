@@ -11,7 +11,7 @@ is the e2e substrate: if it can't be tested without a GUI, it's built wrong.
 | Unit           | Pure logic in-crate: math, pools, rebase, graph compile, TOI solvers, replication encode/decode                                  | `cargo nextest`, per crate          |
 | Property       | Invariant-heavy code: `WorldPos` rebase, BVH after random churn, undo inverses, snapshot roundtrip                               | `proptest` or a seeded loop         |
 | Integration    | Crate pairs through public APIs: ECS↔net replication, scene→server instantiation, HAL graph on NullBackend                       | `tests/` dirs                       |
-| **Sim e2e**    | Full headless server+client, input scripts, N ticks, state-hash assert (`apps/sim`)                                              | nextest, headless — runs everywhere |
+| **Sim e2e**    | Full headless server+client, input scripts, N ticks, state-hash assert (`crcbl sim`)                                             | nextest, headless — runs everywhere |
 | **Render e2e** | Offscreen render → readback → golden-image compare (`crcbl screenshot`)                                                          | needs GPU or software rasterizer    |
 | **Editor e2e** | Command sequences against headless editor server: edit → save → reload → verify; random-command + full-undo = initial-state-hash | nextest, headless                   |
 | Sample e2e     | Each sample's determinism script + golden frames — samples are test fixtures, not just demos                                     | CI per sample                       |

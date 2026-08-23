@@ -167,11 +167,9 @@ by the determinism rule.
   regressions visible as a red bar, not a vibe).
 - Ring overflow counters + mailbox staleness (consumer using an old state
   because producer is behind) surfaced in the inspector.
-- A headless sim runnable at any worker count. **There is no `crcbl sim`
-  subcommand** — `crcbl-cli` does not parse the word, and the determinism
-  harness is `apps/sim`, whose flags are `--ticks`, `--tick-rate` and `--seed`.
-  A worker count is what it would gain to make the killer test below runnable;
-  nothing exposes one yet.
+- A headless sim runnable at any worker count. `crcbl sim` is the determinism
+  harness — `--ticks`, `--tick-rate` and `--seed` — and a worker count is what
+  it would gain to make the killer test below runnable; nothing exposes one yet.
 
 ## Testing (topic 12)
 
