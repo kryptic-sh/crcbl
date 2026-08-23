@@ -529,6 +529,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A GPU error raised on the way out no longer exits 0.** `Device::take_error`
+  was drained only at the top of a frame, so everything after the last one — the
+  final submit completing, the final `wait_idle`, the swapchain and surface
+  teardown — had no reader, and a run that violated the specification while
+  shutting down reported success. `GpuContext::destroy` now drains it once more
+  after the destroys and returns `GpuError::Hal` if anything was there.
 - **A read-only depth attachment no longer loses the barrier that orders its
   store.** `ResourceState::DepthStencilRead` expanded to a read-only Vulkan
   access mask, but an attachment in that state still performs

@@ -2096,7 +2096,8 @@ impl GpuContext {
     ///
     /// # Errors
     ///
-    /// [`GpuError`] if a final wait failed.
+    /// [`GpuError`] if a final wait failed, or if the device had an
+    /// out-of-band error left to report.
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.drain()?;
         if let Some(semaphore) = self.timeline.take() {
@@ -2107,6 +2108,17 @@ impl GpuContext {
         // the one the struct declares.
         self.device.destroy_swapchain(self.swapchain);
         self.instance.destroy_surface(self.surface);
+
+        // **The last chance anything has to read the out-of-band channel.**
+        // `acquire` drains it at the top of every frame, which leaves the whole
+        // of teardown uncovered: the final submit's errors do not arrive until
+        // it has completed, and there is no frame after that to hear them. A
+        // run that violated the specification on its way out used to exit 0.
+        // After the destroys above rather than before, so the teardown calls
+        // themselves are inside what this reports.
+        if let Some(message) = self.device.take_error() {
+            return Err(GpuError::Hal(HalError::Backend(message)));
+        }
         Ok(())
     }
 }
@@ -9040,6 +9052,28 @@ mod tests {
         );
 
         gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// An error raised on the way out still reaches the caller.
+    ///
+    /// `acquire` drains the out-of-band channel at the top of a frame, so
+    /// everything after the last one — the final submit completing, the
+    /// teardown calls themselves — had no reader at all, and a run that
+    /// violated the specification while shutting down exited 0.
+    #[test]
+    fn a_device_error_raised_during_teardown_fails_the_run() {
+        let (mut shell, window, recorder, gpu) = null_context("teardown error", Pacing::default());
+
+        recorder.report_device_error("the swapchain was destroyed while still in use");
+        let error = gpu
+            .destroy()
+            .expect_err("the device had an error left to report");
+        assert!(
+            error.to_string().contains("destroyed while still in use"),
+            "the reason must survive teardown, not just the fact: {error}"
+        );
+
         shell.destroy_window(window).expect("the window goes away");
     }
 

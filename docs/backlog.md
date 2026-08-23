@@ -68,10 +68,13 @@ refused at `VkInstance::open` rather than passing having checked nothing, which
   `-WRITE-AFTER-WRITE` arrive at `ERROR` severity, so the fatal gate catches
   them. Not verified for CI's layer build; one that reported hazards as warnings
   would take the whole class out of the binary gate silently.
-- **An error raised after the last frame is never taken.** `Device::take_error`
-  is called only from `crcbl::engine`'s `acquire`, so a violation during
-  teardown or the final `wait_idle` still exits 0. A drain at shutdown closes
-  it.
+- **An error raised while the device itself is destroyed is still never taken.**
+  `GpuContext::destroy` drains the channel after the swapchain and the surface
+  are gone, so the final submit, the final `wait_idle` and those two destroys
+  are covered. What is not is anything the backend reports while dropping the
+  device and the instance, which happens after the last call any crcbl code
+  makes. Closing that means a drain inside the backend's own `Drop`, with
+  nowhere to return it to.
 - **`ValidationSink::CAPACITY` bounds what the drain can hand back.** Past it
   only the counters grow. Not practical while the first error stops the run, but
   it is a cap rather than "every error forever".
