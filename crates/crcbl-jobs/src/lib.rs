@@ -44,10 +44,16 @@
 //! all, where it runs every chunk on the calling thread and reaches the same
 //! answer.
 //!
-//! **Not here yet**: the browser's worker backend, which needs the pinned
-//! nightly and cross-origin isolation proved locally. Until it lands, wasm gets
-//! [`Inline`] from [`default_spawner`] and a pool with no workers, which is a
-//! whole answer rather than a stub.
+//! Beside them on `wasm32` is the `workers` module and its `Workers`, the
+//! browser's backend. It cannot start a thread itself — only the host can
+//! instantiate the module again against the shared memory — so it **queues**
+//! each spawn for a page to drain and turn into a `Worker`. It is what
+//! [`default_spawner`] picks there, and it answers [`Spawn::threaded`] with
+//! `false` until a page has said it can start workers, so an artifact loaded by
+//! a page without the shim degrades onto [`Inline`]'s behaviour rather than
+//! promising threads it has no way to get. Unlinked here for `Threads`'
+//! reason turned around: neither the module nor the type exists off `wasm32`,
+//! so a link to either is unresolvable in the native rustdoc gate.
 //!
 //! # The unsafe, and what checks it
 //!
@@ -93,8 +99,12 @@ pub mod mailbox;
 pub mod pool;
 pub mod ring;
 mod spawn;
+#[cfg(target_arch = "wasm32")]
+pub mod workers;
 
 pub use pool::Pool;
 #[cfg(not(target_arch = "wasm32"))]
 pub use spawn::Threads;
 pub use spawn::{Inline, Spawn, SpawnError, Work, default_spawner};
+#[cfg(target_arch = "wasm32")]
+pub use workers::Workers;

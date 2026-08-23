@@ -71,11 +71,17 @@ pub enum SpawnError {
 
 /// A spawner with no threads behind it: every [`Spawn::spawn`] is refused.
 ///
-/// **This is the browser today**, and it is what a consumer degrades onto
-/// rather than a stub standing in for something missing: the design's rule is
-/// that pipeline stages collapse into sequential calls in the tick driver and
-/// `par_for` runs inline, so a runtime that answers `false` to
-/// [`Spawn::threaded`] is fully served — just serially.
+/// **This is what a consumer degrades onto**, rather than a stub standing in
+/// for something missing: the design's rule is that pipeline stages collapse
+/// into sequential calls in the tick driver and `par_for` runs inline, so a
+/// runtime that answers `false` to [`Spawn::threaded`] is fully served — just
+/// serially.
+///
+/// It is no longer what [`default_spawner`] hands a browser build — `Workers`
+/// is, from the `workers` module, and neither is nameable off `wasm32` — but a
+/// browser page that never announces a worker shim gets the same behaviour
+/// through it, which is the point of asking [`Spawn::threaded`] rather than
+/// asking which backend was chosen.
 ///
 /// It is also the honest backend for a test that wants the single-threaded
 /// path, which is half of what the `--threads 1` vs `--threads N` determinism
@@ -142,9 +148,12 @@ impl Spawn for Threads {
 /// The backend for the target this was compiled for.
 ///
 /// The one place `cfg(target_arch)` is written for the whole threading model:
-/// native gets `Threads`, wasm32 gets [`Inline`] until the worker backend
-/// lands behind this same seam. A consumer calls this and asks
-/// [`Spawn::threaded`]; nothing above here knows which target it is on.
+/// native gets `Threads`, wasm32 gets `Workers`. A consumer calls this and asks
+/// [`Spawn::threaded`]; nothing above here knows which target it is on — and on
+/// wasm32 that answer is `false` until the page has announced a worker shim, so
+/// a build with no host behind it behaves exactly as [`Inline`] does. Neither
+/// backend is linked from here: each is absent on the other target, so a link
+/// to it is unresolvable in one of the two rustdoc gates.
 #[must_use]
 pub fn default_spawner() -> Box<dyn Spawn> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -153,7 +162,7 @@ pub fn default_spawner() -> Box<dyn Spawn> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        Box::new(Inline)
+        Box::new(crate::workers::Workers)
     }
 }
 

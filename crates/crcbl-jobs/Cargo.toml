@@ -11,5 +11,14 @@ repository.workspace = true
 # spells it this way; see `crcbl-store` for the same call.
 thiserror = { workspace = true }
 
+# The worker backend's gate artifact, built by `web/build.sh --threads` and
+# driven by `web/tools/worker-gate.mjs`. A `cdylib` because the thing under test
+# is a wasm module a Web Worker instantiates, and an *example* because its
+# exports exist only to be observed — a cargo feature on the library would put
+# them where a demo build could pick them up.
+[[example]]
+name = "web_worker_gate"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

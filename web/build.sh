@@ -84,10 +84,16 @@ profile_flag=()
 # neither of the two things that instantiate a site artifact can satisfy that:
 # `web/tools/wasm-loader.js` passes an empty import object on purpose, and
 # `web/tools/smoke.mjs` synthesises a stub memory of a single page. Each is a
-# `LinkError` on a threaded module rather than a threaded demo. There is no
-# worker backend behind `crcbl-jobs`'s `Spawn` seam yet either; what this mode
-# produces is the artifact such a backend needs, gated symbol by symbol by
+# `LinkError` on a threaded module rather than a threaded demo. What this mode
+# produces is the artifact the worker backend needs, gated symbol by symbol by
 # `web/tools/check-exports.mjs --threads`.
+#
+# IT ALSO RUNS THE BACKEND. `crcbl-jobs`'s `Workers` spawner queues each spawn
+# for a host to drain; `crates/crcbl-jobs/examples/web_worker_gate.rs` is a
+# `cdylib` that exercises it, and `web/tools/worker-gate.mjs` brings real
+# `node:worker_threads` workers up through the ABI and asserts they run Rust on
+# stacks and thread-locals of their own. That is the only place any of this is
+# actually executed rather than checked by symbol.
 #
 # IT IS NOT PART OF THE PAGES BUILD AND CANNOT BECOME ONE. GitHub Pages sends
 # no COOP/COEP pair, so a `SharedArrayBuffer` cannot exist on the published
@@ -169,11 +175,24 @@ if [ "$THREADS" = "1" ]; then
       "$THREADED_DIR/$TARGET/$PROFILE/$lib.wasm" --sample "$crate" --threads --quiet
   done
 
+  # The worker backend's own gate. An example rather than a demo crate: its
+  # exports exist only to be observed, and an example cannot reach a site
+  # artifact by any route. See the crate docs on `crcbl_jobs::workers`.
+  echo "==> cargo +$NIGHTLY build --example web_worker_gate -p crcbl-jobs ($PROFILE, threaded)"
+  (cd "$REPO" && RUSTFLAGS="${threaded_rustflags[*]}" cargo "+$NIGHTLY" build \
+    --locked --example web_worker_gate -p crcbl-jobs --target "$TARGET" \
+    "${profile_flag[@]}" --target-dir "$THREADED_DIR" -Z build-std=std,panic_abort)
+
+  echo "==> bringing Web Workers up through the spawn ABI"
+  node "$REPO/web/tools/worker-gate.mjs" \
+    "$THREADED_DIR/$TARGET/$PROFILE/examples/web_worker_gate.wasm" --quiet
+
   echo "==> $THREADED_DIR/$TARGET/$PROFILE"
   for row in "${DEMOS[@]}"; do
     IFS=: read -r _ lib _ <<<"$row"
     echo "    $lib.wasm"
   done
+  echo "    examples/web_worker_gate.wasm"
   exit 0
 fi
 

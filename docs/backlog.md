@@ -6107,13 +6107,13 @@ runner GitHub retires. If this job ever goes red on a timeout, the fix is the
 ## P5B — the job system, and the two decisions in front of it
 
 `crates/crcbl-jobs` carries the spawn seam (`Spawn`, `Threads`, `Inline`,
-`default_spawner`), the design's two communication primitives — `mailbox`
-(latest-wins triple buffer, for states) and `ring` (bounded SPSC, for streams) —
-and the work-stealing `pool` with `par_for` in both modes. The order is forced:
-the spawn seam and its single-threaded fallback came first (a pool on
+`Workers`, `default_spawner`), the design's two communication primitives —
+`mailbox` (latest-wins triple buffer, for states) and `ring` (bounded SPSC, for
+streams) — and the work-stealing `pool` with `par_for` in both modes. The order
+is forced: the spawn seam and its single-threaded fallback came first (a pool on
 `std::thread` would silently have no browser story — spawning _compiles_ on
 wasm32 and returns `UNSUPPORTED_PLATFORM` at run time), then the pool, then
-adoption. **What is still owed is the worker backend behind the seam.** The
+adoption, and the browser's `Workers` backend behind the same seam last. The
 adoption slice found **one consumer, not four**, and that is a fact about the
 samples rather than a shortfall: `apps/horde`'s `steer_enemies` is on `par_for`,
 and every other candidate collection is smaller than a single chunk — breakout
@@ -6247,9 +6247,9 @@ thing to give — horde works around it by handing `Pool::with_workers` an
 `Inline` spawner when `--workers 0` is asked for, which is a caller saying
 "threads, but none" through the only channel there is.
 
-- **Cross-origin isolation is proved locally, and the worker backend is blocked
-  on the pinned nightly's `rust-src`.** The isolation half is done:
-  `web/tools/serve.mjs` sends `Cross-Origin-Opener-Policy: same-origin` and
+- **Cross-origin isolation is proved locally, and no page uses it yet.** The
+  isolation half is done: `web/tools/serve.mjs` sends
+  `Cross-Origin-Opener-Policy: same-origin` and
   `Cross-Origin-Embedder-Policy: require-corp`, `web/build.sh --serve` runs it,
   and `run-browser-e2e.sh` refuses a run whose output does not contain the
   `crossOriginIsolated === true` check by name. Two cautions for whoever next
@@ -6261,161 +6261,143 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   is declined, the demos run single-threaded through `Inline` and the roadmap's
   `crossOriginIsolated` gate should be struck rather than left unmeetable.
 
-- **Unblocked 2026-08-22: the pinned nightly can build a threaded wasm
-  artifact.** This entry read "Blocked 2026-08-06" because `rust-src` was
-  missing on `nightly-2026-07-02`. It was installed with the
-  `rustup component add` the entry itself named, and `21-jobs.md`'s finding 1
-  was then re-run rather than assumed:
+- **The Web Worker spawn backend is in, and `default_spawner` yields it.**
+  `crcbl_jobs::workers` (`Workers`, plus the `shim` module's
+  `__crcbl_web_jobs_*` exports) is P5B step 3 of `21-jobs.md`'s order.
+  `web/build.sh --threads` builds it and `web/tools/worker-gate.mjs` runs real
+  `node:worker_threads` workers through it. What is left is below; the shape of
+  the bootstrap is no longer an open question and the paragraphs arguing it have
+  been deleted rather than annotated.
 
-  ```
-  RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals" \
-    cargo +nightly-2026-07-02 build -p crcbl-jobs \
-    --target wasm32-unknown-unknown -Z build-std=std,panic_abort
-  ```
+- **`Pool` cannot be driven from the browser's main thread, and the spawn queue
+  can.** This is the sharpest consequence of the backend landing, and it is not
+  something the backend can fix. `Pool::par_for` takes `Shared::sleep` — a
+  `std::sync::Mutex` — on every submission, and `pool::work` takes it and waits
+  on `Condvar` before parking; both lower to `Atomics.wait` on wasm, which
+  **throws** on a browser main thread rather than blocking. So the topology
+  `21-jobs.md` settled (the game worker owns the pool, main forwards and
+  presents) is not a preference, it is the only arrangement that runs.
+  `crcbl_jobs::workers`'s own queue is deliberately different: it is taken with
+  `Mutex::try_lock` in a spin (`workers::hold`), never `lock`, precisely so the
+  drain half is legal on main. **Traced through std's sources, not observed** —
+  `sys/sync/mutex/futex.rs` is the `wasm + atomics` arm, its `lock` reaches
+  `futex_wait` and `sys/pal/wasm/atomics/futex.rs` turns that into
+  `memory_atomic_wait32`, while its `try_lock` is one `compare_exchange` with no
+  futex path. Node lets its main thread block, so no local gate can show the
+  trap; the browser is where it would.
 
-  exits 0 with the single warning finding 1 predicted,
-  `unstable feature specified for -Ctarget-feature: atomics`. The pinned-nightly
-  plan stands unchanged — a second toolchain pinned by date for that one target,
-  in the shape `decoder-fuzz` already uses, because `rust-toolchain.toml` pins
-  an **exact stable** (`1.97.0`) on purpose and its own comment calls a floating
-  channel a broken promise.
+- **A worker that skips `__wasm_init_tls` does not necessarily trap, which
+  corrects the entry that used to sit here.** Measured against
+  `crates/crcbl-jobs/examples/web_worker_gate.rs`: with the call omitted,
+  `__tls_base` is simply left at zero, every worker's thread-locals alias one
+  address near the start of linear memory, and a `thread_local!` with a `const`
+  initialiser reads and writes it without complaint. The earlier
+  `RuntimeError: unreachable` came from a different crate, but **not** because
+  its thread-local was lazily initialised — it was `const { Cell::new(0) }`, the
+  same shape. The cause was measured on 2026-08-23 by reading `__tls_base` in a
+  fresh worker instance before any init: in that build it starts at **1048576**,
+  which is also the initial `__stack_pointer`, so a worker skipping the call
+  wrote its thread-locals into the top of the static stack region and the
+  corruption trapped. In the gate's build it starts at **zero** and the aliasing
+  is harmless. **The initial value is a layout accident of the module**, so both
+  outcomes are real and neither is a rule: a trap here is luck, and a gate must
+  observe TLS separation directly. **It defeated this gate's first shape**: a
+  "count each thread once" flag was satisfied by the first worker setting the
+  shared flag for all of them, and the red check came back green. The observable
+  that works is `gate_tls_shared` — a thread-local holding **the caller's own
+  frame address**, so a thread that finds an address its stack could not have
+  produced is reading someone else's TLS. Anyone writing another TLS assertion
+  should start there.
 
-  **Correction 2026-08-23: that command's artifact cannot be used by a worker,
-  so "it builds" was a weaker result than it read as.** Built exactly as above,
-  `crcbl_horde.wasm` has **zero imports** and exports its memory. A worker
-  cannot attach to a memory the module owns — only to one the host constructs
-  and the module imports — so nothing about that artifact is threaded beyond the
-  atomic instructions being legal. The link arguments are the missing half, and
-  with them the surface a worker needs is all reachable:
+- **The handle in the spawn ABI is a table index, not a pointer, and that was a
+  deliberate departure.** The design sketched here previously said to double-box
+  `Work` to a thin pointer and hand JS the address. It is not needed:
+  `workers::Queue::handed_out` keeps the `Work` owned by Rust and gives JS an
+  integer, so `__crcbl_web_jobs_entry` validates by lookup and an invented,
+  replayed or corrupted handle finds nothing instead of being read as an
+  address. The consequence worth knowing is that **the backend adds no `unsafe`
+  to `crcbl-jobs` at all** — the crate's unsafe is still only `mailbox`, `ring`
+  and `pool`. Cost: lookup is a linear scan of the in-flight list, which is
+  worker count and not work count, and handles are unique only up to `u32::MAX`
+  — `next_handle` saturates rather than wrapping, so `0` can never be minted,
+  but past the ceiling every later request carries `u32::MAX`.
+  `__crcbl_web_jobs_entry` `swap_remove`s one matching entry per call, so each
+  work still runs exactly once even then; what a collision costs is the pairing
+  between a worker's name and its work. Four billion spawns away, and stated
+  because "never reused" is not what the code does.
 
-  ```
-  -C link-arg=--shared-memory  -C link-arg=--import-memory
-  -C link-arg=--max-memory=1073741824
-  -C link-arg=--export=__wasm_init_tls   -C link-arg=--export=__tls_base
-  -C link-arg=--export=__tls_size        -C link-arg=--export=__tls_align
-  -C link-arg=--export=__stack_pointer   -C link-arg=--export=__heap_base
-  ```
+- **`WORKER_STACK_BYTES` is 1 MiB by argument and nothing has measured it.** It
+  was chosen to match the stack the linker gives the main thread. Each worker
+  leaks one, and the TLS block beside it, on purpose — a pool worker's loop
+  never returns, so there is no moment at which either could be freed. A
+  subsystem thread with deep recursion or a large frame is the case that would
+  find the number wrong, and the failure would look like the `__stack_pointer`
+  one: corruption, not a clean overflow.
 
-  That artifact imports `env.memory`, instantiates under node against a
-  `WebAssembly.Memory({initial: 257, maximum: 16384, shared: true})` whose
-  buffer **is** a `SharedArrayBuffer`, and reports `__tls_size` 2041 with
-  `__tls_align` 8. `__stack_pointer` comes back as a mutable global that JS can
-  **write** — checked by writing it, not by reading its type — which is the one
-  fact the whole bootstrap turns on: wasm globals are per-instance, so every
-  worker would otherwise run on the main thread's stack region.
+- **`spawn` cannot report a host-side refusal, and this is in the seam's
+  grain.** A queued request that the page then fails to turn into a `Worker`
+  cannot be reported: `Spawn::spawn` has returned `Ok` long before. The honest
+  question stays `Spawn::threaded`, asked once at startup, which on wasm is
+  false until `__crcbl_web_jobs_host_ready` has been called. What is **not**
+  covered is a host that announces itself and then cannot deliver — the queue
+  grows and nothing complains.
 
-  **This settles the shape of the worker backend, and it needs no new
-  dependency.** `wasm-bindgen-rayon` and `wasm_thread` are the ecosystem's
-  answers and both drag in `wasm-bindgen`, which this repo deliberately does not
-  use — `web/tools/wasm-loader.js` is hand-written against raw `__crcbl_web_*`
-  exports. With the symbols above the bootstrap is: the main thread allocates a
-  stack and a `__tls_size` block from its own allocator and double-boxes the
-  `Work` to a thin pointer; JS posts
-  `{module, memory, stackTop, tlsPtr, workPtr}` to a `Worker`; the worker
-  instantiates against the same memory, sets `__stack_pointer`, calls
-  `__wasm_init_tls(tlsPtr)`, and calls an exported entry that reconstitutes the
-  `Box` and runs it.
+- **No page implements the worker shim, so nothing on the site uses any of
+  this.** The demos' artifacts are still the single-threaded ones and
+  `Spawn::threaded()` answers false in a browser today, which is why
+  `bash web/build.sh` is unchanged by the backend landing. Whoever adds the shim
+  owns: a loader that constructs the shared memory (`wasm-loader.js` passes an
+  empty import object on purpose), the drain loop on the page, and the
+  `crossOriginIsolated` check in front of both. `web/tools/worker-gate.mjs` is
+  the drain loop written once already and is the thing to copy.
 
-  **The bootstrap was then run, not just designed** (2026-08-23, under
-  `node:worker_threads`, against a throwaway crate exporting one function that
-  reads a `thread_local`, allocates a `Vec`, and bumps a `static AtomicU32`).
-  Three workers instantiated the same module against the same shared memory and
-  each ran Rust: allocation from the shared heap returned the right answer, the
-  `AtomicU32` accumulated every call from every thread, each worker saw its own
-  `thread_local` start at zero and increment, and the main thread's own
-  `thread_local` was still correct afterwards. So a worker backend behind the
-  `Spawn` seam is a real option and not a hoped-for one.
+- **The gate is node, and node is not a browser.** `worker-gate.mjs` uses
+  `node:worker_threads`, so what it proves is the bootstrap sequence — a
+  structured-cloned `WebAssembly.Module`, one shared memory, per-instance
+  globals. It is **not** evidence that a browser `Worker` accepts a cloned
+  module on all three engines, nor that `Atomics.wait` behaves as it does here:
+  node lets its main thread block and a browser does not. The local
+  `crossOriginIsolated` gate means the browser question can be asked without
+  touching Pages, and nobody has.
 
-  **Both bootstrap steps were red-checked by removing them, and the failure
-  modes are not alike.** Skipping `__wasm_init_tls` traps at once —
-  `RuntimeError: unreachable`, no call lands, impossible to miss. Skipping the
-  `__stack_pointer` write is the dangerous one: every worker keeps the main
-  thread's stack region, the function that only allocates and returns still
-  gives the **right** answer on every call, and the damage shows solely in the
-  one probe that writes a large stack array — two workers returned garbage where
-  the value is deterministic and a third died with
-  `memory access out of bounds`. A "did the closure run" smoke test passes that
-  build. Whatever gate covers the worker backend therefore has to make a worker
-  **use** its stack; observing that work happened is not enough to tell the two
-  builds apart.
+- **`--export=__heap_base` is passed, asserted by nothing, and used by
+  nothing.** The backend allocates worker stacks and TLS blocks from Rust's own
+  allocator (`workers::leak`) rather than carving them out of the heap base, so
+  the symbol has no consumer. It stays in the link arguments because the
+  bootstrap notes named it; drop it or assert it, but do not leave a reader
+  thinking something depends on it.
 
-  Still unmeasured: what stack size per worker is right (the probe used 1 MiB,
-  chosen to match LLD's default rather than measured), and whether a browser
-  `Worker` accepts a structured-cloned `WebAssembly.Module` on all three runners
-  — node is not evidence for that, though the local `crossOriginIsolated` gate
-  means it can be asked without touching Pages.
+- **`--max-memory` is passed and only reachable as the maximum the gate reads
+  back out of the import.** Unchanged from when `--threads` landed.
 
-  **`rust-src` was installed locally and no CI job has it.** The only
-  `nightly-2026-07-02` in `ci.yml` today is the `decoder-fuzz` job, which does
-  not build threaded wasm and correctly does not ask for the component. So
-  nothing is owed to an existing step — what is owed is that the _new_ job which
-  builds the threaded artifact must set `components: rust-src` on its
-  `setup-rust-toolchain`, or it will fail there while passing here.
+- **`+mutable-globals` is asserted and cannot be made to fail.** Dropping it
+  from `-C target-feature` changes nothing — the artifact still exports a
+  `__stack_pointer` JS can write. Forcing the opposite, `-mutable-globals`,
+  makes `rust-lld` refuse to link:
+  `mutable global exported but 'mutable-globals' feature not present in inputs: __stack_pointer`.
+  With `--no-check-features` added to suppress that, the global is still mutable
+  and still writable. The check's _mechanism_ has teeth — writing an immutable
+  global throws `TypeError: Can't set the value of an immutable global`,
+  verified against `__tls_size` — but on this toolchain no flag combination was
+  found that makes `__stack_pointer` fail it. Belt and braces, not a guard.
 
-  No backend was written against a toolchain that could not build it:
-  `default_spawner` still yields `Inline` on wasm, which is a whole answer
-  rather than a stub. Three things are still known to be in the way and are
-  worth deciding before writing code:
-  - **A wasm module cannot start its own worker** (`21-jobs.md` finding 2), so
-    the backend is an `extern "C"` import the `web/` half implements — the same
-    hand-written ABI shape `crcbl-audio`'s `web` module and `crcbl-store`'s OPFS
-    path already use, and the reason no engine crate depends on `wasm-bindgen`.
-    A `web-sys`/`js-sys` backend would be a new dependency in a wasm graph that
-    currently has zero third-party crates, which is the user's call.
-  - **The site's demos are still built without atomics**, so the worker path
-    cannot be exercised by anything a browser loads. `web/build.sh --threads`
-    now builds the worker-capable artifact for every demo crate into
-    `target/wasm-threaded/`, gated per demo by
-    `web/tools/check-exports.mjs --threads`; nothing publishes it. It could not
-    be published as things stand: `web/tools/wasm-loader.js` passes an empty
-    import object on purpose, and `web/tools/smoke.mjs` stubs a memory of one
-    page — run against a threaded artifact it stops at
-    `LinkError: … memory import has 1 pages which is smaller than the declared initial of 20`.
-    Whoever writes the worker backend owns that half too — a loader that
-    constructs the shared memory, and a page that only uses it when
-    `crossOriginIsolated`.
-  - **The fallback has to be automatic and loud**, because every GitHub Pages
-    visitor is in the non-isolated state. The observable to assert is the one
-    `apps/horde`'s determinism tests already use — `pool.workers()` and two
-    distinct thread ids — not "a worker backend was selected".
+- **`--shared-memory` cannot be dropped on its own.** Without it `rust-lld` does
+  not synthesise `__wasm_init_tls`, `__tls_size` or `__tls_align` at all, so the
+  link fails on the `--export` of them before an artifact exists. The isolated
+  red check meant dropping those three exports as well, and then the gate
+  reports the unshared memory by name. The flags are not independent.
 
-  **What the threaded gate does and does not catch** (measured 2026-08-23 while
-  adding `--threads` to `web/build.sh` and `web/tools/check-exports.mjs`; each
-  flag below was tested by rebuilding `horde` without it):
-  - **`+mutable-globals` is asserted and cannot be made to fail.** Dropping it
-    from `-C target-feature` changes nothing — the artifact still exports a
-    `__stack_pointer` JS can write, and the gate is green. Forcing the opposite,
-    `-mutable-globals`, does not produce a weaker artifact either: `rust-lld`
-    refuses to link,
-    `mutable global exported but 'mutable-globals' feature not present in inputs: __stack_pointer`.
-    With `--no-check-features` added to suppress that, the global is still
-    mutable and still writable. The check's _mechanism_ does have teeth —
-    writing an immutable global throws
-    `TypeError: Can't set the value of an immutable global`, verified against
-    `__tls_size` on a good artifact — but on this toolchain no flag combination
-    was found that makes `__stack_pointer` fail it. Treat the flag as belt and
-    braces rather than as something the gate is guarding.
-  - **`--shared-memory` cannot be dropped on its own.** Without it `rust-lld`
-    does not synthesise `__wasm_init_tls`, `__tls_size` or `__tls_align` at all,
-    so the link fails on the `--export` of them before an artifact exists. The
-    isolated red check meant dropping those three exports as well, and then the
-    gate reports the unshared memory by name. Worth knowing before concluding
-    the flags are independent: they are not.
-  - **`--max-memory` and `--export=__heap_base` are passed and not asserted.**
-    The first is only reachable as the maximum the gate reads back out of the
-    import; the second nothing looks at. A build that dropped
-    `--export=__heap_base` passes this gate, so whoever needs that symbol for
-    the bootstrap has to add the assertion with it.
-  - **No CI job runs `--threads`,** by the same reasoning as
-    `web/run-browser-e2e.sh`: it is a local gate, and the `rust-src` component
-    it needs is installed on this machine and on no runner. The note above about
-    `components: rust-src` is what a CI job would owe.
-  - **Nothing runs a threaded demo artifact in a Worker.** The gate instantiates
-    it once, on the main thread, against a shared memory it constructs, and
-    writes `__stack_pointer`. The correction above is explicit that a worker
-    gate has to make a worker _use_ its stack — that was done once by hand
-    against the throwaway probe crate and is not a gate anywhere, least of all
-    for the demos.
+- **No CI job runs `--threads` or the worker gate**, by the same reasoning as
+  `web/run-browser-e2e.sh`: they are local gates, and the `rust-src` component
+  they need is installed on this machine and on no runner. The only
+  `nightly-2026-07-02` in `ci.yml` is the `decoder-fuzz` job, which does not
+  build threaded wasm and correctly does not ask for the component. A CI job
+  that did would owe `components: rust-src` on its `setup-rust-toolchain`.
+
+- **Nothing runs a threaded _demo_ artifact in a Worker.** The gate runs the
+  `crcbl-jobs` example, which links the same backend but none of the engine.
+  `check-exports.mjs --threads` still only instantiates a demo once, on the main
+  thread. A demo in a worker needs the page shim above first.
 
 ## The private-item doc gate only ever runs on Linux
 

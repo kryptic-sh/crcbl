@@ -214,7 +214,14 @@ Cheaper, and they catch a different class of mistake. Both run on every PR:
 node web/tools/check-exports.mjs target/site/demos/breakout/crcbl_breakout_bg.wasm
 node web/tools/smoke.mjs        target/site/demos/breakout/crcbl_breakout_bg.wasm
 node --check web/engine/*.js web/demos/*/*.js    # every file parses
+
+./web/build.sh --threads                         # the threaded artifacts, and the worker gate
+node web/tools/worker-gate.mjs \
+  target/wasm-threaded/wasm32-unknown-unknown/release/examples/web_worker_gate.wasm
 ```
+
+The `--threads` half is a **local** gate: it needs the pinned
+`nightly-2026-07-02` with `rust-src`, which no CI runner has.
 
 `check-exports.mjs` compares three lists: what the Rust sources declare with
 `#[unsafe(no_mangle)]`, what the shim calls off the exports object, and what the
@@ -222,6 +229,18 @@ built artifact actually exports. A symbol in either of the first two that is
 missing from the third is a failure. It also asserts `memory` is exported and
 that the module imports nothing outside the loader's own module — which today
 means nothing at all, since no artifact imports anything.
+
+`worker-gate.mjs` is the gate over the Web Worker spawn backend, and the only
+thing anywhere that executes it. `./web/build.sh --threads` builds
+`crates/crcbl-jobs/examples/web_worker_gate.rs` as a threaded `cdylib` and
+drives it: the host announces itself through `__crcbl_web_jobs_host_ready`, a
+`Pool` spawns through the seam, each queued request is drained with
+`__crcbl_web_jobs_take`, and a `node:worker_threads` worker instantiates against
+the same shared memory, writes `__stack_pointer`, calls `__wasm_init_tls` and
+enters `__crcbl_web_jobs_entry`. It asserts that a chunk ran on a thread that is
+not the driver, on a **stack of its own** and with **thread-locals of its own**
+— both of which fail silently rather than loudly, which is why the gate has
+`--no-stack-pointer` and `--no-init-tls` switches that must turn it red.
 
 `smoke.mjs` goes further and _runs_ the module: it instantiates the deployed
 artifact under node with every import stubbed to throw, and drives the
@@ -244,10 +263,12 @@ all runs here. What it cannot see, a black canvas included, is what
   now**: `./web/build.sh --threads` produces worker-capable artifacts under
   `target/wasm-threaded/`, and `tools/check-exports.mjs --threads` gates the
   surface a worker needs — a shared `env.memory` import, `__wasm_init_tls`, and
-  the TLS and stack globals. Nothing publishes them and nothing loads them: the
-  site's artifacts are still the single-threaded ones, and **the worker backend
-  behind `crcbl-jobs`'s `Spawn` seam does not exist** — `default_spawner` still
-  yields `Inline` on wasm. See `docs/backlog.md`.
+  the TLS and stack globals. **The backend behind `crcbl-jobs`'s `Spawn` seam
+  exists now too** — `default_spawner` yields `Workers` on wasm — but nothing
+  publishes or loads a threaded artifact: the site's artifacts are still the
+  single-threaded ones, and no page implements the worker shim yet, so
+  `Spawn::threaded()` answers `false` there and every demo runs exactly as it
+  did. See `docs/backlog.md`.
 - **No pointer lock, no clipboard, no IME.** The Web shell backend clears those
   capability bits; there is nothing for a shim to wire.
 - **No service worker, no offline cache.** The site is static files.
