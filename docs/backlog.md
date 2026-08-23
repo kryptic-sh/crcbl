@@ -12352,13 +12352,34 @@ camera. What is left is one performance gap and one level-of-detail gap.
   every scaled instance in the tree is an axis-aligned scale on axis-aligned
   normals, where the old rule was already right.
 
-- **`select_level` judges a scaled instance at its mesh-space size**
-  (`crates/crcbl-shaders/shaders/draw_gen.slang`). A group's radius and its
-  error are distances in the mesh's own space while the centre goes through the
-  transform, so a scaled instance picks a level for the size it was authored at.
-  It costs a level rather than dropping geometry, and changing it moves every
-  level-of-detail golden. Unexercised today: the DAG mesh is placed at the
-  identity everywhere in the tree.
+- **`select_level` now judges a scaled instance at the size it is drawn**, and
+  the parenthetical this entry used to carry — that changing it "moves every
+  level-of-detail golden" — was **wrong**: every DAG instance in the tree is at
+  the identity, where `max_stretch` is exactly `1.0`, and all 26 render-e2e
+  goldens matched with zero channels differing. What the fix left uncovered:
+  - **The radius half is held by text equality alone.** Measured while
+    red-checking: reverting `group.radius * stretch` to `group.radius` while
+    leaving the error scaled leaves
+    `a_scaled_instance_of_the_patch_selects_a_finer_level` **green**, and so it
+    is at 400, 200, 120 and 80 units back as well — the dunes DAG has four
+    levels, and the radius term never moves the projection far enough to cross a
+    threshold at any distance where both guard rails hold. So what catches a
+    dropped radius scaling is
+    `the_two_shaders_bound_a_stretched_length_with_one_function`'s call-site
+    assertion and `GroupCost::scaled`'s own test, not the device. A DAG with
+    more levels, or a near camera where the sphere dominates the distance, would
+    be what closes it.
+  - **Only a uniform scale.** Every new test scales uniformly, where the bound
+    is exact; the over-estimate branch on a shear is untested end to end.
+  - **The device oracle leans on an f32 identity.** The scaled instance's
+    expected level is `ClusterDag::uniform_level(eye / 4)`, which is the same
+    judgement only in exact arithmetic; the stretch is a power of two so it held
+    bit for bit on radv, but a threshold landing within an ulp could disagree on
+    another adapter.
+  - **WGSL is reasoned, not run.** `draw_gen.wgsl` carries `max_stretch` and
+    naga accepts it, but nothing has executed it in a browser, and Slang emits
+    the Gram product as `basis * transpose(basis)` under its transposed WGSL
+    matrix storage.
 
 **Coverage gap from the shading change itself.** The MSL and DXIL artifacts were
 regenerated and are unexercised locally — the vk/RADV leg is what ran here (mesh

@@ -686,6 +686,39 @@ float projected_error(float error, float3 center, float radius, float3 eye, floa
     return error * pixels_per_unit / distance;
 }
 
+/// The largest factor by which `basis` can grow a vector's length, bounded from
+/// above — what a length in the mesh's own space has to be multiplied by to be a
+/// length in the space `basis` maps it into.
+///
+/// That factor is `basis`' largest singular value, and this bounds it rather
+/// than computing it: `sigma_max^2 = lambda_max(B^T B)`, and a symmetric
+/// matrix's spectral radius is at most any induced norm of it, so the largest
+/// absolute row sum of `B^T B` is an upper bound on `sigma_max^2`. The bound is
+/// **exact** whenever `basis`' columns are orthogonal — every rotation-then-scale,
+/// which is every transform this engine builds — and an over-estimate on a
+/// shear, which for a selection means expanding a group sooner than it had to
+/// and drawing finer, never coarser than the metric asked for.
+///
+/// `1.0` for a rotation or a translation, so nothing that was already correct
+/// moves.
+///
+/// **The body below also appears verbatim in `shaders/mesh_cluster.slang`**,
+/// where the same bound carries a cluster's bounding sphere across the same
+/// transform for the cull, and `crcbl_render::cull`'s `max_stretch` is it in
+/// Rust. `crcbl_shaders::cluster_select`'s
+/// `the_two_shaders_bound_a_stretched_length_with_one_function` is what holds
+/// the two shader texts equal.
+float max_stretch(float3x3 basis)
+{
+    float3x3 gram = mul(transpose(basis), basis);
+    float bound = 0.0;
+    for (uint row = 0; row < 3; ++row)
+    {
+        bound = max(bound, abs(gram[row][0]) + abs(gram[row][1]) + abs(gram[row][2]));
+    }
+    return sqrt(bound);
+}
+
 /// Whether a group is **expanded** — its children drawn rather than its parents
 /// — from the eye this frame selects at, given whether it was last frame.
 ///
@@ -718,22 +751,31 @@ uint group_is_expanded(float error, float3 center, float radius, float3 eye, uin
 /// early exit here even though the answer is a minimum.
 ///
 /// **In world space**, exactly as `mesh_cluster.slang`'s descent is: the
-/// sphere's centre goes through the instance's transform, its radius does not,
-/// and the eye stays where it is. That is the same statement as putting the
-/// camera through the inverse transform, and it needs no inverse.
+/// sphere's centre goes through the instance's transform, its radius and the
+/// group's error through [`max_stretch`] of that transform's 3x3, and the eye
+/// stays where it is. For a similarity — a rotation, a translation, a uniform
+/// scale of `s` — that is exactly the same statement as putting the camera
+/// through the inverse transform, and it needs no inverse: every term of the
+/// projection is scaled by `s` and the eye at `eye/s` answers the same level.
+/// `crcbl`'s `a_scaled_instance_of_the_patch_selects_a_finer_level` uses that
+/// equivalence as its oracle on a real device.
 ///
-/// **The radius staying in mesh space is a gap under a scaled instance, not a
-/// property.** `GpuInstance::transform` may scale — see its declaration above —
-/// and a group's radius and its error are both distances in the *mesh's* own
-/// space, so a scaled instance is judged at the wrong size and selects a level
-/// to match. It is the shape of the bug `mesh_cluster.slang`'s
-/// `cluster_survives` closed one pass later with `max_stretch`. Written down
-/// rather than changed here because it costs a level and does not drop
-/// geometry, and because changing it moves every level-of-detail golden.
+/// **Both lengths are scaled, and neither is decoration.** A group's radius and
+/// its error are distances in the *mesh's* own space and `GpuInstance::transform`
+/// may scale — see its declaration above — so an instance drawn ten times the
+/// size it was authored at has a simplification that moves the surface ten times
+/// as far on screen, and judging it at the mesh's size selects a level for a
+/// picture nobody is looking at. `max_stretch` bounds the factor from above, so
+/// what it can do to a group is expand it *earlier* than the mesh's own size
+/// would: finer geometry, never coarser than the metric asked for. At a rotation
+/// or a translation it is exactly `1.0` and nothing moves.
+/// `crcbl_shaders::level_select::MeshLevels::select` takes the same number as
+/// its `stretch` argument, and `GroupCost::scaled` is where it lands.
 uint select_level(GpuInstance instance, uint instance_index)
 {
     MeshLevels levels = mesh_levels_of(instance.mesh);
     float3 eye = gen.camera_position.xyz;
+    float stretch = max_stretch((float3x3)instance.transform);
     uint base = instance_index * gen.group_stride;
     uint chosen = levels.top_level;
     for (uint i = 0; i < levels.group_count; ++i)
@@ -742,8 +784,8 @@ uint select_level(GpuInstance instance, uint instance_index)
         LevelGroup group = level_group_at(at);
         float3 center = mul(instance.transform,
             float4(group.center_x, group.center_y, group.center_z, 1.0)).xyz;
-        uint expanded = group_is_expanded(
-            group.error, center, group.radius, eye, group_state[base + at]);
+        uint expanded = group_is_expanded(group.error * stretch, center,
+            group.radius * stretch, eye, group_state[base + at]);
         group_state[base + at] = expanded;
         if (expanded == 1u && group.level < chosen)
         {

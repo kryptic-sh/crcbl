@@ -318,6 +318,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A scaled instance now picks the level of detail for the size it is drawn
+  at.** A cluster group's radius and its simplification error are lengths in the
+  mesh's own space, and `draw_gen.slang`'s `select_level` put only the group's
+  centre through the instance transform — so an instance drawn four times the
+  size it was authored at kept a level whose error moves the surface four times
+  as far on screen as the metric was told. Both lengths now go through
+  `max_stretch` of the instance's 3×3, the same bound the cluster cull already
+  used for its bounding sphere, and `mesh_cluster.slang`'s screen-error heatmap
+  scales them too so it still describes the cut it is drawn over. Seam-visible
+  as a signature change: `MeshLevels::select` and `uniform_level` take a
+  `stretch`, and `GroupCost::scaled` is the new host spelling. A rotation or a
+  translation gives exactly `1.0`, so nothing already correct moves — every
+  render golden is unchanged.
+
 - **The `bare` sample opens at the size its help says.** It hand-rolled the
   `--size` fallback with 640x480 instead of calling
   `crcbl::engine::requested_window_size`, while pasting in the shared `OPTIONS:`

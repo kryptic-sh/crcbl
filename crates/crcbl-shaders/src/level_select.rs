@@ -216,8 +216,8 @@ impl MeshLevels {
     /// is and what a caller sweeping budgets wants. A frame's real answer is
     /// [`select`](Self::select)'s, because a frame has a previous frame.
     ///
-    /// `eye` is in the same space as the spheres, which for an instance means
-    /// the spheres go through its transform and the camera stays where it is.
+    /// `eye` is in the same space as the spheres and `stretch` carries the
+    /// mesh-space lengths into it — see [`select`](Self::select), which this is.
     ///
     /// # Panics
     ///
@@ -229,6 +229,7 @@ impl MeshLevels {
         groups: &[LevelGroup],
         eye: [f32; 3],
         pixels_per_unit: f32,
+        stretch: f32,
         budget: f32,
     ) -> u32 {
         let mut state = vec![false; groups.len()];
@@ -236,6 +237,7 @@ impl MeshLevels {
             groups,
             eye,
             pixels_per_unit,
+            stretch,
             LodBudgets::sharp(budget),
             &mut state,
         )
@@ -262,6 +264,19 @@ impl MeshLevels {
     /// [`ClusterDag::expand`](crate::cluster_dag::ClusterDag::expand) is the same
     /// update stated over the hierarchy instead of over these records.
     ///
+    /// # The two spaces, and `stretch` is what joins them
+    ///
+    /// `eye` and each group's centre are in **one** space — the instance's, if
+    /// the caller put the centres through its transform, which is what the
+    /// shader does at the call site. The group's radius and its error are
+    /// lengths in the **mesh's** own space, and `stretch` is how much longer
+    /// such a length is once the instance's transform has been applied to it:
+    /// [`GroupCost::scaled`](crate::cluster_select::GroupCost::scaled) is where
+    /// the two are multiplied and carries why bounding that factor from above is
+    /// the conservative direction. `1.0` is an instance at a rotation or a
+    /// translation, where nothing moves; `crcbl_render::cull::max_stretch` and
+    /// `max_stretch` in both shaders are what compute it from a transform.
+    ///
     /// # Panics
     ///
     /// If this record names groups `groups` does not hold, or if `state` is not
@@ -272,6 +287,7 @@ impl MeshLevels {
         groups: &[LevelGroup],
         eye: [f32; 3],
         pixels_per_unit: f32,
+        stretch: f32,
         budgets: LodBudgets,
         state: &mut [bool],
     ) -> u32 {
@@ -284,7 +300,13 @@ impl MeshLevels {
         let mut chosen = self.top_level;
         for at in mine {
             let group = &groups[at];
-            let expanded = group_is_expanded(&group.cost, eye, pixels_per_unit, budgets, state[at]);
+            let expanded = group_is_expanded(
+                &group.cost.scaled(stretch),
+                eye,
+                pixels_per_unit,
+                budgets,
+                state[at],
+            );
             state[at] = expanded;
             if expanded && group.level < chosen {
                 chosen = group.level;
@@ -586,7 +608,7 @@ mod tests {
         for eye in [[0.0; 3], [1.0, 2.0, 3.0], [-40.0, 6.0, -40.0]] {
             for budget in [f32::NEG_INFINITY, 0.0, 1.0, 32.0, f32::INFINITY] {
                 assert_eq!(
-                    MeshLevels::FLAT.uniform_level(&groups, eye, 166.0, budget),
+                    MeshLevels::FLAT.uniform_level(&groups, eye, 166.0, 1.0, budget),
                     0,
                     "a flat mesh chose another level at {eye:?} under {budget}"
                 );
@@ -603,6 +625,13 @@ mod tests {
     /// that is exactly the shape two copies drift in. The sweep is asserted to
     /// have produced more than one answer, because a comparison in which both
     /// sides always said zero would pass without either of them working.
+    ///
+    /// At a stretch of `1.0` throughout, because the hierarchy rule is stated
+    /// over a mesh and knows no instance —
+    /// [`a_stretched_instance_selects_a_finer_level`] is what covers the values
+    /// an instance transform produces.
+    ///
+    /// [`a_stretched_instance_selects_a_finer_level`]: fn@a_stretched_instance_selects_a_finer_level
     #[test]
     fn the_records_choose_the_level_the_dag_rule_chooses() {
         let dag = dunes_dag();
@@ -617,7 +646,7 @@ mod tests {
         for eye in EYES {
             for budget in BUDGETS {
                 let theirs = dag.uniform_level(eye, PIXELS_PER_UNIT, budget);
-                let ours = record.uniform_level(&groups, eye, PIXELS_PER_UNIT, budget);
+                let ours = record.uniform_level(&groups, eye, PIXELS_PER_UNIT, 1.0, budget);
                 assert_eq!(
                     u32::try_from(theirs).expect("small"),
                     ours,
@@ -630,6 +659,76 @@ mod tests {
             seen.len() > 1,
             "the sweep produced one answer ({seen:?}), so the comparison never had \
              anything to disagree about"
+        );
+    }
+
+    /// **An instance drawn larger than the mesh it was authored as selects a
+    /// finer level**, over the committed DAG at one eye and one budget.
+    ///
+    /// A group's radius and its error are lengths in the mesh's own space, so an
+    /// instance scaled by four has a simplification that moves the surface four
+    /// times as far on screen — and before `stretch` reached
+    /// [`GroupCost::scaled`](crate::cluster_select::GroupCost::scaled) it was
+    /// judged at the size it was authored at and drew a level whose error was
+    /// four times what the metric had been told. This is the observable that
+    /// separates the two: the same records, the same eye and the same budget,
+    /// and only the stretch different.
+    ///
+    /// Three assertions, and the first two are what make the third worth
+    /// making:
+    ///
+    /// * **Neither end saturates.** The unscaled instance is not already at the
+    ///   coarsest level and the most-stretched one has not bottomed out at zero,
+    ///   so the sweep is measuring the rule rather than a clamp.
+    /// * **The level never gets coarser as the stretch grows**, which is the
+    ///   direction the bound guarantees: `max_stretch` over-estimates on a shear
+    ///   and is exact everywhere else, so what it can do is expand a group
+    ///   early.
+    /// * **And by four it is strictly finer.** A `stretch` that reached the
+    ///   projection and cancelled, or that scaled the radius and not the error,
+    ///   would leave this equal.
+    #[test]
+    fn a_stretched_instance_selects_a_finer_level() {
+        let dag = dunes_dag();
+        let groups = dag.level_groups();
+        let record = MeshLevels {
+            first_group: 0,
+            group_count: u32::try_from(groups.len()).expect("small"),
+            first_level: 0,
+            top_level: u32::try_from(dag.levels.len() - 1).expect("small"),
+        };
+        let level = |stretch: f32| {
+            record.uniform_level(
+                &groups,
+                STRETCH_EYE,
+                PIXELS_PER_UNIT,
+                stretch,
+                STRETCH_BUDGET,
+            )
+        };
+        let chosen: Vec<u32> = STRETCHES.iter().map(|&stretch| level(stretch)).collect();
+
+        assert!(
+            chosen[0] < record.top_level,
+            "the unscaled instance already draws the coarsest level ({chosen:?}), so this \
+             eye and budget leave the rule nowhere to move"
+        );
+        assert!(
+            *chosen.last().expect("the sweep is not empty") > 0,
+            "every stretch bottomed out at level 0 ({chosen:?}), so the comparison below is \
+             between two clamps"
+        );
+        assert!(
+            chosen.windows(2).all(|pair| pair[0] >= pair[1]),
+            "the levels chosen at stretches {STRETCHES:?} are {chosen:?}, and a larger \
+             instance must never select a coarser level than a smaller one"
+        );
+        assert!(
+            level(4.0) < level(1.0),
+            "at four times its authored size the patch selected level {} and unscaled it \
+             selects {}, so the stretch is not reaching the metric",
+            level(4.0),
+            level(1.0),
         );
     }
 
@@ -664,4 +763,20 @@ mod tests {
         1.0e6,
         f32::INFINITY,
     ];
+
+    /// The stretches [`a_stretched_instance_selects_a_finer_level`] judges the
+    /// same records at — an instance at the identity, and three uniform scales.
+    ///
+    /// [`a_stretched_instance_selects_a_finer_level`]: fn@a_stretched_instance_selects_a_finer_level
+    const STRETCHES: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+
+    /// Where that sweep's eye stands: [`EYES`]'s shape — the patch's near edge,
+    /// a little way up — and 200 units further back, which is far enough out
+    /// that the unscaled patch draws at a middling level rather than at either
+    /// end of the DAG.
+    const STRETCH_EYE: [f32; 3] = [0.0, 4.0, -crate::dunes::DUNES_EXTENT - 200.0];
+
+    /// And the budget it runs under, in pixels. One of [`BUDGETS`], picked for
+    /// the same reason as the eye: it leaves the answer room on both sides.
+    const STRETCH_BUDGET: f32 = 32.0;
 }

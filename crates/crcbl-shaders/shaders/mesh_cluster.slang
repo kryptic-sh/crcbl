@@ -464,6 +464,46 @@ float projected_error(float error, float3 center, float radius, float3 eye, floa
     return error * pixels_per_unit / distance;
 }
 
+/// The largest factor by which `basis` can grow a vector's length, bounded from
+/// above — what a length in the mesh's own space has to be multiplied by to be a
+/// length in the space `basis` maps it into: a bounding *sphere*'s radius, so
+/// that it still bounds the transformed cluster, and a simplification error, so
+/// that it is still the distance the surface may have moved.
+///
+/// That factor is `basis`' largest singular value, and this bounds it rather
+/// than computing it: `sigma_max^2 = lambda_max(B^T B)`, and a symmetric
+/// matrix's spectral radius is at most any induced norm of it, so the largest
+/// absolute row sum of `B^T B` is an upper bound on `sigma_max^2`. Bounding is
+/// the safe direction for a cull, and the bound is **exact** whenever `basis`'
+/// columns are orthogonal — every rotation-then-scale, which is every transform
+/// this engine builds — because `B^T B` is then diagonal and its rows are the
+/// columns' squared lengths.
+///
+/// The alternative, `max` over the columns' lengths, is exact on the same
+/// matrices and *under*-estimates on a sheared one, which is the direction that
+/// drops geometry. This form needs no contract about what a caller may pass.
+///
+/// `1.0` for a rotation or a translation, so nothing that was already correct
+/// moves. `crcbl_render::cull`'s `max_stretch` is this function in Rust and
+/// `cluster_survives_cull` is the oracle a test compares this whole rule to.
+///
+/// **Read by both halves of this file and by `shaders/draw_gen.slang`**: the
+/// cull carries a cluster's sphere across a transform with it, `cluster_heat`
+/// below carries a group's radius and error, and the selection that overlay is
+/// drawn over does the same in the other file. `crcbl_shaders::cluster_select`'s
+/// `the_two_shaders_bound_a_stretched_length_with_one_function` is what holds
+/// the two shader texts equal.
+float max_stretch(float3x3 basis)
+{
+    float3x3 gram = mul(transpose(basis), basis);
+    float bound = 0.0;
+    for (uint row = 0; row < 3; ++row)
+    {
+        bound = max(bound, abs(gram[row][0]) + abs(gram[row][1]) + abs(gram[row][2]));
+    }
+    return sqrt(bound);
+}
+
 /// A distinct colour per DAG level, for the LOD view.
 ///
 /// **A `switch` rather than an array index**, and that is not style. `level`
@@ -927,8 +967,14 @@ LevelGroup level_group_at(uint group)
 /// and is not for one that has none.
 ///
 /// **In world space, exactly as `draw_gen.slang`'s `select_level` is**: the
-/// sphere's centre goes through the instance's transform, its radius does not,
-/// and the eye stays where it is.
+/// sphere's centre goes through the instance's transform, its radius and the
+/// group's error through [`max_stretch`] of that transform's 3x3, and the eye
+/// stays where it is. The scaling is not an embellishment here — it is what
+/// keeps this tint a picture *of* the cut. The selector judges a scaled
+/// instance's groups at the stretched size, so an overlay that projected the
+/// mesh-space lengths would shade the frame by a number nothing in the selection
+/// uses, which is the one way a heatmap can be wrong while looking entirely
+/// plausible.
 float3 cluster_heat(uint cluster_index, float4x4 transform)
 {
     ClusterSelect select = cluster_select[cluster_index];
@@ -936,10 +982,11 @@ float3 cluster_heat(uint cluster_index, float4x4 transform)
     if ((select.flags & HAS_PRODUCER) != 0)
     {
         LevelGroup group = level_group_at(select.producer_group);
+        float stretch = max_stretch((float3x3)transform);
         float3 center = mul(transform,
                             float4(group.center_x, group.center_y, group.center_z, 1.0)).xyz;
-        projected = projected_error(
-            group.error, center, group.radius, frame.camera_position.xyz, frame.lod_params.x);
+        projected = projected_error(group.error * stretch, center, group.radius * stretch,
+                                    frame.camera_position.xyz, frame.lod_params.x);
     }
     return heat_tint(projected, frame.lod_params.y, frame.lod_params.z);
 }
@@ -1010,37 +1057,6 @@ bool preserves_angles(float3x3 basis)
            && largest - gram[2][2] <= slack;
 }
 
-/// The largest factor by which `basis` can grow a vector's length, bounded from
-/// above — what a bounding *sphere*'s radius has to be multiplied by to still
-/// bound the transformed cluster.
-///
-/// That factor is `basis`' largest singular value, and this bounds it rather
-/// than computing it: `sigma_max^2 = lambda_max(B^T B)`, and a symmetric
-/// matrix's spectral radius is at most any induced norm of it, so the largest
-/// absolute row sum of `B^T B` is an upper bound on `sigma_max^2`. Bounding is
-/// the safe direction for a cull, and the bound is **exact** whenever `basis`'
-/// columns are orthogonal — every rotation-then-scale, which is every transform
-/// this engine builds — because `B^T B` is then diagonal and its rows are the
-/// columns' squared lengths.
-///
-/// The alternative, `max` over the columns' lengths, is exact on the same
-/// matrices and *under*-estimates on a sheared one, which is the direction that
-/// drops geometry. This form needs no contract about what a caller may pass.
-///
-/// `1.0` for a rotation or a translation, so nothing that was already correct
-/// moves. `crcbl_render::cull`'s `max_stretch` is this function in Rust and
-/// `cluster_survives_cull` is the oracle a test compares this whole rule to.
-float max_stretch(float3x3 basis)
-{
-    float3x3 gram = mul(transpose(basis), basis);
-    float bound = 0.0;
-    for (uint row = 0; row < 3; ++row)
-    {
-        bound = max(bound, abs(gram[row][0]) + abs(gram[row][1]) + abs(gram[row][2]));
-    }
-    return sqrt(bound);
-}
-
 /// What `cluster_survives` answered: kept, or which of its two tests refused.
 ///
 /// Three named values rather than a bool, because the counters downstream are
@@ -1065,7 +1081,7 @@ static const uint CLUSTER_REJECTED_BY_CONE = 2;
 /// **The cull is in world space**, which is where the frustum already is: the
 /// planes are `cull.slang`'s own for this frame, and `frame.camera_position` is
 /// world-space too. The sphere is carried there by the **whole** transform: the
-/// centre by the matrix, the radius by `max_stretch` below, and the cone axis by
+/// centre by the matrix, the radius by `max_stretch` above, and the cone axis by
 /// the 3x3 and then made a unit vector again.
 ///
 /// **The cone half is skipped entirely where the transform does not preserve

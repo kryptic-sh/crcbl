@@ -168,6 +168,45 @@ impl GroupCost {
         }
         self.error * pixels_per_unit / distance
     }
+
+    /// This group as an instance whose transform stretches a mesh-space length
+    /// by at most `stretch` presents it: **both lengths multiplied, the centre
+    /// and the projection left alone**.
+    ///
+    /// [`error`](Self::error) and [`GroupBounds::radius`](crate::cluster_dag::GroupBounds::radius)
+    /// are distances in the mesh's own units, and an instance may be drawn at
+    /// another size —
+    /// [`GpuInstance::transform`](crate::mesh::GpuInstance::transform) carries a
+    /// scale. An instance drawn ten times the size it was authored at has a
+    /// simplification that moves the surface ten times as far on screen, and a
+    /// sphere ten times as wide to be judged from; judging either at the mesh's
+    /// own size picks the level for a picture nobody is looking at.
+    ///
+    /// `stretch` is the largest factor that transform can grow a length by,
+    /// bounded from above — `crcbl_render::cull::max_stretch` in Rust and
+    /// `max_stretch` in `draw_gen.slang` and `mesh_cluster.slang`, which
+    /// `the_two_shaders_bound_a_stretched_length_with_one_function` holds to one
+    /// text. It is exactly `1.0` for a rotation or a translation, where this is
+    /// the identity and nothing that was already correct moves. Bounding from
+    /// above is the conservative direction here: it can only raise the projected
+    /// error, so a scaled instance expands a group *earlier* and draws finer,
+    /// never coarser than the metric asked for.
+    ///
+    /// **The centre is the caller's**, which is the division of labour with
+    /// `draw_gen.slang`: that shader puts the centre through the whole transform
+    /// at the call site and scales exactly these two lengths, so what comes back
+    /// is a group whose sphere is where the instance is and whose lengths are the
+    /// size the instance draws them at.
+    #[must_use]
+    pub fn scaled(&self, stretch: f32) -> Self {
+        Self {
+            error: self.error * stretch,
+            bounds: GroupBounds {
+                center: self.bounds.center,
+                radius: self.bounds.radius * stretch,
+            },
+        }
+    }
 }
 
 /// Whether a group is expanded this frame, given whether it was last frame.
@@ -629,6 +668,135 @@ mod tests {
                 "the sentinel and the infinity disagree about the budget {budget}"
             );
         }
+    }
+
+    /// `max_stretch`, character for character, as both shaders that carry a
+    /// mesh-space length across an instance transform must declare it.
+    ///
+    /// The signature and body only — the doc comment above each copy is
+    /// deliberately not compared, on the same terms as `projected_error` above:
+    /// each file says why *it* has the copy, and holding two explanations to one
+    /// wording buys nothing.
+    const MAX_STRETCH: &str = concat!(
+        "float max_stretch(float3x3 basis)\n",
+        "{\n",
+        "    float3x3 gram = mul(transpose(basis), basis);\n",
+        "    float bound = 0.0;\n",
+        "    for (uint row = 0; row < 3; ++row)\n",
+        "    {\n",
+        "        bound = max(bound, abs(gram[row][0]) + abs(gram[row][1]) + abs(gram[row][2]));\n",
+        "    }\n",
+        "    return sqrt(bound);\n",
+        "}\n",
+    );
+
+    /// **The two shaders bound a stretched length with one function**, character
+    /// for character, and each of them really uses it on an instance transform.
+    ///
+    /// Three call sites now scale a mesh-space length by the largest singular
+    /// value of an instance's 3×3 basis: `draw_gen.slang`'s `select_level`,
+    /// which judges a group's radius and error at the size the instance is drawn
+    /// at; `mesh_cluster.slang`'s `cluster_heat`, which shades a cluster by the
+    /// same projection and would otherwise tint a scaled instance by a number
+    /// the selection no longer uses; and that file's `cluster_survives`, which
+    /// carries a cluster's bounding sphere across the same transform for the
+    /// cull. A bound that differed between them is one instance judged at two
+    /// sizes — a cut chosen for one and an overlay drawn for another.
+    ///
+    /// Equal text cannot differ under any input, which is the stronger of the
+    /// two assertions available here, and it is the one
+    /// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` and
+    /// `the_two_shaders_project_the_error_with_one_function` already make for
+    /// the other two functions two shaders share.
+    ///
+    /// **The second half is what stops a shader declaring the function and never
+    /// calling it.** A copy of `max_stretch` sitting beside a projection of the
+    /// unscaled radius passes a declaration check and selects exactly as wrongly
+    /// as before, which is the bug this closed.
+    #[test]
+    fn the_two_shaders_bound_a_stretched_length_with_one_function() {
+        for (name, source, uses) in [
+            (
+                "draw_gen.slang",
+                include_str!("../shaders/draw_gen.slang"),
+                &[
+                    "float stretch = max_stretch((float3x3)instance.transform);",
+                    "group.error * stretch",
+                    "group.radius * stretch",
+                ][..],
+            ),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+                &[
+                    "float stretch = max_stretch((float3x3)transform);",
+                    "group.error * stretch",
+                    "group.radius * stretch",
+                    "float radius = cluster.radius * max_stretch(basis);",
+                ][..],
+            ),
+        ] {
+            assert!(
+                source.contains(MAX_STRETCH),
+                "{name} does not carry this exact function, so one instance transform has two \
+                 bounds and the cut and the overlay are drawn from different ones:\n{MAX_STRETCH}"
+            );
+            for use_site in uses {
+                assert!(
+                    source.contains(use_site),
+                    "{name} declares `max_stretch` and does not spell `{use_site}`, so either \
+                     the declaration is decoration or a mesh-space length is still being judged \
+                     at the mesh's own size"
+                );
+            }
+        }
+    }
+
+    /// **Stretching a group multiplies both of its lengths and moves nothing
+    /// else**, and at `1.0` it moves nothing at all.
+    ///
+    /// [`GroupCost::scaled`] is the Rust half of the three shader call sites
+    /// above. The identity case is asserted on the *bits*, because it is what
+    /// every instance in the tree is at: a `scaled` that perturbed a record there
+    /// would move every level-of-detail golden for no reason.
+    #[test]
+    fn a_stretched_group_scales_both_lengths_and_costs_more() {
+        let cost = GroupCost {
+            error: 0.25,
+            bounds: crate::cluster_dag::GroupBounds {
+                center: [1.0, -2.0, 3.0],
+                radius: 4.0,
+            },
+        };
+        let eye = [0.0, 0.0, 40.0];
+        let plain = cost.projected_error(eye, PIXELS_PER_UNIT);
+        assert!(plain.is_finite(), "the eye is outside the sphere: {plain}");
+
+        let same = cost.scaled(1.0);
+        assert_eq!(same.error.to_bits(), cost.error.to_bits());
+        assert_eq!(
+            same.bounds.radius.to_bits(),
+            cost.bounds.radius.to_bits(),
+            "a stretch of one must leave a record's bits alone"
+        );
+        assert_eq!(
+            same.projected_error(eye, PIXELS_PER_UNIT).to_bits(),
+            plain.to_bits(),
+            "an instance at the identity must project exactly what it did before"
+        );
+
+        let bigger = cost.scaled(4.0);
+        assert_eq!(bigger.error, 1.0, "the error is a mesh-space length");
+        assert_eq!(bigger.bounds.radius, 16.0, "and so is the radius");
+        assert_eq!(
+            bigger.bounds.center, cost.bounds.center,
+            "the centre is the caller's, taken through the whole transform"
+        );
+        assert!(
+            bigger.projected_error(eye, PIXELS_PER_UNIT) > plain,
+            "a group drawn four times its authored size must cost more on screen than \
+             {plain}, or the scaling reaches the projection and cancels"
+        );
     }
 
     /// **The band is where the previous answer decides**, and only there.

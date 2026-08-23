@@ -336,6 +336,155 @@ fn the_uniform_cut_gets_coarser_as_the_dunes_patch_recedes() {
     headless.finish();
 }
 
+/// How many times its authored size the stretched patch is drawn at.
+///
+/// **A power of two, and that is what makes the comparison below an equality
+/// rather than a tolerance.** A uniform scale of `s` about the origin sends a
+/// group's centre to `s·c` and its radius and error to `s·r` and `s·e`, so the
+/// projection becomes `s·e·ppu / (|eye − s·c| − s·r)` — which is the unscaled
+/// metric with the eye at `eye/s`. At a power of two every one of those products
+/// is exact in `f32` and scaling commutes with rounding, so the device's
+/// arithmetic and the host's agree bit for bit rather than nearly.
+///
+/// Four rather than two because the levels of this DAG are separated by hundreds
+/// of units of viewing distance — see [`DUNES_RECEDING_CAMERAS`] — so a scale
+/// that moved the effective distance by a smaller factor could land on the same
+/// level and assert nothing.
+const DUNES_STRETCH: f32 = 4.0;
+
+/// How far past the patch's near edge the two instances are judged from.
+///
+/// Far enough out that **neither** instance is at an end of its DAG: the
+/// unscaled patch has somewhere finer to go and the stretched one has not
+/// bottomed out at level 0, so the comparison is measuring the rule rather than
+/// a clamp. Both assertions below say so out loud, because which levels this
+/// produces depends on the committed DAG, on the budget the renderer ships and
+/// on the pixels-per-unit this harness's viewport gives — and a camera that
+/// stopped straddling anything would otherwise go quiet rather than red.
+///
+/// [`crcbl::shaders::level_select`]'s `a_stretched_instance_selects_a_finer_level`
+/// is the same claim with no device in it, at the same shape of camera.
+const DUNES_STRETCH_BACK: f32 = 800.0;
+
+/// **A scaled instance of the patch selects a finer level than the same patch at
+/// the identity**, on a real device, from the same camera in the same frame
+/// shape.
+///
+/// `docs/backlog.md`'s "the DAG mesh is placed at the identity everywhere in the
+/// tree", and the defect that hid behind it: a group's radius and its error are
+/// lengths in the **mesh's** own space, and only the centre used to go through
+/// the instance transform. An instance drawn four times its authored size was
+/// therefore judged at the size it was authored at and drew a level whose
+/// simplification moves the surface four times as far on screen as the metric
+/// was told. `draw_gen.slang`'s `select_level` now carries both lengths across
+/// with `max_stretch`, exactly as `cluster_survives` carries the cull's
+/// bounding sphere.
+///
+/// **The observable is the same one the rest of this file reads** — the bucket
+/// whose `instance_count` came out non-zero, which *is* the level a uniform cut
+/// took, and there is no second buffer recording an intention. Two renderers
+/// rather than two frames of one, because the expansion state persists between
+/// frames on purpose: each starts from the zeroes `DrawGen` wrote, so the two
+/// answers are one frame apart from the same beginning and neither can be
+/// carrying the other's history.
+///
+/// Three assertions:
+///
+/// * **The unscaled instance has somewhere finer to go**, so the comparison is
+///   measuring the rule rather than a clamp at level 0.
+/// * **Each level is the host rule's own.** The unscaled instance's is the DAG's
+///   answer at this eye; the stretched one's is the DAG's answer at `eye/4`, by
+///   the equivalence [`DUNES_STRETCH`] records — and *that* is the assertion the
+///   old behaviour fails, because judging mesh-space lengths from a scaled
+///   instance is a third answer that is neither. One frame from a fresh
+///   renderer, so the hysteresis band is not in play: the state starts collapsed
+///   and a group with no history expands exactly when it is over the expand
+///   budget, which is what [`ClusterDag::uniform_level`] evaluates.
+/// * **And the stretched instance draws strictly finer**, which is the claim in
+///   the words the defect was written in.
+///
+/// [`ClusterDag::uniform_level`]: crcbl::shaders::cluster_dag::ClusterDag::uniform_level
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_scaled_instance_of_the_patch_selects_a_finer_level() {
+    let (headless, mut renderer, mut pool) = uniform_scene();
+    let camera = dunes_camera_back(DUNES_STRETCH_BACK);
+
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera, None);
+    let [pixels_per_unit, expand, _hold] = renderer.lod_params();
+    let plain = selected_level(&headless, &renderer, crcbl::render::scene::DEMO_DUNES)
+        .expect("no bucket drew the patch at the identity");
+    renderer.destroy(headless.device.as_ref());
+
+    // The same scene one instance apart: the cube first, this suite's
+    // insertion-order convention, then the patch at four times its authored
+    // size.
+    let mut stretched =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    place_cube(&mut stretched);
+    assert!(
+        stretched.selects_levels(),
+        "a device with no mesh stage takes the patch through a uniform cut"
+    );
+    place(
+        &mut stretched,
+        crcbl::render::scene::DEMO_DUNES,
+        crcbl::render::scene::DEMO_UNTINTED,
+        Mat4::from_scale(Vec3::splat(DUNES_STRETCH)),
+    );
+    let _ = render_mesh(&headless, &mut stretched, &mut pool, &camera, None);
+    let scaled = selected_level(&headless, &stretched, crcbl::render::scene::DEMO_DUNES)
+        .expect("no bucket drew the patch at four times its size");
+    stretched.destroy(headless.device.as_ref());
+
+    let dag = crcbl::shaders::cluster_dag::dunes_dag();
+    let want_plain = dag.uniform_level(camera.eye.to_array(), pixels_per_unit, expand);
+    let want_scaled = dag.uniform_level(
+        (camera.eye / DUNES_STRETCH).to_array(),
+        pixels_per_unit,
+        expand,
+    );
+    eprintln!(
+        "{}: dunes from {DUNES_STRETCH_BACK} units back — level {plain} at the identity \
+         (host rule says {want_plain}), level {scaled} at {DUNES_STRETCH}x (host rule at \
+         eye/{DUNES_STRETCH} says {want_scaled}), {pixels_per_unit} px/unit, budget {expand}",
+        crate::SUITE
+    );
+
+    assert!(
+        plain > 0,
+        "the patch at the identity already draws its finest level from \
+         {DUNES_STRETCH_BACK} units back, so a scaled instance has nowhere finer to go and \
+         this camera proves nothing"
+    );
+    assert!(
+        scaled > 0,
+        "the patch at {DUNES_STRETCH} times its size bottomed out at level 0 from \
+         {DUNES_STRETCH_BACK} units back, so the comparison below is against a clamp — move \
+         the camera further out"
+    );
+    assert_eq!(
+        plain, want_plain,
+        "at the identity the GPU took level {plain} and the host rule takes {want_plain}"
+    );
+    assert_eq!(
+        scaled, want_scaled,
+        "at {DUNES_STRETCH} times its authored size the GPU took level {scaled}, and a \
+         uniform scale of {DUNES_STRETCH} about the origin is the same judgement as the \
+         same patch seen from eye/{DUNES_STRETCH}, which is level {want_scaled}"
+    );
+    assert!(
+        scaled < plain,
+        "the patch drew level {scaled} at {DUNES_STRETCH} times its size and level {plain} \
+         at the identity, so the instance transform is not reaching the group's radius and \
+         error"
+    );
+
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
 /// How far either side of the boundary the drifting camera steps, as a fraction
 /// of the boundary distance.
 ///
