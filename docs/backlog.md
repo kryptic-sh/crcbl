@@ -117,6 +117,40 @@ left:
   taken. No page does — `web/engine/demo.js` boots once — and the alternative is
   discarding a teardown to make room for a boot. Documented on `retain` itself.
 
+### The probe gate does not pass on this machine, and CI's does
+
+`web/run-probe-e2e.sh` reports **83/87 locally**, with groups X, Y, Z and AA —
+the presented canvas frame, the reconfigured canvas frame, the padded-stride
+indirect draw and the depth plane — all failing the same way:
+
+```
+state FAILED, 0 bytes … — the device was lost: destroyed: Device was destroyed.
+```
+
+Measured 2026-08-23. What is known:
+
+- **It is not this session's WebGPU work.** Reproduced with
+  `crates/crcbl-webgpu/src/{hal/device.rs,hal/channel.rs,web.rs}` and
+  `web/engine/gpu-replay.js` restored to their content at commit `ba556c2`, with
+  a full `--build`, and the four groups failed identically.
+- **It is not the adapter.** `--adapter swiftshader` fails the same four, in the
+  same way, as `auto` does on the RX 7900 XTX.
+- **CI does not see it.** The Pages workflow runs this gate on three runners and
+  was green on the same tree.
+- The script's own header documents a _different_ hardware symptom for group X
+  alone — transparent black with "[Invalid Texture] is invalid due to a previous
+  error", 86/87 — so that row does not describe this, and the row's count is now
+  stale for this machine either way.
+- The page log ends with a 404 for a resource the run does not name. Whether
+  that is the cause or an unrelated fetch was not chased.
+
+**Nothing was changed for it.** It is a local-environment finding — most likely
+the browser this machine resolves versus the runners' — and the cost of leaving
+it is that the probe gate cannot be used as a local check: a real regression in
+those four groups would land in a run that is already red. Whoever picks it up
+starts by naming the local browser build and comparing it against the version
+the Pages job installs.
+
 ### What P8 actually still owes, measured
 
 The roadmap's P8 row reads "Phys slice 3: batch queries at scale, sleeping and
