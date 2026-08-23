@@ -272,9 +272,10 @@ format choice already covers them.
   factors are linear, base-colour _textures_ are sRGB.
 - **`GltfInstance::transform` is column-major `[f32; 16]`**, the layout
   `GpuInstance::transform` holds, and is **not** guaranteed rigid: glTF nodes
-  carry scale and this preserves it, while that field requires rotation and
-  translation only because the mesh shader has no inverse-transpose. Deciding
-  what to do about a scaled node belongs to the upload step; see
+  carry scale and this preserves it. That field takes any affine matrix — the
+  mesh shaders build the normal transform out of it — so a scaled node needs no
+  decision at the upload step. What it still costs is the per-cluster back-face
+  cull, which `crcbl_scene::gltf_render` reports as a `scale` skip; see
   `docs/backlog.md`.
 - **The importer validates the document itself** (`crcbl_scene::gltf_check`) and
   parses with `Gltf::from_slice_without_validation`, because `gltf` 1.4.1's own

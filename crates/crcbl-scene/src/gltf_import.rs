@@ -464,12 +464,12 @@ impl GltfInstance {
     /// produces it — which is the layout
     /// [`crcbl_shaders::mesh::GpuInstance::transform`] holds.
     ///
-    /// **Not necessarily rigid.** That field additionally requires rotation and
-    /// translation only, because the mesh shader transforms normals with the
-    /// 3×3 part and no inverse-transpose; glTF nodes carry scale and this
-    /// preserves it. Deciding what to do with a scaled node — bake it into the
-    /// vertices, or grow the shader an inverse-transpose — belongs to the
-    /// upload step, and losing the scale here would take the choice away.
+    /// **Scale is preserved, including a non-uniform one.** That field takes
+    /// any affine matrix — the mesh shaders build the normal transform out of it
+    /// rather than assuming its 3×3 is orthonormal — so a scaled node needs
+    /// neither baking into the vertices nor a decision at the upload step. What
+    /// a scaled node still costs is in `crcbl_scene::gltf_render`, which reports
+    /// it: the per-cluster back-face cull has not learned the same lesson.
     #[inline]
     #[must_use]
     pub const fn transform(&self) -> [f32; 16] {

@@ -667,11 +667,11 @@ const AO_CAMERA_UP: f32 = 2.2;
 /// [`AO_RUN`] × [`AO_WALL`] × [`AO_TROUGH`] and lifted so its floor is the plane
 /// `y = 0`.
 ///
-/// **A non-uniform scale, and it is safe on this mesh alone.** Every face of
-/// `crcbl_shaders::mesh::OPEN_BOX_FACES` is axis aligned, so an axis-aligned
-/// scale leaves each normal on its own axis and `mesh.slang` renormalises what it
-/// is handed. A mesh with an oblique face would need the inverse transpose, which
-/// nothing in this engine builds.
+/// **A non-uniform scale, and it needs nothing special of this mesh.** Every
+/// face of `crcbl_shaders::mesh::OPEN_BOX_FACES` is axis aligned, so an
+/// axis-aligned scale leaves each normal on its own axis whatever the shader
+/// does with it — and a mesh with an oblique face is fine here too, since
+/// `mesh.slang` takes a normal through `normal_basis`, the cofactor matrix.
 ///
 /// **Centred on the camera's axis because that is where the claim is measured**,
 /// and no longer to avoid anything. This once said a box this large slid

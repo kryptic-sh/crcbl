@@ -1219,10 +1219,10 @@ impl View {
 ///
 /// The geometry is already at world scale and world position — every mesh above
 /// is built where it stands — so each transform is the identity. That is
-/// deliberate rather than lazy: `GpuInstance::transform` must be **rigid**
-/// because the shader transforms normals with its 3×3 part and no inverse
-/// transpose, and a room built at its own size never has to reason about which
-/// scales are safe on which faces.
+/// deliberate rather than lazy: a room built at its own size never has to
+/// reason about which scales are safe on which faces. `GpuInstance::transform`
+/// takes any affine matrix now — the shaders build the normal transform out of
+/// it — so this is a simplicity the room keeps rather than a rule it obeys.
 ///
 /// # Errors
 ///

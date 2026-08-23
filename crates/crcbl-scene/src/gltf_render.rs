@@ -739,18 +739,26 @@ fn place_instances(scene: &GltfScene, slots: &Slots, skips: &mut Skips<'_>) -> V
             None => format!("node {node}"),
         };
         if let Some(ratio) = non_uniform_scale(&transform) {
-            // Not refused: the geometry is right and only the shading is off,
-            // which is a far better answer than an object missing from the
-            // frame. `mesh.slang` normalises the interpolated normal, so a
-            // *uniform* scale is exact and only this case is wrong.
+            // Not refused: the object draws and shades correctly, and what is
+            // left is a cull that can drop part of it. Refusing the node
+            // outright would lose all of it.
+            //
+            // The shading half of this warning is gone — `mesh.slang` and
+            // `mesh_cluster.slang` take a normal through `normal_basis`, the
+            // cofactor matrix, which is exact under any affine transform. What
+            // is left is `cluster_survives`, which carries a cluster's *cone
+            // axis* through the bare 3×3 and leaves its half-angle alone: a
+            // scaled instance can have a cluster rejected as back-facing while
+            // it holds a triangle facing the camera. `docs/backlog.md` carries
+            // what closing it needs.
             skips.push(
                 "scale",
                 at(),
                 format!(
                     "its world transform scales axes unequally (longest ÷ shortest = \
-                     {ratio:.3}), and the mesh shader transforms normals with the 3×3 part \
-                     and no inverse-transpose; the object draws in the right place and \
-                     lights wrongly"
+                     {ratio:.3}); it draws and lights correctly, and the mesh path's \
+                     per-cluster back-face cull carries the cone axis through the 3×3 \
+                     unchanged, so parts of it may go missing"
                 ),
             );
         }
@@ -786,9 +794,8 @@ fn place_instances(scene: &GltfScene, slots: &Slots, skips: &mut Skips<'_>) -> V
 
 /// How unequally a transform scales its axes, or `None` when it does not.
 ///
-/// The scales are the lengths of the basis columns, which is what the shader's
-/// 3×3 multiply does to a normal. Rotation does not change them and translation
-/// is not in them, so this reads scale and nothing else.
+/// The scales are the lengths of the basis columns. Rotation does not change
+/// them and translation is not in them, so this reads scale and nothing else.
 fn non_uniform_scale(transform: &Mat4) -> Option<f32> {
     let lengths = [
         transform.x_axis.truncate().length(),
@@ -1041,6 +1048,8 @@ mod tests {
         );
     }
 
+    /// The skip is about the cull, not the shading: a normal goes through the
+    /// cofactor matrix now, and a cone axis does not.
     #[test]
     fn a_non_uniform_scale_is_reported_and_the_object_is_still_placed() {
         let json = replacing(
@@ -1065,12 +1074,13 @@ mod tests {
         assert_eq!(
             converted.instances.len(),
             1,
-            "a scaled node lights wrongly and still draws; dropping it would lose the object"
+            "a scaled node draws and shades correctly and may lose clusters to the cone \
+             cull; dropping the node would lose all of it"
         );
     }
 
     #[test]
-    fn a_uniform_scale_is_not_reported_because_the_shader_normalises_the_normal() {
+    fn a_uniform_scale_is_not_reported_because_it_moves_no_direction() {
         let json = replacing(
             &triangle_json(BIN_CHUNK_BUFFER),
             r#""translation": [10.0, 0.0, 0.0]"#,
