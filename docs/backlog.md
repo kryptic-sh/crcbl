@@ -92,6 +92,31 @@ Nothing in those was contradicted; nothing in most of them was checkable either.
 goldens, `22`, `39`'s first three rows, `40`'s first row, and the ROADMAP's P5B,
 P7, P7B, S4, S4B, S4C and its e2e-harness table.
 
+### The WebGPU teardown work of 2026-08-23, and the one case left open
+
+Two leaks were found by writing the browser gate's group I and both are fixed —
+the acquire path minting a handle pair per frame that nothing retired, and the
+command channel being freed by the dropping device one call before the shim's
+next drain, so a run's whole teardown was encoded and then thrown away. What is
+left:
+
+- **A `WebGpuInstance` dropped with no device open strands whatever it
+  encoded.** `web::retain` is called from `Drop for WebGpuDevice` and from
+  nowhere else, so a page that creates a surface and then fails to open a device
+  drops the last channel handle without parking it, and the `DestroySurface` on
+  the stream is never drained. Harmless today — a page in that state is not
+  going to replay anything either — and the fix is a second `Drop`, on the
+  instance, calling the same `retain`. Left undone because a `Drop` whose whole
+  body is a global side effect earns its place by the leak it prevents, and this
+  one prevents a leak nothing can observe. Revisit if an instance ever outlives
+  its devices in a real page.
+- **A retained channel makes `web::install` refuse for one pump.** `install`
+  answers `false` while a live channel is installed, and a parked handle counts
+  as live until `__crcbl_web_gpu_stream_release` lets it go, so a page that tore
+  a demo down and booted another inside the same frame would be told the slot is
+  taken. No page does — `web/engine/demo.js` boots once — and the alternative is
+  discarding a teardown to make room for a boot. Documented on `retain` itself.
+
 ### What P8 actually still owes, measured
 
 The roadmap's P8 row reads "Phys slice 3: batch queries at scale, sleeping and
