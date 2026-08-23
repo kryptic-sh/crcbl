@@ -5016,32 +5016,45 @@ has no shell, audio or store, so its e2e helper needs no isolation flag at all.
 `crcbl-shell`'s `WindowDesc::default` has `visible: true`, but its callers are
 either real window creation or e2e suites whose point is a real window.
 
-### Counted claims in doc comments have not been swept, only spot-fixed
+### The counted-claims sweep is done for `apps/*`; the wider one is not
 
 `CLAUDE.md`'s rule is that a count of code elements — "four impls", "the three
-call sites" — loses the number entirely, because nothing recomputes prose. Two
-present-tense violations were found and fixed on 2026-08-15: `crcbl::args`'s
-`Common` said a shared flag "reaches four games" when six samples hold it, and
-`crcbl`'s umbrella test doc said it builds "the loopback pair the four games
-build" — wrong in composition as well as count, since `apps/horde` has no
-transport at all and `apps/hud` does.
+call sites" — loses the number entirely, because nothing recomputes prose. The
+tractable half of the sweep this entry used to ask for ran on 2026-08-23, scoped
+as it proposed: present-tense counts of populations that grow. Thirty comment
+sites changed, eight of them wrong at the time — the CLI's "four subcommands"
+against seven `Command` variants, `crcbl::args`'s "four help texts" and
+`crcbl-ui`'s "four samples" against nine and seven, `apps/sandbox`'s "the four
+games" against eight callers, and `apps/asteroids`' "48 kHz is what the other
+two samples use" against three that do. The rest were true and decorative.
 
-**The sweep was not finished.** A regex over every doc comment in `crates/`
-returns roughly a hundred counted phrases, and most are legitimate and must not
-be "fixed": "two backends" and "three backends" usually name the real backend
-set, "three samples" is often an MSAA sample count, `crcbl-ui/src/budget.rs`
-means statistical samples, and a great many are past-tense accounts of what a
-duplication looked like before it was extracted — which the rule explicitly
-exempts and which are worth keeping.
+**What was deliberately left, so it is not re-swept:** past-tense accounts of
+what a duplication used to look like (the rule exempts them and they are worth
+keeping); counts that name a real set rather than a population — "the four
+games" IS breakout, flappy, asteroids and horde, and `apps/*/src/art.rs`'s "the
+other two samples" was checked and names the real pair; sample counts that are
+MSAA or statistical; and closed enums whose count is the argument and is already
+pinned by a test (`DisplayMode has exactly two variants` and its like).
 
-So the remaining work is not mechanical. What would make it tractable: restrict
-to **present-tense counts of `apps/*`**, which is the population that actually
-grows. Candidates noticed but not verified: `crcbl-render/build.rs` ("five times
-— the four samples and `crates/crcbl-render`", "three games"),
-`crcbl-ui/src/debug.rs` ("four samples each remembering to add the same
-module"), `crcbl-ui/src/menu.rs` ("three samples the same arithmetic"). Each
-needs reading before editing — the count may be right, and the past-tense ones
-are correct as they stand.
+**Three things the sweep surfaced and did not fix.**
+
+- **The shell-backend denominators are ambiguous.** `crcbl-shell/src/lib.rs`,
+  `clipboard.rs` and `appkit/monitors.rs` say "three of five backends" and "the
+  first of the five backends" while `ShellBackend` has six variants. Five is
+  probably the real platform backends with `Headless` excluded, which would make
+  it the "names a real set" exemption — but nobody has confirmed that against
+  the enum's own docs, and guessing either way writes a wrong comment.
+- **`crates/crcbl-render/build.rs` contradicts itself**, and this is a code
+  question rather than a comment one. Its header says the script's body _is_
+  `crcbl_sprite::bake::bake_dir` and "those three are parameters now"; the
+  section below it says the extraction has not happened and "the fix is a real
+  `crcbl_sprite::bake::bake_dir` entry point". One of the two is stale and
+  deciding which means reading `crcbl-sprite`.
+- **The wider sweep is still not done.** A regex over every doc comment in
+  `crates/` returns roughly a hundred counted phrases and most are legitimate;
+  what has now been covered is counts of `apps/*` and of this workspace's own
+  subcommands, forwards and callers. Counts of _crates_, of trait impls and of
+  enum variants outside the pinned ones were not systematically checked.
 
 ### rustc's lint suppression inside external macros is a hazard for every forwarding macro we write
 

@@ -6,11 +6,16 @@
 //! `deny.toml`, and it is not a framework that would own engine policy. It was
 //! still rejected for P0, on four grounds:
 //!
-//! 1. **Size, against this workspace's baseline.** The whole workspace has five
-//!    third-party dependencies (`bitflags`, `glam`, `log`, `proptest`,
-//!    `thiserror`). `clap` with its default features brings ten to twelve
-//!    crates. It would be, by a wide margin, the largest dependency in the
-//!    engine — to parse this CLI's subcommands and flags.
+//! 1. **Size, for what it buys.** `clap` with its default features brings a
+//!    dependency tree of its own to parse this CLI's subcommands and flags,
+//!    which are one `match`. **This ground is weaker than it was written**, and
+//!    saying so is the point of recording it: the original text called `clap`
+//!    "by a wide margin, the largest dependency in the engine" against a
+//!    workspace whose third-party list it then enumerated. That list is far
+//!    longer now — `ash`, `gltf` and `serde` are each larger than `clap` — so
+//!    the superlative is false and only the ratio survives. Read
+//!    `[workspace.dependencies]` in the root `Cargo.toml` for what the baseline
+//!    actually is rather than trusting a sentence here.
 //! 2. **Consistency with decisions already made.** `docs/plan/15-windowing.md`
 //!    rejected `winit`, `x11rb` and `wayland-client` and this workspace
 //!    hand-wrote a Wayland protocol scanner and its own libxcb bindings rather
