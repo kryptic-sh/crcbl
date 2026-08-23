@@ -304,7 +304,9 @@ echo "crcbl vk e2e: $RAN tests ran against a real Vulkan implementation"
 LEAKS="$(grep -F 'object(s) still alive at device teardown' "${OUTPUT}.plain" || true)"
 if [ -n "$LEAKS" ]; then
     echo "crcbl vk e2e: a device was destroyed with objects still alive:" >&2
-    echo "$LEAKS" | sed 's/^/                /' >&2
+    while IFS= read -r line; do
+        echo "                $line" >&2
+    done <<<"$LEAKS"
     echo "              The suite's own teardown reporter wrote that. Destroy the" >&2
     echo "              objects in the test that made them — the kinds and formats" >&2
     echo "              above are what it saw — rather than leaving the line in the" >&2
