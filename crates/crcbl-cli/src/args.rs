@@ -75,6 +75,7 @@ COMMANDS:
     lod           Report or generate a glTF mesh's LOD chain.
     bench         Run a fixed benchmark scenario and report its distribution.
     sim           Run the determinism harness and print its state hash.
+    settings      Read or write a game's settings.toml.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -343,6 +344,75 @@ OPTIONS:
 OUTPUT:
     hash:<hex> ticks:<n> final_tick:<n>";
 
+/// `crcbl settings --help`.
+pub const SETTINGS_USAGE: &str = "\
+crcbl settings — read or write a game's settings.toml
+
+USAGE:
+    crcbl settings [OPTIONS] list
+    crcbl settings [OPTIONS] get <KEY>
+    crcbl settings [OPTIONS] set <KEY> <VALUE>
+
+The file is `settings.toml` in the game's own config directory — on Linux that
+is ~/.config/<APP>/settings.toml, and it is whatever the platform names
+elsewhere. Every subcommand reports the path it used, so which file was read is
+never a guess.
+
+APP is the game the settings belong to. Without --app it is the package name of
+the nearest Cargo.toml at or above the current directory, which is the same
+project `crcbl run` and `crcbl build` work on. Outside a project, or in a
+workspace root that declares no package, there is nothing to derive it from and
+the command refuses rather than inventing a name.
+
+`list` and `get` only read. `set` is the only thing here that writes, and the
+only thing that creates the config directory — a game's start-up never does.
+
+WHAT list SHOWS:
+    The player's settings file, and nothing else. A game's compiled-in defaults
+    are layers that live in the game's own binary, so a key the game defaults
+    and the player has never changed is absent here and still has a value when
+    the game runs.
+
+HOW set TYPES A VALUE:
+    TOML's own value grammar decides, because the file it lands in is TOML:
+
+        true, false            a boolean
+        42, -7, 0x2a, 1_000    an integer
+        1.5, 2e3, inf, nan     a float
+        \"true\", \"42\"           quoted: a string of those characters
+        anything else          a string of exactly the characters typed
+
+    The type is the point. `engine.video.shadows` is read back as a boolean, and
+    the string \"false\" is not one, so a value written as text there would be a
+    line in the file that does nothing at all. Quote a value to force it to be
+    text; a shell eats one layer of quotes, so that is `set game.name '\"42\"'`.
+
+    A list or a table is stored as the text that was typed: this verb writes
+    scalars, and `get` renders the same four kinds. A settings file may hold
+    either — `list` shows them — but neither is something to write from here.
+
+    A value starting with `-` would be read as an option, so `--` ends the
+    options: `crcbl settings set game.offset -- -7`.
+
+KEYS:
+    A dotted path, `engine.video.shadows`. Each segment is ASCII letters,
+    digits, `_` or `-`, which is what a TOML bare key is.
+
+EXIT CODES:
+    0  the command answered, `get` on a key that is not set included
+    1  the command failed: the file could not be read or written, or `get` found
+       a table or a list, which it does not render — `list` shows those
+    2  the invocation was malformed
+
+OPTIONS:
+        --app <NAME>        Whose settings these are. Default: the package name
+                            of the project in the current directory.
+        --config-dir <DIR>  Use DIR in place of the platform's config directory,
+                            so the file is DIR/<APP>/settings.toml. For a
+                            sandbox, a CI job, or a second profile.
+        --json              Emit one JSON object instead of human output.
+    -h, --help              Print this text.";
+
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invocation {
@@ -377,6 +447,8 @@ pub enum Command {
     Bench(BenchArgs),
     /// The determinism harness: N ticks of a seed-generated world, hashed.
     Sim(SimArgs),
+    /// A game's `settings.toml`, read or written.
+    Settings(SettingsArgs),
 }
 
 impl Command {
@@ -397,6 +469,8 @@ impl Command {
             // The scenario is a field of its own, for the reason above.
             Self::Bench(_) => "bench",
             Self::Sim(_) => "sim",
+            // The branch is a field of its own, for the reason above.
+            Self::Settings(_) => "settings",
         }
     }
 
@@ -412,6 +486,7 @@ impl Command {
             Self::Lod(args) => args.json,
             Self::Bench(args) => args.json,
             Self::Sim(args) => args.json,
+            Self::Settings(args) => args.json,
         }
     }
 }
@@ -783,6 +858,63 @@ pub struct SimArgs {
     pub json: bool,
 }
 
+/// Which half of `crcbl settings` was asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsAction {
+    /// Print the whole file.
+    List,
+    /// Print one dotted key's value.
+    Get,
+    /// Write one dotted key's value and persist the file.
+    Set,
+}
+
+impl SettingsAction {
+    /// The name this branch is reported under in `--json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Get => "get",
+            Self::Set => "set",
+        }
+    }
+}
+
+/// `crcbl settings`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingsArgs {
+    /// Which branch to run.
+    pub action: SettingsAction,
+    /// The dotted key. Always `Some` for [`SettingsAction::Get`] and
+    /// [`SettingsAction::Set`] and always `None` for
+    /// [`SettingsAction::List`] — the parser refuses the combinations that are
+    /// neither, the way [`LodArgs::output`] is refused on the branches that
+    /// write nothing.
+    pub key: Option<String>,
+    /// The value to write, as it was typed. Always `Some` for
+    /// [`SettingsAction::Set`] and always `None` otherwise.
+    ///
+    /// Text rather than a typed value: what type it lands as is
+    /// `settings_cmd`'s decision and is documented in [`SETTINGS_USAGE`], and
+    /// making it here would put half the rule in the parser.
+    pub value: Option<String>,
+    /// The game whose settings these are. `None` is "derive it from the project
+    /// in the current directory", which is a filesystem question and so is left
+    /// to the command.
+    pub app: Option<String>,
+    /// Stands in for the platform's config directory, so the file is
+    /// `<config_dir>/<app>/settings.toml`.
+    ///
+    /// `None` is the platform's own answer. This exists because the platform's
+    /// answer is not redirectable everywhere — `dirs` reads `XDG_CONFIG_HOME`
+    /// on Linux and a Windows known folder on Windows — so a test, a container
+    /// or a CI job that must not touch the developer's real `~/.config` has no
+    /// portable way to say so through the environment.
+    pub config_dir: Option<PathBuf>,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
 /// `crcbl replay --help`.
 pub const REPLAY_USAGE: &str = "\
 crcbl replay — read a .crpl replay file and dump its metadata
@@ -813,6 +945,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("lod") => parse_lod(args),
         Some("bench") => parse_bench(args),
         Some("sim") => parse_sim(args),
+        Some("settings") => parse_settings(args),
         Some(other) if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
@@ -1598,6 +1731,133 @@ fn parse_sim(mut args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Sim(parsed))
 }
 
+fn parse_settings(mut args: impl Iterator<Item = OsString>) -> Invocation {
+    let mut app = None;
+    let mut config_dir = None;
+    let mut json = false;
+    // The subcommand and its key and value, collected as they arrive so that
+    // `crcbl settings --app mygame get engine.video.shadows` and
+    // `crcbl settings get engine.video.shadows --app mygame` are the same
+    // invocation. Every other subcommand here accepts its flags in any
+    // position and this one is not the place to break that.
+    let mut positional: Vec<OsString> = Vec::new();
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(SETTINGS_USAGE),
+            Some("--json") => json = true,
+            // Everything after `--` is a subcommand, a key or a value, whatever
+            // it looks like. A settings value can start with a `-` — a negative
+            // number is the ordinary case — and there is otherwise no way to
+            // type one: `crcbl settings set game.offset -- -7`. Same separator
+            // `run` uses for the same reason.
+            Some("--") => positional.extend(args.by_ref()),
+            Some("--app") => {
+                let Some(value) = args.next() else {
+                    return bad("--app needs a name");
+                };
+                let Some(name) = value.to_str() else {
+                    return not_text("settings", "name for --app", &value);
+                };
+                match check_app_name(name) {
+                    Ok(()) => app = Some(name.to_string()),
+                    Err(why) => {
+                        return Invocation::BadUsage(format!(
+                            "`--app {name}` is not a usable directory name: {why}"
+                        ));
+                    }
+                }
+            }
+            // A path, so it stays an `OsString` all the way to `PathBuf`.
+            Some("--config-dir") => match args.next() {
+                Some(value) if !value.is_empty() => config_dir = Some(PathBuf::from(value)),
+                _ => return bad("--config-dir needs a directory"),
+            },
+            Some(other) if other.starts_with('-') => {
+                return Invocation::BadUsage(format!("`settings` has no option `{other}`"));
+            }
+            _ => positional.push(arg),
+        }
+    }
+
+    let Some((first, rest)) = positional.split_first() else {
+        return bad("`settings` needs a subcommand (list, get, set)");
+    };
+    let action = match first.to_str() {
+        Some("list") => SettingsAction::List,
+        Some("get") => SettingsAction::Get,
+        Some("set") => SettingsAction::Set,
+        _ => {
+            return Invocation::BadUsage(format!(
+                "`settings` has no subcommand `{}` (known: list, get, set)",
+                first.to_string_lossy()
+            ));
+        }
+    };
+
+    // How many arguments each branch takes, checked before any of them is
+    // read: an extra one is a typo the shell split in two, not something to
+    // drop silently.
+    let wanted = match action {
+        SettingsAction::List => 0,
+        SettingsAction::Get => 1,
+        SettingsAction::Set => 2,
+    };
+    if rest.len() > wanted {
+        return Invocation::BadUsage(format!(
+            "`settings {}` takes {wanted} argument(s); `{}` is one too many",
+            action.name(),
+            rest[wanted].to_string_lossy()
+        ));
+    }
+
+    let key = match action {
+        SettingsAction::List => None,
+        _ => {
+            let Some(raw) = rest.first() else {
+                return Invocation::BadUsage(format!(
+                    "`settings {}` needs a key, such as `engine.video.shadows`",
+                    action.name()
+                ));
+            };
+            let Some(key) = raw.to_str() else {
+                return not_text("settings", "key", raw);
+            };
+            if let Err(why) = check_settings_key(key) {
+                return Invocation::BadUsage(format!("`{key}` is not a settings key: {why}"));
+            }
+            Some(key.to_string())
+        }
+    };
+
+    let value = match action {
+        SettingsAction::Set => {
+            let Some(raw) = rest.get(1) else {
+                return Invocation::BadUsage(format!(
+                    "`settings set {}` needs a value",
+                    key.as_deref().unwrap_or_default()
+                ));
+            };
+            // TOML is UTF-8 by definition, so a value that is not text is one
+            // that could not be written to the file whatever it means.
+            let Some(value) = raw.to_str() else {
+                return not_text("settings", "value", raw);
+            };
+            Some(value.to_string())
+        }
+        _ => None,
+    };
+
+    Invocation::Command(Command::Settings(SettingsArgs {
+        action,
+        key,
+        value,
+        app,
+        config_dir,
+        json,
+    }))
+}
+
 /// The next argument as a whole number, for the three values `sim` takes.
 ///
 /// Separate from [`count`] because these are `u64` and not `usize`: `--seed` is
@@ -1759,6 +2019,54 @@ fn bad(message: &str) -> Invocation {
     Invocation::BadUsage(message.to_string())
 }
 
+/// Whether `name` is safe to use as the config directory of a game.
+///
+/// It becomes a path component under the platform's config directory, so this
+/// is a boundary check and not a style one: `..`, a separator, or a drive
+/// prefix would put `settings.toml` somewhere the user did not name. Restricted
+/// to the characters a Cargo package name already allows, because the default
+/// comes from one — see [`SettingsArgs::app`].
+pub fn check_app_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("it is empty");
+    }
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
+    {
+        return Err("only letters, digits, `-` and `_` are allowed");
+    }
+    if name.starts_with('-') {
+        return Err("it would be read as an option");
+    }
+    Ok(())
+}
+
+/// Whether `key` is a dotted settings key this CLI will read and write.
+///
+/// Each segment has to be a TOML *bare* key, so that a key typed here is
+/// spelled in `settings.toml` exactly as it was typed and a person editing the
+/// file by hand meets no quoting. An empty segment — `a..b`, a leading or a
+/// trailing dot — is refused rather than written: `crcbl_store`'s dotted
+/// navigation splits on `.` and would create a table whose name is the empty
+/// string, which nothing could then read back.
+fn check_settings_key(key: &str) -> Result<(), &'static str> {
+    if key.is_empty() {
+        return Err("it is empty");
+    }
+    for segment in key.split('.') {
+        if segment.is_empty() {
+            return Err("a dot has nothing on one side of it");
+        }
+        if !segment.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        }) {
+            return Err("a segment is ASCII letters, digits, `_` and `-`");
+        }
+    }
+    Ok(())
+}
+
 /// Whether `name` can be both a directory name and a Cargo package name.
 ///
 /// Checked here, at parse time, because a name that only fails once half the
@@ -1803,6 +2111,10 @@ fn check_name(name: &str) -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
+    use std::path::Path;
+
+    use crcbl_store::settings::SETTINGS_FILE;
+
     fn parse_args(args: &[&str]) -> Invocation {
         parse(args.iter().map(OsString::from))
     }
@@ -1837,6 +2149,9 @@ mod tests {
             vec!["bench", "--scenario", "jobs", "--json"],
             vec!["bench", "--scenario", "phys", "--json"],
             vec!["sim", "--json"],
+            vec!["settings", "--app", "g", "list", "--json"],
+            vec!["settings", "--app", "g", "get", "a.b", "--json"],
+            vec!["settings", "--app", "g", "set", "a.b", "c", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
@@ -2654,6 +2969,179 @@ mod tests {
             assert!(
                 matches!(parse_args(&["new", name]), Invocation::Command(_)),
                 "`{name}` should be accepted"
+            );
+        }
+    }
+    // ── settings ────────────────────────────────────────────────────────
+
+    fn settings(args: &[&str]) -> SettingsArgs {
+        match command(args) {
+            Command::Settings(parsed) => parsed,
+            other => panic!("expected `settings`, got {other:?}"),
+        }
+    }
+
+    /// Each branch parses to its own action, and only the branches that take a
+    /// key and a value carry them.
+    #[test]
+    fn settings_parses_its_three_subcommands() {
+        let list = settings(&["settings", "list"]);
+        assert_eq!(list.action, SettingsAction::List);
+        assert_eq!((list.key.as_deref(), list.value.as_deref()), (None, None));
+
+        let get = settings(&["settings", "get", "engine.video.shadows"]);
+        assert_eq!(get.action, SettingsAction::Get);
+        assert_eq!(get.key.as_deref(), Some("engine.video.shadows"));
+        assert_eq!(get.value, None);
+
+        let set = settings(&["settings", "set", "engine.video.shadows", "false"]);
+        assert_eq!(set.action, SettingsAction::Set);
+        assert_eq!(set.key.as_deref(), Some("engine.video.shadows"));
+        assert_eq!(set.value.as_deref(), Some("false"));
+    }
+
+    /// `--app` and `--config-dir` are accepted on either side of the
+    /// subcommand, because every other command here takes its flags in any
+    /// position and a settings invocation typed the natural way must not be a
+    /// usage error.
+    #[test]
+    fn settings_takes_its_options_before_or_after_the_subcommand() {
+        for argv in [
+            vec![
+                "settings",
+                "--app",
+                "mygame",
+                "--config-dir",
+                "/tmp/c",
+                "get",
+                "a.b",
+            ],
+            vec![
+                "settings",
+                "get",
+                "a.b",
+                "--app",
+                "mygame",
+                "--config-dir",
+                "/tmp/c",
+            ],
+            vec![
+                "settings",
+                "--app",
+                "mygame",
+                "get",
+                "--config-dir",
+                "/tmp/c",
+                "a.b",
+            ],
+        ] {
+            let parsed = settings(&argv);
+            assert_eq!(parsed.app.as_deref(), Some("mygame"), "{argv:?}");
+            assert_eq!(
+                parsed.config_dir.as_deref(),
+                Some(Path::new("/tmp/c")),
+                "{argv:?}"
+            );
+            assert_eq!(parsed.key.as_deref(), Some("a.b"), "{argv:?}");
+        }
+    }
+
+    /// A negative number is an ordinary settings value and starts with the
+    /// character that opens an option, so there has to be a way to type one.
+    #[test]
+    fn settings_takes_a_value_that_looks_like_an_option_after_a_double_dash() {
+        let parsed = settings(&["settings", "set", "game.offset", "--", "-7"]);
+        assert_eq!(parsed.value.as_deref(), Some("-7"));
+        // Without it, `-7` is what it looks like.
+        assert!(matches!(
+            parse_args(&["settings", "set", "game.offset", "-7"]),
+            Invocation::BadUsage(_)
+        ));
+    }
+
+    /// Every shape that is not an invocation, each for a different reason: no
+    /// branch, a branch that does not exist, a missing key, a missing value, an
+    /// argument too many, a key that could not be written back, and an `--app`
+    /// that would put `settings.toml` somewhere nobody named.
+    #[test]
+    fn settings_refuses_a_malformed_invocation() {
+        for argv in [
+            vec!["settings"],
+            vec!["settings", "frobnicate"],
+            vec!["settings", "get"],
+            vec!["settings", "set"],
+            vec!["settings", "set", "a.b"],
+            vec!["settings", "list", "a.b"],
+            vec!["settings", "get", "a.b", "c"],
+            vec!["settings", "set", "a.b", "c", "d"],
+            vec!["settings", "get", ""],
+            vec!["settings", "get", "a..b"],
+            vec!["settings", "get", ".a"],
+            vec!["settings", "get", "a."],
+            vec!["settings", "get", "a b"],
+            vec!["settings", "get", "a/b"],
+            vec!["settings", "--app", "", "list"],
+            vec!["settings", "--app", "..", "list"],
+            vec!["settings", "--app", "a/b", "list"],
+            vec!["settings", "--app", "-x", "list"],
+            vec!["settings", "--app"],
+            vec!["settings", "--config-dir"],
+            vec!["settings", "--config-dir", "", "list"],
+            vec!["settings", "--frobnicate", "list"],
+        ] {
+            assert!(
+                matches!(parse_args(&argv), Invocation::BadUsage(_)),
+                "{argv:?} should be a bad invocation"
+            );
+        }
+    }
+
+    /// `..` as an app name is the one refusal that is a boundary and not a
+    /// style rule: it would resolve the settings file outside the config
+    /// directory the platform named.
+    #[test]
+    fn an_app_name_is_a_single_path_component() {
+        for name in ["", "..", ".", "a/b", "a\\b", "-x", "a b", "a.b"] {
+            assert!(
+                check_app_name(name).is_err(),
+                "`{name}` must not become a directory name"
+            );
+        }
+        for name in ["mygame", "my-game", "my_game", "2048"] {
+            assert!(check_app_name(name).is_ok(), "`{name}` is a usable name");
+        }
+    }
+
+    #[test]
+    fn settings_help_is_the_settings_help() {
+        for argv in [
+            vec!["settings", "--help"],
+            vec!["settings", "-h"],
+            vec!["settings", "get", "--help"],
+            vec!["settings", "set", "a.b", "c", "--help"],
+        ] {
+            assert_eq!(
+                parse_args(&argv),
+                Invocation::Help(SETTINGS_USAGE),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The help names the file it reads and the escape hatch for a value that
+    /// looks like an option, because both are things a user cannot discover by
+    /// trying.
+    #[test]
+    fn the_settings_help_names_the_file_and_the_double_dash() {
+        for value in [
+            SETTINGS_FILE,
+            "set game.offset -- -7",
+            "--app",
+            "--config-dir",
+        ] {
+            assert!(
+                SETTINGS_USAGE.contains(value),
+                "`settings --help` does not name `{value}`:\n{SETTINGS_USAGE}"
             );
         }
     }

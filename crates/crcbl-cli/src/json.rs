@@ -35,6 +35,17 @@ pub enum Json {
     /// tell apart from a real measurement. Nothing this CLI reports is
     /// *expected* to be non-finite — see [`write_float`].
     Float(f32),
+    /// A JSON number with a fraction that came in as an `f64`.
+    ///
+    /// Separate from [`Float`](Self::Float) rather than replacing it, because
+    /// the two round-trip differently: `Debug` prints the shortest decimal that
+    /// reads back as the *same bits*, and `0.03f32` widened to an `f64` is
+    /// `0.029999999329447746`. A measurement this CLI computes in single
+    /// precision has to stay single precision on the way out, and a value read
+    /// from a TOML file — where a float is an `f64` by definition — has to keep
+    /// every digit the file spelled. `null` for a non-finite value, on
+    /// [`Float`](Self::Float)'s terms.
+    Double(f64),
     /// A string, escaped on the way out.
     String(String),
     /// An array.
@@ -60,7 +71,8 @@ impl Display for Json {
         match self {
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write!(f, "{value}"),
-            Self::Float(value) => write_float(f, *value),
+            Self::Float(value) => write_float(f, value.is_finite(), value),
+            Self::Double(value) => write_float(f, value.is_finite(), value),
             Self::String(value) => write_escaped(f, value),
             Self::Array(items) => {
                 f.write_char('[')?;
@@ -88,14 +100,19 @@ impl Display for Json {
     }
 }
 
-/// Writes a JSON number for an `f32`, or `null` when there is no such number.
+/// Writes a JSON number for a float, or `null` when there is no such number.
 ///
 /// `{:?}` and not `{}`: `Debug` for a float is the shortest decimal that reads
 /// back as the same bits, which is exactly what a machine-readable schema wants
 /// — `Display` would print `0.03` for a value that is not 0.03. Both an integral
 /// value (`2.0`) and an exponent (`1e-8`) are spellings RFC 8259 accepts.
-fn write_float(f: &mut Formatter<'_>, value: f32) -> fmt::Result {
-    if value.is_finite() {
+///
+/// `finite` is passed in rather than tested here: `f32` and `f64` share this
+/// rule and share nothing in the type system that would let one function ask
+/// them both, and the alternative — a copy of the rule per width — is how the
+/// two would come to disagree about what JSON can spell.
+fn write_float(f: &mut Formatter<'_>, finite: bool, value: &impl fmt::Debug) -> fmt::Result {
+    if finite {
         write!(f, "{value:?}")
     } else {
         f.write_str("null")
@@ -178,6 +195,39 @@ mod tests {
         }
         for value in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
             assert_eq!(Json::Float(value).to_string(), "null", "{value}");
+        }
+    }
+
+    /// A `f64` keeps the digits widening an `f32` would invent, and vice versa.
+    ///
+    /// The reason the two variants exist. `0.03f32` is not 0.03 — widened to a
+    /// `f64` it is 0.029999999329447746, and a shortest-round-trip rendering of
+    /// the wide value prints all of it. A TOML float, meanwhile, *is* an `f64`,
+    /// so a settings value with more precision than a `f32` holds has to come
+    /// out of `crcbl settings get` unchanged. One variant could not do both.
+    #[test]
+    fn the_two_float_widths_each_round_trip_at_their_own_precision() {
+        assert_eq!(Json::Float(0.03).to_string(), "0.03");
+        assert_eq!(
+            Json::Double(f64::from(0.03f32)).to_string(),
+            "0.029999999329447746"
+        );
+
+        let precise = 0.123_456_789_012_345_67f64;
+        let rendered = Json::Double(precise).to_string();
+        assert_eq!(
+            rendered.parse::<f64>().expect("a JSON number").to_bits(),
+            precise.to_bits(),
+            "{rendered} is not {precise} read back"
+        );
+        assert_ne!(
+            Json::Float(precise as f32).to_string(),
+            rendered,
+            "an f32 cannot hold this value, so the two renderings must differ"
+        );
+
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(Json::Double(value).to_string(), "null", "{value}");
         }
     }
 

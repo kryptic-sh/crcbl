@@ -171,7 +171,12 @@ fn execute(command: &mut Command, described: &str) -> Result<(), Failure> {
 ///
 /// Upwards because `crcbl run` from `src/` is something people do, and because
 /// a game with a `scenes/` directory invites being run from inside it.
-fn locate_manifest() -> Result<PathBuf, Failure> {
+///
+/// `pub(crate)` for [`settings_cmd`](crate::settings_cmd), which derives the
+/// game's name from the same project these two build and run. A second search
+/// of its own would be a second answer to "which project is this", and the two
+/// would drift.
+pub(crate) fn locate_manifest() -> Result<PathBuf, Failure> {
     let cwd = std::env::current_dir()
         .map_err(|error| Failure::new(format!("cannot read the current directory: {error}")))?;
     let mut candidate: Option<&Path> = Some(cwd.as_path());

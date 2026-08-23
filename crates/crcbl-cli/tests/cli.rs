@@ -140,6 +140,7 @@ fn help_and_version_exit_zero() {
         "lod",
         "bench",
         "sim",
+        "settings",
     ] {
         let output = crcbl(temporary.path(), &[command, "--help"]);
         assert_eq!(code(&output), 0, "{command} --help");
@@ -216,6 +217,17 @@ fn a_malformed_invocation_exits_two() {
         vec!["sim", "towers.scene"],
         vec!["sim", "--input", "script.ron"],
         vec!["sim", "--hash"],
+        // `settings` without a branch, with one that answers to nothing, and
+        // with a key or a value missing. None of these reaches the filesystem,
+        // so none of them needs a config directory that exists.
+        vec!["settings"],
+        vec!["settings", "frobnicate"],
+        vec!["settings", "get"],
+        vec!["settings", "set", "engine.video.shadows"],
+        vec!["settings", "list", "engine.video.shadows"],
+        vec!["settings", "get", "engine..video"],
+        vec!["settings", "--app", "..", "list"],
+        vec!["settings", "--config-dir"],
     ] {
         let output = crcbl(temporary.path(), &args);
         assert_eq!(code(&output), 2, "{args:?} should be exit 2");
@@ -1841,12 +1853,12 @@ fn bench_refuses_an_unknown_scenario_by_name() {
 // sim — the determinism harness
 // ---------------------------------------------------------------------------
 //
-// These were `apps/sim/tests/headless.rs` until the harness moved behind the
-// `crcbl sim` verb, and they are the same tests against the same contract: the
-// arguments, the exit codes and the one-line output. They are here rather than
-// in the subcommand's own `#[cfg(test)]` module for the reason this file exists
-// at all — the compiled binary is what CI and a developer actually invoke, and
-// only a separate target can spawn it.
+// These were the `crcbl-sim` binary's own headless tests until the harness
+// moved behind the `crcbl sim` verb, and they are the same tests against the
+// same contract: the arguments, the exit codes and the one-line output. They
+// are here rather than in the subcommand's own `#[cfg(test)]` module for the
+// reason this file exists at all — the compiled binary is what CI and a
+// developer actually invoke, and only a separate target can spawn it.
 //
 // The determinism harness had no tests at all before that file was written,
 // which is how `--tick-rate 0` survived: it parsed cleanly and then divided by
@@ -2046,4 +2058,394 @@ fn field_values<'a>(json: &'a str, key: &str) -> impl Iterator<Item = &'a str> {
         .collect();
     assert!(!values.is_empty(), "no `{key}` in {json}");
     values.into_iter()
+}
+
+// ---------------------------------------------------------------------------
+// settings — a game's settings.toml, from a terminal
+// ---------------------------------------------------------------------------
+//
+// Every one of these points `--config-dir` at a directory of the test's own, so
+// nothing here can read or write the developer's real `~/.config`. That flag is
+// why they can: `dirs` resolves the config directory from `XDG_CONFIG_HOME` on
+// Linux and from a Windows known folder on Windows, so there is no environment
+// variable that redirects it everywhere, and a suite that redirected it on the
+// two platforms where it works would be silently writing to a real machine on
+// the third.
+
+use crcbl_store::NativeStorage;
+use crcbl_store::settings::{SETTINGS_FILE, SettingsStack};
+
+/// Runs `crcbl settings` with its config root inside `home`.
+///
+/// The working directory is `home` too, which has no project above it that this
+/// suite put there — every one of these passes `--app`, so nothing depends on
+/// what a manifest search would find.
+fn settings(home: &Path, args: &[&str]) -> Output {
+    let mut argv: Vec<&str> = vec!["settings", "--config-dir", arg(home), "--app", "testgame"];
+    argv.extend_from_slice(args);
+    crcbl(home, &argv)
+}
+
+/// The directory `--config-dir <home> --app testgame` resolves to.
+fn settings_root(home: &Path) -> PathBuf {
+    home.join("testgame")
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// **`set` then `get` gives the value back**, for each kind the verb writes.
+#[test]
+fn a_value_written_by_set_is_the_value_get_reports() {
+    let temporary = TempDir::new("settings-roundtrip");
+    let home = temporary.path();
+
+    for (key, typed, expected, kind) in [
+        ("engine.video.shadows", "false", "false", "boolean"),
+        ("engine.audio.channels", "2", "2", "integer"),
+        ("engine.audio.master_volume", "0.8", "0.8", "float"),
+        ("game.difficulty", "normal", "normal", "string"),
+        // The escape hatch: quoted, so it is the four characters and not the
+        // boolean. The shell layer is gone here — this is the argv the shell
+        // would have produced.
+        ("game.label", "\"true\"", "true", "string"),
+    ] {
+        let written = settings(home, &["set", key, typed]);
+        assert_eq!(code(&written), 0, "set {key}: {}", stderr(&written));
+        assert!(
+            stdout(&written).contains(&format!("({kind})")),
+            "set {key} did not report it as a {kind}: {}",
+            stdout(&written)
+        );
+
+        let read = settings(home, &["get", key]);
+        assert_eq!(code(&read), 0, "get {key}: {}", stderr(&read));
+        assert_eq!(stdout(&read).trim_end(), expected, "get {key}");
+
+        let json = stdout(&settings(home, &["--json", "get", key]));
+        assert!(has_field(&json, "present", "true"), "{json}");
+        assert!(has_field(&json, "type", &format!("\"{kind}\"")), "{json}");
+    }
+}
+
+/// **A boolean this verb writes is a boolean in the file**, read back by
+/// `SettingsStack` itself rather than by the verb that wrote it.
+///
+/// `crcbl-store` skips a value it cannot deserialize, so `shadows = "false"`
+/// and no `shadows` key at all are the same answer to `get::<bool>`. A `set`
+/// that wrote the string would therefore produce a file that looks right in
+/// every other test here — `settings get` would even read it back — and does
+/// nothing at all when a game starts.
+#[test]
+fn a_boolean_written_by_set_is_a_boolean_to_the_store_that_reads_it() {
+    let temporary = TempDir::new("settings-typed");
+    let home = temporary.path();
+
+    assert_eq!(
+        code(&settings(home, &["set", "engine.video.shadows", "false"])),
+        0
+    );
+    assert_eq!(
+        code(&settings(home, &["set", "game.label", "\"false\""])),
+        0
+    );
+
+    let storage = NativeStorage::at(settings_root(home));
+    let stack = SettingsStack::from_storage(&storage);
+    assert_eq!(
+        stack.get::<bool>("engine.video.shadows"),
+        Some(false),
+        "the engine reads this key as a bool and got nothing"
+    );
+    assert_eq!(
+        stack.get::<bool>("game.label"),
+        None,
+        "a quoted value must stay text"
+    );
+    assert_eq!(stack.get::<String>("game.label").as_deref(), Some("false"));
+}
+
+/// **A setting this verb writes is one the engine reads.**
+///
+/// The end of the chain the other tests only cover halves of:
+/// `crcbl::settings::video_effects` is what `GpuContext::open` calls at
+/// start-up, and it is the consumer that decides whether writing
+/// `engine.video.shadows = false` from a terminal actually switches the shadow
+/// pass off. Without this the verb could write a file every test here agrees
+/// is correct and the engine ignores.
+#[test]
+fn a_setting_written_from_the_cli_reaches_the_engine_that_reads_it() {
+    use crcbl::render::RenderEffects;
+    use crcbl::settings::video_effects;
+
+    let temporary = TempDir::new("settings-engine");
+    let home = temporary.path();
+    let storage = NativeStorage::at(settings_root(home));
+
+    // Nothing written yet: the player has asked for nothing, so nothing is
+    // clamped. The arm that fails if an absent key ever reads as `false`.
+    assert_eq!(
+        video_effects(&SettingsStack::from_storage(&storage)),
+        RenderEffects::all()
+    );
+
+    assert_eq!(
+        code(&settings(home, &["set", "engine.video.shadows", "false"])),
+        0
+    );
+
+    assert_eq!(
+        video_effects(&SettingsStack::from_storage(&storage)),
+        RenderEffects::all().difference(RenderEffects::SHADOWS),
+        "`crcbl settings set` wrote a file the engine does not read"
+    );
+}
+
+/// **`list` shows what was set**, in both renderings, and says which file it
+/// read.
+#[test]
+fn list_shows_the_file_it_read_and_everything_in_it() {
+    let temporary = TempDir::new("settings-list");
+    let home = temporary.path();
+    let path = settings_root(home).join(SETTINGS_FILE);
+
+    // Before anything exists, `list` still answers and names the file.
+    let empty = settings(home, &["list"]);
+    assert_eq!(code(&empty), 0, "{}", stderr(&empty));
+    assert!(stdout(&empty).contains("no file yet"), "{}", stdout(&empty));
+    assert!(stdout(&empty).contains(arg(&path)), "{}", stdout(&empty));
+
+    assert_eq!(
+        code(&settings(home, &["set", "engine.video.shadows", "false"])),
+        0
+    );
+    assert_eq!(
+        code(&settings(home, &["set", "game.difficulty", "hard"])),
+        0
+    );
+
+    let listed = settings(home, &["list"]);
+    assert_eq!(code(&listed), 0, "{}", stderr(&listed));
+    let human = stdout(&listed);
+    assert!(human.contains(arg(&path)), "{human}");
+    assert!(human.contains("shadows = false"), "{human}");
+    assert!(human.contains("difficulty = \"hard\""), "{human}");
+
+    let json = stdout(&settings(home, &["--json", "list"]));
+    assert!(has_field(&json, "file_exists", "true"), "{json}");
+    assert!(has_field(&json, "count", "2"), "{json}");
+    assert!(
+        json.contains(r#"{"key":"engine.video.shadows","type":"boolean","value":false}"#),
+        "{json}"
+    );
+    assert!(
+        json.contains(r#"{"key":"game.difficulty","type":"string","value":"hard"}"#),
+        "{json}"
+    );
+    assert!(json.contains(&json_string(&path)), "{json}");
+}
+
+/// **A key that is not set is an answer, not a failure**, and it is not
+/// mistakable for a value: stdout carries nothing a script could read as one.
+#[test]
+fn get_of_a_key_that_is_not_set_answers_and_exits_zero() {
+    let temporary = TempDir::new("settings-absent");
+    let home = temporary.path();
+
+    let absent = settings(home, &["get", "engine.video.shadows"]);
+    assert_eq!(
+        code(&absent),
+        0,
+        "an unset key is not a failure of the tool"
+    );
+    assert!(
+        stdout(&absent).trim().is_empty(),
+        "stdout must hold nothing a script would read as the value: {:?}",
+        stdout(&absent)
+    );
+    assert!(
+        stderr(&absent).contains("is not set"),
+        "and a person has to be told why it was empty: {:?}",
+        stderr(&absent)
+    );
+
+    let json = stdout(&settings(home, &["--json", "get", "engine.video.shadows"]));
+    assert!(has_field(&json, "ok", "true"), "{json}");
+    assert!(has_field(&json, "present", "false"), "{json}");
+    assert!(
+        !json.contains("\"value\":"),
+        "an absent key has no value field to misread: {json}"
+    );
+
+    // A key holding something `get` does not render is the *other* answer, and
+    // `SettingsStack::contains` is the only thing that tells the two apart.
+    assert_eq!(
+        code(&settings(home, &["set", "engine.video.shadows", "false"])),
+        0
+    );
+    let table = settings(home, &["get", "engine.video"]);
+    assert_eq!(
+        code(&table),
+        1,
+        "a table is a failed `get`, not an absent key"
+    );
+    assert!(stderr(&table).contains("list"), "{}", stderr(&table));
+}
+
+/// **Reading creates nothing; only `set` creates the config directory.**
+///
+/// `SettingsStack::platform` is deliberately `mkdir`-free so that a start-up on
+/// a machine that has never had a settings file leaves it that way, and a CLI
+/// that created the directory just to report an empty file would undo that for
+/// every developer who ran `crcbl settings list` once.
+#[test]
+fn only_set_creates_the_config_directory() {
+    let temporary = TempDir::new("settings-mkdir");
+    let home = temporary.path();
+    let root = settings_root(home);
+
+    assert_eq!(code(&settings(home, &["list"])), 0);
+    assert_eq!(code(&settings(home, &["get", "engine.video.shadows"])), 0);
+    assert!(
+        !root.exists(),
+        "reading settings created {}",
+        root.display()
+    );
+
+    assert_eq!(
+        code(&settings(home, &["set", "engine.video.shadows", "false"])),
+        0
+    );
+    assert!(
+        root.join(SETTINGS_FILE).is_file(),
+        "set wrote nothing to {}",
+        root.display()
+    );
+}
+
+/// **Without `--app` the game is the project in the current directory** — the
+/// same project `crcbl run` and `crcbl build` act on, found by the same search.
+#[test]
+fn the_game_defaults_to_the_project_in_the_current_directory() {
+    let temporary = TempDir::new("settings-project");
+    let project = temporary.path().join("settingsgame");
+    let inside = project.join("src");
+    std::fs::create_dir_all(&inside).expect("a project to stand in");
+    std::fs::write(
+        project.join("Cargo.toml"),
+        b"[package]\nname = \"settingsgame\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a manifest");
+    let home = temporary.path().join("config");
+
+    // From a subdirectory, because the manifest search goes upwards.
+    let output = crcbl(
+        &inside,
+        &[
+            "settings",
+            "--config-dir",
+            arg(&home),
+            "--json",
+            "set",
+            "game.difficulty",
+            "hard",
+        ],
+    );
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let json = stdout(&output);
+    assert!(has_field(&json, "app", "\"settingsgame\""), "{json}");
+    assert!(
+        home.join("settingsgame").join(SETTINGS_FILE).is_file(),
+        "the file did not land under the package's own name"
+    );
+}
+
+/// **A directory with no game in it is refused, not guessed at.**
+///
+/// A virtual workspace root has a `Cargo.toml` and no package, so the search
+/// succeeds and there is still no name — the case where inventing one would put
+/// a player's settings somewhere nothing will ever read them.
+#[test]
+fn a_manifest_with_no_package_refuses_and_names_the_flag_that_fixes_it() {
+    let temporary = TempDir::new("settings-noproject");
+    let workspace = temporary.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("a workspace root");
+    std::fs::write(
+        workspace.join("Cargo.toml"),
+        b"[workspace]\nmembers = []\nresolver = \"2\"\n",
+    )
+    .expect("a manifest");
+    let home = temporary.path().join("config");
+
+    let output = crcbl(
+        &workspace,
+        &["settings", "--config-dir", arg(&home), "list"],
+    );
+    assert_eq!(code(&output), 1, "{}", stdout(&output));
+    assert!(stderr(&output).contains("--app"), "{}", stderr(&output));
+    assert!(!home.exists(), "a refusal must create nothing");
+}
+
+/// **A settings file that will not parse fails the command, and `set` does not
+/// write over it.**
+///
+/// `SettingsStack::platform` turns an unreadable file into an empty layer and a
+/// log line, because a game's start-up must not die over one — and that is the
+/// wrong answer here: a `set` on top of it would serialise the empty layer back
+/// and the player's file would be gone. So this verb loads the file itself and
+/// a parse error is a failure.
+#[test]
+fn a_settings_file_that_is_not_toml_fails_the_command_and_is_left_alone() {
+    let temporary = TempDir::new("settings-broken");
+    let home = temporary.path();
+    let root = settings_root(home);
+    std::fs::create_dir_all(&root).expect("a config directory");
+    let path = root.join(SETTINGS_FILE);
+    let broken = b"this is not = = toml\n";
+    std::fs::write(&path, broken).expect("a broken settings file");
+
+    for args in [
+        vec!["list"],
+        vec!["get", "engine.video.shadows"],
+        vec!["set", "engine.video.shadows", "false"],
+    ] {
+        let output = settings(home, &args);
+        assert_eq!(code(&output), 1, "{args:?}: {}", stdout(&output));
+        assert!(
+            stderr(&output).contains("cannot read"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    assert_eq!(
+        std::fs::read(&path).expect("the file is still there"),
+        broken,
+        "a refused command rewrote the player's file"
+    );
+}
+
+/// **An ancestor holding a scalar is reported, not clobbered.**
+///
+/// A hand-edited `settings.toml` can put anything anywhere, and `engine = "x"`
+/// makes `engine.video.shadows` a key with nowhere to go. `crcbl-store` refuses
+/// that write; what is asserted here is that the refusal reaches the exit code
+/// and that whatever else the file held survives.
+#[test]
+fn a_set_under_a_scalar_ancestor_fails_rather_than_discarding_it() {
+    let temporary = TempDir::new("settings-ancestor");
+    let home = temporary.path();
+    let root = settings_root(home);
+    std::fs::create_dir_all(&root).expect("a config directory");
+    let path = root.join(SETTINGS_FILE);
+    let original = b"engine = \"not a table\"\n";
+    std::fs::write(&path, original).expect("a hand-edited settings file");
+
+    let output = settings(home, &["set", "engine.video.shadows", "false"]);
+    assert_eq!(code(&output), 1, "{}", stdout(&output));
+    assert_eq!(
+        std::fs::read(&path).expect("the file is still there"),
+        original,
+        "a refused set rewrote the player's file"
+    );
 }
