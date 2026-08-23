@@ -311,6 +311,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A bind group covering more of a buffer than the slot allows is refused.**
+  `Limits::max_uniform_buffer_range` and `Limits::max_storage_buffer_range` were
+  reported by every backend and checked by none, so an over-long binding was
+  `VUID-VkWriteDescriptorSet-descriptorType-00332`/`-00333` — undefined
+  behaviour a validation layer catches and a release driver does not.
+  `create_bind_group` and `update_bind_group` now return `InvalidDescriptor`
+  naming the binding, the length bound and the limit.
+  `BindingResource::WHOLE_BUFFER` is resolved against the buffer's size less the
+  offset first, so an over-large buffer bound whole is refused and the same
+  buffer bound in pieces is not. `Limits`' doc no longer claims every field is a
+  hard ceiling: the two `min_*_buffer_offset_alignment` fields are alignments,
+  and `optimal_buffer_copy_offset_alignment` is a preference a copy may ignore.
+
 - **`crcbl_core::log::is_installed` no longer claims an install that was
   rejected.** It answered "did this module build a logger", and
   `try_init_logging` has to build one before offering it to `log::set_logger` —

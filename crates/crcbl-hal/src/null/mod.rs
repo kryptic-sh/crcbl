@@ -2203,6 +2203,7 @@ impl NullDevice {
             check_resource_kind(declared.kind, &entry.resource, entry.binding)?;
             self.check_binding(&entry.resource)?;
             self.check_shader_writable_memory(declared.kind, &entry.resource, entry.binding)?;
+            self.check_binding_range(declared.kind, &entry.resource, entry.binding)?;
         }
         Ok(())
     }
@@ -2256,6 +2257,71 @@ impl NullDevice {
              and readback heaps refuse D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS at creation and \
              pin the resource to a state a shader cannot write from. Read-only storage bindings of \
              a host-visible buffer are unaffected"
+        )))
+    }
+
+    /// Refuses a buffer range longer than the limit for the slot it fills.
+    ///
+    /// [`Limits::max_uniform_buffer_range`](crate::Limits::max_uniform_buffer_range)
+    /// and
+    /// [`Limits::max_storage_buffer_range`](crate::Limits::max_storage_buffer_range)
+    /// are the two ceilings a bind group can exceed, and the one a caller is
+    /// likeliest to walk into by accident: a uniform ceiling of 64 KiB is small
+    /// enough that an ordinary table outgrows it, and the buffer itself was
+    /// created without complaint because a buffer of that size is legal — it is
+    /// binding *all of it* to a uniform slot that is not.
+    ///
+    /// [`BindingResource::WHOLE_BUFFER`](crate::BindingResource::WHOLE_BUFFER)
+    /// is resolved against the buffer's own size before comparing, because that
+    /// is what the backend does with it: a whole-buffer binding of a buffer over
+    /// the ceiling is the same violation spelled without a number, and checking
+    /// only explicit sizes would let the commonest spelling through.
+    ///
+    /// Vulkan states both as VUIDs on `VkDescriptorBufferInfo` rather than as
+    /// errors, so a violation there is undefined behaviour caught by validation
+    /// layers if they happen to be on; refusing here is what makes it a named
+    /// error every no-GPU test meets.
+    fn check_binding_range(
+        &self,
+        kind: crate::BindingKind,
+        resource: &crate::BindingResource,
+        binding: u32,
+    ) -> Result<(), HalError> {
+        let limits = &self.caps.limits;
+        let (ceiling, what) = match kind {
+            crate::BindingKind::UniformBuffer { .. } => {
+                (limits.max_uniform_buffer_range, "max_uniform_buffer_range")
+            }
+            crate::BindingKind::StorageBuffer { .. } => {
+                (limits.max_storage_buffer_range, "max_storage_buffer_range")
+            }
+            _ => return Ok(()),
+        };
+        let crate::BindingResource::Buffer {
+            buffer,
+            offset,
+            size,
+        } = resource
+        else {
+            return Ok(());
+        };
+        let state = self.recorder.lock();
+        let Some(object) = state.get(ObjectKind::Buffer, buffer.to_bits()) else {
+            return Err(HalError::invalid_handle("buffer", *buffer));
+        };
+        let Detail::Buffer { size: length, .. } = &object.detail else {
+            unreachable!("a buffer handle always carries buffer detail");
+        };
+        let bound = if *size == crate::BindingResource::WHOLE_BUFFER {
+            length.saturating_sub(*offset)
+        } else {
+            *size
+        };
+        if bound <= ceiling {
+            return Ok(());
+        }
+        Err(HalError::InvalidDescriptor(format!(
+            "binding {binding} is given {bound} bytes of a buffer, over this device's {what} of              {ceiling}"
         )))
     }
 

@@ -4195,3 +4195,94 @@ fn a_polled_device_stamps_its_own_ownership_like_any_other() {
     assert!(matches!(error, HalError::ForeignObject { .. }), "{error:?}");
     polled.destroy_buffer(buffer);
 }
+
+/// A buffer range longer than the slot's limit is refused, in both spellings.
+///
+/// The two range limits are the ones a caller walks into by accident rather
+/// than by asking for something exotic: the uniform ceiling is 64 KiB on the
+/// desktop preset, small enough that an ordinary table outgrows it, and the
+/// buffer itself is created without complaint because a buffer that size is
+/// perfectly legal — binding *all of it* to a uniform slot is what is not.
+///
+/// Both spellings are checked because `WHOLE_BUFFER` is the commoner one and
+/// carries no number to compare: a check reading only explicit sizes would pass
+/// every `whole_buffer` binding, which is most of them. The `offset` case is
+/// what shows the sentinel is resolved against what is actually bound — one
+/// byte in, the same over-large buffer fits.
+#[test]
+fn a_buffer_range_over_the_slots_limit_is_refused() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+    let limits = device.caps().limits;
+
+    for (kind, ceiling, named) in [
+        (
+            BindingKind::UniformBuffer { dynamic: false },
+            limits.max_uniform_buffer_range,
+            "max_uniform_buffer_range",
+        ),
+        (
+            BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            limits.max_storage_buffer_range,
+            "max_storage_buffer_range",
+        ),
+    ] {
+        let layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("one buffer"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    kind,
+                    count: 1,
+                    flags: crate::BindingFlags::empty(),
+                }],
+            })
+            .expect("a single-buffer layout");
+        let buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some("one byte too long"),
+                size: ceiling + 1,
+                usage: BufferUsage::UNIFORM | BufferUsage::STORAGE,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a buffer of any size is legal; binding all of it is not");
+        let group_of = |offset, size| {
+            device.create_bind_group(&BindGroupDesc {
+                label: None,
+                layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: crate::BindingResource::Buffer {
+                        buffer,
+                        offset,
+                        size,
+                    },
+                }],
+                variable_count: None,
+            })
+        };
+
+        for (case, offset, size) in [
+            ("whole buffer", 0, crate::BindingResource::WHOLE_BUFFER),
+            ("explicit size", 0, ceiling + 1),
+        ] {
+            let error = group_of(offset, size).expect_err("a range over the ceiling");
+            let text = error.to_string();
+            assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+            assert!(text.contains("binding 0"), "{case}: {text}");
+            assert!(text.contains(named), "{case}: {text}");
+            assert!(text.contains(&(ceiling + 1).to_string()), "{case}: {text}");
+            assert!(text.contains(&ceiling.to_string()), "{case}: {text}");
+        }
+
+        // Exactly the ceiling is allowed, by either spelling.
+        group_of(1, crate::BindingResource::WHOLE_BUFFER)
+            .expect("one byte in, the rest of the buffer is exactly the ceiling");
+        group_of(0, ceiling).expect("a range of exactly the ceiling");
+    }
+}

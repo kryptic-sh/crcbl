@@ -759,6 +759,17 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// including a host-visible buffer filling a writable storage binding,
     /// which every backend refuses because D3D12 cannot express it. See
     /// [`MemoryLocation`](crate::MemoryLocation).
+    ///
+    /// Also [`HalError::InvalidDescriptor`] for a buffer range longer than
+    /// [`Limits::max_uniform_buffer_range`](crate::Limits::max_uniform_buffer_range)
+    /// or
+    /// [`Limits::max_storage_buffer_range`](crate::Limits::max_storage_buffer_range),
+    /// whichever the slot names. The range is what the binding covers, so
+    /// [`BindingResource::WHOLE_BUFFER`](crate::BindingResource::WHOLE_BUFFER)
+    /// is the buffer's size less the offset: an over-large buffer bound whole is
+    /// refused, and the same buffer bound in pieces is not. Vulkan states both
+    /// as VUIDs rather than as errors, so this is the seam turning what would be
+    /// undefined behaviour into a refusal a caller can act on.
     fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError>;
 
     /// Updates entries of an existing bind group in place.

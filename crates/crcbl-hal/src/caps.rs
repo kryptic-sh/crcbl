@@ -336,10 +336,14 @@ bitflags::bitflags! {
 
 /// Numeric device limits.
 ///
-/// Every field is a hard ceiling on **the one quantity it names**: a descriptor
-/// exceeding that quantity is a [`HalError`](crate::HalError), not undefined
-/// behaviour. Fields are named after the thing they bound, not after any one
-/// API's spelling of it.
+/// Most fields are a hard ceiling on **the one quantity each names**: a
+/// descriptor exceeding that quantity is a [`HalError`](crate::HalError), not
+/// undefined behaviour. Three are not ceilings at all, and each says so in its
+/// own line: the two `min_*_buffer_offset_alignment` fields are alignments a
+/// binding offset must be a multiple of, and
+/// [`optimal_buffer_copy_offset_alignment`](Self::optimal_buffer_copy_offset_alignment)
+/// is a preference — a copy ignoring it is slower and never refused. Fields are
+/// named after the thing they bound, not after any one API's spelling of it.
 ///
 /// # These are not a set of independent budgets
 ///
