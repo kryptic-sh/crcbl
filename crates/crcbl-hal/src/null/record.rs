@@ -689,6 +689,9 @@ pub(super) struct State {
     /// [`suboptimal`](crate::AcquiredFrame::suboptimal). See
     /// [`Recorder::report_suboptimal_acquires`].
     pub(super) suboptimal_acquires: u32,
+    /// The extent every acquire reports instead of the configured one. See
+    /// [`Recorder::clamp_acquired_extent_to`].
+    pub(super) clamped_extent: Option<(u32, u32)>,
     /// How many `wait_until_presented` calls report
     /// [`SurfaceError::Timeout`](crate::SurfaceError::Timeout). See
     /// [`Recorder::report_present_wait_timeouts`].
@@ -715,6 +718,7 @@ impl State {
             reconfigure_failures: 0,
             swapchain_out_of_date: false,
             suboptimal_acquires: 0,
+            clamped_extent: None,
             present_wait_timeouts: 0,
             refused_adapters: std::collections::BTreeSet::new(),
             lost_device: None,
@@ -1119,6 +1123,35 @@ impl Recorder {
     /// again. Default `0`.
     pub fn report_suboptimal_acquires(&self, times: u32) {
         self.lock().suboptimal_acquires = times;
+    }
+
+    /// Makes every `acquire_next_frame` report `extent` rather than the extent
+    /// the swapchain was configured at, as if a compositor had chosen a size of
+    /// its own.
+    ///
+    /// **A standing rule, not a count, and unlike its two siblings above.** A
+    /// compositor that clamps does not stop clamping; the engine answers by
+    /// adopting the answer, after which the sizes agree and its branch stops
+    /// firing on its own. So a standing rule cannot make a driven loop spin the
+    /// way a latched suboptimal would — and it is what lets a test see the
+    /// branch fire once and then stay quiet, which a one-shot could not show.
+    ///
+    /// This backend has no window system to clamp against, so the acquired
+    /// extent was always the configured one and `crcbl/src/engine.rs`'s
+    /// "obligation 3: the answer, not the request" branch — the one that writes
+    /// the compositor's chosen size back into the config — was reachable from
+    /// no test in this workspace, and from no device it can run headlessly.
+    ///
+    /// Default `None`, which reports the configured extent.
+    pub fn clamp_acquired_extent_to(&self, extent: (u32, u32)) {
+        self.lock().clamped_extent = Some(extent);
+    }
+
+    /// The clamp an acquire should report instead of its configured extent, if
+    /// one is set. The backend's half of
+    /// [`clamp_acquired_extent_to`](Self::clamp_acquired_extent_to).
+    pub(super) fn clamped_extent(&self) -> Option<(u32, u32)> {
+        self.lock().clamped_extent
     }
 
     /// Consumes one suboptimal acquire, if any are owed. The backend's half of

@@ -8293,6 +8293,77 @@ mod tests {
         shell.destroy_window(window).expect("the window goes away");
     }
 
+    /// **When the compositor picks a different size, the engine adopts it — and
+    /// stops asking once it has.**
+    ///
+    /// "Obligation 3: the answer, not the request". A window system may hand
+    /// back a swapchain smaller than the one asked for, and a caller that keeps
+    /// rendering at its requested extent draws off the end of the image. The
+    /// branch that writes the answer back into `configured_extent` and `config`
+    /// existed and was reachable from no test in this workspace and no device
+    /// it can run headlessly: the null backend had no window system to disagree
+    /// with, so the acquired extent was the configured one by construction.
+    /// `Recorder::clamp_acquired_extent_to` is what makes it disagree.
+    ///
+    /// Both halves matter. `config.extent` has to move too, because `resize`
+    /// early-returns when the requested extent already matches it — leaving it
+    /// holding the size the shell asked for made a resize back to the
+    /// compositor's own choice look like a change and reconfigure for nothing.
+    #[test]
+    fn a_compositors_own_extent_is_adopted_and_then_agreed_with() {
+        use crcbl_hal::null::{NullInstance, Recorder};
+
+        let clamped = (256, 200);
+        let recorder = Recorder::new();
+        recorder.clamp_acquired_extent_to(clamped);
+        let (_shell, mut gpu) = open_null_context(
+            NullInstance::gpu_driven().with_recorder(recorder),
+            Features::empty(),
+            Pacing::Off,
+        );
+        assert_ne!(
+            gpu.configured_extent, clamped,
+            "the fixture must start at a different size, or this checks nothing"
+        );
+
+        let acquired = gpu
+            .acquire()
+            .expect("the null swapchain acquires")
+            .expect("a frame, not a skipped one");
+        assert_eq!(
+            acquired.extent, clamped,
+            "the injector is what makes the two disagree"
+        );
+        assert_eq!(
+            gpu.configured_extent, clamped,
+            "the engine renders at the answer, not the request"
+        );
+        assert_eq!(
+            gpu.config.extent, clamped,
+            "and the config holds it too, or a resize back to this size looks like a change"
+        );
+
+        // Having adopted it, the sizes agree and the branch stops firing. A
+        // standing clamp is what lets this be observed: the second acquire
+        // reports the same extent and must change nothing.
+        let logs = crcbl_core::log::capture();
+        gpu.acquire()
+            .expect("the second acquire succeeds")
+            .expect("a frame");
+        assert_eq!(
+            (gpu.configured_extent, gpu.config.extent),
+            (clamped, clamped)
+        );
+        assert!(
+            !logs
+                .records()
+                .iter()
+                .any(|record| record.message.contains("swapchain configured at")),
+            "the sizes already agree, so nothing is re-adopted: {:?}",
+            logs.records()
+        );
+    }
+
     /// **A wait that finishes unsatisfied does not retire the buffer it was
     /// waiting on.**
     ///

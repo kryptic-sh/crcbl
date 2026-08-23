@@ -1944,6 +1944,11 @@ impl Device for NullDevice {
         // here also spends the injection only on an acquire that got this far,
         // which is what leaves a refused one recording and consuming nothing.
         let suboptimal = self.recorder.take_suboptimal_acquire();
+        // Read before the lock, for the reason the line above gives: the
+        // recorder's mutex is not reentrant and `acquired_extent` takes it.
+        // The configured extent it falls back to is read out of the swapchain
+        // below and applied there.
+        let clamp = self.recorder.clamped_extent();
         let mut state = self.recorder.lock();
         let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
             return Err(SurfaceError::Hal(HalError::invalid_handle(
@@ -1964,6 +1969,7 @@ impl Device for NullDevice {
         };
         let index = *next;
         let slot = index as usize;
+        let configured = *extent;
         // `.max(1)`, not `unwrap_or(1)`: `u32::try_from(0usize)` is `Ok(0)`, so
         // the fallback never fired for the one input it looked like it guarded
         // against, and an empty ring divided by zero.
@@ -1972,9 +1978,10 @@ impl Device for NullDevice {
             image: images[slot],
             view: views[slot],
             // This backend has no window system to clamp against, so the
-            // configured extent is always the requested one — which is exactly
-            // the case obligation 3 says costs nothing to obey.
-            extent: *extent,
+            // configured extent is the requested one unless a test has said
+            // otherwise — see `Recorder::clamp_acquired_extent_to`, which is
+            // what makes obligation 3's branch reachable at all.
+            extent: clamp.unwrap_or(configured),
             index,
             acquire_semaphore: acquire_semaphores[slot],
             present_semaphore: present_semaphores[slot],
