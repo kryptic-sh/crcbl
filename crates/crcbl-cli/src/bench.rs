@@ -593,11 +593,24 @@ mod tests {
 
         // And the baseline reaches the same answer as the parallel run, which
         // is the whole reason a baseline is worth comparing against.
+        //
+        // **What proves the second run took the other path is `submissions`,
+        // not the workers' chunk count.** Whether a worker gets a chunk is the
+        // scheduler's to decide: the driver pops from its own end of the deque
+        // while the thieves are still waking, and on a loaded macOS runner it
+        // took all of them, which failed this test on a claim it does not own.
+        // `submissions` is incremented once by the parallel path and never by
+        // the inline one, so it separates the two arms by construction.
         let parallel = measure(&args(3, iterations, 2)).expect("a run");
         assert_eq!(serial.checksum, parallel.checksum);
-        assert!(
-            parallel.stats.chunks_run_by_workers > 0,
-            "a pool with workers that ran nothing on them is not the parallel arm"
+        assert_eq!(
+            parallel.stats.submissions, iterations as u64,
+            "a pool with workers did not take the parallel path"
+        );
+        assert_eq!(
+            parallel.stats.chunks_run_by_driver + parallel.stats.chunks_run_by_workers,
+            iterations as u64 * CHUNKS_PER_CALL,
+            "the parallel arm lost or repeated a chunk"
         );
     }
 
