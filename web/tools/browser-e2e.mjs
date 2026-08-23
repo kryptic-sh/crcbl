@@ -3081,6 +3081,53 @@ try {
           'a clean teardown, so it is not one'
   );
 
+  // **A STEADY-STATE FRAME MUST TAKE NOTHING IT DOES NOT GIVE BACK**, which is
+  // the half of this group's question the teardown check cannot ask. A run that
+  // hands the replayer one more object every frame and destroys them all at
+  // shutdown passes the check below and is still a page that grows without
+  // bound for as long as somebody looks at it — which is exactly what the
+  // acquire path did until 2026-08-23, minting a fresh image and image-view
+  // handle per frame that nothing ever retired. It was measured at 581 of each
+  // after one second of breakout, and a shutdown-only gate saw nothing wrong.
+  //
+  // Counted in **frames rather than seconds**, because a frame is the unit the
+  // growth was in and a slow runner would otherwise watch a shorter run. The
+  // demo has been drawing for the whole suite by now, so nothing here is
+  // warm-up: a kind that climbs at this point is climbing for good.
+  const FRAMES_WATCHED = 60;
+  const replayedNow = () => evaluate(page, `crcbl.gpu.stats().replayed`);
+  const framesBefore = await replayedNow();
+  const drewMore = await until(async () => {
+    const now = await replayedNow();
+    return typeof now === 'number' && now >= framesBefore + FRAMES_WATCHED
+      ? { now }
+      : null;
+  });
+  const heldLater = drewMore
+    ? await evaluate(page, `crcbl.gpu.replayer.liveObjects()`)
+    : null;
+  const countsOf = (held) =>
+    new Map((held ?? []).map(({ kind, count }) => [kind, count]));
+  const before = countsOf(heldRunning);
+  const grew = [...countsOf(heldLater)]
+    .filter(([kind, count]) => count > (before.get(kind) ?? 0))
+    .map(([kind, count]) => `${kind} ${before.get(kind) ?? 0} -> ${count}`);
+  check(
+    'I',
+    'a steady-state frame gives back everything it takes',
+    Boolean(drewMore) && Array.isArray(heldLater) && grew.length === 0,
+    !drewMore
+      ? `the demo drew fewer than ${FRAMES_WATCHED} more frames in ${TIMEOUT_MS} ms, ` +
+          'so nothing here is a verdict about what a frame holds on to'
+      : !Array.isArray(heldLater)
+        ? `liveObjects() answered ${JSON.stringify(heldLater)} the second time`
+        : grew.length === 0
+          ? `nothing climbed over ${FRAMES_WATCHED} frames`
+          : `over ${FRAMES_WATCHED} frames: ${grew.join(', ')} — a frame that ` +
+            'takes one more of something every time is a page that grows for as ' +
+            'long as it is open, whatever its teardown then destroys'
+  );
+
   // **THE PAGE'S OWN STOP BUTTON, AND NOT `crcbl.exports`.** `demo.js` wires it
   // to `shell.requestClose()`, which asks the engine to close the way a
   // compositor's close button does on the desktop: the next `api.frame()` runs
