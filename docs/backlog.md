@@ -565,6 +565,19 @@ skipped is an arm that did not run:
 grep -rniE '(e?println)!\(.*(skip|cannot run|unreachable here)' --include='*.rs' crates
 ```
 
+**Re-run 2026-08-23, and that query's hits are gated now rather than counted.**
+Seven tests in `crcbl-vk`'s suite return early when the device reports no
+`TASK_SHADER` — the amplification stage is their whole subject — and nextest
+counts each early return as a pass, so an adapter that stopped reporting the
+feature would take the mesh path out of the run and leave `50 tests ran`
+unchanged. `run-vk-e2e.sh` and `run-vk-e2e.ps1` count those lines: a banner on a
+developer's machine, `exit 1` under `CI`, which is the loader probe's own shape.
+Shown red by making one test return early unconditionally — the summary still
+read `50 tests ran` and the run failed with
+`1 MESH-PATH TEST(S) RETURNED EARLY AND COUNTED AS PASSES`. The other hit,
+`validation_gate.rs`'s sync-hazard probe, is a deliberate env switch CI sets in
+nine places and is left alone.
+
 **Fixed by subtracting the feature**, which manufactures the lesser device
 instead of waiting for hardware — the move `mesh.rs` already used to reach
 `GeometryPath::IndirectPerBatch`:
