@@ -63,11 +63,13 @@ refused at `VkInstance::open` rather than passing having checked nothing, which
   shell-log greps fail on one. Killing a correct-but-slow frame is a worse
   default than logging it, so widening this would be a decision rather than a
   fix. **Considered and declined** for now.
-- **Sync hazards ride the error path only because this layer build says so.**
-  Verified on layer 1.4.357 against radv that `SYNC-HAZARD-READ-AFTER-WRITE` and
-  `-WRITE-AFTER-WRITE` arrive at `ERROR` severity, so the fatal gate catches
-  them. Not verified for CI's layer build; one that reported hazards as warnings
-  would take the whole class out of the binary gate silently.
+- **Sync hazards ride the error path, on CI's layer build too.** Verified on
+  layer 1.4.357 against radv that `SYNC-HAZARD-READ-AFTER-WRITE` and
+  `-WRITE-AFTER-WRITE` arrive at `ERROR` severity, and on Ubuntu's 1.3.275 — the
+  build CI installs — that `-WRITE-AFTER-WRITE` does: it came through
+  `Device::take_error` and failed the viewer's suite, which is how the read-only
+  depth attachment's missing write scope was found. `READ-AFTER-WRITE` on that
+  build is still untested.
 - **An error raised while the device itself is destroyed is still never taken.**
   `GpuContext::destroy` drains the channel after the swapchain and the surface
   are gone, so the final submit, the final `wait_idle` and those two destroys
@@ -263,17 +265,6 @@ leaves behind is smaller than it was:
   and no last-N ring, and nothing on any platform spawns an input thread. Worth
   knowing that `crcbl_jobs::default_spawner` has exactly one caller in the tree
   and it is `apps/horde`'s steering pool.
-- **`lantern`'s `video` argument is the one half of this still unguarded.** Its
-  `Gpu::from_context` passes `ctx.video_effects()` into
-  `request_for(room::View::Main, video, effects)`. Deleting the whole
-  `set_effect_request` call reds
-  `app::tests::an_effect_flag_reaches_the_frame_and_the_summary`, but replacing
-  `video` with `RenderEffects::all()` reds nothing —
-  `gpu::tests::the_players_video_clamp_reaches_both_views` calls `request_for`
-  directly and never opens a `GpuContext`. The shape of the fix is the
-  `effects_opened_with(SettingsSource)` helper `viewer`, `quarry` and `sandbox`
-  now have, pointed at lantern's own `Gpu::from_context`. Established by reading
-  both tests, not by sabotage.
 - **Coverage gap: `apps/quarry/tests/device/harness.rs` observes none of this.**
   It opens under `SettingsSource::None` and builds its own `ForwardRenderer`
   rather than going through `Gpu::from_context`, deliberately, so no developer's

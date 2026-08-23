@@ -1197,6 +1197,115 @@ mod tests {
         );
     }
 
+    /// A settings store holding one `settings.toml`.
+    fn settings_file(toml: &str) -> crcbl::store::MemoryStorage {
+        use crcbl::store::StorageSource;
+
+        let storage = crcbl::store::MemoryStorage::new();
+        storage
+            .write(
+                std::path::Path::new(crcbl::store::settings::SETTINGS_FILE),
+                toml.as_bytes(),
+            )
+            .expect("memory storage accepts every write");
+        storage
+    }
+
+    /// The effects one whole start-up resolves to for both views, with
+    /// `settings` standing in for the player's file.
+    ///
+    /// Through [`Gpu::from_context`] rather than around it. The test below it
+    /// hands `request_for` its arguments by hand, which proves the resolution
+    /// order and nothing about whether this sample passes
+    /// [`GpuContext::video_effects`] into it — replacing that argument with
+    /// [`RenderEffects::all`] used to red nothing at all.
+    fn effects_opened_with(
+        settings: crcbl::engine::SettingsSource<'_>,
+    ) -> (RenderEffects, RenderEffects) {
+        use crcbl::backend::GpuBackend;
+        use crcbl::engine::{Clock, open_window, wait_for_configure};
+        use crcbl::shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let clock = Clock::new(true);
+        let window = open_window(
+            &mut shell,
+            &clock,
+            &WindowDesc {
+                title: "lantern",
+                app_id: "sh.kryptic.crcbl.lantern",
+                ..WindowDesc::default()
+            },
+        )
+        .expect("headless always creates a window");
+        let mut events = 0;
+        let extent =
+            wait_for_configure(&mut shell, window, &mut events).expect("headless configures");
+
+        let ctx = GpuContext::open(
+            &shell,
+            window,
+            extent,
+            &GpuContextDesc {
+                // The null backend, so this needs no driver and no window
+                // system — and this sample's own label and feature set, so it
+                // is lantern's start-up being asked.
+                backend: Some(GpuBackend::Null),
+                settings,
+                ..desc(GpuOptions::default(), Forced::default())
+            },
+        )
+        .expect("the null backend opens everywhere");
+
+        let gpu = Gpu::from_context(ctx, Forced::default(), RenderEffects::all())
+            .expect("the null device builds lantern's renderers");
+        let paths = gpu.paths();
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+        (paths.effects, paths.monitor_effects)
+    }
+
+    /// **The player's `[engine.video]` clamp reaches the frames this sample
+    /// draws**, both of them.
+    ///
+    /// The guard for one line: `let video = ctx.video_effects()` in
+    /// [`Gpu::from_context`]. Replace it with [`RenderEffects::all`] and the
+    /// run with no settings file is unchanged, which is why the control below
+    /// cannot catch it and only a run with a real clamp in front of it can.
+    ///
+    /// One arm per effect, because a file that switched them all off resolves
+    /// to the empty set however few of the keys were wired.
+    #[test]
+    fn the_players_video_clamp_reaches_the_frames() {
+        let (main, monitor) = effects_opened_with(crcbl::engine::SettingsSource::None);
+        assert_eq!(
+            (main, monitor),
+            (RenderEffects::DEFAULT_STACK, room::MONITOR_STACK),
+            "a run with no settings at all draws each view's own camera stack, \
+             or the comparisons below are against the wrong control",
+        );
+
+        for (key, off) in [
+            ("shadows", RenderEffects::SHADOWS),
+            ("ambient_occlusion", RenderEffects::AMBIENT_OCCLUSION),
+            ("reflections", RenderEffects::REFLECTIONS),
+        ] {
+            let storage = settings_file(&format!("[engine.video]\n{key} = false\n"));
+            let (clamped, clamped_monitor) =
+                effects_opened_with(crcbl::engine::SettingsSource::Source(&storage));
+            assert_eq!(
+                clamped,
+                main.difference(off),
+                "`{key} = false` did not reach the room this sample draws",
+            );
+            assert_eq!(
+                clamped_monitor,
+                monitor.difference(off),
+                "`{key} = false` did not reach the monitor's own view",
+            );
+        }
+    }
+
     /// **A run's `--no-*` flags reach both views, and the camera layer still
     /// separates them.**
     ///
