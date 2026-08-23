@@ -33,6 +33,12 @@ source "${CRATE_DIR}/tests/sway-session.sh"
 # shellcheck source=tools/nextest-summary.sh
 source "${REPO_ROOT}/tools/nextest-summary.sh"
 
+# And what the validation layer said is `tools/vk-validation-log.sh`'s, for
+# the same reason again: three harnesses carried the same two greps and the
+# same five error messages, and a fourth was about to.
+# shellcheck source=tools/vk-validation-log.sh
+source "${REPO_ROOT}/tools/vk-validation-log.sh"
+
 cleanup() {
     local status=$?
     sway_session_stop
@@ -155,55 +161,11 @@ assert_nothing_left_alive() {
 
 # `assert_validation_saw_nothing <log> <what>` — vk runs only.
 #
-# **`CRCBL_VK_VALIDATION=1` is set on every run below and used to prove
-# nothing.** A validation error reaches `crcbl_core::log::error!` in
-# `crcbl-vk`'s `debug` module and the process still exits 0, so each run
-# advertised that it was validating and no run could fail because of it. This is
-# the shell's copy of `ValidationReport::assert_clean`, which the vk and
-# windowed e2e suites reach from Rust and nothing above the seam could — the
-# same check `run-x11-e2e.sh` carries for the same reason, alongside the same
-# teardown grep.
-#
-# Both of `assert_clean`'s halves, because the second is worthless without the
-# first: a log with no validation errors in it is exactly what a run with no
-# messenger produces. `crcbl-vk` prints the "validation enabled" line only once
-# the debug messenger really exists, so its absence means the layer was missing,
-# `VK_EXT_debug_utils` was, or the messenger failed to be created — every one of
-# which turns the grep below into a green light wired to nothing.
-#
-# Errors **and** warnings, which is where `assert_clean` draws the line and what
-# `docs/plan/02-vulkan-backend.md`'s P1 exit criterion says. The messenger only
-# ever subscribes to those two severities, so there is no informational chatter
-# to filter out here. The pattern names the level, the module and the callback's
-# own `vk <kind>:` prefix — the teardown leak warning above comes from
-# `crcbl_vk::device` and is a different question, asked separately.
+# The questions are `tools/vk-validation-log.sh`'s, which three harnesses
+# carried inline before it existed; what belongs on the way out of *this* one
+# is this harness's own knowledge, which is all that is left here.
 assert_validation_saw_nothing() {
-    local log="$1" what="$2" complaints
-    if ! grep -qF 'crcbl-vk: validation enabled (' "$log"; then
-        echo "crcbl e2e: ${what} ran with CRCBL_VK_VALIDATION=1 and never loaded the layer," >&2
-        echo "           so a clean log here proves nothing. Install" >&2
-        echo "           VK_LAYER_KHRONOS_validation (Arch: vulkan-validation-layers," >&2
-        echo "           Debian/Ubuntu: vulkan-validationlayers) — crcbl-vk warns by name" >&2
-        echo "           when it is missing, and the warning is in the log above." >&2
-        cat "$log" >&2
-        sway_log_tail
-        exit 1
-    fi
-    if grep -qF 'a panic escaped the Vulkan debug messenger callback' "$log"; then
-        echo "crcbl e2e: ${what} lost validation messages — a panic escaped the messenger" >&2
-        echo "           callback, so the check below cannot see what the layer said." >&2
-        cat "$log" >&2
-        sway_log_tail
-        exit 1
-    fi
-    complaints="$(grep -E '(ERROR|WARN) +crcbl_vk::debug] vk ' "$log" || true)"
-    [ -z "$complaints" ] && return 0
-    echo "crcbl e2e: the validation layer complained about ${what}:" >&2
-    while IFS= read -r line; do
-        echo "               $line" >&2
-    done <<<"$complaints"
-    echo "           Those are specification violations this run committed. Fix them" >&2
-    echo "           where they were recorded rather than leaving the line in a log." >&2
+    crcbl_validation_saw_nothing "$1" "$2" && return 0
     sway_log_tail
     exit 1
 }
@@ -474,9 +436,9 @@ measuring ${mean_ms} ms a frame, nothing left alive, validation silent"
 # can tell "the layer had nothing to report" from "nothing could have reached
 # this log if it had". A messenger the loader never calls back, a callback that
 # stops reaching `log::error!`, a record whose module path or level moves out
-# from under that `(ERROR|WARN) +crcbl_vk::debug] vk ` pattern, a `CRCBL_LOG`
-# that filters it — each of those makes the second grep a green light wired to
-# nothing, and a quiet log is what every one of them looks like.
+# from under `tools/vk-validation-log.sh`'s pattern, a `CRCBL_LOG` that filters
+# it — each of those makes the second grep a green light wired to nothing, and
+# a quiet log is what every one of them looks like.
 #
 # So this pass sets `CRCBL_VK_VALIDATION_SELF_TEST=1`, which asks a debug build
 # of `crcbl-vk` to submit one synthetic message through

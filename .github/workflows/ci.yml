@@ -113,6 +113,8 @@ jobs:
           web/*.sh
       - name: The summary guard rejects the runs it is there to reject
         run: ./tools/nextest-summary-test.sh
+      - name: The validation-log guard rejects the logs it is there to reject
+        run: ./tools/vk-validation-log-test.sh
 
       # `docs/backlog.md` is the working record and its worth is that an entry
       # can be acted on months later. A moved file breaks that silently: the

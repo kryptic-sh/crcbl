@@ -57,6 +57,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tools/x11-display.sh
 source "${REPO_ROOT}/tools/x11-display.sh"
 
+# And what the validation layer said is `tools/vk-validation-log.sh`'s, for
+# the same reason: three harnesses carried the same two greps and the same
+# five error messages, and a fourth was about to.
+# shellcheck source=tools/vk-validation-log.sh
+source "${REPO_ROOT}/tools/vk-validation-log.sh"
+
 cd "$REPO_ROOT"
 
 SAMPLE_FRAMES=120
@@ -212,52 +218,13 @@ run_sample() {
     fi
 
     # **And what the validation layer said, which until now was nothing this
-    # script could act on.** `CRCBL_VK_VALIDATION=1` is set on the run above and
-    # a violation only reaches `crcbl_core::log::error!` — the sample still exits
-    # 0, so every run advertised that it was validating and none could fail
-    # because of it. This is the shell's copy of `ValidationReport::assert_clean`,
-    # which the vk and windowed e2e suites reach from Rust; the two shell e2e
-    # harnesses carry the same pair of greps beside their own leak check.
-    #
-    # The first grep is `assert_clean`'s "enabled" half and is not pedantry: a
-    # log with no validation errors in it is exactly what a run with no messenger
-    # produces, so without it the second grep is a green light wired to nothing.
-    # `crcbl-vk` prints that line only once the debug messenger really exists.
-    #
-    # Errors **and** warnings, which is where `assert_clean` draws the line and
-    # what `docs/plan/02-vulkan-backend.md`'s P1 exit criterion says. The
-    # messenger subscribes to no other severity, so there is no chatter to
-    # filter. The pattern names the level, the module and the callback's own
-    # `vk <kind>:` prefix, which is what keeps the teardown warning above — from
-    # `crcbl_vk::device` — a separate question.
-    if ! grep -qF 'crcbl-vk: validation enabled (' "$log"; then
-        echo "crcbl e2e: ${sample} ran with CRCBL_VK_VALIDATION=1 and never loaded the" >&2
-        echo "           layer, so a clean log here proves nothing. Install" >&2
-        echo "           VK_LAYER_KHRONOS_validation (Arch: vulkan-validation-layers," >&2
-        echo "           Debian/Ubuntu: vulkan-validationlayers) — crcbl-vk warns by name" >&2
-        echo "           when it is missing, and the warning is in the log above." >&2
-        cat "$log" >&2
-        log_tail
-        exit 1
-    fi
-    if grep -qF 'a panic escaped the Vulkan debug messenger callback' "$log"; then
-        echo "crcbl e2e: ${sample} lost validation messages — a panic escaped the" >&2
-        echo "           messenger callback, so the check below cannot see what the" >&2
-        echo "           layer said." >&2
-        cat "$log" >&2
-        log_tail
-        exit 1
-    fi
-    local complaints
-    complaints="$(grep -E '(ERROR|WARN) +crcbl_vk::debug] vk ' "$log" || true)"
-    if [ -n "$complaints" ]; then
-        echo "crcbl e2e: the validation layer complained about ${sample}:" >&2
-        while IFS= read -r line; do
-            echo "               $line" >&2
-        done <<<"$complaints"
-        echo "           Those are specification violations this run committed. Fix" >&2
-        echo "           them where they were recorded rather than leaving the line" >&2
-        echo "           in a log." >&2
+    # script could act on.** `CRCBL_VK_VALIDATION=1` is set on the run above
+    # and a violation only reaches `crcbl_core::log::error!` — the sample still
+    # exits 0, so every run advertised that it was validating and none could
+    # fail because of it. `tools/vk-validation-log.sh` carries both halves of
+    # the question and why neither stands without the other; this is the third
+    # harness to ask it and the first not to spell it out again.
+    if ! crcbl_validation_saw_nothing "$log" "$sample"; then
         log_tail
         exit 1
     fi
@@ -273,8 +240,8 @@ run_sample() {
 # neither can tell "the layer had nothing to report" from "nothing could have
 # reached this log if it had". A messenger the loader never calls back, a
 # callback that stops reaching `log::error!`, a record whose module path or
-# level moves out from under that `(ERROR|WARN) +crcbl_vk::debug] vk ` pattern,
-# a `CRCBL_LOG` that filters it — each of those makes the second grep a green
+# level moves out from under `tools/vk-validation-log.sh`'s pattern, a
+# `CRCBL_LOG` that filters it — each of those makes the second grep a green
 # light wired to nothing, and each is invisible from a log that is simply
 # quiet.
 #
