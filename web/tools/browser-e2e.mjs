@@ -3107,36 +3107,75 @@ try {
   // growth was in and a slow runner would otherwise watch a shorter run. The
   // demo has been drawing for the whole suite by now, so nothing here is
   // warm-up: a kind that climbs at this point is climbing for good.
+  // **GROWTH HAS TO BE SUSTAINED, NOT MERELY OBSERVED ONCE.** This used to take
+  // one sample, wait, take another, and fail on any kind that had risen. That
+  // cannot tell a leak from a fixed-size ring filling up, and one of the kinds
+  // here is ring-shaped: `readbacks` is the instantaneous occupancy of
+  // `CullStatsRing`, which holds `FRAMES_IN_FLIGHT + 1` slots per renderer and
+  // whose `take_slot` will not reuse a slot that is still polling — so it is
+  // bounded at three per renderer and legitimately *rises* when a readback's
+  // round trip takes more frames, which is exactly what a loaded CI runner
+  // does. It failed twice that way (lantern 2 -> 5 against a ceiling of six,
+  // quarry 1 -> 2 against three), both strictly inside the bound.
+  //
+  // So the question asked is whether a kind climbs in **every** window rather
+  // than in one. A ring saturates and stops; a leak does not, and the leak this
+  // check exists for — a fresh image and view minted per frame and never
+  // retired — climbs in all of them, at 581 per second. The teeth are the same
+  // and the false positive is gone. Per-kind ceilings were the alternative and
+  // were not taken: they would put the engine's ring depths in this file, to be
+  // silently wrong the day one changed.
   const FRAMES_WATCHED = 60;
+  const WINDOWS = 3;
   const replayedNow = () => evaluate(page, `crcbl.gpu.stats().replayed`);
-  const framesBefore = await replayedNow();
-  const drewMore = await until(async () => {
-    const now = await replayedNow();
-    return typeof now === 'number' && now >= framesBefore + FRAMES_WATCHED
-      ? { now }
-      : null;
-  });
-  const heldLater = drewMore
-    ? await evaluate(page, `crcbl.gpu.replayer.liveObjects()`)
-    : null;
   const countsOf = (held) =>
     new Map((held ?? []).map(({ kind, count }) => [kind, count]));
-  const before = countsOf(heldRunning);
-  const grew = [...countsOf(heldLater)]
-    .filter(([kind, count]) => count > (before.get(kind) ?? 0))
-    .map(([kind, count]) => `${kind} ${before.get(kind) ?? 0} -> ${count}`);
+  const heldSamples = [heldRunning];
+  let watched = true;
+  for (let window = 0; window < WINDOWS && watched; window += 1) {
+    const framesBefore = await replayedNow();
+    const drewMore = await until(async () => {
+      const now = await replayedNow();
+      return typeof now === 'number' && now >= framesBefore + FRAMES_WATCHED
+        ? { now }
+        : null;
+    });
+    watched = Boolean(drewMore);
+    heldSamples.push(
+      watched ? await evaluate(page, `crcbl.gpu.replayer.liveObjects()`) : null
+    );
+  }
+  const readSamples = heldSamples.every((held) => Array.isArray(held));
+  // A kind counts as growing only if it rose across every window in turn.
+  const grew = readSamples
+    ? [...countsOf(heldSamples[heldSamples.length - 1])]
+        .filter(([kind]) =>
+          heldSamples.every(
+            (held, index) =>
+              index === 0 ||
+              (countsOf(held).get(kind) ?? 0) >
+                (countsOf(heldSamples[index - 1]).get(kind) ?? 0)
+          )
+        )
+        .map(
+          ([kind]) =>
+            `${kind} ${heldSamples
+              .map((held) => countsOf(held).get(kind) ?? 0)
+              .join(' -> ')}`
+        )
+    : [];
   check(
     'I',
     'a steady-state frame gives back everything it takes',
-    Boolean(drewMore) && Array.isArray(heldLater) && grew.length === 0,
-    !drewMore
+    watched && readSamples && grew.length === 0,
+    !watched
       ? `the demo drew fewer than ${FRAMES_WATCHED} more frames in ${TIMEOUT_MS} ms, ` +
           'so nothing here is a verdict about what a frame holds on to'
-      : !Array.isArray(heldLater)
-        ? `liveObjects() answered ${JSON.stringify(heldLater)} the second time`
+      : !readSamples
+        ? `liveObjects() answered ${JSON.stringify(heldSamples.find((held) => !Array.isArray(held)))} on one of the heldSamples`
         : grew.length === 0
-          ? `nothing climbed over ${FRAMES_WATCHED} frames`
-          : `over ${FRAMES_WATCHED} frames: ${grew.join(', ')} — a frame that ` +
+          ? `nothing climbed across all ${WINDOWS} windows of ${FRAMES_WATCHED} frames`
+          : `over ${WINDOWS} windows of ${FRAMES_WATCHED} frames: ${grew.join(', ')} — a frame that ` +
             'takes one more of something every time is a page that grows for as ' +
             'long as it is open, whatever its teardown then destroys'
   );

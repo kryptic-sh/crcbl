@@ -6109,6 +6109,40 @@ the mip case, because neither refuses it. So the rules are covered against the
 null backend, `crcbl-webgpu` and `crcbl-vk` separately, and the suite that
 exists to stop exactly this kind of divergence cannot yet be pointed at them.
 
+## The browser leak check watches occupancy, not just totals (2026-08-24)
+
+Check I in `web/tools/browser-e2e.mjs` ("a steady-state frame gives back
+everything it takes") took one `liveObjects()` sample, waited 60 frames, took
+another, and failed on any kind that had risen. It failed twice on CI and
+neither was a leak: lantern `readbacks 2 -> 5` (commit `fa7fc11`) and quarry
+`readbacks 1 -> 2` (commit `68e278c`), neither reproducible on this machine.
+
+**`readbacks` is not a monotone tally — it is the occupancy of a fixed-size
+ring.** `CullStatsRing` (`crates/crcbl-render/src/cull_stats.rs`) holds
+`FRAMES_IN_FLIGHT + 1` = 3 slots per `ForwardRenderer`, and `take_slot` matches
+only `Recording` or `Idle`, never `Polling` — so a slot with a live readback is
+never reused and the count is hard-bounded at three per renderer. quarry has one
+renderer (ceiling 3, observed 2); lantern has two, `renderer` and `monitor` in
+`apps/lantern/src/gpu.rs` (ceiling 6, observed 5). Both failures were strictly
+inside the bound. Occupancy rises with the readback round trip measured _in
+frames_, which is exactly what a loaded CI runner stretches.
+
+The check now asks whether a kind climbs across **every** one of three windows
+rather than one: a ring saturates and stops, a leak does not. Verified both ways
+— the acquire-path leak it was written for (a fresh image and view per frame,
+never retired) still fails it, at `imageViews 520 -> 580 -> 641 -> 701`.
+
+**Per-kind ceilings were the alternative and were declined**: they would put the
+engine's ring depths in a JS test file, to be silently wrong the day one
+changed. If a future leak turns out to be slow enough to saturate within three
+windows, the answer is more windows, not a table of engine constants.
+
+Not fixed, and the reason this took a bisect to see: **`liveObjects()` reports
+totals with no way to say which kinds are ring-shaped.** A kind that carried its
+own bound would let the check compare against it directly instead of inferring
+from the shape of the curve. Worth doing only if a second question wants the
+same thing.
+
 ## The WSI swapchain-format check has no e2e, and WebGPU has no check (2026-08-24)
 
 `SwapchainDesc::format` "must be one of `SurfaceCaps::formats`" is now refused
