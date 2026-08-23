@@ -591,9 +591,16 @@ run_sandbox_toggle() {
     # `borderless` may carry the monitor it landed on — `DisplayMode`'s
     # `Display` prints "borderless on monitor 2" once the backend can say which
     # output the surface is on — so the suffix is optional and the exit reason
-    # still has to be there. Anchoring on `(CloseRequested)` is what makes this
-    # a check that the run *ended* borderless rather than passed through it.
-    if ! grep -qE "at ${SANDBOX_BORDERLESS}, borderless( on monitor [0-9]+)? \(CloseRequested\)" \
+    # still has to be there. Anchoring on `CloseRequested` inside the same
+    # parenthesis is what makes this a check that the run *ended* borderless
+    # rather than passed through it.
+    #
+    # `[^)]*` covers the fields the summary carries before its exit reason —
+    # `effects shadows ao ssr` today. It went in when that field did: the
+    # regex demanded `(CloseRequested)` immediately after the mode, so adding a
+    # field to the line reddened this harness and nothing else, which is a
+    # harness reading a sample's prose rather than a fact about the window.
+    if ! grep -qE "at ${SANDBOX_BORDERLESS}, borderless( on monitor [0-9]+)? \([^)]*CloseRequested\)" \
         "$SANDBOX_LOG"; then
         echo "crcbl e2e: F11 did not leave the sandbox borderless at ${SANDBOX_BORDERLESS}" >&2
         cat "$SANDBOX_LOG" >&2
