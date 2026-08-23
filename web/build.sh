@@ -231,13 +231,15 @@ if [ "$THREADS" = "1" ]; then
   #   --max-memory           a shared memory must declare a maximum
   #   --export=__wasm_init_tls, __tls_base, __tls_size, __tls_align
   #                          a worker sets its own TLS block up before it runs
-  #                          any Rust; skipping the call traps immediately
+  #                          any Rust. Skipping the call is **silent** as often
+  #                          as not: `__tls_base`'s initial value is a layout
+  #                          accident of the module, and where it starts at zero
+  #                          every worker's thread-locals simply alias one
+  #                          address and are read and written without a trap
   #   --export=__stack_pointer  wasm globals are per-instance, so a worker that
   #                          does not set this one runs on the main thread's
   #                          stack region — and only code that *uses* its stack
   #                          can tell the difference
-  #   --export=__heap_base   where the module's own allocator region begins,
-  #                          which is what the stack and TLS block are cut from
   threaded_rustflags=(
     "-C target-feature=+atomics,+bulk-memory,+mutable-globals"
     "-C link-arg=--shared-memory"
@@ -248,7 +250,6 @@ if [ "$THREADS" = "1" ]; then
     "-C link-arg=--export=__tls_size"
     "-C link-arg=--export=__tls_align"
     "-C link-arg=--export=__stack_pointer"
-    "-C link-arg=--export=__heap_base"
   )
 
   echo "==> threaded build: $NIGHTLY, -Z build-std=std,panic_abort, into $THREADED_DIR"

@@ -6563,13 +6563,6 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   driving this" framing is out of date for the same reason. Not done here or in
   the slice before it, both times because the write set excluded `crates/`.
 
-- **`--export=__heap_base` is passed, asserted by nothing, and used by
-  nothing.** The backend allocates worker stacks and TLS blocks from Rust's own
-  allocator (`workers::leak`) rather than carving them out of the heap base, so
-  the symbol has no consumer. It stays in the link arguments because the
-  bootstrap notes named it; drop it or assert it, but do not leave a reader
-  thinking something depends on it.
-
 - **`--max-memory` is passed and only reachable as the maximum the gate reads
   back out of the import.** Unchanged from when `--threads` landed.
 

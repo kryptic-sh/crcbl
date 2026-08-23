@@ -290,7 +290,7 @@ link arguments are the missing half:
 -C link-arg=--max-memory=1073741824
 -C link-arg=--export=__wasm_init_tls   -C link-arg=--export=__tls_base
 -C link-arg=--export=__tls_size        -C link-arg=--export=__tls_align
--C link-arg=--export=__stack_pointer   -C link-arg=--export=__heap_base
+-C link-arg=--export=__stack_pointer
 ```
 
 With those, the module imports `env.memory`, and the bootstrap was **run**
