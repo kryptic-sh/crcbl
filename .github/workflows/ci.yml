@@ -1596,6 +1596,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: >-
           cargo run --locked --quiet --package breakout -- --headless --frames
           60 --backend vk
@@ -1627,6 +1628,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: >-
           cargo run --locked --quiet --package bare -- --headless --frames 30
           --backend vk
@@ -1646,6 +1648,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: >-
           cargo run --locked --quiet --package asteroids -- --headless --frames
           60 --backend vk
@@ -1673,6 +1676,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: >-
           cargo run --locked --quiet --package flappy -- --headless --frames 60
           --backend vk
@@ -1686,6 +1690,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: >-
           cargo run --locked --quiet --package horde -- --headless --frames 60
           --backend vk
@@ -1717,6 +1722,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: cargo test --locked --quiet --package viewer
       # The UI system's own fixture, and the only sample whose frame is a clear
       # plus `ui-composite` and nothing else — no sprite pass at all. That makes
@@ -1727,6 +1733,7 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: >-
           cargo run --locked --quiet --package hud -- --headless --frames 60
           --backend vk

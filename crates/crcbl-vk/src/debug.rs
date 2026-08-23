@@ -30,6 +30,33 @@
 //! mitigation. It is off by default because it is expensive and noisy on WSI
 //! paths, and on with `CRCBL_VK_SYNC_VALIDATION=1`, which is what the e2e
 //! harness sets.
+//!
+//! # Failing the run on an error
+//!
+//! Counting is enough for a *test*, which has a moment to call
+//! [`ValidationReport::assert_clean`] in. A **binary** has no such moment:
+//! `cargo run --package hud -- --headless --backend vk` exits 0 with the layer
+//! reporting through [`crcbl_core::log::error!`] and nobody reading it, which is
+//! the same manual eyeball the sink exists to replace. So
+//! [`ValidationSink::take_error`] drains errors into
+//! [`crcbl_hal::Device::take_error`] — the seam's channel for a failure the
+//! driver reports out of band, which is exactly what a layer message is — and
+//! the engine's frame loop, which calls it before recording anything, turns one
+//! into a failed run.
+//!
+//! **Errors only, never warnings.** A specification violation makes the frame's
+//! behaviour undefined, so a run that stops there loses nothing that was worth
+//! having. A performance warning describes a frame that is correct and merely
+//! slow, and a player would rather have it. The shell harnesses that grep a
+//! run's log fail on both, deliberately: a harness may hold this engine to a
+//! standard a shipped binary is not held to.
+//!
+//! **Off unless [`FATAL_VALIDATION_ENV_VAR`] asks for it**, because
+//! [`VALIDATION_ENV_VAR`] is already on by default in a debug build: an
+//! unconditional version would end every developer's `cargo run` at the first
+//! error and take away the frame that caused it. The validation layer makes the
+//! same call — its own `debug_action=VK_DBG_LAYER_ACTION_BREAK` is opt-in, and
+//! vkconfig defaults to log-only.
 
 use core::ffi::{CStr, c_void};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -49,6 +76,11 @@ pub const VALIDATION_ENV_VAR: &str = "CRCBL_VK_VALIDATION";
 
 /// Set to a truthy value to add synchronisation validation on top.
 pub const SYNC_VALIDATION_ENV_VAR: &str = "CRCBL_VK_SYNC_VALIDATION";
+
+/// Set to a truthy value to make a validation **error** fail the run through
+/// [`crcbl_hal::Device::take_error`] instead of only reaching the log. Warnings
+/// are unaffected; see the module's "Failing the run on an error".
+pub const FATAL_VALIDATION_ENV_VAR: &str = "CRCBL_VK_VALIDATION_FATAL";
 
 /// How severe a message the layer emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -180,9 +212,23 @@ pub struct ValidationSink {
 struct SinkInner {
     errors: AtomicU64,
     warnings: AtomicU64,
+    kept: Mutex<Kept>,
+}
+
+/// The messages themselves, and how far [`ValidationSink::take_error`] has read.
+#[derive(Debug, Default)]
+struct Kept {
     /// Bounded, so a shader spewing one message per draw cannot exhaust memory
     /// while still leaving the counters exact.
-    messages: Mutex<Vec<ValidationMessage>>,
+    messages: Vec<ValidationMessage>,
+    /// How many of `messages` [`ValidationSink::take_error`] has handed out.
+    ///
+    /// A cursor rather than a drain, because the two readers ask different
+    /// questions of the same list: `take_error` wants each error once, and
+    /// [`ValidationSink::report`] wants everything the layer ever said. Removing
+    /// a taken message would leave `assert_clean` failing on a count with no
+    /// text under it.
+    taken: usize,
 }
 
 impl SinkInner {
@@ -199,10 +245,10 @@ impl SinkInner {
         // A poisoned mutex here would mean a panic inside the messenger, which
         // is already a lost cause; dropping the message beats a second panic
         // raised from inside a driver callback.
-        if let Ok(mut messages) = self.messages.lock()
-            && messages.len() < ValidationSink::CAPACITY
+        if let Ok(mut kept) = self.kept.lock()
+            && kept.messages.len() < ValidationSink::CAPACITY
         {
-            messages.push(message);
+            kept.messages.push(message);
         }
     }
 }
@@ -224,19 +270,42 @@ impl ValidationSink {
     }
 
     /// A snapshot of everything recorded so far.
+    ///
+    /// Unaffected by [`Self::take_error`]: a taken error is still in here, and
+    /// still counted.
     #[must_use]
     pub fn report(&self, enabled: bool) -> ValidationReport {
         ValidationReport {
             messages: self
                 .inner
-                .messages
+                .kept
                 .lock()
-                .map(|messages| messages.clone())
+                .map(|kept| kept.messages.clone())
                 .unwrap_or_default(),
             errors: self.inner.errors.load(Ordering::Relaxed),
             warnings: self.inner.warnings.load(Ordering::Relaxed),
             enabled,
         }
+    }
+
+    /// The next [`Severity::Error`] this sink has not been asked about yet.
+    ///
+    /// The draining reader, for [`crcbl_hal::Device::take_error`]'s "each error
+    /// is reported once" contract — a warning is never handed back here, and
+    /// [`Self::report`] is what still sees both. Past [`Self::CAPACITY`]
+    /// messages there is nothing left to hand back, because only the counters
+    /// keep growing; a caller asking every frame has long since been told about
+    /// the first one.
+    #[must_use]
+    pub fn take_error(&self) -> Option<ValidationMessage> {
+        let mut kept = self.inner.kept.lock().ok()?;
+        while let Some(message) = kept.messages.get(kept.taken).cloned() {
+            kept.taken += 1;
+            if message.severity == Severity::Error {
+                return Some(message);
+            }
+        }
+        None
     }
 }
 
@@ -269,6 +338,22 @@ pub(crate) fn sync_validation_wanted() -> bool {
 
 /// The pure half of [`sync_validation_wanted`]; see [`validation_policy`].
 const fn sync_validation_policy(override_: Option<bool>) -> bool {
+    match override_ {
+        Some(explicit) => explicit,
+        None => false,
+    }
+}
+
+/// Whether a validation error should fail the run rather than only be logged.
+/// Opt-in only, on every profile; see the module's "Failing the run on an
+/// error" for why the default cannot be "on wherever validation is".
+#[must_use]
+pub(crate) fn fatal_validation_wanted() -> bool {
+    fatal_validation_policy(env_flag(FATAL_VALIDATION_ENV_VAR))
+}
+
+/// The pure half of [`fatal_validation_wanted`]; see [`validation_policy`].
+const fn fatal_validation_policy(override_: Option<bool>) -> bool {
     match override_ {
         Some(explicit) => explicit,
         None => false,
@@ -539,6 +624,44 @@ mod tests {
         );
     }
 
+    /// The draining reader: errors once each, warnings never, and the
+    /// snapshotting reader left holding everything.
+    ///
+    /// The last part is the one worth a test — a `take_error` that removed what
+    /// it handed back would leave every `assert_clean` in the e2e suite failing
+    /// on a count with no message under it, which is a worse report than the one
+    /// it replaced.
+    #[test]
+    fn take_error_hands_back_each_error_once_and_leaves_the_report_whole() {
+        let sink = ValidationSink::new();
+        assert_eq!(sink.take_error(), None, "an empty sink has nothing to give");
+
+        sink.record(message(Severity::Warning, "VUID-warn"));
+        sink.record(message(Severity::Error, "VUID-err"));
+        sink.record(message(Severity::Info, "note"));
+        sink.record(message(Severity::Error, "VUID-err-2"));
+
+        assert_eq!(
+            sink.take_error().map(|taken| taken.id),
+            Some("VUID-err".to_string()),
+            "the warning between them is not a device error"
+        );
+        assert_eq!(
+            sink.take_error().map(|taken| taken.id),
+            Some("VUID-err-2".to_string())
+        );
+        assert_eq!(sink.take_error(), None, "each error is reported once");
+
+        let report = sink.report(true);
+        assert_eq!((report.errors, report.warnings), (2, 1));
+        assert_eq!(
+            report.messages.len(),
+            3,
+            "taking an error must not remove it from the snapshot:\n{}",
+            report.summary()
+        );
+    }
+
     /// A message storm must not be able to exhaust memory, and must not be able
     /// to make the counters lie either.
     #[test]
@@ -624,6 +747,13 @@ mod tests {
         assert!(!sync_validation_policy(None));
         assert!(sync_validation_policy(Some(true)));
         assert!(!sync_validation_policy(Some(false)));
+
+        // And so is failing the run on an error: on by default it would end a
+        // developer's `cargo run` at the first one, since validation itself is
+        // already on by default here.
+        assert!(!fatal_validation_policy(None));
+        assert!(fatal_validation_policy(Some(true)));
+        assert!(!fatal_validation_policy(Some(false)));
     }
 
     /// The user-data pointer round trip. If `into_raw`/`from_raw` ever stop

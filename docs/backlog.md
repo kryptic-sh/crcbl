@@ -3,49 +3,64 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### The validation gate reaches three harnesses; CI's seven sites are still open
+### What the validation gate still cannot see
 
-`crcbl-vk` now announces its messenger and `tools/run-samples-windowed.sh`,
-`run-x11-e2e.sh` and `run-wayland-e2e.sh` fail on what the layer reports.
-`crates/crcbl/tests/windowed_e2e.rs` was already covered — every one of its
-tests ends in `Windowed::finish()`, which calls
+`crcbl-vk` announces its messenger; `tools/run-samples-windowed.sh`,
+`run-x11-e2e.sh` and `run-wayland-e2e.sh` fail on what the layer reports; and
+`CRCBL_VK_VALIDATION_FATAL=1` routes an error through `Device::take_error` so
+the engine's frame loop fails the run, which is what the seven `ci.yml` steps
+now set. `crates/crcbl/tests/windowed_e2e.rs` was already covered by
 `ValidationReport::assert_clean`. What is left:
 
-- **Seven `CRCBL_VK_VALIDATION=1` sites in `.github/workflows/ci.yml` still
-  cannot fail on a validation error.** Verified 2026-08-24: six are direct
-  `cargo run --locked --quiet --package {breakout,bare,asteroids,flappy,horde,hud} -- --headless --backend vk`
-  steps and the seventh is `cargo test --locked --quiet --package viewer`; none
-  runs a harness script, and `apps/viewer` names neither `validation_report` nor
-  `assert_clean`. Options, in order of preference: **a change at the `crcbl`
-  seam** so a binary's own exit code reflects the report —
-  `crcbl::args::run_front_end` is the one place every sample front end passes
-  through, it would cover six of the seven with no new file and no duplicated
-  shell, and it would make every run of a sample fail on a violation rather than
-  only CI's; a shared `tools/run-headless-validated.sh <package> [args…]`
-  invoked once per step; or an opt-in fatal-on-validation-error variable inside
-  `crcbl-vk`, which is what the validation layer's own
-  `debug_action=VK_DBG_LAYER_ACTION_BREAK` does and would need one `env:` line
-  per step. Inline greps in six `run:` blocks were **considered and declined** —
-  duplicated shell in a YAML file that has already taken two wrong-anchor edits.
-- **Nothing proves the layer is awake during a _sample_ run.** The greps fail on
-  a missing layer, a missing messenger, a lost message and a `CRCBL_LOG` filter
-  that silences `crcbl_vk::debug` — that last one takes the "validation enabled"
-  line with it, which is why the line is emitted from `debug` and not from
-  `instance`. What they do not catch is a layer that loads, creates a messenger,
-  prints the line and then checks nothing
+- **The fatal gate is silent when the layer is absent.**
+  `InstanceInner::fatal_validation` is
+  `validation_enabled && fatal_validation_wanted()`, so on an image without
+  `VK_LAYER_KHRONOS_validation` the seven CI steps pass having checked nothing.
+  `VkInstance::open` already warns ("requested but is not installed"), and the
+  three shell harnesses assert `announce_messenger`'s line before believing a
+  clean log — but none of the six `cargo run` steps greps anything. Options: (a)
+  have those steps grep for that line, (b) make `CRCBL_VK_VALIDATION_FATAL=1`
+  plus a missing layer a hard failure in `VkInstance::open`, (c) rely on the
+  shell harnesses. **(b) is the one that cannot be forgotten**, and it is what
+  the variable already means: a run that asked for a fatal gate and did not get
+  one is a run whose result is worthless. Not done because it changes what a
+  missing layer costs, which is a decision. Verified the layer is present
+  locally (spec 1.4.357); **not** verified on CI's lavapipe image.
+- **Warnings are outside the binary gate, deliberately.** `Severity::Warning` is
+  never returned by `ValidationSink::take_error`; only `assert_clean` and the
+  shell-log greps fail on one. Killing a correct-but-slow frame is a worse
+  default than logging it, so widening this would be a decision rather than a
+  fix. **Considered and declined** for now.
+- **Sync hazards ride the error path only because this layer build says so.**
+  Verified on layer 1.4.357 against radv that `SYNC-HAZARD-READ-AFTER-WRITE` and
+  `-WRITE-AFTER-WRITE` arrive at `ERROR` severity, so the fatal gate catches
+  them. Not verified for CI's layer build; one that reported hazards as warnings
+  would take the whole class out of the binary gate silently.
+- **An error raised after the last frame is never taken.** `Device::take_error`
+  is called only from `crcbl::engine`'s `acquire`, so a violation during
+  teardown or the final `wait_idle` still exits 0. A drain at shutdown closes
+  it.
+- **`ValidationSink::CAPACITY` bounds what the drain can hand back.** Past it
+  only the counters grow. Not practical while the first error stops the run, but
+  it is a cap rather than "every error forever".
+- **Nothing proves the layer is awake during a _sample_ run.** The greps and the
+  fatal gate both fail on a missing layer, a missing messenger, a lost message
+  and a `CRCBL_LOG` filter that silences `crcbl_vk::debug` — that last takes the
+  "validation enabled" line with it, which is why the line is emitted from
+  `debug` and not from `instance`. What none of them catches is a layer that
+  loads, creates a messenger, prints the line and then checks nothing
   (`VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` is enough).
   `crates/crcbl-vk/tests/vk_e2e/validation_gate.rs` closes this for the vk suite
   by committing a deliberate violation; there is no equivalent for a binary run.
   `vkSubmitDebugUtilsMessageEXT` works cleanly as an injection route through the
-  real callback — it was the red-check mechanism for this slice — so a
-  debug-build-only injection hook is the obvious shape if this is worth closing.
+  real callback, so a debug-build-only injection hook is the obvious shape.
 - **Not verified on CI's runners.** Everything above was measured on radv on an
   RX 7900 XTX and on llvmpipe under Xvfb and sway. Across nine samples and nine
   sandbox passes on both drivers the layer emitted zero errors and zero
-  warnings, so the worry that a performance warning would redden the gate is not
-  borne out here — but the layer build differs on CI (`validation_gate.rs`
-  records `cross-submission=no` locally against `yes` there), so a CI leg could
-  emit a warning this machine does not.
+  warnings, so the worry that a performance warning would redden the shell gates
+  is not borne out here — but the layer build differs on CI
+  (`validation_gate.rs` records `cross-submission=no` locally against `yes`
+  there), so a CI leg could emit a warning this machine does not.
 
 ### Breakout over an impaired link: what costs travel, and what only delays it
 

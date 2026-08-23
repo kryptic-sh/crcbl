@@ -16,6 +16,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A Vulkan validation error can fail a run, not just log one.**
+  `CRCBL_VK_VALIDATION_FATAL=1` makes `crcbl-vk` answer the seam's existing
+  out-of-band channel — `Device::take_error`, which the engine already drains at
+  the top of every frame — so a specification violation becomes
+  `GpuError::Hal(HalError::Backend(…))` and stops the run. A headless sample
+  that drew through one used to exit 0 with the message in a log nobody read.
+  All seven CI steps that set `CRCBL_VK_VALIDATION` now set this too; none of
+  them could fail on validation before. **Errors only**: a performance warning
+  describes a correct frame, so it still only logs, and the shell harnesses stay
+  the stricter gate. **Off by default**, including in a debug build where
+  validation itself is on, so a developer's `cargo run` still reaches the frame
+  that caused the error. `ValidationSink::take_error` is the new drain;
+  `ValidationSink::report` is unaffected and still shows every message, taken or
+  not.
 - **`crcbl-vk` says out loud when validation is on, and the harnesses that run a
   binary now fail on what it reports.** A run with `CRCBL_VK_VALIDATION=1` logs
   `crcbl-vk: validation enabled (VK_LAYER_KHRONOS_validation), …` at info from

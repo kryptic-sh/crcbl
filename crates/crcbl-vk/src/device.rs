@@ -53,6 +53,7 @@ use crcbl_hal::{
 use crate::adapter::AdapterRecord;
 use crate::command::VkCommandEncoder;
 use crate::conv;
+use crate::debug::VALIDATION_LAYER;
 use crate::deletion::RetireQueue;
 use crate::instance::{InstanceInner, next_owner_id};
 use crate::mem::{self, MemoryRequest};
@@ -1692,6 +1693,32 @@ impl Device for VkDevice {
 
     fn queue(&self, kind: QueueKind) -> Option<QueueHandle> {
         self.inner.queues[queue_index(kind) as usize].map(|_| queue_handle(self.inner.tag, kind))
+    }
+
+    /// The validation layer's errors, one per call.
+    ///
+    /// A specification violation is exactly the seam's out-of-band failure: the
+    /// call that committed it returns nothing at all — `vkCmdCopyBuffer` has no
+    /// return value — and the message arrives later on the debug messenger, so a
+    /// caller watching return values sees a healthy device. Draining them here
+    /// is what puts them in front of the engine's frame loop, which asks before
+    /// recording anything and fails the run on an answer; until this existed
+    /// every headless sample exited 0 with the layer complaining into a log.
+    ///
+    /// **Errors only, and opt-in.** [`crate::debug`]'s "Failing the run on an
+    /// error" has both reasons: a performance warning is a correct frame, and an
+    /// unconditional version would end a developer's `cargo run` at the first
+    /// violation and take away the frame that caused it.
+    fn take_error(&self) -> Option<String> {
+        if !self.inner.instance.fatal_validation {
+            return None;
+        }
+        self.inner.instance.sink.take_error().map(|message| {
+            format!(
+                "{VALIDATION_LAYER} reported {}: {}",
+                message.id, message.text
+            )
+        })
     }
 
     // --- resources ---

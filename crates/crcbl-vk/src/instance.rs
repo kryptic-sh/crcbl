@@ -224,6 +224,11 @@ pub(crate) struct InstanceInner {
     messenger_user_data: *mut c_void,
     pub(crate) sink: ValidationSink,
     pub(crate) validation_enabled: bool,
+    /// Whether [`crate::VkDevice`]'s `take_error` reports what the layer said,
+    /// which is what turns a validation error into a failed run rather than a
+    /// log line. Off unless [`debug::FATAL_VALIDATION_ENV_VAR`] asks for it —
+    /// see that module's "Failing the run on an error".
+    pub(crate) fatal_validation: bool,
     pub(crate) id: u64,
     pub(crate) adapters: Vec<AdapterRecord>,
     surfaces: Mutex<Surfaces>,
@@ -456,6 +461,11 @@ impl VkInstance {
             );
         }
         let validation_enabled = want_validation && validation_available;
+        // `&&` rather than the flag alone so that the field answers the question
+        // a reader has — "will an error stop this run" — instead of the one the
+        // environment answered. Without the layer there is nothing to report,
+        // and the warning above has already said so.
+        let fatal_validation = validation_enabled && debug::fatal_validation_wanted();
 
         // Only ever the intersection of wanted and available. Requesting an
         // absent extension fails `vkCreateInstance` outright, and this backend
@@ -681,6 +691,7 @@ impl VkInstance {
                 messenger_user_data: user_data,
                 sink,
                 validation_enabled,
+                fatal_validation,
                 id: next_owner_id(),
                 adapters,
                 surfaces: Mutex::new(Surfaces::default()),
