@@ -95,8 +95,7 @@ impl EntityOverlapQueries<'_> {
         self.queries
             .overlap_sphere_into(centre, radius, scratch, &mut ids);
         for id in ids.iter() {
-            let slot = id.index() as usize;
-            let Some(entity) = self.collider_to_entity.get(slot).and_then(|e| *e) else {
+            let Some(entity) = self.entity_for(*id) else {
                 continue;
             };
             out.push(entity);
@@ -104,6 +103,77 @@ impl EntityOverlapQueries<'_> {
         // Back where it came from, keeping the capacity for the next call.
         scratch.ids = ids;
     }
+
+    /// [`PhysicsSystem::overlap_aabb`] under a shared borrow, writing into a
+    /// buffer the caller owns.
+    ///
+    /// `out` is cleared and then filled with the same entities in the same
+    /// order the `&mut self` form produces, because that form is this one.
+    /// Broadphase-only, exactly like [`PhysicsSystem::overlap_aabb`]: an entity
+    /// whose *AABB* meets `aabb` is named, whatever its shape does.
+    pub fn overlap_aabb_into(
+        &self,
+        aabb: &Aabb,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<Entity>,
+    ) {
+        out.clear();
+        let mut ids = std::mem::take(&mut scratch.ids);
+        self.queries.overlap_aabb_into(aabb, scratch, &mut ids);
+        for id in ids.iter() {
+            let Some(entity) = self.entity_for(*id) else {
+                continue;
+            };
+            out.push(entity);
+        }
+        scratch.ids = ids;
+    }
+
+    /// [`PhysicsSystem::cast_ray`] under a shared borrow, working in `scratch`
+    /// instead of the system's own buffers.
+    ///
+    /// Triggers are non-solid and are skipped, and a hit on a collider no
+    /// entity is mapped to answers `None` — both exactly as in the `&mut self`
+    /// form, which calls this one.
+    #[must_use]
+    pub fn cast_ray(&self, ray: &Ray, scratch: &mut QueryScratch) -> Option<(Entity, ShapeHit)> {
+        let (id, hit) = self.queries.cast_ray(ray, scratch)?;
+        Some((self.entity_for(id)?, hit))
+    }
+
+    /// [`PhysicsSystem::sweep_sphere`] under a shared borrow, working in
+    /// `scratch` instead of the system's own buffers.
+    ///
+    /// Every collider in the world is a candidate, including the sweeper's own
+    /// if it has one — there is no entity-level exclusion here, because
+    /// [`PhysicsSystem::sweep_body`] needs the body's velocity and transform to
+    /// build its segment and this view does not carry them.
+    #[must_use]
+    pub fn sweep_sphere(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        scratch: &mut QueryScratch,
+    ) -> Option<(Entity, ShapeHit)> {
+        let (id, hit) = self.queries.sweep_sphere(segment, radius, scratch)?;
+        Some((self.entity_for(id)?, hit))
+    }
+
+    /// The entity a collider id belongs to, or `None` if nothing is mapped to
+    /// its slot. The view's copy of [`PhysicsSystem`]'s own reverse-map
+    /// lookup — both call one free function, so the two borrow shapes cannot
+    /// disagree about which entity a slot is.
+    fn entity_for(&self, id: ColliderId) -> Option<Entity> {
+        entity_for_in(self.collider_to_entity, id)
+    }
+}
+
+/// The entity mapped to a collider id's slot, or `None` if there is none.
+///
+/// Both [`PhysicsSystem`] and [`EntityOverlapQueries`] resolve hits through
+/// this, one holding the reverse map and the other borrowing it.
+fn entity_for_in(collider_to_entity: &[Option<Entity>], id: ColliderId) -> Option<Entity> {
+    collider_to_entity.get(id.index() as usize).and_then(|e| *e)
 }
 
 impl PhysicsSystem {
@@ -307,8 +377,12 @@ impl PhysicsSystem {
     /// Cast a ray, returning the closest hit entity and details.
     #[must_use]
     pub fn cast_ray(&mut self, ray: &Ray) -> Option<(Entity, ShapeHit)> {
-        let (id, hit) = self.world.cast_ray(ray)?;
-        Some((self.entity_for(id)?, hit))
+        // Lent to the view and put straight back, as
+        // [`PhysicsSystem::overlap_sphere_into`] does and for the same reason.
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let hit = self.overlap_queries().cast_ray(ray, &mut scratch);
+        self.scratch = scratch;
+        hit
     }
 
     /// Sweep a sphere, returning the closest hit entity and details.
@@ -318,8 +392,12 @@ impl PhysicsSystem {
     /// builds the same segment and leaves that body out of the answer.
     #[must_use]
     pub fn sweep_sphere(&mut self, segment: &Segment, radius: f64) -> Option<(Entity, ShapeHit)> {
-        let (id, hit) = self.world.sweep_sphere(segment, radius)?;
-        Some((self.entity_for(id)?, hit))
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let hit = self
+            .overlap_queries()
+            .sweep_sphere(segment, radius, &mut scratch);
+        self.scratch = scratch;
+        hit
     }
 
     /// Sweep the body at `entity` along the segment it covers in `dt`: from where
@@ -441,11 +519,12 @@ impl PhysicsSystem {
     /// Overlap query: return all entities whose AABB intersects `aabb`.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<Entity> {
-        self.world
-            .overlap_aabb(aabb)
-            .into_iter()
-            .filter_map(|id| self.entity_for(id))
-            .collect()
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let mut out = Vec::new();
+        self.overlap_queries()
+            .overlap_aabb_into(aabb, &mut scratch, &mut out);
+        self.scratch = scratch;
+        out
     }
 
     /// Direct access to the underlying [`PhysicsWorld`] for advanced use.
@@ -464,9 +543,7 @@ impl PhysicsSystem {
     /// The entity a collider id belongs to, or `None` if nothing is mapped to
     /// its slot.
     fn entity_for(&self, id: ColliderId) -> Option<Entity> {
-        self.collider_to_entity
-            .get(id.index() as usize)
-            .and_then(|e| *e)
+        entity_for_in(&self.collider_to_entity, id)
     }
 
     fn add_collider_to_world(
@@ -805,6 +882,221 @@ mod tests {
                     handle.join().expect("a query thread panicked"),
                     expected,
                     "a thread sharing the view disagreed with the scan",
+                );
+            }
+        });
+    }
+
+    /// Every probe's answers from one borrow shape or the other, so a whole
+    /// run compares in a single `assert_eq!`.
+    #[derive(Debug, PartialEq)]
+    struct EntityProbeAnswers {
+        rays: Vec<Option<(Entity, ShapeHit)>>,
+        sweeps: Vec<Option<(Entity, ShapeHit)>>,
+        aabbs: Vec<Vec<Entity>>,
+    }
+
+    /// **The view names the right entity for a cast, a sweep and a box query,
+    /// and says the same thing to every thread asking at once.**
+    ///
+    /// The geometry is already pinned a layer down, by
+    /// `crate::world::tests::the_shared_view_casts_sweeps_and_boxes_like_a_scan_would`,
+    /// which holds the traversal to a brute-force scan. What this layer adds is
+    /// the collider-slot-to-entity step, so the oracle here is the entity
+    /// *positions*: every probe is aimed so that which entity it must name
+    /// follows from where the entities were placed, with no shape arithmetic in
+    /// the oracle at all. A slot mapped to the wrong entity is what that
+    /// catches, and it is why the expected answers are all different entities.
+    ///
+    /// The concurrent half is the reason the shared form exists — see
+    /// [`the_view_names_the_right_entities_from_every_thread_at_once`], which
+    /// makes the same argument for the sphere overlap.
+    #[test]
+    fn the_view_casts_sweeps_and_boxes_for_the_right_entities_from_every_thread() {
+        const RADIUS: f64 = 0.45;
+        // Rows are one unit apart and the colliders are narrower than half of
+        // that, so a probe aimed down the middle of a row reaches that row and
+        // nothing else, and one aimed between two rows reaches neither.
+        const ROWS: u32 = 5;
+        const COLUMNS: u32 = 7;
+        // Narrow enough that the swept volume between two rows still reaches
+        // neither: `RADIUS + SWEEP_RADIUS` has to stay under half a row.
+        const SWEEP_RADIUS: f64 = 0.04;
+
+        let mut phys = PhysicsSystem::new();
+        let mut placed: Vec<(Entity, DVec3)> = Vec::new();
+        for idx in 0..ROWS * COLUMNS {
+            let entity = test_entity(idx);
+            let position = DVec3::new(f64::from(idx % COLUMNS), f64::from(idx / COLUMNS), 0.0);
+            let transform = Transform::from_position(position);
+            phys.set_collider(
+                entity,
+                &ColliderComponent::Sphere {
+                    offset: DVec3::ZERO,
+                    radius: RADIUS,
+                    is_trigger: false,
+                },
+                &transform,
+            );
+            phys.set_transform(entity, transform);
+            placed.push((entity, position));
+        }
+
+        // The entity nearest the -X end of a row, which is what a cast or a
+        // sweep coming from there must name.
+        let first_in_row = |row: f64| {
+            placed
+                .iter()
+                .filter(|(_, p)| p.y == row)
+                .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
+                .map(|(entity, _)| *entity)
+        };
+
+        let rays: Vec<Ray> = (0..ROWS)
+            .map(|row| Ray::new(DVec3::new(-10.0, f64::from(row), 0.0), DVec3::X))
+            // Between two rows, so it reaches neither.
+            .chain(std::iter::once(Ray::new(
+                DVec3::new(-10.0, 1.5, 0.0),
+                DVec3::X,
+            )))
+            .collect();
+        let expected_rays: Vec<Option<Entity>> = (0..ROWS)
+            .map(|row| first_in_row(f64::from(row)))
+            .chain(std::iter::once(None))
+            .collect();
+
+        let sweeps: Vec<(Segment, f64)> = (0..ROWS)
+            .map(|row| {
+                (
+                    Segment::new(
+                        DVec3::new(-10.0, f64::from(row), 0.0),
+                        DVec3::new(10.0, f64::from(row), 0.0),
+                    ),
+                    SWEEP_RADIUS,
+                )
+            })
+            .chain(std::iter::once((
+                Segment::new(DVec3::new(-10.0, 1.5, 0.0), DVec3::new(10.0, 1.5, 0.0)),
+                SWEEP_RADIUS,
+            )))
+            .collect();
+        let expected_sweeps = expected_rays.clone();
+
+        let aabbs = [
+            Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(0.1)),
+            Aabb::from_centre_half(DVec3::new(3.0, 2.0, 0.0), DVec3::splat(1.0)),
+            Aabb::from_centre_half(DVec3::new(50.0, 50.0, 0.0), DVec3::splat(1.0)),
+        ];
+        // Two AABBs meet when they overlap on every axis, and a sphere's is its
+        // centre grown by its radius — the whole of the test this query does.
+        let expected_aabbs: Vec<Vec<Entity>> = aabbs
+            .iter()
+            .map(|aabb| {
+                let mut hits: Vec<Entity> = placed
+                    .iter()
+                    .filter(|(_, p)| {
+                        Aabb::from_centre_half(*p, DVec3::splat(RADIUS)).intersects(aabb)
+                    })
+                    .map(|(entity, _)| *entity)
+                    .collect();
+                hits.sort_unstable_by_key(|entity| entity.to_bits());
+                hits
+            })
+            .collect();
+
+        // The oracle has to be able to tell a mix-up from a match: every row's
+        // answer is a different entity, and the box probes are neither all
+        // empty nor all the same.
+        let mut named: Vec<Entity> = expected_rays.iter().flatten().copied().collect();
+        assert_eq!(named.len(), ROWS as usize, "every row has a nearest entity");
+        named.sort_unstable_by_key(|entity| entity.to_bits());
+        named.dedup();
+        assert_eq!(
+            named.len(),
+            ROWS as usize,
+            "two rows expect the same entity, so a slot-to-entity mix-up could \\
+             pass this",
+        );
+        let widest = expected_aabbs.iter().map(Vec::len).max().unwrap_or(0);
+        assert!(
+            widest > 4 && expected_aabbs.iter().any(Vec::is_empty),
+            "the box probes reach at most {widest} entities and never nothing, \\
+             so one of the two cases never runs",
+        );
+
+        let exclusive = EntityProbeAnswers {
+            rays: rays.iter().map(|ray| phys.cast_ray(ray)).collect(),
+            sweeps: sweeps
+                .iter()
+                .map(|(segment, radius)| phys.sweep_sphere(segment, *radius))
+                .collect(),
+            aabbs: aabbs
+                .iter()
+                .map(|aabb| {
+                    let mut hits = phys.overlap_aabb(aabb);
+                    hits.sort_unstable_by_key(|entity| entity.to_bits());
+                    hits
+                })
+                .collect(),
+        };
+
+        assert_eq!(
+            exclusive
+                .rays
+                .iter()
+                .map(|hit| hit.map(|(entity, _)| entity))
+                .collect::<Vec<_>>(),
+            expected_rays,
+            "the entities the casts named",
+        );
+        assert_eq!(
+            exclusive
+                .sweeps
+                .iter()
+                .map(|hit| hit.map(|(entity, _)| entity))
+                .collect::<Vec<_>>(),
+            expected_sweeps,
+            "the entities the sweeps named",
+        );
+        assert_eq!(exclusive.aabbs, expected_aabbs, "the entities in the boxes");
+
+        // One scratch and one output buffer for the whole run, as a `par_for`
+        // chunk holds them: a query that forgot to clear its output is visible
+        // here and would not be if every probe got a fresh buffer.
+        let ask = |queries: &EntityOverlapQueries<'_>| {
+            let mut scratch = crate::world::QueryScratch::new();
+            let mut found = Vec::new();
+            EntityProbeAnswers {
+                rays: rays
+                    .iter()
+                    .map(|ray| queries.cast_ray(ray, &mut scratch))
+                    .collect(),
+                sweeps: sweeps
+                    .iter()
+                    .map(|(segment, radius)| queries.sweep_sphere(segment, *radius, &mut scratch))
+                    .collect(),
+                aabbs: aabbs
+                    .iter()
+                    .map(|aabb| {
+                        queries.overlap_aabb_into(aabb, &mut scratch, &mut found);
+                        let mut hits = found.clone();
+                        hits.sort_unstable_by_key(|entity| entity.to_bits());
+                        hits
+                    })
+                    .collect(),
+            }
+        };
+
+        let queries = phys.overlap_queries();
+        assert_eq!(ask(&queries), exclusive, "the calling thread's own answers");
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4).map(|_| scope.spawn(|| ask(&queries))).collect();
+            for handle in handles {
+                assert_eq!(
+                    handle.join().expect("a query thread panicked"),
+                    exclusive,
+                    "a thread sharing the view disagreed with the placements",
                 );
             }
         });

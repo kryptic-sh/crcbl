@@ -144,6 +144,9 @@ pub struct QueryScratch {
     stack: Vec<u32>,
     /// The elements the descent turned up, before the exact shape test.
     candidates: Vec<u32>,
+    /// The leaves a ray descent turned up. Separate from `candidates` because
+    /// a ray leaf carries the AABB entry distance alongside its element id.
+    ray_hits: Vec<BvhHit>,
     /// The collider ids the exact test kept, for a caller mapping them onto
     /// something of its own — [`crate::system::EntityOverlapQueries`] maps them
     /// to entities, which is why this is reachable from that module and from
@@ -206,6 +209,72 @@ impl OverlapQueries<'_> {
             out,
         );
     }
+
+    /// [`PhysicsWorld::overlap_aabb`] under a shared borrow, working in
+    /// `scratch` and writing into a buffer the caller owns.
+    ///
+    /// `out` is cleared and then filled, with the same ids in the same tree
+    /// order the `&mut self` form produces, because the two are one
+    /// implementation and not two that agree.
+    pub fn overlap_aabb_into(
+        &self,
+        aabb: &Aabb,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<ColliderId>,
+    ) {
+        overlap_aabb_core(self.bvh, self.generations, aabb, scratch, out);
+    }
+
+    /// [`PhysicsWorld::cast_ray`] under a shared borrow, working in `scratch`
+    /// instead of the world's own buffers.
+    ///
+    /// Triggers are skipped and the closest exact hit wins, exactly as in the
+    /// `&mut self` form, because the two are one implementation.
+    #[must_use]
+    pub fn cast_ray(
+        &self,
+        ray: &Ray,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        cast_ray_core(self.bvh, self.colliders, self.generations, ray, scratch)
+    }
+
+    /// [`PhysicsWorld::sweep_sphere`] under a shared borrow, working in
+    /// `scratch` instead of the world's own buffers.
+    #[must_use]
+    pub fn sweep_sphere(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        self.sweep_sphere_excluding(segment, radius, None, scratch)
+    }
+
+    /// [`PhysicsWorld::sweep_sphere_excluding`] under a shared borrow, working
+    /// in `scratch` instead of the world's own buffers.
+    ///
+    /// This is the form a body sweeping its own path needs — see the `&mut
+    /// self` method for why the exclusion happens in the narrow phase and not
+    /// after the fact. The two forms are one implementation.
+    #[must_use]
+    pub fn sweep_sphere_excluding(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        exclude: Option<ColliderId>,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        sweep_sphere_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            segment,
+            radius,
+            exclude,
+            scratch,
+        )
+    }
 }
 
 /// The one implementation of "which colliders overlap this sphere".
@@ -253,6 +322,174 @@ fn overlap_sphere_core(
             out.push(ColliderId::new(idx, generations[slot]));
         }
     }
+}
+
+/// The one implementation of "which colliders' AABBs meet this AABB".
+///
+/// Broadphase-only by design — the BVH's leaves *are* the collider AABBs, so
+/// there is nothing to refine. Both [`PhysicsWorld::overlap_aabb`] and
+/// [`OverlapQueries::overlap_aabb_into`] come through here.
+fn overlap_aabb_core(
+    bvh: &Bvh,
+    generations: &[u32],
+    aabb: &Aabb,
+    scratch: &mut QueryScratch,
+    out: &mut Vec<ColliderId>,
+) {
+    bvh.traverse_aabb_into(aabb, &mut scratch.stack, &mut scratch.candidates);
+    out.clear();
+    out.extend(
+        scratch
+            .candidates
+            .iter()
+            .map(|&slot| id_for_slot_in(generations, slot)),
+    );
+}
+
+/// The one implementation of "what does this ray hit first".
+///
+/// Both [`PhysicsWorld::cast_ray`] and [`OverlapQueries::cast_ray`] come
+/// through here. Triggers are non-solid and are skipped by `closest_hit_core`.
+fn cast_ray_core(
+    bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    ray: &Ray,
+    scratch: &mut QueryScratch,
+) -> Option<(ColliderId, ShapeHit)> {
+    // Out of the scratch and back into it, because the descent borrows the
+    // stack at the same time and the two are fields of one struct.
+    let mut hits = core::mem::take(&mut scratch.ray_hits);
+    bvh.traverse_ray_into(ray, &mut scratch.stack, &mut hits);
+    let best = closest_hit_core(colliders, generations, ray, &hits);
+    scratch.ray_hits = hits;
+    best
+}
+
+/// The one implementation of "what does this swept sphere hit first".
+///
+/// Both [`PhysicsWorld::sweep_sphere_excluding`] and
+/// [`OverlapQueries::sweep_sphere_excluding`] come through here — and so do
+/// the two `sweep_sphere` forms, which are this with no exclusion.
+///
+/// The broadphase query is the swept *volume* and not the centre line; see
+/// [`PhysicsWorld::sweep_sphere`] for what that costs and what it fixes.
+fn sweep_sphere_core(
+    bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    segment: &Segment,
+    radius: f64,
+    exclude: Option<ColliderId>,
+    scratch: &mut QueryScratch,
+) -> Option<(ColliderId, ShapeHit)> {
+    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
+    let bounds = Aabb::new(
+        segment.start.min(segment.end),
+        segment.start.max(segment.end),
+    )
+    .inflated(radius);
+    bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+    closest_swept_core(
+        colliders,
+        generations,
+        segment,
+        radius,
+        &scratch.candidates,
+        skip,
+    )
+}
+
+/// Given BVH hits (AABB-level), find the closest exact hit using shape-level
+/// intersection. Triggers are non-solid and are skipped.
+fn closest_hit_core(
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    ray: &Ray,
+    bvh_hits: &[BvhHit],
+) -> Option<(ColliderId, ShapeHit)> {
+    let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
+    for bvh_hit in bvh_hits {
+        let idx = bvh_hit.element_id as usize;
+        let Some(Some(slot)) = colliders.get(idx) else {
+            continue;
+        };
+        if slot.is_trigger {
+            continue;
+        }
+        let hit = match &slot.entry {
+            ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
+            ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
+            ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
+        };
+        if let Some(hit) = hit
+            && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
+        {
+            best = Some((hit.t, id_for_slot_in(generations, bvh_hit.element_id), hit));
+        }
+    }
+    best.map(|(_, id, hit)| (id, hit))
+}
+
+/// Given broadphase candidates, find the closest exact swept-sphere hit.
+/// Triggers are non-solid and are skipped, and so is `skip` — the storage slot
+/// of the collider the caller excluded, if any.
+fn closest_swept_core(
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    segment: &Segment,
+    radius: f64,
+    candidates: &[u32],
+    skip: Option<usize>,
+) -> Option<(ColliderId, ShapeHit)> {
+    let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
+    for &element in candidates {
+        let idx = element as usize;
+        if Some(idx) == skip {
+            continue;
+        }
+        let Some(Some(slot)) = colliders.get(idx) else {
+            continue;
+        };
+        if slot.is_trigger {
+            continue;
+        }
+        let hit = match &slot.entry {
+            ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
+            ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
+            ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+        };
+        if let Some(hit) = hit
+            && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
+        {
+            best = Some((hit.t, id_for_slot_in(generations, element), hit));
+        }
+    }
+    best.map(|(_, id, hit)| (id, hit))
+}
+
+/// Resolve an id to a live storage slot, or `None` if the id is stale
+/// (generation mismatch) or names an empty slot.
+///
+/// The free form of [`PhysicsWorld::slot_of`], which is what
+/// `sweep_sphere_core` needs: a shared view has the two arrays but not the
+/// world.
+fn slot_of_in(
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    id: ColliderId,
+) -> Option<usize> {
+    let slot = id.index as usize;
+    if generations.get(slot).copied() != Some(id.generation) {
+        return None;
+    }
+    colliders.get(slot).and_then(|s| s.as_ref()).map(|_| slot)
+}
+
+/// The id currently naming `slot`. Only call with a slot the BVH just
+/// reported, i.e. one that is live.
+fn id_for_slot_in(generations: &[u32], slot: u32) -> ColliderId {
+    ColliderId::new(slot, generations[slot as usize])
 }
 
 impl PhysicsWorld {
@@ -459,13 +696,12 @@ impl PhysicsWorld {
     /// shape-aware overlap. Triggers are included.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<ColliderId> {
-        self.ensure_bvh();
-        let bvh = self.bvh.as_ref().unwrap();
-        let slots = bvh.traverse_aabb(aabb);
-        slots
-            .into_iter()
-            .map(|slot| self.id_for_slot(slot))
-            .collect()
+        let mut scratch = core::mem::take(&mut self.scratch);
+        let mut out = Vec::new();
+        self.overlap_queries()
+            .overlap_aabb_into(aabb, &mut scratch, &mut out);
+        self.scratch = scratch;
+        out
     }
 
     /// Cast a ray against all colliders, returning the closest hit (if any).
@@ -477,10 +713,10 @@ impl PhysicsWorld {
     /// [`PhysicsWorld::overlap_sphere`] to detect them.
     #[must_use]
     pub fn cast_ray(&mut self, ray: &Ray) -> Option<(ColliderId, ShapeHit)> {
-        self.ensure_bvh();
-        let bvh = self.bvh.as_ref().unwrap();
-        let hits = bvh.traverse_ray(ray);
-        self.closest_hit(ray, &hits)
+        let mut scratch = core::mem::take(&mut self.scratch);
+        let hit = self.overlap_queries().cast_ray(ray, &mut scratch);
+        self.scratch = scratch;
+        hit
     }
 
     /// Sweep a sphere along a segment, returning the closest hit (if any).
@@ -541,16 +777,12 @@ impl PhysicsWorld {
         radius: f64,
         exclude: Option<ColliderId>,
     ) -> Option<(ColliderId, ShapeHit)> {
-        let skip = exclude.and_then(|id| self.slot_of(id));
-        self.ensure_bvh();
-        let bvh = self.bvh.as_ref().unwrap();
-        let bounds = Aabb::new(
-            segment.start.min(segment.end),
-            segment.start.max(segment.end),
-        )
-        .inflated(radius);
-        let candidates = bvh.traverse_aabb(&bounds);
-        self.closest_swept(segment, radius, &candidates, skip)
+        let mut scratch = core::mem::take(&mut self.scratch);
+        let hit =
+            self.overlap_queries()
+                .sweep_sphere_excluding(segment, radius, exclude, &mut scratch);
+        self.scratch = scratch;
+        hit
     }
 
     /// Get the AABB of a collider by id.
@@ -584,20 +816,13 @@ impl PhysicsWorld {
     /// Resolve an id to a live storage slot, or `None` if the id is stale
     /// (generation mismatch) or names an empty slot.
     fn slot_of(&self, id: ColliderId) -> Option<usize> {
-        let slot = id.index as usize;
-        if self.generations.get(slot).copied() != Some(id.generation) {
-            return None;
-        }
-        self.colliders
-            .get(slot)
-            .and_then(|s| s.as_ref())
-            .map(|_| slot)
+        slot_of_in(&self.colliders, &self.generations, id)
     }
 
     /// The id currently naming `slot`. Only call with a slot the BVH just
     /// reported, i.e. one that is live.
     fn id_for_slot(&self, slot: u32) -> ColliderId {
-        ColliderId::new(slot, self.generations[slot as usize])
+        id_for_slot_in(&self.generations, slot)
     }
 
     fn add(&mut self, entry: ColliderEntry) -> ColliderId {
@@ -665,68 +890,6 @@ impl PhysicsWorld {
         if self.bvh.is_none() {
             self.rebuild();
         }
-    }
-
-    /// Given BVH hits (AABB-level), find the closest exact hit using
-    /// shape-level intersection. Triggers are non-solid and are skipped.
-    fn closest_hit(&self, ray: &Ray, bvh_hits: &[BvhHit]) -> Option<(ColliderId, ShapeHit)> {
-        let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
-        for bvh_hit in bvh_hits {
-            let idx = bvh_hit.element_id as usize;
-            let Some(Some(slot)) = self.colliders.get(idx) else {
-                continue;
-            };
-            if slot.is_trigger {
-                continue;
-            }
-            let hit = match &slot.entry {
-                ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
-                ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
-                ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
-            };
-            if let Some(hit) = hit
-                && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
-            {
-                best = Some((hit.t, self.id_for_slot(bvh_hit.element_id), hit));
-            }
-        }
-        best.map(|(_, id, hit)| (id, hit))
-    }
-
-    /// Given broadphase candidates, find the closest exact swept-sphere hit.
-    /// Triggers are non-solid and are skipped, and so is `skip` — the storage
-    /// slot of the collider the caller excluded, if any.
-    fn closest_swept(
-        &self,
-        segment: &Segment,
-        radius: f64,
-        candidates: &[u32],
-        skip: Option<usize>,
-    ) -> Option<(ColliderId, ShapeHit)> {
-        let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
-        for &element in candidates {
-            let idx = element as usize;
-            if Some(idx) == skip {
-                continue;
-            }
-            let Some(Some(slot)) = self.colliders.get(idx) else {
-                continue;
-            };
-            if slot.is_trigger {
-                continue;
-            }
-            let hit = match &slot.entry {
-                ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
-                ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
-                ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
-            };
-            if let Some(hit) = hit
-                && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
-            {
-                best = Some((hit.t, self.id_for_slot(element), hit));
-            }
-        }
-        best.map(|(_, id, hit)| (id, hit))
     }
 }
 
@@ -875,6 +1038,378 @@ mod tests {
             "the widest query in the fixture found {biggest} colliders, so the \
              comparison above was mostly two empty vectors",
         );
+    }
+
+    /// Every probe's answers, from one form or the other, so a whole run
+    /// compares in a single `assert_eq!`.
+    #[derive(Debug, PartialEq)]
+    struct ProbeAnswers {
+        rays: Vec<Option<(ColliderId, ShapeHit)>>,
+        sweeps: Vec<Option<(ColliderId, ShapeHit)>>,
+        excluded_sweeps: Vec<Option<(ColliderId, ShapeHit)>>,
+        aabbs: Vec<Vec<ColliderId>>,
+    }
+
+    /// The exact ray test for a collider, with no tree and no traversal
+    /// between the shape and the answer.
+    fn scan_ray_one(ray: &Ray, entry: &ColliderEntry) -> Option<ShapeHit> {
+        match entry {
+            ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
+            ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
+            ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
+        }
+    }
+
+    /// The exact swept-sphere test for a collider, likewise.
+    fn scan_sweep_one(segment: &Segment, radius: f64, entry: &ColliderEntry) -> Option<ShapeHit> {
+        match entry {
+            ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
+            ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
+            ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+        }
+    }
+
+    /// **The ray, sweep and AABB queries answer a brute-force scan under a
+    /// shared borrow, from every thread asking at once.**
+    ///
+    /// The companion to `the_shared_view_finds_exactly_what_a_scan_would`, and
+    /// it is held to the same standard for the same reason: comparing
+    /// [`OverlapQueries::cast_ray`] with [`PhysicsWorld::cast_ray`] proves
+    /// nothing on its own, because they are one implementation and a defect in
+    /// it moves both sides of that comparison together. So each answer is also
+    /// checked against an exhaustive scan of the fixture, which shares no code
+    /// with the traversal.
+    ///
+    /// What the scan can and cannot pin down:
+    ///
+    /// * For a ray or a sweep the scan gives the closest `t`, and the query's
+    ///   own `t` must equal it exactly — same inputs through the same shape
+    ///   functions, so this is not a tolerance question. The *identity* is then
+    ///   checked by re-running the exact test on the collider that came back:
+    ///   a query that returned a farther collider fails on `t`, and one that
+    ///   returned a mislabelled id fails on the re-test.
+    /// * For an AABB overlap the scan gives the whole set, compared sorted —
+    ///   tree order is not something a scan can reproduce. The order is a
+    ///   property of the two forms sharing one traversal, which is why they do.
+    ///
+    /// The concurrent half is what the shared form exists for: one view, a
+    /// [`QueryScratch`] per thread, and every thread must reach the answers the
+    /// calling thread reached alone. It guards a future regression — putting
+    /// the scratch back inside the view is exactly the change that would break
+    /// it — rather than a race in today's code, which holds only shared
+    /// references.
+    #[test]
+    fn the_shared_view_casts_sweeps_and_boxes_like_a_scan_would() {
+        let mut world = PhysicsWorld::new();
+        // (id, shape, is_trigger): the oracle, and all the scan below reads.
+        let mut fixture: Vec<(ColliderId, ColliderEntry, bool)> = Vec::new();
+        // A lattice, so a probe lands on a neighbourhood rather than on one
+        // collider or none, and a descent that pruned a subtree it should not
+        // have loses something the scan still finds.
+        let mut row_start = None;
+        for x in -3..=3 {
+            for y in -3..=3 {
+                let sphere = Sphere::new(DVec3::new(f64::from(x), f64::from(y), 0.0), 0.4);
+                let id = world.add_sphere(sphere);
+                if x == -3 && y == 0 {
+                    row_start = Some(id);
+                }
+                fixture.push((id, ColliderEntry::Sphere(sphere), false));
+            }
+        }
+        let row_start = row_start.expect("the lattice contains (-3, 0, 0)");
+        // A capsule and a box as well, so every arm of the exact test is
+        // exercised rather than only the sphere one.
+        let capsule = Capsule::new(DVec3::new(0.0, 0.0, 3.0), 0.3, 1.0);
+        fixture.push((
+            world.add_capsule(capsule),
+            ColliderEntry::Capsule(capsule),
+            true,
+        ));
+        let boxed = BoxCollider::new(DVec3::new(1.5, 1.5, 0.0), DVec3::splat(0.5));
+        fixture.push((world.add_box(boxed), ColliderEntry::Box(boxed), false));
+        // A trigger standing in front of the first ray's solid hits. Triggers
+        // are non-solid, so a cast that reports this one has stopped skipping
+        // them — and `the_skipped_trigger_was_in_the_way` below checks that
+        // this collider really is in the way, so the skip is a branch the run
+        // actually takes.
+        let trigger = Sphere::new(DVec3::new(-5.0, 0.0, 0.0), 0.5);
+        let trigger_id = world.add_sphere(trigger);
+        assert!(world.set_trigger(trigger_id, true), "the trigger was added");
+        fixture.push((trigger_id, ColliderEntry::Sphere(trigger), true));
+
+        let rays = [
+            // Down the lattice's middle row, through the trigger first.
+            Ray::new(DVec3::new(-10.0, 0.0, 0.0), DVec3::X),
+            // Another row, no trigger on it.
+            Ray::new(DVec3::new(-10.0, 2.0, 0.0), DVec3::X),
+            // Along +Z through a lattice sphere and the capsule behind it.
+            Ray::new(DVec3::new(0.0, 0.0, -10.0), DVec3::Z),
+            // Between the rows, so only the box is wide enough to be hit.
+            Ray::new(DVec3::new(-10.0, 1.5, 0.0), DVec3::X),
+            // Diagonally across the lattice.
+            Ray::new(DVec3::new(-10.0, -10.0, 0.0), DVec3::new(1.0, 1.0, 0.0)),
+            // Nowhere near anything.
+            Ray::new(DVec3::new(-10.0, 20.0, 0.0), DVec3::X),
+            // Bounded short of the first solid collider, so `t_max` decides.
+            Ray::new(DVec3::new(-10.0, 0.0, 0.0), DVec3::X).with_bounds(0.0, 5.0),
+        ];
+        let sweeps = [
+            (
+                Segment::new(DVec3::new(-10.0, 0.0, 0.0), DVec3::new(10.0, 0.0, 0.0)),
+                0.2,
+            ),
+            // Between two rows, close enough that the swept volume reaches
+            // both — the case a centre-line traversal used to drop.
+            (
+                Segment::new(DVec3::new(-10.0, 0.7, 0.0), DVec3::new(10.0, 0.7, 0.0)),
+                0.35,
+            ),
+            (
+                Segment::new(DVec3::new(0.0, 3.0, -10.0), DVec3::new(0.0, 3.0, 10.0)),
+                0.1,
+            ),
+            // Starting inside a collider.
+            (
+                Segment::new(DVec3::new(0.0, 3.0, 0.0), DVec3::new(0.1, 3.0, 0.0)),
+                0.2,
+            ),
+            // Nowhere near anything.
+            (
+                Segment::new(DVec3::new(20.0, 20.0, 20.0), DVec3::new(30.0, 30.0, 30.0)),
+                0.5,
+            ),
+        ];
+        let aabbs = [
+            Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.2)),
+            Aabb::from_centre_half(DVec3::new(1.5, 1.5, 0.0), DVec3::splat(0.6)),
+            Aabb::from_centre_half(DVec3::new(50.0, 50.0, 0.0), DVec3::splat(1.0)),
+            Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(10.0)),
+        ];
+
+        // ── The exclusive form's answers, before the view borrows the world ──
+        let plain_sweeps: Vec<Option<(ColliderId, ShapeHit)>> = sweeps
+            .iter()
+            .map(|(segment, radius)| world.sweep_sphere(segment, *radius))
+            .collect();
+        // The same sweeps with the collider each one actually hits left out —
+        // the query a body sweeping its own path runs, and the only form of it
+        // where the exclusion is guaranteed to change the answer. The last
+        // entry is the opposite case: excluding a collider that sweep never
+        // reaches, which must change nothing.
+        let mut excluded_sweeps: Vec<(Segment, f64, ColliderId)> = sweeps
+            .iter()
+            .zip(&plain_sweeps)
+            .filter_map(|((segment, radius), hit)| hit.map(|(id, _)| (*segment, *radius, id)))
+            .collect();
+        excluded_sweeps.push((sweeps[2].0, sweeps[2].1, row_start));
+
+        let exclusive = ProbeAnswers {
+            rays: rays.iter().map(|ray| world.cast_ray(ray)).collect(),
+            sweeps: plain_sweeps,
+            excluded_sweeps: excluded_sweeps
+                .iter()
+                .map(|(segment, radius, skip)| {
+                    world.sweep_sphere_excluding(segment, *radius, Some(*skip))
+                })
+                .collect(),
+            aabbs: aabbs
+                .iter()
+                .map(|aabb| {
+                    let mut ids = world.overlap_aabb(aabb);
+                    ids.sort_unstable_by_key(|id| id.index());
+                    ids
+                })
+                .collect(),
+        };
+
+        // ── The scan, which shares no code with the traversal ─────────────
+        let solid = |skip: Option<ColliderId>| {
+            fixture
+                .iter()
+                .filter(move |(id, _, is_trigger)| !is_trigger && Some(*id) != skip)
+        };
+        let closest =
+            |hits: &mut dyn Iterator<Item = ShapeHit>| hits.map(|hit| hit.t).min_by(f64::total_cmp);
+        let entry_of = |wanted: ColliderId| {
+            fixture
+                .iter()
+                .find(|(id, _, _)| *id == wanted)
+                .map(|(_, entry, is_trigger)| (entry.clone(), *is_trigger))
+                .expect("the query named a collider the fixture does not hold")
+        };
+
+        let mut rays_that_hit = 0usize;
+        for (ray, answer) in rays.iter().zip(&exclusive.rays) {
+            let scanned =
+                closest(&mut solid(None).filter_map(|(_, entry, _)| scan_ray_one(ray, entry)));
+            assert_eq!(
+                answer.map(|(_, hit)| hit.t),
+                scanned,
+                "the closest solid hit along {ray:?}",
+            );
+            if let Some((id, hit)) = answer {
+                let (entry, is_trigger) = entry_of(*id);
+                assert!(!is_trigger, "a cast reported a trigger: {ray:?}");
+                assert_eq!(
+                    scan_ray_one(ray, &entry),
+                    Some(*hit),
+                    "the collider the cast named does not produce the hit it reported",
+                );
+                rays_that_hit += 1;
+            }
+        }
+        assert!(
+            rays_that_hit >= 4 && rays_that_hit < rays.len(),
+            "{rays_that_hit} of {} ray probes hit, so the comparison above was \
+             mostly empty on one side or never exercised a miss",
+            rays.len(),
+        );
+
+        // The trigger is genuinely in the way of the first ray, so skipping it
+        // is a branch this run takes rather than one it never reaches.
+        let with_triggers = closest(
+            &mut fixture
+                .iter()
+                .filter_map(|(_, entry, _)| scan_ray_one(&rays[0], entry)),
+        );
+        assert!(
+            with_triggers < exclusive.rays[0].map(|(_, hit)| hit.t),
+            "the trigger is not in front of the first ray's solid hits, so \
+             nothing here would notice if triggers stopped being skipped",
+        );
+
+        let mut sweeps_that_hit = 0usize;
+        for ((segment, radius), answer) in sweeps.iter().zip(&exclusive.sweeps) {
+            let scanned = closest(
+                &mut solid(None)
+                    .filter_map(|(_, entry, _)| scan_sweep_one(segment, *radius, entry)),
+            );
+            assert_eq!(
+                answer.map(|(_, hit)| hit.t),
+                scanned,
+                "the closest solid hit sweeping r{radius} along {segment:?}",
+            );
+            if let Some((id, hit)) = answer {
+                let (entry, is_trigger) = entry_of(*id);
+                assert!(!is_trigger, "a sweep reported a trigger: {segment:?}");
+                assert_eq!(
+                    scan_sweep_one(segment, *radius, &entry),
+                    Some(*hit),
+                    "the collider the sweep named does not produce the hit it reported",
+                );
+                sweeps_that_hit += 1;
+            }
+        }
+        assert!(
+            sweeps_that_hit >= 3 && sweeps_that_hit < sweeps.len(),
+            "{sweeps_that_hit} of {} sweep probes hit, so the comparison above \
+             was mostly empty on one side or never exercised a miss",
+            sweeps.len(),
+        );
+
+        let mut exclusion_mattered = 0usize;
+        let mut exclusion_was_moot = 0usize;
+        for ((segment, radius, skip), answer) in
+            excluded_sweeps.iter().zip(&exclusive.excluded_sweeps)
+        {
+            let scanned = closest(
+                &mut solid(Some(*skip))
+                    .filter_map(|(_, entry, _)| scan_sweep_one(segment, *radius, entry)),
+            );
+            assert_eq!(
+                answer.map(|(_, hit)| hit.t),
+                scanned,
+                "the closest hit excluding {skip:?}, sweeping r{radius} along {segment:?}",
+            );
+            assert_ne!(
+                answer.map(|(id, _)| id),
+                Some(*skip),
+                "the excluded collider came back anyway",
+            );
+            // Whether the exclusion was load-bearing is the scan's to say, not
+            // the query's: it is whether the closest solid hit moved when that
+            // collider left the fixture.
+            let unexcluded = closest(
+                &mut solid(None)
+                    .filter_map(|(_, entry, _)| scan_sweep_one(segment, *radius, entry)),
+            );
+            if unexcluded == scanned {
+                exclusion_was_moot += 1;
+            } else {
+                exclusion_mattered += 1;
+            }
+        }
+        assert!(
+            exclusion_mattered >= 3 && exclusion_was_moot >= 1,
+            "{exclusion_mattered} exclusions changed the answer and \
+             {exclusion_was_moot} did not, so one of the two cases never ran",
+        );
+
+        let mut widest = 0usize;
+        for (aabb, answer) in aabbs.iter().zip(&exclusive.aabbs) {
+            let mut scanned: Vec<ColliderId> = fixture
+                .iter()
+                .filter(|(_, entry, _)| entry.aabb().intersects(aabb))
+                .map(|(id, _, _)| *id)
+                .collect();
+            scanned.sort_unstable_by_key(|id| id.index());
+            assert_eq!(&scanned, answer, "the AABBs meeting {aabb:?}");
+            widest = widest.max(answer.len());
+        }
+        assert!(
+            widest > 4,
+            "the widest AABB probe found {widest} colliders, so the comparison \
+             above was mostly two empty vectors",
+        );
+
+        // ── The same answers under a shared borrow, from several threads ──
+        // One scratch and one output buffer for the whole run, which is how a
+        // `par_for` chunk holds them — and what makes a query that forgot to
+        // clear its output visible here.
+        let ask = |queries: &OverlapQueries<'_>| {
+            let mut scratch = QueryScratch::new();
+            let mut ids = Vec::new();
+            ProbeAnswers {
+                rays: rays
+                    .iter()
+                    .map(|ray| queries.cast_ray(ray, &mut scratch))
+                    .collect(),
+                sweeps: sweeps
+                    .iter()
+                    .map(|(segment, radius)| queries.sweep_sphere(segment, *radius, &mut scratch))
+                    .collect(),
+                excluded_sweeps: excluded_sweeps
+                    .iter()
+                    .map(|(segment, radius, skip)| {
+                        queries.sweep_sphere_excluding(segment, *radius, Some(*skip), &mut scratch)
+                    })
+                    .collect(),
+                aabbs: aabbs
+                    .iter()
+                    .map(|aabb| {
+                        queries.overlap_aabb_into(aabb, &mut scratch, &mut ids);
+                        let mut found = ids.clone();
+                        found.sort_unstable_by_key(|id| id.index());
+                        found
+                    })
+                    .collect(),
+            }
+        };
+
+        let queries = world.overlap_queries();
+        assert_eq!(ask(&queries), exclusive, "the calling thread's own answers");
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4).map(|_| scope.spawn(|| ask(&queries))).collect();
+            for handle in handles {
+                assert_eq!(
+                    handle.join().expect("a query thread panicked"),
+                    exclusive,
+                    "a thread sharing the view disagreed with the scan",
+                );
+            }
+        });
     }
 
     /// **A sphere overlap is shape-aware: the query radius is expanded by each

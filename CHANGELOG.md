@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every read-only physics query has a shared, `Sync` form.** `OverlapQueries`
+  (colliders) and `EntityOverlapQueries` (entities) already carried
+  `overlap_sphere_into`; they now also carry `overlap_aabb_into`, `cast_ray` and
+  `sweep_sphere`, with `sweep_sphere_excluding` at the collider layer. Each
+  takes `&self` and a caller-owned `QueryScratch`, so a data-parallel pass hands
+  one view to every chunk and gives each chunk its own buffers.
+
+  The exclusive forms are unchanged in behaviour and now delegate to the same
+  `*_core` the shared forms use, so there is no second copy of a traversal for
+  the two to disagree in. A side effect worth knowing: `PhysicsWorld::cast_ray`,
+  `overlap_aabb` and `sweep_sphere_excluding` no longer allocate per call —
+  `cast_ray` used to build a traversal stack and a hit vector on every cast.
+
 - **`crcbl bench --scenario jobs`** times `crcbl_jobs::Pool::par_for` over a
   fixed synthetic workload and reports it as a distribution: p50, p95, p99 and
   max, never a mean, with the pool's own counters beside them and the

@@ -412,8 +412,24 @@ impl Bvh {
     /// if the same element was inserted twice.
     #[must_use]
     pub fn traverse_ray(&self, ray: &Ray) -> Vec<BvhHit> {
+        let mut hits = Vec::new();
+        self.traverse_ray_into(ray, &mut Vec::with_capacity(64), &mut hits);
+        hits
+    }
+
+    /// [`traverse_ray`](Self::traverse_ray) writing into buffers the caller
+    /// owns, for the same reason
+    /// [`traverse_aabb_into`](Self::traverse_aabb_into) exists — and
+    /// additionally because [`crate::world::OverlapQueries`] holds only a
+    /// shared borrow of the world and so cannot reach the world's own buffers.
+    ///
+    /// Both `out` and the descent `stack` are **cleared** and then filled, so
+    /// what they held before never reaches an answer.
+    pub fn traverse_ray_into(&self, ray: &Ray, stack: &mut Vec<u32>, out: &mut Vec<BvhHit>) {
+        out.clear();
+        stack.clear();
         if self.root == NIL {
-            return Vec::new();
+            return;
         }
 
         let inv_dir = ray.dir.recip();
@@ -421,8 +437,6 @@ impl Bvh {
         let t_min = ray.t_min;
         let t_max = ray.t_max;
 
-        let mut hits = Vec::new();
-        let mut stack = Vec::with_capacity(64);
         stack.push(self.root);
 
         while let Some(node_idx) = stack.pop() {
@@ -445,7 +459,7 @@ impl Bvh {
                 let t = t_entry.max(t_min);
                 let end = (node.child_left + node.leaf_count) as usize;
                 for i in node.child_left as usize..end {
-                    hits.push(BvhHit {
+                    out.push(BvhHit {
                         element_id: self.element_indices[i],
                         t,
                     });
@@ -456,8 +470,6 @@ impl Bvh {
                 stack.push(node.child_left);
             }
         }
-
-        hits
     }
 
     /// Walk the BVH with a segment, returning all intersected element ids.

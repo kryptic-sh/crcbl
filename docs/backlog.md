@@ -6230,11 +6230,33 @@ would be the serial loop plus a pool. **The "two samples freeze a seam" rule has
 therefore not been met**, and `Spawn::threaded` returning a `bool` is still the
 most likely thing to give.
 
-- **Only `overlap_sphere_into` has the shared form.** `cast_ray`, `sweep_sphere`
-  and `overlap_aabb` are still `&mut self` — nothing parallel calls them yet,
-  and `sweep_bolts` (the obvious candidate) reduces into a shared hit list in an
-  order the scheduler would choose, so it needs a design decision before it
-  needs an API.
+- **Every read-only query has the shared form now; nothing calls it in parallel
+  yet.** `OverlapQueries` and `EntityOverlapQueries` carry
+  `overlap_sphere_into`, `overlap_aabb_into`, `cast_ray` and `sweep_sphere`
+  (plus `sweep_sphere_excluding` at the collider layer), each `&self` with a
+  caller-owned `QueryScratch`, and each sharing one `*_core` with the
+  `&mut self` form so the two cannot drift. What is **not** done is P8's actual
+  adoption: no `par_for` in `apps/` or `crcbl-phys` calls them, so this removed
+  the reason it could not happen rather than doing it.
+
+  Still owed at that boundary: `PhysicsSystem::sweep_body` has no shared mirror
+  and `EntityOverlapQueries` has no entity-level sweep exclusion — both need
+  `bodies`, `transforms` and `entity_to_collider` widened into the view, which
+  is most of the system's state and was deferred for want of a caller.
+  `sweep_bolts` (the obvious first adopter) reduces into a shared hit list in an
+  order the scheduler would choose, so it still needs a design decision before
+  it needs an API. And `PhysicsWorld` has no `overlap_aabb_into` on the
+  `&mut self` side, so that owned form still allocates a `Vec` per call —
+  `overlap_sphere_into` is the precedent for fixing it when something runs it
+  per body per tick.
+
+  Two things measured while doing it, both worth knowing: `cast_ray`,
+  `overlap_aabb` and `sweep_sphere_excluding` **stopped allocating per call** as
+  a side effect of routing through the view (`cast_ray` used to build a 64-slot
+  stack and a hit vector on every cast); and `QueryScratch` is now four `Vec`s
+  per thread, which is what a `par_for` adoption sizing per-chunk state is
+  paying for.
+
 - **`STEER_CHUNK` was chosen by argument, and the instrument to settle it now
   exists.** Sixty-four enemies a chunk keeps the split independent of the worker
   count and stays under the pool's queue capacity well past any crowd horde
