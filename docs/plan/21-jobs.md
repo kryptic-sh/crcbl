@@ -213,13 +213,25 @@ intact rather than adding the first import to a browser artifact.
 
 Two things about it decide how the rest of this document reads. `Workers`
 answers `Spawn::threaded` **false** until a page announces itself, so an
-artifact loaded by a page with no shim degrades exactly as `Inline` did — which
-is every page today, because **nothing implements the shim yet**. And `Pool`
-itself cannot be driven from the browser's main thread at all: `par_for` and
-`pool::work` both take a `std::sync::Mutex` and wait on a `Condvar`, which lower
-to `Atomics.wait` and throw there. The topology this document settled — the game
-worker owns the pool, the main thread forwards and presents — is therefore the
-only arrangement that runs, not the preferred one.
+artifact loaded by a page with no shim degrades exactly as `Inline` did. Since
+2026-08-23 one page does implement it — `web/jobs/`, driven by
+`web/run-jobs-e2e.sh`, which brings workers up in a real browser and asserts
+Rust ran on a stack and a thread-local of its own. No **demo** page does, so
+every published artifact still degrades.
+
+**A claim that stood here has been withdrawn.** This paragraph said `Pool`
+cannot be driven from the browser's main thread at all, because `par_for` and
+`pool::work` take a `std::sync::Mutex` and wait on a `Condvar`, which lower to
+`Atomics.wait` and throw there. That was traced through std's sources and never
+observed, and writing it as a fact was the mistake — measured on 2026-08-23,
+**3000 `par_for` calls ran from a page's main thread with eight workers up and
+parking between calls, nine threads took chunks, and nothing trapped.** The
+reconciliation is that only a _losing_ `Mutex::lock` reaches `futex_wait`: an
+uncontended lock is a `compare_exchange` and never touches the instruction that
+throws. So the hazard is real and the certainty was not. The topology this
+document settled — the game worker owns the pool, the main thread forwards and
+presents — remains the right shape, because it does not depend on winning a race
+for a lock every frame; it is no longer the _only_ arrangement that can run.
 
 ## Risks
 
