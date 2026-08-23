@@ -1477,12 +1477,23 @@ fn lod_preview_is_refused_as_missing_and_not_as_unknown() {
 // `crcbl import`
 // ---------------------------------------------------------------------------
 
-/// The counts in the human line, `name:value` each, in the order they appear.
+/// The counts in the human report, `name:value` each, in the order they appear.
+///
+/// **The second line only.** The first names the file, and on Windows that path
+/// starts `C:\`, which is a `name:value` pair to anything scanning the whole
+/// report for colons — it read the drive letter as a count and the run failed
+/// there and nowhere else.
 ///
 /// Asserts it found the whole set: a probe that matched nothing would make
 /// every comparison against it vacuously true.
 fn human_counts(human: &str) -> Vec<(String, usize)> {
-    let counts: Vec<(String, usize)> = human
+    let mut lines = human.lines();
+    let named = lines.next().unwrap_or_default();
+    assert!(named.starts_with("imported "), "{human}");
+    let line = lines.next().unwrap_or_else(|| panic!("no counts: {human}"));
+    assert_eq!(lines.next(), None, "two lines, not more: {human}");
+
+    let counts: Vec<(String, usize)> = line
         .split_whitespace()
         .filter_map(|token| token.split_once(':'))
         .map(|(name, value)| {
