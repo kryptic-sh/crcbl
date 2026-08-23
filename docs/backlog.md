@@ -1431,8 +1431,16 @@ thing. So three of six is enough for the bug this group was built for, and the
 open half is end-to-end output coverage in general.
 
 That would be falsified by a demo choosing its own canvas format rather than
-taking the shared one; nothing does today, and if one ever does, this reasoning
-stops holding and the group needs all six.
+taking the shared one. **Checked 2026-08-24, and the answer is stronger than
+"nothing does today": nothing can.** `crcbl::engine` takes the format from
+`SurfaceCaps::preferred_format` and stores it in a private `SwapchainConfig`;
+there is no app-facing knob anywhere, and `web/engine/gpu-replay.js` has exactly
+one `context.configure` call, in `#configureSwapchain`, which every demo
+reaches. Falsifying this needs new public API rather than a demo doing something
+different, so the reasoning above holds structurally and needs no gate to keep
+it true. (The four `Format::Bgra8UnormSrgb` literals in `apps/*/src/art.rs` are
+not counter-examples: every one is inside a `#[cfg(test)]` fixture building a
+sprite pipeline on the null backend, where no surface is involved.)
 
 **What closing it properly would take**, recorded so the option is not
 re-derived: comparing each demo's canvas against the engine's own framebuffer
