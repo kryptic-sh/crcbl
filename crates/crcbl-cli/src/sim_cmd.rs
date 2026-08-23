@@ -5,7 +5,7 @@
 //!
 //! `docs/plan/11-cli-headless.md` puts the determinism half of its exit
 //! criterion behind this verb: "all sample CI determinism + golden-image checks
-//! run through the CLI". It used to be a binary of its own, `apps/sim`, which
+//! run through the CLI". It used to be a binary of its own, `crcbl-sim`, which
 //! meant the one pillar the topic exists to defend had a hole in it — a
 //! capability reachable only by building a second thing.
 //!

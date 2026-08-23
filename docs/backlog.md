@@ -151,6 +151,31 @@ those four groups would land in a run that is already red. Whoever picks it up
 starts by naming the local browser build and comparing it against the version
 the Pages job installs.
 
+### What `crcbl settings` does not do (2026-08-23)
+
+The verb reads and writes **scalars**. A list or a table already in a settings
+file is visible in `settings list` — typed `"other"`, its value the TOML text —
+and `settings get` refuses it with exit 1 rather than rendering it, while
+`settings set k "[1, 2]"` stores the _string_ `"[1, 2]"` because TOML's grammar
+types it as an array, which `Value::read` does not answer for.
+
+Closing it is two separate decisions, not one task:
+
+- **Reading one out** needs `crcbl-cli`'s `Json` to hold dynamic keys —
+  `Json::Object` takes `&'static str` today — or an array-of-records rendering
+  for nested tables. The human rendering has the same question.
+- **Writing one in** needs no new machinery at all: `Value` would gain the
+  variants and `SettingsStack::set` already takes anything `Serialize`. What it
+  needs is a decision about the spelling a shell hands over, since
+  `set k [1, 2]` and `set k "[1, 2]"` cannot both mean the array.
+
+Also owed, and smaller: `docs/plan/14-persistence.md`'s exit criterion
+("`crcbl save dump/diff` works on any save; settings scriptable via CLI") is now
+half met, and the `save` half is blocked on the RON reader decision recorded
+elsewhere in this file. And the default config path on Windows and macOS has no
+local verdict — `--config-dir` makes the suite hermetic everywhere, so only CI
+exercises `NativeStorage::config_root` on those two.
+
 ### What P8 actually still owes, measured
 
 The roadmap's P8 row reads "Phys slice 3: batch queries at scale, sleeping and
