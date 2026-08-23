@@ -310,6 +310,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   where a host application, a test harness or anything else owned the slot
   first, it reported `true` for a logger `log` had refused.
 
+- **`GpuContext::retire_to` no longer destroys a command buffer whose wait was
+  not satisfied.** `Device::wait_semaphores` answers `Ok(false)` for a wait it
+  did not satisfy — an outcome, not an error — and the result was discarded, so
+  the buffer was freed while the device might still have been reading it. It now
+  stays queued and the call reports `GpuError::Unusable`. `u64::MAX` did not
+  make this unreachable: the seam takes a timeout as a number, and the null
+  device answers from its recorded timeline without consulting it.
+
 ### Changed
 
 - **`percentile_of` and `MIN_PERCENTILE_SAMPLES` moved to `crcbl_core::stats`.**

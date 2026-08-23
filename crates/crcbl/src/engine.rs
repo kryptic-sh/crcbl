@@ -1868,9 +1868,27 @@ impl GpuContext {
     /// Waits for and destroys command buffers until at most `keep` are in
     /// flight.
     ///
+    /// # An unsatisfied wait stops the retirement
+    ///
+    /// [`Device::wait_semaphores`] returns `Ok(false)` for a wait that was not
+    /// satisfied, and the seam is explicit that this is an outcome rather than
+    /// an error. Destroying the command buffer anyway would free memory the
+    /// device may still be reading — the exact use-after-free the wait exists
+    /// to prevent — so an unsatisfied wait is reported and the buffer is put
+    /// back at the front of the queue, unretired, for a later call to wait on
+    /// again.
+    ///
+    /// `u64::MAX` does not make this unreachable. It means "no timeout" on the
+    /// APIs that have one, but the seam takes `timeout_ns` as a number and
+    /// `crcbl-hal`'s null device answers from the recorded timeline without
+    /// consulting it at all — so a value nothing has signalled comes back
+    /// `Ok(false)` there however long the caller asked to wait.
+    /// `crcbl_render::MeshPool::flush` treats the same answer the same way.
+    ///
     /// # Errors
     ///
-    /// [`GpuError`] if waiting failed.
+    /// [`GpuError`] if waiting failed, and [`GpuError::Unusable`] if a wait
+    /// completed without being satisfied.
     pub fn retire_to(&mut self, keep: usize) -> Result<(), GpuError> {
         while self.in_flight.len() > keep {
             let (value, command_buffer) = self
@@ -1879,8 +1897,20 @@ impl GpuContext {
                 .unwrap_or_else(|| unreachable!("the queue is non-empty above"));
             match self.timeline {
                 Some(semaphore) => {
-                    self.device
+                    let satisfied = self
+                        .device
                         .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?;
+                    if !satisfied {
+                        // Back where it came from, still owned and still
+                        // undestroyed: the caller may retry, and a buffer
+                        // dropped here would leak instead of being freed once
+                        // the timeline catches up.
+                        self.in_flight.push_front((value, command_buffer));
+                        return Err(GpuError::Unusable(
+                            "a command buffer's timeline wait finished unsatisfied, so the \
+                             device may still be reading it",
+                        ));
+                    }
                 }
                 // The Tier B fallback. Correct, and coarse enough that the log
                 // line in `open` exists to explain the frame rate.
@@ -8261,6 +8291,69 @@ mod tests {
         );
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// **A wait that finishes unsatisfied does not retire the buffer it was
+    /// waiting on.**
+    ///
+    /// `wait_semaphores` answers `Ok(false)` for a wait it did not satisfy, and
+    /// `retire_to` used to discard that `bool` and destroy the command buffer on
+    /// the next line — freeing memory the device may still be reading. `u64::MAX`
+    /// did not make it unreachable: the null device answers from its recorded
+    /// timeline and never looks at `timeout_ns`, which is exactly what this
+    /// fixture leans on.
+    ///
+    /// The queue is loaded directly rather than by rendering, because a frame
+    /// this engine submits signals the value it then waits for — there is no
+    /// sequence of public calls that leaves a value outstanding, which is why
+    /// the arm went unexercised.
+    #[test]
+    fn an_unsatisfied_wait_leaves_the_command_buffer_in_flight() {
+        use crcbl_hal::null::NullInstance;
+
+        let (_shell, mut gpu) = open_null_context(
+            NullInstance::gpu_driven(),
+            Features::TIMELINE_SEMAPHORE,
+            Pacing::Off,
+        );
+        let semaphore = gpu.timeline.expect("the preset carries a timeline");
+
+        // A value nothing has signalled. The device's timeline sits below it,
+        // so the wait completes and reports that it was not satisfied.
+        let command_buffer = gpu
+            .device
+            .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("never submitted"),
+                queue: gpu.queue,
+            })
+            .finish()
+            .expect("an empty encoder finishes");
+        let outstanding = u64::MAX / 2;
+        gpu.in_flight.push_back((outstanding, command_buffer));
+
+        let error = gpu
+            .retire_to(0)
+            .expect_err("the wait cannot be satisfied, so the buffer must not be retired");
+        assert!(
+            matches!(error, GpuError::Unusable(_)),
+            "an unsatisfied wait is not a HAL failure — the call succeeded and said no: {error:?}"
+        );
+        assert_eq!(
+            gpu.in_flight.front().map(|(value, _)| *value),
+            Some(outstanding),
+            "the buffer stays queued, still owned: dropping it here would leak it instead of \
+             freeing it once the timeline catches up"
+        );
+
+        // And the same call retires it once the timeline has reached the value,
+        // so the refusal is about *this* wait and not about the queue being
+        // non-empty.
+        gpu.device
+            .signal_semaphore(semaphore, outstanding)
+            .expect("the host can advance a timeline");
+        gpu.retire_to(0)
+            .expect("a satisfied wait retires the buffer");
+        assert!(gpu.in_flight.is_empty(), "nothing is left in flight");
     }
 
     /// Which present a frame waits for, without a GPU and without spending the
