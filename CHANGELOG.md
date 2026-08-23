@@ -325,6 +325,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   question of different numbers. `crcbl_ui::budget::MIN_PERCENTILE_SAMPLES` is
   now a re-export, so no caller changes.
 
+- **A simplified face can no longer turn past a right angle from the facing it
+  started with.** Flip rejection was per collapse, so a face could rotate all
+  the way round across a run of individually-accepted ones — measured at 16 such
+  faces on a spiked height field at half the triangles, and none after. The
+  check costs about 3% and is not gated on `debug_assertions`. It makes the
+  coarsest levels stall slightly sooner, which moved `clusters/dunes.dag` and
+  two pinned histograms; the quarry goldens render that DAG and are unchanged.
+
 - **The demo shim copies three buffers it used to hand a browser API directly,
   because a shared `WebAssembly.Memory` is refused where a plain one is not.**
   `readUtf8` in `web/engine/wasm.js`, the entropy seed in `web/engine/demo.js`

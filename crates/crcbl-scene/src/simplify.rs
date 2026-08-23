@@ -185,10 +185,13 @@ impl Simplified {
     /// **It is not a certified Hausdorff bound.** It measures the new vertex
     /// against accumulated planes, not the two surfaces against each other, and
     /// the quadric is known to understate error where a surface folds back on
-    /// itself. `docs/plan/25-lod.md`'s testing section wants a property test
-    /// asserting the reported error dominates a sampled Hausdorff distance;
-    /// that test does not exist yet and this number has not been shown to
-    /// satisfy it.
+    /// itself. What is checked is weaker than certification:
+    /// `the_reported_error_dominates_a_sampled_hausdorff_distance` measures a
+    /// two-sided Hausdorff distance between a level and its input by *sampling*
+    /// both surfaces and asserts this number dominates it. A sampled distance
+    /// is a lower bound on the true one, so that rules out an understatement
+    /// coarser than the sampling resolves and says nothing about anything
+    /// finer.
     ///
     /// Zero when no collapse happened.
     #[inline]
@@ -491,6 +494,11 @@ struct Decimator {
     /// merged into.
     incident: Vec<Vec<usize>>,
     quadrics: Vec<Quadric>,
+    /// The unit normal each face had in the *input*, or zero for a face that
+    /// arrived with no area. Parallel to `faces`, and never rewritten: it is
+    /// what [`Decimator::keeps_its_original_facing`] holds a face to across a
+    /// whole decimation rather than only across one collapse.
+    original_normals: Vec<DVec3>,
     alive: Vec<bool>,
     /// On a border or a non-manifold edge, or named by the caller, so never an
     /// endpoint of a collapse.
@@ -512,6 +520,16 @@ impl Decimator {
         let faces: Vec<Option<[u32; 3]>> = indices
             .chunks_exact(3)
             .map(|face| Some([face[0], face[1], face[2]]))
+            .collect();
+
+        let original_normals: Vec<DVec3> = indices
+            .chunks_exact(3)
+            .map(|face| {
+                let corners = [0, 1, 2].map(|corner| positions[face[corner] as usize]);
+                (corners[1] - corners[0])
+                    .cross(corners[2] - corners[0])
+                    .normalize_or_zero()
+            })
             .collect();
 
         let mut incident = vec![Vec::new(); positions.len()];
@@ -552,6 +570,7 @@ impl Decimator {
             faces,
             incident,
             quadrics,
+            original_normals,
             locked,
         }
     }
@@ -651,7 +670,9 @@ impl Decimator {
     ///   which gives that edge four faces — a fold, and a closed mesh that is
     ///   no longer closed by any edge count.
     /// - No surviving face may invert or become a sliver, which is
-    ///   `docs/plan/25-lod.md`'s degenerate/flip rejection.
+    ///   `docs/plan/25-lod.md`'s degenerate/flip rejection — measured both
+    ///   against the facing the face has right now and against the one it
+    ///   arrived with. See [`Self::survives`].
     fn collapse_allowed(&self, a: u32, b: u32, target: DVec3) -> bool {
         let (a, b) = (a as usize, b as usize);
         let shared = self.shared_faces(a, b);
@@ -665,31 +686,46 @@ impl Decimator {
         [a, b].into_iter().all(|v| {
             self.faces_of(v)
                 .filter(|(slot, _)| !shared.contains(slot))
-                .all(|(_, face)| self.survives(face, a, b, target))
+                .all(|(slot, face)| self.survives(slot, face, a, b, target))
         })
     }
 
-    /// Whether one face keeps its facing and its shape when `a` and `b` move to
-    /// `target`.
-    ///
-    /// **This is a per-collapse guard, not an invariant over the whole
-    /// decimation.** Each collapse is refused if it reverses a face, but
-    /// nothing stops a face turning a little under each of several collapses
-    /// until it has come all the way round. That is not hypothetical: pop the
-    /// heap in descending cost order instead of ascending and a face of the
-    /// `spikes` height field in the tests ends up facing `-Z` with every
-    /// individual collapse having passed this check. Keeping the *cheapest
-    /// first* order is what keeps each step small enough for the local test to
-    /// stand in for the global one.
-    fn survives(&self, face: [u32; 3], a: usize, b: usize, target: DVec3) -> bool {
-        let before = face.map(|index| self.positions[index as usize]);
-        let after = face.map(|index| {
+    /// Where `face`'s corners land once `a` and `b` have moved to `target`.
+    fn moved(&self, face: [u32; 3], a: usize, b: usize, target: DVec3) -> [DVec3; 3] {
+        face.map(|index| {
             if index as usize == a || index as usize == b {
                 target
             } else {
                 self.positions[index as usize]
             }
-        });
+        })
+    }
+
+    /// Whether one face keeps its shape and both of its facings when `a` and
+    /// `b` move to `target`.
+    ///
+    /// The two facings are different claims, and the second is why they are
+    /// both here. [`Self::survives_locally`] asks whether *this* collapse turns
+    /// the face over, which nothing else would catch — but a face can turn a
+    /// little under each of several individually-innocent collapses until it
+    /// has come all the way round, and that is not hypothetical: pop the heap
+    /// in descending cost order instead of ascending and, with only the local
+    /// guard, faces of the `spikes` height field end up opposing the normal
+    /// they arrived with — every single collapse having passed that guard.
+    /// [`Self::keeps_its_original_facing`] is the invariant over the whole
+    /// decimation that refuses those collapses, and
+    /// `a_face_cannot_turn_right_round_across_a_run_of_accepted_collapses`
+    /// drives that order and counts them.
+    fn survives(&self, slot: usize, face: [u32; 3], a: usize, b: usize, target: DVec3) -> bool {
+        self.survives_locally(face, a, b, target)
+            && self.keeps_its_original_facing(slot, face, a, b, target)
+    }
+
+    /// Whether one face keeps enough area to face anything, and keeps facing
+    /// the way it faces *now*.
+    fn survives_locally(&self, face: [u32; 3], a: usize, b: usize, target: DVec3) -> bool {
+        let before = face.map(|index| self.positions[index as usize]);
+        let after = self.moved(face, a, b, target);
 
         let old_normal = (before[1] - before[0]).cross(before[2] - before[0]);
         let new_normal = (after[1] - after[0]).cross(after[2] - after[0]);
@@ -707,6 +743,29 @@ impl Decimator {
         // A face that had no area to begin with faces nowhere, so there is no
         // orientation for the collapse to have reversed.
         old_normal.length_squared() == 0.0 || old_normal.dot(new_normal) > 0.0
+    }
+
+    /// Whether one face still faces the way the *input* had it facing.
+    ///
+    /// Held to the input's normal rather than to the previous collapse's, so it
+    /// is an invariant over the whole decimation: no accumulation of accepted
+    /// collapses can carry a face past a right angle from where it started, let
+    /// alone right round. Nothing rewrites `original_normals`, which is what
+    /// makes the reference fixed.
+    fn keeps_its_original_facing(
+        &self,
+        slot: usize,
+        face: [u32; 3],
+        a: usize,
+        b: usize,
+        target: DVec3,
+    ) -> bool {
+        let after = self.moved(face, a, b, target);
+        let normal = (after[1] - after[0]).cross(after[2] - after[0]);
+        let original = self.original_normals[slot];
+        // A face that arrived with no area faced nowhere, so the input gives no
+        // orientation to hold it to.
+        original == DVec3::ZERO || original.dot(normal) > 0.0
     }
 
     /// Merge `b` into `a` at `target`, and re-cost the edges that changed.
@@ -850,6 +909,136 @@ pub(crate) mod tests {
             .collect();
         bits.sort_unstable();
         bits
+    }
+
+    /// A triangle list as the two arrays [`simplify`] takes.
+    type Mesh<'a> = (&'a [[f32; 3]], &'a [u32]);
+
+    /// The exact distance from `point` to a triangle, its interior included.
+    ///
+    /// Christer Ericson, *Real-Time Collision Detection*, §5.1.5
+    /// `ClosestPtPointTriangle`: each branch is the exact Voronoi region of one
+    /// corner or one edge, and the fall-through is the face's own interior.
+    /// Written out rather than reduced to the distance to the triangle's
+    /// *plane*, which is what the quadric already measures — a sampled point's
+    /// nearest triangle is very often one it projects outside of, and there the
+    /// plane distance is arbitrarily smaller than the real one.
+    fn distance_to_triangle(point: DVec3, corners: [DVec3; 3]) -> f64 {
+        let [a, b, c] = corners;
+        let (ab, ac) = (b - a, c - a);
+
+        let ap = point - a;
+        let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return ap.length();
+        }
+        let bp = point - b;
+        let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+        if d3 >= 0.0 && d4 <= d3 {
+            return bp.length();
+        }
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            return (ap - ab * (d1 / (d1 - d3))).length();
+        }
+        let cp = point - c;
+        let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+        if d6 >= 0.0 && d5 <= d6 {
+            return cp.length();
+        }
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            return (ap - ac * (d2 / (d2 - d6))).length();
+        }
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+            return (bp - (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)))).length();
+        }
+
+        // Every branch above is an exact region test, so what is left is the
+        // interior and `va + vb + vc` is twice the triangle's area. A face with
+        // no area would divide by zero and hand back a NaN, which compares
+        // false against any bound and would read as a pass.
+        let denom = va + vb + vc;
+        assert!(denom > 0.0, "a face with no area at {a}, {b}, {c}");
+        (ap - (ab * vb + ac * vc) / denom).length()
+    }
+
+    /// How finely a triangle is sampled for [`sampled_hausdorff`]: the order of
+    /// the barycentric lattice [`surface_samples`] lays over each face.
+    ///
+    /// A lattice rather than random points because this module's contract is
+    /// determinism, and a sampled bound that moves between runs is one nobody
+    /// can act on when it fails. At this order each face contributes its three
+    /// corners, three interior points of each edge and six of its own interior,
+    /// so a face that bulges away from the other surface without any of its
+    /// corners doing so is still seen.
+    const SAMPLE_ORDER: usize = 4;
+
+    /// Every barycentric lattice point of every triangle of a mesh.
+    ///
+    /// Surface points rather than vertices alone, because the two surfaces are
+    /// closest at exactly the places a vertex sample would look: the quadric
+    /// puts each surviving vertex near the planes it came from, while the
+    /// middle of the long triangle spanning a removed bump is where the
+    /// surfaces are actually furthest apart.
+    fn surface_samples(mesh: Mesh<'_>) -> Vec<DVec3> {
+        let (positions, indices) = mesh;
+        let corner = |index: u32| DVec3::from(positions[index as usize].map(f64::from));
+        let mut samples = Vec::new();
+        for face in indices.chunks_exact(3) {
+            let corners = [corner(face[0]), corner(face[1]), corner(face[2])];
+            for i in 0..=SAMPLE_ORDER {
+                for j in 0..=SAMPLE_ORDER - i {
+                    let weights = [i, j, SAMPLE_ORDER - i - j];
+                    let point: DVec3 = std::iter::zip(corners, weights)
+                        .map(|(corner, weight)| corner * weight as f64)
+                        .sum();
+                    samples.push(point / SAMPLE_ORDER as f64);
+                }
+            }
+        }
+        samples
+    }
+
+    /// The largest distance from any lattice point of `from` to the nearest
+    /// point anywhere on `to`'s surface.
+    fn one_sided_hausdorff(from: Mesh<'_>, to: Mesh<'_>) -> f64 {
+        let (positions, indices) = to;
+        let corner = |index: u32| DVec3::from(positions[index as usize].map(f64::from));
+        let faces: Vec<[DVec3; 3]> = indices
+            .chunks_exact(3)
+            .map(|face| [corner(face[0]), corner(face[1]), corner(face[2])])
+            .collect();
+        assert!(!faces.is_empty(), "no surface to measure against");
+        surface_samples(from)
+            .into_iter()
+            .map(|point| {
+                faces
+                    .iter()
+                    .map(|&corners| distance_to_triangle(point, corners))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .fold(0.0f64, f64::max)
+    }
+
+    /// The symmetric sampled Hausdorff distance between two meshes.
+    ///
+    /// **A lower bound on the true Hausdorff distance, never an upper one.**
+    /// Each direction is the maximum over *finitely many* points of an exact
+    /// point-to-surface distance, so it can only miss a deviation, never invent
+    /// one. A test asserting a reported error dominates this therefore catches
+    /// an understatement only when the understatement is coarser than what
+    /// [`SAMPLE_ORDER`] resolves, and it does not certify the reported error
+    /// against anything finer.
+    ///
+    /// Symmetric because the two directions answer different questions and
+    /// neither dominates the other on these fixtures: `level → original` is how
+    /// far the drawn surface strays from the truth, `original → level` is how
+    /// much of the truth the drawn surface never reaches, and a torus
+    /// quartered has the second larger than the first.
+    fn sampled_hausdorff(first: Mesh<'_>, second: Mesh<'_>) -> f64 {
+        one_sided_hausdorff(first, second).max(one_sided_hausdorff(second, first))
     }
 
     /// A closed torus as a `major` × `minor` grid of quads, wrapped both ways.
@@ -1389,19 +1578,19 @@ pub(crate) mod tests {
         let mesh = Decimator::new(&positions, &[0, 1, 2]);
 
         assert!(
-            mesh.survives([0, 1, 2], 0, 0, v(0.2, 0.2, 0.0)),
+            mesh.survives(0, [0, 1, 2], 0, 0, v(0.2, 0.2, 0.0)),
             "a corner that stays on its own side keeps the face"
         );
         assert!(
-            !mesh.survives([0, 1, 2], 0, 0, v(1.0, 1.0, 0.0)),
+            !mesh.survives(0, [0, 1, 2], 0, 0, v(1.0, 1.0, 0.0)),
             "the corner crossed the opposite edge, so the normal reversed"
         );
         assert!(
-            !mesh.survives([0, 1, 2], 0, 0, v(0.5, 0.5, 0.0)),
+            !mesh.survives(0, [0, 1, 2], 0, 0, v(0.5, 0.5, 0.0)),
             "the corner landed on the opposite edge, so the face has no area"
         );
         assert!(
-            !mesh.survives([0, 1, 2], 0, 0, v(-1.0, 2.0, 0.0)),
+            !mesh.survives(0, [0, 1, 2], 0, 0, v(-1.0, 2.0, 0.0)),
             "collinear with the opposite edge however far along it"
         );
 
@@ -1418,7 +1607,7 @@ pub(crate) mod tests {
              test, got {normal}"
         );
         assert!(
-            !mesh.survives([0, 1, 2], 0, 0, sliver),
+            !mesh.survives(0, [0, 1, 2], 0, 0, sliver),
             "a face of no thickness is degenerate however it faces"
         );
     }
@@ -1490,6 +1679,184 @@ pub(crate) mod tests {
             fine.max_error()
         );
         assert!(fine.max_error() > 0.0);
+    }
+
+    /// The invariant [`Decimator::keeps_its_original_facing`] adds, driven on
+    /// the order that breaks the per-collapse one.
+    ///
+    /// [`simplify`] pops the *cheapest* live collapse each time, which keeps
+    /// every step small enough that [`Decimator::survives_locally`] stands in
+    /// for a global guard. This pops the most expensive instead, and there a
+    /// face turns a little under each of a run of collapses that the local
+    /// guard accepts one by one until it is facing backwards: with the global
+    /// check taken out, this fixture leaves faces whose normal opposes the one
+    /// they arrived with, and the count asserted below drops to zero.
+    ///
+    /// **The invariant is each face's own arrival orientation, not the sign of
+    /// one coordinate.** `spikes` is steep enough that its input faces are
+    /// already close to vertical, so a face still well inside a right angle of
+    /// where it started can point below the horizon — this run leaves height
+    /// field faces with a negative `z` normal whether the check is there or
+    /// not. A surface that stops being a height field is a different and looser
+    /// claim than a face that has turned over, and only the second is checked.
+    #[test]
+    fn a_face_cannot_turn_right_round_across_a_run_of_accepted_collapses() {
+        let (positions, indices) = height_field(16, spikes);
+        let target = indices.len() / 3 / 2;
+        let mut mesh = Decimator::new(&positions, &indices);
+        let mut pending: Vec<Candidate> = mesh
+            .initial_candidates()
+            .drain()
+            .map(|entry| entry.0)
+            .collect();
+        let mut refused_only_globally = 0usize;
+
+        while mesh.live_faces > target {
+            // Ascending by cost, so taking from the back takes the dearest.
+            pending.sort_unstable();
+            let mut chosen = None;
+            while let Some(candidate) = pending.pop() {
+                if !mesh.is_current(&candidate) {
+                    continue;
+                }
+                let [lo, hi] = candidate.edge;
+                if mesh.collapse_allowed(lo, hi, candidate.target) {
+                    chosen = Some(candidate);
+                    break;
+                }
+                // Everything `collapse_allowed` tests, minus the global half:
+                // if all of this holds and it still refused, the face's arrival
+                // orientation is what refused it and nothing else did.
+                let (a, b) = (lo as usize, hi as usize);
+                let shared = mesh.shared_faces(a, b);
+                let common = mesh.neighbours(a).intersection(&mesh.neighbours(b)).count();
+                let locally_fine = [a, b].into_iter().all(|vertex| {
+                    mesh.faces_of(vertex)
+                        .filter(|(slot, _)| !shared.contains(slot))
+                        .all(|(_, face)| mesh.survives_locally(face, a, b, candidate.target))
+                });
+                if shared.len() == 2 && common == 2 && locally_fine {
+                    refused_only_globally += 1;
+                }
+            }
+            let Some(candidate) = chosen else { break };
+            let [lo, hi] = candidate.edge;
+            let mut fresh = BinaryHeap::new();
+            mesh.collapse(lo, hi, candidate.target, candidate.cost, &mut fresh);
+            pending.extend(fresh.drain().map(|entry| entry.0));
+        }
+
+        assert_eq!(
+            mesh.live_faces, target,
+            "the decimation has to have run to the target for the rest to mean \
+             anything"
+        );
+        assert!(
+            refused_only_globally > 0,
+            "no collapse was refused by the global check alone, so this order \
+             is not exercising it and the loop below would pass with the check \
+             deleted"
+        );
+        for (slot, face) in mesh
+            .faces
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, face)| Some((slot, (*face)?)))
+        {
+            let corners = face.map(|index| mesh.positions[index as usize]);
+            let normal = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+            assert!(
+                mesh.original_normals[slot].dot(normal) > 0.0,
+                "face {slot} at {corners:?} has turned past a right angle from \
+                 the facing it arrived with, one accepted collapse at a time"
+            );
+        }
+    }
+
+    /// Every distance is worked out from the geometry rather than read off a
+    /// run, and each lands in a different one of §5.1.5's regions.
+    #[test]
+    fn the_distance_to_a_triangle_is_measured_to_its_nearest_point() {
+        let unit = [v(0.0, 0.0, 0.0), v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0)];
+
+        // Not exactly zero: the interior branch rebuilds the closest point
+        // from barycentric weights, so a point on the face comes back within
+        // rounding of itself rather than at it.
+        assert!(distance_to_triangle(v(0.2, 0.3, 0.0), unit) < 1e-15);
+        assert_eq!(
+            distance_to_triangle(v(1.0, 0.0, 0.0), unit),
+            0.0,
+            "a corner is its own nearest point exactly"
+        );
+        // Straight above an interior point, so the face's own interior.
+        assert!((distance_to_triangle(v(0.25, 0.25, 2.0), unit) - 2.0).abs() < 1e-15);
+        // Out past the hypotenuse: its nearest point is (0.5, 0.5, 0), which is
+        // interior to that edge, so the distance is |(1.5, 1.5, 0)|.
+        assert!(
+            (distance_to_triangle(v(2.0, 2.0, 0.0), unit) - (2.0 * 1.5 * 1.5f64).sqrt()).abs()
+                < 1e-15
+        );
+        // Beside the a–b edge, and beside the a–c edge.
+        assert!((distance_to_triangle(v(0.5, -1.0, 0.0), unit) - 1.0).abs() < 1e-15);
+        assert!((distance_to_triangle(v(-3.0, 0.5, 0.0), unit) - 3.0).abs() < 1e-15);
+        // Out past a corner, where neither edge's region reaches.
+        assert!((distance_to_triangle(v(-1.0, -1.0, 0.0), unit) - 2.0f64.sqrt()).abs() < 1e-15);
+
+        // The whole reason this is not a plane distance: the point is *in* the
+        // triangle's plane and four units from the triangle.
+        assert!((distance_to_triangle(v(5.0, 0.0, 0.0), unit) - 4.0).abs() < 1e-15);
+    }
+
+    /// `docs/plan/25-lod.md`'s testing section: the reported error dominates a
+    /// sampled Hausdorff distance between the level and the mesh it came from.
+    ///
+    /// **This does not certify [`Simplified::max_error`] as a Hausdorff bound**
+    /// and the doc comment there still says so. [`sampled_hausdorff`] is a
+    /// lower bound on the true distance, so what this rules out is the reported
+    /// error understating the deviation by more than the sampling resolves —
+    /// which is the failure that would make runtime LOD selection swap in a
+    /// level that visibly pops. It is the check the plan asks for, at the
+    /// strength a sampled measurement can carry.
+    ///
+    /// All three fixtures are curved, and deliberately: the sampled distance is
+    /// computed from `f32` positions, so on a mesh that decimates for free the
+    /// two numbers being compared are both rounding noise. Here the smallest
+    /// sampled distance is five orders of magnitude above that noise, so the
+    /// comparison is between two real quantities.
+    #[test]
+    fn the_reported_error_dominates_a_sampled_hausdorff_distance() {
+        let (torus_positions, torus_indices) = torus(8, 6);
+        let (dune_positions, dune_indices) = height_field(10, dunes);
+        // The tightest of the three by a wide margin, which is what earns it a
+        // place: `spikes` is the fixture built to be adversarial, and halving
+        // it is where the reported error comes closest to the measured one.
+        let (spike_positions, spike_indices) = height_field(16, spikes);
+
+        for (mesh, divisor) in [
+            ((torus_positions.as_slice(), torus_indices.as_slice()), 4),
+            ((dune_positions.as_slice(), dune_indices.as_slice()), 2),
+            ((spike_positions.as_slice(), spike_indices.as_slice()), 2),
+        ] {
+            let triangles = mesh.1.len() / 3;
+            let level = simplify(mesh.0, mesh.1, triangles / divisor).unwrap();
+            assert_eq!(
+                level.indices().len() / 3,
+                triangles / divisor,
+                "the decimation has to have happened for the comparison to mean anything"
+            );
+
+            let sampled = sampled_hausdorff((level.positions(), level.indices()), mesh);
+            assert!(
+                sampled > 0.0,
+                "the two surfaces are identical, so nothing is being bounded"
+            );
+            assert!(
+                f64::from(level.max_error()) >= sampled,
+                "a {triangles}-triangle mesh at 1/{divisor} reports {} but the \
+                 two surfaces are {sampled} apart",
+                level.max_error(),
+            );
+        }
     }
 
     #[test]

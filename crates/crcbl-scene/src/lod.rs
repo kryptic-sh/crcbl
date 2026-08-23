@@ -443,19 +443,22 @@ mod tests {
             .iter()
             .map(|&ratio| target_triangles(base, ratio))
             .collect();
-        assert_eq!(counts, [1152, 576, 288, 144, 96]);
+        assert_eq!(counts, [1152, 576, 288, 144, 100]);
         assert_eq!(targets, [576, 288, 144, 72]);
         assert!(
             counts[4] > targets[3],
             "the fixture has to overshoot for this test to say anything"
         );
-        // Where the coarsest level stops is exactly the locked border: the
-        // outer ring of a 24 x 24 patch is 96 vertices, one interior vertex
-        // survives, and a triangulated polygon with `n` boundary and `k`
-        // interior vertices has `2k + n - 2` faces.
+        // Where the coarsest level stops is the locked border and then
+        // `Decimator::keeps_its_original_facing`: the outer ring of a 24 x 24
+        // patch is 96 vertices and can never go, three interior vertices
+        // survive because the collapses that would remove them are refused by
+        // that check, and a triangulated polygon with `n` boundary and `k`
+        // interior vertices has `2k + n - 2` faces. Without the check the same
+        // chain bottoms out at one interior vertex.
         let border = 96;
         let interior = chain[4].positions().len() - border;
-        assert_eq!(interior, 1);
+        assert_eq!(interior, 3);
         assert_eq!(counts[4], 2 * interior + border - 2);
         assert_levels_got_coarser(&chain);
         for pair in chain.windows(2) {

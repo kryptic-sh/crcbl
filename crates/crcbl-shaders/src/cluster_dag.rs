@@ -1987,8 +1987,8 @@ mod tests {
     /// here that has no derivation to check it against — a change in it is a
     /// change in what the model shows, and has to be looked at rather than
     /// absorbed.
-    const NEAR_HISTOGRAM: &[(usize, usize)] = &[(0, 13), (1, 12)];
-    const FAR_HISTOGRAM: &[(usize, usize)] = &[(2, 15)];
+    const NEAR_HISTOGRAM: &[(usize, usize)] = &[(0, 13), (1, 11)];
+    const FAR_HISTOGRAM: &[(usize, usize)] = &[(2, 13)];
 
     /// Where the near third of the patch ends and the far third begins, along
     /// the axis running away from [`EYES`]`[0]`. The middle third is left out of
