@@ -676,7 +676,7 @@ impl Instance for Dx12Instance {
                 return never("a CAMetalLayer is crcbl-mtl's target, not D3D12's");
             }
             SurfaceTarget::Web { .. } => {
-                return never("a canvas is crcbl-wgpu's target, not D3D12's");
+                return never("a canvas is crcbl-webgpu's target, not D3D12's");
             }
         };
 

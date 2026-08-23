@@ -484,7 +484,7 @@ impl MetalInstance {
             }
             SurfaceTarget::Web { .. } => {
                 return Err(Self::not_yet(
-                    "canvas surfaces — a canvas is crcbl-wgpu's target, not Metal's",
+                    "canvas surfaces — a canvas is crcbl-webgpu's target, not Metal's",
                 ));
             }
         };

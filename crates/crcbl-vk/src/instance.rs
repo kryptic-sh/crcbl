@@ -779,7 +779,7 @@ impl Instance for VkInstance {
             SurfaceTarget::Win32 { .. } => return unsupported("Win32 surfaces land at P14"),
             SurfaceTarget::AppKit { .. } => return unsupported("AppKit surfaces land at P14"),
             SurfaceTarget::Web { .. } => {
-                return unsupported("a canvas is crcbl-wgpu's target, not Vulkan's");
+                return unsupported("a canvas is crcbl-webgpu's target, not Vulkan's");
             }
         };
 
