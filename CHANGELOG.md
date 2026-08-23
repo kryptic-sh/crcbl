@@ -301,6 +301,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   holds the browser's own refusal of a `'timestamp'` query set against the
   probe's answer, so a device without the feature cannot report as covered.
 
+### Fixed
+
+- **`crcbl_core::log::is_installed` no longer claims an install that was
+  rejected.** It answered "did this module build a logger", and
+  `try_init_logging` has to build one before offering it to `log::set_logger` —
+  which takes a `&'static dyn Log`, so there is no other order. On a process
+  where a host application, a test harness or anything else owned the slot
+  first, it reported `true` for a logger `log` had refused.
+
 ### Changed
 
 - **`percentile_of` and `MIN_PERCENTILE_SAMPLES` moved to `crcbl_core::stats`.**

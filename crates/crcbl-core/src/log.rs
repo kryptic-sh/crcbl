@@ -63,6 +63,7 @@ use std::env;
 use std::fmt;
 use std::io::Write as _;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
@@ -408,6 +409,21 @@ macro_rules! trace {
 /// leaks nothing.
 static LOGGER: OnceLock<StderrLogger> = OnceLock::new();
 
+/// Whether [`LOGGER`] is the logger the `log` crate is actually calling.
+///
+/// Separate from `LOGGER.get().is_some()`, which answers a different question
+/// and was what [`is_installed`] used to read. [`try_init_logging`] has to
+/// build the logger *before* offering it to `log::set_logger`, which takes a
+/// `&'static dyn Log` — so on a process where a host application already owns
+/// the slot, `LOGGER` is initialised and then rejected, and the old answer
+/// reported an install that did not happen.
+///
+/// `Relaxed` is enough in both directions: this flag publishes no data. The
+/// logger itself is published by `OnceLock` and by `log::set_logger`'s own
+/// synchronisation, so a caller that reads `true` here and then logs is
+/// ordered by those, not by this.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
 /// Installs the stderr logger using the filter from `CRCBL_LOG`.
 ///
 /// Idempotent and never fatal: if a logger is already installed (a host
@@ -430,6 +446,7 @@ pub fn try_init_logging(filter: Filter) -> Result<(), SetLoggerError> {
         start: Instant::now(),
     });
     ::log::set_logger(logger)?;
+    INSTALLED.store(true, Ordering::Relaxed);
     ::log::set_max_level(logger.filter.max_level());
     // Only the winner of the race writes it, so a second `init_logging` does not
     // claim the run restarted.
@@ -501,9 +518,19 @@ const fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// Whether this module installed the process logger.
+///
+/// `false` when a host application, a test harness or anything else won the
+/// process's single logger slot first — this module built a logger in that case
+/// and `log` never took it, so nothing it emits reaches this one's filter or
+/// its stderr.
+///
+/// Deliberately not "did this module build a logger", which answers a different
+/// question: [`try_init_logging`] has to build one before offering it to
+/// `log::set_logger`, so on a process where somebody else won, that check
+/// reports an install that was rejected.
 #[must_use]
 pub fn is_installed() -> bool {
-    LOGGER.get().is_some()
+    INSTALLED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +831,82 @@ mod tests {
                 .build(),
         );
         logger.flush();
+    }
+
+    /// The environment variable that tells the re-executed test binary it is
+    /// the child of [`a_host_owning_the_slot_means_this_module_installed_nothing`].
+    const HOST_SLOT_CHILD: &str = "CRCBL_LOG_HOST_SLOT_CHILD";
+
+    /// **A host that owns the logger slot first means this module installed
+    /// nothing, and [`is_installed`] has to say so.**
+    ///
+    /// The answer used to be `LOGGER.get().is_some()`, and `try_init_logging`
+    /// builds that logger before offering it to `log::set_logger` — which takes
+    /// a `&'static dyn Log`, so there is no other order. On a process where the
+    /// host won, the old answer was `true` for a logger `log` had rejected: a
+    /// caller checking before deciding whether to route its own diagnostics
+    /// here would have been told yes and then dropped them.
+    ///
+    /// # Why a child process
+    ///
+    /// The logger slot is per process and settable once, so this test and
+    /// `installing_the_logger_is_idempotent` cannot both have it — and under a
+    /// plain `cargo test`, which runs a crate's unit tests as threads in one
+    /// binary, whichever ran second would fail on the other's install. The
+    /// child gets a slot nobody has touched. This is `trace.rs`'
+    /// `the_environment_variable_is_what_turns_the_gate_on` pattern, including
+    /// the check that the child actually ran a test.
+    #[test]
+    #[cfg_attr(miri, ignore = "miri cannot spawn the child process this needs")]
+    fn a_host_owning_the_slot_means_this_module_installed_nothing() {
+        if env::var(HOST_SLOT_CHILD).is_ok() {
+            /// Somebody else's logger, minimal and doing nothing: what is being
+            /// checked is who owns the slot, not what the owner does with it.
+            struct HostLogger;
+            impl Log for HostLogger {
+                fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+                    false
+                }
+                fn log(&self, _record: &Record<'_>) {}
+                fn flush(&self) {}
+            }
+            static HOST: HostLogger = HostLogger;
+
+            assert!(!is_installed(), "nothing has installed anything yet");
+            ::log::set_logger(&HOST).expect("the host wins the empty slot");
+
+            assert!(
+                try_init_logging(Filter::parse("trace")).is_err(),
+                "the slot is taken, so this must not claim it"
+            );
+            assert!(
+                !is_installed(),
+                "log::set_logger rejected this module's logger, so it is not installed, \
+                 whatever LOGGER holds"
+            );
+            assert!(!init_logging(), "the convenience form agrees");
+            assert!(!is_installed());
+            return;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("a test binary knows its own path"),
+        )
+        .args([
+            "--exact",
+            "log::tests::a_host_owning_the_slot_means_this_module_installed_nothing",
+        ])
+        .env(HOST_SLOT_CHILD, "1")
+        .output()
+        .expect("re-running this test binary");
+        let report = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "the child failed:\n{report}");
+        // `--exact` with a name that matches nothing exits zero, so without this
+        // the whole test passes vacuously the moment it is renamed.
+        assert!(
+            report.contains("1 passed"),
+            "the child ran no test — has this one been renamed?\n{report}"
+        );
     }
 
     /// Installs the process logger. Each nextest test runs in its own process,
