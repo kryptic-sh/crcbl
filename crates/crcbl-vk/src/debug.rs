@@ -167,8 +167,8 @@ impl ValidationReport {
 /// The shared side table the messenger writes into.
 ///
 /// An [`Arc`] rather than a global: two instances in one process (the seam's
-/// `dyn` decision exists so `crcbl-vk` and `crcbl-wgpu` can coexist, and a test
-/// may well open two Vulkan instances) must not pollute each other's report.
+/// `dyn` decision exists so two backends can coexist, and a test may well open
+/// two Vulkan instances) must not pollute each other's report.
 /// The pointer is handed to the driver as the messenger's `pUserData`, which is
 /// why it is leaked and reclaimed explicitly rather than borrowed.
 #[derive(Clone, Debug, Default)]

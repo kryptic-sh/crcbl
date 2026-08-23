@@ -1154,9 +1154,9 @@ pub enum Command {
     ///
     /// **WebGPU has no valued device-side fill.** Its `clearBuffer` zeroes and
     /// nothing else, so `value == 0` maps to `clearBuffer(buffer, offset, size)`
-    /// and any other value is a write the replayer refuses to the error queue —
-    /// the same judgement the `crcbl-wgpu` backend makes. The value crosses
-    /// verbatim so the refusal happens where the target is, not at the encoder.
+    /// and any other value is a write the replayer refuses to the error queue.
+    /// The value crosses verbatim so the refusal happens where the target is,
+    /// not at the encoder.
     ClearBuffer {
         /// Buffer zeroed.
         buffer: BufferHandle,

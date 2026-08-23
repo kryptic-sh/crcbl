@@ -923,7 +923,7 @@ fn zero_probes_only_remove_the_ssr_and_rough_fallbacks() {
 /// actually differed. Both are asserted to open the same adapter, and the
 /// selectors they resolve to are asserted to differ **exactly when that adapter
 /// offers one of the flags [`BELOW`] withholds**. A device already at the floor
-/// of both axes — a software rasteriser, `crcbl-wgpu` — is a legitimate run of
+/// of both axes — a software rasteriser, for instance — is a legitimate run of
 /// this test, and the printed line and that assertion are what keep it from
 /// being a silent one.
 ///

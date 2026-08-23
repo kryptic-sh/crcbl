@@ -2794,7 +2794,7 @@ impl Device for VkDevice {
         let entry = lookup_mut(&mut state.swapchains, "swapchain", swapchain, &inner)?;
 
         if entry.is_offscreen() {
-            // The implicit-acquire shape, which is also `crcbl-wgpu`'s: no
+            // The implicit-acquire shape, which is also `crcbl-webgpu`'s: no
             // semaphores, and the caller's `Option::as_slice()` splices nothing.
             // The reuse dependency is not established here. Blocking the host
             // until the previous trip round the ring retired was tried and is

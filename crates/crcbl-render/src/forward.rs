@@ -8798,8 +8798,8 @@ mod tests {
     /// flight, a count afterwards, and a `cull_frame` naming a frame several
     /// behind the one just recorded. The null backend executes no copy, so the
     /// *value* here is the full-screen passes' own draws and nothing else — what the cull
-    /// really kept is asserted against a real GPU, in `crcbl-vk`'s and
-    /// `crcbl-wgpu`'s end-to-end suites, where a scene is culled on purpose.
+    /// really kept is asserted against a real GPU, in the umbrella crate's
+    /// `tests/draw_gen_e2e/`, where a scene is culled on purpose.
     ///
     /// The frame number is the assertion with teeth here: a ring that read the
     /// slot it had just written would report the frame it is on, and a

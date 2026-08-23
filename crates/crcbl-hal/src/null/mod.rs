@@ -8,7 +8,7 @@
 //!    build. `docs/plan/01-foundations.md` calls exactly this out as the slice's
 //!    deliverable check.
 //! 2. **Be the substrate for the graph-compile suite.** `docs/plan/12-testing.md`
-//!    assigns `crcbl-hal`/`crcbl-vk`/`crcbl-wgpu` a "graph-compile unit suite on
+//!    assigns `crcbl-hal`/`crcbl-vk`/`crcbl-webgpu` a "graph-compile unit suite on
 //!    NullBackend"; the render graph that lands at P1 compiles its pass list
 //!    against this backend in CI, with no GPU and no window.
 //! 3. **Answer questions about a frame.** Every call is recorded, so a test can
@@ -67,7 +67,8 @@
 //! `draw_indirect_count`, no buffer device address, no push constants, no
 //! timeline semaphores, and an implicit swapchain acquire. They are two points
 //! in the capability space rather than two tiers, and running the same renderer
-//! code against both is how degradation gets tested before `crcbl-wgpu` exists.
+//! code against both is how degradation gets tested before `crcbl-webgpu` runs
+//! in a browser.
 //!
 //! ```
 //! use crcbl_hal::null::{NullInstance, Recorder};
@@ -241,7 +242,7 @@ impl NullInstance {
     /// semaphores, and — the shape that matters most — an **implicit swapchain
     /// acquire**, so [`AcquiredFrame`] comes back with no semaphores at all.
     /// Every selector lands on its lowest value here. Renderer code that works
-    /// against both presets works against `crcbl-vk` and `crcbl-wgpu`.
+    /// against both presets works against `crcbl-vk` and `crcbl-webgpu`.
     #[must_use]
     pub fn portable() -> Self {
         let mut instance = Self::new(DeviceCaps {

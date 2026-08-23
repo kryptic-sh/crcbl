@@ -232,9 +232,9 @@ struct Slot {
     /// The [`MemoryLocation::HostReadback`] buffer the copy pass writes into.
     ///
     /// One per slot rather than one buffer with per-slot offsets, because a
-    /// readback is a mapping: WebGPU maps a buffer once, and `crcbl-wgpu`
-    /// refuses a second request against a buffer that already has one in
-    /// flight. A ring is exactly the shape that has several in flight.
+    /// readback is a mapping: WebGPU maps a buffer once, so a buffer with a map
+    /// already in flight cannot take a second. A ring is exactly the shape that
+    /// has several in flight.
     buffer: BufferHandle,
     /// What the **last frame that used this slot** left the buffer in, and what
     /// [`CullStatsRing::add_copy_pass`] imports it as.

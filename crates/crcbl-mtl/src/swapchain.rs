@@ -74,7 +74,7 @@
 //! nothing for a semaphore to represent, so this backend creates none and
 //! [`AcquiredFrame::acquire_semaphore`] and
 //! [`AcquiredFrame::present_semaphore`] are both `None` — the implicit-acquire
-//! shape the seam documents for `crcbl-wgpu`, and the reason it made them
+//! shape the seam documents for `crcbl-webgpu`, and the reason it made them
 //! `Option`s at all. MTL3's rule is therefore never engaged rather than worked
 //! around, and no seam change is needed.
 //!
@@ -667,7 +667,7 @@ impl MetalDevice {
                 SwapchainTarget::Layer { .. } => None,
             };
             if let Some((image, view)) = ring {
-                // The implicit-acquire shape, which is also `crcbl-wgpu`'s: no
+                // The implicit-acquire shape, which is also `crcbl-webgpu`'s: no
                 // semaphores, so the caller's `Option::as_slice()` splices
                 // nothing. Nothing orders the reuse of a ring image either, and
                 // on Metal nothing has to — every texture here is
@@ -2266,8 +2266,7 @@ mod tests {
         let present_wait = Duration::from_millis(160);
 
         // More cycles than the layer has drawables: a backend that never gives
-        // one back blocks here rather than finishing, which is the failure
-        // `crcbl-wgpu`'s own e2e docs describe.
+        // one back blocks here rather than finishing.
         let mut previous = None;
         for cycle in 0..(MAX_LAYER_DRAWABLES + 2) {
             let frame = device

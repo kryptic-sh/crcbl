@@ -27,7 +27,7 @@
 //! * `crcbl-vk` returns `Some(..)` for both. The renderer splices
 //!   `acquire_semaphore` into its submit's waits and `present_semaphore` into
 //!   its signals.
-//! * `crcbl-wgpu` returns `None` for both. The same renderer code splices
+//! * `crcbl-webgpu` returns `None` for both. The same renderer code splices
 //!   nothing.
 //!
 //! The renderer is written once, with no per-backend branch, and the WebGPU
@@ -75,7 +75,7 @@
 //! knows), and is deliberately `0xFFFFFFFF, 0xFFFFFFFF` on Wayland, which means
 //! "you choose — the compositor is not going to tell you". WebGPU has no such
 //! query at all. A seam that left this unstated would get one answer from
-//! `crcbl-vk` and a different one from `crcbl-wgpu`, and the bug would look
+//! `crcbl-vk` and a different one from `crcbl-webgpu`, and the bug would look
 //! like a window that renders at the wrong size on exactly one backend.
 //!
 //! ## What P1.1 changed, and why

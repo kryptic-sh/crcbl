@@ -1561,10 +1561,10 @@ fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
 fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
     let headless = Headless::open();
     let device = headless.device.as_ref();
-    // Not a skip. `Features::COMPUTE` exists for a wgpu fallback that has no
-    // compute at all; a device that opened a graphics queue and reports no
-    // compute on any other backend is a capability-reporting bug, not a machine
-    // to tiptoe around.
+    // Not a skip. `Features::COMPUTE` exists so a device without compute can
+    // say so; a device that opened a graphics queue and reports no compute on
+    // any real backend is a capability-reporting bug, not a machine to tiptoe
+    // around.
     assert!(
         device.caps().features.contains(Features::COMPUTE),
         "this device reports no compute; caps say {:?}",
@@ -1855,8 +1855,8 @@ fn write_buffer_writes_host_visible_memory_and_refuses_what_it_cannot_map() {
 /// `size: 0` and `crcbl-vk` serves it, and the seam is on Vulkan's side:
 /// [`Device::request_readback`] promises
 /// [`HalError::InvalidDescriptor`](crcbl::hal::HalError::InvalidDescriptor)
-/// for a range that is *out of bounds*, and an empty range is in bounds. wgpu's
-/// extra strictness comes from `mapAsync`, so it stays in wgpu's own suite.
+/// for a range that is *out of bounds*, and an empty range is in bounds. That
+/// extra strictness came from `mapAsync`, and it went with the crate.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
 fn a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking() {
@@ -2336,9 +2336,9 @@ fn exercise_timeline(headless: &Headless, claim: TimelineClaim) -> Exercise {
 /// # What each outcome means
 ///
 /// * [`Exercise::Refused`] — either `create_semaphore` would not hand out a
-///   timeline, or the backend has no host signal for one. `crcbl-wgpu` is the
-///   second case: its counter is a record of what each submission will have
-///   completed, so there is no object to signal.
+///   timeline, or the backend has no host signal for one. `crcbl-webgpu` is the
+///   first case: `create_semaphore` refuses a timeline outright, because WebGPU
+///   orders submissions implicitly and `onSubmittedWorkDone` carries no value.
 /// * [`Exercise::SilentlyIgnored`] — the call returned `Ok` and the counter did
 ///   not move, which is the shape this whole mechanism exists to separate from a
 ///   working call.
@@ -2471,8 +2471,8 @@ fn exercise_cpu_timeline_signal(headless: &Headless) -> Exercise {
 /// # What each outcome means
 ///
 /// * [`Exercise::Refused`] — no timeline, no host signal, or the backend refuses
-///   the wait itself. `crcbl-wgpu` refuses twice over: its timeline is
-///   per-submission completion, so there is nothing to signal and nothing for a
+///   the wait itself. `crcbl-webgpu` refuses at the first step: it hands out no
+///   timeline at all, so there is nothing to signal and nothing for a
 ///   queue-side wait to block on.
 /// * [`Exercise::SilentlyIgnored`] — the wait was accepted, the gate was opened,
 ///   and the submission's own signal never arrived inside the deadline.
@@ -3226,8 +3226,8 @@ const MSAA_RESOLVE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// Samples the multisampled colour target carries.
 ///
 /// Four, which is the multisample level every backend on this seam reports —
-/// `crcbl-wgpu` answers a flat `max_sample_count: 4`, and `crcbl-vk` intersects
-/// the three `VkPhysicalDeviceLimits` sample masks that matter. The exercise
+/// `crcbl-vk`, for one, intersects the three `VkPhysicalDeviceLimits` sample
+/// masks that matter. The exercise
 /// reads [`crcbl::hal::Limits::max_sample_count`] rather than assuming it, and
 /// says so instead of running, on a device that reports less.
 const MSAA_RESOLVE_SAMPLES: u32 = 4;
@@ -3722,8 +3722,8 @@ const STENCIL_READ_MASK: u32 = 0xFF;
 ///
 /// A backend may refuse through the return value or through
 /// [`Device::take_error`] — `crcbl-mtl` uses the first for this case and
-/// `crcbl-wgpu` the second, routing a bad format to the uncaptured-error
-/// handler and returning a live-looking handle anyway. Reading one channel
+/// `crcbl-webgpu` the second, returning a live-looking handle and letting the
+/// replayer's error scope carry the refusal. Reading one channel
 /// would score one of them wrong, which is why the raster fixture reads both
 /// and why this does.
 #[test]
@@ -3866,9 +3866,9 @@ fn a_created_image_is_one_the_device_can_serve() {
 /// has: radv reports `D24_UNORM_S8_UINT` with no
 /// `DEPTH_STENCIL_ATTACHMENT` format feature at all, and Metal's
 /// `isDepth24Stencil8PixelFormatSupported` answers no on Apple silicon.
-/// [`Format::D24UnormS8Uint`] is second and exists for wgpu, which is the
-/// mirror image: `Depth24PlusStencil8` is core there and `Depth32FloatStencil8`
-/// is behind a feature `crcbl-wgpu` does not enable.
+/// [`Format::D24UnormS8Uint`] is second and exists for WebGPU, which is the
+/// mirror image: `depth24plus-stencil8` is core there and
+/// `depth32float-stencil8` is an optional feature.
 const STENCIL_FORMATS: [Format; 2] = [Format::D32FloatS8Uint, Format::D24UnormS8Uint];
 
 /// Why [`exercise_stencil_reference`] declines a device that will make neither
@@ -4355,9 +4355,8 @@ impl Raster {
     /// # Errors
     ///
     /// Whatever `finish` returned. That is where a refusal this seam's encoders
-    /// defer surfaces — `crcbl-wgpu`'s padded-stride refusal is recorded at the
-    /// call and reported here — so the caller reads it as
-    /// [`Exercise::Refused`] rather than losing it.
+    /// defer surfaces, so the caller reads it as [`Exercise::Refused`] rather
+    /// than losing it.
     fn render_target(
         &self,
         headless: &Headless,
@@ -5107,8 +5106,8 @@ fn exercise_push_constants(headless: &Headless) -> Exercise {
 /// [`Capability::PushConstants`] is the one capability whose refusal the seam
 /// pins to a *place*: `crcbl_hal::pipeline` requires
 /// [`PipelineLayoutDesc::push_constants`](crcbl::hal::PipelineLayoutDesc) to fail
-/// at layout creation rather than have the writes dropped later. Three backends
-/// do exactly that today — `crcbl-mtl`, `crcbl-dx12` and `crcbl-wgpu` all return
+/// at layout creation rather than have the writes dropped later. `crcbl-mtl`
+/// and `crcbl-dx12` do exactly that today — both return
 /// [`HalError::Unsupported`] from `create_pipeline_layout`. But a backend that
 /// gains the range and not the write would refuse at pipeline creation, and one
 /// that defers its errors would refuse at
@@ -6066,8 +6065,8 @@ fn update_bind_group_dispatch(
 /// `create_bind_group_layout` is the first, and it is where the flag is judged.
 /// `create_bind_group` and `create_pipeline_layout` follow, because a backend
 /// that gained the layout and not the group would refuse there.
-/// `update_bind_group` itself is the fourth and is where `crcbl-wgpu` and
-/// `crcbl-webgpu` land, both of them on immutable WebGPU bind groups. A backend
+/// `update_bind_group` itself is the fourth and is where `crcbl-webgpu` lands,
+/// on immutable WebGPU bind groups. A backend
 /// that defers its errors would refuse at
 /// [`finish`](crcbl::hal::CommandEncoder::finish) instead, which
 /// [`update_bind_group_dispatch`] returns rather than unwrapping. All of them
@@ -7287,11 +7286,9 @@ fn bindless_expected() -> Vec<u32> {
 /// [`BindingFlags`](crcbl::hal::BindingFlags) here and no longer does: it binds
 /// the table as a Metal argument buffer of device addresses, and refuses only
 /// the flags it genuinely cannot serve. `crcbl-webgpu` refuses because WebGPU
-/// has no binding arrays at all; and
-/// `crcbl-wgpu` refuses there too, because a wgpu binding array's length is the
-/// layout's fixed count rather than something a group chooses. A backend that
+/// has no binding arrays at all. A backend that
 /// accepted the layout and not the group would refuse at `create_bind_group` —
-/// which is where all three also refuse `variable_count` — and one that defers
+/// which is where they also refuse `variable_count` — and one that defers
 /// its errors would refuse at [`finish`](crcbl::hal::CommandEncoder::finish), so
 /// every step is matched rather than the first alone.
 ///
@@ -7338,7 +7335,7 @@ fn exercise_bindless_descriptor_array(headless: &Headless) -> Exercise {
     // One buffer per descriptor, each with its own contents. Distinct buffers
     // rather than one buffer at four offsets: two descriptors resolving to the
     // same object would let a backend that dropped one of them still look
-    // correct, which is `crcbl-wgpu`'s array suite's reason for the same choice.
+    // correct.
     let upload = device
         .create_buffer(&BufferDesc {
             label: Some("bindless source upload"),
@@ -7553,8 +7550,8 @@ fn bindless_dispatch(
             label: Some("bindless_probe.slang"),
             spirv: crcbl::shaders::BINDLESS_PROBE.spirv(),
             // `wgsl` is `None`, and that is the artifact rather than an
-            // omission: `crcbl-webgpu` and `crcbl-wgpu` refuse this layout
-            // above and could never reach here. The MSL is real — the shader's
+            // omission: `crcbl-webgpu` refuses this layout above and could
+            // never reach here. The MSL is real — the shader's
             // array is a bounded `ParameterBlock` precisely so that Metal has
             // something loadable — and this line is now taken, because
             // `crcbl-mtl` binds the table as an argument buffer.

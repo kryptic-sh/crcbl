@@ -48,9 +48,9 @@
 //! which is what makes it WGSL a browser will accept: the push-constant form
 //! lowered to a module-scope `var<uniform>` with no `@group`/`@binding` at all,
 //! which `naga` rejects outright, so the only backend that ingests WGSL —
-//! `crcbl-wgpu`, which deliberately never reports
-//! [`PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) on any target — could
-//! not create the module.
+//! `crcbl-webgpu`, on a WebGPU with no
+//! [`PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) at all — could not
+//! create the module.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -327,7 +327,7 @@ impl UiRenderer {
             // No range at all: the block arrives through the bind group, and a
             // backend without push constants must refuse a range rather than
             // drop the writes silently — which is exactly what the null backend
-            // and `crcbl-wgpu` do, and is how the browser used to lose its HUD.
+            // does, and is how the browser used to lose its HUD.
             push_constants: None,
         })?;
         rollback.pipeline_layouts.push(pipeline_layout);

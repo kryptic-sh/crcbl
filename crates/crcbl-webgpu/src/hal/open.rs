@@ -1,9 +1,9 @@
 //! Opening an instance: adapter enumeration as a `Future`.
 //!
 //! Every other backend's `Instance` exists the moment its constructor returns —
-//! `crcbl-wgpu` blocks on the enumeration future, `crcbl-vk` enumerates
-//! synchronously. This one cannot: it learns its adapters over the reply channel
-//! a frame or more after it asks, so the constructor hands back a `Future` whose
+//! `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all enumerate synchronously. This
+//! one cannot: it learns its adapters over the reply channel a frame or more
+//! after it asks, so the constructor hands back a `Future` whose
 //! `poll` drains the channel and absorbs into an [`AdapterProbe`] each frame
 //! until the browser answers.
 //!

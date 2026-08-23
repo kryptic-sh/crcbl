@@ -3,7 +3,8 @@
 //!
 //! Everything above this crate (`crcbl-render`, the samples, the editor) talks
 //! to the GPU exclusively through the traits here. Everything below it
-//! (`crcbl-vk`, `crcbl-wgpu`, later `crcbl-mtl` / `crcbl-dx12`) implements them.
+//! (`crcbl-vk`, `crcbl-webgpu`, and the deferred `crcbl-mtl` / `crcbl-dx12`)
+//! implements them.
 //! No backend type ever appears in a signature on this side of the seam, and no
 //! `#[cfg(target_os = "…")]` ever appears above it.
 //!
@@ -43,12 +44,13 @@
 //!
 //! Why:
 //!
-//! 1. **Two backends are compiled in at once.** `docs/plan/10-wasm-webgpu.md`
-//!    wants `crcbl-wgpu` available on native as a triage tool ("does it repro on
-//!    wgpu?") alongside `crcbl-vk`. With a generics-first seam, backend choice
-//!    would be a compile-time decision, and supporting both would monomorphise
-//!    the entire renderer — graph included — once per backend, doubling compile
-//!    time and binary size to serve a runtime choice.
+//! 1. **Two backends are compiled in at once.** A macOS build links `crcbl-vk`
+//!    and `crcbl-mtl`; a Windows build links `crcbl-vk` and `crcbl-dx12`; the
+//!    umbrella crate's manifest is where that pairing is written. With a
+//!    generics-first seam, backend choice would be a compile-time decision, and
+//!    supporting both would monomorphise the entire renderer — graph included —
+//!    once per backend, doubling compile time and binary size to serve a
+//!    runtime choice.
 //! 2. **The renderer holds one backend for the process lifetime.** Nothing swaps
 //!    backends in a loop, so there is nothing for monomorphisation to specialise
 //!    across.
@@ -122,8 +124,9 @@
 //! [`Box<dyn Device>`](Device) — deliberately the same request/poll pair as
 //! readback, because it is the same problem: WebGPU's `requestDevice` is a
 //! promise and the browser main thread cannot block on it. `crcbl-vk` completes
-//! on its first poll, `crcbl-wgpu` drives the real future, and [`null`] can be
-//! told to take N polls so a caller's loop is testable with no GPU.
+//! on its first poll, `crcbl-webgpu` waits for the browser's reply to
+//! `requestDevice`, and [`null`] can be told to take N polls so a caller's loop
+//! is testable with no GPU.
 //! `Instance::create_device` remains as the blocking wrapper **on native
 //! only** — it is `#[cfg]`-ed out of `wasm32` builds so a browser caller gets a
 //! compile error instead of a run-time refusal. See [`device`] for the argument.
@@ -171,13 +174,13 @@
 //! direction is:
 //!
 //! ```text
-//! crcbl-shell ──▶ crcbl-core ◀── crcbl-hal ◀── crcbl-vk / crcbl-wgpu / …
+//! crcbl-shell ──▶ crcbl-core ◀── crcbl-hal ◀── crcbl-vk / crcbl-webgpu / …
 //! ```
 //!
 //! # Stability
 //!
 //! This seam is **provisional**, not frozen. Per `docs/plan/ROADMAP.md` it
-//! freezes at **P5 exit**, when two backends (`crcbl-vk` and `crcbl-wgpu`) have
+//! freezes at **P5 exit**, when two backends (`crcbl-vk` and `crcbl-webgpu`) have
 //! implemented it — not at P0, and not at P1. Changes before then are expected
 //! and cheap; changes after need justification.
 //!

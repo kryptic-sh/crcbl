@@ -2,7 +2,7 @@
 //! `NullBackend`'s recorded command stream.
 //!
 //! `docs/plan/12-testing.md` lists this among the per-subsystem "non-negotiables"
-//! — "`crcbl-hal`/`crcbl-vk`/`crcbl-wgpu`: graph-compile unit suite on
+//! — "`crcbl-hal`/`crcbl-vk`/`crcbl-webgpu`: graph-compile unit suite on
 //! NullBackend" — and `crcbl-hal`'s null backend exists to make exactly this
 //! assertable. Every test here runs **with no ICD, no driver and no GPU**, which
 //! is what lets it run on the macOS and Windows CI legs and under
@@ -2435,9 +2435,9 @@ fn declaring_one_image_twice_in_a_pass_is_an_error() {
 /// `crcbl_hal::shader`'s contract is that a caller supplies every format it
 /// holds and the backend picks. Nothing about a Vulkan run can check that: a
 /// call site that quietly stopped passing its WGSL renders exactly the same on
-/// `crcbl-vk`, and only `crcbl-wgpu` — which needs a GPU, or a browser — would
-/// notice. That is precisely how the WGSL artifacts sat unused between P5.3 and
-/// P5.9. This runs with no ICD, no driver and no GPU.
+/// `crcbl-vk`, and only a backend that reads the WGSL — which needs a GPU, or a
+/// browser — would notice. That is precisely how the WGSL artifacts sat unused
+/// between P5.3 and P5.9. This runs with no ICD, no driver and no GPU.
 ///
 /// # DXIL is a list, so a two-stage module offers it like any other format
 ///

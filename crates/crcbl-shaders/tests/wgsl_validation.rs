@@ -10,9 +10,10 @@
 //! it either way. [`the_artifact_that_shipped_without_a_binding_is_refused`]
 //! keeps the exact artifact around so the failure path stays exercised.
 //!
-//! naga is the right validator because it is the one `crcbl-wgpu` will actually
-//! run: `wgpu` compiles WGSL through it on every native backend, so a module
-//! naga rejects is a pipeline that fails to create.
+//! naga is the validator this suite can run: it is a WGSL frontend in Rust, so
+//! it reads the artifacts with no browser and no GPU anywhere in the loop. It is
+//! not the browser's validator, and the next section is what that leaves
+//! uncovered.
 //!
 //! # naga accepting a module is not Dawn accepting it
 //!

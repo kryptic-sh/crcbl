@@ -156,8 +156,8 @@ impl MetalInstance {
     ///
     /// `None` when the system reports no Metal device at all — the case a
     /// backend registry falls through on, and the same shape
-    /// `crcbl_wgpu::WgpuInstance::new_native` uses for it. On a Mac this does
-    /// not happen: `MTLCopyAllDevices` returns at least the built-in GPU.
+    /// `crcbl_dx12::Dx12Instance::open` uses for it. On a Mac this does not
+    /// happen: `MTLCopyAllDevices` returns at least the built-in GPU.
     ///
     /// Enumeration is `MTLCopyAllDevices` rather than
     /// `MTLCreateSystemDefaultDevice`, and both halves of that matter. The seam

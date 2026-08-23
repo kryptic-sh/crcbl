@@ -1066,9 +1066,9 @@ pub const DIVERGENCES: &[Divergence] = &[
 /// The answer to "what is left?", derived rather than maintained. A row is here
 /// when its backend [drives a GPU](BackendKind::is_gpu) and its
 /// [`kind`](Divergence::kind) [blocks parity](DivergenceKind::blocks_parity) —
-/// so `crcbl-wgpu`, which is deleted once `crcbl-webgpu` replaces it, is
-/// excluded by the first half rather than by a reader remembering to skip it,
-/// and [`DivergenceKind::ApiAbsence`] by the second.
+/// so [`BackendKind::Null`] is excluded by the first half rather than by a
+/// reader remembering to skip it, and [`DivergenceKind::ApiAbsence`] by the
+/// second.
 ///
 /// The set is snapshotted by this module's own tests, so it shrinks only when
 /// somebody updates the snapshot deliberately. Yields in [`DIVERGENCES`] order.

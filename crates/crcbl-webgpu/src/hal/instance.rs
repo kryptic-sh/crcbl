@@ -32,7 +32,7 @@ pub struct WebGpuInstance {
     /// A [`SurfaceHandle`] carries no kind and the stream answers no query about
     /// one, so the only place the distinction exists is the `create_surface`
     /// call that made it — which is why it is recorded there and nowhere else.
-    /// The same slot table `crcbl-wgpu`'s instance keeps, minus the platform
+    /// The same slot table `crcbl-vk`'s instance keeps, minus the platform
     /// object a browser has none of.
     ///
     /// A `Vec` rather than a set because a run holds one surface or two, and
@@ -151,10 +151,10 @@ impl WebGpuInstance {
 /// encode entirely and the readback is a whole transfer function away from the
 /// image it is compared against.
 ///
-/// **Deliberately the same list `crcbl-vk` and `crcbl-wgpu` state for their own
-/// offscreen surfaces**, minus `Rgba16Float`, so the parity gate compares a
-/// frame drawn into the same format the native suites drew into — which is the
-/// only reason the gate exists. `Rgba16Float` is absent because
+/// **Deliberately the same list `crcbl-vk` states for its own offscreen
+/// surfaces**, minus `Rgba16Float`, so the parity gate compares a frame drawn
+/// into the same format the native suites drew into — which is the only reason
+/// the gate exists. `Rgba16Float` is absent because
 /// [`crate::tag`] can name it but nothing has ever asked this backend for a
 /// half-float ring, and a `formats` entry is a promise that a swapchain can be
 /// created with it.

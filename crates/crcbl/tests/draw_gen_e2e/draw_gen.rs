@@ -245,8 +245,8 @@ fn generate_with(
         queue: headless.queue,
     });
     // Where the poison comes from, when there is one. **A copy, not a
-    // `fill_buffer`**: `crcbl-wgpu` refuses a fill with a non-zero value —
-    // wgpu's `clear_buffer` is a zero fill and it has nothing else — so the
+    // `fill_buffer`**: `crcbl-webgpu` refuses a fill with a non-zero value —
+    // WebGPU's `clearBuffer` is a zero fill and it has nothing else — so the
     // Vulkan original's fill was a backend-specific mechanism wearing a seam
     // call's name. This puts the same bytes in the same three buffers on every
     // backend, and every assertion below reads them unchanged.

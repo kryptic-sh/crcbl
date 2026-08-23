@@ -14,7 +14,7 @@
 //! sampling — and it is tempting to advertise them because they are true of the
 //! *API*. They are not yet true of this *backend*: nothing here opens a device,
 //! so a caller that keyed off one of those flags would find the entry point
-//! behind it refusing. `crcbl-wgpu` reached the same conclusion for its query
+//! behind it refusing. `crcbl-dx12` reached the same conclusion for its query
 //! features and states it the same way.
 //!
 //! The consequence is a short feature set and a lot of prose. The prose is the
@@ -190,7 +190,7 @@ pub(crate) fn adapter_info(
 ///   about its class — a discrete card in a headless Mac and an integrated one
 ///   in a closed-lid laptop both answer yes.
 /// * [`DeviceType::Cpu`] is never reported. Metal has no software rasteriser to
-///   report it for; the equivalent CI target on macOS is `crcbl-wgpu`.
+///   report it for.
 ///
 /// [`DeviceType::Virtual`] is never reported either, and that one is a genuine
 /// gap rather than a decision: **Metal has no virtualisation query**. A

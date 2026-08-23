@@ -182,9 +182,10 @@ bitflags::bitflags! {
         /// Occlusion queries.
         const OCCLUSION_QUERY = 1 << 7;
         /// Compute shaders. Effectively universal — WebGPU has them, which is
-        /// why GPU culling stays GPU-side on every [`GeometryPath`] — but a
-        /// GL-ES2-class wgpu fallback would not, and the renderer needs
-        /// somewhere to say so.
+        /// why GPU culling stays GPU-side on every [`GeometryPath`] — but the
+        /// bit still has to exist so a device without them can say so:
+        /// [`crate::null`] refuses `create_compute_pipeline` outright when its
+        /// caps omit it.
         const COMPUTE = 1 << 8;
         /// Timeline semaphores: monotonic counters usable for both GPU-GPU and
         /// CPU-GPU waits. Vulkan `timelineSemaphore`, DX12 `ID3D12Fence`,

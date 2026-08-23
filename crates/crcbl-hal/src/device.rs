@@ -286,10 +286,9 @@ impl DeviceDesc<'_> {
 
 /// A backend's entry point: enumerates adapters and opens devices and surfaces.
 ///
-/// One instance exists per process per backend. Both `crcbl-vk` and
-/// `crcbl-wgpu` may be instantiated in the same process — that is the whole
-/// point of the `dyn` decision in the crate docs, and it is how topic 10's
-/// "does it repro on wgpu?" triage works.
+/// One instance exists per process per backend. More than one backend may be
+/// instantiated in the same process — that is the whole point of the `dyn`
+/// decision in the crate docs.
 pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Which backend this is. For logs and bug reports — never for behaviour.
     fn backend(&self) -> BackendKind;

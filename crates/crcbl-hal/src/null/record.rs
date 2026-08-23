@@ -930,9 +930,9 @@ impl Recorder {
     ///
     /// The no-GPU assertion for the seam's "offer every artifact you have"
     /// rule. A call site that stopped passing its WGSL keeps working on Vulkan
-    /// and keeps working here, so nothing but running `crcbl-wgpu` on a machine
-    /// with a GPU would notice — which is how the WGSL artifacts sat unused
-    /// from P5.3 to P5.9. This notices, in the plain test suite.
+    /// and keeps working here, so nothing but a backend that actually reads the
+    /// WGSL would notice — which is how the WGSL artifacts sat unused from P5.3
+    /// to P5.9. This notices, in the plain test suite.
     ///
     /// A log rather than a lookup on the handle, because a caller that builds
     /// pipelines destroys its modules immediately afterwards — by the time a

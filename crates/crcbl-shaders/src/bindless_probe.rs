@@ -45,9 +45,8 @@
 //!
 //! # No WGSL
 //!
-//! `crcbl-webgpu` has no binding arrays at all and `crcbl-wgpu` has no binding
-//! array whose length a group chooses, so neither can reach a dispatch of this
-//! shader and a WGSL artifact would be bytes nothing loads.
+//! `crcbl-webgpu` has no binding arrays at all, so it cannot reach a dispatch
+//! of this shader and a WGSL artifact would be bytes nothing loads.
 //!
 //! [`SOURCE_CAPACITY`]: crate::bindless_probe::SOURCE_CAPACITY
 

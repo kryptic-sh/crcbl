@@ -4492,7 +4492,7 @@ impl Device for Dx12Device {
     /// The back buffer DXGI says is next, with no synchronisation attached.
     ///
     /// **This is the implicit-acquire shape the seam documents for
-    /// `crcbl-wgpu` and `crcbl-mtl`, and D3D12 is a third example of it**:
+    /// `crcbl-webgpu` and `crcbl-mtl`, and D3D12 is a third example of it**:
     /// there is no acquire semaphore to signal and no present semaphore to
     /// wait, because `GetCurrentBackBufferIndex` is a read of state DXGI
     /// already maintains and `Present` is ordered on the queue the swapchain
@@ -10691,8 +10691,7 @@ pub(crate) mod tests {
     /// nothing in D3D12 reports it: every waiter past the higher value simply
     /// never wakes, on a queue that is otherwise healthy. So the check is here,
     /// and it is [`HalError::InvalidDescriptor`] — the value is a field the
-    /// caller can correct — which is the answer `crcbl-mtl` and `crcbl-wgpu`
-    /// both give.
+    /// caller can correct — which is the answer `crcbl-mtl` gives too.
     ///
     /// The second half is the one that is easy to miss: two signals on the same
     /// semaphore in **one** `SubmitInfo` have to be checked against each other,

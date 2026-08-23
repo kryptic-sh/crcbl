@@ -30,8 +30,8 @@
 //! every device has compute, `ID3D12Fence`, PIX markers — and it is tempting to
 //! advertise them because they are true of the *API*. They are not yet true of
 //! this *backend*: a caller that keyed off one of those flags would find the
-//! entry point behind it refusing. `crcbl-mtl` and `crcbl-wgpu` reached the same
-//! conclusion and state it the same way.
+//! entry point behind it refusing. `crcbl-mtl` reached the same conclusion and
+//! states it the same way.
 //!
 //! A flag moves when the call behind it lands, and the resource slice moved two:
 //! `TEXTURE_COMPRESSION_BC`, now that `create_image` creates BC images, and

@@ -254,9 +254,8 @@ impl Dx12Instance {
     ///
     /// `None` when DXGI will not start or when no adapter it lists can be opened
     /// as a D3D12 device at all — the case a backend registry falls through on,
-    /// and the same shape `crcbl_mtl::MetalInstance::open` and
-    /// `crcbl_wgpu::WgpuInstance::new_native` use for it. On a stock Windows
-    /// this does not happen: WARP ships with the OS.
+    /// and the same shape `crcbl_mtl::MetalInstance::open` uses for it. On a
+    /// stock Windows this does not happen: WARP ships with the OS.
     ///
     /// # WARP is asked for by name, and the ordinary enumeration skips software
     ///

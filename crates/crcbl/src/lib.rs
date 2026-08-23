@@ -174,7 +174,7 @@ pub use crcbl_server as server;
 /// backend and no seam type: it hands out `&[u32]`, `Option<&str>` and
 /// entry-point names, which is exactly what [`hal::ShaderModuleDesc`] takes.
 /// Pass **both** artifacts on every call — `crcbl-vk` reads the SPIR-V,
-/// `crcbl-wgpu` reads the WGSL, and the caller does not choose.
+/// `crcbl-webgpu` reads the WGSL, and the caller does not choose.
 pub use crcbl_shaders as shaders;
 /// [`crcbl-shell`](crcbl_shell): the windowing seam, its Linux backends and
 /// [`HeadlessShell`](crcbl_shell::HeadlessShell).

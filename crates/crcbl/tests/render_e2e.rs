@@ -2148,7 +2148,7 @@ fn the_ui_scene_draws_the_same_frame_on_every_geometry_path() {
 /// Both arms land on the same path, and the test says so rather than passing
 /// quietly: the arms are asserted to differ **exactly when the adapter reports
 /// the flag**, so "this backend has no mesh shaders" is a checked claim instead
-/// of a skip. `crcbl-wgpu`, `crcbl-dx12` and `crcbl-mtl` all report none — see
+/// of a skip. `crcbl-webgpu`, `crcbl-dx12` and `crcbl-mtl` all report none — see
 /// each backend's `caps` — so on those three this is a self-comparison and the
 /// printed line is what says so.
 fn draw_scene_on_every_geometry_path(

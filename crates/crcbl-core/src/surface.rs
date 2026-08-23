@@ -14,7 +14,7 @@
 //!   crcbl-shell   crcbl-hal
 //!                    ^
 //!                    |
-//!            crcbl-vk / crcbl-wgpu / …
+//!            crcbl-vk / crcbl-webgpu / …
 //! ```
 //!
 //! * `crcbl-shell` must not depend on `crcbl-hal` — a windowing library that

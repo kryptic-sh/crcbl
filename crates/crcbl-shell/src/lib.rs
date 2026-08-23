@@ -16,7 +16,7 @@
 //! direction across the two seams is:
 //!
 //! ```text
-//! crcbl-shell ──▶ crcbl-core ◀── crcbl-hal ◀── crcbl-vk / crcbl-wgpu / …
+//! crcbl-shell ──▶ crcbl-core ◀── crcbl-hal ◀── crcbl-vk / crcbl-webgpu / …
 //! ```
 //!
 //! # What is in this crate

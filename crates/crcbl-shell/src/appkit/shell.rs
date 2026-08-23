@@ -1216,7 +1216,7 @@ impl Shell for AppKitShell {
     }
 
     /// The `CAMetalLayer` `crcbl-vk` needs for `VK_EXT_metal_surface`, and
-    /// `crcbl-wgpu` for a Metal surface.
+    /// `crcbl-mtl` for its swapchain.
     ///
     /// Available the instant the window exists — AppKit creates a real, sized
     /// window synchronously, and this backend passes `defer: NO` so that the

@@ -489,9 +489,9 @@ impl core::fmt::Debug for PendingInstance {
 impl PendingInstance {
     /// Advances the open. `Ok(None)` means "not yet, poll again".
     ///
-    /// A no-op waker, for the reason `crcbl-wgpu` gives for the same choice: the
-    /// browser's event loop resolves the promise on its own and the caller's
-    /// loop is the executor, so there is nobody for a waker to wake.
+    /// A no-op waker: the browser's event loop resolves the promise on its own
+    /// and the caller's loop is the executor, so there is nobody for a waker to
+    /// wake.
     ///
     /// # Errors
     ///
@@ -876,7 +876,7 @@ mod tests {
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
         assert_eq!(auto, [GpuBackend::Vulkan]);
         // A browser has one GPU backend and it is `crcbl-webgpu`. No feature
-        // decides this any more: `crcbl-wgpu` is not a dependency on wasm32, so
+        // decides this any more: `crcbl-wgpu` was deleted on 2026-08-21, so
         // there is no second candidate a build flag could reach.
         #[cfg(target_arch = "wasm32")]
         assert_eq!(auto, [GpuBackend::WebGpu]);

@@ -15,7 +15,7 @@
 //! ```
 //!
 //! Every artifact is handed over on every call and the backend picks:
-//! `crcbl-vk` reads the SPIR-V, `crcbl-wgpu` reads the WGSL, `crcbl-mtl` reads
+//! `crcbl-vk` reads the SPIR-V, `crcbl-webgpu` reads the WGSL, `crcbl-mtl` reads
 //! the MSL, `crcbl-dx12` reads the DXIL. See `crcbl_hal::shader` for why the
 //! seam is shaped that way and what a caller owes it.
 //!
@@ -95,8 +95,8 @@
 //! every leg of CI including the Linux one. A macOS-only step in the middle of
 //! it would make the artifacts unregenerable on the machine most contributors
 //! have, which is precisely the toolchain friction the committed-artifact
-//! design exists to avoid. The cost is a compile at start-up per module, on the
-//! same path `crcbl-wgpu` already pays for WGSL.
+//! design exists to avoid. The cost is a compile at start-up per module, the
+//! same shape a browser's `createShaderModule` already has for WGSL.
 //!
 //! What is *not* here is `03-gpu-driven-rendering.md`'s tier permutation axis.
 //! The triangle does not vary by tier, and a permutation system with one
@@ -114,7 +114,7 @@
 //! ```
 //!
 //! `naga` rejects that — "Binding decoration is missing or not applicable" — so
-//! `crcbl-wgpu` cannot create the module at all. It is not fixable in the
+//! no module can be created from it at all. It is not fixable in the
 //! artifact, which is a faithful translation of a source asking for something
 //! the target does not have; the only fix is in the source.
 //!

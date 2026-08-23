@@ -2739,7 +2739,7 @@ impl Device for MetalDevice {
     /// hands back a ready texture, so `crcbl_mtl::swapchain` creates no
     /// semaphore at all and hands back `None` for both of
     /// [`AcquiredFrame`]'s — the implicit-acquire shape the seam documents for
-    /// `crcbl-wgpu`. Nothing here signals a binary semaphore from outside a
+    /// `crcbl-webgpu`. Nothing here signals a binary semaphore from outside a
     /// submission, so the rule stands unweakened.
     fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
         // **The declaration has to be true.** `supports` answers the timeline
@@ -3965,7 +3965,7 @@ pub(crate) mod tests {
     /// completes — every texel comes back [`POISON`], which is neither of the
     /// two colours the last assertion admits.
     /// **Needs a device that executes a shader.** Feature-gated *and*
-    /// `#[ignore]`d, the shape `crcbl-vk` and `crcbl-wgpu` already use for the
+    /// `#[ignore]`d, the shape `crcbl-vk` and `crcbl-dx12` already use for the
     /// same reason: `--all-features` on a machine that cannot run it must stay
     /// green, and `tests/run-mtl-e2e.sh` is the only thing that turns it on —
     /// and that script fails when the suite reports zero tests run, because

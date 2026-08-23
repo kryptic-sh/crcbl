@@ -169,9 +169,9 @@ pub(crate) fn offscreen_surface_caps() -> SurfaceCaps {
 /// The per-image synchronisation a windowed swapchain owns.
 ///
 /// The seam's decision that "the swapchain owns its synchronisation" is what
-/// keeps `crcbl-wgpu`'s implementation three lines, and this is the Vulkan
-/// half of the bargain: binary semaphores nothing above the seam ever creates,
-/// handed out through [`AcquiredFrame`].
+/// lets a backend with an implicit acquire hand back no semaphores at all, and
+/// this is the Vulkan half of the bargain: binary semaphores nothing above the
+/// seam ever creates, handed out through [`AcquiredFrame`].
 #[derive(Debug)]
 pub(crate) struct FrameSync {
     /// Signalled by `vkAcquireNextImageKHR`. One per *ring slot*, rotated, with

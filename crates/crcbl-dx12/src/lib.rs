@@ -92,9 +92,8 @@
 //! why Windows has no golden images and no render coverage. WARP is D3D12's
 //! software rasteriser and ships in Windows, so if it supports **SM6.6 dynamic
 //! resources** — the model this backend is specced around — then DX12 buys
-//! Windows the equivalent of lavapipe. If it does not, `crcbl-wgpu` already
-//! covers the portable path there and the CI half of DX12's justification
-//! collapses to Xbox plus tooling.
+//! Windows the equivalent of lavapipe. If it does not, the CI half of DX12's
+//! justification collapses to Xbox plus tooling.
 //!
 //! So enumeration asks DXGI for WARP **by name**, beside whatever hardware is
 //! present, and this crate's tests publish what each adapter actually answered:

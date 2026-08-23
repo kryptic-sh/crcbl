@@ -51,9 +51,9 @@ fn open_probe() -> Headless {
 /// answer.
 ///
 /// **It reaches the list through a copy, not through
-/// [`CommandEncoder::fill_buffer`].** `crcbl-wgpu` refuses a fill with a
-/// non-zero value outright — wgpu offers `clear_buffer`, which is a zero fill
-/// and nothing else — so the Vulkan original's one-line fill is a
+/// [`CommandEncoder::fill_buffer`].** `crcbl-webgpu` refuses a fill with a
+/// non-zero value outright — WebGPU's `clearBuffer` zeroes and nothing else —
+/// so the Vulkan original's one-line fill is a
 /// backend-specific mechanism wearing a seam call's name. The staging copy in
 /// [`CullProbe::over`] and [`CullProbe::run`] puts the same bytes in the same
 /// place on every backend; the assertions that read them are unchanged.
@@ -563,7 +563,7 @@ impl CullProbe {
         // fill_buffer` is documented as writing a repeating 32-bit value, and
         // three of the four backends cannot honour that: `crcbl-dx12` has no
         // buffer fill at all, `crcbl-mtl`'s takes a byte rather than a word, and
-        // `crcbl-wgpu` refuses any non-zero value. A zero fill is not the safe
+        // `crcbl-webgpu` refuses any non-zero value. A zero fill is not the safe
         // subset either — dx12 refuses that too. So the zero comes from the same
         // `HostUpload` staging buffer as the sentinel, one word past the list.
         //
