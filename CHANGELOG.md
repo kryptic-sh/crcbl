@@ -529,6 +529,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A frame's closing barrier before a present now names a pipeline stage.**
+  `ResourceState::Present` expanded to `VK_PIPELINE_STAGE_2_NONE` on Vulkan, and
+  that state is the destination scope of the transition into
+  `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` — so synchronisation validation reported
+  `SYNC-HAZARD-PRESENT-AFTER-WRITE` with `write_barriers: 0` against every
+  windowed frame, 480 of them in a 120-frame sandbox run. It names
+  `ALL_COMMANDS` now, which is correct in both scopes and costs nothing on a
+  barrier with no work after it. Only ever visible with sync validation on,
+  which no windowed CI step sets — `docs/backlog.md` records what is left there.
 - **The three offscreen GPU suites now fail when the device reports a failure
   its return values did not carry.** `render_e2e`, `tiling_e2e` and `gltf_e2e`
   were the lavapipe CI steps a Vulkan validation error could not fail: a frame

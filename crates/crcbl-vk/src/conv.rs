@@ -705,7 +705,23 @@ pub fn state_masks(state: ResourceState) -> StateMasks {
         // carries the dependency, so the barrier only has to reach the layout.
         // Naming an access mask here is the classic over-sync that validation's
         // sync layer flags.
-        ResourceState::Present => (S::NONE, A::NONE, L::PRESENT_SRC_KHR),
+        // **`ALL_COMMANDS` and not `NONE`, and the asymmetry of the two
+        // scopes is the reason.** A barrier's masks are used on both sides of
+        // this state: the frame's opening transition reads it as the *source*
+        // scope and its closing one as the *destination*. `NONE` in the source
+        // scope orders the transition against nothing at all, and in the
+        // destination scope the validation layer rejects it for a present —
+        // Vulkan-ValidationLayers issue 7545, where `NONE` is refused although
+        // the specification calls it equivalent to `BOTTOM_OF_PIPE` there. Both
+        // hazards were reported against every windowed frame this project
+        // draws. `ALL_COMMANDS` is correct in either scope and costs nothing
+        // here: the opening barrier has no work before it in the command buffer
+        // and the closing one has none after it.
+        //
+        // The access mask stays empty. Presentation engine access is not
+        // expressible, and it is the swapchain's semaphore that carries
+        // availability — which is what the stage mask was wrongly asked to say.
+        ResourceState::Present => (S::ALL_COMMANDS, A::NONE, L::PRESENT_SRC_KHR),
     };
     StateMasks {
         stage,
@@ -1166,20 +1182,26 @@ mod tests {
         assert_eq!((one.level_count, one.layer_count), (1, 1));
     }
 
-    /// `Undefined` and `Present` must expand to empty masks: the first because
-    /// discarding contents is free, the second because the swapchain's own
-    /// semaphore carries the dependency. Getting either wrong is a validation
-    /// warning on the very first frame — which is precisely what P1's "zero
-    /// validation errors" gate is there to catch.
+    /// `Undefined` and `Present` carry no **access**: discarding contents is
+    /// free, and presentation engine access is not expressible — the
+    /// swapchain's own semaphore carries availability.
+    ///
+    /// Their stages differ, and the difference is the point. `Undefined` is
+    /// only ever a source scope for a discard, so it names none. `Present` is a
+    /// source scope on a frame's opening transition and a destination scope on
+    /// its closing one, and `NONE` is wrong in both: it orders the first
+    /// against nothing, and synchronisation validation refuses it on the second
+    /// before a present. Every windowed frame reported both until this named
+    /// `ALL_COMMANDS`.
     #[test]
-    fn the_two_free_states_carry_no_stages_or_accesses() {
+    fn the_two_free_states_carry_no_accesses() {
         let undefined = state_masks(ResourceState::Undefined);
         assert_eq!(undefined.stage, vk::PipelineStageFlags2::NONE);
         assert_eq!(undefined.access, vk::AccessFlags2::NONE);
         assert_eq!(undefined.layout, vk::ImageLayout::UNDEFINED);
 
         let present = state_masks(ResourceState::Present);
-        assert_eq!(present.stage, vk::PipelineStageFlags2::NONE);
+        assert_eq!(present.stage, vk::PipelineStageFlags2::ALL_COMMANDS);
         assert_eq!(present.access, vk::AccessFlags2::NONE);
         assert_eq!(present.layout, vk::ImageLayout::PRESENT_SRC_KHR);
     }

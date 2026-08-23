@@ -25,51 +25,50 @@ and a depth-test-only pass has nothing to write back.
   transitions are whole-resource so it is likely benign, and WebGPU has no
   explicit barriers at all, but neither was checked.
 
-### Sync validation is off in every windowed run, and turning it on goes red
+### One present-path hazard is ours and one is the layer's
 
 `CRCBL_VK_SYNC_VALIDATION` is set by the `vk e2e (lavapipe)` job and by nothing
-else. The four harnesses that put a frame on a **real** window —
+else, so the four harnesses that put a frame on a **real** window —
 `tools/run-samples-windowed.sh`, `crates/crcbl-shell/tests/run-x11-e2e.sh`,
-`run-wayland-e2e.sh` and `crates/crcbl/tests/run-windowed-e2e.sh` — each export
-`CRCBL_VK_VALIDATION=1` themselves and grep their own logs, but none of them
-asks for synchronisation validation. So the one class of run that actually
-presents to a swapchain is the one class never checked for present-path hazards.
-`crates/crcbl-cli/tests/run-cli-e2e.sh` asks for neither, and its CI step sets
-`CRCBL_CLI_E2E_BACKEND: vk`.
+`run-wayland-e2e.sh` and `crates/crcbl/tests/run-windowed-e2e.sh` — are the one
+class of run that presents to a swapchain and the one class never checked for
+present-path hazards. Turning it on under CI's own layer 1.3.275 reported 480
+`PRESENT-AFTER-WRITE` and 480 `WRITE-AFTER-READ` on a 120-frame sandbox run.
 
-**Measured, and it is not a free switch.** With `CRCBL_VK_SYNC_VALIDATION=1` and
-CI's own layer 1.3.275 and Mesa 25.2.8:
+**A reference program separated the two.** Under an identical layer, ICD,
+settings file and display, Ubuntu's own `vkcube` from the same 1.3.275
+`vulkan-tools` reports nothing while crcbl reports 960 — so this was never a
+blanket false positive of that layer's present modelling, which is what the
+first reading of it assumed.
 
-| harness                   | exit | hazards                                           |
-| ------------------------- | ---- | ------------------------------------------------- |
-| `run-samples-windowed.sh` | 1    | 480 `PRESENT-AFTER-WRITE`, 480 `WRITE-AFTER-READ` |
-| `run-x11-e2e.sh`          | 1    | 480 `PRESENT-AFTER-WRITE`, 480 `WRITE-AFTER-READ` |
-| `run-windowed-e2e.sh`     | 100  | 12 of each                                        |
-
-With the **installed** layer 1.4.357 against radv, all four are green — the same
-layer-build split that decided the read-only depth attachment's hazard, pointing
-the other way this time.
-
-**The open question is whether these are real.** The message is
-`WRITE_AFTER_READ` for a frame's opening `vkCmdPipelineBarrier2` at `seq_no: 1`
-against `prior_usage: SYNC_PRESENT_ENGINE_SYNCVAL_PRESENT_ACQUIRE_READ_SYNCVAL`
-— syncval's model of the present engine, not a real queue operation. Against
-that being a defect: `crcbl::engine` does the textbook thing, extending the
-submit's waits with `acquired.acquire_semaphore` and signalling
-`acquired.present_semaphore` for the present to wait on, with the seam's
-conservative `ALL_COMMANDS` stage mask on the wait; the reported `read_barriers`
-list is non-empty, so syncval can see that wait; and it fires on **every frame
-of every sample**, which a correct present loop should not produce. For it being
-a defect: nothing here has proved the ordering syncval wants, and "the newer
-layer stopped reporting it" is also what a regression in the layer looks like —
-which is exactly what the depth-attachment hazard turned out to be.
-
-**Not turned on, deliberately**, until that is settled: a gate whose failures
-nobody has classified would train everyone to ignore it. Settling it means
-reading the 1.3.275 → 1.4.357 syncval changelog for the present-path rework, or
-reproducing the same pattern in a minimal program. Headless runs are unaffected
-either way — they never present, which is why the `vk-e2e` job has had sync
-validation on all along and has never seen this class.
+- **`PRESENT-AFTER-WRITE` was ours, and is fixed.** `ResourceState::Present`
+  expanded to `VK_PIPELINE_STAGE_2_NONE`, and that state is the _destination_
+  scope of a frame's closing transition. Vulkan-ValidationLayers issue 7545 is
+  the same report: the layer refuses `NONE` before a present although the
+  specification calls it equivalent to `BOTTOM_OF_PIPE` there. It names
+  `ALL_COMMANDS` now and the class is gone.
+- **`WRITE-AFTER-READ` is the layer's, and is not fixed here.** It is reported
+  against the frame's _opening_ transition, whose source state is
+  `ResourceState::Undefined` and therefore names no stage. `graph.rs`'s
+  `Acquired` variant says why that is right: the acquire semaphore is waited on
+  by the submission that runs the graph, so the barrier has no ordering left to
+  carry, only a layout to reach. Layer 1.4.357 agrees and reports nothing;
+  1.3.275 wants a source scope. `vkcube` escapes it by accident rather than by
+  being more correct — it transitions inside a render pass whose external
+  subpass dependency names `COLOR_ATTACHMENT_OUTPUT`.
+- **Measured: giving `Undefined` a source scope of `ALL_COMMANDS` silences all
+  960**, and that is the wrong trade. `Undefined` is the first-use state of
+  every graph transient, so it would put an execution dependency on all prior
+  commands into the hot path once per transient per frame, to satisfy one layer
+  build. The precise alternative is a `ResourceState` variant for the acquired
+  swapchain image, which the seam would then make every backend answer — real
+  surface added for a disagreement between two layer builds. **Not done.**
+- **So sync validation stays off on those four harnesses**, and the reason is
+  the second bullet rather than the first. Revisit when CI's runner image
+  carries a layer that has the acquire-read modelling of 1.4.357.
+  `crates/crcbl-cli/tests/run-cli-e2e.sh` asks for neither validation nor sync
+  validation while its CI step sets `CRCBL_CLI_E2E_BACKEND: vk`; that is a
+  separate gap and untouched.
 
 ### Where the Vulkan validation gate is still a no-op
 
