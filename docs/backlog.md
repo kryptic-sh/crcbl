@@ -6320,10 +6320,10 @@ tests and not another runner.
   compared by a person reading two blocks of output.
 - **The bench's environment block has no target triple.** A binary cannot read
   one — Cargo hands `TARGET` to build scripts and nothing else, and `std` offers
-  only `ARCH`, `OS` and `FAMILY`, which is what the block reports. A
-  `crates/crcbl-cli/build.rs` emitting `cargo::rustc-env=CRCBL_TARGET=$TARGET`
-  is the four-line fix, and it was left out of the slice that would otherwise
-  have introduced the first build script in that crate. It matters the moment
+  only `ARCH`, `OS` and `FAMILY`, which is what the block reports. A build
+  script in `crcbl-cli` emitting `cargo::rustc-env=CRCBL_TARGET=$TARGET` is the
+  four-line fix, and it was left out of the slice that would otherwise have
+  introduced the first build script in that crate. It matters the moment
   `--compare` exists, because refusing a baseline from different hardware is one
   of the plan's decisions and `ARCH`/`OS` is a coarser key than a triple.
 - **A mode comparison cannot catch a defect that is symmetric across modes**,
@@ -6648,10 +6648,22 @@ two independent causes had stacked up before anybody looked:
   `cdylib`, so the step died before interpreting anything. Fixed with `--tests`,
   which was measured to select the identical set of test binaries.
 
-Both are fixed and `cargo miri test --tests -p crcbl-jobs` now runs **per
+- **A test that is seconds natively and hours interpreted.**
+  `crates/crcbl-ecs/tests/churn_soak.rs` landed on 2026-08-22 — thousands of
+  ticks of spawn/despawn churn against hash maps — and under miri it **did not
+  finish in fifty minutes** on the machine it was measured on, against a job
+  whose whole budget is an hour. It now carries `#![cfg(not(miri))]`, which
+  costs nothing this job is for: `crcbl-ecs` contains no `unsafe` at all, so
+  there was nothing there for the interpreter to find.
+
+All three are fixed and `cargo miri test --tests -p crcbl-jobs` now runs **per
 commit** in `ci.yml`, because that is the crate the value is concentrated in —
 its unsafe is concurrent, and x86-64's total store order makes a weakened
 ordering invisible to everything else here.
+
+**The third one generalises, and nothing guards it:** any test landing in one of
+the six interpreted crates that runs for seconds natively can push this job past
+its timeout, and the only thing that would say so is the weekly run itself.
 
 **What is still open is the other five crates**, which stay weekly for the
 reason `cron.yml` gives: interpreting the full list is minutes per PR. So the
