@@ -4386,6 +4386,14 @@ impl Device for Dx12Device {
             )?;
             entry.images.clear();
             entry.views.clear();
+            // And the outstanding acquire, for the same reason one line up: the
+            // index it holds points into the images just destroyed, so a present
+            // across a reconfigure would present a dead back buffer. `crcbl-vk`
+            // and the null backend get this by replacing the whole entry; this
+            // one edits in place, so it has to say so. Held to it by
+            // `a_present_without_an_acquire_is_refused` in
+            // `crates/crcbl/tests/hal_seam_e2e.rs`, which is what found it.
+            entry.acquired = None;
         }
 
         let (present_mode, images, views) = if offscreen {

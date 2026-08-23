@@ -16403,7 +16403,11 @@ What is left is only what the suite cannot reach:
   catch the same frame presented twice. Closing that means reworking when the
   pair is retired, which is what keeps the replayer holding one pair per
   swapchain rather than one per frame ever drawn.
-- **Whether `crcbl-mtl` and `crcbl-dx12` clear the slot on reconfigure is still
-  unverified** — both refuse a present with no acquire, but neither runs on this
-  machine. The agnostic test now asserts it, so CI answers the question on the
-  next run of their jobs rather than anyone having to reason about it.
+- **CI answered the reconfigure question the same day it was asked.** The new
+  agnostic test went red on `dx12 e2e (software adapter)` and green on Metal:
+  `crcbl-mtl` clears the slot, `crcbl-dx12` did not. Its `reconfigure_swapchain`
+  edits the entry in place (`entry.images.clear()`) where `crcbl-vk` and the
+  null backend replace it wholesale, so the acquired index survived and pointed
+  into back buffers that had just been destroyed. Fixed by clearing it beside
+  the images. That is a bug fix on a deferred backend, taken because the
+  deferral requires their jobs keep passing — not new work on it.

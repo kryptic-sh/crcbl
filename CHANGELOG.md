@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-dx12` clears the outstanding acquire when a swapchain is
+  reconfigured.** `reconfigure_swapchain` destroys the old back buffers and
+  their views but edited the swapchain entry in place, so the acquired ring
+  index survived and named an image that no longer existed — a present across a
+  reconfigure presented a dead back buffer. `crcbl-vk` and the null backend
+  avoid this by replacing the whole entry; this one now says it explicitly.
+  Found by the agnostic `a_present_without_an_acquire_is_refused` the moment it
+  first ran on WARP.
+
 - **The null backend refuses a present with no matching acquire**, the last of
   the seam's presentation rules it could not state. It kept a ring cursor but no
   record of the outstanding acquire, so it had nothing to refuse against, while
