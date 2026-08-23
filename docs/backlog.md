@@ -12,53 +12,30 @@ Every finding below was checked against the tree twice, once by the audit and
 once again before the correcting edit, and each document now carries its own
 correction. What is left here is the work the corrections revealed.
 
-**The largest one: the server does not consume client input.** `crcbl-server`
-decodes an `INPUT_TAG` or `COMMAND_TAG` payload to validate it and then drops
-it. So replication runs one way: the server simulates and sends, the client
-interpolates and displays, and nothing a player does reaches the simulation.
-That is a phase-sized gap, not a slice, and it is the reason several smaller
-rows below cannot be closed on their own — there is nothing for a jitter buffer
-to key or for a lead to align. (The comment claiming "P3 wires them into the
-simulation" is gone; the code now says what it does.)
+**The server consumes client input now** — shipped 2026-08-23 — and what the gap
+leaves behind is smaller than it was:
 
-**The three shapes were measured on 2026-08-23**, and two of them are not what
-they looked like. `ClientToServer::Input` carries a `TickId` and an opaque
-`Vec<u8>` — the engine has no idea what a game's input means — so the server can
-only _hold_ input and hand it over. Where it hands it to is the question:
-
-- **A bounded per-session queue on `Server`, read through an accessor** is only
-  reachable from the **host**, not from where game logic runs.
-  `GameModule::tick` takes `&mut World` and nothing else, `crcbl-ecs` does not
-  depend on `crcbl-server` and must not start, so the facade would read the
-  accessor and put the bytes back into the shared cell described below — the
-  side channel with an extra hop. The cap itself is still needed whatever the
-  shape: the number of messages a tick carries is the peer's choice, the same
-  multiplier `fd::Writes` and `Device::MAX_PENDING_OFFERS` are capped against.
-- **An ECS resource the schedule sees** is bigger than it reads. `World` holds
-  `pool`, `schedule`, `dead` and `tick_dt` and has no resource storage at all —
-  and `SystemTrait::tick(&mut self, dt: f64)` does not take a `World`, so a
-  _system_ could not read a world resource even after one existed. "A game reads
-  its own input in a system like any other state" needs the schedule's borrow
-  model to change, which is P8's blocked question, not this one's.
-- **A callback the host registers** makes the server's tick re-entrant into game
-  code, and nothing else in this engine does that.
-
-**What the fourth shape is, and why it has a consumer today:** hand the inputs
-to `GameModule::tick` as an argument. `self.module`, `self.world` and an input
-field on `Server` are disjoint borrows, so the argument form compiles where
-`&mut self` would not, and it needs no resource map and no dependency inversion.
-It also replaces something rather than adding it — **`apps/breakout`,
-`apps/asteroids`, `apps/flappy` and `apps/horde` all encode a per-tick intent,
-send it, and then deliver the real one to their module through an
-`Arc<Mutex<GameLogic>>` side channel**, which `apps/breakout/src/game.rs`'s own
-header admits in as many words. The demonstration is deleting that write and
-having the paddle still move.
-
-The jitter buffer and the client's tick lead are the same work afterwards
-whatever is picked, and neither can start before it. Worth knowing for when they
-do: **nothing anywhere compares an input's `TickId` against the server's clock**
-— the field round-trips and is read by nothing, so that groundwork is absent
-rather than partial.
+- **Three samples still deliver intent through a shared cell.** `apps/breakout`
+  was converted: its `Intent` gained `from_wire`, `BreakoutModule::tick` reads
+  the bytes out of the `ClientInputs` the server hands it, and the
+  `Arc<Mutex<GameLogic>>` it shares with its module is output-only.
+  `apps/asteroids`, `apps/flappy` and `apps/horde` still write `logic.intent`
+  under a lock while also sending the same intent over the wire, where it now
+  lands in the server's queue and is dropped unread. Converting each is the same
+  three edits breakout took — a `from_wire`, a module reading `ClientInputs`,
+  and deleting the facade's write — and one converted sample was the proof, so
+  these are mechanical rather than open.
+- **`ClientToServer::Command` is still not consumed.** It is decoded, charged
+  against the session's error budget if malformed, and dropped, and the code
+  says why: a command is a request that has to be answered once and stay
+  answered, not a per-tick sample, and nothing on this server answers one yet.
+- **The jitter buffer, the client's tick lead and rate correction are still
+  absent**, and now they are the next thing rather than blocked behind this.
+  Input frames are handed over in arrival order with the `TickId` their client
+  stamped them with, and **nothing compares that tick against the server's
+  clock** — so the groundwork is a carried field and nothing else. A frame not
+  read during the tick it is offered in is gone; holding it is exactly what the
+  buffer would be.
 
 **What each corrected row leaves owed**, in the order a reader would meet them:
 

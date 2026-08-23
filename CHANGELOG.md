@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The server consumes client input.** `Server` holds the input frames that
+  arrived since the last tick — each with the `TickId` its client stamped it
+  with — and hands them to `GameModule::tick` as a `ClientInputs` view, in
+  arrival order. The queue is emptied at the start of every tick, so a frame is
+  offered to exactly one module call and holding it for a later one is the
+  jitter buffer this deliberately is not. It is bounded by
+  `crcbl_server::MAX_CLIENT_INPUTS_PER_TICK` — twice
+  `DEFAULT_MAX_CATCH_UP_TICKS`, because how many arrive in one tick is the
+  peer's choice — and frames past the cap are refused newest-first, so the
+  module reads the order the client sent rather than a reordered prefix.
+  `ClientInputs::dropped` tells the module and `Server::dropped_input_count`
+  tells an operator. Aligning an input to the tick it names is still absent, and
+  the code says so where a reader will look.
+
+- **`apps/breakout` plays over the wire.** Its `Intent` gained `from_wire` — the
+  first decode half any sample has — and the paddle, the launch and the restart
+  are driven by bytes that were sealed, sent over `InMemoryTransport`, opened
+  and decoded inside the server's tick. The `Arc<Mutex<GameLogic>>` it shares
+  with its module is output-only: nothing reaches the simulation except over the
+  transport.
+
 - **`crcbl-webgpu` reports what the browser never let go of at teardown.** The
   other three backends warn from their device's destructor —
   `N object(s) still alive at device teardown (…)` — and their e2e runners fail
@@ -634,6 +655,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   frame.
 
 ### Breaking
+
+- **`GameModule::tick` takes the tick's client input.** The signature is
+  `fn tick(&mut self, world: &mut World, inputs: ClientInputs<'_>)`. Every
+  implementation adds the parameter; one that ignores input names it `_inputs`.
+  `ClientInputs` is exported from `crcbl-ecs`, so `crcbl::ecs::ClientInputs`.
 
 - **`crcbl_hal::null::Event::PresentWaited` carries a `timed_out` flag.**
   `Event` is not `#[non_exhaustive]`, so a `match` that destructures that

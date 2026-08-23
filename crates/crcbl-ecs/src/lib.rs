@@ -52,7 +52,7 @@ mod world;
 
 pub use component_hash::ComponentHash;
 pub use entity::{Entity, EntityMarker};
-pub use game_module::GameModule;
+pub use game_module::{ClientInputs, GameModule};
 pub use inspector::{Inspector, SystemStats};
 pub use schedule::Schedule;
 pub use system::{DebugCtx, DebugDrawFn, System, SystemTrait};

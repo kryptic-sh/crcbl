@@ -86,7 +86,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::core::input::KeyCode;
-use crcbl::ecs::{Entity, GameModule, World};
+use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::jobs::{Inline, Pool, Spawn, default_spawner};
 use crcbl::math::DVec3;
@@ -1781,7 +1781,7 @@ impl GameModule for HordeModule {
 
     fn register(&self, _world: &mut World) {}
 
-    fn tick(&mut self, world: &mut World) {
+    fn tick(&mut self, world: &mut World, _inputs: ClientInputs<'_>) {
         let mut logic = lock(&self.shared);
         run_tick(&mut logic, world, &mut self.pool);
     }

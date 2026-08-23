@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::core::rand::hash_u64;
-use crcbl::ecs::{GameModule, World};
+use crcbl::ecs::{ClientInputs, GameModule, World};
 use crcbl::net::ProtocolCompatibility;
 use crcbl::session::Loopback;
 
@@ -328,7 +328,7 @@ impl GameModule for HudModule {
 
     fn register(&self, _world: &mut World) {}
 
-    fn tick(&mut self, _world: &mut World) {
+    fn tick(&mut self, _world: &mut World, _inputs: ClientInputs<'_>) {
         run_tick(&mut lock(&self.shared));
     }
 }

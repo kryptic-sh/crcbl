@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::core::input::{KeyCode, PointerButton};
-use crcbl::ecs::{Entity, GameModule, World};
+use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
@@ -316,7 +316,7 @@ impl GameModule for FlappyModule {
 
     fn register(&self, _world: &mut World) {}
 
-    fn tick(&mut self, world: &mut World) {
+    fn tick(&mut self, world: &mut World, _inputs: ClientInputs<'_>) {
         let mut logic = lock(&self.shared);
         run_tick(&mut logic, world);
     }

@@ -16,7 +16,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crcbl_core::{FrameClock, TickId};
-use crcbl_ecs::{GameModule, Inspector, World};
+use crcbl_ecs::{ClientInputs, GameModule, Inspector, World};
 use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::InboundRateLimiter;
 use crcbl_net::{
@@ -34,6 +34,23 @@ use crcbl_net::{
 /// have, forever. This bounds that stall, and is the server half of the same
 /// guarantee the client makes by re-announcing its baseline.
 const KEYFRAME_RECOVERY_TICKS: u32 = 32;
+
+/// The most client input frames one tick will hold.
+///
+/// **How many arrive is the peer's choice, not ours.** A client sends one
+/// frame per tick its own clock consumed, and
+/// [`DEFAULT_MAX_CATCH_UP_TICKS`](crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS)
+/// is the most a well-behaved one hands itself for a single frame — so twice
+/// that leaves room for a client running ahead of this server's rate and still
+/// bounds what a peer that simply keeps sending can make the server allocate.
+/// Whatever a tick does not hold is refused, and
+/// [`Server::dropped_input_count`] is what says so.
+///
+/// Public because it is a statement to the other end of the wire: a client
+/// that sends more input than this for one server tick is sending some of it
+/// into a counter.
+pub const MAX_CLIENT_INPUTS_PER_TICK: usize =
+    2 * crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS as usize;
 
 // ---------------------------------------------------------------------------
 // Server
@@ -69,6 +86,14 @@ pub struct Server<T: Transport> {
     auth_failure_count: u64,
     rate_limited_message_count: u64,
     rate_limited_byte_count: u64,
+    /// The client input frames that arrived since the current tick began, in
+    /// arrival order, handed to the module as [`ClientInputs`] and emptied at
+    /// the start of every tick. Bounded by [`MAX_CLIENT_INPUTS_PER_TICK`].
+    client_inputs: Vec<(TickId, Vec<u8>)>,
+    /// Frames the cap refused during the current tick.
+    dropped_inputs: u32,
+    /// Frames the cap has refused since this server was built.
+    dropped_input_count: u64,
     /// Optional game logic module (ticked after the ECS schedule).
     module: Option<Box<dyn GameModule>>,
 }
@@ -127,6 +152,9 @@ impl<T: Transport> Server<T> {
             auth_failure_count: 0,
             rate_limited_message_count: 0,
             rate_limited_byte_count: 0,
+            client_inputs: Vec::new(),
+            dropped_inputs: 0,
+            dropped_input_count: 0,
             module: None,
         })
     }
@@ -150,11 +178,22 @@ impl<T: Transport> Server<T> {
     /// module destroyed, emit delta-encoded snapshot.
     fn tick(&mut self) {
         let was_connected = self.session.state() == SessionState::Connected;
+        // Last tick's inputs go before this tick's are read: a frame is
+        // offered to exactly one `GameModule::tick`, and holding it for a
+        // later one is the jitter buffer this deliberately is not.
+        self.client_inputs.clear();
+        self.dropped_inputs = 0;
         self.drain_inputs();
         self.update_session_for_transport();
         self.world.tick();
         if let Some(ref mut module) = self.module {
-            module.tick(&mut self.world);
+            // Three disjoint field borrows: the module, the world it mutates,
+            // and the inputs it reads. That is why the inputs are an argument
+            // and not something the module reaches back through `Server` for.
+            module.tick(
+                &mut self.world,
+                ClientInputs::new(&self.client_inputs, self.dropped_inputs),
+            );
         }
         // `World::despawn` only marks: the entity stays in the pool and in
         // every system's storage until a sweep. `World::tick` sweeps at its own
@@ -180,7 +219,10 @@ impl<T: Transport> Server<T> {
         }
     }
 
-    /// Consume queued client messages: handshake, inputs (discarded — P3), and acks.
+    /// Consume queued client messages: handshake, inputs, and acks.
+    ///
+    /// Inputs are queued for this tick's [`GameModule::tick`] — see
+    /// [`Self::queue_input`].
     ///
     /// Each channel is drained under its own budget, so exhausting one leaves
     /// the other readable.
@@ -234,6 +276,23 @@ impl<T: Transport> Server<T> {
         }
     }
 
+    /// Queue one decoded input frame for this tick's [`GameModule::tick`],
+    /// or refuse it once the tick is holding [`MAX_CLIENT_INPUTS_PER_TICK`].
+    ///
+    /// The **newest** frame is refused rather than the oldest evicted: the
+    /// frames already queued are the ones the module is about to read in
+    /// arrival order, and dropping from the front would hand it a reordered
+    /// prefix of what the client said. Refusing costs nothing and keeps the
+    /// order the peer sent.
+    fn queue_input(&mut self, tick: TickId, data: Vec<u8>) {
+        if self.client_inputs.len() >= MAX_CLIENT_INPUTS_PER_TICK {
+            self.dropped_inputs = self.dropped_inputs.saturating_add(1);
+            self.dropped_input_count = self.dropped_input_count.saturating_add(1);
+            return;
+        }
+        self.client_inputs.push((tick, data));
+    }
+
     /// Dispatch one inbound payload on its tag byte.
     ///
     /// Only the handshake travels unauthenticated — it is what establishes the
@@ -274,18 +333,23 @@ impl<T: Transport> Server<T> {
                 Ok(ack) => self.session.handle_ack(ack.sector, ack.tick),
                 Err(_) => self.processing_error_count += 1,
             },
-            // **Decoded to validate the frame, then discarded.** Nothing
-            // consumes client input yet: the server simulates its own world and
-            // sends snapshots, and a client's input reaches no system. The
-            // decode is still worth doing — a malformed frame counts against
-            // this session's error budget, which is what stops a peer sending
-            // rubbish cheaply — but a caller must not read this as input being
-            // applied. `docs/backlog.md` carries what closing it needs and the
-            // choice it rests on; the comment here used to promise "P3 wires
-            // them into the simulation", and P3 is done.
             Some(crcbl_net::codec::INPUT_TAG | crcbl_net::codec::COMMAND_TAG) => {
-                if crcbl_net::decode_client_to_server(&payload).is_err() {
-                    self.processing_error_count += 1;
+                match crcbl_net::decode_client_to_server(&payload) {
+                    Ok(crcbl_net::ClientToServer::Input { tick, data }) => {
+                        self.queue_input(tick, data);
+                    }
+                    // **A command is not this tick's state.** `Input` is a
+                    // sample of what the player was doing when the client
+                    // sampled it, which is why it is queued and cleared every
+                    // tick; a command ("ready up", a chat line) is a request
+                    // that has to be answered once and stay answered, and
+                    // nothing on this server consumes one yet. Decoding it
+                    // still charges a malformed frame against this session's
+                    // error budget, which is what stops a peer sending rubbish
+                    // cheaply — but a caller must not read this arm as a
+                    // command being acted on.
+                    Ok(crcbl_net::ClientToServer::Command { .. }) => {}
+                    Err(_) => self.processing_error_count += 1,
                 }
             }
             _ => self.processing_error_count += 1,
@@ -620,8 +684,10 @@ impl<T: Transport> Server<T> {
     /// Attach a [`GameModule`] to drive game-specific per-tick logic.
     ///
     /// The module's [`GameModule::tick`] is called every server tick after the
-    /// ECS schedule runs. Only one module can be attached at a time; calling
-    /// this again replaces any existing module.
+    /// ECS schedule runs, and is handed the [`ClientInputs`] that arrived since
+    /// the previous tick — which is the only way client input reaches game
+    /// logic. Only one module can be attached at a time; calling this again
+    /// replaces any existing module.
     ///
     /// Whatever the module despawns is swept before the tick's snapshot is
     /// serialised, so a destruction is replicated on the tick it happened.
@@ -642,6 +708,17 @@ impl<T: Transport> Server<T> {
     #[must_use]
     pub fn rate_limited_byte_count(&self) -> u64 {
         self.rate_limited_byte_count
+    }
+
+    /// Number of input frames refused because the tick they arrived in was
+    /// already holding [`MAX_CLIENT_INPUTS_PER_TICK`].
+    ///
+    /// A growing value means a peer is sending input faster than this server
+    /// will hold it. The frames were never stored and are not recoverable;
+    /// this is what keeps their loss from being silent.
+    #[must_use]
+    pub fn dropped_input_count(&self) -> u64 {
+        self.dropped_input_count
     }
 
     /// Number of messages rejected because they were unauthenticated, carried
@@ -894,11 +971,67 @@ mod tests {
 
         fn register(&self, _world: &mut World) {}
 
-        fn tick(&mut self, world: &mut World) {
+        fn tick(&mut self, world: &mut World, _inputs: ClientInputs<'_>) {
             if self.armed.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 world.despawn(self.victim);
             }
         }
+    }
+
+    /// What one [`GameModule::tick`] call was handed, recorded from inside the
+    /// server's own tick.
+    ///
+    /// Shared rather than read back off the module, because `set_module` moves
+    /// the module into the `Server` and nothing hands it back.
+    #[derive(Debug, Default)]
+    struct SeenInputs {
+        /// One entry per tick the module ran: the frames of that tick.
+        ticks: Vec<Vec<(TickId, Vec<u8>)>>,
+        /// The drop count of the last tick's view.
+        dropped: u32,
+    }
+
+    /// A [`GameModule`] that records the [`ClientInputs`] of every tick it runs.
+    struct RecordInputs {
+        seen: std::sync::Arc<std::sync::Mutex<SeenInputs>>,
+    }
+
+    impl GameModule for RecordInputs {
+        fn name(&self) -> &str {
+            "record-inputs"
+        }
+
+        fn register(&self, _world: &mut World) {}
+
+        fn tick(&mut self, _world: &mut World, inputs: ClientInputs<'_>) {
+            let mut seen = self.seen.lock().expect("test module is not poisoned");
+            seen.ticks.push(
+                inputs
+                    .iter()
+                    .map(|(tick, data)| (tick, data.to_vec()))
+                    .collect(),
+            );
+            seen.dropped = inputs.dropped();
+        }
+    }
+
+    /// Attaches a [`RecordInputs`] module to `server` and returns what it sees.
+    fn record_inputs(
+        server: &mut Server<InMemoryTransport>,
+    ) -> std::sync::Arc<std::sync::Mutex<SeenInputs>> {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(SeenInputs::default()));
+        server.set_module(Box::new(RecordInputs {
+            seen: std::sync::Arc::clone(&seen),
+        }));
+        seen
+    }
+
+    /// One `ClientToServer::Input` on the wire.
+    fn input(tick: u64, data: &[u8]) -> Vec<u8> {
+        crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Input {
+            tick: TickId::from_raw(tick),
+            data: data.to_vec(),
+        })
     }
 
     /// Unseal and decode one snapshot payload the way a client does.
@@ -1055,6 +1188,137 @@ mod tests {
         server.update(Duration::ZERO);
         assert_eq!(server.update(5 * TICK), 5);
         assert_eq!(server.tick_id(), TickId::from_raw(5));
+    }
+
+    // ── Client input ───────────────────────────────────────────────────────
+
+    /// **The bytes a client sealed reach the module.** The frame goes over the
+    /// transport, through the session MAC, and out the other side with the tick
+    /// the client stamped it with and the payload it carried — a server that
+    /// decoded it only to drop it hands the module an empty view.
+    #[test]
+    fn a_sealed_input_frame_reaches_the_module_with_its_tick_and_bytes() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        send_sealed(&mut peer, &mut crypto, &input(41, &[7, 8, 9]));
+        assert_eq!(server.update(2 * TICK), 1);
+
+        let seen = seen.lock().expect("test module is not poisoned");
+        assert_eq!(
+            seen.ticks,
+            vec![vec![(TickId::from_raw(41), vec![7, 8, 9])]],
+            "the module was handed {:?}",
+            seen.ticks,
+        );
+        assert_eq!(seen.dropped, 0);
+        assert_eq!(server.processing_error_count(), 0);
+        assert_eq!(server.dropped_input_count(), 0);
+    }
+
+    /// **A frame is offered to one tick and then it is gone.** The queue is
+    /// emptied at the start of every tick, so the tick after the one an input
+    /// arrived in sees nothing — holding it until the tick it names is the
+    /// jitter buffer this deliberately is not.
+    #[test]
+    fn an_input_frame_is_cleared_after_the_tick_that_was_offered_it() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        send_sealed(&mut peer, &mut crypto, &input(41, &[7]));
+        assert_eq!(server.update(2 * TICK), 1);
+        assert_eq!(server.update(3 * TICK), 1);
+
+        let seen = seen.lock().expect("test module is not poisoned");
+        assert_eq!(seen.ticks.len(), 2, "two ticks must have run");
+        assert_eq!(seen.ticks[0].len(), 1);
+        assert!(
+            seen.ticks[1].is_empty(),
+            "the second tick was handed {:?} again",
+            seen.ticks[1],
+        );
+    }
+
+    /// **The cap is what a peer cannot spend past.** One tick's worth of
+    /// frames past [`MAX_CLIENT_INPUTS_PER_TICK`] is refused: the module sees
+    /// exactly the cap, in the order they were sent, and both the view and the
+    /// server's counter say how many were dropped.
+    #[test]
+    fn input_past_the_per_tick_cap_is_refused_and_counted() {
+        const EXCESS: usize = 3;
+
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        for i in 0..MAX_CLIENT_INPUTS_PER_TICK + EXCESS {
+            send_sealed(&mut peer, &mut crypto, &input(i as u64, &[i as u8]));
+        }
+        assert_eq!(server.update(2 * TICK), 1);
+
+        let seen = seen.lock().expect("test module is not poisoned");
+        let frames = seen.ticks.first().expect("the module ran a tick");
+        assert_eq!(
+            frames.len(),
+            MAX_CLIENT_INPUTS_PER_TICK,
+            "the module was handed {} frames",
+            frames.len(),
+        );
+        // The *first* frames sent, not the last: the cap refuses the newest.
+        assert_eq!(frames[0].0, TickId::ZERO);
+        assert_eq!(
+            frames[MAX_CLIENT_INPUTS_PER_TICK - 1].0,
+            TickId::from_raw(MAX_CLIENT_INPUTS_PER_TICK as u64 - 1),
+        );
+        assert_eq!(seen.dropped, EXCESS as u32, "the view must say it dropped");
+        assert_eq!(server.dropped_input_count(), EXCESS as u64);
+        // The refused frames are not errors: the peer sent well-formed input
+        // and this server chose not to hold it.
+        assert_eq!(server.processing_error_count(), 0);
+    }
+
+    /// A malformed input frame still costs the peer its error budget, and
+    /// reaches no module.
+    #[test]
+    fn a_malformed_input_frame_counts_as_an_error_and_queues_nothing() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        // The tag of an input, then a truncated body.
+        send_sealed(&mut peer, &mut crypto, &[crcbl_net::codec::INPUT_TAG, 1, 2]);
+        assert_eq!(server.update(2 * TICK), 1);
+
+        assert_eq!(server.processing_error_count(), 1);
+        let seen = seen.lock().expect("test module is not poisoned");
+        assert_eq!(seen.ticks, vec![Vec::new()]);
+    }
+
+    /// A command is decoded and goes no further: it is not per-tick state, and
+    /// queueing one as input would hand the module a frame no client meant as
+    /// one.
+    #[test]
+    fn a_command_is_not_queued_as_input() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        let command = crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command {
+            data: vec![1, 2, 3],
+        });
+        send_sealed(&mut peer, &mut crypto, &command);
+        assert_eq!(server.update(2 * TICK), 1);
+
+        assert_eq!(server.processing_error_count(), 0);
+        let seen = seen.lock().expect("test module is not poisoned");
+        assert_eq!(seen.ticks, vec![Vec::new()]);
     }
 
     // ── Snapshot emission ──────────────────────────────────────────────────
