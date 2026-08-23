@@ -519,6 +519,90 @@ fn a_zero_extent_swapchain_is_refused_with_a_reason() {
     drop(device);
 }
 
+/// `SwapchainDesc::format` "must be one of [`SurfaceCaps::formats`]", which
+/// every backend now says rather than three of them saying it.
+///
+/// `crcbl-vk` used to pass whatever it was given straight to
+/// `vkCreateSwapchainKHR`. That is
+/// `VUID-VkSwapchainCreateInfoKHR-imageFormat-01273`: the validation layer
+/// reports it and a release driver need not, so the same descriptor was a
+/// refusal on the null, Metal and D3D12 backends and an unusable swapchain on
+/// Vulkan — or a working one, depending on the driver.
+///
+/// The unsupported format is not hard-coded. It is picked from the surface's
+/// **own** reported list so the test says the same thing on a backend whose
+/// list differs, and the pick is asserted absent before it is used — a format
+/// that turned out to be offered would make the refusal below vacuous. The
+/// accepting arm is here for the same reason: a backend that refused *every*
+/// format would pass the first assertion and present nothing.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_swapchain_format_the_surface_does_not_offer_is_refused() {
+    let instance = instance();
+    let adapter = select_adapter(instance.as_ref());
+    // SAFETY: `Offscreen` names no platform object.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen");
+    let caps = instance
+        .surface_caps(surface, adapter.id)
+        .expect("an offscreen surface has caps");
+    let device = instance
+        .create_device(&DeviceDesc {
+            label: Some("crcbl hal seam e2e"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: Some(surface),
+        })
+        .expect("a device opens");
+
+    let swapchain_of = |format| {
+        device.create_swapchain(&SwapchainDesc {
+            label: None,
+            surface,
+            format,
+            extent: EXTENT,
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        })
+    };
+
+    // A depth format is the case the null backend's own comment names, and no
+    // window system presents one. Asserted rather than assumed.
+    let unsupported = Format::D32Float;
+    assert!(
+        !caps.formats.contains(&unsupported),
+        "this surface offers {unsupported:?}, so the refusal below would prove nothing: {:?}",
+        caps.formats
+    );
+    let error = swapchain_of(unsupported)
+        .err()
+        .unwrap_or_else(|| panic!("{unsupported:?} is not a format any surface can present"));
+    let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+        panic!("{unsupported:?} was refused as the wrong kind of error: {error}");
+    };
+    // The one thing every backend's wording has in common, and the only part a
+    // caller can act on: which format it was.
+    assert!(
+        message.contains(&format!("{unsupported:?}")),
+        "the refusal does not name the format it refused: {message}"
+    );
+
+    // …and one the surface does offer still builds.
+    let offered = *caps
+        .formats
+        .first()
+        .expect("a surface with no formats at all cannot present");
+    let swapchain = swapchain_of(offered).unwrap_or_else(|error| {
+        panic!("{offered:?} is one of this surface's own formats: {error}")
+    });
+    device.destroy_swapchain(swapchain);
+
+    instance.destroy_surface(surface);
+    assert_no_out_of_band_error(device.as_ref());
+    drop(device);
+}
+
 /// **Obligation 3**: handles do not cross devices, and the failure is detected
 /// rather than undefined.
 ///

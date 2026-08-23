@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` refuses a swapchain format the surface does not offer.**
+  `SwapchainDesc::format` is documented "must be one of `SurfaceCaps::formats`",
+  and the null, Metal and D3D12 backends each answered
+  `HalError::InvalidDescriptor` for one that is not. Vulkan passed whatever it
+  was given straight to `vkCreateSwapchainKHR`, which is
+  `VUID-VkSwapchainCreateInfoKHR-imageFormat-01273` — reported by the validation
+  layer and not necessarily by a release driver, so the same descriptor was a
+  caller bug on three backends and an unusable-or-working swapchain on the
+  fourth depending on the driver. Both paths now check: the WSI one against
+  `vkGetPhysicalDeviceSurfaceFormatsKHR` filtered exactly as `surface_caps`
+  filters it, and the offscreen ring against its own list. Callers who already
+  read `SurfaceCaps::formats` see no change.
+
 - **A page that opens a second GPU device no longer wedges on the first one's
   last answer.** The engine's pump held any reply `putReplyStream` would not
   take and offered it again next frame, which is right for the three reasons a

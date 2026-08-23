@@ -3307,6 +3307,16 @@ impl VkDevice {
             desc.extent,
         );
 
+        // SAFETY: as above.
+        let offered = unsafe {
+            surface_ext.get_physical_device_surface_formats(self.inner.physical, surface_raw)
+        }
+        .map_err(|error| conv::surface_error("vkGetPhysicalDeviceSurfaceFormatsKHR", error))?;
+        swapchain::check_swapchain_format(
+            desc.format,
+            &crate::instance::surface_formats(&offered),
+        )?;
+
         let extent = swapchain::resolve_swapchain_extent(desc.extent, &capabilities)?;
         if extent.clamped {
             // The seam's obligation 1 says the shell's size is authoritative;
@@ -3458,6 +3468,7 @@ impl VkDevice {
         desc: &SwapchainDesc<'_>,
     ) -> Result<SwapchainEntry, SurfaceError> {
         let caps = swapchain::offscreen_surface_caps();
+        swapchain::check_swapchain_format(desc.format, &caps.formats)?;
         let extent = swapchain::resolve_swapchain_extent(
             desc.extent,
             &vk::SurfaceCapabilitiesKHR {

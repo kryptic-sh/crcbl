@@ -139,6 +139,29 @@ pub(crate) fn resolve_image_count(
     requested.clamp(capabilities.min_image_count.max(1), max)
 }
 
+/// Holds [`SwapchainDesc::format`] to the list the surface actually offers.
+///
+/// The seam says the field "must be one of [`SurfaceCaps::formats`]" and this
+/// backend used to pass whatever it was given straight to
+/// `vkCreateSwapchainKHR`. That is
+/// `VUID-VkSwapchainCreateInfoKHR-imageFormat-01273`: the validation layer
+/// reports it and a release driver does not have to, so a caller naming a
+/// format no surface can present got an unusable swapchain on some drivers and
+/// a working one on others. Both the WSI and the offscreen path go through
+/// here, each against its own list.
+pub(crate) fn check_swapchain_format(
+    format: Format,
+    offered: &[Format],
+) -> Result<(), SurfaceError> {
+    if offered.contains(&format) {
+        return Ok(());
+    }
+    Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+        "SwapchainDesc::format is {format:?}, which this surface does not offer; \
+         SurfaceCaps::formats has {offered:?}"
+    ))))
+}
+
 /// The capabilities an offscreen "surface" reports.
 ///
 /// There is no window system to ask, so this is a statement of what the ring
@@ -409,6 +432,29 @@ mod tests {
     // one field that decides windowed-or-offscreen — so the tests below need a
     // non-null value that names no driver object.
     use ash::vk::Handle as _;
+
+    /// [`check_swapchain_format`] itself, which both swapchain paths call and
+    /// only the offscreen one has an e2e test for: the seam suite is offscreen
+    /// by construction, so the WSI call site is reached by
+    /// `run-wayland-e2e.sh` and `run-x11-e2e.sh` only with formats that pass.
+    /// This is where the refusal is held to its wording.
+    #[test]
+    fn a_format_the_surface_does_not_offer_is_refused_by_name() {
+        let offered = [Format::Rgba8UnormSrgb, Format::Bgra8UnormSrgb];
+
+        check_swapchain_format(Format::Bgra8UnormSrgb, &offered)
+            .expect("a format on the list is what the list is for");
+
+        let error = check_swapchain_format(Format::D32Float, &offered)
+            .expect_err("no surface presents a depth format");
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+            panic!("the wrong kind of error: {error}");
+        };
+        // Both halves: what was asked for, and what was on offer instead. A
+        // message with only the first leaves the caller guessing.
+        assert!(message.contains("D32Float"), "{message}");
+        assert!(message.contains("Rgba8UnormSrgb"), "{message}");
+    }
 
     /// A `SwapchainEntry` with nothing in it but the fields the present-id
     /// bookkeeping reads, so the bookkeeping is testable with no driver in the

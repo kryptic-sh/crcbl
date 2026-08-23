@@ -1036,6 +1036,35 @@ impl crcbl_hal::PendingDevice for VkPendingDevice {
     }
 }
 
+/// The seam's format list for a surface, from what `vkGetPhysicalDeviceSurface\
+/// FormatsKHR` reported.
+///
+/// Split out of [`build_surface_caps`] because `build_swapchain` needs the same
+/// list to hold `SwapchainDesc::format` to it: a swapchain whose format is not
+/// one this returns is a caller bug the seam states, and re-deriving the list
+/// there would be a second copy of the filter that could drift from the one
+/// `surface_caps` answers with.
+#[must_use]
+pub(crate) fn surface_formats(formats: &[vk::SurfaceFormatKHR]) -> Vec<Format> {
+    let mut mapped: Vec<Format> = formats
+        .iter()
+        // Only the standard non-linear sRGB colour space: the engine tonemaps
+        // into a display-referred swapchain, and an HDR colour space is a P7
+        // decision with its own metadata, not something to pick up by accident.
+        .filter(|format| format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        .filter_map(|format| conv::format_from_vk(format.format))
+        .collect();
+    // "Best first", per the seam. sRGB first is what the tonemap pass wants,
+    // and stable ordering means two drivers listing the same formats in
+    // different orders pick the same one. Sorted *before* the dedup, which is
+    // the only order in which `Vec::dedup` — which only ever removes
+    // consecutive equals — deduplicates anything; the pass that used to run
+    // here first was a no-op on an unsorted list.
+    mapped.sort_by_key(|format| (!format.is_srgb(), *format));
+    mapped.dedup();
+    mapped
+}
+
 /// Builds the seam's [`SurfaceCaps`] from the three Vulkan queries.
 ///
 /// Pure, and the reason it is a free function: this is where **obligation 2 of
@@ -1056,22 +1085,7 @@ pub(crate) fn build_surface_caps(
     formats: &[vk::SurfaceFormatKHR],
     present_modes: &[vk::PresentModeKHR],
 ) -> SurfaceCaps {
-    let mut mapped: Vec<Format> = formats
-        .iter()
-        // Only the standard non-linear sRGB colour space: the engine tonemaps
-        // into a display-referred swapchain, and an HDR colour space is a P7
-        // decision with its own metadata, not something to pick up by accident.
-        .filter(|format| format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
-        .filter_map(|format| conv::format_from_vk(format.format))
-        .collect();
-    // "Best first", per the seam. sRGB first is what the tonemap pass wants,
-    // and stable ordering means two drivers listing the same formats in
-    // different orders pick the same one. Sorted *before* the dedup, which is
-    // the only order in which `Vec::dedup` — which only ever removes
-    // consecutive equals — deduplicates anything; the pass that used to run
-    // here first was a no-op on an unsorted list.
-    mapped.sort_by_key(|format| (!format.is_srgb(), *format));
-    mapped.dedup();
+    let mapped = surface_formats(formats);
 
     let mut modes: Vec<PresentMode> = present_modes
         .iter()
