@@ -12258,32 +12258,38 @@ recorded in `docs/plan/18-render-features.md`. What is left:
   last-writer-wins and the file is not a stable baseline. That is why the
   bit-identical check above compared captured output rather than re-blessing.
 
-## `GpuInstance::transform` claims to be rigid and is not
+## The cull has not learned what the shading learned (2026-08-23)
 
-Its doc says "Rigid (rotation + translation), so its upper-left 3×3 transforms
-normals correctly without an inverse-transpose", declared
-character-for-character in every `.slang` file that reads a transform — `mesh`,
-`cull` and `draw_gen` — and held there by an equality test. **It is false** for
-two shipped scenes: the `Scene::Ao` trough is `scale(6, 2, 1.6)` and
-`Scene::Spot`'s floor is a cube scaled `6 × 0.2 × 6`.
+`GpuInstance::transform`'s "must be rigid" claim is gone: both mesh shaders take
+a normal through `normal_basis`, the cofactor matrix, so any affine transform
+shades correctly. Two places downstream still read a scaled instance as if it
+were not scaled, and both are in the mesh path where the shading was.
 
-The culling half of that lie is fixed (see the cluster-radius entry). The normal
-half is not, and it is a different failure: a non-uniformly scaled instance
-shades with a normal that is not perpendicular to its surface, which reads as
-lighting that is subtly wrong rather than geometry that vanishes.
+- **`cluster_survives` carries a cluster's cone axis through the bare 3×3**
+  (`crates/crcbl-shaders/shaders/mesh_cluster.slang`) and renormalises it. A
+  cone axis is an averaged _normal_, so it needs the same cofactor matrix the
+  vertex stage now uses — and that is only half the fix: a non-uniform scale
+  also widens the cone, so `cone_cutoff` has to be relaxed conservatively or the
+  test starts rejecting clusters that hold a front-facing triangle. Dropped
+  geometry, not mis-lit geometry, which is why `crcbl_scene::gltf_render` still
+  reports a `scale` skip and says this is what it is about. Closing it means
+  moving `crcbl_render::cull::cluster_survives_cull` — the Rust oracle a test
+  compares the rule to — in the same step, and deriving the widened half-angle
+  rather than guessing it. The radius half of the same function is already
+  handled, by `max_stretch`.
+- **`select_level` judges a scaled instance at its mesh-space size**
+  (`crates/crcbl-shaders/shaders/draw_gen.slang`). A group's radius and its
+  error are distances in the mesh's own space while the centre goes through the
+  transform, so a scaled instance picks a level for the size it was authored at.
+  It costs a level rather than dropping geometry, and changing it moves every
+  level-of-detail golden. Unexercised today: the DAG mesh is placed at the
+  identity everywhere in the tree.
 
-Two ways out, and it is a decision rather than a fix:
-
-- **Make the claim true** — forbid non-uniform scale in an instance transform
-  and push it into the mesh. Cheap to state, expensive for callers, and the two
-  scenes above would have to change.
-- **Make the code true** — carry an inverse-transpose, or renormalise after
-  transforming. Costs bytes in `GpuInstance` or work in the shader, and touches
-  all five declarations plus three shaders' artifacts.
-
-Nothing observable is known to be wrong today, which is why this is a decision
-and not an incident. But it is a documented contract nothing enforces, and the
-culling bug is what happens when one of those goes unexamined for long enough.
+**Coverage gap from the shading change itself.** The MSL and DXIL artifacts were
+regenerated and are unexercised locally — the vk/RADV leg is what ran here (mesh
+e2e 9/9, render e2e 26/26, both goldens unmoved). `--check` proves the artifacts
+came from the pinned tools, not that Metal and D3D12 render them identically,
+and the two backends are deferred, so nothing will prove it soon.
 
 ## One primitive shades black on Windows lavapipe, intermittently
 
