@@ -1067,28 +1067,20 @@ file rots.
    the `wgpu-e2e` suite, both CI jobs, the registry entry, `CRCBL_GPU=wgpu` and
    the whole `wgpu` family out of the lockfile. What it left behind is below.
 
-**What the deletion left behind, measured on 2026-08-21.** The code went in one
-commit; the prose did not. `git grep -lI 'crcbl-wgpu\|crcbl_wgpu'` finds the
-name in **92 files** outside this backlog — plan documents, crate docs, test
-comments and `CHANGELOG.md`. Most of that is history and correct as history.
-Three are justifications that are now false and will mislead whoever reads them
-next:
+**What the deletion left behind is swept.** The three false justifications this
+entry named by name — `crcbl-mtl`'s and `crcbl`'s `Cargo.toml` comments and
+`parity_blockers`' own doc — are correct as of 2026-08-23, as is every other
+present-tense mention outside the two `.slang` files recorded under "The stale
+`crcbl-wgpu` mentions the comment sweep could not reach" above. What is left of
+the name is history, and correct as history.
 
-- **`crates/crcbl-mtl/Cargo.toml`** justifies `objc2-quartz-core` and
-  `objc2-core-foundation` as "already in this workspace's lockfile — `wgpu-hal`
-  resolves them for `crcbl-wgpu`". Both halves expired: `wgpu-hal` is gone, and
-  so is `raw-window-metal`, the other dependent the argument fell back on, so
-  `crcbl-mtl` is the only thing resolving either now (read out of `Cargo.lock`,
-  2026-08-21). The dependency is fine; the reason written beside it is not.
-- **`crates/crcbl/Cargo.toml`** still describes `crcbl-wgpu` as "a
-  `cfg(not(wasm32))` dependency above", which no longer exists.
-- **`crates/crcbl-hal/src/capability.rs`**'s `parity_blockers` doc still
-  explains its filter as excluding "`crcbl-wgpu`, which is deleted once
-  `crcbl-webgpu` replaces it".
-
-Nothing enforces this: `tools/check-doc-citations.sh` resolves the paths a doc
-cites, not the names in its prose, so it is a read-and-fix sweep rather than
-something a gate will surface.
+**Nothing enforces that, and it is the gap worth knowing:**
+`tools/check-doc-citations.sh` resolves the paths a doc cites, not the names in
+its prose, so a comment naming a deleted crate is a read-and-fix sweep rather
+than something a gate surfaces. A gate that could is conceivable — a deny-list
+of removed crate names, checked against comments — and was not built, because a
+list of the names we have deleted so far is a list somebody has to remember to
+extend, which is the same failure mode one step further back.
 
 **`naga` did not leave with it**, and notes here said otherwise twice. See "The
 `crcbl-wgpu` deletion bar was already answered" above for the owner's decision
