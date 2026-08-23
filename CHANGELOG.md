@@ -33,6 +33,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   caller's seed still reproduces the whole run. `Loopback` is now generic over
   its transport with `InMemoryTransport` as the default, so every existing
   `Loopback::new` call site is unchanged.
+- **`crcbl_net::Clock`, with `SystemClock` and `ManualClock`.**
+  `ConditionSimulator` schedules delayed messages against a clock rather than
+  against `Instant::now`, and `ConditionSimulator::with_clock` /
+  `Loopback::impaired_on_a_manual_clock` hand a test one it drives by hand.
+  Cloned `ManualClock` handles share one time, so both ends of a link move
+  together. `ConditionSimulator::new` is unchanged and still reads the wall
+  clock. What this buys: a latency run that spends no wall time and reproduces
+  exactly from its seed — breakout's impairment sweep went from about three
+  minutes and a different answer every run to 2.2 seconds and the same one.
 
 - **Bloom.** `docs/plan/18-render-features.md`'s P10 chain: a threshold-free
   partial-Karis downsample pyramid, a 3×3 tent upsample added back down it, and

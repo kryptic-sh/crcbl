@@ -1461,8 +1461,7 @@ mod tests {
     use super::*;
     use crcbl::core::TickId;
     use crcbl::core::time::{ManualTime, TimeSource as _};
-    use crcbl::net::{ConditionSimulator, SimConditions};
-    use std::time::Instant;
+    use crcbl::net::{ConditionSimulator, ManualClock, SimConditions};
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];
@@ -2508,40 +2507,58 @@ mod tests {
     /// that loses its first hello fails as if the link were dead.
     const IMPAIRED_HANDSHAKE_TICKS: u32 = 400;
 
-    impl Game<ConditionSimulator<InMemoryTransport>> {
+    impl Game<ConditionSimulator<InMemoryTransport, ManualClock>> {
         /// The same board and the same module, over a link running
-        /// `conditions` in both directions.
+        /// `conditions` in both directions, on a clock the caller drives.
         ///
         /// The session is **not** shaken hands with yet: an impaired link needs
-        /// several ticks for that and needs wall time to pass between them, and
-        /// pacing them is [`ImpairedRun`]'s.
-        fn impaired(tick_hz: u32, conditions: SimConditions) -> Result<Self, GameError> {
-            Self::build(true, tick_hz, |world, module| {
-                Loopback::impaired(world, module, tick_hz, COMPATIBILITY, conditions)
-            })
+        /// several ticks for that and needs its clock moved between them, and
+        /// driving it is [`ImpairedRun`]'s.
+        fn impaired(
+            tick_hz: u32,
+            conditions: SimConditions,
+        ) -> Result<(Self, ManualClock), GameError> {
+            let mut clock = None;
+            let game = Self::build(true, tick_hz, |world, module| {
+                let (session, handle) = Loopback::impaired_on_a_manual_clock(
+                    world,
+                    module,
+                    tick_hz,
+                    COMPATIBILITY,
+                    conditions,
+                )?;
+                clock = Some(handle);
+                Ok(session)
+            })?;
+            Ok((
+                game,
+                clock.expect("the constructor ran, so it left its clock"),
+            ))
         }
     }
 
-    /// Drives a [`Game`] over an impaired link, one tick per tick period of
-    /// **wall** time.
+    /// Drives a [`Game`] over an impaired link, one tick period of the link's
+    /// own clock per tick.
     ///
-    /// [`ConditionSimulator`] schedules a delayed message against
-    /// [`Instant::now`], so latency and jitter mean something only to a run
-    /// whose ticks are spaced in real time: a loop ticking as fast as it could
-    /// would find that nothing ever came due, and would measure a dead link
-    /// rather than a slow one. Pacing to an absolute deadline off the run's
-    /// start rather than sleeping a period per tick is what keeps one slow tick
-    /// from being added to every tick after it.
+    /// **The clock is driven, not read.** A `ConditionSimulator` on the wall
+    /// clock releases a delayed message at a real instant, so a run over one
+    /// has to sleep past every delay — slow, and passing or failing on how
+    /// evenly the machine happened to space its ticks, which is why every
+    /// latency measurement in this workspace used to be `#[ignore]`d. On a
+    /// [`ManualClock`] the same run spends no wall time and reproduces exactly
+    /// from its seed, at any latency.
+    ///
+    /// The clock moves by one tick period per tick, beside the simulated time
+    /// [`Game::tick`] is already advancing, so "150 ms of latency" means a
+    /// hundred and fifty milliseconds of the same clock the ticks are counted
+    /// on.
     struct ImpairedRun {
-        game: Game<ConditionSimulator<InMemoryTransport>>,
-        started: Instant,
-        paced: u32,
+        game: Game<ConditionSimulator<InMemoryTransport, ManualClock>>,
+        /// The link's clock, shared with both of its ends.
+        clock: ManualClock,
         /// The direction key currently held, so a steering player sends an edge
         /// only when it changes.
         held: Option<KeyCode>,
-        /// Whether this link's impairments are scheduled in wall time — see
-        /// [`ImpairedRun::pace`].
-        timed: bool,
     }
 
     impl ImpairedRun {
@@ -2553,25 +2570,18 @@ mod tests {
         /// protocol retransmits one, so a link that eats a hello costs the
         /// client's whole handshake timeout before it sends another.
         fn try_new(conditions: SimConditions) -> Option<(Self, u32)> {
-            let timed = !conditions.latency.is_zero() || !conditions.jitter.is_zero();
-            let game =
+            let (game, clock) =
                 Game::impaired(DEFAULT_TICK_HZ, conditions).expect("headless game always starts");
             let mut run = Self {
                 game,
-                started: Instant::now(),
-                paced: 0,
+                clock,
                 held: None,
-                timed,
             };
             for tick in 1..=IMPAIRED_HANDSHAKE_TICKS {
                 if run.game.handshake_tick() {
-                    // The run's clock starts at the first playable tick, so the
-                    // handshake's ticks are not counted against it.
-                    run.started = Instant::now();
-                    run.paced = 0;
                     return Some((run, tick));
                 }
-                run.pace();
+                run.advance();
             }
             None
         }
@@ -2584,27 +2594,16 @@ mod tests {
                 .0
         }
 
-        /// Sleep until the next tick is due in wall time, on the links where
-        /// that means anything.
+        /// Moves the link's clock on by one tick period.
         ///
-        /// Only `latency` and `jitter` are scheduled against [`Instant::now`];
-        /// loss, duplication and the reorder window are decided at send time
-        /// off the seeded LCG. A run over a link with neither therefore needs
-        /// no wall time at all — which is what lets a test of one be both
-        /// quick and exactly reproducible.
-        fn pace(&mut self) {
-            if !self.timed {
-                return;
-            }
-            self.paced += 1;
-            let due = self.started + self.game.tick_period * self.paced;
-            if let Some(wait) = due.checked_duration_since(Instant::now()) {
-                std::thread::sleep(wait);
-            }
+        /// Called before the tick rather than after, so the tick runs at the
+        /// clock reading its own messages will be stamped with.
+        fn advance(&mut self) {
+            self.clock.advance(self.game.tick_period);
         }
 
         fn tick(&mut self) {
-            self.pace();
+            self.advance();
             self.game.tick();
         }
 
@@ -2877,9 +2876,36 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            (
+                "lat 50 jit 10",
+                SimConditions {
+                    latency: ms(50),
+                    jitter: ms(10),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 50 jit 40",
+                SimConditions {
+                    latency: ms(50),
+                    jitter: ms(40),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 150 jit 40",
+                SimConditions {
+                    latency: ms(150),
+                    jitter: ms(40),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
         ] {
             let per_tick = Arc::new(Mutex::new(Vec::new()));
-            let mut session = Loopback::impaired(
+            let (mut session, clock) = Loopback::impaired_on_a_manual_clock(
                 World::new(),
                 Box::new(CountingModule {
                     per_tick: Arc::clone(&per_tick),
@@ -2891,16 +2917,7 @@ mod tests {
             .expect("OS entropy is available in a test process");
 
             let period = session.tick_period();
-            let started = Instant::now();
             let mut sim_time = Duration::ZERO;
-            let mut paced = 0u32;
-            let pace = |paced: &mut u32| {
-                *paced += 1;
-                let due = started + period * *paced;
-                if let Some(wait) = due.checked_duration_since(Instant::now()) {
-                    std::thread::sleep(wait);
-                }
-            };
 
             // Bring the session up before anything is counted — both halves
             // of it, or the frames sent while the client is still keyless are
@@ -2912,7 +2929,7 @@ mod tests {
                 session.client_mut().update(sim_time);
                 session.server_mut().update(sim_time);
                 session.client_mut().update(sim_time);
-                pace(&mut paced);
+                clock.advance(period);
             }
             per_tick.lock().unwrap().clear();
 
@@ -2927,7 +2944,7 @@ mod tests {
                 client.update(sim_time);
                 server.update(sim_time);
                 client.update(sim_time);
-                pace(&mut paced);
+                clock.advance(period);
             }
 
             let counts: Vec<usize> = per_tick
@@ -3035,6 +3052,91 @@ mod tests {
         );
     }
 
+    /// The link the jitter guard runs over, and the one it contrasts with.
+    ///
+    /// The same latency in both, so the only difference between the two rows is
+    /// whether arrivals are evenly spaced.
+    const JITTER_LATENCY: Duration = Duration::from_millis(50);
+    /// Jitter wide enough that two frames land in one tick and none in the
+    /// next. Measured, not guessed — see `input_frame_arrivals`, where this
+    /// value puts two frames in seventeen ticks out of a hundred and twenty and
+    /// three in none.
+    const JITTER_SPREAD: Duration = Duration::from_millis(10);
+
+    /// **Latency costs lag; jitter costs travel that never arrives.**
+    ///
+    /// Both halves are asserted here because either alone would be misread.
+    ///
+    /// Over a link with a *constant* delay, a held key loses nothing: every
+    /// frame arrives, one per tick, shifted by the round trip. The paddle is
+    /// behind while the key is down and catches up once it is released, so the
+    /// travel after settling is the full thirty ticks the key was held for.
+    ///
+    /// Add jitter and frames stop arriving one per tick — two become due
+    /// together and the tick between them gets none. The server hands a whole
+    /// tick's queue to one [`GameModule::tick`], [`Intent::from_inputs`] folds
+    /// the pair into a single [`Intent`], and the second frame's tick of travel
+    /// is **gone**: it is still missing after the settle, which is what
+    /// separates it from lag.
+    ///
+    /// **This asserts what the game does today.** A jitter buffer — holding a
+    /// frame for the tick it names instead of collapsing it — is what changes
+    /// it, and this is the test that should go red when one lands.
+    ///
+    /// [`Server::dropped_input_count`] is asserted zero in both arms so the
+    /// difference is read as the fold's and not as the per-tick cap refusing
+    /// frames.
+    #[test]
+    fn jitter_costs_paddle_travel_that_latency_alone_only_delays() {
+        let travel = |conditions| {
+            let mut run = ImpairedRun::new(conditions);
+            let step = PADDLE_SPEED * run.game.tick_dt_secs();
+            run.hold(KeyCode::ArrowRight, SWEEP_HELD_TICKS);
+            run.settle(SWEEP_SETTLE_TICKS);
+            let settled = (run.game.paddle_x() / step).round() as u32;
+            (settled, run.game.session.server().dropped_input_count())
+        };
+
+        let (steady, steady_dropped) = travel(SimConditions {
+            latency: JITTER_LATENCY,
+            seed: SWEEP_SEED,
+            ..Default::default()
+        });
+        assert_eq!(
+            steady_dropped, 0,
+            "the server's per-tick cap refused a frame"
+        );
+        assert_eq!(
+            steady,
+            SWEEP_HELD_TICKS,
+            "a held key over a link with a constant delay lost {} tick(s) of \
+             travel. Constant delay shifts arrivals, it does not bunch them, so \
+             every frame should still reach a tick of its own and the paddle \
+             should catch up during the settle",
+            SWEEP_HELD_TICKS - steady,
+        );
+
+        let (jittered, jittered_dropped) = travel(SimConditions {
+            latency: JITTER_LATENCY,
+            jitter: JITTER_SPREAD,
+            seed: SWEEP_SEED,
+            ..Default::default()
+        });
+        assert_eq!(
+            jittered_dropped, 0,
+            "the server's per-tick cap refused a frame; this difference is \
+             supposed to be the fold's",
+        );
+        assert!(
+            jittered < steady,
+            "the same key held over the same delay with {JITTER_SPREAD:?} of \
+             jitter on it travelled {jittered}/{SWEEP_HELD_TICKS}, the same as \
+             without. Either arrivals stopped bunching or something is now \
+             holding a bunched frame for the tick it names — which is the jitter \
+             buffer this asserts the absence of",
+        );
+    }
+
     /// **Two input frames in one server tick are one tick of intent.**
     ///
     /// The server empties its input queue at the top of every tick and hands
@@ -3044,12 +3146,14 @@ mod tests {
     /// holding the key. The tick that gets nothing runs on
     /// [`Intent::default`], a player holding nothing, and the paddle stops.
     ///
-    /// Frames bunch like this on any link with delay on it: nothing lines an
+    /// Frames bunch whenever arrivals are unevenly spaced: nothing lines an
     /// input up with the tick it names, so two that happen to become due
-    /// together are two the module can only see at once. Over a
-    /// `ConditionSimulator` at 150 ms every frame sent arrived and the server
-    /// refused none of them — see `input_frame_arrivals` — and they still
-    /// reached the module bunched, which is the whole of the loss.
+    /// together are two the module can only see at once. A *constant* delay
+    /// does not do it — `input_frame_arrivals` shows one frame per tick at both
+    /// 50 and 150 ms, exactly as with no delay at all — but jitter does, and so
+    /// does a real game loop whose own ticks are not evenly spaced. Every frame
+    /// still arrives and the server refuses none of them; the loss is entirely
+    /// here, in the fold.
     ///
     /// **This asserts what the game does today.** A jitter buffer is what
     /// changes it, and this is the test that should go red when one lands.

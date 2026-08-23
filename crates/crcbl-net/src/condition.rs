@@ -4,10 +4,116 @@
 //! impairments: packet loss, latency, jitter, duplication, and reordering.
 //! Uses a deterministic LCG-based RNG so the same seed always produces the
 //! same impairment pattern.
+//!
+//! # Loss reproduces exactly; latency needs a clock
+//!
+//! Loss, duplication and the reorder window are decided at send time from the
+//! seeded LCG, so a run over them is a pure function of the seed. Latency and
+//! jitter are not: a delayed message is due at an *instant*, and the simulator
+//! has to ask something what time it is.
+//!
+//! That question goes through [`Clock`]. The default is [`SystemClock`], which
+//! reads the wall clock and makes a latency test spend real seconds and depend
+//! on how evenly the driving loop happened to be spaced. [`ManualClock`] is the
+//! alternative: a handle a test advances by hand, cloned so that both ends of a
+//! link share one time, which makes a latency run instant and exactly
+//! reproducible. See [`ConditionSimulator::with_clock`].
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::{Message, MessageKind, Transport, TransportError};
+
+// ── Clock ────────────────────────────────────────────────────────────────────
+
+/// The time source a [`ConditionSimulator`] schedules delayed messages against.
+///
+/// Time is a [`Duration`] since the clock's own epoch rather than an [`Instant`]
+/// so that a hand-driven clock is plain arithmetic with nothing to overflow, and
+/// so that a caller already speaking simulated time — `Server::update` and
+/// `Client::update` both take a `Duration` — can hand the same value to both.
+///
+/// **Monotonic.** An implementation that goes backwards would make a message
+/// already forwarded become pending again; nothing here defends against it.
+///
+/// `Send` because [`Transport`] is: a simulator holding a clock has to be as
+/// movable between threads as the transport it wraps.
+pub trait Clock: Send {
+    /// Time since this clock's epoch.
+    fn now(&self) -> Duration;
+}
+
+/// The wall clock, and what a simulator gets when no other is named.
+#[derive(Clone, Debug)]
+pub struct SystemClock {
+    start: Instant,
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+}
+
+impl SystemClock {
+    /// A clock whose epoch is now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Clock for SystemClock {
+    fn now(&self) -> Duration {
+        self.start.elapsed()
+    }
+}
+
+/// A clock a test drives by hand, in nanoseconds since zero.
+///
+/// **Clones share one time**, which is the point: a link has two ends and each
+/// gets its own [`ConditionSimulator`], so both are handed clones of one clock
+/// and a single [`advance`](Self::advance) moves the whole link. A test that
+/// gave each end its own clock would have two directions running on two
+/// timelines.
+///
+/// Nanoseconds in a `u64` reach a little past five hundred years, and
+/// [`advance`](Self::advance) saturates rather than wrapping, so the clock can
+/// never run backwards however absurd the argument.
+#[derive(Clone, Debug, Default)]
+pub struct ManualClock {
+    nanos: Arc<AtomicU64>,
+}
+
+impl ManualClock {
+    /// A clock reading zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Moves every handle to this clock forward by `by`.
+    pub fn advance(&self, by: Duration) {
+        let by = u64::try_from(by.as_nanos()).unwrap_or(u64::MAX);
+        // `fetch_update` rather than `fetch_add`: an add wraps in release
+        // builds, and a clock that wraps to zero would make every pending
+        // message due at once — the opposite of what the caller asked for.
+        let _ = self
+            .nanos
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |now| {
+                Some(now.saturating_add(by))
+            });
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> Duration {
+        Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
+    }
+}
 
 // ── SimConditions ────────────────────────────────────────────────────────────
 
@@ -57,7 +163,8 @@ const MAX_SIMULATED_DELAY: Duration = Duration::from_secs(3600);
 
 struct PendingMessage {
     msg: Message,
-    release_at: Instant,
+    /// When this message becomes due, on the simulator's [`Clock`].
+    release_at: Duration,
 }
 
 /// A [`Transport`] wrapper that applies configurable network impairments.
@@ -67,23 +174,19 @@ struct PendingMessage {
 /// duplication, and reordering rules. Draining of ready messages happens on
 /// every `send_*` and `recv` call so that messages eventually flow even in
 /// send-only or recv-only usage.
-pub struct ConditionSimulator<T: Transport> {
+pub struct ConditionSimulator<T: Transport, C: Clock = SystemClock> {
     inner: T,
     conditions: SimConditions,
     pending: Vec<PendingMessage>,
     /// Messages that are due (release_at <= now) but not yet forwarded.
     ready: Vec<Message>,
+    clock: C,
 }
 
-impl<T: Transport> ConditionSimulator<T> {
+impl<T: Transport> ConditionSimulator<T, SystemClock> {
     /// Create a new simulator wrapping `inner` with the given `conditions`.
     pub fn new(inner: T, conditions: SimConditions) -> Self {
-        Self {
-            inner,
-            conditions,
-            pending: Vec::new(),
-            ready: Vec::new(),
-        }
+        Self::with_clock(inner, conditions, SystemClock::new())
     }
 
     /// Convenience constructor: only packet loss.
@@ -109,6 +212,24 @@ impl<T: Transport> ConditionSimulator<T> {
                 ..Default::default()
             },
         )
+    }
+}
+
+impl<T: Transport, C: Clock> ConditionSimulator<T, C> {
+    /// The same, scheduling against `clock` instead of the wall clock.
+    ///
+    /// A [`ManualClock`] here is what makes a latency run instant and exactly
+    /// reproducible; see this module's header. Both ends of a link must be
+    /// given clones of **one** clock, or the two directions run on two
+    /// timelines.
+    pub fn with_clock(inner: T, conditions: SimConditions, clock: C) -> Self {
+        Self {
+            inner,
+            conditions,
+            pending: Vec::new(),
+            ready: Vec::new(),
+            clock,
+        }
     }
 
     /// Replace the current conditions.
@@ -178,18 +299,16 @@ impl<T: Transport> ConditionSimulator<T> {
     /// Push a message into the internal buffer with a future release time.
     fn enqueue(&mut self, msg: Message) {
         let delay = self.compute_delay();
-        let release_at = if delay.is_zero() {
-            Instant::now()
-        } else {
-            Instant::now() + delay
-        };
+        // `saturating_add` because both halves are caller-configurable and a
+        // `Duration + Duration` past the type's range panics.
+        let release_at = self.clock.now().saturating_add(delay);
         self.pending.push(PendingMessage { msg, release_at });
     }
 
     /// Move all due pending messages into `self.ready`, optionally reorder,
     /// then forward them to the inner transport.
     fn drain_pending(&mut self) {
-        let now = Instant::now();
+        let now = self.clock.now();
 
         // Collect due messages via swap_remove — order of the *remaining*
         // (future-due) messages does not matter.
@@ -229,7 +348,7 @@ impl<T: Transport> ConditionSimulator<T> {
 
 // ── Transport impl ───────────────────────────────────────────────────────────
 
-impl<T: Transport> Transport for ConditionSimulator<T> {
+impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
     fn send_reliable(&mut self, mut msg: Message) -> Result<(), TransportError> {
         if !self.inner.is_connected() {
             return Err(TransportError::Disconnected);
@@ -296,7 +415,7 @@ impl<T: Transport> Transport for ConditionSimulator<T> {
     }
 }
 
-impl<T: Transport> std::fmt::Debug for ConditionSimulator<T> {
+impl<T: Transport, C: Clock> std::fmt::Debug for ConditionSimulator<T, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConditionSimulator")
             .field("conditions", &self.conditions)
@@ -500,6 +619,82 @@ mod tests {
         let received = drain_all(&mut b);
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].payload, vec![1]);
+    }
+
+    /// The same message, the same delay, and no wall time spent at all.
+    ///
+    /// **This is the test the one above cannot be.** A wall-clock latency test
+    /// has to sleep past the delay, which makes it slow, and it passes or fails
+    /// on how the machine happened to schedule it — the reason every latency
+    /// measurement in this workspace was `#[ignore]`d. Driving the clock by
+    /// hand makes the same question exact: at one nanosecond short of the delay
+    /// the message is still held, and at the delay it is through.
+    #[test]
+    fn a_hand_driven_clock_holds_a_message_to_the_nanosecond() {
+        let (a, mut b) = InMemoryTransport::pair();
+        let clock = ManualClock::new();
+        let latency = Duration::from_millis(50);
+        let mut sim = ConditionSimulator::with_clock(
+            a,
+            SimConditions {
+                latency,
+                seed: 0,
+                ..Default::default()
+            },
+            clock.clone(),
+        );
+
+        sim.send_reliable(msg(1)).unwrap();
+        assert!(b.recv().unwrap().is_none(), "due at once at time zero");
+
+        // One nanosecond short: `drain_pending` compares `release_at <= now`,
+        // so this is the last reading at which the message must still be held.
+        clock.advance(latency - Duration::from_nanos(1));
+        sim.recv().unwrap();
+        assert!(
+            b.recv().unwrap().is_none(),
+            "a message one nanosecond short of its release time was forwarded",
+        );
+
+        clock.advance(Duration::from_nanos(1));
+        sim.recv().unwrap();
+        let received = drain_all(&mut b);
+        assert_eq!(received.len(), 1, "the message was due and did not arrive");
+        assert_eq!(received[0].payload, vec![1]);
+    }
+
+    /// Cloned handles are one clock, which is what lets a link's two ends share
+    /// a timeline.
+    #[test]
+    fn every_handle_to_a_manual_clock_reads_the_same_time() {
+        let clock = ManualClock::new();
+        let other = clock.clone();
+        assert_eq!(clock.now(), Duration::ZERO);
+
+        clock.advance(Duration::from_millis(7));
+        assert_eq!(other.now(), Duration::from_millis(7));
+
+        other.advance(Duration::from_millis(3));
+        assert_eq!(clock.now(), Duration::from_millis(10));
+    }
+
+    /// A clock cannot be driven backwards, however absurd the argument.
+    ///
+    /// `fetch_add` would wrap here and make every pending message due at once,
+    /// which is the opposite of what a caller asking for a long delay wants.
+    #[test]
+    fn advancing_a_manual_clock_past_its_range_saturates_rather_than_wrapping() {
+        let clock = ManualClock::new();
+        clock.advance(Duration::from_secs(u64::MAX));
+        let far = clock.now();
+        assert!(far > Duration::from_secs(500 * 365 * 24 * 3600));
+
+        clock.advance(Duration::from_secs(u64::MAX));
+        assert!(
+            clock.now() >= far,
+            "the clock went backwards: {far:?} then {:?}",
+            clock.now(),
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ pub use codec::{
     decode_server_to_client, encode_ack, encode_client_to_server, encode_handshake_result,
     encode_hello, encode_server_to_client,
 };
-pub use condition::{ConditionSimulator, SimConditions};
+pub use condition::{Clock, ConditionSimulator, ManualClock, SimConditions, SystemClock};
 pub use delta::{
     Baseline, BaselineDecodeError, BaselineStore, Delta, DeltaCodec, DeltaDecodeError,
     MAX_AUTHENTICATED_SYSTEMS, MAX_BASELINE_ENCODED_BYTES, MAX_BASELINE_ENTITIES,

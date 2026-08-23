@@ -36,7 +36,8 @@ use std::time::Duration;
 use crcbl_core::FrameClock;
 use crcbl_ecs::{GameModule, World};
 use crcbl_net::{
-    ConditionSimulator, InMemoryTransport, ProtocolCompatibility, SimConditions, Transport,
+    Clock, ConditionSimulator, InMemoryTransport, ManualClock, ProtocolCompatibility,
+    SimConditions, Transport,
 };
 
 /// A server and its client, wired to each other and to nothing else.
@@ -144,6 +145,97 @@ impl Loopback<ConditionSimulator<InMemoryTransport>> {
         compatibility: ProtocolCompatibility,
         conditions: SimConditions,
     ) -> Result<Self, SessionError> {
+        Self::impaired_on(
+            world,
+            module,
+            tick_hz,
+            compatibility,
+            conditions,
+            crcbl_net::SystemClock::new(),
+        )
+    }
+}
+
+impl Loopback<ConditionSimulator<InMemoryTransport, ManualClock>> {
+    /// The same pair over a clock the caller drives, and the handle to drive it.
+    ///
+    /// **What this buys is a latency test that spends no wall time.** A
+    /// `ConditionSimulator` on the wall clock schedules a delayed message at a
+    /// real instant, so a run over one has to sleep past every delay and then
+    /// passes or fails on how evenly the machine happened to space its ticks.
+    /// Driven by hand it is exact: advance the clock by a tick period per tick,
+    /// beside the simulated time the two halves are already updated with, and
+    /// the run is a pure function of its seed at any latency.
+    ///
+    /// The returned [`ManualClock`] is a clone of the one **both** ends hold,
+    /// so one [`ManualClock::advance`] moves the whole link. Handing it back
+    /// rather than taking one is deliberate: two ends given two clocks is two
+    /// timelines, and there is no way to make that mistake through this
+    /// signature.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Entropy`], exactly as [`Loopback::new`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Loopback::new`]: a zero `tick_hz`, or a `compatibility` leaving
+    /// either identifier zero.
+    pub fn impaired_on_a_manual_clock(
+        world: World,
+        module: Box<dyn GameModule>,
+        tick_hz: u32,
+        compatibility: ProtocolCompatibility,
+        conditions: SimConditions,
+    ) -> Result<(Self, ManualClock), SessionError> {
+        let clock = ManualClock::new();
+        let session = Self::impaired_on(
+            world,
+            module,
+            tick_hz,
+            compatibility,
+            conditions,
+            clock.clone(),
+        )?;
+        Ok((session, clock))
+    }
+}
+
+impl<C: Clock + Clone> Loopback<ConditionSimulator<InMemoryTransport, C>> {
+    /// Both directions behind a [`ConditionSimulator`] running `conditions`,
+    /// scheduling against `clock`.
+    ///
+    /// What it is for: every sample plays over [`InMemoryTransport`], which
+    /// drops nothing, delays nothing and reorders nothing, so a game's own
+    /// behaviour under loss or latency is exercised by no test anywhere. This
+    /// is the constructor that lets one be written — a scripted run over a
+    /// seeded impairment pattern, reproducing exactly.
+    ///
+    /// **Both ends are wrapped, and they are given different seeds.** One seed
+    /// for both starts the two directions on the same draw sequence, which is
+    /// one impairment pattern sampled twice rather than two; `conditions.seed`
+    /// is the client's and the server's is derived from it, so the caller's
+    /// single seed still reproduces the whole run.
+    ///
+    /// **Both ends share one clock**, because a link whose two directions
+    /// disagree about the time is not a link.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Entropy`], exactly as [`Loopback::new`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Loopback::new`]: a zero `tick_hz`, or a `compatibility` leaving
+    /// either identifier zero.
+    pub fn impaired_on(
+        world: World,
+        module: Box<dyn GameModule>,
+        tick_hz: u32,
+        compatibility: ProtocolCompatibility,
+        conditions: SimConditions,
+        clock: C,
+    ) -> Result<Self, SessionError> {
         let (server_transport, client_transport) = InMemoryTransport::pair();
         let server_conditions = SimConditions {
             seed: conditions.seed ^ SERVER_SEED_SALT,
@@ -154,8 +246,8 @@ impl Loopback<ConditionSimulator<InMemoryTransport>> {
             module,
             tick_hz,
             compatibility,
-            ConditionSimulator::new(server_transport, server_conditions),
-            ConditionSimulator::new(client_transport, conditions),
+            ConditionSimulator::with_clock(server_transport, server_conditions, clock.clone()),
+            ConditionSimulator::with_clock(client_transport, conditions, clock),
         )
     }
 }

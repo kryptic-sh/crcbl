@@ -47,53 +47,64 @@ tests ends in `Windowed::finish()`, which calls
   records `cross-submission=no` locally against `yes` there), so a CI leg could
   emit a warning this machine does not.
 
-### Breakout over an impaired link: two breaks, and only one is the buffer
+### Breakout over an impaired link: what costs travel, and what only delays it
 
-`crcbl::session::Loopback::impaired` and `apps/breakout`'s `ImpairedRun` make a
-game playable over a seeded `ConditionSimulator`, and the first thing measured
-with them was breakout at latencies from 50 to 150 ms, loss from 2 to 30 %,
-jitter to 40 ms and reorder windows to 3. **The game stays playable at every
-severity run** — lives held at 3 and bricks kept breaking at 150 ms + 40 ms
-jitter + 10 % loss + reorder 3. Breakout is unusually forgiving because its
+`crcbl::session::Loopback::impaired`, `crcbl_net::ManualClock` and
+`apps/breakout`'s `ImpairedRun` make a game playable over a seeded
+`ConditionSimulator` on a clock the test drives, so a latency run spends no wall
+time and reproduces exactly. Breakout was measured at latencies to 150 ms, loss
+to 30 %, jitter to 40 ms and reorder windows to 3. **The game stays playable at
+every severity run** — lives held at 3 and bricks kept breaking at 150 ms + 40
+ms jitter + 10 % loss + reorder 3. Breakout is unusually forgiving because its
 authoritative state reaches the renderer through the shared cell rather than
 through snapshots, so server→client impairment is invisible to its gameplay and
 only input is affected. A game that read its state from snapshots would not be.
 
-- **Input frames bunch under latency, and the fold destroys them. This is the
-  jitter buffer.** At 150 ms every frame sent arrived — no loss, and
-  `Server::dropped_input_count()` zero, so the per-tick cap refused none — but
-  they arrive bunched: over 60 ticks, 7 were handed two frames and 67 none. The
-  server empties its queue at the top of each tick and hands the whole of it to
-  one `GameModule::tick`, so `Intent::from_inputs` folds both frames into one
-  intent and two ticks of a held direction become one step of paddle travel,
-  while the starved tick runs on `Intent::default()` — a player holding nothing.
-  The felt defect is a paddle that travels roughly 60 % of what was asked for.
-  `two_input_frames_in_one_tick_cost_a_tick_of_paddle_travel` pins it, and is
-  the test that should go red when a buffer lands.
+- **Constant delay does not bunch input frames; jitter does, and the fold eats
+  what bunches.** Measured with `input_frame_arrivals` on the manual clock: at
+  50 ms and at 150 ms every one of 60 frames arrives one per tick, the same
+  histogram as a perfect link. Add 10 ms of jitter to the same 50 ms and 17
+  ticks of 120 are handed two frames while 77 get none. The server empties its
+  queue at the top of each tick and hands the whole of it to one
+  `GameModule::tick`, so `Intent::from_inputs` folds the pair into one intent
+  and the second frame's tick of travel is gone. A held key that travels 30/30
+  ticks over a steady 50 ms travels 21/30 with jitter on it, and is **still**
+  21/30 after settling — which is what separates it from lag.
+  `jitter_costs_paddle_travel_that_latency_alone_only_delays` pins both halves
+  and is the test that should go red when a jitter buffer lands.
+
+  **An earlier reading of this attributed the bunching to latency itself.** That
+  was an artifact of driving the run on the wall clock: the ticks were unevenly
+  spaced, not the arrivals. The mechanism is the same and the fix is the same;
+  the cause is not. Worth knowing, because a real game loop's ticks are not
+  evenly spaced either, so the effect reaches a player over a link with no
+  jitter on it at all.
+
+- **Pure latency is lag and nothing else.** The paddle falls behind by very
+  nearly the delay in ticks — 26/30 at 50 ms, 20/30 at 150 ms — and recovers all
+  of it during the settle. What latency does cost is the round trip before an
+  edge takes effect: a launch press lands on tick 5 at 50 ms and tick 11 at 150
+  ms, against tick 1 on a perfect link.
 - **A launch edge lost to packet loss is lost forever, and a buffer would not
   touch it.** The launch bit is `just_pressed`, true for one tick, so it rides
   in exactly one datagram; `Client::set_input` replaces the pending frame on the
   next tick with one that no longer carries it, the channel is unreliable, and
-  nothing tracks whether the server applied the edge. Measured 1 press in 20
-  lost at 2 % loss and 5 in 15 at 30 %. The frame never arrived, so there is
-  nothing to buffer: the fix is resend-until-acked, or latching the edge into
-  `pending_input` until the server acknowledges the tick that applied it.
-  `a_launch_edge_the_link_drops_is_never_resent` pins it.
+  nothing tracks whether the server applied the edge. Measured 5 presses in 15
+  lost at 30 % loss. The frame never arrived, so there is nothing to buffer: the
+  fix is resend-until-acked, or latching the edge into `pending_input` until the
+  server acknowledges the tick that applied it.
+  `a_launch_edge_the_link_drops_is_never_resent` pins it. A _held_ key barely
+  notices loss at all — 29/30 at 10 % — because the next tick resends the same
+  held state; it is edges that a lossy link deletes.
 - **Reorder is a non-event.** A window of 3 against a window of 1 at the same
-  latency is inside the run-to-run noise, because `Intent::from_inputs` is
+  latency is identical on every column, because `Intent::from_inputs` is
   order-insensitive for edges (they are OR-ed) and only the held state and the
   aim take the last word — and the window can only permute frames that were
   already going to land in the same tick.
-- **`ConditionSimulator` schedules against `Instant::now` and has no injectable
-  clock.** So every latency measurement has to sleep in real wall time, takes
-  minutes, and is scheduler-dependent — which is why the only non-`#[ignore]`d
-  guards left behind are loss-based. A time source on the simulator is the
-  single biggest lever for turning the first finding above into a guard that is
-  both deterministic and instant. `crcbl-net`.
 - **Nothing retransmits the reliable channel.** A lost hello costs the client's
-  whole `HANDSHAKE_TIMEOUT` before another is sent; at 30 % loss, 5 of 20
-  sessions failed to come up inside 400 ticks. "Reliable" here means a separate
-  queue, not delivery. `crcbl-net` / `crcbl-client`.
+  whole `HANDSHAKE_TIMEOUT` before another is sent; at 30 % loss, sessions
+  regularly fail to come up inside `IMPAIRED_HANDSHAKE_TICKS`. "Reliable" here
+  means a separate queue, not delivery. `crcbl-net` / `crcbl-client`.
 - **`ConditionSimulator::drain_pending` swallows the inner transport's error**
   on both send paths — `let _ = self.inner.send_reliable(msg)` and the
   unreliable one beside it — so a `Backpressure` drop from a full
