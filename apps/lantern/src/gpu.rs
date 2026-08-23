@@ -314,8 +314,8 @@ pub struct Gpu {
     ///
     /// What that costs is a second copy of everything the room makes resident —
     /// the geometry and cluster pools, the material table, the page, the
-    /// instance ring — and a second shadow atlas. For a room of eleven objects
-    /// that is small; for a scene where it is not, the answer is a view
+    /// instance ring — and a second shadow atlas. For a room of this size that
+    /// is small; for a scene where it is not, the answer is a view
     /// parameter inside `crcbl-render` rather than a renderer per camera, and
     /// `docs/backlog.md` is where that is written down.
     monitor: ForwardRenderer,

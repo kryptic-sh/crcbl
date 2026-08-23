@@ -32,8 +32,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the downlight's map are held side by side.
   `room::the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit`
   is what asserts it, and it fails to compile if the region is ever shortened
-  back. No read point in the room moved: every measured value in the golden
-  suite is identical to the run before the light was added.
+  back. Adding the light moved no read point in the room: every measured value
+  in the golden suite was identical to the run before it.
+
+- **A corner post stands in that downlight's cone, so the third shadow is in the
+  picture.** A tile in the atlas is not a shadow on screen — the cone fell where
+  nothing stood, so its map was rendered on every frame and occluded nothing a
+  camera could see, and a frame drawn with the spot holding a tile was
+  byte-identical to one drawn with it holding none. `POST_MESH`'s slender post
+  is what stands in it now, and two new public read points on the `-x` wall,
+  `room::SPOT_LIT` and `room::SPOT_SHADOWED`, are the pair its shadow divides —
+  one material row, one normal, one of them with the post between it and the
+  fitting.
+
+  That wall face is the one surface in the room the downlight lights alone (the
+  sun is back-facing to it, the lamp at `t = 0` is past its own reach), so
+  `apps/lantern/tests/golden.rs`'s shadow toggle measures the spot's own map and
+  nothing else: the shadowed block reads 50.9 with the atlas and 105.2 without
+  it on radv, 51.0 → 105.2 on lavapipe, while the lit block in the same pool
+  does not move at all. With the post unplaced the same block reads 112.5 →
+  112.5, which is what the claim exists to catch.
+  `room::the_downlight_casts_a_shadow_of_the_corner_post` holds the geometry
+  behind it with no GPU. `apps/lantern/tests/golden/room.png` and `live.png` are
+  re-blessed for it, and the frame costs 0.008 ms more on a 0.51 ms frame with
+  no new pass.
 
 - **`crcbl_hal::null::NullInstance::with_adapters` and
   `Recorder::refuse_surface_on`** let a null instance list more than one adapter

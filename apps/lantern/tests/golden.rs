@@ -1,5 +1,5 @@
 //! The room off a real device, from the fixed camera, against a checked-in
-//! golden — and six claims about the lighting in front of it.
+//! golden — and the claims about the lighting in front of it.
 //!
 //! # A golden alone cannot make a claim about lighting
 //!
@@ -11,7 +11,7 @@
 //! before it are about **where** the frame is bright and dark, in the shape
 //! `crates/crcbl/tests/render_e2e.rs` uses.
 //!
-//! Each of the six is a ratio between two blocks of pixels rather than an
+//! Each of them is a ratio between two blocks of pixels rather than an
 //! absolute value, because an absolute one is a second golden written in
 //! numbers: it moves when the tonemap moves, and it says nothing a reviewer can
 //! act on.
@@ -72,7 +72,40 @@ const REVIEW_DIR: &str = "target/lantern";
 /// stops counting at the bound it is given.
 const MIN_COLORS: usize = 64;
 
-/// Half-extents, in pixels, of the block each claim below averages over.
+/// Half-extents, in pixels, of the block the downlight's two claims average
+/// over, at [`EXTENT`].
+///
+/// Smaller than [`BLOCK`], and the corner is what makes it so: the downlight's
+/// pool is the far end of the room seen from seven metres, its two read points
+/// sit a third of a metre apart on a wall that is nearly edge-on to the camera,
+/// and a block sized for the open floor takes the corner post's own silhouette
+/// in on one side. Swept rather than guessed — the largest block that holds
+/// both points inside their own region of the pool, with a couple of pixels
+/// spare at [`EXTENT`], is this one.
+const CORNER_BLOCK: (u32, u32) = (3, 3);
+
+/// How much brighter the downlight's pool has to read than the band of it the
+/// corner post shadows.
+///
+/// Both blocks are the same plaster on the same wall at the same normal, and
+/// neither is in the sun or the lamp's reach at `t = 0` —
+/// `crcbl_lantern::room::the_downlight_casts_a_shadow_of_the_corner_post` is
+/// what proves that with no GPU. What separates them is the post, and what is
+/// left under it is the ambient.
+///
+/// **Two rather than the ratio that was measured, and the room with no post in
+/// it is why.** The shadowed block is further down the wall than the lit one,
+/// so the falloff alone leaves it dimmer even with nothing standing in the
+/// cone: with the corner post unplaced the pair reads 153.0 against 111.0 on
+/// radv and 152.8 against 111.1 on lavapipe, a ratio of 1.38 either way. With
+/// it placed the same pair reads 147.3 against 51.9 and 147.2 against 53.0,
+/// which is 2.8. Two sits between the two states rather than under the measured
+/// one, which is what makes this go red when the occluder goes away — and it is
+/// the half [`SPOT_SHADOW_LIFT`] cannot cover, because it is the one a single
+/// frame can carry, at both extents and on both capability arms.
+const SPOT_SHADOW_RATIO: f32 = 2.0;
+
+/// Half-extents, in pixels, of the block each other claim below averages over.
 ///
 /// A block rather than a pixel, because a single pixel is a sample of the
 /// rasteriser as much as of the lighting: one texel of the floor's check, one
@@ -204,6 +237,24 @@ const AO_CORNER: Vec3 = Vec3::new(-1.2, 0.0, -2.32);
 /// well above one, because a frame in which the two are close is a frame whose
 /// shadow switch did nothing.
 const SHADOW_LIFT: f32 = 1.6;
+
+/// How much brighter the band the corner post shadows must get when the atlas
+/// is switched off.
+///
+/// **The one block in this room whose whole direct term is the downlight's.**
+/// The `-x` wall's inner face is back-facing to the sun, so no cascade can
+/// change it whatever it resolves to, and the lamp at `t = 0` is past its own
+/// reach, where `punctual_falloff` is exactly zero. So the only thing switching
+/// the atlas off can add here is the light the corner post was blocking, which
+/// is what makes this a claim about the spot's own tile rather than about the
+/// frame — and its control, `room::SPOT_LIT`, is the same wall in the same pool
+/// with nothing between it and the fitting.
+///
+/// Measured 50.9 → 105.2 on radv and 51.0 → 105.2 on lavapipe. With the corner
+/// post unplaced the same block reads 112.5 → 112.5 — it does not move at all,
+/// which is the state this whole claim exists to catch, and one and a half sits
+/// between the two.
+const SPOT_SHADOW_LIFT: f32 = 1.5;
 
 /// How much brighter the contact corner must get when occlusion is switched off.
 ///
@@ -601,6 +652,17 @@ fn channel(image: &Image, centre: (u32, u32), half: (u32, u32), index: usize) ->
     }
 }
 
+/// [`CORNER_BLOCK`] at the extent a caller's `block` was scaled to.
+///
+/// [`inspect`] is handed the block its caller measured at, so the ratio between
+/// that and [`BLOCK`] is the extent's own scale — one at [`EXTENT`], five at
+/// [`REVIEW_EXTENT`]. Deriving it rather than passing a second block is what
+/// makes the corner's blocks the same patch of the room at both.
+fn corner_block(block: (u32, u32)) -> (u32, u32) {
+    let scale = (block.0 / BLOCK.0).max(1);
+    (CORNER_BLOCK.0 * scale, CORNER_BLOCK.1 * scale)
+}
+
 /// Every claim this suite makes about the lighting, at whatever extent.
 ///
 /// One function so the golden's extent and the review extent assert the *same*
@@ -734,6 +796,33 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
         "the plaster beside the coloured wall reads a red-to-blue of {tinted_redness:.3} and \
          the same plaster across the room {plain_redness:.3} — the CPU control isolates the \
          coloured wall's contribution, and its rendered tint is missing"
+    );
+
+    // ---- 7. the downlight lights a corner and the post stands in it ---------
+    //
+    // Two blocks of the `-x` wall's inner face, both inside the cone, one with
+    // the corner post between it and the fitting. Neither is in the sun — that
+    // face is back-facing to it — and neither is in the lamp's reach at `t = 0`,
+    // so the whole of what separates them is the post. This is the half a
+    // single frame can carry, which is why it is here rather than only in
+    // `every_effect_toggles_and_the_frame_says_so`: it runs at both extents and
+    // on both capability arms, and it goes red with the post unplaced — see
+    // `SPOT_SHADOW_RATIO`, whose value was set from a run with it unplaced
+    // rather than from the shipped one alone.
+    let corner = corner_block(block);
+    let pool = brightness(image, project(&camera, extent, room::SPOT_LIT), corner);
+    let shadowed = brightness(image, project(&camera, extent, room::SPOT_SHADOWED), corner);
+    eprintln!("lantern corner: downlight pool {pool:.1}, post's shadow {shadowed:.1}");
+    assert!(
+        pool > LIT_FLOOR,
+        "the downlight's pool is at {pool:.1}/255 — the third light reached nothing, so \
+         there is no cone in this frame to cast a shadow in"
+    );
+    assert!(
+        pool > shadowed * SPOT_SHADOW_RATIO,
+        "the downlight's pool reads {pool:.1} and the band the corner post shadows reads \
+         {shadowed:.1} on the same wall — the post is not in the cone, or the cone is not \
+         where it is aimed"
     );
 }
 
@@ -897,7 +986,7 @@ fn the_room_draws_the_same_on_a_path_below_the_devices_own() {
     );
 
     // Every claim, on every arm: the golden is a comparison of pixels and the
-    // six in front of it are what say the frame holds the room at all, so an
+    // claims in front of it are what say the frame holds the room at all, so an
     // arm that lost a mesh or a material row on the way down its lesser tail
     // fails on the claim rather than on a diff nobody can read.
     for (image, paths) in [(&best, &best_paths), (&lesser, &lesser_paths)] {
@@ -1005,6 +1094,37 @@ fn every_effect_toggles_and_the_frame_says_so() {
         "the sunlit floor moved from {sunlit_on:.1} to {sunlit_off:.1} — a floor already in \
          full sun has no shadow to lose, so this is the whole frame changing rather than the \
          shadows"
+    );
+
+    // ---- the downlight's own shadow ----------------------------------------
+    //
+    // The `-x` wall's inner face is back-facing to the sun and out of the lamp's
+    // reach at `t = 0` — `room::the_downlight_casts_a_shadow_of_the_corner_post`
+    // is what proves both with no GPU — so the downlight is the whole of the
+    // direct light on it and switching the atlas off can only add back what the
+    // corner post was blocking. The control is the same wall in the same pool
+    // with nothing between it and the fitting: it was never shadowed, so it
+    // cannot move.
+    let corner = corner_block(block);
+    let post_on = brightness(&all_on, at(room::SPOT_SHADOWED), corner);
+    let post_off = brightness(&no_shadows, at(room::SPOT_SHADOWED), corner);
+    let pool_on = brightness(&all_on, at(room::SPOT_LIT), corner);
+    let pool_off = brightness(&no_shadows, at(room::SPOT_LIT), corner);
+    eprintln!(
+        "lantern toggles: post's shadow {post_on:.1} -> {post_off:.1}, \
+         downlight pool {pool_on:.1} -> {pool_off:.1}"
+    );
+    assert!(
+        post_off > post_on * SPOT_SHADOW_LIFT,
+        "the band the corner post shadows reads {post_on:.1} with shadows and \
+         {post_off:.1} without — the downlight holds a tile in the atlas and nothing in \
+         its cone is being occluded by it"
+    );
+    assert!(
+        pool_on > LIT_FLOOR && (pool_off - pool_on).abs() < pool_on * UNCHANGED,
+        "the downlight's pool moved from {pool_on:.1} to {pool_off:.1} — a patch of that \
+         cone with nothing between it and the fitting has no shadow to lose, so this is \
+         the whole frame changing rather than the spot's own map"
     );
 
     // ---- ambient occlusion -------------------------------------------------

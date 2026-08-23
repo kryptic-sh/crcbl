@@ -39,10 +39,10 @@
 //! # What this model leaves out, named rather than omitted
 //!
 //! - **No occluder inside the room is modelled.** The plinth, the mirror panel,
-//!   the metal block and the lamp are all invisible to the gather, so a probe
-//!   standing behind one of them still receives the wall or the floor it hides —
-//!   the bounce has no contact darkening under any object, and the volume is
-//!   smoother than the room is.
+//!   the metal block, the corner post in the downlight's cone and the lamp are
+//!   all invisible to the gather, so a probe standing behind one of them still
+//!   receives the wall or the floor it hides — the bounce has no contact
+//!   darkening under any object, and the volume is smoother than the room is.
 //! - **Only the sun bounces, and only once.** A face out of the sun's reach
 //!   emits nothing at all, so there is no second bounce and no ambient bounce.
 //! - **The lamp does not bounce**, for the same reason and one more: it moves,

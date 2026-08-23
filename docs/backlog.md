@@ -3,52 +3,44 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### lantern's downlight now holds a tile, and its shadow still changes no pixel
+### P7B's exit criterion is met and the ROADMAP row is still unticked
 
-The atlas grew to seven light tiles and `room::spot` is shadowed: `Selection`
-gives it the tile past the lamp's cube at every phase of the orbit, and the
-shadow pass rasterises into it. **Measured on the device**, not inferred — a
-scene with a point light and a spot together fills light tiles 0–5 with the
-cube's faces (tile 2 empty, being the face that looks at nothing) and light tile
-6 — atlas tile 8 — with 1048576 written texels, in one frame.
+`apps/lantern`'s room now has a corner post standing in `room::spot`'s cone
+(`room::POST_MIN`/`POST_MAX`), so all three of its lights cast a shadow a camera
+can see, and `apps/lantern/tests/golden.rs` measures the third one two ways: a
+ratio inside one frame (`SPOT_SHADOW_RATIO`, run at both extents and on both
+capability arms) and a shadows-on/shadows-off lift (`SPOT_SHADOW_LIFT`). Both
+were red-checked by leaving the post resident and unplaced, on radv and on
+lavapipe, and both went red.
 
-**But lantern's picture is unchanged.** Rendering the room with `LIGHT_SLOTS` at
-2 and at 1 — the same cone geometry, the only difference being whether the
-downlight is given a tile — produced two byte-identical 1280×960 frames on radv.
-The reason is the room, not the engine: sampling every room AABB against the
-cone shows the mirror, the block and the monitor lie wholly outside it, and the
-only object inside is the plinth's `-x` corner, whose top edge projects to the
-floor at `x = -1.846` — inside the plinth's own footprint of `-2.0..-0.4`. So
-the downlight occludes nothing visible from `fixed_camera`.
+**What is left is one line in `docs/plan/ROADMAP.md`.** That file was outside
+the write set of the change that added the post, so the P7B row still reads
+"what is left is not the engine but the room" — which is no longer true. Whoever
+ticks it should read the row's exit criterion against
+`room::the_downlight_casts_a_shadow_of_the_corner_post` and the two golden
+claims rather than taking this entry's word for it.
 
-The consequence for P7B: the engine limitation the roadmap row named is gone and
-the sample does shadow all three of its lights, but nobody looking at
-`tests/golden/room.png` can _see_ the third shadow. If the row wants a visible
-one it needs an occluder standing in the cone — something on the floor between
-the downlight and its pool, clear of the plinth. That is a change to the
-sample's composition and a re-bless, so it was left for the owner rather than
-taken here.
+### What the corner post's slice did not cover
 
-**Considered and declined: re-blessing the goldens anyway.** The atlas going
-4096 × 2048 → 3072 × 3072 changes `Cascades::params`' inverse extent, which is
-the denominator of the shadow bias, so the picture does move a little — blessing
-from radv rewrote `room.png` by 5 pixels of 49152 (max delta 3/255) and
-`live.png` by 400 of 691200 (max 9/255). Both are under the rasteriser tolerance
-the goldens are compared with, and the committed references pass unchanged on
-radv _and_ on lavapipe. Blessing would have pulled the reference toward one
-rasteriser for a sub-tolerance difference, so the references were put back.
-
-Cross-rasteriser drift after the change, `fixed_camera` at 1280×960, radv
-against lavapipe: 341602 of 1228800 pixels differ (27.8%), 340689 of them by
-exactly 1/255; mean 1.01, max 110/255 on 11 pixels. No before-figure was taken —
-the pre-change frame would have needed HEAD built in a second worktree, which
-was not done.
-
-Not verified: nothing measures the new atlas's 36 MiB on a device; that figure
-is `TILE` × `TILE` × 4 bytes × 9 tiles, computed from the constants. `crcbl-mtl`
-and `crcbl-dx12` type-check and document on `aarch64-apple-darwin` and
-`x86_64-pc-windows-msvc`, and their MSL and DXIL artifacts are regenerated with
-the pinned compilers, but no Metal or D3D12 device ran this atlas.
+- **Only radv and lavapipe drew it.** `apps/lantern/tests/golden/room.png` and
+  `apps/lantern/tests/golden/live.png` were re-blessed on radv (AMD Radeon RX
+  7900 XTX, RADV NAVI31, Mesa 26.1.8) and the references then pass unchanged on
+  lavapipe: 49 of 49152 pixels over tolerance (0.0997% against a 1% budget), 2
+  grossly wrong (0.0041% against 0.1%), ssim 0.999447. No Metal, D3D12 or WebGPU
+  device has drawn the room with the post in it — those arms are CI's word.
+- **No before-figure for cross-rasteriser drift.** The same gap the seven-tile
+  atlas change left: comparing radv against lavapipe before and after would have
+  needed HEAD built in a second worktree, and that was not done. Only the
+  after-figure above exists.
+- **The frame cost is a mean, not a bound.** 24 runs of `--frames 1200` each
+  way, `--headless --backend vk` on radv: 0.5148 ms with the post against 0.5068
+  ms without, so +0.008 ms (+1.6%) on a 46-pass frame whose pass count does not
+  change. The per-pass shadow delta (+0.0015 ms) is inside its own run-to-run
+  spread, so the total is the number worth quoting. Nothing measured the browser
+  frame, which is where `pages.yml` calls lantern the heaviest thing the site
+  ships.
+- **The 36 MiB atlas is still a computed figure.** `TILE` × `TILE` × 4 bytes × 9
+  tiles from the constants; nothing measures it on a device.
 
 ### What the point-and-spot atlas tests were not held against
 

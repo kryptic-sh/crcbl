@@ -77,6 +77,14 @@
 //! `the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit` is
 //! what says the arrangement still holds at every phase of the lamp's orbit,
 //! and it fails to compile if the region is ever shortened back.
+//!
+//! **A tile in the atlas is not a shadow in the picture**, and the downlight
+//! needed both. Its cone was aimed at the one corner nothing stood in, so the
+//! map was rendered on every frame and occluded nothing a camera could see — a
+//! frame drawn with the spot holding a tile and one drawn with it holding none
+//! came back as the same bytes. What stands in the cone now is this module's
+//! `POST_MIN` corner post, and [`SPOT_LIT`] and [`SPOT_SHADOWED`] are the pair
+//! of points on one wall its shadow divides.
 
 use std::borrow::Cow;
 
@@ -292,6 +300,62 @@ pub const BRASS_BACK: Vec3 = Vec3::new(
     0.7 * BLOCK_MAX.y,
     BLOCK_MIN.z,
 );
+
+/// The corner post standing in the downlight's cone: minimum corner.
+///
+/// **Tall and slender rather than low and broad, and the downlight's own
+/// steepness is why.** `SPOT_AT` hangs near the ceiling and `SPOT_POOL` is
+/// almost directly under it, so a shadow in that cone leaves its caster's foot
+/// close to vertically — a crate on that floor puts its shadow underneath
+/// itself, which is where the crate already is. What a point source gives
+/// instead is magnification: a silhouette held most of the way up to the
+/// fitting is cast at the ratio of the two heights, so a post this thin darkens
+/// a broad band of the pool and leaves the rest of it lit on both sides rather
+/// than replacing it. `the_downlight_casts_a_shadow_of_the_corner_post` is what
+/// measures that, and it prints the ratio.
+const POST_MIN: Vec3 = Vec3::new(-2.75, 0.0, -3.05);
+
+/// The corner post's maximum corner.
+///
+/// **Inside the cone whole**, its top corners included, so it is an occluder
+/// rather than something the cone clips at an edge — and short of the fitting,
+/// so the pool is cut across rather than capped. It stands clear of
+/// [`PLINTH_MIN`]'s plinth and off the `-x` wall, which is what leaves lit pool
+/// on both sides of the shadow instead of a dark corner.
+const POST_MAX: Vec3 = Vec3::new(-2.61, 1.6, -2.69);
+
+/// A point on the `-x` wall **inside the downlight's pool, with the corner post
+/// between it and the fitting**.
+///
+/// The wall rather than the floor, and the frame is why: the pool's floor share
+/// is a few dozen pixels at the extent the goldens are blessed at, this face is
+/// the largest part of it the [`fixed_camera`] sees, and the floor there carries
+/// [`FLOOR`]'s check while this is plain [`PLASTER`].
+///
+/// **The one surface in this room the downlight lights alone.** [`sun`] stands
+/// outside this wall, so its inner face is back-facing to it and receives
+/// exactly nothing however the cascades resolve, and [`lamp`] at `t = 0` is
+/// further off than its own reach, where the shader's `punctual_falloff` is
+/// exactly zero rather than small. So the whole of what a shadow atlas can take
+/// away here is the downlight's own direct term — which is what makes
+/// `apps/lantern/tests/golden.rs`'s shadow toggle a claim about this cone
+/// rather than about the frame.
+pub const SPOT_SHADOWED: Vec3 = Vec3::new(-HALF_WIDTH, 0.32, -2.85);
+
+/// The same wall, the same row, the same normal, **inside the same pool and
+/// clear of the post's shadow**.
+///
+/// [`SPOT_SHADOWED`]'s control, and the two differ in one thing: whether the
+/// post stands between the point and the fitting.
+/// `the_downlight_casts_a_shadow_of_the_corner_post` is what says so with no
+/// GPU — the segment from here to the fitting misses the post's box and the
+/// segment from [`SPOT_SHADOWED`] crosses it.
+///
+/// Nothing else reaches this one either, for [`SPOT_SHADOWED`]'s reasons, so a
+/// frame drawn without the shadow atlas has to leave the block here exactly
+/// where it was. That is the half that separates "the atlas stopped darkening
+/// this cone" from "the frame got brighter".
+pub const SPOT_LIT: Vec3 = Vec3::new(-HALF_WIDTH, 0.90, -2.90);
 
 // ---------------------------------------------------------------------------
 // The monitor
@@ -679,6 +743,8 @@ pub const MONITOR_BEZEL_MESH: usize = 9;
 /// The monitor's screen, sitting on the bezel — the surface [`MONITOR_LAYER`]
 /// lands on.
 pub const MONITOR_SCREEN_MESH: usize = 10;
+/// The corner post standing in the downlight's cone.
+pub const POST_MESH: usize = 11;
 
 /// Which way a quad faces along the axis its plane is perpendicular to.
 ///
@@ -902,24 +968,21 @@ fn shell_slab(label: &'static str, min: Vec3, max: Vec3) -> MeshDesc<'static> {
 // The description
 // ---------------------------------------------------------------------------
 
-/// Everything the room makes resident: nine meshes, five material rows, a
-/// two-layer page and the irradiance volume [`crate::bounce`] bakes from the
-/// constants above.
+/// Everything the room makes resident: every mesh, every material row, the page
+/// and the irradiance volume [`crate::bounce`] bakes from the constants above.
 ///
-/// The mesh order is [`FLOOR_MESH`] through [`BLOCK_MESH`] and the row order is
-/// [`PLASTER`] through [`ROUGH_METAL`]; both are load-bearing, and the constants
+/// The mesh order is [`FLOOR_MESH`] through [`POST_MESH`] and the row order is
+/// [`PLASTER`] through [`MONITOR`]; both are load-bearing, and the constants
 /// above are how an instance names one.
 ///
 /// # The capacities are sized for this room rather than defaulted
 ///
 /// `Capacities::default` reserves what the engine's own demo scene has always
 /// reserved, which is sixteen thousand instances and a quarter of a megabyte of
-/// index buffer for a room of twenty-seven quads. Sizing them down is the
-/// cheapest demonstration of what
-/// [`Capacities`] is for — and it is not free
-/// to get wrong in the other direction, so
-/// `the_room_fits_the_capacities_it_reserves` is what checks the description
-/// against them with no GPU in the room.
+/// index buffer for a room of this size. Sizing them down is the cheapest
+/// demonstration of what [`Capacities`] is for — and it is not free to get wrong
+/// in the other direction, so `the_room_fits_the_capacities_it_reserves` is what
+/// checks the description against them with no GPU in the room.
 #[must_use]
 pub fn room() -> SceneDesc<'static> {
     let mut page = PageDesc::opaque_white(PAGE_EXTENT);
@@ -989,6 +1052,7 @@ pub fn room() -> SceneDesc<'static> {
                     (SCREEN_MIN.y, SCREEN_MAX.y),
                 );
             }),
+            mesh_of("corner post", |b| b.box_outward(POST_MIN, POST_MAX)),
         ],
         materials: vec![
             // **First, so it is row 0** — the row `mesh::GpuInstance::default`
@@ -1069,7 +1133,7 @@ pub const CAPACITIES: Capacities = Capacities {
 /// needs the two runs to have placed things in the same order. One list, walked
 /// once, is what makes that true by construction rather than by two call sites
 /// agreeing.
-const OBJECTS: [(usize, usize, Seen); 11] = [
+const OBJECTS: [(usize, usize, Seen); 12] = [
     (FLOOR_MESH, FLOOR, Seen::Everywhere),
     (CEILING_MESH, PLASTER, Seen::Everywhere),
     (BACK_WALL_MESH, PLASTER, Seen::Everywhere),
@@ -1081,6 +1145,7 @@ const OBJECTS: [(usize, usize, Seen); 11] = [
     (BLOCK_MESH, ROUGH_METAL, Seen::Everywhere),
     (MONITOR_BEZEL_MESH, PLASTER, Seen::NotOnTheMonitor),
     (MONITOR_SCREEN_MESH, MONITOR, Seen::NotOnTheMonitor),
+    (POST_MESH, PLASTER, Seen::Everywhere),
 ];
 
 /// Which of the room's two views an object stands in.
@@ -1246,12 +1311,13 @@ const LAMP_INTENSITY: f32 = 4.0;
 ///
 /// A warm point light orbiting the middle of the room, below the ceiling. Warm
 /// against the sun's near-white, so which light lit a surface is legible in the
-/// picture rather than a brightness difference — and it is the light that
-/// occludes: `crcbl::render::shadow`'s selection hands the atlas's light tiles
-/// to the most influential candidate, and [`spot`] is the other candidate. The
-/// two cannot both be shadowed and this one always wins; the module header says
-/// why, and this module's `SPOT_REACH` is what makes it so on every frame rather
-/// than on most of them.
+/// picture rather than a brightness difference. It occludes through a cube of
+/// the atlas's light tiles and [`spot`] occludes through the tile beside them:
+/// `crcbl::render::shadow`'s light region holds both at once, on every frame of
+/// the orbit rather than on the frames one of them happens to win, which is what
+/// the module header and
+/// `the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit`
+/// say.
 ///
 /// A pure function of the time, so a frame at `t` is the same frame on every
 /// machine — which is what makes a golden of it worth anything.
@@ -1350,14 +1416,12 @@ const SPOT_COLOR: Vec3 = Vec3::new(0.72, 0.82, 1.0);
 /// way, and only this one has an angle past which it is *exactly* zero with a
 /// ramp in front of it — see this module's `SPOT_OUTER_ANGLE`.
 ///
-/// **It lights and it does not occlude, and that is the engine's budget rather
-/// than an oversight.** `crcbl::render::shadow`'s atlas keeps
-/// [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles for lights that are
-/// not the sun, a point light needs
-/// [`POINT_FACES`](crcbl::render::shadow::POINT_FACES) of them for its cube, and
-/// the two constants are the same number — so a room holding one point light and
-/// one spot has room for one of their maps and not both. [`lamp`] is the one
-/// that gets it, deterministically; see this module's `SPOT_REACH`.
+/// **It lights and it occludes**, which took two changes rather than one.
+/// `crcbl::render::shadow`'s light region grew a tile past a point light's cube,
+/// so this cone has a map of its own beside [`lamp`]'s — and then the room grew
+/// a corner post, because a map written into the atlas is not a shadow in the
+/// picture until something stands in the cone to be one. [`SPOT_LIT`] and
+/// [`SPOT_SHADOWED`] are where the difference is read.
 ///
 /// It is also not in [`crate::bounce`]'s gather, which bakes the sun's first
 /// bounce and nothing else — so the pool below is direct light with no indirect
@@ -1476,6 +1540,7 @@ mod tests {
                 BLOCK_MESH,
                 MONITOR_BEZEL_MESH,
                 MONITOR_SCREEN_MESH,
+                POST_MESH,
             ]
             .map(|mesh| labels[mesh]),
             [
@@ -1490,6 +1555,7 @@ mod tests {
                 "metal block",
                 "monitor bezel",
                 "monitor screen",
+                "corner post",
             ],
             "an index that names the wrong entry places the wrong mesh, and the frame \
              still draws"
@@ -1760,6 +1826,12 @@ mod tests {
     /// Written out here rather than derived, because the whole value of the list
     /// is that it is the *complete* set: a read point missing from it is a claim
     /// the spot could quietly start contributing to.
+    ///
+    /// [`SPOT_LIT`] and [`SPOT_SHADOWED`] are deliberately **not** in it. They
+    /// are the downlight's own pair, they are inside its cone by construction,
+    /// and `the_downlight_casts_a_shadow_of_the_corner_post` is what holds them
+    /// there — either of them added here would assert the opposite of what it
+    /// is for.
     const READ_POINTS: [(&str, Vec3); 9] = [
         ("SUNLIT_FLOOR", SUNLIT_FLOOR),
         ("SHADED_FLOOR", SHADED_FLOOR),
@@ -1890,6 +1962,192 @@ mod tests {
         eprintln!(
             "lantern room: the lamp's closest approach to the downlight's pool is \
              {nearest:.3} m against a reach of {LAMP_REACH}"
+        );
+    }
+
+    /// Whether the segment from `from` to `to` passes through the corner post.
+    ///
+    /// The slab test a ray-vs-AABB is, clamped to the segment rather than run
+    /// to infinity: the post is axis-aligned, like everything else this file
+    /// builds, which is the same reason [`crate::bounce`] gives for having no
+    /// intersector in it either.
+    fn segment_meets_post(from: Vec3, to: Vec3) -> bool {
+        let direction = to - from;
+        let (mut enter, mut exit) = (0.0f32, 1.0f32);
+        for ((origin, step), (low, high)) in from
+            .to_array()
+            .into_iter()
+            .zip(direction.to_array())
+            .zip(POST_MIN.to_array().into_iter().zip(POST_MAX.to_array()))
+        {
+            if step == 0.0 {
+                if origin < low || origin > high {
+                    return false;
+                }
+                continue;
+            }
+            let (near, far) = ((low - origin) / step, (high - origin) / step);
+            enter = enter.max(near.min(far));
+            exit = exit.min(near.max(far));
+        }
+        enter <= exit
+    }
+
+    /// **Something stands in the downlight's cone, and the shadow of it divides
+    /// a pair of points on one wall.**
+    ///
+    /// A tile in the atlas is not a shadow in the picture. This cone was aimed
+    /// at the one corner of the room nothing stood in, so its map was rendered
+    /// on every frame and occluded nothing a camera could see — a frame drawn
+    /// with the spot holding a tile and a frame drawn with it holding none came
+    /// back as the same bytes. This is the geometry that makes them differ, and
+    /// every half of it is a segment test rather than a picture.
+    ///
+    /// **The post is inside the cone whole**, its top corners included, so it
+    /// is an occluder rather than something the cone clips at an edge.
+    /// **The pair is on one surface** — the `-x` wall's inner face, one material
+    /// row, one normal, both inside the reach and the outer angle. And **the
+    /// segment to the fitting is what separates them**: it crosses the post's
+    /// box from [`SPOT_SHADOWED`] and misses it from [`SPOT_LIT`].
+    ///
+    /// **What the pair rests on is that nothing else lights that face.**
+    /// [`sun`] stands outside this wall, so its inner face is back-facing to it
+    /// and receives exactly nothing whatever the cascades resolve; the lamp at
+    /// `t = 0` is further off than its own reach, where the falloff is exactly
+    /// zero rather than small. So the downlight is the whole of the direct
+    /// light there, and a frame drawn without the shadow atlas can differ from
+    /// one drawn with it by this post's shadow and by nothing else.
+    #[test]
+    fn the_downlight_casts_a_shadow_of_the_corner_post() {
+        let Light::Spot(light) = spot() else {
+            panic!("the corner downlight is a spot light");
+        };
+
+        // In the room, on the floor, under the fitting, and clear of everything
+        // else standing in this end of it. Every one of these is a relation
+        // between two constants in this file, so a const block is what says it:
+        // a post moved through a wall does not compile.
+        const {
+            assert!(
+                POST_MIN.x > -HALF_WIDTH
+                    && POST_MAX.x < HALF_WIDTH
+                    && POST_MIN.z > -HALF_DEPTH
+                    && POST_MAX.z < HALF_DEPTH
+                    && POST_MAX.y < HEIGHT,
+                "the corner post stands outside the room"
+            );
+            assert!(
+                POST_MIN.y == 0.0,
+                "the corner post does not stand on the floor, so its shadow starts \
+                 nowhere the pool is"
+            );
+            assert!(
+                POST_MAX.y < SPOT_AT.y,
+                "the corner post reaches the fitting, so the cone is capped rather than \
+                 cut across"
+            );
+            assert!(
+                POST_MAX.x < PLINTH_MIN.x && POST_MAX.x < MIRROR_MIN.x,
+                "the corner post overlaps the plinth or the mirror panel"
+            );
+        }
+
+        // Inside the cone whole. A post the cone clipped would be lit down one
+        // side and its shadow would be an edge of the pool rather than a band
+        // across it.
+        let mut widest = 0.0f32;
+        for x in [POST_MIN.x, POST_MAX.x] {
+            for y in [POST_MIN.y, POST_MAX.y] {
+                for z in [POST_MIN.z, POST_MAX.z] {
+                    let corner = Vec3::new(x, y, z);
+                    let offset = corner - SPOT_AT;
+                    let distance = offset.length();
+                    let angle = (offset.normalize().dot(light.direction))
+                        .clamp(-1.0, 1.0)
+                        .acos();
+                    assert!(
+                        distance < light.radius && angle < light.outer_angle,
+                        "the post's corner {corner:?} is {distance:.3} m from the downlight \
+                         and {:.1}° off its axis, outside a reach of {} and a cone of \
+                         {:.1}° — the cone clips the post rather than the post standing \
+                         in it",
+                        angle.to_degrees(),
+                        light.radius,
+                        light.outer_angle.to_degrees(),
+                    );
+                    widest = widest.max(angle);
+                }
+            }
+        }
+
+        // The sun cannot reach the inner face of the wall it comes from. A
+        // bound rather than a tolerance: the shading takes `max(N·L, 0)`.
+        let towards_sun = sun().direction;
+        assert!(
+            towards_sun.dot(Vec3::X) < 0.0,
+            "the sun has come round to the inner face of the -x wall, so the pair below is \
+             no longer the downlight's alone: {towards_sun:?}"
+        );
+        let Light::Point(at_zero) = lamp(0.0) else {
+            panic!("the lamp is a point light");
+        };
+
+        for (name, point) in [("SPOT_LIT", SPOT_LIT), ("SPOT_SHADOWED", SPOT_SHADOWED)] {
+            assert_eq!(
+                point.x, -HALF_WIDTH,
+                "{name} is not on the inner face of the -x wall"
+            );
+            assert!(
+                point.y > 0.0 && point.y < HEIGHT,
+                "{name} is not on the wall at all: {point:?}"
+            );
+            let offset = point - SPOT_AT;
+            let distance = offset.length();
+            let angle = (offset.normalize().dot(light.direction))
+                .clamp(-1.0, 1.0)
+                .acos();
+            assert!(
+                distance < light.radius && angle < light.outer_angle,
+                "{name} at {point:?} is {distance:.3} m from the downlight and {:.1}° off \
+                 its axis, outside a reach of {} and a cone of {:.1}° — it is not in the \
+                 pool the claim is about",
+                angle.to_degrees(),
+                light.radius,
+                light.outer_angle.to_degrees(),
+            );
+            let reach = at_zero.position.distance(point);
+            assert!(
+                reach > at_zero.radius,
+                "the lamp is {reach:.3} m from {name} at t = 0 and reaches {} — what is \
+                 read there is no longer the downlight's alone",
+                at_zero.radius
+            );
+        }
+
+        assert!(
+            segment_meets_post(SPOT_SHADOWED, SPOT_AT),
+            "the segment from {SPOT_SHADOWED:?} to the fitting misses the post, so there is \
+             nothing between the two to cast a shadow"
+        );
+        assert!(
+            !segment_meets_post(SPOT_LIT, SPOT_AT),
+            "the segment from {SPOT_LIT:?} to the fitting crosses the post, so the control \
+             stands in the shadow it is supposed to be read beside"
+        );
+
+        // The magnification the post is shaped for, and the margin the widest
+        // corner of it keeps inside the cone. Printed rather than asserted:
+        // both are consequences of the constants above and an assertion on
+        // either would be a second copy of them.
+        eprintln!(
+            "lantern room: the corner post stands {:.2} m under a fitting at {:.2} m, so a \
+             silhouette at its top is cast {:.1}x its own size; its widest corner clears \
+             the cone by {:.1}° of {:.1}°",
+            POST_MAX.y,
+            SPOT_AT.y,
+            SPOT_AT.y / (SPOT_AT.y - POST_MAX.y),
+            (light.outer_angle - widest).to_degrees(),
+            light.outer_angle.to_degrees(),
         );
     }
 
