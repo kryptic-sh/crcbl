@@ -708,6 +708,60 @@ impl Peer {
         self.flush();
     }
 
+    /// Starts one `MULTIPLE` conversion of every `(target, property)` pair.
+    ///
+    /// ICCCM's batch form, from the requestor's side: the pairs go on this
+    /// peer's own window as an `ATOM_PAIR` list, the request names that
+    /// property, and the owner writes each conversion into the property its
+    /// pair names. [`take_read`](Self::take_read) then yields the list *as the
+    /// owner left it* — a pair whose property atom came back `0` is one the
+    /// owner refused — and [`own_property`](Self::own_property) reads each
+    /// conversion out.
+    pub fn read_clipboard_multiple(&mut self, pairs: &[(&str, &str)]) {
+        let clipboard = self.atom("CLIPBOARD");
+        let multiple = self.atom("MULTIPLE");
+        let atom_pair = self.atom("ATOM_PAIR");
+        let list = self.atom("PEER_MULTIPLE");
+        let words: Vec<u32> = pairs
+            .iter()
+            .flat_map(|(target, property)| [self.atom(target), self.atom(property)])
+            .collect();
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_ne_bytes()).collect();
+        // Every property the owner will write into is cleared first, so a value
+        // read back afterwards cannot be one this peer left there itself.
+        for (_, property) in pairs {
+            let property = self.atom(property);
+            self.delete_property(property);
+        }
+        self.set_property(self.window, list, atom_pair, 32, &bytes);
+        self.incoming = Incoming {
+            active: true,
+            ..Incoming::default()
+        };
+        // SAFETY: the connection, window and atoms are live.
+        unsafe {
+            (self.lib.convert_selection)(
+                self.connection,
+                self.window,
+                clipboard,
+                multiple,
+                list,
+                ffi::value::CURRENT_TIME,
+            );
+        }
+        self.flush();
+    }
+
+    /// A property on this peer's own window, by name, as raw bytes.
+    ///
+    /// `None` for a property that is not there — which, after a `MULTIPLE`, is
+    /// what a target the owner refused looks like.
+    #[must_use]
+    pub fn own_property(&mut self, name: &str) -> Option<Vec<u8>> {
+        let property = self.atom(name);
+        self.read_property(property).map(|(_, bytes)| bytes)
+    }
+
     /// Whether the outstanding read has been answered, without taking it.
     #[must_use]
     pub fn has_answer(&self) -> bool {

@@ -5638,9 +5638,7 @@ nothing.
   refresh, so nothing in `read_crtcs`, `read_output_name` or the mode lookup
   runs in the x11 e2e. Exercising it needs an X server with a RandR provider
   that reports CRTCs, which no harness here has.
-- **No ICCCM `MULTIPLE` target** (`crates/crcbl-shell/src/x11/xselection.rs`);
-  the `TIMESTAMP` half of that finding is fixed. An undocumented omission,
-  unlike the many deliberate ones in that file.
+
 - **`optimal_buffer_copy_offset_alignment` is read by nothing**
   (`crates/crcbl-hal/src/caps.rs`), which is correct rather than a gap: it is a
   preference, not a ceiling, and a copy that ignores it is slower and never

@@ -127,44 +127,120 @@ impl X11Shell {
             event.property
         };
 
-        if event.target == self.conn.atoms.timestamp {
+        if event.target == self.conn.atoms.multiple {
+            return self.answer_multiple(event);
+        }
+        if self.convert_target(event.requestor, event.target, property) {
+            property
+        } else {
+            0
+        }
+    }
+
+    /// Answers a `MULTIPLE`: every conversion the requestor listed, in one
+    /// round of the conversation.
+    ///
+    /// ICCCM's batch form. The requestor puts a list of `(target, property)`
+    /// pairs of type `ATOM_PAIR` on **its own** window and names that property
+    /// in the request; the owner converts each pair into the property the pair
+    /// names, replaces the property atom of any pair it could not convert with
+    /// `None`, writes the list back, and answers with the list's property. A
+    /// peer wanting text and a URI list pays one exchange instead of two, which
+    /// is the whole point of it.
+    ///
+    /// **This is the one target whose answer needs a reply**, and the module
+    /// header's rule that answering must not block still holds: the reply comes
+    /// from the *server*, which is not the client waiting on our
+    /// `SelectionNotify`, so nothing here waits on the peer. No other target
+    /// pays the round trip.
+    ///
+    /// `None` for the request's own property is refused rather than guessed at:
+    /// the pairs have to be read from somewhere, and the pre-ICCCM convention of
+    /// using the target atom as the property name would name `MULTIPLE` itself,
+    /// which is not where a requestor put anything.
+    ///
+    /// A pair naming `MULTIPLE` as its *target* is refused too. ICCCM does not
+    /// define it, and answering it would be a recursion a peer chooses the
+    /// depth of.
+    fn answer_multiple(&mut self, event: &ffi::SelectionRequestEvent) -> u32 {
+        if event.property == 0 {
+            return 0;
+        }
+        let mut pairs = self
+            .conn
+            .get_property_words(event.requestor, event.property);
+        // An odd word count is a malformed list: the last target has no
+        // property to go into, and guessing one would write a conversion
+        // somewhere the requestor is not reading.
+        if pairs.is_empty() || !pairs.len().is_multiple_of(2) {
+            return 0;
+        }
+        for pair in pairs.chunks_exact_mut(2) {
+            let (target, into) = (pair[0], pair[1]);
+            let converted = target != self.conn.atoms.multiple
+                && into != 0
+                && self.convert_target(event.requestor, target, into);
+            if !converted {
+                // The refusal, in the place ICCCM puts it: the property half of
+                // the pair becomes `None` and the requestor reads the list back
+                // to see which of its targets it did not get.
+                pair[1] = 0;
+            }
+        }
+        self.conn.set_property(
+            event.requestor,
+            event.property,
+            self.conn.atoms.atom_pair,
+            32,
+            &window::words_to_bytes(&pairs),
+        );
+        event.property
+    }
+
+    /// Converts one target into one property on `requestor`, reporting whether
+    /// it could.
+    ///
+    /// The body of a single conversion, shared by the ordinary one-target
+    /// request and by every pair of a [`MULTIPLE`](Self::answer_multiple).
+    fn convert_target(&mut self, requestor: u32, target: u32, property: u32) -> bool {
+        if target == self.conn.atoms.timestamp {
             // ICCCM: the answer is the timestamp we *acquired* the selection
             // with, as a 32-bit `INTEGER`. Not the current server time — a peer
             // uses this to tell one ownership from the next.
             let acquired = [self.owner_time];
             self.conn.set_property(
-                event.requestor,
+                requestor,
                 property,
                 ffi::value::ATOM_INTEGER,
                 32,
                 &window::words_to_bytes(&acquired),
             );
-            return property;
+            return true;
         }
 
-        if event.target == self.conn.atoms.targets {
+        if target == self.conn.atoms.targets {
             let targets = self.advertised_targets();
             self.conn.set_property(
-                event.requestor,
+                requestor,
                 property,
                 ffi::value::ATOM_ATOM,
                 32,
                 &window::words_to_bytes(&targets),
             );
-            return property;
+            return true;
         }
 
-        let Some(mime) = self.conn.atoms.mime_for_target(event.target) else {
-            return 0;
+        let Some(mime) = self.conn.atoms.mime_for_target(target) else {
+            return false;
         };
         let Some((_, bytes)) = self.offers.iter().find(|(offered, _)| *offered == mime) else {
-            return 0;
+            return false;
         };
 
         if bytes.len() <= self.conn.max_property_bytes {
             self.conn
-                .set_property(event.requestor, property, event.target, 8, bytes);
-            return property;
+                .set_property(requestor, property, target, 8, bytes);
+            return true;
         }
 
         // `INCR`: the property is written with type `INCR` and a *size
@@ -174,22 +250,22 @@ impl X11Shell {
         // the transfer starts and never advances.
         let estimate = [u32::try_from(bytes.len()).unwrap_or(u32::MAX)];
         self.conn.set_property(
-            event.requestor,
+            requestor,
             property,
             self.conn.atoms.incr,
             32,
             &window::words_to_bytes(&estimate),
         );
-        self.select_property_changes(event.requestor);
+        self.select_property_changes(requestor);
         self.writes.push(Write::new(
-            event.requestor,
+            requestor,
             property,
-            event.target,
+            target,
             bytes.clone(),
             self.conn.max_property_bytes,
             ffi::monotonic_nanos(),
         ));
-        property
+        true
     }
 
     /// The `TARGETS` list, in preference order.
@@ -202,7 +278,17 @@ impl X11Shell {
         // `TIMESTAMP` too: ICCCM requires *every* selection owner to answer it,
         // and a peer that uses it to detect an ownership change (which is what
         // it is for) reads an owner that omits it as broken.
-        let mut targets = vec![self.conn.atoms.targets, self.conn.atoms.timestamp];
+        //
+        // `MULTIPLE` is advertised because it is answered — see
+        // [`answer_multiple`](Self::answer_multiple). A peer that batches its
+        // conversions looks for it here first and falls back to one request per
+        // target when it is absent, so listing it is what makes the batch form
+        // reachable at all.
+        let mut targets = vec![
+            self.conn.atoms.targets,
+            self.conn.atoms.timestamp,
+            self.conn.atoms.multiple,
+        ];
         for (mime, _) in &self.offers {
             if *mime == MimeType::TextUtf8 {
                 // All four spellings, because an X11 peer may ask for any of

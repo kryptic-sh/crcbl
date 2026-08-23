@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **X11 answers ICCCM's `MULTIPLE` selection target.** A peer that wants several
+  formats can write one `ATOM_PAIR` list and ask once, instead of a
+  `ConvertSelection` per format; each pair is converted into the property that
+  pair names, and a pair the owner cannot serve comes back with its property
+  atom replaced by `None`. `MULTIPLE` is advertised in `TARGETS`, which is how a
+  peer knows to use it.
+
 - **A device with more than two channels says so.** `AudioStream::open` logs the
   channel count it found when it exceeds the mixer's two, naming how many stay
   silent. The mixer feeds the first two channels and leaves the rest alone — on

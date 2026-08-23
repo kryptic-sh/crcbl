@@ -1921,6 +1921,107 @@ fn our_selection_is_readable_by_another_client() {
     assert_eq!(session.peer.take_read().expect("answered"), None);
 }
 
+/// **A `MULTIPLE` request is answered pair by pair**, with the refusals named.
+///
+/// ICCCM's batch form: a peer that wants two formats writes an `ATOM_PAIR` list
+/// of `(target, property)` on its own window and asks for `MULTIPLE` once,
+/// instead of one `ConvertSelection` per target. The owner converts each pair
+/// into the property that pair names and replaces the property atom of any pair
+/// it could not convert with `None`.
+///
+/// Three things are asserted, and the third is what stops the first two passing
+/// against an owner that ignored the request: both offered formats arrive, in
+/// the properties the peer chose rather than in one of the owner's choosing;
+/// the list comes back with a `0` in the pair the owner refused and the atoms it
+/// did convert intact; and a format never offered leaves its property absent
+/// rather than holding something else's bytes.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_multiple_request_is_answered_pair_by_pair() {
+    let mut session = Session::open();
+    let window = session.window(&desc("batch copy"));
+    session.peer.release_clipboard();
+    session.pump();
+
+    session
+        .shell
+        .clipboard_offer(
+            window,
+            &[
+                ClipboardOffer::text("copied from crcbl"),
+                ClipboardOffer::ron("(entity: 1)"),
+            ],
+        )
+        .expect("the clipboard is claimable");
+
+    // `MULTIPLE` is advertised, which is how a peer knows to try the batch form
+    // at all.
+    session.peer.read_clipboard("TARGETS");
+    session.pump_until("the TARGETS reply", |session| session.peer_answered());
+    let targets = session
+        .peer
+        .take_read()
+        .expect("answered")
+        .expect("targets");
+    let targets: Vec<u32> = targets
+        .chunks_exact(4)
+        .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
+        .collect();
+    assert!(
+        targets.contains(&session.peer.atom("MULTIPLE")),
+        "an owner that answers MULTIPLE has to advertise it: {targets:?}",
+    );
+
+    session.peer.read_clipboard_multiple(&[
+        ("UTF8_STRING", "PEER_TEXT"),
+        ("application/x-crcbl+ron", "PEER_RON"),
+        ("image/png", "PEER_PNG"),
+    ]);
+    session.pump_until("the MULTIPLE reply", |session| session.peer_answered());
+    let list = session
+        .peer
+        .take_read()
+        .expect("answered")
+        .expect("the pair list comes back");
+
+    assert_eq!(
+        session.peer.own_property("PEER_TEXT"),
+        Some(b"copied from crcbl".to_vec()),
+        "the text went into the property the peer named",
+    );
+    assert_eq!(
+        session.peer.own_property("PEER_RON"),
+        Some(b"(entity: 1)".to_vec()),
+        "and so did the engine format, in the same exchange",
+    );
+    assert_eq!(
+        session.peer.own_property("PEER_PNG"),
+        None,
+        "a format nobody offered leaves its property alone",
+    );
+
+    let words: Vec<u32> = list
+        .chunks_exact(4)
+        .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
+        .collect();
+    assert_eq!(words.len(), 6, "one pair per target asked for: {words:?}");
+    assert_eq!(
+        words[1],
+        session.peer.atom("PEER_TEXT"),
+        "a converted pair keeps its property: {words:?}",
+    );
+    assert_eq!(
+        words[3],
+        session.peer.atom("PEER_RON"),
+        "and so does the second: {words:?}",
+    );
+    assert_eq!(
+        words[5], 0,
+        "the refused pair's property is None, which is how a requestor learns \
+         which of its targets it did not get: {words:?}",
+    );
+}
+
 /// A payload larger than one request goes out as `INCR`, driven by the peer.
 #[test]
 #[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
