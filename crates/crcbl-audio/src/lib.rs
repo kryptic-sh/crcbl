@@ -167,6 +167,17 @@ impl AudioStream {
         let supported = device.default_output_config().ok()?;
         let sample_rate = supported.sample_rate();
         let channels = supported.channels() as usize;
+        if channels > CHANNELS {
+            // Said out loud rather than left to be discovered by listening.
+            // `fill_audio` feeds the first two channels and leaves the rest
+            // silent, which on a 5.1 device is four speakers that never carry
+            // anything — see its docs for why that is the only routing cpal's
+            // channel *count* supports.
+            crcbl_core::log::warn!(
+                "audio device reports {channels} channels; the mixer is {CHANNELS}-channel, so                  the first two carry the output and the remaining {} stay silent",
+                channels - CHANNELS
+            );
+        }
         let config: cpal::StreamConfig = supported.into();
 
         let src = Arc::clone(&source);
@@ -270,6 +281,28 @@ impl Drop for AudioStream {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Fills one device block from `source`, adapting the mixer's stereo output to
+/// whatever channel count the device asked for.
+///
+/// # The three layouts, and why the third leaves speakers silent
+///
+/// Stereo is a straight fill. Mono averages the pair, which is a downmix and
+/// loses nothing a mono device could have played anyway.
+///
+/// **Anything wider gets the stereo pair in its first two channels and silence
+/// in the rest** — on a 5.1 device that is centre, LFE and both surrounds
+/// carrying nothing. That is a deliberate floor, not an oversight, and the
+/// reason is that `cpal` reports a channel *count* and not a channel *layout*:
+/// `SupportedStreamConfig::channels` is a `u16`, so nothing here knows which
+/// index is the centre or whether index 0 is even front-left. Writing an upmix
+/// matrix against positions the API never states would be guessing, and a
+/// guessed centre channel is worse than a silent one — it duplicates dialogue
+/// into a speaker that may be a surround.
+///
+/// A real upmix wants a layout the platform states (WASAPI's channel mask,
+/// CoreAudio's `AudioChannelLayout`), which means going under `cpal` or past
+/// it. Until then [`AudioStream::open`] logs the layout it found so the silence
+/// is diagnosable instead of merely audible.
 fn fill_audio(
     data: &mut [f32],
     channels: usize,
@@ -439,6 +472,47 @@ mod tests {
                 data.iter().all(|s| *s == 0.0),
                 "stale samples left for {channels} channels: {data:?}"
             );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_wider_device_gets_the_stereo_pair_and_documented_silence() {
+        /// A source that writes a different constant into each of the two
+        /// channels, so the test can tell "the pair landed" from "something
+        /// landed" — a source with one value everywhere would pass a routing
+        /// that fed the same sample to both.
+        struct Split;
+        impl AudioSource for Split {
+            fn fill(&self, buffer: &mut [AudioSample], _rate: u32) {
+                for frame in buffer.chunks_exact_mut(CHANNELS) {
+                    frame[0] += 0.25;
+                    frame[1] += -0.5;
+                }
+            }
+        }
+
+        // 5.1 and 7.1, the two layouts a desktop actually reports.
+        for channels in [6usize, 8] {
+            let frames = 8;
+            let mut data = vec![0.7f32; frames * channels];
+            let mut scratch = Vec::new();
+            fill_audio(&mut data, channels, &Split, 48_000, &mut scratch);
+
+            for (index, frame) in data.chunks_exact(channels).enumerate() {
+                assert!(
+                    (frame[0] - 0.25).abs() < 1e-6 && (frame[1] + 0.5).abs() < 1e-6,
+                    "frame {index} of {channels} channels lost the stereo pair: {frame:?}"
+                );
+                assert!(
+                    frame[CHANNELS..].iter().all(|s| *s == 0.0),
+                    "frame {index} of {channels} channels: the channels past the stereo pair \
+                     are documented silent, and this one carries {:?}. If that is now a real \
+                     upmix, `fill_audio`'s docs are the thing to change first — they say why \
+                     guessing a layout cpal does not report is worse than silence.",
+                    &frame[CHANNELS..]
+                );
+            }
         }
     }
 

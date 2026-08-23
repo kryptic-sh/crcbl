@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A device with more than two channels says so.** `AudioStream::open` logs the
+  channel count it found when it exceeds the mixer's two, naming how many stay
+  silent. The mixer feeds the first two channels and leaves the rest alone — on
+  5.1 that is centre, LFE and both surrounds — because `cpal` reports a channel
+  count and not a layout, so nothing can know which index is the centre.
+  `fill_audio`'s docs now say that, and a test pins it.
+
 - **Every read-only physics query has a shared, `Sync` form.** `OverlapQueries`
   (colliders) and `EntityOverlapQueries` (entities) already carried
   `overlap_sphere_into`; they now also carry `overlap_aabb_into`, `cast_ray` and
