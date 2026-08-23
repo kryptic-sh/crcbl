@@ -50,15 +50,34 @@ and `crcbl-dx12` type-check and document on `aarch64-apple-darwin` and
 `x86_64-pc-windows-msvc`, and their MSL and DXIL artifacts are regenerated with
 the pinned compilers, but no Metal or D3D12 device ran this atlas.
 
-**The point-and-spot atlas probe is not in the tree.** It was temporary
-instrumentation in `crates/crcbl/tests/forward_e2e/shadow.rs`, run and then
-reverted, because that file is outside the write set this work was given. The
-tile assertions there still cover a spot alone
-(`a_shadowed_spot_fills_the_tile_it_was_given_and_no_other`) and a point alone
-(`a_shadowed_point_lights_faces_are_the_six_the_host_built`); **no committed
-test rasterises both into one atlas**, which is the coverage gap the seventh
-tile actually created. It is a short addition to that module, on the pattern of
-the two beside it.
+### What the point-and-spot atlas tests were not held against
+
+`a_point_light_and_a_spot_hold_the_cube_and_the_tile_past_it` and
+`a_point_light_and_a_spot_each_darken_the_floor_their_own_caster_blocks` in
+`crates/crcbl/tests/forward_e2e/shadow.rs` were run on radv and on lavapipe, and
+the two rasterisers agree on every tile count and every band. Three gaps are
+left, none of them a defect anybody saw:
+
+- **No Metal, D3D12 or WebGPU device ran them.** `CRCBL_GPU=webgpu` cannot run
+  this suite on this machine at all — `crcbl-webgpu` reaches a device only on
+  `wasm32` and refuses to open natively, which the existing shadow tests hit the
+  same way — so those arms are CI's word alone.
+- **The seven-tile region was never actually shrunk back to six.** Every
+  assertion was shown to go red, but the strongest sabotage —
+  `crcbl_shaders::mesh::SHADOW_LIGHT_TILES` back to `SHADOW_POINT_FACES` — needs
+  edits across `crcbl-shaders`' Rust constants and two `.slang` sources, a new
+  atlas shape to satisfy the
+  `ATLAS_COLUMNS * ATLAS_ROWS == CASCADES + LIGHT_TILES` assertion, and
+  regenerated MSL and DXIL. The proxy used instead was widening the spot's
+  `outer_angle` past `MAX_SPOT_HALF_ANGLE` so `can_be_shadowed` refuses it a
+  tile: that produces the same observable — the tile past the point light's cube
+  left at the reversed-Z clear — and does fail the assertion. It is the same
+  failure by a different cause, not the cause itself.
+- **The depth-range check inside the atlas test was not red-checked.**
+  `every depth is in 0..1` cannot be made to fail without breaking a projection;
+  it is the same assertion the two tests beside it carry, and the written-texel
+  counts printed alongside it are what say the loop reads real data rather than
+  an empty tile.
 
 ### DECISION NEEDED — should lantern's irradiance volume carry the downlight?
 

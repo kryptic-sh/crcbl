@@ -1176,3 +1176,381 @@ fn a_point_lights_shadow_follows_its_caster_from_one_face_to_another() {
         with_z.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// A point light and a spot in one atlas
+// ---------------------------------------------------------------------------
+//
+// `docs/plan/18-render-features.md`'s 2026-08-23 slice: the light region grew
+// from a point light's cube to one tile past it, so a frame can shadow a point
+// light and a spot at the same time. `crcbl_render::shadow`'s own tests cover
+// the arithmetic that hands the runs out; the two below are what says the pair
+// survives a device — both maps rasterised into one atlas, and both of them
+// sampled in one shaded frame.
+//
+// **Each light stands over its own floor.** `punctual_falloff` reaches exactly
+// zero at a light's radius and the spot's cone is a narrow one, so the point's
+// reach ends before the spot's pool begins and the cone never covers the
+// point's. That is what makes the two bands separable, and it is the property
+// the second test turns on: a floor lit by both lights everywhere darkens under
+// either caster, and a pair of assertions that cannot tell one shadow from the
+// other is a pair one working map passes.
+
+/// Where the point light hangs.
+///
+/// **Outboard of its own caster**, which is what keeps its shadow clear of that
+/// caster's own image. The camera looks straight down, so an object standing off
+/// the frame's axis leans *outward* in the picture while its shadow falls *away*
+/// from the light: put the light between the axis and the caster and the two
+/// land on top of each other, and put the caster between the axis and the light
+/// — as [`PAIR_POINT_CASTER_AT`] is — and the shadow falls inward, past a band
+/// the caster's image cannot reach.
+const PAIR_POINT_AT: crcbl::math::Vec3 = crcbl::math::Vec3::new(1.3, 0.6, 0.0);
+
+/// How far the point light reaches, in world units.
+///
+/// Two things at once. It is short enough that this light is **exactly** dark at
+/// [`PAIR_SPOT_BAND_AT`] — `punctual_falloff` windows to zero at the radius, and
+/// `light_cluster.slang` culls against the same number — which is what leaves
+/// the spot's band lit by the spot alone. And it is what ranks this light above
+/// the spot in [`Selection`](crcbl::render::shadow::Selection), whose metric is
+/// radius over distance to the eye: the two lights sit at all but the same
+/// distance from this camera, so the wider radius is what decides the order, and
+/// the point light takes the first run of tiles with the spot behind it.
+const PAIR_POINT_REACH: f32 = 1.6;
+
+/// Where the spot hangs: 45° from vertical, tilted along `-Z`, so its cone's
+/// axis lands on the floor at the frame's `z = 0` and the light itself stands
+/// `+Z` of that pool.
+///
+/// Outboard of its own caster on the same terms [`PAIR_POINT_AT`] is, in `z`
+/// rather than in `x`.
+const PAIR_SPOT_AT: crcbl::math::Vec3 = crcbl::math::Vec3::new(-1.2, 0.7, 0.7);
+
+/// How far the spot reaches, in world units.
+///
+/// Past its own band and not much further — a cone that reached the point
+/// light's floor would light the far side of the frame through a map that
+/// belongs to this side of it.
+const PAIR_SPOT_REACH: f32 = 1.3;
+
+/// Where the point light's caster stands: inboard of its light, on the `x` axis.
+const PAIR_POINT_CASTER_AT: crcbl::math::Vec3 = crcbl::math::Vec3::new(0.85, 0.0, 0.0);
+
+/// Where the spot's caster stands: inboard of its light, under the cone.
+const PAIR_SPOT_CASTER_AT: crcbl::math::Vec3 = crcbl::math::Vec3::new(-1.2, 0.0, 0.15);
+
+/// How tall the point light's caster is, in world units.
+///
+/// A cube rather than the pyramid the spot's and the point light's scenes above
+/// cast with, because what these bands need is a *wide* shadow: a pyramid's is a
+/// triangle that narrows to nothing at its tip, so a band placed far enough from
+/// the caster to be clear of the caster's own image sits where that shadow is a
+/// few texels across. A box throws one as wide at its far edge as at its near
+/// one.
+const PAIR_POINT_CASTER_SIDE: f32 = 0.3;
+
+/// How tall the spot's caster is, on the same terms.
+///
+/// Shorter than the point light's, because this one has a cone to stay inside.
+/// The spot's pool is a few tenths of a unit across at this throw, and the
+/// caster, its shadow and a band between the two all have to fit in it — a
+/// taller caster throws its shadow past the edge, where there is no light for
+/// the shadow to be the absence of.
+const PAIR_SPOT_CASTER_SIDE: f32 = 0.24;
+
+/// Where the point light's shadow is measured, in world `x` and `z`.
+///
+/// Inside the caster's shadow and inboard of the caster's own image. The two
+/// lean opposite ways from the frame's axis — see [`PAIR_POINT_AT`] — so there
+/// is floor between them that the shadow covers and the picture of the caster
+/// does not.
+const PAIR_POINT_BAND_AT: (f32, f32) = (0.35, 0.0);
+
+/// Where the spot's shadow is measured, on the same terms.
+///
+/// Straight down-light of its caster, which stands directly below the spot in
+/// `x`, so the band's `x` is the light's own.
+const PAIR_SPOT_BAND_AT: (f32, f32) = (PAIR_SPOT_AT.x, -0.15);
+
+/// A cube of side `side` standing on the floor at `at`.
+fn pair_caster(at: crcbl::math::Vec3, side: f32) -> crcbl::math::Mat4 {
+    crcbl::math::Mat4::from_translation(at + crcbl::math::Vec3::new(0.0, 0.5 * side, 0.0))
+        * crcbl::math::Mat4::from_scale(crcbl::math::Vec3::splat(side))
+}
+
+/// The point light of the combined scene.
+fn pair_point_light() -> crcbl::render::Light {
+    crcbl::render::Light::Point(crcbl::render::PointLight {
+        position: PAIR_POINT_AT,
+        radius: PAIR_POINT_REACH,
+        color: crcbl::math::Vec3::new(1.0, 0.95, 0.85) * 5.0,
+    })
+}
+
+/// The spot of the combined scene, at [`spot_light`]'s cone angles.
+fn pair_spot_light() -> crcbl::render::Light {
+    crcbl::render::Light::Spot(crcbl::render::SpotLight {
+        position: PAIR_SPOT_AT,
+        radius: PAIR_SPOT_REACH,
+        color: crcbl::math::Vec3::new(1.0, 0.95, 0.85) * 5.0,
+        // Along the cone, away from the light: straight down at the floor below
+        // it, so its pool sits under the light rather than beside it.
+        direction: crcbl::math::Vec3::new(0.0, -PAIR_SPOT_AT.y, -PAIR_SPOT_AT.z),
+        inner_angle: 0.18,
+        outer_angle: 0.28,
+    })
+}
+
+/// Which of the combined scene's two casters are in the frame.
+///
+/// A struct rather than two `bool` arguments, because every assertion below
+/// turns on *which* caster was left out and `render_pair(true, false)` does not
+/// say which.
+#[derive(Clone, Copy)]
+struct Casters {
+    point: bool,
+    spot: bool,
+}
+
+/// Draws the floor under both lights, with whichever of the two casters
+/// `casters` names.
+fn render_pair(casters: Casters) -> ShadowFrame {
+    render_scene(&ShadowScene {
+        prepare: &move |renderer| {
+            // The point light first, so a tie in the selection's ranking breaks
+            // towards it by index — the order the assertions below are written
+            // against.
+            renderer.set_lights(&[pair_point_light(), pair_spot_light()]);
+            for (wanted, at, side) in [
+                (casters.point, PAIR_POINT_CASTER_AT, PAIR_POINT_CASTER_SIDE),
+                (casters.spot, PAIR_SPOT_CASTER_AT, PAIR_SPOT_CASTER_SIDE),
+            ] {
+                if wanted {
+                    crate::mesh_scene::place(
+                        renderer,
+                        crcbl::render::scene::DEMO_CUBE,
+                        crcbl::render::scene::DEMO_UNTINTED,
+                        pair_caster(at, side),
+                    );
+                }
+            }
+        },
+        camera: point_camera(),
+        // Dim, on `render_spot`'s terms: a bright sun would light both shadowed
+        // bands from a direction neither map knows anything about, and the
+        // ratios below would be measuring the sun.
+        sun: crcbl::render::DirectionalLight {
+            color: crcbl::render::DirectionalLight::default().color * 0.03,
+            ambient: crcbl::render::DirectionalLight::default().ambient * 0.09,
+            ..crcbl::render::DirectionalLight::default()
+        },
+        // The cube, scaled into a floor whose `+Y` face is the plane `y = 0`.
+        model: crcbl::math::Mat4::from_translation(crcbl::math::Vec3::new(
+            0.0,
+            -0.5 * SPOT_FLOOR_SCALE,
+            0.0,
+        )) * crcbl::math::Mat4::from_scale(crcbl::math::Vec3::splat(SPOT_FLOOR_SCALE)),
+    })
+}
+
+/// **A point light's cube and a spot's map are in the atlas at once.**
+///
+/// The claim the seventh light tile was added for, made against the image
+/// rather than against the selection: `crcbl_render::shadow`'s unit tests say
+/// `Selection` hands out a run of [`POINT_FACES`](crcbl::render::shadow::POINT_FACES)
+/// and a run of one, and nothing until this said the shadow pass then rasterised
+/// into both of them. A viewport that stopped at the cube, a second cull that
+/// was never dispatched, or a region still sized for one point light all leave a
+/// frame in which the spot lights without occluding — which is a picture that
+/// looks entirely plausible.
+///
+/// Three things are asserted and they are three different failures:
+///
+/// * the point light's `+Y` face is at the clear. It looks straight up from a
+///   light with nothing above it, so it is empty in a correct frame — and it is
+///   empty only if the point light's run starts at light tile 0, which is what
+///   pins the rest of the arithmetic below.
+/// * the faces its caster stands in hold depths, so the cube is a map rather
+///   than six cleared tiles.
+/// * the tile **past** the cube holds the spot's map. That tile exists at all
+///   only because the light region is a point light's cube plus one.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_point_light_and_a_spot_hold_the_cube_and_the_tile_past_it() {
+    // The tile the spot is expected in: the one after the point light's run,
+    // which is at light tile 0 because the point light outranks the spot — see
+    // `PAIR_POINT_REACH`. Named rather than written as a literal, so a light
+    // region shrunk back to a point light's six faces fails on the sentence
+    // below instead of on an out-of-range tile.
+    let spot_tile = crcbl::render::shadow::POINT_FACES;
+    assert!(
+        spot_tile < crcbl::render::shadow::LIGHT_TILES,
+        "the atlas's light region is {} tiles, so a point light's cube fills the whole of it and \
+         a spot in the same frame is refused a map — there is no tile here for a second shadowed \
+         light to be rendered into",
+        crcbl::render::shadow::LIGHT_TILES
+    );
+
+    let frame = render_pair(Casters {
+        point: true,
+        spot: true,
+    });
+    // As `the_shadow_atlas_is_written_rather_than_left_at_its_clear_value`: a
+    // backend that declares no depth-image copy was held to that refusal in
+    // `render_scene`, and has no atlas for the tiles below.
+    let Some(atlas) = frame.atlas() else {
+        return;
+    };
+    let written = |light_tile: usize| {
+        let tile = tile(atlas, crcbl::render::shadow::light_tile(light_tile));
+        assert!(
+            tile.iter().all(|depth| (0.0..=1.0).contains(depth)),
+            "light tile {light_tile} holds a depth outside 0..1, so its reversed-Z range is not \
+             the one the comparison sampler tests against"
+        );
+        tile.iter().filter(|depth| **depth > 0.0).count()
+    };
+    let counts: Vec<usize> = (0..crcbl::render::shadow::LIGHT_TILES)
+        .map(written)
+        .collect();
+    eprintln!(
+        "{suite}: point and spot — written texels per light tile {counts:?}",
+        suite = crate::SUITE
+    );
+
+    // `+Y`, which `shadow::face_axis` puts at index 2 of the point light's run.
+    assert_eq!(
+        counts[2], 0,
+        "the point light's `+Y` face looks straight up from a light with nothing above it and \
+         holds {} written texel(s). Either the six matrices are not the six `shadow::face_axis` \
+         names, or this light's run does not start where the assertions below read it",
+        counts[2]
+    );
+    // `-X` and `-Y`. The caster stands inboard of its light and below it by very
+    // nearly as much as it stands inboard, so it straddles the boundary between
+    // those two faces and each of their frusta holds a part of it — and `-X` is
+    // the face the band in the next test reads its shadow through. A real area
+    // rather than a stray texel, on
+    // `a_shadowed_point_lights_faces_are_the_six_the_host_built`'s terms: a
+    // caster this close to the light covers a few per cent of a 90° face, and a
+    // mis-transformed sliver covers far less.
+    let texels = f64::from(crcbl::render::shadow::TILE).powi(2);
+    for face in [1, 3] {
+        let fraction = counts[face] as f64 / texels;
+        assert!(
+            fraction > 0.01,
+            "the point light's face {face} has its caster standing in it and wrote {fraction:.4} \
+             of its texels, which is a sliver rather than a caster — a face that shadows nothing \
+             and a frame that looks correct"
+        );
+    }
+    // And the spot's own tile, past the whole of that cube.
+    let fraction = counts[spot_tile] as f64 / texels;
+    assert!(
+        fraction > 0.05,
+        "light tile {spot_tile} is the spot's, and it wrote {fraction:.4} of its texels. At the \
+         reversed-Z clear it is a spot that was given a tile and never rendered into it; a sliver \
+         is a map that was rendered through the wrong matrix. Both light the floor and occlude \
+         nothing"
+    );
+}
+
+/// **Both maps are sampled, and each caster darkens only its own light's
+/// floor.**
+///
+/// Writing a tile is not occluding with it, and the atlas assertion above cannot
+/// tell the two apart: a second map rendered perfectly and never read produces
+/// exactly the frame a light with no map at all does. So each band here is
+/// measured against the same band of a frame that differs in **one instance**,
+/// on `removing_a_spots_caster_lights_the_floor_it_darkened`'s terms.
+///
+/// What makes it a test of *two* shadows rather than one is a third reading of
+/// each band, in the frame that keeps its own caster and drops the **other**
+/// light's — and it has to stay dark. Without that a scene lit by both lights
+/// everywhere would satisfy the first claim twice over with a single working
+/// map, since either caster removed would lift either band. Here the point
+/// light's falloff is exactly zero at the spot's band and the cone never
+/// reaches the point light's, so a band that brightens when the far caster
+/// leaves is not measuring the map this test names.
+///
+/// Those two are asserted **first**, before the claim they underwrite: a band
+/// the far caster also darkens makes the numbers in the claim meaningless, and
+/// a run that reports which of the two it is beats one that reports "no shadow
+/// here" about a band two shadows fall on.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_point_light_and_a_spot_each_darken_the_floor_their_own_caster_blocks() {
+    let both = render_pair(Casters {
+        point: true,
+        spot: true,
+    });
+    let no_point = render_pair(Casters {
+        point: false,
+        spot: true,
+    });
+    let no_spot = render_pair(Casters {
+        point: true,
+        spot: false,
+    });
+
+    let band = |frame: &ShadowFrame, at: (f32, f32)| point_band(frame, at.0, at.1);
+    let point = (
+        band(&both, PAIR_POINT_BAND_AT),
+        band(&no_point, PAIR_POINT_BAND_AT),
+        band(&no_spot, PAIR_POINT_BAND_AT),
+    );
+    let spot = (
+        band(&both, PAIR_SPOT_BAND_AT),
+        band(&no_spot, PAIR_SPOT_BAND_AT),
+        band(&no_point, PAIR_SPOT_BAND_AT),
+    );
+    eprintln!(
+        "{suite}: point and spot — the point light's band measures {:.1} with both casters, \
+         {:.1} without its own and {:.1} without the spot's; the spot's band measures {:.1}, \
+         {:.1} and {:.1}",
+        point.0,
+        point.1,
+        point.2,
+        spot.0,
+        spot.1,
+        spot.2,
+        suite = crate::SUITE
+    );
+
+    // **Each band belongs to one light, and that is asserted before anything is
+    // read from it.** A band the far caster also darkens makes the pair below
+    // meaningless — it would go dark and light again with either instance, and
+    // one working map would satisfy both.
+    assert!(
+        point.2 < point.0 * SPOT_SHADOW_RATIO,
+        "the point light's band lifted from {:.1} to {:.1} when the *spot's* caster left the \
+         frame. Nothing the spot occludes can reach this band — it is outside the cone — so what \
+         darkened it is not the map this test says it is",
+        point.0,
+        point.2
+    );
+    assert!(
+        spot.2 < spot.0 * SPOT_SHADOW_RATIO,
+        "and the spot's band lifted from {:.1} to {:.1} when the *point light's* caster left, \
+         which is the mirror of the same defect: the point light's falloff is exactly zero here",
+        spot.0,
+        spot.2
+    );
+    assert!(
+        point.0 * SPOT_SHADOW_RATIO < point.1,
+        "the point light's caster must darken the floor inboard of it, but that band measures \
+         {:.1} with the caster and {:.1} without it — a shadow is the difference between those \
+         two and there is not one here",
+        point.0,
+        point.1
+    );
+    assert!(
+        spot.0 * SPOT_SHADOW_RATIO < spot.1,
+        "and the spot's caster must darken the floor under its cone, but that band measures \
+         {:.1} with the caster and {:.1} without it. A tile in the atlas is not an occluder \
+         until something samples it",
+        spot.0,
+        spot.1
+    );
+}
