@@ -10917,9 +10917,19 @@ it.
   What is still unasserted is the second half: that the **recorded render area**
   is that extent. `crates/crcbl-hal/src/swapchain.rs` states it as a caller
   obligation and says using the requested size instead is the bug the field
-  exists to prevent — and the injector now makes that bug expressible, so the
-  test is a matter of driving a frame and reading the recorded pass rather than
-  of building a fixture.
+  exists to prevent.
+
+  **It is not as close as it looks, and here is the trap.** The render area is
+  not a number a caller passes: `crcbl_render`'s graph derives it from the
+  _attachment image's_ extent, and refuses a pass whose attachments disagree.
+  The clamp injector changes only what `acquire_next_frame` reports — the null
+  swapchain's images keep the configured size — so a frame built through it has
+  an image of one size and an `AcquiredFrame::extent` of another, and any
+  mismatch a test saw would be the fixture's rather than the engine's. Closing
+  the second half means teaching the injector to resize the swapchain's images
+  along with the reported extent, which is what a compositor actually does.
+  Until then the honest statement is that the _adoption_ is tested and the
+  _rendering_ is not.
 
 ### No runner has two native backends, so nothing compares them directly
 
