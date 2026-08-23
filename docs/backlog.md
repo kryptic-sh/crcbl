@@ -5645,10 +5645,6 @@ nothing.
   wrong. What would use it is a staging allocator that rounds each copy's offset
   up to it; nothing does. The two range limits beside it are enforced now, in
   the null backend and in `crcbl-vk`.
-- **`fp3232` divides the fraction by `u32::MAX` rather than `2^32`**
-  (`crates/crcbl-shell/src/x11/input.rs`) — ~2.3e-10 relative error,
-  unobservable, and the new test asserts to `1e-6` so it does not pin the
-  exactness either.
 - Assorted DRY/YAGNI survivors: `destroy_offer(&data::Offer)` taking a
   throwaway; `crcbl-vk`'s three independent teardown sweeps (`destroy_trash`,
   `Drop`, `build_swapchain`'s `unwind`) — note the _bug_ under that bullet is

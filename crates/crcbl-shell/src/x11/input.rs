@@ -712,7 +712,15 @@ fn is_repeat_pair(first: &Raw, second: Option<&Raw>) -> bool {
 /// fraction instead, which reads more naturally, gives the wrong sign for every
 /// backwards mouse movement.
 fn fp3232(integral: i32, frac: u32) -> f64 {
-    f64::from(integral) + f64::from(frac) / f64::from(u32::MAX)
+    /// What one unit of the fraction is worth: `2^-32`, so the fraction is
+    /// divided by `2^32` and **not** by `u32::MAX`.
+    ///
+    /// The two differ by one part in four billion, which is why dividing by
+    /// `u32::MAX` — the natural-looking spelling, and what this used to do — is
+    /// invisible in a mouse delta and wrong anyway: `0x8000_0000` is exactly a
+    /// half in this format, and no value of the fraction can reach 1.0.
+    const SCALE: f64 = 4_294_967_296.0;
+    f64::from(integral) + f64::from(frac) / SCALE
 }
 
 /// The `(dx, dy)` of an `XI_RawMotion`, from its *raw* valuators.
@@ -876,10 +884,19 @@ mod tests {
         // The trap: the fraction is unsigned and the integral part is the
         // floor, so -0.5 is (-1, 0x8000_0000). Subtracting instead gives -1.5,
         // and every leftward mouse movement is then three times too far.
-        assert!((fp3232(3, 0) - 3.0).abs() < 1e-9);
-        assert!((fp3232(0, u32::MAX / 2) - 0.5).abs() < 1e-6);
-        assert!((fp3232(-1, u32::MAX / 2) + 0.5).abs() < 1e-6);
-        assert!((fp3232(-3, 0) + 3.0).abs() < 1e-9);
+        // Exact equality, because these values are exact in the format and in
+        // `f64` alike: the fraction is a count of `2^-32`, so a half is
+        // `0x8000_0000` and nothing rounds. Asserted to a tolerance before,
+        // which let the scale be `u32::MAX` — a division that can never quite
+        // produce a half.
+        assert_eq!(fp3232(3, 0), 3.0);
+        assert_eq!(fp3232(0, 1 << 31), 0.5);
+        assert_eq!(fp3232(-1, 1 << 31), -0.5);
+        assert_eq!(fp3232(-3, 0), -3.0);
+        // The largest fraction is one unit short of the next integer, and never
+        // reaches it.
+        assert_eq!(fp3232(0, u32::MAX), 1.0 - 1.0 / 4_294_967_296.0);
+        assert!(fp3232(0, u32::MAX) < 1.0);
     }
 
     #[test]
