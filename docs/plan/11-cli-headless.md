@@ -76,7 +76,7 @@ Simulation & verification:
   headless server tick loop over a seed-generated world and prints
   `hash:<hex> ticks:<n> final_tick:<n>`; same input, same hash. This is the
   stage 4 determinism harness, and it is a CLI verb rather than a binary of its
-  own — `apps/sim` was deleted on 2026-08-23 and its tests moved to
+  own — the `crcbl-sim` binary was deleted on 2026-08-23 and its tests moved to
   `crates/crcbl-cli/tests/cli.rs`.
 
   **It takes no scene and no input script.** The sketch above was
