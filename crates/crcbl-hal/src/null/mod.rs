@@ -1901,11 +1901,18 @@ impl Device for NullDevice {
             acquire_semaphores,
             present_semaphores,
             next,
+            acquired,
         } = &mut object.detail
         else {
             unreachable!("a swapchain handle always carries swapchain detail");
         };
         let index = *next;
+        // The seam does not make an acquire exclusive — Vulkan lets a mailbox
+        // ring hold several at once — so a second acquire overwrites rather
+        // than being refused, exactly as every other backend's single slot
+        // does. What the slot is for is the *present*, which needs to have been
+        // given a frame at all.
+        *acquired = Some(index);
         let slot = index as usize;
         // `.max(1)`, not `unwrap_or(1)`: `u32::try_from(0usize)` is `Ok(0)`, so
         // the fallback never fired for the one input it looked like it guarded
@@ -1936,6 +1943,21 @@ impl Device for NullDevice {
                 .map_err(SurfaceError::Hal)?;
         }
         let mut state = self.recorder.lock();
+        // **A present needs a frame to present**, which this backend could not
+        // say until it had somewhere to remember the acquire. The wording is
+        // the one `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` already answer, so
+        // one agnostic test holds every backend to the same sentence.
+        let Some(Detail::Swapchain { acquired, .. }) = state
+            .get_mut(ObjectKind::Swapchain, present.swapchain.to_bits())
+            .map(|object| &mut object.detail)
+        else {
+            unreachable!("check_current resolved this swapchain a moment ago");
+        };
+        if acquired.take().is_none() {
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                "present without a matching acquire_next_frame".to_string(),
+            )));
+        }
         state.events.push(Event::Presented {
             swapchain: present.swapchain,
             present_id: present.present_id,
@@ -2088,6 +2110,7 @@ impl NullDevice {
             views,
             acquire_semaphores,
             present_semaphores,
+            acquired: None,
             next: 0,
         })
     }

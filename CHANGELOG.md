@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The null backend refuses a present with no matching acquire**, the last of
+  the seam's presentation rules it could not state. It kept a ring cursor but no
+  record of the outstanding acquire, so it had nothing to refuse against, while
+  `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` had each been answering "present
+  without a matching `acquire_next_frame`" all along — the one backend whose
+  purpose is to model the seam with no driver in the room was the one that could
+  not. `Detail::Swapchain` now carries the acquired ring index, taken by the
+  present and cleared by `reconfigure_swapchain`, which reissues the ring the
+  index pointed into. With every backend answering, one agnostic test
+  (`a_present_without_an_acquire_is_refused`) now holds them all to the same
+  sentence.
+
 - **`crcbl-webgpu` refuses a present with no frame to present.** `crcbl-vk`,
   `crcbl-mtl` and `crcbl-dx12` all answer "present without a matching
   `acquire_next_frame`"; this backend answered `Ok` and encoded the command, so

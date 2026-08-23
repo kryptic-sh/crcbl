@@ -603,6 +603,111 @@ fn a_swapchain_format_the_surface_does_not_offer_is_refused() {
     drop(device);
 }
 
+/// A present needs a frame to present, and every backend says so in the same
+/// sentence.
+///
+/// This was the last rule the null backend could not state — it tracked no
+/// outstanding acquire, so it had nothing to refuse a present against — while
+/// `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` had each been answering
+/// "present without a matching acquire_next_frame" all along. Now that the
+/// reference backend models it too, one test can hold them all to it.
+///
+/// The second arm is the one with teeth: `reconfigure_swapchain` reissues the
+/// whole ring, so a frame acquired before it names an image that no longer
+/// exists. Presenting it is a use-after-free rather than a stale number, and
+/// the backends clear the slot on reconfigure for exactly that reason.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_present_without_an_acquire_is_refused() {
+    let instance = instance();
+    let adapter = select_adapter(instance.as_ref());
+    // SAFETY: `Offscreen` names no platform object.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen");
+    let device = instance
+        .create_device(&DeviceDesc {
+            label: Some("crcbl hal seam e2e"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: Some(surface),
+        })
+        .expect("a device opens");
+    let caps = instance
+        .surface_caps(surface, adapter.id)
+        .expect("an offscreen surface has caps");
+    let describe = |extent| SwapchainDesc {
+        label: Some("present without acquire"),
+        surface,
+        format: *caps.formats.first().expect("a presentable format"),
+        extent,
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device
+        .create_swapchain(&describe(EXTENT))
+        .expect("a swapchain");
+    let queue = device
+        .queue(crcbl::hal::QueueKind::Graphics)
+        .expect("a graphics queue");
+    let present_now = || {
+        device.present(
+            queue,
+            &PresentInfo {
+                swapchain,
+                waits: &[],
+                present_id: None,
+            },
+        )
+    };
+    let refused = |error: SurfaceError, case: &str| {
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+            panic!("{case} was refused as the wrong kind of error: {error}");
+        };
+        assert!(
+            message.contains("without a matching acquire_next_frame"),
+            "{case}: every backend answers the same sentence, and this one said {message}"
+        );
+    };
+
+    refused(
+        present_now().expect_err("nothing has been acquired yet"),
+        "a present before any acquire",
+    );
+
+    // Acquired, so the present goes through — without this the refusal above
+    // would be satisfied by a backend that refused every present.
+    let frame = device
+        .acquire_next_frame(swapchain)
+        .expect("an acquire on a live swapchain");
+    let _ = frame.image;
+    present_now().expect("an acquired frame is one to present");
+
+    // The slot is taken by the present, so the next one has nothing again.
+    refused(
+        present_now().expect_err("that frame has already been presented"),
+        "a second present of the same frame",
+    );
+
+    // And a reconfigure reissues the ring, so the frame acquired before it
+    // names an image that no longer exists.
+    device
+        .acquire_next_frame(swapchain)
+        .expect("an acquire before the reconfigure");
+    device
+        .reconfigure_swapchain(swapchain, &describe((EXTENT.0 / 2, EXTENT.1 / 2)))
+        .expect("a reconfigure");
+    refused(
+        present_now().expect_err("the reconfigure destroyed the frame that was acquired"),
+        "a present across a reconfigure",
+    );
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+    assert_no_out_of_band_error(device.as_ref());
+    drop(device);
+}
+
 /// **Obligation 3**: handles do not cross devices, and the failure is detected
 /// rather than undefined.
 ///

@@ -16385,14 +16385,25 @@ the two deferred backends. It did not — `crcbl-vk` never had the hole, and
 neither deferred backend. **"Fixing it needs an agnostic test" is the assumption
 to check before parking anything else on the deferral.**
 
-What remains here is genuinely blocked:
+**Both halves are now closed and the agnostic test exists.** The null backend
+carries the acquired ring index (`Detail::Swapchain::acquired`), takes it at
+present and clears it on reconfigure, so
+`a_present_without_an_acquire_is_refused` in
+`crates/crcbl/tests/hal_seam_e2e.rs` holds every backend the suite runs to the
+same sentence, and `crcbl-hal`'s own
+`a_present_without_a_matching_acquire_is_refused` covers the reference backend
+with no ICD.
 
-- **The null backend tracks no outstanding acquire at all**, so it cannot refuse
-  a present without one — the one backend whose whole purpose is to model the
-  seam's rules with no driver in the room. Adding that state is its own slice
-  and would let the refusal be tested with no ICD.
-- **An agnostic test still cannot be written**, but for a narrower reason than
-  before: `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all refuse, so one would pass
-  on the three backends the suite runs — it is the null backend that would fail
-  it, and `crcbl-webgpu` that the suite cannot reach. Do the null slice first
-  and the agnostic test comes free.
+What is left is only what the suite cannot reach:
+
+- **`crcbl-webgpu` is not in the agnostic suite** (it is a native binary), so
+  its half is covered by `a_present_with_no_acquired_frame_is_refused` in that
+  crate's own `hal::tests`. Its refusal is also narrower — it retires the
+  acquired pair at the next acquire rather than at the present, so it does not
+  catch the same frame presented twice. Closing that means reworking when the
+  pair is retired, which is what keeps the replayer holding one pair per
+  swapchain rather than one per frame ever drawn.
+- **Whether `crcbl-mtl` and `crcbl-dx12` clear the slot on reconfigure is still
+  unverified** — both refuse a present with no acquire, but neither runs on this
+  machine. The agnostic test now asserts it, so CI answers the question on the
+  next run of their jobs rather than anyone having to reason about it.

@@ -633,6 +633,20 @@ pub(super) enum Detail {
         acquire_semaphores: Vec<Option<Handle<crate::Semaphore>>>,
         present_semaphores: Vec<Option<Handle<crate::Semaphore>>>,
         next: u32,
+        /// The ring index handed out by the last
+        /// [`acquire_next_frame`](crate::Device::acquire_next_frame) and not yet
+        /// presented, if any.
+        ///
+        /// This backend models the seam's rules with no driver in the room, and
+        /// "a present needs a frame to present" is one it could not state
+        /// without somewhere to remember the acquire. `crcbl-vk`, `crcbl-mtl`
+        /// and `crcbl-dx12` each keep the same slot and each refuse a present
+        /// that finds it empty; this is that slot.
+        ///
+        /// Cleared by `reconfigure_swapchain` as well as by a present, because
+        /// a reconfigure destroys the ring the index pointed into — presenting
+        /// across one is a use-after-free, not a stale number.
+        acquired: Option<u32>,
     },
 }
 

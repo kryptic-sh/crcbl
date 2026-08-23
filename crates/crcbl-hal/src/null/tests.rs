@@ -1615,6 +1615,97 @@ fn a_refused_adapter_never_serves_a_surface_while_its_neighbours_do() {
 }
 
 /// The out-of-date injection, from the seam's side: while the latch is set,
+/// A present needs a frame to present, on the backend whose whole purpose is to
+/// model the seam's rules with no driver in the room.
+///
+/// This was the last of those rules the null backend could not state: it kept a
+/// ring cursor but no record of the outstanding acquire, so it had nothing to
+/// refuse a present against, while `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` had
+/// each been answering "present without a matching `acquire_next_frame`" all
+/// along. `a_present_without_an_acquire_is_refused` in
+/// `crates/crcbl/tests/hal_seam_e2e.rs` is the same assertions against a real
+/// device; this is the half that needs no ICD.
+///
+/// The reconfigure arm is the one with teeth. A reconfigure reissues the whole
+/// ring, so an index acquired before it points into images that no longer
+/// exist — presenting it is a use-after-free rather than a stale number.
+#[test]
+fn a_present_without_a_matching_acquire_is_refused() {
+    let instance = NullInstance::gpu_driven();
+    let recorder = instance.recorder();
+    let device = open(&instance);
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("every device has a graphics queue");
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let desc = |extent| SwapchainDesc {
+        label: None,
+        surface,
+        format: Format::Bgra8UnormSrgb,
+        extent,
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device.create_swapchain(&desc((8, 8))).expect("swapchain");
+    let present_now = || {
+        device.present(
+            queue,
+            &PresentInfo {
+                swapchain,
+                waits: &[],
+                present_id: None,
+            },
+        )
+    };
+    let refused = |error: SurfaceError, case: &str| {
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+            panic!("{case} was refused as the wrong kind of error: {error}");
+        };
+        assert!(
+            message.contains("without a matching acquire_next_frame"),
+            "{case}: {message}"
+        );
+    };
+
+    recorder.clear();
+    refused(
+        present_now().expect_err("nothing has been acquired yet"),
+        "a present before any acquire",
+    );
+    assert_eq!(
+        recorder.events().len(),
+        0,
+        "a refused present must record nothing: {:?}",
+        recorder.events()
+    );
+
+    // Acquired, so it goes through — a backend that refused every present would
+    // satisfy the assertion above and fail this one.
+    device.acquire_next_frame(swapchain).expect("acquire");
+    present_now().expect("an acquired frame is one to present");
+
+    // The present took the slot, so the same frame cannot go twice.
+    refused(
+        present_now().expect_err("that frame has already been presented"),
+        "a second present of the same frame",
+    );
+
+    // And a reconfigure reissues the ring the index pointed into.
+    device.acquire_next_frame(swapchain).expect("acquire");
+    device
+        .reconfigure_swapchain(swapchain, &desc((16, 16)))
+        .expect("reconfigure");
+    refused(
+        present_now().expect_err("the reconfigure destroyed the frame that was acquired"),
+        "a present across a reconfigure",
+    );
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
 /// **all three** of the calls a frame makes on a swapchain report
 /// [`SurfaceError::OutOfDate`], and only a reconfigure that actually rebuilt
 /// something clears it.
