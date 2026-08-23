@@ -254,10 +254,12 @@ only input is affected. A game that read its state from snapshots would not be.
   order-insensitive for edges (they are OR-ed) and only the held state and the
   aim take the last word — and the window can only permute frames that were
   already going to land in the same tick.
-- **Nothing retransmits the reliable channel.** A lost hello costs the client's
-  whole `HANDSHAKE_TIMEOUT` before another is sent; at 30 % loss, sessions
-  regularly fail to come up inside `IMPAIRED_HANDSHAKE_TICKS`. "Reliable" here
-  means a separate queue, not delivery. `crcbl-net` / `crcbl-client`.
+- **Nothing in the _protocol_ retransmits the reliable channel.**
+  `ConditionSimulator` now does — its reliable channel re-sends what it decided
+  to drop, so the impaired harness no longer loses sessions to an eaten hello —
+  but that is the simulator standing in for a transport, not `crcbl-client`
+  doing it. Over any real backend a lost hello still costs the client's whole
+  `HANDSHAKE_TIMEOUT` before another is sent. `crcbl-net` / `crcbl-client`.
 - **`Server` and `Client` expose no transport accessor**, so a test cannot
   degrade a link _after_ the session is up. Having one would let a measurement
   handshake cleanly and then impair, isolating gameplay from handshake noise.

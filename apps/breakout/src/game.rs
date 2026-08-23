@@ -2501,10 +2501,10 @@ mod tests {
 
     /// How many ticks [`ImpairedRun`] will spend bringing a session up.
     ///
-    /// A lost hello is not retried until the client's own handshake timeout
-    /// expires, and that timeout is measured in seconds while these ticks are
-    /// sixtieths of one — so the budget has to cover several of them or a run
-    /// that loses its first hello fails as if the link were dead.
+    /// A hello the link eats is retransmitted by the `ConditionSimulator`
+    /// rather than costing the client's whole handshake timeout, so the budget
+    /// only has to cover a few of that retransmission's doublings — but a run
+    /// that loses several in a row still needs room for them.
     const IMPAIRED_HANDSHAKE_TICKS: u32 = 400;
 
     impl Game<ConditionSimulator<InMemoryTransport, ManualClock>> {
@@ -2567,8 +2567,10 @@ mod tests {
         ///
         /// A budget rather than an unbounded wait, because a handshake that
         /// never lands is one of the outcomes worth measuring: nothing in the
-        /// protocol retransmits one, so a link that eats a hello costs the
-        /// client's whole handshake timeout before it sends another.
+        /// *protocol* retransmits one, so over a real transport a lost hello
+        /// still costs the client's whole handshake timeout. What this link has
+        /// instead is `ConditionSimulator`'s reliable channel, which re-sends
+        /// what it decided to drop.
         fn try_new(conditions: SimConditions) -> Option<(Self, u32)> {
             let (game, clock) =
                 Game::impaired(DEFAULT_TICK_HZ, conditions).expect("headless game always starts");
@@ -3019,8 +3021,8 @@ mod tests {
                 seed: SWEEP_SEED.wrapping_add(seed),
                 ..Default::default()
             }) else {
-                // A handshake this link ate. Its own finding, and not this
-                // one's: nothing retransmits a hello either.
+                // A handshake this link ate through every retransmission the
+                // simulator allows. Its own finding, and not this one's.
                 continue;
             };
             sessions += 1;

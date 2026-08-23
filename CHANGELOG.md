@@ -529,6 +529,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`ConditionSimulator`'s reliable channel is now actually reliable.** It
+  implements `Transport`, whose `send_reliable` promises ordered, lossless
+  delivery, and it was applying its loss, duplication and reorder draws to both
+  channels — so a handshake could be dropped, duplicated or delivered out of
+  order by the thing standing in for a transport that does none of those. The
+  layering is now a real stack's: a lossy wire underneath, and the reliability
+  the transport provides on top. On `send_reliable` a loss draw costs a
+  retransmission instead of the message (500 ms, doubling per attempt, after
+  ENet's `ENET_PEER_DEFAULT_ROUND_TRIP_TIME` and its `roundTripTimeout *= 2`),
+  the duplicate draw is not taken at all, and a message is never released before
+  the one in front of it — head-of-line blocking, which is what stops jitter
+  from permuting the channel. Past five retransmissions the send returns
+  `TransportError::Disconnected`: a link that cannot deliver is a dead link, and
+  `loss_rate` may be 1.0. `send_unreliable` is unchanged, and `SimConditions`'
+  field docs now say which channel each knob is about.
 - **Every lavapipe CI step now fails on a validation error, not just the seven
   that ran a sample binary.** The other seventeen — the agnostic e2e harnesses
   and every sample golden — inherited validation from the debug build profile

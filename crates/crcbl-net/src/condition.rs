@@ -5,12 +5,30 @@
 //! Uses a deterministic LCG-based RNG so the same seed always produces the
 //! same impairment pattern.
 //!
+//! # The impairments are the wire's; the guarantees are the transport's
+//!
+//! [`Transport::send_reliable`] promises ordered, lossless delivery, so a
+//! simulator that dropped, duplicated or permuted what was handed to it would
+//! be breaking the contract of the trait it implements. The layering here is
+//! the one a real stack has: a lossy wire underneath, and on top of it the
+//! reliability the transport being stood in for would provide. Loss on that
+//! channel therefore costs a retransmission rather than the message, nothing
+//! is duplicated because a reliability layer de-duplicates, and nothing is
+//! reordered because an ordered channel holds a message until the one in front
+//! of it has gone. No acknowledgement protocol is needed for any of it: the
+//! simulator is the thing that decided to drop the packet, so it already knows
+//! which one to send again.
+//!
+//! [`Transport::send_unreliable`] is where every impairment applies
+//! undiminished, and is the channel [`SimConditions`] is really about.
+//!
 //! # Loss reproduces exactly; latency needs a clock
 //!
-//! Loss, duplication and the reorder window are decided at send time from the
-//! seeded LCG, so a run over them is a pure function of the seed. Latency and
-//! jitter are not: a delayed message is due at an *instant*, and the simulator
-//! has to ask something what time it is.
+//! Loss, duplication and the reorder window are drawn at send time from the
+//! seeded LCG, so which messages they fall on is a pure function of the seed.
+//! What they then cost is not: latency, jitter and a reliable retransmission
+//! all leave a message due at an *instant*, and the simulator has to ask
+//! something what time it is.
 //!
 //! That question goes through [`Clock`]. The default is [`SystemClock`], which
 //! reads the wall clock and makes a latency test spend real seconds and depend
@@ -119,17 +137,35 @@ impl Clock for ManualClock {
 
 /// Configuration for the [`ConditionSimulator`] transport wrapper.
 ///
+/// **Read every knob as describing the unreliable channel.** The reliable one
+/// is ordered and lossless — see this module's header — so it converts loss
+/// into delay and ignores duplication and reordering outright. Each field says
+/// what it does on each side.
+///
 /// All fields are `pub` so conditions can be constructed with struct literal
 /// syntax or mutated on the fly.
 #[derive(Debug, Clone)]
 pub struct SimConditions {
-    /// Probability of dropping each message (0.0 = none, 1.0 = all).
+    /// Probability of the wire eating each message (0.0 = none, 1.0 = all).
+    ///
+    /// **Unreliable channel:** the message is gone. **Reliable channel:** the
+    /// draw costs a retransmission instead, so the message arrives late rather
+    /// than never, and a link that keeps eating it eventually reports
+    /// [`TransportError::Disconnected`] — see `RELIABLE_RETRANSMIT_TIMEOUT`
+    /// and `MAX_RELIABLE_RETRANSMISSIONS`.
     pub loss_rate: f64,
-    /// Fixed delay added to each message.
+    /// Fixed delay added to each message, on both channels.
     pub latency: Duration,
-    /// Random ±jitter added to the latency.
+    /// Random ±jitter added to the latency, on both channels.
+    ///
+    /// **Reliable channel:** it delays without reordering. Two draws of
+    /// different sizes would otherwise let the second message overtake the
+    /// first, so a reliable message is never released before its predecessor.
     pub jitter: Duration,
     /// Probability of duplicating each message.
+    ///
+    /// **Unreliable channel only:** a reliability layer de-duplicates, so the
+    /// draw is not taken for [`Transport::send_reliable`] at all.
     pub duplicate_rate: f64,
     /// If greater than one, shuffle within runs of this many consecutive ready
     /// messages before they are forwarded to the inner transport.
@@ -137,6 +173,10 @@ pub struct SimConditions {
     /// A message can therefore move at most `reorder_window - 1` places, which
     /// is what makes a scripted reorder test reproduce a bounded depth rather
     /// than an arbitrary permutation of everything that happened to be ready.
+    ///
+    /// **Unreliable channel only:** reliable messages keep the slots they were
+    /// due in and the shuffle happens around them, because that channel
+    /// delivers in the order it was handed.
     pub reorder_window: usize,
     /// Seed for the deterministic LCG RNG.
     pub seed: u64,
@@ -161,6 +201,46 @@ impl Default for SimConditions {
 /// [`ConditionSimulator::compute_delay`].
 const MAX_SIMULATED_DELAY: Duration = Duration::from_secs(3600);
 
+/// What the first retransmission of a lost reliable message waits, doubling on
+/// each further loss.
+///
+/// **This is ENet's number and ENet's mechanism**, which is the ecosystem
+/// answer closest to what this simulator stands in for: a game transport with
+/// a reliable channel beside an unreliable one.
+/// `ENET_PEER_DEFAULT_ROUND_TRIP_TIME` is the round-trip timeout it gives a
+/// peer before any RTT sample exists, and `enet_protocol_check_timeouts` does
+/// `outgoingCommand->roundTripTimeout *= 2` before requeueing a command that
+/// went unacknowledged. QUIC (RFC 9002) has the same shape from a longer
+/// start — a `kInitialRtt` of 333 ms yields a first PTO near TCP's 1 s initial
+/// RTO — and doubles its PTO on each consecutive firing.
+///
+/// A sample is what this cannot have: the simulator is told a `latency`, not
+/// an RTT, and the caller may configure one that has nothing to do with how
+/// long an acknowledgement would take. The no-sample value is therefore the
+/// honest one to use.
+const RELIABLE_RETRANSMIT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Retransmissions a reliable message gets before the link is reported dead.
+///
+/// **Not a delivery policy — a diagnosis.** Past this the simulator returns
+/// [`TransportError::Disconnected`], which is what a reliable transport says
+/// when the far end has gone, not a message it decided to give up on.
+///
+/// ENet gives up when a command's doublings reach `ENET_PEER_TIMEOUT_LIMIT`
+/// (32, so five of them) and at least `ENET_PEER_TIMEOUT_MINIMUM` has passed;
+/// the same count of doublings from `RELIABLE_RETRANSMIT_TIMEOUT` spends a
+/// total that lands between that minimum and `ENET_PEER_TIMEOUT_MAXIMUM`, so
+/// the simulated link concludes the same thing after about the same wait.
+///
+/// The simulator itself does not go down with the verdict:
+/// [`Transport::is_connected`] still reports the transport underneath, so a
+/// caller that treats the error as it would any other and tries again gets a
+/// fresh set of draws rather than a wrapper that has latched shut.
+///
+/// A cap is also what keeps the draw loop finite: `loss_rate` may be 1.0, and
+/// re-rolling until a message survives would never return.
+const MAX_RELIABLE_RETRANSMISSIONS: u32 = 5;
+
 struct PendingMessage {
     msg: Message,
     /// When this message becomes due, on the simulator's [`Clock`].
@@ -180,6 +260,9 @@ pub struct ConditionSimulator<T: Transport, C: Clock = SystemClock> {
     pending: Vec<PendingMessage>,
     /// Messages that are due (release_at <= now) but not yet forwarded.
     ready: Vec<Message>,
+    /// Release time of the most recently enqueued reliable message, which no
+    /// later one may be released before. See [`ConditionSimulator::enqueue`].
+    last_reliable_release: Duration,
     clock: C,
 }
 
@@ -228,6 +311,7 @@ impl<T: Transport, C: Clock> ConditionSimulator<T, C> {
             conditions,
             pending: Vec::new(),
             ready: Vec::new(),
+            last_reliable_release: Duration::ZERO,
             clock,
         }
     }
@@ -296,12 +380,52 @@ impl<T: Transport, C: Clock> ConditionSimulator<T, C> {
             .min(MAX_SIMULATED_DELAY)
     }
 
+    /// Draw for the loss of a reliable message and return what its
+    /// retransmissions cost it.
+    ///
+    /// A reliable channel does not drop, so a message the wire ate is sent
+    /// again rather than discarded, and the new attempt is drawn for in turn —
+    /// a link that keeps eating it keeps pushing it further out, doubling the
+    /// wait as ENet doubles a command's `roundTripTimeout`.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Disconnected`] once every attempt
+    /// [`MAX_RELIABLE_RETRANSMISSIONS`] allows has been eaten: a link that
+    /// cannot deliver is a dead link, not an unbounded retry.
+    fn reliable_retransmit_delay(&mut self) -> Result<Duration, TransportError> {
+        let mut delay = Duration::ZERO;
+        let mut backoff = RELIABLE_RETRANSMIT_TIMEOUT;
+        // One draw for the first transmission and one for each retransmission
+        // it is allowed; surviving any of them is the message getting through.
+        for _ in 0..=MAX_RELIABLE_RETRANSMISSIONS {
+            if self.next_f64() >= self.conditions.loss_rate {
+                return Ok(delay);
+            }
+            delay = delay.saturating_add(backoff);
+            backoff = backoff.saturating_mul(2);
+        }
+        Err(TransportError::Disconnected)
+    }
+
     /// Push a message into the internal buffer with a future release time.
-    fn enqueue(&mut self, msg: Message) {
-        let delay = self.compute_delay();
+    ///
+    /// `retransmit` is what the message has already spent being sent again,
+    /// and is [`Duration::ZERO`] for anything on the unreliable channel.
+    fn enqueue(&mut self, msg: Message, retransmit: Duration) {
+        let delay = self.compute_delay().saturating_add(retransmit);
         // `saturating_add` because both halves are caller-configurable and a
         // `Duration + Duration` past the type's range panics.
-        let release_at = self.clock.now().saturating_add(delay);
+        let mut release_at = self.clock.now().saturating_add(delay);
+        if msg.kind == MessageKind::Reliable {
+            // Head-of-line blocking, which is what an ordered channel actually
+            // costs: a message whose jitter draw came out short waits for the
+            // one in front of it instead of overtaking it, and a retransmission
+            // holds up everything queued behind it. A receiver resequencing the
+            // channel would spend the same wait.
+            release_at = release_at.max(self.last_reliable_release);
+            self.last_reliable_release = release_at;
+        }
         self.pending.push(PendingMessage { msg, release_at });
     }
 
@@ -318,25 +442,36 @@ impl<T: Transport, C: Clock> ConditionSimulator<T, C> {
     fn drain_pending(&mut self) -> Result<(), TransportError> {
         let now = self.clock.now();
 
-        // Collect due messages via swap_remove — order of the *remaining*
-        // (future-due) messages does not matter.
+        // Collect due messages in the order they were sent. `swap_remove`
+        // would be cheaper, but it permutes both what it takes and what it
+        // leaves behind, and the reliable channel promises the order it was
+        // handed — a burst released together must come out as it went in.
         let mut i = 0;
         while i < self.pending.len() {
             if self.pending[i].release_at <= now {
-                let pm = self.pending.swap_remove(i);
+                let pm = self.pending.remove(i);
                 self.ready.push(pm.msg);
-                // Don't increment — a new element now occupies index i.
+                // Don't increment — the next message has shifted into index i.
             } else {
                 i += 1;
             }
         }
 
         // Apply reordering if configured, one window at a time so the
-        // configured depth is the depth a message can actually move.
+        // configured depth is the depth a message can actually move — and over
+        // the unreliable messages alone. A reliable one keeps the slot it was
+        // due in and the shuffle happens around it.
         let window = self.conditions.reorder_window;
         if window > 1 && self.ready.len() > 1 {
-            for run in self.ready.chunks_mut(window) {
-                deterministic_shuffle(run, &mut self.conditions.seed);
+            let unreliable: Vec<usize> = self
+                .ready
+                .iter()
+                .enumerate()
+                .filter(|(_, msg)| msg.kind == MessageKind::Unreliable)
+                .map(|(slot, _)| slot)
+                .collect();
+            for run in unreliable.chunks(window) {
+                deterministic_shuffle(&mut self.ready, run, &mut self.conditions.seed);
             }
         }
 
@@ -385,19 +520,14 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
         // set here rather than trusted from the caller.
         msg.kind = MessageKind::Reliable;
 
-        // Loss check (before consuming the message).
-        if self.next_f64() < self.conditions.loss_rate {
-            return Ok(());
-        }
+        // Loss on this channel is a retransmission and not a drop, and there
+        // is no duplicate draw at all: what the caller is talking to is a
+        // reliable transport over a lossy wire, and the layer that re-sends
+        // what the wire ate is the same layer that de-duplicates. The error is
+        // the far end being gone, not this message being given up on.
+        let retransmit = self.reliable_retransmit_delay()?;
 
-        // Duplicate check (before consuming the message).
-        let dup = self.next_f64() < self.conditions.duplicate_rate;
-        let dup_msg = if dup { Some(msg.clone()) } else { None };
-
-        self.enqueue(msg);
-        if let Some(m) = dup_msg {
-            self.enqueue(m);
-        }
+        self.enqueue(msg, retransmit);
 
         // A refusal here is a delay, not a loss: the message stays in
         // `self.ready` and every entry point drains before it does anything
@@ -423,9 +553,9 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
         let dup = self.next_f64() < self.conditions.duplicate_rate;
         let dup_msg = if dup { Some(msg.clone()) } else { None };
 
-        self.enqueue(msg);
+        self.enqueue(msg, Duration::ZERO);
         if let Some(m) = dup_msg {
-            self.enqueue(m);
+            self.enqueue(m, Duration::ZERO);
         }
 
         // A refusal here is a delay, not a loss: the message stays in
@@ -465,16 +595,22 @@ impl<T: Transport, C: Clock> std::fmt::Debug for ConditionSimulator<T, C> {
 
 // ── Deterministic shuffle ────────────────────────────────────────────────────
 
-/// Fisher-Yates shuffle driven by an LCG — reproducible for a given seed.
+/// Fisher-Yates shuffle over the given `positions` of `items`, driven by an
+/// LCG — reproducible for a given seed, and leaving every position it was not
+/// given exactly where it is.
+///
+/// Positions rather than a subslice because the reorder window permutes the
+/// unreliable messages *around* the reliable ones, which are sitting in an
+/// ordered queue that must come out as it went in.
 ///
 /// The index comes from the LCG's **high** bits. A truncating LCG's low bit
 /// `k` has period `2^(k+1)`, so `seed % (i + 1)` for small `i` is close to a
 /// fixed alternating pattern — the shuffle would not shuffle.
-fn deterministic_shuffle<T>(items: &mut [T], seed: &mut u64) {
-    for i in (1..items.len()).rev() {
+fn deterministic_shuffle<T>(items: &mut [T], positions: &[usize], seed: &mut u64) {
+    for i in (1..positions.len()).rev() {
         *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let j = ((*seed >> 32) % (i as u64 + 1)) as usize;
-        items.swap(i, j);
+        items.swap(positions[i], positions[j]);
     }
 }
 
@@ -491,6 +627,14 @@ mod tests {
     fn msg(payload: u8) -> Message {
         Message {
             kind: MessageKind::Reliable,
+            payload: vec![payload],
+        }
+    }
+
+    /// The same, on the channel the impairments apply to.
+    fn unreliable_msg(payload: u8) -> Message {
+        Message {
+            kind: MessageKind::Unreliable,
             payload: vec![payload],
         }
     }
@@ -520,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn loss_rate_1_drops_all() {
+    fn loss_rate_1_drops_every_unreliable_message() {
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::new(
             a,
@@ -531,16 +675,84 @@ mod tests {
         );
 
         for i in 0..20 {
-            sim.send_reliable(msg(i)).unwrap();
+            sim.send_unreliable(unreliable_msg(i)).unwrap();
         }
 
         let received = drain_all(&mut b);
         assert_eq!(received.len(), 0);
     }
 
+    /// **Loss on the reliable channel is delay, not loss.**
+    ///
+    /// [`Transport::send_reliable`] promises delivery, so the draw that would
+    /// have eaten the message schedules another attempt instead. Every message
+    /// handed over arrives, whatever the wire ate on the way.
+    #[test]
+    fn a_reliable_message_the_link_eats_is_retransmitted_rather_than_dropped() {
+        let (a, mut b) = InMemoryTransport::pair();
+        let clock = ManualClock::new();
+        let mut sim = ConditionSimulator::with_clock(
+            a,
+            SimConditions {
+                loss_rate: 0.5,
+                seed: 42,
+                ..Default::default()
+            },
+            clock.clone(),
+        );
+
+        let n = 20u8;
+        for i in 0..n {
+            sim.send_reliable(msg(i)).unwrap();
+        }
+
+        // The draws have to have fired, or this would pass just as well over a
+        // link that impairs nothing: at half loss some of the twenty are
+        // waiting on a retransmission and cannot be here yet.
+        let mut arrived: Vec<u8> = drain_all(&mut b).iter().map(|m| m.payload[0]).collect();
+        assert!(
+            arrived.len() < usize::from(n),
+            "all {n} messages went straight through a link losing half of what \
+             it carries, so nothing was retransmitted and nothing is under test",
+        );
+
+        // Past the last doubling — the sum of the budget's waits is less than
+        // the one that would come after it — everything is through.
+        clock.advance(RELIABLE_RETRANSMIT_TIMEOUT * (1 << (MAX_RELIABLE_RETRANSMISSIONS + 1)));
+        sim.recv().unwrap();
+        arrived.extend(drain_all(&mut b).iter().map(|m| m.payload[0]));
+        assert_eq!(
+            arrived,
+            (0..n).collect::<Vec<u8>>(),
+            "a message handed to the reliable channel was dropped or overtaken",
+        );
+    }
+
+    /// **A link that cannot deliver is a dead link, not an unbounded retry.**
+    ///
+    /// The retransmissions are capped, so total loss reports the far end gone
+    /// — which is what a reliable transport says when nothing it sends is ever
+    /// acknowledged — rather than re-rolling until one draw survives, which at
+    /// this loss rate never happens.
+    #[test]
+    fn a_link_that_eats_every_retransmission_reports_the_far_end_gone() {
+        let (a, mut b) = InMemoryTransport::pair();
+        let mut sim = ConditionSimulator::with_loss(a, 1.0, 0);
+
+        assert!(
+            matches!(sim.send_reliable(msg(1)), Err(TransportError::Disconnected)),
+            "a reliable send over a link that delivers nothing reported success",
+        );
+        assert!(
+            b.recv().unwrap().is_none(),
+            "the message the simulator gave up on was forwarded anyway",
+        );
+    }
+
     #[test]
     fn loss_rate_50_percent_approximate() {
-        // 50 % loss — verify we get some, but not all, messages.
+        // 50 % loss on the channel loss applies to — verify we get some, but
+        // not all, messages.
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::new(
             a,
@@ -553,7 +765,7 @@ mod tests {
 
         let n = 200;
         for i in 0..n {
-            sim.send_reliable(msg(i as u8)).unwrap();
+            sim.send_unreliable(unreliable_msg(i as u8)).unwrap();
         }
 
         let received = drain_all(&mut b);
@@ -580,7 +792,7 @@ mod tests {
             },
         );
         for i in 0..n {
-            sim1.send_reliable(msg(i as u8)).unwrap();
+            sim1.send_unreliable(unreliable_msg(i as u8)).unwrap();
         }
         let r1: Vec<u8> = drain_all(&mut b1).iter().map(|m| m.payload[0]).collect();
 
@@ -594,7 +806,7 @@ mod tests {
             },
         );
         for i in 0..n {
-            sim2.send_reliable(msg(i as u8)).unwrap();
+            sim2.send_unreliable(unreliable_msg(i as u8)).unwrap();
         }
         let r2: Vec<u8> = drain_all(&mut b2).iter().map(|m| m.payload[0]).collect();
 
@@ -624,11 +836,47 @@ mod tests {
             },
         );
 
-        sim.send_reliable(msg(7)).unwrap();
-        sim.send_reliable(msg(8)).unwrap();
+        sim.send_unreliable(unreliable_msg(7)).unwrap();
+        sim.send_unreliable(unreliable_msg(8)).unwrap();
 
         let received = drain_all(&mut b);
         assert_eq!(received.len(), 4); // two original + two duplicates
+    }
+
+    /// A reliability layer de-duplicates, so the draw is not taken on the
+    /// reliable channel at all: the rate that doubles every unreliable message
+    /// leaves the reliable one carrying exactly what it was handed.
+    #[test]
+    fn the_reliable_channel_never_duplicates_however_high_the_rate() {
+        let conditions = || SimConditions {
+            duplicate_rate: 1.0,
+            ..Default::default()
+        };
+
+        let (a, mut b) = InMemoryTransport::pair();
+        let mut sim = ConditionSimulator::new(a, conditions());
+        for i in 0..4u8 {
+            sim.send_reliable(msg(i)).unwrap();
+        }
+        let payloads: Vec<u8> = drain_all(&mut b).iter().map(|m| m.payload[0]).collect();
+        assert_eq!(
+            payloads,
+            (0..4u8).collect::<Vec<u8>>(),
+            "the reliable channel delivered a message twice",
+        );
+
+        // The control: the same rate on the channel it applies to, so a pass
+        // above cannot be the duplication machinery being broken everywhere.
+        let (c, mut d) = InMemoryTransport::pair();
+        let mut lossy = ConditionSimulator::new(c, conditions());
+        for i in 0..4u8 {
+            lossy.send_unreliable(unreliable_msg(i)).unwrap();
+        }
+        assert_eq!(
+            drain_all(&mut d).len(),
+            8,
+            "the duplicate rate did nothing on the channel it applies to",
+        );
     }
 
     // ── Latency ──────────────────────────────────────────────────────────
@@ -734,6 +982,58 @@ mod tests {
         );
     }
 
+    /// **Jitter delays a reliable message; it never lets one overtake another.**
+    ///
+    /// Two draws of different sizes would otherwise make the second message due
+    /// before the first, which is reordering on a channel that promised none.
+    /// The clamp that stops it is head-of-line blocking, and the cost is the
+    /// later message waiting for the earlier one.
+    ///
+    /// **Draining a step at a time is what makes this a question.** Everything
+    /// that comes due together leaves in the order it was queued whatever its
+    /// release time, so one drain at the end would pass over a simulator that
+    /// had no clamp at all.
+    #[test]
+    fn jitter_never_releases_a_reliable_message_before_the_one_in_front_of_it() {
+        let latency = Duration::from_millis(50);
+        let jitter = Duration::from_millis(40);
+        let (a, mut b) = InMemoryTransport::pair();
+        let clock = ManualClock::new();
+        let mut sim = ConditionSimulator::with_clock(
+            a,
+            SimConditions {
+                latency,
+                jitter,
+                seed: 123,
+                ..Default::default()
+            },
+            clock.clone(),
+        );
+
+        let n = 16u8;
+        for i in 0..n {
+            sim.send_reliable(msg(i)).unwrap();
+        }
+
+        // A millisecond at a time, out to the furthest the jitter can push a
+        // message, so every release the draws chose is observed where it falls.
+        let step = Duration::from_millis(1);
+        let mut arrived = Vec::new();
+        let mut elapsed = Duration::ZERO;
+        while elapsed <= latency + jitter {
+            clock.advance(step);
+            elapsed += step;
+            sim.recv().unwrap();
+            arrived.extend(drain_all(&mut b).iter().map(|m| m.payload[0]));
+        }
+
+        assert_eq!(
+            arrived,
+            (0..n).collect::<Vec<u8>>(),
+            "jitter permuted the ordered channel",
+        );
+    }
+
     #[test]
     fn zero_latency_immediate_delivery() {
         let (a, mut b) = InMemoryTransport::pair();
@@ -785,7 +1085,7 @@ mod tests {
         );
 
         for i in 0..10 {
-            sim.send_reliable(msg(i as u8)).unwrap();
+            sim.send_unreliable(unreliable_msg(i as u8)).unwrap();
         }
 
         // All messages are buffered with latency — none delivered yet.
@@ -817,8 +1117,10 @@ mod tests {
         );
 
         // Stage the ready queue directly: the windowing is what is under test,
-        // not the latency scheduling that would normally fill it.
-        sim.ready.extend((0..12u8).map(msg));
+        // not the latency scheduling that would normally fill it. Unreliable,
+        // because that is the only channel a window may permute — the reliable
+        // one is ordered, and the test below is where that is pinned.
+        sim.ready.extend((0..12u8).map(unreliable_msg));
         sim.drain_pending().unwrap();
 
         let payloads: Vec<u8> = drain_all(&mut b).iter().map(|m| m.payload[0]).collect();
@@ -835,6 +1137,64 @@ mod tests {
                 "message {payload} moved {moved} places, past the window of 3: {payloads:?}"
             );
         }
+    }
+
+    /// **The window permutes what may be permuted and steps over the rest.**
+    ///
+    /// A reorder window is an impairment of the unreliable channel, so the
+    /// reliable messages sharing the same ready queue come out of it in the
+    /// order they went in while the unreliable ones around them are shuffled.
+    #[test]
+    fn a_reorder_window_shuffles_the_unreliable_messages_around_the_reliable_ones() {
+        let (a, mut b) = InMemoryTransport::pair();
+        let mut sim = ConditionSimulator::new(
+            a,
+            SimConditions {
+                reorder_window: 4,
+                seed: 7,
+                ..Default::default()
+            },
+        );
+
+        // Staged directly, as above. Even payloads travel reliably and odd
+        // ones do not, so one queue carries both kinds through one shuffle.
+        let staged = 16u8;
+        sim.ready.extend((0..staged).map(|i| {
+            if i % 2 == 0 {
+                msg(i)
+            } else {
+                unreliable_msg(i)
+            }
+        }));
+        sim.drain_pending().unwrap();
+
+        // The two kinds arrive on two queues, so they are read back on two —
+        // the interleaving is the inner transport's to lose, the order within
+        // each channel is not.
+        let mut reliable = Vec::new();
+        while let Ok(Some(m)) = b.recv_reliable() {
+            reliable.push(m.payload[0]);
+        }
+        let unreliable: Vec<u8> = drain_all(&mut b).iter().map(|m| m.payload[0]).collect();
+
+        assert_eq!(
+            reliable,
+            (0..staged).step_by(2).collect::<Vec<u8>>(),
+            "a reorder window permuted the ordered channel",
+        );
+
+        let mut sorted = unreliable.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (0..staged).skip(1).step_by(2).collect::<Vec<u8>>(),
+            "the unreliable messages did not all arrive",
+        );
+        assert_ne!(
+            unreliable, sorted,
+            "a window of 4 over eight unreliable messages must reorder some of \
+             them, or the shuffle is stepping over everything: {unreliable:?}",
+        );
     }
 
     /// Latency turns a steady stream into a burst on release, so the simulator
@@ -889,7 +1249,7 @@ mod tests {
         let mut swapped = 0usize;
         for _ in 0..64 {
             let mut pair = [0u8, 1];
-            deterministic_shuffle(&mut pair, &mut seed);
+            deterministic_shuffle(&mut pair, &[0, 1], &mut seed);
             if pair == [1, 0] {
                 swapped += 1;
             }
@@ -998,14 +1358,14 @@ mod tests {
             },
         );
 
-        sim.send_reliable(msg(1)).unwrap();
+        sim.send_unreliable(unreliable_msg(1)).unwrap();
         assert!(b.recv().unwrap().is_none());
 
         sim.set_conditions(SimConditions {
             loss_rate: 0.0, // no loss
             ..Default::default()
         });
-        sim.send_reliable(msg(2)).unwrap();
+        sim.send_unreliable(unreliable_msg(2)).unwrap();
         let m = b.recv().unwrap().unwrap();
         assert_eq!(m.payload, vec![2]);
     }
@@ -1090,7 +1450,7 @@ mod tests {
     fn the_loss_only_constructor_applies_the_loss_rate_it_was_given() {
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::with_loss(a, 1.0, 0);
-        sim.send_reliable(msg(1)).unwrap();
+        sim.send_unreliable(unreliable_msg(1)).unwrap();
         assert!(b.recv().unwrap().is_none());
     }
 
@@ -1151,8 +1511,9 @@ mod tests {
     /// simulator did rather than what it managed to do in 50 ms.
     #[test]
     fn a_negative_jittered_delay_is_clamped_and_released_while_a_positive_one_is_held() {
-        // Both seeds run the same three draws — loss, duplicate, then jitter —
-        // so the seed is what decides the sign of `(r - 0.5)` on the third.
+        // Both seeds run the same two draws — loss, then jitter, the
+        // duplicate draw not being taken on this channel — so the seed is what
+        // decides the sign of `(r - 0.5)` on the second.
         let jittered = |seed: u64| {
             let (a, mut b) = InMemoryTransport::pair();
             let mut sim = ConditionSimulator::new(
@@ -1169,7 +1530,7 @@ mod tests {
             drain_all(&mut b)
         };
 
-        let released = jittered(6);
+        let released = jittered(2);
         assert_eq!(released.len(), 1, "a delay below zero is due immediately");
         assert_eq!(released[0].payload, vec![1]);
 
