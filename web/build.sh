@@ -252,6 +252,13 @@ if [ "$THREADS" = "1" ]; then
     "-C link-arg=--export=__stack_pointer"
   )
 
+  # Whatever the caller already set is kept in front of ours rather than
+  # replaced: CI puts `-D warnings` there, and overwriting it took the warning
+  # gate off the one build that compiles the atomics path — the half no other
+  # job compiles at all. Joined into one string because that is what `RUSTFLAGS`
+  # is; a `[target]` table cannot be used here for the reason below.
+  THREADED_RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }${threaded_rustflags[*]}"
+
   echo "==> threaded build: $NIGHTLY, -Z build-std=std,panic_abort, into $THREADED_DIR"
   for row in "${DEMOS[@]}"; do
     if [ "$GATE_ONLY" = "1" ]; then break; fi
@@ -260,7 +267,7 @@ if [ "$THREADS" = "1" ]; then
     # `RUSTFLAGS` rather than a `[target]` table: it has to apply to the std
     # units `-Z build-std` compiles too, which is the whole reason std is being
     # rebuilt.
-    (cd "$REPO" && RUSTFLAGS="${threaded_rustflags[*]}" cargo "+$NIGHTLY" build \
+    (cd "$REPO" && RUSTFLAGS="$THREADED_RUSTFLAGS" cargo "+$NIGHTLY" build \
       --locked --lib -p "$crate" --target "$TARGET" "${profile_flag[@]}" \
       --target-dir "$THREADED_DIR" -Z build-std=std,panic_abort)
 
@@ -273,7 +280,7 @@ if [ "$THREADS" = "1" ]; then
   # exports exist only to be observed, and an example cannot reach a site
   # artifact by any route. See the crate docs on `crcbl_jobs::workers`.
   echo "==> cargo +$NIGHTLY build --example web_worker_gate -p crcbl-jobs ($PROFILE, threaded)"
-  (cd "$REPO" && RUSTFLAGS="${threaded_rustflags[*]}" cargo "+$NIGHTLY" build \
+  (cd "$REPO" && RUSTFLAGS="$THREADED_RUSTFLAGS" cargo "+$NIGHTLY" build \
     --locked --example web_worker_gate -p crcbl-jobs --target "$TARGET" \
     "${profile_flag[@]}" --target-dir "$THREADED_DIR" -Z build-std=std,panic_abort)
 

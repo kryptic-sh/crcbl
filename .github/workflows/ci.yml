@@ -18,6 +18,21 @@ env:
   # Opt JS-based actions into Node 24 ahead of the GitHub default flip, so
   # upstream incompatibility surfaces here rather than on a release day.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # **A rustc warning fails this workflow, on every target, the way clippy and
+  # rustfmt already do.** Clippy's `-D warnings` covers what clippy is pointed
+  # at, and every other step — `cargo build`, `cargo check`, `cargo test`,
+  # `nextest`, the e2e harnesses, the wasm builds — compiled with warnings
+  # merely printed. That mattered most where it was least visible: a backend's
+  # platform half is compiled by exactly one job, so `crcbl-mtl`'s warnings
+  # exist only on macOS, `crcbl-dx12`'s only on Windows and `crcbl-webgpu`'s
+  # only on wasm32, and a warning in one of those was a line in a log nobody
+  # opens.
+  #
+  # Safe as a blanket setting because cargo caps lints on registry and git
+  # dependencies (`--cap-lints allow`), so this reaches this workspace's own
+  # crates and nothing else. `web/build.sh` keeps it in front of the flags it
+  # adds rather than replacing it — see the comment there.
+  RUSTFLAGS: '-D warnings'
 
 concurrency:
   group:

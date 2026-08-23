@@ -527,6 +527,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   holds the browser's own refusal of a `'timestamp'` query set against the
   probe's answer, so a device without the feature cannot report as covered.
 
+### Changed
+
+- **A rustc warning now fails CI on every target, the way clippy and rustfmt
+  already did.** Clippy's `-D warnings` only covered what clippy was pointed at;
+  `cargo build`, `cargo check`, `cargo test`, `nextest`, the e2e harnesses and
+  the wasm builds all compiled with warnings merely printed. That mattered most
+  where it was least visible: a backend's platform half is compiled by exactly
+  one job, so `crcbl-mtl`'s warnings existed only on macOS, `crcbl-dx12`'s only
+  on Windows and `crcbl-webgpu`'s only on wasm32 — a line in a log nobody opens.
+  `RUSTFLAGS: -D warnings` is set for the whole workflow, which reaches this
+  workspace's crates and not its dependencies, since cargo caps lints on
+  registry and git dependencies. `web/build.sh` now keeps an inherited
+  `RUSTFLAGS` in front of the flags it adds instead of replacing it, which had
+  taken the gate off the threaded wasm build — the one build that compiles the
+  atomics path.
+
 ### Fixed
 
 - **A frame's closing barrier before a present now names a pipeline stage.**
