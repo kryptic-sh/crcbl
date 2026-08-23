@@ -3,7 +3,7 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### DECISION NEEDED — lantern cannot shadow its point light and its spot at once
+### The shadow atlas holds one point cube and nothing beside it — taking option (a)
 
 P7B's exit criterion is "lantern renders the scene complete on
 `LightingPath::Rasterised`", and the roadmap row says it stays unticked because
@@ -33,7 +33,28 @@ is chosen to lose deliberately and
 sweeping the orbit with both a carried selection and a fresh one so the answer
 does not depend on when the run started.
 
-The options, all of them engine-side and therefore not this slice's to take:
+**Decided 2026-08-23: option (a), and taken as ordinary work rather than
+referred up.** Four MiB of atlas against "the engine cannot shadow a point light
+and a spot at the same time" is not a close trade, and the limitation is not
+lantern's — it applies to every scene with one of each, which is an ordinary
+lighting rig rather than a corner case. Recorded here rather than only in a
+commit so it is cheap to reverse if the owner disagrees with the budget.
+
+What it costs in tooling, measured before committing to it rather than after:
+`mesh.slang`'s own `crcbl-targets` line names **spirv, wgsl, msl and dxil**, and
+**nine** shaders import it, so a constant change regenerates every one of those
+across all four targets and `compile-shaders.sh --check` demands the result be
+byte-identical. That needs both pinned compilers. `slangc` is the version in
+`ci.yml`'s `SLANG_VERSION` (2026.14) and its release asset answers a request
+here, so it is a download. `dxc` is the harder half: `CRCBL_DXC` deliberately
+**never** falls back to `PATH`, because distributions ship Shader Model 6.10
+preview builds that abort on a four-line shader, and `ci.yml` notes the archive
+carrying it is around 492 MiB. **Regenerating three of the four target sets is
+worse than regenerating none** — it would leave `crcbl-dx12`'s artifacts drifted
+against a shader they no longer match, which is exactly the breakage the seam
+rule forbids for a deferred backend.
+
+The options as they were costed:
 
 - **(a) Grow the light region to seven tiles.** `SHADOW_LIGHT_TILES` 6 → 7 with
   the grid at `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` = 3 × 3, which the
@@ -48,7 +69,15 @@ The options, all of them engine-side and therefore not this slice's to take:
   same gap the other way round and costs the sample its point light as well.
 - **(c) Leave it.** lantern shows the cone, the penumbra and the lamp's cube
   shadow; P7B's row stays unticked and the reason changes from "no spot light"
-  to "the atlas holds one of the two maps". This is what is in the tree.
+  to "the atlas holds one of the two maps". This is what is in the tree today,
+  and (a) is what replaces it.
+
+One consequence to carry into that work:
+`room::the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` exists to
+pin the _current_ behaviour and its premise stops being true the moment the
+light region grows. It must be rewritten to assert that both lights hold tiles,
+not deleted — a test that disappears alongside the limitation it described
+leaves nothing asserting the new one.
 
 Evidence: `room::the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit`
 runs `Selection` over the real light list and is red-checked both ways — a
