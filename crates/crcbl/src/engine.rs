@@ -8334,6 +8334,12 @@ mod tests {
             acquired.extent, clamped,
             "the injector is what makes the two disagree"
         );
+        // The images the frame will draw into are that size too: the injector
+        // clamps where a platform does, when the ring is built, and
+        // `build_ring` creates the images and records the swapchain's extent
+        // from one variable. Not asserted here because the null backend keeps
+        // no image detail to read it back from — it is structural, and stated
+        // where it is made rather than checked where it is used.
         assert_eq!(
             gpu.configured_extent, clamped,
             "the engine renders at the answer, not the request"

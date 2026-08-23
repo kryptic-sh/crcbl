@@ -10919,17 +10919,19 @@ it.
   obligation and says using the requested size instead is the bug the field
   exists to prevent.
 
-  **It is not as close as it looks, and here is the trap.** The render area is
-  not a number a caller passes: `crcbl_render`'s graph derives it from the
-  _attachment image's_ extent, and refuses a pass whose attachments disagree.
-  The clamp injector changes only what `acquire_next_frame` reports — the null
-  swapchain's images keep the configured size — so a frame built through it has
-  an image of one size and an `AcquiredFrame::extent` of another, and any
-  mismatch a test saw would be the fixture's rather than the engine's. Closing
-  the second half means teaching the injector to resize the swapchain's images
-  along with the reported extent, which is what a compositor actually does.
-  Until then the honest statement is that the _adoption_ is tested and the
-  _rendering_ is not.
+  **The fixture is now sound for it, which it was not at first.** The render
+  area is not a number a caller passes: `crcbl_render`'s graph derives it from
+  the _attachment image's_ extent and refuses a pass whose attachments disagree.
+  A clamp applied only to what `acquire_next_frame` reports would have left the
+  ring holding images of the configured size, so any mismatch a test saw would
+  have been the fixture's rather than the engine's. The injector therefore
+  clamps where a platform does — in `build_ring`, so the images are created at
+  that size and the swapchain records it — and both come from one variable
+  there.
+
+  So what is left is only the driven frame: render through a clamped swapchain
+  and assert the recorded `BeginRenderPass` area is the acquired extent. The
+  null recorder keeps the command, so nothing new has to be built for it.
 
 ### No runner has two native backends, so nothing compares them directly
 

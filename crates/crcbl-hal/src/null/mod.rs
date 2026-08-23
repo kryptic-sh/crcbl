@@ -1944,11 +1944,6 @@ impl Device for NullDevice {
         // here also spends the injection only on an acquire that got this far,
         // which is what leaves a refused one recording and consuming nothing.
         let suboptimal = self.recorder.take_suboptimal_acquire();
-        // Read before the lock, for the reason the line above gives: the
-        // recorder's mutex is not reentrant and `acquired_extent` takes it.
-        // The configured extent it falls back to is read out of the swapchain
-        // below and applied there.
-        let clamp = self.recorder.clamped_extent();
         let mut state = self.recorder.lock();
         let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
             return Err(SurfaceError::Hal(HalError::invalid_handle(
@@ -1969,7 +1964,6 @@ impl Device for NullDevice {
         };
         let index = *next;
         let slot = index as usize;
-        let configured = *extent;
         // `.max(1)`, not `unwrap_or(1)`: `u32::try_from(0usize)` is `Ok(0)`, so
         // the fallback never fired for the one input it looked like it guarded
         // against, and an empty ring divided by zero.
@@ -1977,11 +1971,11 @@ impl Device for NullDevice {
         let frame = AcquiredFrame {
             image: images[slot],
             view: views[slot],
-            // This backend has no window system to clamp against, so the
-            // configured extent is the requested one unless a test has said
-            // otherwise — see `Recorder::clamp_acquired_extent_to`, which is
-            // what makes obligation 3's branch reachable at all.
-            extent: clamp.unwrap_or(configured),
+            // The extent the ring was actually built at, which is the
+            // requested one unless `Recorder::clamp_acquired_extent_to` gave
+            // this backend a platform opinion — the thing that makes
+            // obligation 3's branch reachable at all.
+            extent: *extent,
             index,
             acquire_semaphore: acquire_semaphores[slot],
             present_semaphore: present_semaphores[slot],
@@ -2088,6 +2082,14 @@ impl NullDevice {
         // Clamped to what `surface_caps` reports, not to a pair of literals
         // that happened to agree with it.
         let image_count = desc.image_count.clamp(RING_MIN_IMAGES, RING_MAX_IMAGES);
+        // The platform's say over the extent, if a test has given this backend
+        // one — see `Recorder::clamp_acquired_extent_to`. Applied here rather
+        // than at acquire so the ring's *images* are the clamped size too: a
+        // swapchain reporting one extent and holding images of another is a
+        // fixture no window system produces, and a render area derived from
+        // those images would disagree with the acquired extent for a reason
+        // that is the fixture's rather than the caller's.
+        let extent = self.recorder.clamped_extent().unwrap_or(desc.extent);
         let mut images = Vec::with_capacity(image_count as usize);
         let mut views = Vec::with_capacity(image_count as usize);
         let mut acquire_semaphores = Vec::with_capacity(image_count as usize);
@@ -2097,7 +2099,7 @@ impl NullDevice {
                 .create_image(&ImageDesc {
                     label: Some("swapchain image"),
                     image_type: ImageType::D2,
-                    extent: crate::Extent3d::d2(desc.extent.0, desc.extent.1),
+                    extent: crate::Extent3d::d2(extent.0, extent.1),
                     format: desc.format,
                     mip_levels: 1,
                     samples: 1,
@@ -2138,7 +2140,7 @@ impl NullDevice {
             }
         }
         Ok(Detail::Swapchain {
-            extent: desc.extent,
+            extent,
             images,
             views,
             acquire_semaphores,

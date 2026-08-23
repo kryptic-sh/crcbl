@@ -1129,6 +1129,15 @@ impl Recorder {
     /// the swapchain was configured at, as if a compositor had chosen a size of
     /// its own.
     ///
+    /// **Applied where the platform applies it: when the ring is built.** The
+    /// swapchain's images are created at the clamped size and the swapchain
+    /// records it, so an acquire reports it without a second rule of its own.
+    /// Clamping only the *reported* number would have produced a swapchain
+    /// holding images of one size and answering with another — a fixture no
+    /// window system produces, and one that would make a render area derived
+    /// from those images disagree for the fixture's reasons rather than the
+    /// caller's.
+    ///
     /// **A standing rule, not a count, and unlike its two siblings above.** A
     /// compositor that clamps does not stop clamping; the engine answers by
     /// adopting the answer, after which the sizes agree and its branch stops
