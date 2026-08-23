@@ -160,28 +160,65 @@ Recommendation, not taken without the owner: 3, then 1, then 2 — and only afte
 an ECS benchmark scenario exists to measure against, for the reason the
 profiling plan gives about numbers that cannot be compared.
 
-### A refit-only tree degrades as its elements travel, and nothing measures it
+### DECISION NEEDED — a refit-only tree degrades, and the number is now known
 
-`Bvh::update_aabb` never re-picks a leaf's place — its own doc says callers
+`Bvh::update_aabb` never re-picks a leaf's place: it writes the new box into the
+leaf and grows the ancestors it walks back through. Its own doc says callers
 whose elements travel should remove and re-insert instead, and nothing in the
-engine does. So a tree that only ever refits grows looser the further its
-elements get from where they were inserted, and the query cost follows.
+engine does. `crcbl bench --scenario phys --ticks N` measures what that costs.
 
-This was written down as "the refit phase cannot tell a refit from a rebuild",
-on the assumption that a body escaping its fitted bounds forces a rebuild. It
-does not: `update_aabb` returns `false` only when the element index names
-nothing live, and there is no containment test anywhere in it. A teleport across
-the world refits exactly like a footstep.
+**Measured 2026-08-23**, release, 2000 bodies of radius 0.5 in a 48-unit arena,
+reproduced twice on this machine:
 
-What is now possible and not done: `crcbl bench --scenario phys` reports one
-iteration's refits and tree builds, so the degradation is measurable — run the
-refit phase for many ticks of accumulated drift and watch `depth` and the query
-timing move while the build count stays flat. The scenario drifts each body one
-tick's worth from rest and rebuilds the world every iteration, so it currently
-measures the _fresh_ tree, never the aged one. Making that a parameter is a
-small change; deciding what the engine should do about the answer — a
-remove-and-reinsert rule, a rebuild cadence, a teleport threshold — is not, and
-needs the measurement first.
+|  ticks | depth | nodes | builds | query p50 | neighbours/query | ns per result |
+| -----: | ----: | ----: | -----: | --------: | ---------------: | ------------: |
+|      1 |    12 |  3999 |      1 |    516 µs |             5.96 |          43.3 |
+|    100 |    12 |  3999 |      1 |    559 µs |             5.87 |          47.6 |
+|   1000 |    12 |  3999 |      1 |    735 µs |             5.71 |          64.4 |
+|  10000 |    12 |  3999 |      1 |   1641 µs |             5.23 |         156.8 |
+| 100000 |    12 |  3999 |      1 |   5299 µs |             3.98 |         666.2 |
+
+Read the last column, not the fourth: the crowd thins as it walks, so raw query
+time understates the decay. **The tree's reported shape never changes** — depth
+12, 3999 nodes, one build — at every tick count, which is the finding rather
+than a null result. The boxes stay exact for the current positions while the
+topology remains the answer `Bvh::build` gave for where the crowd was _placed_.
+Refit and build cost stay flat throughout, so a running game sees none of this
+in its physics tick and all of it in its broadphase queries.
+
+It is inside run-to-run noise below 100 ticks and unmistakable by 1000 — about
+17 seconds of simulation at 60 Hz, an RMS displacement of roughly one world unit
+against a 0.5-unit body radius.
+
+**The decision, with the trade-off now priced.** A rebuild costs about 490 µs on
+this fixture and buys back up to 4.8 ms of query time per tick at the far end.
+The options are not equivalent:
+
+1. **A rebuild cadence** — rebuild every N ticks, or when a cheap staleness
+   estimate crosses a threshold. Simple, and it makes one tick in N expensive,
+   which is a frame-time spike a game has to absorb.
+2. **Remove-and-reinsert on the move**, which is what `update_aabb`'s own doc
+   recommends. Spreads the cost evenly and keeps the tree's placement honest;
+   costs more per update than a refit, on every update, including the many that
+   barely move.
+3. **Refit with a fattened box**, the usual answer in the literature: a body
+   moves inside its own slack without touching the tree, and only reinserts when
+   it leaves. Bounds the degradation and costs one comparison per update, at the
+   price of a looser tree from the start and a slack constant to choose.
+4. **Leave it**, and say so in the API: below a few hundred ticks the decay is
+   not measurable, and a game that rebuilds on level load may never reach the
+   range where it matters.
+
+**Not verified:** any target but Linux x86-64, and no tick count above 100000 —
+at 2000 bodies that is already 200 million refits per iteration, and the trend
+had not plateaued.
+
+**Considered and declined for the fixture:** reflecting bodies off the arena
+walls, which would hold the density constant and make the raw query timing
+comparable across tick counts without the per-result normalisation. It cannot be
+done without moving bodies that start within one step of an edge, which would
+change what `--ticks 1` reports and cost the scenario its bit-identity with
+every number recorded before the flag existed.
 
 ### The phys bench's default is a debug-build size, and its guard is quadratic
 
@@ -13174,18 +13211,39 @@ Topic 25's QEM simplifier exists host-side with no consumer. What is left:
   `Quadric::ZERO` is spelled out with that reason. **This applies anywhere in
   the workspace that derives `Default` through a glam matrix**, which is why it
   is here rather than only in that file.
-- **Flip rejection is per-collapse, not a global invariant.** A face can rotate
-  a little under each of several individually-accepted collapses until it has
-  come all the way round; demonstrated by popping in descending cost order,
-  where a height field ends up with a face pointing at `-Z` and every single
-  collapse having passed the check. The cheapest-first order is what keeps the
-  local test a workable stand-in. A global orientation check is the fix.
+- **Flip rejection has a global half now, and the symptom this entry named was
+  not the defect.** A face may no longer turn past a right angle from the facing
+  it arrived with, which took a spiked height field from 16 such faces to none
+  when collapses are popped in descending cost order.
+
+  What the entry described — a face ending up pointing at `-Z` — is a different
+  thing and is **unchanged** (14 before, 15 after). That field's slopes reach
+  about 9 units per unit, so its input normals are already some 84 degrees off
+  vertical and a face well inside a right angle of its own arrival normal can
+  still point below the horizon. On a gentler field the two coincide and both go
+  to zero. Worth keeping because it is the sort of symptom that reads as one bug
+  and is two: "points the wrong way in world space" and "has turned over
+  relative to where it started" are not the same claim.
+
 - **A rejected candidate is dropped, not deferred** — an edge refused now is
   only reconsidered if an endpoint is later merged into. Cheap, terminates,
   leaves some collapses unmade.
-- **`max_error` is not a certified Hausdorff bound**, so the plan's "reported
-  error ≥ sampled Hausdorff" property test does not exist. Runtime selection
-  will lean on this number, so that test is owed before it does.
+- **`max_error` now has the property test**, and it is a sampled bound rather
+  than a certified one — say so before leaning on it. The test asserts the
+  reported error dominates a two-sided Hausdorff distance sampled on a
+  barycentric lattice, which is a _lower_ bound on the true distance, so it
+  rules out understatement coarser than the sampling and certifies nothing
+  finer. Swept 15 fixtures by 9 targets with no counterexample; the tightest
+  genuine ratio was 1.13.
+
+  **A trap for anyone extending it:** flat and crease-only fixtures report
+  `max_error == 0` exactly while the sampled distance comes back around 1.8e-15,
+  and a staircase reports 5.8e-7 against 1.1e-6. Both are `f32` position
+  rounding, not error. The shipped fixtures are curved, where the sampled
+  distance is five orders of magnitude above that noise; a flat one needs a
+  tolerance derived from `f32::EPSILON` times the extent, not a widened
+  assertion.
+
 - **Never measured on a real asset.** Every fixture is synthetic — torus, height
   field, tetrahedron — there is no glTF corpus case and no benchmark, and the
   cost is O(E) in candidates with re-pushes per collapse.
