@@ -1415,6 +1415,8 @@ jobs:
           # header records what the misplacement cost.
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl-vk/tests/run-vk-e2e.sh
       # **The Vulkan arm of `crates/crcbl/tests/render_e2e.rs`, and the reason
       # its goldens can be trusted.** That test draws the cube, sprite and UI
@@ -1437,6 +1439,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-render-e2e.sh
 
       # The same HAL-seam behaviours on this backend, from the one agnostic
@@ -1447,6 +1452,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-hal-seam-e2e.sh
 
       # The draw-generation buffers, read back and compared against the CPU
@@ -1489,6 +1497,9 @@ jobs:
           CRCBL_GPU: vk
           CRCBL_SEAM_WITHHOLD: all
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: >
           crates/crcbl/tests/run-hal-seam-e2e.sh -E
           'test(every_declared_capability_behaves_the_way_it_was_declared)'
@@ -1497,12 +1508,18 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/quarry/tests/run-quarry-e2e.sh
 
       - name: Check the draw generation on lavapipe
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-draw-gen-e2e.sh
 
       # The forward pass's own state — the froxel grid, the shadow atlas as
@@ -1515,6 +1532,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-forward-e2e.sh
 
       # The sprite pass, the nine-slice, the button skin and the shared menu.
@@ -1529,6 +1549,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-sprite-e2e.sh
 
       # The lit mesh, its four goldens, its HDR scene target, its resize storm
@@ -1548,6 +1571,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-mesh-e2e.sh
 
       # `crates/crcbl/tests/tiling_e2e.rs`, which until this step existed had
@@ -1566,6 +1592,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-tiling-e2e.sh
 
       # See the WARP step of the same name: this suite's `#[ignore]` named a
@@ -1575,6 +1604,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: crates/crcbl/tests/run-gltf-e2e.sh
       # The only frame in the tree drawn from an **application's** `SceneDesc`
       # rather than from `crcbl_render::scene::demo`, which is what makes it
@@ -1592,6 +1624,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/lantern/tests/run-lantern-golden.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
@@ -1625,6 +1660,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/breakout/tests/run-breakout-golden.sh
       # The library seam, against a real driver. `apps/bare` writes its own
       # loop against the public API instead of plugging into the engine's, and
@@ -1678,6 +1716,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/asteroids/tests/run-asteroids-golden.sh
       - name: Run flappy headless against lavapipe
         env:
@@ -1692,6 +1733,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/flappy/tests/run-flappy-golden.sh
       - name: Run horde headless against lavapipe
         env:
@@ -1710,6 +1754,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/horde/tests/run-horde-golden.sh
       # **The viewer is driven through its tests, not its binary, and that is
       # deliberate.** Every step above runs a sample's executable headless; the
@@ -1759,6 +1806,9 @@ jobs:
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/hud/tests/run-hud-golden.sh
       # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
       # The reference, what lavapipe actually rendered, and a red-marked diff of
@@ -2143,6 +2193,12 @@ jobs:
       # step was written. `draw_gen_e2e`, `hal_seam_e2e`, `gltf_e2e` and the
       # tiling suite are golden-free on the same measurement and could follow;
       # they are left out of this change so that a failure here names one thing.
+      # **The validation gate the Linux job sets on every step is not set
+      # here.** Not because this leg deserves less: the layer build on this
+      # runner is not one any machine in this project can install, so whether it
+      # reports what the Linux build reports can only be learned by turning it
+      # on and reading a red run — and every round trip is a full CI run against
+      # a leg with no local reproduction. `docs/backlog.md` carries it.
       - name: Check the forward pass on lavapipe
         shell: bash
         env:

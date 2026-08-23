@@ -529,6 +529,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Every lavapipe CI step now fails on a validation error, not just the seven
+  that ran a sample binary.** The other seventeen — the agnostic e2e harnesses
+  and every sample golden — inherited validation from the debug build profile
+  alone: on, reported to a log, and fatal to nothing, which is a layer message
+  in every CI log and in no CI result. They all set `CRCBL_VK_VALIDATION`,
+  `CRCBL_VK_SYNC_VALIDATION` and `CRCBL_VK_VALIDATION_FATAL` now, and all
+  fifteen harnesses were run against CI's own layer 1.3.275 and Mesa 25.2.8 with
+  the full gate on before the change landed. The Windows leg and the coverage
+  job are excluded, each with the reason beside it in `ci.yml`.
 - **A GPU error raised on the way out no longer exits 0.** `Device::take_error`
   was drained only at the top of a frame, so everything after the last one — the
   final submit completing, the final `wait_idle`, the swapchain and surface
