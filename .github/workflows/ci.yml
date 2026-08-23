@@ -396,22 +396,31 @@ jobs:
   # no std sources to compile without it. The nightly is pinned in
   # `web/build.sh`; the two spellings have to move together.
   #
-  # NO Xvfb AND NO GPU, unlike every other browser step in this repository.
-  # There is no canvas on the page this drives — the claims are about threads,
-  # stacks and thread-locals — so headless Chrome is the whole environment.
+  # Two gates, one toolchain, one `-Z build-std` output — which is why they
+  # share a job rather than having one each: rebuilding std for wasm32 is the
+  # expensive half and a second job would pay it again.
   #
-  # `web/run-jobs-e2e.sh` builds what it drives, which is two artifacts: the
-  # threaded one through `web/build.sh --threads --gate-only` (which also runs
-  # `web/tools/worker-gate.mjs` under real `node:worker_threads`, so that gate
-  # comes with this job rather than needing one of its own) and a plain build of
-  # the same example as the negative control. Then it runs its four red checks,
-  # and fails if any of them does not break the assertion it is meant to break.
+  # `web/run-jobs-e2e.sh` needs no Xvfb and no GPU, unlike every other browser
+  # step in this repository: there is no canvas on the page it drives, and its
+  # claims are about threads, stacks and thread-locals. It builds two artifacts
+  # — the threaded one through `web/build.sh --threads --gate-only`, which also
+  # runs `web/tools/worker-gate.mjs` under real `node:worker_threads`, so that
+  # gate comes along with it — and a plain build of the same example as the
+  # negative control. Then it runs its four red checks and fails if any of them
+  # does not break the assertion it is meant to break.
+  #
+  # `web/run-horde-threads-e2e.sh` does need both. It builds the whole
+  # `--threads` site, loads the horde demo the way a visitor would, and asserts
+  # the steering pass ran on a thread that is not the page's — P5B's exit
+  # criterion, which until this job was proven on one developer machine and
+  # nowhere else. It brings up its own Xvfb; the step below only installs one.
   jobs-worker-e2e:
-    name: threaded wasm + worker gate (linux)
-    # A cold run compiles std for wasm32 before it drives anything, and nobody
-    # has measured that here — this is a ceiling, and the first green run is
-    # what should replace it with a budget.
-    timeout-minutes: 30
+    name: threaded wasm gates (linux)
+    # A cold run compiles std for wasm32, then every demo crate against it,
+    # before either browser starts. Nobody has measured that on a runner — this
+    # is a ceiling, and the first green run is what should replace it with a
+    # budget.
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -431,7 +440,7 @@ jobs:
           node-version: '24'
       # A missing browser must not be mistaken for a failing gate, so it is
       # named, executed and printed before anything drives it.
-      - name: Check the browser gate's assumptions
+      - name: Check the browser gates' assumptions
         run: |
           set -euo pipefail
           browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
@@ -441,8 +450,24 @@ jobs:
           fi
           echo "browser: $browser ($("$browser" --version))"
           echo "CRCBL_CHROMIUM=$browser" >> "$GITHUB_ENV"
+          # Only the horde gate needs it: `run-horde-threads-e2e.sh` opens a
+          # WebGPU device and brings up its own Xvfb to do it, for the reason
+          # `web/run-browser-e2e.sh` documents — a Linux headless Chrome cannot
+          # read a WebGPU canvas back and one inside Xvfb can.
+          if ! command -v Xvfb >/dev/null 2>&1; then
+            echo "Xvfb is not on this image; installing it."
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends xvfb
+          fi
+          echo "Xvfb: $(command -v Xvfb)"
       - name: Drive the Web Worker spawn backend in a real browser
         run: ./web/run-jobs-e2e.sh
+      # P5B's last exit criterion, and the reason this job pays for a second
+      # threaded build rather than living somewhere else: it wants the whole
+      # `--threads` site, not the one example the step above drives. Sharing the
+      # job shares the `-Z build-std` output, which is the expensive half.
+      - name: Run horde's simulation off the main thread in a real browser
+        run: ./web/run-horde-threads-e2e.sh
 
   # Linux is the developer's daily driver, so it carries the full gate.
   test-linux:
