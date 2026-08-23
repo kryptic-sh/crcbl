@@ -2490,3 +2490,70 @@ fn screaming_snake_spells_a_variant_the_way_tag_rs_does() {
     assert_eq!(screaming_snake("Ccw"), "CCW");
     assert_eq!(screaming_snake("OneMinusSrcAlpha"), "ONE_MINUS_SRC_ALPHA");
 }
+
+/// A module standing in for a `web/engine` file that has grown a declaration
+/// [`js_decls`] cannot read.
+///
+/// Both real modules list nothing in [`FileMirror::opaque`], so the arm that
+/// accounts for such a declaration is reached by no other test here — and an
+/// escape hatch nothing runs is one whose behaviour on the day it is needed is
+/// whatever the code happens to do. One readable declaration beside the
+/// unreadable one, because "the mirror still checks everything else" is half of
+/// what the arm has to keep true.
+const OPAQUE_MODULE: &str = "\
+const READABLE = 0x07;
+const UNREADABLE = new Map([['a', 1]]);
+";
+
+/// [`OPAQUE_MODULE`]'s mirror, with the `opaque` list the one thing a caller
+/// varies.
+fn opaque_module_mirror(opaque: &'static [(&'static str, &'static str)]) -> FileMirror {
+    FileMirror {
+        file: "opaque-module.js",
+        src: OPAQUE_MODULE,
+        scalars: vec![("READABLE", 7)],
+        ordered: Vec::new(),
+        bytes: Vec::new(),
+        text: Vec::new(),
+        flags: Vec::new(),
+        masks: Vec::new(),
+        inverted: &[],
+        opaque,
+    }
+}
+
+/// A declaration this parse cannot read is accounted for by naming it, and
+/// naming it costs the file nothing else.
+#[test]
+fn an_expression_the_parse_cannot_read_is_accepted_once_it_is_named() {
+    let claimed = check_file(&opaque_module_mirror(&[(
+        "UNREADABLE",
+        "a Map literal, which no wire value is spelled as",
+    )]));
+    assert_eq!(
+        claimed.into_iter().collect::<Vec<_>>(),
+        ["READABLE"],
+        "listing a declaration as opaque claimed a Rust constant, and it stands \
+         for the ones this parse deliberately does not read"
+    );
+}
+
+/// And leaving it unnamed fails, which is what makes the list a decision rather
+/// than a default.
+#[test]
+#[should_panic(expected = "checks nothing against")]
+fn an_expression_the_parse_cannot_read_fails_while_it_is_unnamed() {
+    check_file(&opaque_module_mirror(&[]));
+}
+
+/// The list is held from the other direction too: an expression that became
+/// readable has to leave it, or the mirror would go on skipping a value it
+/// could now check.
+#[test]
+#[should_panic(expected = "is now an expression this test can read")]
+fn a_declaration_this_parse_can_read_may_not_stay_on_the_opaque_list() {
+    check_file(&opaque_module_mirror(&[(
+        "READABLE",
+        "a Map literal, which it stopped being",
+    )]));
+}

@@ -1594,10 +1594,6 @@ held the same way. What is left, in the order it is worth taking:
   under `RUSTDOCFLAGS: -D warnings`, which covers this crate's wasm half.
   Re-verified 2026-08-23 by running that command for `-p crcbl-webgpu`: exit 0.
 
-- **`FileMirror::opaque` is now empty for both files.** The machinery stays
-  because it is what makes `js_decls` total, but nothing exercises it, so it is
-  a path that could rot without anything noticing.
-
 ### `System<T>`'s internals are not observable, so a desync surfaces as a panic
 
 `crates/crcbl-ecs/tests/churn_soak.rs` catches a component row outliving its
