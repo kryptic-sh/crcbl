@@ -418,9 +418,10 @@ jobs:
   miri-jobs:
     name: miri (crcbl-jobs)
     runs-on: ubuntu-latest
-    # About a minute of interpretation locally; the rest is `cargo miri setup`
-    # and a cold compile of std for miri's target.
-    timeout-minutes: 20
+    # Measured on the first (cold-cache) run: 1.4 min end to end, of which
+    # about a minute is interpretation and the rest `cargo miri setup` and a
+    # compile of std for miri's target. This is headroom, not a budget.
+    timeout-minutes: 10
     env:
       # `rust-toolchain.toml` pins an exact stable and claims authority over
       # rustup; miri only exists on nightly, so the channel is overridden here.

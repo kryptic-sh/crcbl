@@ -6646,10 +6646,12 @@ taken:
   needs a decision about issue noise and about a token with `issues: write`.
 - **Move the whole census per-PR.** Measured at about three and a half minutes
   of interpretation on top of a cold compile, so it is not obviously too
-  expensive any more — `crcbl-core` 81 s, `crcbl-store` 58 s, `crcbl-ui` 17 s,
-  `crcbl-ecs` 6 s, `crcbl-hal` 2 s, from `cron.yml`'s own note. Against: those
-  five have no concurrent unsafe, so the per-commit value really is concentrated
-  where it has already been moved.
+  expensive any more — and the crcbl-jobs job that did move takes **1.4 min end
+  to end on a cold cache**, which is the honest scale to reason from —
+  `crcbl-core` 81 s, `crcbl-store` 58 s, `crcbl-ui` 17 s, `crcbl-ecs` 6 s,
+  `crcbl-hal` 2 s, from `cron.yml`'s own note. Against: those five have no
+  concurrent unsafe, so the per-commit value really is concentrated where it has
+  already been moved.
 - **Run the cron nightly instead of weekly.** Shortens the blind window without
   answering the question, since nobody watches a nightly job either.
 - **Accept it** and treat "trigger it deliberately after anything lands near it"
