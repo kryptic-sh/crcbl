@@ -75,17 +75,42 @@ refused at `VkInstance::open` rather than passing having checked nothing, which
 - **`ValidationSink::CAPACITY` bounds what the drain can hand back.** Past it
   only the counters grow. Not practical while the first error stops the run, but
   it is a cap rather than "every error forever".
-- **Nothing proves the layer is awake during a _sample_ run.** The greps and the
-  fatal gate both fail on a missing layer, a missing messenger, a lost message
-  and a `CRCBL_LOG` filter that silences `crcbl_vk::debug` — that last takes the
-  "validation enabled" line with it, which is why the line is emitted from
-  `debug` and not from `instance`. What none of them catches is a layer that
-  loads, creates a messenger, prints the line and then checks nothing
-  (`VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` is enough).
-  `crates/crcbl-vk/tests/vk_e2e/validation_gate.rs` closes this for the vk suite
-  by committing a deliberate violation; there is no equivalent for a binary run.
-  `vkSubmitDebugUtilsMessageEXT` works cleanly as an injection route through the
-  real callback, so a debug-build-only injection hook is the obvious shape.
+- **Nothing proves the layer is _checking_ during a sample run.**
+  `CRCBL_VK_VALIDATION_SELF_TEST` closed the report half: the three harnesses
+  now each set it and require their own validation check to come back red, so
+  that check has been watched failing. The checking half is untouched, and the
+  two read alike. Measured on layer 1.4.357: a message submitted through
+  `vkSubmitDebugUtilsMessageEXT` still reaches the messenger with
+  `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false`, with
+  `VK_KHRONOS_VALIDATION_DISABLES=VK_VALIDATION_FEATURE_DISABLE_ALL`, with
+  `MESSAGE_ID_FILTER` naming the id and with
+  `DEBUG_ACTION=VK_DBG_LAYER_ACTION_IGNORE`; only `VK_LOADER_LAYERS_DISABLE`
+  stops it, and that already fails the "validation enabled" grep. The same
+  `VALIDATE_CORE=false` makes `validation_gate.rs`'s
+  `a_deliberate_violation_is_caught_by_the_layer` fail while
+  `tools/run-samples-windowed.sh` stays green — so a layer that loads, prints
+  the line, delivers submitted messages and validates nothing passes every pass
+  in all three harnesses. The layer's stateless parameter checks are not
+  governed by `validate_core` either (a zero `messageSeverity` produced
+  `VUID-vkSubmitDebugUtilsMessageEXT-messageSeverity-parameter` with the setting
+  both ways), so no instance-level provocation asks the question. **Closing it
+  needs a core-check violation inside a binary run** — a debug-only, env-gated
+  equivalent of `validation_gate.rs`'s oversized `copy_buffer_to_buffer`,
+  recorded and dropped without submitting, from somewhere that has a device.
+  That changes which crate owns the hook, which is why it was not done with the
+  report half.
+- **Severity mis-mapping is outside the self-test.** An error reported as a
+  warning still matches the harnesses' `(ERROR|WARN)` pattern, so the new pass
+  says nothing about which severity the record carried.
+- **The self-test injects at `VkInstance::open`, so it says nothing about the
+  frame loop.** A messenger that stops calling back after the first frame would
+  leave every pass green.
+- **`Device::take_error`'s wording attributes the injected message to the
+  layer.** With `CRCBL_VK_VALIDATION_FATAL=1` alongside the self-test the run
+  dies with `VK_LAYER_KHRONOS_validation reported CRCBL-VALIDATION-SELF-TEST`,
+  which the message body then contradicts. One string in `crcbl-vk`'s device
+  module; left alone because the two variables together are a developer
+  combination, not one any gate sets.
 - **Not verified on CI's runners.** Everything above was measured on radv on an
   RX 7900 XTX and on llvmpipe under Xvfb and sway. Across nine samples and nine
   sandbox passes on both drivers the layer emitted zero errors and zero

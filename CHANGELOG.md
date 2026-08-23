@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A binary run can prove its own validation check is able to fail.**
+  `CRCBL_VK_VALIDATION_SELF_TEST=1` asks a **debug** build of `crcbl-vk` to put
+  one synthetic message (`CRCBL-VALIDATION-SELF-TEST`, `ERROR`, `VALIDATION`)
+  through `vkSubmitDebugUtilsMessageEXT` as `VkInstance::open` creates the debug
+  messenger, so it travels the messenger, the callback, `ValidationSink` and the
+  log exactly as a layer error does. The three shell harnesses that run a binary
+  under the layer — `tools/run-samples-windowed.sh` and the two `crcbl-shell`
+  e2e scripts — each gained a pass that sets it and requires their own
+  validation check to come back red. Until now that check had never been shown
+  able to match anything: demoting the callback's record from `error!` to
+  `info!` leaves every ordinary pass green and only this one goes red. **Off by
+  default on every profile**, and `#[cfg(debug_assertions)]` besides, so a
+  release build cannot be made to write validation errors into its own log — it
+  logs that it heard the request and cannot honour it. It does **not** prove the
+  layer is checking anything: a submitted message is delivered whatever the
+  layer's checks are set to, and `docs/backlog.md` says what would.
+
 - **Every sample reports the effects its frames were actually drawn through.**
   `RenderEffects::row` is the one spelling — `shadows ao ssr`, `none` for an
   empty set — and `viewer`, `quarry` and `sandbox` now carry it on their summary

@@ -265,6 +265,88 @@ run_sample() {
     echo "crcbl e2e: ${sample} presented ${SAMPLE_FRAMES} frames at ${want_extent} windowed on x11/vk, nothing left alive, validation silent"
 }
 
+# `self_test_validation <name> <WxH> [sample args...]` — the same arguments
+# `run_sample` takes, and it runs `run_sample` itself.
+#
+# **The pass that proves the validation check above can fail.** The two greps in
+# `run_sample` ask whether the messenger exists and whether it said anything;
+# neither can tell "the layer had nothing to report" from "nothing could have
+# reached this log if it had". A messenger the loader never calls back, a
+# callback that stops reaching `log::error!`, a record whose module path or
+# level moves out from under that `(ERROR|WARN) +crcbl_vk::debug] vk ` pattern,
+# a `CRCBL_LOG` that filters it — each of those makes the second grep a green
+# light wired to nothing, and each is invisible from a log that is simply
+# quiet.
+#
+# So this pass sets `CRCBL_VK_VALIDATION_SELF_TEST=1`, which asks a debug build
+# of `crcbl-vk` to submit one synthetic message through
+# `vkSubmitDebugUtilsMessageEXT` as the instance opens, and then requires the
+# whole of `run_sample` to come back **red** on it. It calls `run_sample` in a
+# subshell rather than repeating the greps, so what is proven able to fail is
+# the check the other runs are graded by, not a copy of it that could drift
+# from it.
+#
+# What this does NOT prove is that the layer is *checking* anything: a
+# submitted message reaches the messenger even with the layer's own checks
+# disabled (measured on layer 1.4.357 with `VALIDATE_CORE=false` and with
+# `DISABLES=VK_VALIDATION_FEATURE_DISABLE_ALL`). The deliberate violation in
+# `crates/crcbl-vk/tests/vk_e2e/validation_gate.rs` is what asks that question,
+# and it needs a device and a command buffer to ask it with.
+self_test_validation() {
+    local sample="$1"
+    local log="${RUNTIME_DIR}/${sample}.log"
+    local refusal="${RUNTIME_DIR}/${sample}.self-test.log"
+    # The `pMessageIdName` `crcbl-vk` gives the injected message. Nothing else
+    # emits it, so the greps below can be exact — and they match the whole log
+    # line rather than the id alone, because a rebuild's compiler output is
+    # tee'd into this same log and a warning naming the constant would answer
+    # the question the engine's own line is there to answer.
+    local id="CRCBL-VALIDATION-SELF-TEST"
+    local line="crcbl_vk::debug\] vk validation: ${id}"
+
+    echo "crcbl e2e: re-running ${sample} with CRCBL_VK_VALIDATION_SELF_TEST=1, which must fail"
+    # Everything the pass says is captured: this run is *expected* to print a
+    # failure, and printing one at the top level would read like a broken gate.
+    local failed=0
+    (
+        export CRCBL_VK_VALIDATION_SELF_TEST=1
+        run_sample "$@"
+    ) >"$refusal" 2>&1 || failed=1
+
+    # Did the message arrive at all? Asked first, because a self-test that was
+    # never injected explains every other failure below it.
+    if ! grep -qE "$line" "$log"; then
+        echo "crcbl e2e: ${sample} ran with CRCBL_VK_VALIDATION_SELF_TEST=1 and no ${id}" >&2
+        echo "           line reached its log, so the validation check the other runs" >&2
+        echo "           are graded by has never been seen to fail. Either the debug" >&2
+        echo "           messenger is not calling back, or the callback no longer" >&2
+        echo "           reaches crcbl_core::log::error!, or CRCBL_LOG dropped it." >&2
+        cat "$refusal" >&2
+        log_tail
+        exit 1
+    fi
+    if [ "$failed" -eq 0 ]; then
+        echo "crcbl e2e: ${sample} logged the injected ${id} message and still passed," >&2
+        echo "           so run_sample's validation grep is not reading what the" >&2
+        echo "           messenger writes." >&2
+        cat "$refusal" >&2
+        log_tail
+        exit 1
+    fi
+    # ...and it failed *there* rather than somewhere else on the way. Both
+    # halves: the check's own headline, and this message inside what it printed.
+    if ! grep -qF "the validation layer complained about ${sample}" "$refusal" \
+        || ! grep -qE "$line" "$refusal"; then
+        echo "crcbl e2e: ${sample} failed with the self-test injected, but not on the" >&2
+        echo "           validation check — so that check still has not been shown to" >&2
+        echo "           fail. What it did fail on:" >&2
+        cat "$refusal" >&2
+        log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: ${sample} went red on the injected ${id}, so the validation check is live"
+}
+
 # See the equivalent block in `run-x11-e2e.sh` for why the loader probe is a
 # skip on a developer machine and a hard failure in CI. There is no null-backend
 # fallback here: a sample that never reached a swapchain is exactly what this
@@ -280,6 +362,11 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
         run_sample "${fields[@]}"
     done
     echo "crcbl e2e: ${#SAMPLES[@]} samples ran windowed against Xvfb on ${DISPLAY}"
+    # One more run of the first sample, this time required to fail. It runs
+    # after the loop, not instead of any of it: every sample above was still
+    # graded by the ordinary passes with nothing injected.
+    read -r -a fields <<<"${SAMPLES[0]}"
+    self_test_validation "${fields[@]}"
 else
     echo "crcbl e2e: no Vulkan loader; skipping the windowed sample pass" >&2
     if [ -n "${CI:-}" ]; then

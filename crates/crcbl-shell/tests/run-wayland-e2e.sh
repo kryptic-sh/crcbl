@@ -466,6 +466,83 @@ swapchain on a different present mode" >&2
 measuring ${mean_ms} ms a frame, nothing left alive, validation silent"
 }
 
+# `self_test_validation <backend> [windowed|fullscreen]` — the arguments
+# `run_sandbox` takes, and it runs `run_sandbox` itself.
+#
+# **The pass that proves `assert_validation_saw_nothing` can fail.** Its two
+# greps ask whether the messenger exists and whether it said anything; neither
+# can tell "the layer had nothing to report" from "nothing could have reached
+# this log if it had". A messenger the loader never calls back, a callback that
+# stops reaching `log::error!`, a record whose module path or level moves out
+# from under that `(ERROR|WARN) +crcbl_vk::debug] vk ` pattern, a `CRCBL_LOG`
+# that filters it — each of those makes the second grep a green light wired to
+# nothing, and a quiet log is what every one of them looks like.
+#
+# So this pass sets `CRCBL_VK_VALIDATION_SELF_TEST=1`, which asks a debug build
+# of `crcbl-vk` to submit one synthetic message through
+# `vkSubmitDebugUtilsMessageEXT` as the instance opens, and requires the whole
+# of `run_sandbox` to come back **red** on it. `run_sandbox` in a subshell
+# rather than the greps again, so what is shown able to fail is the check the
+# other runs are graded by and not a copy that could drift from it.
+#
+# What it does NOT prove is that the layer is *checking* anything: a submitted
+# message reaches the messenger even with the layer's own checks disabled
+# (measured on layer 1.4.357 with `VALIDATE_CORE=false` and with
+# `DISABLES=VK_VALIDATION_FEATURE_DISABLE_ALL`). The deliberate violation in
+# `crates/crcbl-vk/tests/vk_e2e/validation_gate.rs` is what asks that question,
+# and it needs a device and a command buffer to ask it with.
+self_test_validation() {
+    local refusal="${SWAY_RUNTIME_DIR}/sandbox.self-test.log"
+    # The `pMessageIdName` `crcbl-vk` gives the injected message. Nothing else
+    # emits it, so the greps below can be exact — and they match the whole log
+    # line rather than the id alone, because a rebuild's compiler output is
+    # tee'd into this same log and a warning naming the constant would answer
+    # the question the engine's own line is there to answer.
+    local id="CRCBL-VALIDATION-SELF-TEST"
+    local line="crcbl_vk::debug\] vk validation: ${id}"
+
+    echo "crcbl e2e: re-running the sandbox with CRCBL_VK_VALIDATION_SELF_TEST=1, which must fail"
+    # Everything this pass prints is captured: the run is *expected* to fail,
+    # and a failure printed at the top level would read like a broken gate.
+    local failed=0
+    (
+        export CRCBL_VK_VALIDATION_SELF_TEST=1
+        run_sandbox "$@"
+    ) >"$refusal" 2>&1 || failed=1
+
+    # Did the message arrive at all? Asked first, because a self-test that was
+    # never injected explains every other failure below it.
+    if ! grep -qE "$line" "$SANDBOX_LOG"; then
+        echo "crcbl e2e: the sandbox ran with CRCBL_VK_VALIDATION_SELF_TEST=1 and no ${id}" >&2
+        echo "           line reached its log, so the validation check the other runs are" >&2
+        echo "           graded by has never been seen to fail. Either the debug messenger" >&2
+        echo "           is not calling back, or the callback no longer reaches" >&2
+        echo "           crcbl_core::log::error!, or CRCBL_LOG dropped it." >&2
+        cat "$refusal" >&2
+        sway_log_tail
+        exit 1
+    fi
+    if [ "$failed" -eq 0 ]; then
+        echo "crcbl e2e: the sandbox logged the injected ${id} message and still passed, so" >&2
+        echo "           assert_validation_saw_nothing is not reading what the messenger writes." >&2
+        cat "$refusal" >&2
+        sway_log_tail
+        exit 1
+    fi
+    # ...and it failed *there* rather than somewhere else on the way. Both
+    # halves: the check's own headline, and this message inside what it printed.
+    if ! grep -qF "the validation layer complained about the sandbox" "$refusal" \
+        || ! grep -qE "$line" "$refusal"; then
+        echo "crcbl e2e: the sandbox failed with the self-test injected, but not on the" >&2
+        echo "           validation check — so that check still has not been shown to fail." >&2
+        echo "           What it did fail on:" >&2
+        cat "$refusal" >&2
+        sway_log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: the sandbox went red on the injected ${id}, so the validation check is live"
+}
+
 # Vulkan first, and only when there is a loader to run it on: this harness is
 # also used on developer machines, and `docs/plan/12-testing.md`'s "no silently
 # skipped gate" rule is served by the message rather than by failing a machine
@@ -632,6 +709,10 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     cargo build --locked --quiet --package crcbl-shell \
         --features wayland-e2e --bin crcbl-e2e-wayland-key
     run_sandbox_toggle vk
+    # One more windowed run, this time required to fail. After the passes above
+    # rather than instead of any of them: each of those was still graded by the
+    # ordinary checks with nothing injected.
+    self_test_validation vk windowed
 else
     echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2
     if [ -n "${CI:-}" ]; then

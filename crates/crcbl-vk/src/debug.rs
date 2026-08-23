@@ -57,6 +57,38 @@
 //! error and take away the frame that caused it. The validation layer makes the
 //! same call — its own `debug_action=VK_DBG_LAYER_ACTION_BREAK` is opt-in, and
 //! vkconfig defaults to log-only.
+//!
+//! # Proving the report path is live
+//!
+//! [`ValidationReport::assert_clean`] is a Rust call, so a harness that runs a
+//! *binary* greps its log instead: the "validation enabled" line present, and
+//! no error line from this module under it. The first half is checkable — the
+//! line is either there or it is not. The second half had never been shown able
+//! to fail at all, and there are several ways it silently cannot: a messenger
+//! the loader never calls back, a `messenger_callback` that stops reaching
+//! [`crcbl_core::log::error!`], a record whose module path or level moves out
+//! from under the harness's pattern, a `CRCBL_LOG` that drops it. Every one of
+//! those leaves a harness reading a clean log and reporting success.
+//!
+//! So [`SELF_TEST_VALIDATION_ENV_VAR`] asks a debug build to put one synthetic
+//! message through `vkSubmitDebugUtilsMessageEXT` — the entry point Vulkan
+//! provides for exactly this — at [`Severity::Error`] and message type
+//! `VALIDATION`, so that it travels the loader, the messenger, the callback,
+//! the sink, the log filter and the harness's own grep: every link a real
+//! error's *report* travels. A harness sets it, requires its own validation
+//! check to go **red**, and has then watched that check fail.
+//!
+//! **It does not prove the layer is checking anything**, and it is worth being
+//! exact about that, because the two questions read alike. Measured against
+//! layer 1.4.357: a message submitted this way arrives at the messenger with
+//! `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` set, with
+//! `VK_KHRONOS_VALIDATION_DISABLES=VK_VALIDATION_FEATURE_DISABLE_ALL` set, and
+//! with the layer's own `MESSAGE_ID_FILTER` naming this message's id — a
+//! submitted message is delivered by the messenger dispatch, which is a
+//! different mechanism from the validation the layer would otherwise be doing.
+//! What proves *that* is a real violation, and the ones the core checks own are
+//! recorded into a command buffer: `tests/vk_e2e/validation_gate.rs`, which an
+//! instance opening has no device to do.
 
 use core::ffi::{CStr, c_void};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -81,6 +113,14 @@ pub const SYNC_VALIDATION_ENV_VAR: &str = "CRCBL_VK_SYNC_VALIDATION";
 /// [`crcbl_hal::Device::take_error`] instead of only reaching the log. Warnings
 /// are unaffected; see the module's "Failing the run on an error".
 pub const FATAL_VALIDATION_ENV_VAR: &str = "CRCBL_VK_VALIDATION_FATAL";
+
+/// Set to a truthy value to have a **debug** build put one synthetic message
+/// through the messenger as the instance opens, so a harness that greps the
+/// run's log can watch its own validation check fail. See the module's
+/// "Proving the report path is live", which is also where the limit of what
+/// that proves is written down. A release build says it heard the request and
+/// cannot honour it.
+pub const SELF_TEST_VALIDATION_ENV_VAR: &str = "CRCBL_VK_VALIDATION_SELF_TEST";
 
 /// How severe a message the layer emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -360,6 +400,25 @@ const fn fatal_validation_policy(override_: Option<bool>) -> bool {
     }
 }
 
+/// Whether a run was asked to prove the messenger's report path is live.
+///
+/// The *request*, not the answer: this is the environment's opinion on every
+/// profile, because a release build has to be able to say it heard a request it
+/// cannot honour. Whether it can is [`submit_self_test_message`]'s existence,
+/// and that is a `cfg`, not a value.
+#[must_use]
+pub(crate) fn validation_self_test_wanted() -> bool {
+    validation_self_test_policy(env_flag(SELF_TEST_VALIDATION_ENV_VAR))
+}
+
+/// The pure half of [`validation_self_test_wanted`]; see [`validation_policy`].
+const fn validation_self_test_policy(override_: Option<bool>) -> bool {
+    match override_ {
+        Some(explicit) => explicit,
+        None => false,
+    }
+}
+
 /// Parses a boolean environment variable, tolerating the spellings people
 /// actually type. An unset or empty variable is "no opinion".
 fn env_flag(name: &str) -> Option<bool> {
@@ -538,6 +597,57 @@ pub(crate) fn announce_messenger() {
     crcbl_core::log::info!(
         "crcbl-vk: validation enabled ({VALIDATION_LAYER}), messages go through the debug messenger"
     );
+}
+
+/// The `pMessageIdName` the self-test message carries.
+///
+/// Fixed, and nothing else in this repository emits it, so a harness can grep
+/// for it exactly and a person meeting it in a log can search for it here.
+#[cfg(debug_assertions)]
+const SELF_TEST_MESSAGE_ID: &CStr = c"CRCBL-VALIDATION-SELF-TEST";
+
+/// What the self-test message says, written for whoever meets it in a log
+/// rather than for the grep: nothing was violated, and the message is the
+/// point.
+#[cfg(debug_assertions)]
+const SELF_TEST_MESSAGE: &CStr = c"this run asked for a validation self-test, so crcbl-vk \
+    submitted this message through vkSubmitDebugUtilsMessageEXT for the messenger to report, \
+    so that whatever reads this log can watch its own check fail; it is not a specification \
+    violation and nothing here did anything wrong";
+
+/// Puts one synthetic message through the messenger, so a harness can watch
+/// the check that reads this log fail. See the module's "Proving the report
+/// path is live" for what that does and does not settle.
+///
+/// **`#[cfg(debug_assertions)]` as well as [`SELF_TEST_VALIDATION_ENV_VAR`],
+/// and the two gates answer different questions.** The variable is a harness
+/// asking for the injection *now*; the `cfg` is why a shipped binary cannot be
+/// asked at all. Without it, anything that can set one environment variable
+/// could make a release build write `ERROR … vk validation: …` lines into its
+/// own log — forging the evidence every gate in this repository reads, and out
+/// of the one build nobody is watching.
+///
+/// [`Severity::Error`] and `VALIDATION`, because the point is to travel the
+/// path a real error travels: any other severity or type would prove a
+/// different path is live and say nothing about the one that matters. It is
+/// recorded like any other error, so a run that also set
+/// [`FATAL_VALIDATION_ENV_VAR`] fails on it — which is the same answer, arrived
+/// at through the same drain.
+#[cfg(debug_assertions)]
+pub(crate) fn submit_self_test_message(debug_ext: &ash::ext::debug_utils::Instance) {
+    let data = vk::DebugUtilsMessengerCallbackDataEXT::default()
+        .message_id_name(SELF_TEST_MESSAGE_ID)
+        .message(SELF_TEST_MESSAGE);
+    // SAFETY: `debug_ext` was created from a live instance with
+    // `VK_EXT_debug_utils` enabled, and every pointer in `data` is a `'static`
+    // NUL-terminated string that outlives the call.
+    unsafe {
+        debug_ext.submit_debug_utils_message(
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+            vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
+            &data,
+        );
+    }
 }
 
 /// Leaks a sink's inner allocation into a raw pointer for `pUserData`.
@@ -754,6 +864,14 @@ mod tests {
         assert!(!fatal_validation_policy(None));
         assert!(fatal_validation_policy(Some(true)));
         assert!(!fatal_validation_policy(Some(false)));
+
+        // So is the self-test injection — and its second gate is not a policy
+        // at all: `submit_self_test_message` does not exist in a release build,
+        // so this one says only that the *request* was heard, which is what
+        // lets that build say it cannot honour it.
+        assert!(!validation_self_test_policy(None));
+        assert!(validation_self_test_policy(Some(true)));
+        assert!(!validation_self_test_policy(Some(false)));
     }
 
     /// The user-data pointer round trip. If `into_raw`/`from_raw` ever stop

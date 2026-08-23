@@ -671,6 +671,50 @@ impl VkInstance {
             // than this module so that one log filter governs the line and the
             // errors it vouches for; see `announce_messenger`.
             debug::announce_messenger();
+
+            // **And, when a harness asks, one synthetic message through the
+            // messenger that line just vouched for.** The line above is half of
+            // what a harness checks; the other half is that no error line
+            // follows it, and nothing had ever shown that half able to fail —
+            // a messenger the loader never calls back, or a log record that
+            // moved out from under the harness's pattern, both read as silence.
+            // Debug builds only, and see `debug`'s "Proving the report path is
+            // live" for the limit of what it settles. Here rather than
+            // anywhere else because the messenger is what it travels through,
+            // so where that line is absent there is nothing to inject into.
+            #[cfg(debug_assertions)]
+            if debug::validation_self_test_wanted()
+                && let Some(debug_ext) = debug_ext.as_ref()
+            {
+                debug::submit_self_test_message(debug_ext);
+            }
+        }
+        // **A self-test that could not be run says so, rather than being a run
+        // that quietly did not do it.** Not a refusal to open, unlike
+        // `OpenError::FatalValidationUnavailable`: that variant exists because
+        // a run whose errors cannot stop it is indistinguishable, from the
+        // outside, from a run that had none — nothing else in the log carries
+        // the difference. Here the difference is already in the log twice over:
+        // the "validation enabled" line is missing for exactly the case below,
+        // and the harness that set this variable fails on that line's absence
+        // before it ever looks for the injected message. A second gate on an
+        // already-gated condition would only decide *which* error a developer
+        // reads first.
+        if debug::validation_self_test_wanted()
+            && (messenger == vk::DebugUtilsMessengerEXT::null() || !cfg!(debug_assertions))
+        {
+            // The two ways the request goes unhonoured, one per profile,
+            // because "not supported here" arriving as silence is the failure
+            // this whole variable exists to remove.
+            #[cfg(debug_assertions)]
+            const WHY: &str = "there is no debug messenger to put one through";
+            #[cfg(not(debug_assertions))]
+            const WHY: &str = "this is a release build, which does not carry the injection";
+            crcbl_core::log::warn!(
+                "crcbl-vk: {} asked for a validation self-test and none was injected: {}",
+                debug::SELF_TEST_VALIDATION_ENV_VAR,
+                WHY
+            );
         }
 
         let surface_ext =
