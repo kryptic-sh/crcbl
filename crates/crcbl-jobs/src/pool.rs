@@ -279,15 +279,21 @@ struct Sleep {
     /// between the search and the sleep is either found by the search or
     /// changes the number, and a worker cannot park beside work it never saw.
     submissions: u64,
-    /// Workers currently parked.
+    /// Workers **blocked on the condvar**, not workers that have decided to
+    /// block.
+    ///
+    /// The distinction is the whole value of the number. Counted around the
+    /// wait rather than before the predicate, so a worker whose predicate is
+    /// already false — a submission landed while it was deciding — is never
+    /// counted, and one that is counted cannot do anything until it is woken.
+    /// Counted before the predicate it was the weaker claim "has decided to
+    /// park", and a test that waited for it to reach the worker count could
+    /// still be racing a worker on its way back out to steal.
     ///
     /// Maintained under the same lock the sleep waits on, which is what makes
-    /// it exact rather than a hint: a worker that has decided to park has
-    /// already counted itself by the time anything else can take the lock. So a
-    /// submission that finds it zero can skip the broadcast — nobody is
-    /// listening — and a test can wait for the pool to be genuinely asleep
-    /// before asserting anything about waking it, which is otherwise a race the
-    /// test would usually win and occasionally lose.
+    /// it exact rather than a hint. So a submission that finds it zero can skip
+    /// the broadcast — nobody is listening — and a test can wait for the pool
+    /// to be genuinely asleep before asserting anything about it.
     parked: usize,
     shutdown: bool,
 }
@@ -667,19 +673,22 @@ fn work(shared: &Shared) {
         }
 
         let mut sleep = lock(&shared.sleep);
-        sleep.parked += 1;
         while !sleep.shutdown && sleep.submissions == submissions {
-            // Under the lock the sleep waits on, and before the wait: a thread
-            // that sees `parked` reach the worker count has to have taken this
-            // lock, so by then every worker it counted has counted itself here
-            // too. That is what a test can wait for.
+            // Around the wait, not around the loop: a thread that sees `parked`
+            // reach the worker count has to have taken this lock, and every
+            // worker it counted is *inside* the wait rather than on its way to
+            // deciding. Counted outside, a worker whose predicate was already
+            // false was counted and then went straight back out to steal — so a
+            // test that waited for the pool to be asleep could still be racing
+            // one, which it usually won and occasionally lost.
             shared.stats.parks.fetch_add(1, Ordering::Relaxed);
+            sleep.parked += 1;
             sleep = shared
                 .wake
                 .wait(sleep)
                 .unwrap_or_else(PoisonError::into_inner);
+            sleep.parked -= 1;
         }
-        sleep.parked -= 1;
         if sleep.shutdown {
             return;
         }
@@ -839,7 +848,8 @@ mod tests {
         Pool::with_workers(&Threads, workers).expect("native threads")
     }
 
-    /// Blocks until every worker is parked.
+    /// Blocks until every worker is parked, and hands back the lock they must
+    /// reacquire to stop being parked.
     ///
     /// **The precondition for any assertion about waking them**, and it is not
     /// optional: a freshly built pool's workers spend their first moments
@@ -849,14 +859,30 @@ mod tests {
     /// that cannot fail. Measured rather than assumed: with this wait removed,
     /// a `notify_all` deleted from either the submission or the shutdown path
     /// leaves the whole suite green.
+    ///
+    /// **Returning the guard is what makes the answer stay true.** Dropping it
+    /// leaves only "every worker was inside the wait a moment ago", and a
+    /// worker already notified is still counted while it queues for this very
+    /// lock — so a caller reading counters after that can be racing one on its
+    /// way back out to steal. Measured: with the guard dropped before the read,
+    /// `resetting_the_counters_zeroes_every_one_of_them` fails about once in
+    /// two thousand runs under load, always with a steal failure the reset had
+    /// already cleared. Held, no worker can leave the wait at all, so a caller
+    /// holding it sees a pool that genuinely cannot move.
     #[cfg(not(target_arch = "wasm32"))]
-    fn wait_until_parked(pool: &Pool) {
+    fn wait_until_parked(pool: &Pool) -> MutexGuard<'_, Sleep> {
         let deadline = Instant::now() + DEADLINE;
-        while lock(&pool.shared.sleep).parked < pool.workers() {
+        loop {
+            let sleep = lock(&pool.shared.sleep);
+            if sleep.parked >= pool.workers() {
+                return sleep;
+            }
+            let parked = sleep.parked;
+            drop(sleep);
             assert!(
                 Instant::now() < deadline,
                 "only {} of {} workers ever parked",
-                lock(&pool.shared.sleep).parked,
+                parked,
                 pool.workers(),
             );
             std::thread::yield_now();
@@ -1017,7 +1043,7 @@ mod tests {
         assert_eq!(pool.workers(), 2);
         // Parked first, so the chunks below can only reach a worker that was
         // woken by the submission.
-        wait_until_parked(&pool);
+        drop(wait_until_parked(&pool));
 
         let arrived = AtomicUsize::new(0);
         let threads = Mutex::new(std::collections::HashSet::new());
@@ -1046,7 +1072,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn a_panicking_chunk_leaves_the_pool_fit_for_the_next_call() {
         let mut pool = threaded(3);
-        wait_until_parked(&pool);
+        drop(wait_until_parked(&pool));
         let mut items = vec![0_u32; 64];
 
         let ran = AtomicUsize::new(0);
@@ -1180,7 +1206,7 @@ mod tests {
                 *item = 1;
             }
         });
-        wait_until_parked(&pool);
+        drop(wait_until_parked(&pool));
         drop(pool);
 
         let deadline = Instant::now() + DEADLINE;
@@ -1352,7 +1378,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn a_stolen_chunk_is_counted_as_a_steal_and_as_a_worker_running_it() {
         let mut pool = threaded(2);
-        wait_until_parked(&pool);
+        drop(wait_until_parked(&pool));
         pool.reset_stats();
 
         let arrived = AtomicUsize::new(0);
@@ -1388,7 +1414,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn a_worker_that_finds_nothing_counts_the_search_that_found_it() {
         let pool = threaded(3);
-        wait_until_parked(&pool);
+        drop(wait_until_parked(&pool));
 
         let stats = pool.stats();
         assert!(
@@ -1407,7 +1433,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn a_worker_with_nothing_left_to_do_parks_and_the_park_is_counted() {
         let pool = threaded(2);
-        wait_until_parked(&pool);
+        drop(wait_until_parked(&pool));
 
         let stats = pool.stats();
         assert!(
@@ -1490,7 +1516,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn resetting_the_counters_zeroes_every_one_of_them() {
         let mut pool = threaded(2);
-        wait_until_parked(&pool);
+        drop(wait_until_parked(&pool));
 
         // The waiting chunks again, so that a worker is guaranteed to have
         // stolen and run one of them.
@@ -1525,7 +1551,9 @@ mod tests {
             before + 1,
             "the inline path did not count its chunk to the driver",
         );
-        wait_until_parked(&pool);
+        // Held across every read below: the pool is asleep, and while this
+        // guard exists no worker can leave the wait to make it otherwise.
+        let asleep = wait_until_parked(&pool);
 
         let stats = pool.stats();
         for (name, count) in [
@@ -1546,5 +1574,6 @@ mod tests {
             PoolStats::default(),
             "a parked pool's counters moved, or a field was not reset",
         );
+        drop(asleep);
     }
 }
