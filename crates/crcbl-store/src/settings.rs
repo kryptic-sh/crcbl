@@ -101,10 +101,28 @@ pub struct StorageSettingsFile {
 impl StorageSettingsFile {
     /// Load settings from `path` in `storage`. If the file does not exist,
     /// returns an empty (defaults-only) table.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Other`] if the file is not UTF-8 or is not valid TOML,
+    /// and whatever the backend reports for a read that is neither a hit nor a
+    /// [`StorageError::NotFound`]. TOML *is* UTF-8 by definition, so the two
+    /// belong together: decoding lossily instead would feed replacement
+    /// characters to the parser, and a settings file that came back with a
+    /// truncated key and no complaint is one the next save writes back.
     pub fn load(storage: &dyn StorageSource, path: &Path) -> Result<Self, StorageError> {
         let data = match storage.read(path) {
-            Ok(bytes) => toml::from_str(&String::from_utf8_lossy(&bytes))
-                .map_err(|e| StorageError::Other(format!("invalid settings TOML: {e}")))?,
+            Ok(bytes) => {
+                let text = str::from_utf8(&bytes).map_err(|e| {
+                    StorageError::Other(format!(
+                        "settings file {} is not UTF-8: invalid byte at offset {}",
+                        path.display(),
+                        e.valid_up_to()
+                    ))
+                })?;
+                toml::from_str(text)
+                    .map_err(|e| StorageError::Other(format!("invalid settings TOML: {e}")))?
+            }
             Err(StorageError::NotFound(_)) => toml::Table::new(),
             Err(e) => return Err(e),
         };
@@ -599,6 +617,36 @@ mod tests {
 
         let file = StorageSettingsFile::load(&storage, path).unwrap();
         assert_eq!(file.table().get("volume"), Some(&toml::Value::Integer(75)));
+    }
+
+    /// A settings file that is not UTF-8 is reported, not silently repaired.
+    ///
+    /// The bytes are a valid TOML document with one invalid byte inside a
+    /// string, which is the shape a partial write or a foreign encoding leaves
+    /// behind. Decoded lossily it parses — `volume` survives, the string becomes
+    /// a replacement character — so the load used to succeed with a value the
+    /// file does not contain, and the next `save` wrote that back.
+    #[test]
+    fn load_rejects_a_file_that_is_not_utf8() {
+        let storage = crate::MemoryStorage::new();
+        let path = Path::new("settings.toml");
+        let mut bytes = b"volume = 75\nname = \"".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"\"\n");
+        storage.write(path, &bytes).unwrap();
+
+        // The premise: lossy decoding would have parsed this.
+        assert!(
+            toml::from_str::<toml::Table>(&String::from_utf8_lossy(&bytes)).is_ok(),
+            "the fixture must be a document only the encoding refuses"
+        );
+
+        let error = StorageSettingsFile::load(&storage, path)
+            .expect_err("a settings file that is not UTF-8");
+        let text = error.to_string();
+        assert!(text.contains("not UTF-8"), "{text}");
+        assert!(text.contains("settings.toml"), "{text}");
+        assert!(text.contains("offset 20"), "{text}");
     }
 
     #[test]

@@ -5567,25 +5567,18 @@ nothing.
 
 ### What is still live, all Low
 
-- **`fill_audio`'s multichannel fan-out writes only the front pair**
-  (`crates/crcbl-audio/src/lib.rs`). The `else` branch — any device that is
-  neither mono nor stereo — writes `data[i * channels]` and `+ 1` and leaves
-  channels 2..n at the zero `data.fill(0.0)` left. A 5.1 or 7.1 output plays a
-  stereo image with four dead speakers and no diagnostic anywhere. Nothing in
-  the surrounding comments justifies it.
-- **`FrameClock::new`'s `# Panics` is incomplete**
-  (`crates/crcbl-core/src/time.rs`). It names `tick_hz == 0`;
-  `tick_hz > 1_000_000_000` also panics, because the period truncates to zero
-  and `with_period` rejects it.
-- **`log::is_installed` answers for the wrong thing**
-  (`crates/crcbl-core/src/log.rs`). It is `LOGGER.get().is_some()`, but
-  `init_logging` runs `LOGGER.get_or_init` _before_ `log::set_logger`, so a host
-  application that already owns the process slot leaves this answering `true`
-  while the module installed nothing. The file documents a `set_logger` race
-  elsewhere, for the capture path.
-- **A non-UTF-8 `settings.toml` is mangled, not reported**
-  (`crates/crcbl-store/src/settings.rs`) — `String::from_utf8_lossy` before
-  `toml::from_str`, so replacement characters reach the parser.
+- **`fill_audio` still writes only the front pair on a wider device**
+  (`crates/crcbl-audio/src/lib.rs`). No longer silent — `AudioStream::open`
+  warns with the channel count and how many stay quiet, the docs say why, and
+  `a_wider_device_gets_the_stereo_pair_and_documented_silence` pins it — but a
+  5.1 or 7.1 output still plays a stereo image with four dead speakers. Real
+  fan-out is a **decision, not an omission**: `cpal` reports a channel _count_
+  and no layout, so nothing in the process knows which index is the centre or
+  the LFE. Doing it properly means either a platform-specific layout query
+  (`WAVEFORMATEXTENSIBLE`'s channel mask on Windows,
+  `kAudioDevicePropertyPreferredChannelLayout` on macOS, ALSA/PulseAudio channel
+  maps on Linux) or a user-facing speaker-layout setting the mixer pans into.
+  Nobody has asked for surround yet.
 - **X11 `wait_events` can sleep with events already decoded**
   (`crates/crcbl-shell/src/x11/shell.rs`). `collect_events` drains libxcb's
   queue _and_ the socket via `xcb_poll_for_event`, then stops at
@@ -9063,10 +9056,9 @@ Per-crate review passes explicitly disproved these before publishing anything:
   memory).
 - **core/ecs/input**: wrong-kind bindings silently produce permanently idle
   actions (user-profile typo, no diagnostic); `set_enabled(true)` doesn't
-  resolve immediately; `FrameClock::new(tick_hz > 1e9)` panics with a misleading
-  message; `FrameArena` doc claims "neither Send nor Sync" (it is Send, only
-  !Sync); `with_capacity(usize::MAX)` overflow is pre-empted by the vec capacity
-  check; `Held` duration quantizes to f32 after ~19 days uptime.
+  resolve immediately; `FrameArena` doc claims "neither Send nor Sync" (it is
+  Send, only !Sync); `with_capacity(usize::MAX)` overflow is pre-empted by the
+  vec capacity check; `Held` duration quantizes to f32 after ~19 days uptime.
 - **phys**: `world_mut()` lets a caller desync `collider_to_entity`;
   `ThrustForce` fields are pub (unnormalized direction silently scales thrust);
   negative collider radii bypass the constructors; per-tick `Vec<Entity>` in

@@ -311,6 +311,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A settings file that is not UTF-8 is reported instead of repaired.**
+  `StorageSettingsFile::load` decoded with `String::from_utf8_lossy` before
+  parsing, so a partial write or a foreign encoding reached the TOML parser as
+  replacement characters — often still a valid document, whose truncated values
+  the next `save` wrote back. It now returns `StorageError::Other` naming the
+  file and the byte offset. TOML is UTF-8 by definition, so this rejects nothing
+  a settings file was allowed to contain.
+
 - **`FrameClock::new` names a tick rate it cannot run.** A rate over 1 GHz
   truncates to a zero-nanosecond period, and the panic came from `with_period`
   blaming a `Duration` the caller never wrote. It is now rejected in `new`, by
