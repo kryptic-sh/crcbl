@@ -3,6 +3,75 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### DECISION NEEDED — lantern cannot shadow its point light and its spot at once
+
+P7B's exit criterion is "lantern renders the scene complete on
+`LightingPath::Rasterised`", and the roadmap row says it stays unticked because
+`apps/lantern`'s room had no spot light. It has one now — `room::spot`, a cool
+downlight in the back-left corner, in the light list `room::lights` hands both
+views. **Its cone is drawn and its shadow is not**, and the row still cannot be
+ticked, because the shadow is not lantern's to give.
+
+`crcbl_shaders::mesh::SHADOW_LIGHT_TILES` is 6 and `SHADOW_POINT_FACES` is 6:
+the atlas's whole light region is exactly one point light's cube. `run_is_free`
+therefore has one base a point light can start at, so a room holding one point
+light and one spot has room for one of their two maps and `shadow::Selection`
+decides which — the other lights without occluding. That is the module's own
+documented degradation, not a bug; what it means here is that **no arrangement
+of lantern's room can show a spot shadow and a point shadow in the same frame.**
+
+Making the spot the winner instead is not a fix either. `Selection` ranks by
+radius over distance to the eye and `room::lamp` **orbits**, so its influence
+swings from 0.611 to 1.738 over one period (measured by sweeping the orbit
+against `fixed_camera`'s eye). A spot that beat the lamp's weakest phase would
+lose at its strongest, and the room's one shadow would appear and disappear as
+the lamp went round — worse than either light having it. From where `room::spot`
+hangs, beating the lamp at _every_ phase needs a radius of 11.6, in a room 8 m
+deep and 6 m across — a light bounded by nothing but its cone. So `SPOT_REACH`
+is chosen to lose deliberately and
+`the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` pins it,
+sweeping the orbit with both a carried selection and a fresh one so the answer
+does not depend on when the run started.
+
+The options, all of them engine-side and therefore not this slice's to take:
+
+- **(a) Grow the light region to seven tiles.** `SHADOW_LIGHT_TILES` 6 → 7 with
+  the grid at `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` = 3 × 3, which the
+  `TILES == CASCADES + LIGHT_TILES` assertion makes exact. The atlas goes from
+  4096 × 2048 to 3072 × 3072 of `D32Float` — 32 MiB to 36 MiB — and
+  `FrameUniforms` gains one `float4x4`. `LIGHT_SLOTS` stays 2, so no new
+  `DrawGen` and none of the ~5 MiB each costs. Both `.slang` copies of the
+  constants move with it and the drift test is what holds them together.
+  Cheapest of the three, and the only one that closes P7B's row as written.
+- **(b) Convert `room::lamp` to a spot.** One tile, always shadowed, no engine
+  change — and the room then renders sun and spot shadows only, which is the
+  same gap the other way round and costs the sample its point light as well.
+- **(c) Leave it.** lantern shows the cone, the penumbra and the lamp's cube
+  shadow; P7B's row stays unticked and the reason changes from "no spot light"
+  to "the atlas holds one of the two maps". This is what is in the tree.
+
+Evidence: `room::the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit`
+runs `Selection` over the real light list and is red-checked both ways — a
+`SPOT_REACH` of 4.5 makes the spot win on part of the orbit, and an
+`outer_angle` past `MAX_SPOT_HALF_ANGLE` makes it ineligible rather than outbid.
+Not verified: nothing here measures option (a)'s atlas on a device; the memory
+figures are `TILE` × `TILE` × 4 bytes per tile arithmetic, not a capture.
+
+### DECISION NEEDED — should lantern's irradiance volume carry the downlight?
+
+`crate::bounce` bakes a single analytic gather of **the sun's** first bounce off
+the room's interior, and `room::spot` is not in it — so the downlight's pool is
+direct light with no indirect term, exactly as `room::lamp`'s pool is. The lamp
+is excluded because it moves and a baked volume cannot follow it; the downlight
+is static, so that reason does not apply to it and the exclusion is currently
+just "the gather is the sun's".
+
+Adding it means a second source in `bounce::probes`, new probe rows, and a
+re-bless — and it would move `BOUNCE_TINT`, whose two read points
+(`TINTED_PLASTER`, `UNTINTED_PLASTER`) sit on the same back wall the cone's
+corner reaches. Left out deliberately rather than overlooked; it is its own
+slice if the sample ever wants indirect light from more than one source.
+
 ### DECISION NEEDED — the ten export names, and whether a proc macro earns a dependency
 
 The other half of `web_exports!`'s residue. `crcbl::impl_web_pending!` took the

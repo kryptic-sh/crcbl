@@ -702,18 +702,20 @@ impl Gpu {
         };
         let extent = acquired.extent;
 
-        // The only thing in the room that moves. The nine objects were placed
+        // The room's punctual lights, both views from the one list — see
+        // `room::lights`. Only the lamp in it moves; the objects were placed
         // once and never rewritten, so a still frame uploads no instance bytes
-        // at all — the lamp is a row of the light list, not an instance.
-        self.renderer.set_lights(&[room::lamp(self.elapsed)]);
+        // at all, because a light is a row of the light list and not an
+        // instance.
+        self.renderer.set_lights(&room::lights(self.elapsed));
         self.renderer
             .begin_frame(self.ctx.device(), &self.camera, &room::sun(), extent)?;
         // The monitor's view of the same room at the same instant: the same
-        // lamp, the same sun, its own camera and its own extent. Its own
+        // lights, the same sun, its own camera and its own extent. Its own
         // `begin_frame` because that call writes one camera into the frame's
         // uniform slot and freezes one resolved effect set — which is what
         // makes two views two renderers.
-        self.monitor.set_lights(&[room::lamp(self.elapsed)]);
+        self.monitor.set_lights(&room::lights(self.elapsed));
         self.monitor.begin_frame(
             self.ctx.device(),
             &room::monitor_camera(),

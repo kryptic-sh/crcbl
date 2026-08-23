@@ -65,10 +65,11 @@ const REVIEW_DIR: &str = "target/lantern";
 
 /// How many distinct colours a frame of this room has to have.
 ///
-/// A room lit by a sun through a window, an orange lamp and a cool ambient, on
-/// nine objects in five materials: a frame with fewer than this drew the clear
-/// colour and very little else. Counted rather than guessed at — see
-/// `Image::distinct_colors`, which stops counting at the bound it is given.
+/// A room lit by a sun through a window, an orange lamp, a cool downlight in the
+/// far corner and a cool ambient, over every object and material row the room
+/// declares: a frame with fewer than this drew the clear colour and very little
+/// else. Counted rather than guessed at — see `Image::distinct_colors`, which
+/// stops counting at the bound it is given.
 const MIN_COLORS: usize = 64;
 
 /// Half-extents, in pixels, of the block each claim below averages over.
@@ -511,7 +512,8 @@ fn build(
     // **`t = 0`, like every other screenshot in the tree.** The lamp's orbit is
     // a pure function of the time, so a golden is only worth comparing at a time
     // both runs agree on — and zero is the one the app's own first frame draws.
-    renderer.set_lights(&[room::lamp(0.0)]);
+    // The corner downlight stands still and is in the list at every time.
+    renderer.set_lights(&room::lights(0.0));
     Ok(renderer)
 }
 

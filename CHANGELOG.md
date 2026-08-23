@@ -16,6 +16,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_lantern::room::spot` puts a spot light in lantern's room**, and
+  `room::lights` is the one list both of the sample's views and its golden suite
+  feed to `set_lights` — the sample used to spell `[room::lamp(t)]` at each of
+  those three call sites. It is a cool downlight over the room's back-left
+  corner, which is the one part of the room neither the sun (blocked by the wall
+  below the window's sill) nor the orbiting lamp (out of `LAMP_REACH` from every
+  point on its orbit) reaches, so its cone and its penumbra are legible against
+  what was there rather than added to it. `apps/lantern/tests/golden/room.png`
+  and `live.png` are re-blessed for it.
+
+  **Its cone is drawn and its shadow is not**, which is the shadow atlas rather
+  than the sample: `crcbl_shaders::mesh::SHADOW_LIGHT_TILES` and
+  `SHADOW_POINT_FACES` are the same number, so the light region holds one point
+  light's cube and nothing beside it, and a room with a point light and a spot
+  in it gets one of their two maps. The lamp is the one that gets it, on every
+  frame of its orbit rather than on the frames it happens to win — see
+  `docs/backlog.md`, which carries what it would take for both to be shadowed.
+  No read point in the room moved: every measured value in the golden suite is
+  identical to the run before the light was added.
+
 - **`crcbl_hal::null::NullInstance::with_adapters` and
   `Recorder::refuse_surface_on`** let a null instance list more than one adapter
   and make a named one answer `HalError::Unsupported` for a surface — the

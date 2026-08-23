@@ -58,6 +58,26 @@
 //!
 //! Neither is faked. A fixture whose job is showing what the renderer does must
 //! not flatter it.
+//!
+//! # Three lights, and one of them lights without occluding
+//!
+//! [`sun`] is directional and shadowed through the cascades, [`lamp`] is a point
+//! light shadowed through a cube, and [`spot`] is a cone in the back-left
+//! corner — the one part of the room the other two do not reach. Between them
+//! they are every light kind `crcbl::render::light` has.
+//!
+//! **The downlight's cone is drawn and its shadow is not**, and the reason is
+//! `crcbl::render::shadow`'s atlas rather than anything in this file: its light
+//! region holds [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles, a
+//! point light's cube needs
+//! [`POINT_FACES`](crcbl::render::shadow::POINT_FACES) of them, and the two
+//! constants are the same number — so a room with one point light and one spot
+//! in it can have one of their two maps. The lamp is the one that gets it, on
+//! every frame of its orbit rather than on the frames it happens to win, which
+//! is what this module's `SPOT_REACH` is chosen for and what
+//! `the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` holds. What
+//! it would take for both to be shadowed at once is a decision about that atlas
+//! and it is written up in `docs/backlog.md`.
 
 use std::borrow::Cow;
 
@@ -65,6 +85,7 @@ use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
     Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc,
     InstancePoolError, Light, MeshDesc, PageDesc, PointLight, Projection, RenderEffects, SceneDesc,
+    SpotLight,
 };
 use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
 
@@ -1228,7 +1249,10 @@ const LAMP_INTENSITY: f32 = 4.0;
 /// against the sun's near-white, so which light lit a surface is legible in the
 /// picture rather than a brightness difference — and it is the light that
 /// occludes: `crcbl::render::shadow`'s selection hands the atlas's light tiles
-/// to the most influential candidate, and this is the only candidate.
+/// to the most influential candidate, and [`spot`] is the other candidate. The
+/// two cannot both be shadowed and this one always wins; the module header says
+/// why, and this module's `SPOT_REACH` is what makes it so on every frame rather
+/// than on most of them.
 ///
 /// A pure function of the time, so a frame at `t` is the same frame on every
 /// machine — which is what makes a golden of it worth anything.
@@ -1244,6 +1268,131 @@ pub fn lamp(seconds: f32) -> Light {
         radius: LAMP_REACH,
         color: Vec3::new(1.0, 0.62, 0.28) * LAMP_INTENSITY,
     })
+}
+
+/// Where the corner downlight hangs.
+///
+/// **The back-left corner, which is the one part of this room neither of the
+/// other two lights can reach.** The sun comes in through a window in the `-x`
+/// wall and travels `+x`, so the inner faces of that wall are back-facing to it
+/// and the floor along their foot is below the opening's sill — see
+/// [`SHADED_FLOOR`], which is that same shadow further out into the room.
+/// [`lamp`]'s orbit is centred on the room and [`LAMP_REACH`] is short of this
+/// corner from every point on it. So what is here before the spot is the ambient
+/// term and [`crate::bounce`]'s volume, and nothing else — which is what makes a
+/// cone put down here a cone and not an addition to something.
+const SPOT_AT: Vec3 = Vec3::new(-2.6, 2.2, -2.8);
+
+/// The floor point the cone's **axis** lands on.
+///
+/// The direction [`spot`] emits is derived from this rather than written as a
+/// second pose, on [`monitor_camera`]'s terms: a downlight moved along the wall
+/// takes its aim with it and there is no second place to keep in step.
+///
+/// Nearly under the fitting rather than raking across the room, and the corner
+/// is why: a cone this steep is cut by the floor and by the `-x` wall at once
+/// and reaches the back wall where those two meet, so the pool is one shape laid
+/// across surfaces at three angles — which is a good deal more to read a
+/// penumbra against than an ellipse on a flat floor is.
+const SPOT_POOL: Vec3 = Vec3::new(-2.75, 0.0, -3.15);
+
+/// How far the downlight reaches, on [`LAMP_REACH`]'s terms exactly — the
+/// distance at which `SpotLight::radius`'s window closes.
+///
+/// **Short enough that the lamp always outranks it**, which is the whole of what
+/// keeps this room's shadow atlas deterministic.
+/// `crcbl::render::shadow::Selection` ranks lights by radius over distance to
+/// the eye, and the atlas's light region is exactly one point light's worth of
+/// tiles — so whichever of the two ranks first takes all of them and the other
+/// lights without occluding. A reach that let this spot win on some frames and
+/// lose on others would move the room's one point shadow in and out of the
+/// picture as the lamp orbits.
+/// `the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` is what holds
+/// it, and `docs/backlog.md` carries what it would take for both to be shadowed
+/// at once.
+const SPOT_REACH: f32 = 3.2;
+
+/// Half-angle of the cone's bright core, in radians.
+const SPOT_INNER_ANGLE: f32 = 12.0 * std::f32::consts::PI / 180.0;
+
+/// Half-angle at which the cone closes, in radians.
+///
+/// Twice [`SPOT_INNER_ANGLE`], so half the cone's width is penumbra: the ramp
+/// between the two is the one thing in a frame that a cone written as a boolean
+/// cannot produce, and `crates/crcbl/tests/render_e2e.rs`'s
+/// `the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor` is the engine
+/// golden that measures it on a scene built for nothing else.
+///
+/// Also what keeps every read point in this room out of the cone.
+/// `spot_cone` saturates, so a surface past this angle receives *exactly*
+/// nothing from this light — a bound rather than a tolerance, and the only kind
+/// of exclusion worth asserting.
+/// `the_corner_spot_reaches_no_read_point_in_the_room` is what measures every
+/// margin and names the tightest one, which is the plaster beside the back
+/// wall's far corner.
+const SPOT_OUTER_ANGLE: f32 = 24.0 * std::f32::consts::PI / 180.0;
+
+/// How bright the downlight is, before its colour.
+const SPOT_INTENSITY: f32 = 5.0;
+
+/// Its colour: cool white.
+///
+/// Cool against [`sun`]'s near-white and [`lamp`]'s orange, for the reason the
+/// lamp is orange: three lights that differed only in brightness would leave a
+/// reader unable to say which one lit a surface, and this room's whole job is
+/// being readable.
+const SPOT_COLOR: Vec3 = Vec3::new(0.72, 0.82, 1.0);
+
+/// The corner downlight: `docs/plan/18-render-features.md`'s **spot**, in the
+/// sample.
+///
+/// A cone is the one thing neither of this room's other lights has. The sun is
+/// directional and unbounded, [`lamp`] falls off with distance and in no other
+/// way, and only this one has an angle past which it is *exactly* zero with a
+/// ramp in front of it — see this module's `SPOT_OUTER_ANGLE`.
+///
+/// **It lights and it does not occlude, and that is the engine's budget rather
+/// than an oversight.** `crcbl::render::shadow`'s atlas keeps
+/// [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles for lights that are
+/// not the sun, a point light needs
+/// [`POINT_FACES`](crcbl::render::shadow::POINT_FACES) of them for its cube, and
+/// the two constants are the same number — so a room holding one point light and
+/// one spot has room for one of their maps and not both. [`lamp`] is the one
+/// that gets it, deterministically; see this module's `SPOT_REACH`.
+///
+/// It is also not in [`crate::bounce`]'s gather, which bakes the sun's first
+/// bounce and nothing else — so the pool below is direct light with no indirect
+/// term of its own, exactly as the lamp's pool is.
+///
+/// A static light rather than a second moving one: a golden is worth comparing
+/// only at a time both runs agree on, and a cone that stood still is one whose
+/// shape a reviewer can judge in any frame the sample ever draws.
+#[must_use]
+pub fn spot() -> Light {
+    Light::Spot(SpotLight {
+        position: SPOT_AT,
+        radius: SPOT_REACH,
+        color: SPOT_COLOR * SPOT_INTENSITY,
+        direction: (SPOT_POOL - SPOT_AT).normalize(),
+        inner_angle: SPOT_INNER_ANGLE,
+        outer_angle: SPOT_OUTER_ANGLE,
+    })
+}
+
+/// Every light in the room that is not the sun, at `seconds` into the run.
+///
+/// **One list, so the two views cannot disagree about what is lit.** `crate::gpu`
+/// draws the room twice a frame — the player's view and the monitor's — and the
+/// golden suite draws it a third time out of process; a room whose light list
+/// was spelled at each of those call sites is a room where a light added to one
+/// frame is missing from another, which is a picture rather than an error. The
+/// sun is not in it: [`ForwardRenderer::begin_frame`] takes one of its own, and
+/// it is row 0 of the list the shader reads.
+///
+/// [`ForwardRenderer::begin_frame`]: crcbl::render::ForwardRenderer::begin_frame
+#[must_use]
+pub fn lights(seconds: f32) -> [Light; 2] {
+    [lamp(seconds), spot()]
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,14 +1599,15 @@ mod tests {
         // own volume, and the pool is what the rows are copied into.
         assert_eq!(scene.probes.probes.len() as u32, CAPACITIES.probes);
         assert_eq!(scene.probes.volume.total(), CAPACITIES.probes);
-        // The sun takes a row of the light list too, so the lamp needs room
-        // beside it rather than exactly the whole list.
-        const {
-            assert!(
-                1 + 1 < CAPACITIES.lights,
-                "the sun and the lamp both need a row"
-            );
-        }
+        // The sun takes a row of the light list too, so `room::lights` needs
+        // room beside it rather than exactly the whole list.
+        let punctual = lights(0.0).len() as u32;
+        assert!(
+            punctual < CAPACITIES.lights,
+            "the room's punctual lights fill the list and leave the sun no row: \
+             {punctual} of {}",
+            CAPACITIES.lights
+        );
     }
 
     /// **Every quad faces into the room**, which is the one mistake in this file
@@ -1605,6 +1755,218 @@ mod tests {
         }
     }
 
+    /// Every point this room's assertions are aimed at, and what each one is
+    /// evidence about.
+    ///
+    /// Written out here rather than derived, because the whole value of the list
+    /// is that it is the *complete* set: a read point missing from it is a claim
+    /// the spot could quietly start contributing to.
+    const READ_POINTS: [(&str, Vec3); 9] = [
+        ("SUNLIT_FLOOR", SUNLIT_FLOOR),
+        ("SHADED_FLOOR", SHADED_FLOOR),
+        ("TINTED_PLASTER", TINTED_PLASTER),
+        ("UNTINTED_PLASTER", UNTINTED_PLASTER),
+        ("MIRROR_FOOT", MIRROR_FOOT),
+        ("MIRROR_MISSES", MIRROR_MISSES),
+        ("BRASS_AT", BRASS_AT),
+        ("BRASS_BACK", BRASS_BACK),
+        ("SCREEN_AT", SCREEN_AT),
+    ];
+
+    /// **The corner downlight contributes exactly nothing at any point this
+    /// room's other claims are read at**, so adding it moved none of them.
+    ///
+    /// Two hard bounds and no tolerance between them: `punctual_falloff` reaches
+    /// zero at [`SPOT_REACH`] and `spot_cone` saturates outside
+    /// [`SPOT_OUTER_ANGLE`], so a point past either receives nothing at all
+    /// rather than a little. Each read point has to clear one of them, and the
+    /// margin is printed so a placement that drifted towards a claim is visible
+    /// before it arrives.
+    ///
+    /// **The pool is checked first**, and that is what stops this passing
+    /// vacuously: a spot aimed out of the room, or one whose reach closed before
+    /// its own axis landed, clears every read point below by lighting nothing.
+    #[test]
+    fn the_corner_spot_reaches_no_read_point_in_the_room() {
+        let Light::Spot(light) = spot() else {
+            panic!("the corner downlight is a spot light");
+        };
+        assert!(
+            light.inner_angle <= light.outer_angle,
+            "the cone's core is wider than the cone: {light:?}"
+        );
+
+        // The axis lands on the floor, inside the room, and inside its own
+        // reach — which is the claim that there is a cone here to exclude
+        // things from.
+        let throw = SPOT_AT.distance(SPOT_POOL);
+        assert!(
+            throw < light.radius,
+            "the axis lands {throw:.3} m out and the reach closes at {}, so the pool is \
+             unlit and every exclusion below is free",
+            light.radius
+        );
+        assert_eq!(SPOT_POOL.y, 0.0, "the pool is not on the floor");
+        assert!(
+            SPOT_POOL.x.abs() < HALF_WIDTH && SPOT_POOL.z.abs() < HALF_DEPTH,
+            "the pool is outside the room: {SPOT_POOL:?}"
+        );
+        assert!(
+            SPOT_AT.y < HEIGHT && SPOT_AT.x.abs() < HALF_WIDTH && SPOT_AT.z.abs() < HALF_DEPTH,
+            "the fitting hangs outside the room: {SPOT_AT:?}"
+        );
+
+        let mut tightest: Option<(f32, &str)> = None;
+        for (name, point) in READ_POINTS {
+            let offset = point - SPOT_AT;
+            let distance = offset.length();
+            let angle = (offset.normalize().dot(light.direction))
+                .clamp(-1.0, 1.0)
+                .acos();
+            assert!(
+                distance > light.radius || angle > light.outer_angle,
+                "{name} at {point:?} is {distance:.3} m from the downlight and \
+                 {:.1}° off its axis, which is inside a reach of {} and a cone of {:.1}° — \
+                 the claim read there is no longer about what it says it is",
+                angle.to_degrees(),
+                light.radius,
+                light.outer_angle.to_degrees(),
+            );
+            // The angular margin of the points the reach does not already
+            // exclude, which is the one a change of aim eats into.
+            if distance <= light.radius {
+                let margin = angle - light.outer_angle;
+                if tightest.is_none_or(|(held, _)| margin < held) {
+                    tightest = Some((margin, name));
+                }
+            }
+        }
+        let (margin, name) = tightest.expect(
+            "some read point is within the downlight's reach, or the reach is a bound on \
+             nothing",
+        );
+        eprintln!(
+            "lantern room: the corner downlight clears its nearest read point, {name}, by \
+             {:.1}° of cone",
+            margin.to_degrees()
+        );
+    }
+
+    /// **The corner of the room the downlight is in is the one neither of the
+    /// other two lights reaches**, which is what makes its cone legible at all.
+    ///
+    /// A pool laid over floor the sun already lights, or floor the lamp sweeps,
+    /// is a pool nobody can pick out of what was there before — and a frame with
+    /// one is a frame that says nothing about a cone. Both halves are geometry
+    /// and neither needs a device: the ray back along the sun meets the window
+    /// wall below the opening's sill, and the whole of the lamp's orbit stays
+    /// further from the pool than [`LAMP_REACH`].
+    #[test]
+    fn the_corner_the_downlight_stands_in_is_dark_without_it() {
+        let towards = sun().direction;
+        let steps = (SPOT_POOL.x + HALF_WIDTH) / towards.x.abs();
+        let (height, run) = (
+            SPOT_POOL.y + towards.y * steps,
+            SPOT_POOL.z + towards.z * steps,
+        );
+        assert!(
+            !(WINDOW_SILL..=WINDOW_HEAD).contains(&height) || run.abs() > WINDOW_HALF,
+            "the ray back from {SPOT_POOL:?} meets the window wall at ({height:.2}, \
+             {run:.2}), which is inside the opening — the sun is already on the pool"
+        );
+
+        let mut nearest = f32::INFINITY;
+        for step in 0..360 {
+            let seconds = LAMP_PERIOD * step as f32 / 360.0;
+            let Light::Point(light) = lamp(seconds) else {
+                panic!("the lamp is a point light");
+            };
+            nearest = nearest.min(SPOT_POOL.distance(light.position));
+        }
+        assert!(
+            nearest > LAMP_REACH,
+            "the lamp passes within {nearest:.3} m of {SPOT_POOL:?} and reaches \
+             {LAMP_REACH} — the two pools overlap at some point in the orbit"
+        );
+        eprintln!(
+            "lantern room: the lamp's closest approach to the downlight's pool is \
+             {nearest:.3} m against a reach of {LAMP_REACH}"
+        );
+    }
+
+    /// **The shadow atlas goes to the lamp, on every frame of the orbit** — and
+    /// the downlight lights without occluding.
+    ///
+    /// `crcbl::render::shadow`'s light region holds
+    /// [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles, a point light
+    /// needs [`POINT_FACES`](crcbl::render::shadow::POINT_FACES) of them for its
+    /// cube, and the two constants are the same number — so this room's two
+    /// punctual lights cannot both be shadowed and the selection decides which
+    /// one is. It decides by radius over distance to the eye, and the lamp
+    /// *moves*, so "the lamp wins" is a claim about the whole orbit rather than
+    /// about the frame the goldens are taken at: a spot that won on some phases
+    /// would move the room's one point shadow in and out of the picture.
+    ///
+    /// **The last claim is what makes the first one about the budget.** Given
+    /// the downlight alone the selection hands it a tile at once — so the
+    /// refusal above is contention for the region and not the spot being
+    /// ineligible, which is a different bug with the same symptom.
+    #[test]
+    fn the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit() {
+        use crcbl::render::shadow::{LIGHT_TILES, POINT_FACES, Selection};
+
+        const {
+            assert!(
+                LIGHT_TILES < 1 + POINT_FACES,
+                "the atlas now has room for a point light's cube and a spot's tile side by \
+                 side, so the reason for everything below has gone: this room should shadow \
+                 both of its punctual lights, and the golden that says otherwise is stale"
+            );
+        }
+
+        let eye = fixed_camera().eye;
+        let held_by = |selection: &Selection| -> Vec<usize> {
+            selection
+                .slots()
+                .iter()
+                .flatten()
+                .map(|assignment| assignment.light)
+                .collect()
+        };
+        // Two sweeps of the same orbit. The first is the run the sample makes:
+        // one selection carried frame to frame, hysteresis and all. The second
+        // starts each phase from nothing — `HOLD_RATIO` boosts whatever held a
+        // tile last frame, so a run that began at some other time is the case
+        // the first sweep cannot see, and a room whose shadow depended on when
+        // it was started is not a fixture.
+        let mut carried = Selection::default();
+        for step in 0..360 {
+            let seconds = LAMP_PERIOD * step as f32 / 360.0;
+            let lights = lights(seconds);
+            carried.update(&lights, eye);
+            let mut fresh = Selection::default();
+            fresh.update(&lights, eye);
+            for (held, how) in [(held_by(&carried), "carried"), (held_by(&fresh), "fresh")] {
+                assert_eq!(
+                    held,
+                    vec![0],
+                    "at {seconds:.3}s a {how} selection gave the atlas to {held:?} of \
+                     {lights:?} — the room's shadow is supposed to be the lamp's on every \
+                     frame, whenever the run started"
+                );
+            }
+        }
+
+        let mut alone = Selection::default();
+        alone.update(&[spot()], eye);
+        assert!(
+            alone.slots().iter().flatten().count() == 1,
+            "the downlight on its own is refused a tile as well, so it is ineligible \
+             rather than outbid: {:?}",
+            spot()
+        );
+    }
+
     /// The fixed camera stands in the room, at eye height, looking at something
     /// inside it.
     ///
@@ -1644,6 +2006,12 @@ mod tests {
     /// [`lamp`]'s radius at `t = 0`, so the light that moves contributes to
     /// neither; and neither is under an object that would occlude the sun before
     /// it arrives.
+    ///
+    /// The corner downlight is the room's third light and it reaches neither of
+    /// them either. That is not repeated here, because
+    /// `the_corner_spot_reaches_no_read_point_in_the_room` makes the claim once
+    /// for every read point in the file — which is the only shape of it that
+    /// stays true as points are added.
     #[test]
     fn the_two_floor_samples_differ_in_the_sun_and_in_nothing_else() {
         let towards = sun().direction;
