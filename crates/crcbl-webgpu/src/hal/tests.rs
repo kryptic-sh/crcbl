@@ -841,6 +841,107 @@ fn image_and_swapchain_descriptors_are_checked_before_anything_is_encoded() {
     );
 }
 
+/// A write or a readback past the end of the buffer it names, and a handle this
+/// device never issued.
+///
+/// Both ranges are decidable here and were decided nowhere: `write_buffer`
+/// checked only that its end address fits a `u64`, and `request_readback`
+/// checked nothing at all. `queue.writeBuffer` past the end *is* a WebGPU
+/// validation error, so the refusal did arrive — a frame later, in the
+/// browser's words, through `take_error`, which is the same "arrives, but not
+/// from the call" exception `create_pipeline_layout` documents. The seam says
+/// `InvalidDescriptor` from the call, as the other four backends answer.
+///
+/// The stale-handle arm is the half a size table makes possible at all: with no
+/// record of the buffer there is nothing to compare against, so a handle from a
+/// destroyed or foreign buffer used to encode a command naming an id the
+/// replayer would fail to resolve, a frame away.
+#[test]
+fn a_write_or_readback_past_the_end_of_its_buffer_is_refused() {
+    let (channel, device) = device_on_fresh_channel();
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    // `buffer_desc` is 256 bytes.
+    let buffer = device.create_buffer(&buffer_desc()).expect("a buffer");
+    assert_eq!(names(&channel), vec!["CreateBuffer"]);
+
+    let readback = |offset, size| {
+        device.request_readback(&ReadbackDesc {
+            label: None,
+            buffer,
+            offset,
+            size,
+            after: None,
+        })
+    };
+
+    // One byte past the end, from both directions, on both calls.
+    for (case, error) in [
+        (
+            "a write past the end",
+            device.write_buffer(buffer, 250, &[0; 7]),
+        ),
+        (
+            "a write starting past the end",
+            device.write_buffer(buffer, 256, &[0; 1]),
+        ),
+    ] {
+        let error = error.expect_err("{case} runs off the end of a 256-byte buffer");
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{case}: {error}"
+        );
+        assert!(format!("{error}").contains("256-byte"), "{case}: {error}");
+    }
+    for (case, offset, size) in [
+        ("a readback past the end", 250, 7),
+        ("a readback starting past the end", 256, 1),
+    ] {
+        let error = readback(offset, size).expect_err("{case} reads off the end");
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{case}: {error}"
+        );
+        assert!(format!("{error}").contains("256-byte"), "{case}: {error}");
+    }
+    assert_eq!(
+        names(&channel),
+        vec!["CreateBuffer"],
+        "a refused range must not reach the wire"
+    );
+
+    // Exactly to the end is legal on both, which is what keeps the two checks
+    // from being off-by-one in the direction that refuses valid work.
+    device
+        .write_buffer(buffer, 250, &[0; 6])
+        .expect("a write ending exactly at the end is in range");
+    readback(250, 6).expect("so is a readback");
+
+    // And a destroyed buffer is stale rather than silently encoded — the arm
+    // the table makes possible at all, since with no record there is nothing to
+    // compare a range against. (A buffer from *another* device is not tested
+    // here: `device_on_fresh_channel` gives each device its own `HandlePool`
+    // starting at the same place, so two devices' first buffers share their
+    // bits. Cross-device handles are the agnostic suite's
+    // `a_handle_from_one_device_is_foreign_to_another`, on backends whose
+    // handles carry a device tag.)
+    device.destroy_buffer(buffer);
+    let error = device
+        .write_buffer(buffer, 0, &[0; 4])
+        .expect_err("a destroyed buffer is not one to write into");
+    assert!(
+        matches!(error, HalError::InvalidHandle { .. }),
+        "a stale handle is stale, not a bad descriptor: {error}"
+    );
+}
+
 // ── (d) a recorded frame's command stream ──────────────────────────────────
 
 #[test]
@@ -931,9 +1032,12 @@ fn write_buffer_encodes_a_write_buffer_command() {
 fn a_readback_polls_ready_on_a_readback_reply() {
     let (channel, device) = device_on_fresh_channel();
 
-    // A fabricated source buffer handle: request_readback needs one but never
-    // creates it, so the readback poll stays the second command (sequence 1).
-    let source: BufferHandle = Handle::from_bits((1 << 32) | 1).expect("a real handle");
+    // A real source buffer, because `request_readback` holds its range against
+    // the size this device recorded and refuses a handle it never issued. That
+    // makes `CreateBuffer` sequence 0, the readback 1 and the poll 2.
+    let source = device
+        .create_buffer(&buffer_desc())
+        .expect("a source buffer");
     let desc = ReadbackDesc {
         label: None,
         buffer: source,
@@ -950,8 +1054,8 @@ fn a_readback_polls_ready_on_a_readback_reply() {
         ReadbackState::Pending,
     );
 
-    // request_readback is sequence 0 (not awaited), the poll is sequence 1.
-    feed(&channel, |w| w.readback_ready(1, readback, &[1, 2, 3, 4]));
+    // CreateBuffer is sequence 0, request_readback 1 (not awaited), the poll 2.
+    feed(&channel, |w| w.readback_ready(2, readback, &[1, 2, 3, 4]));
     assert_eq!(
         device.poll_readback(readback, &mut out).expect("poll"),
         ReadbackState::Ready,
@@ -971,7 +1075,11 @@ fn a_readback_polls_ready_on_a_readback_reply() {
 fn a_failed_readback_reports_the_reason_rather_than_polling_for_ever() {
     let (channel, device) = device_on_fresh_channel();
 
-    let source: BufferHandle = Handle::from_bits((1 << 32) | 1).expect("a real handle");
+    // A real source, for `a_readback_polls_ready_on_a_readback_reply`'s reason:
+    // the range check needs a size this device recorded.
+    let source = device
+        .create_buffer(&buffer_desc())
+        .expect("a source buffer");
     let desc = ReadbackDesc {
         label: None,
         buffer: source,
@@ -987,9 +1095,9 @@ fn a_failed_readback_reports_the_reason_rather_than_polling_for_ever() {
         ReadbackState::Pending,
     );
 
-    // request_readback is sequence 0 (not awaited), the poll is sequence 1.
+    // CreateBuffer is sequence 0, request_readback 1 (not awaited), the poll 2.
     feed(&channel, |w| {
-        w.readback_failed(1, readback, "mapAsync rejected: device was lost");
+        w.readback_failed(2, readback, "mapAsync rejected: device was lost");
     });
     let error = device
         .poll_readback(readback, &mut out)

@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-webgpu` refuses a write or a readback past the end of its buffer.**
+  `Device::write_buffer` checked only that its end address fits a `u64`, and
+  `Device::request_readback` checked nothing, so a range past the end of the
+  buffer was an `InvalidDescriptor` on the other four backends and an encoded
+  command here. The device now records each live buffer's size — the same table
+  it already keeps for query-set counts, for the same reason: the browser is not
+  needed to know how big a buffer this device asked for. A stale or unissued
+  buffer handle is now `HalError::InvalidHandle` from these two calls rather
+  than a command naming an id the replayer would fail to resolve a frame later.
+  Callers already writing in range see no change.
+
 - **`crcbl-webgpu` checks image and swapchain descriptors instead of encoding
   them.** `create_image` ran no validation at all: a zero extent, an extent past
   `max_image_2d`/`max_image_3d`, more array layers than the device allows, zero

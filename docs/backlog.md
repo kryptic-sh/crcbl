@@ -6076,78 +6076,39 @@ confirmed; the rest of this file assumes them.
   Preserves sample rule 7 and demonstrates the matchmaker and rating curve; only
   the transport is absent.
 
-## `crcbl-webgpu` cannot pre-check a buffer binding's range (2026-08-23)
+## `crcbl-webgpu` keeps no bind group layout table (2026-08-24)
 
-The two range limits — `Limits::max_uniform_buffer_range` and
-`max_storage_buffer_range` — are now enforced at `create_bind_group` by the null
-backend and by `crcbl-vk` (`write_descriptors`, which the update path shares).
-`crcbl-webgpu` cannot join them: its device is a command-stream encoder that
-holds no buffer sizes, so `BindingResource::WHOLE_BUFFER` — the commoner
-spelling — has nothing to resolve against, and a check of explicit sizes alone
-would be a guard that misses most bindings.
+Two seam rules are still unenforced on this backend, and both are blocked on the
+same missing state — **not** the buffer table, which now exists. `WebGpuDevice`
+keeps `buffers: HashMap<u64, u64>` (handle bits to size), added for
+`write_buffer` and `request_readback`, alongside the `query_sets` size table
+that set the precedent. What it does not keep is any record of a **bind group
+layout**, and both remaining rules turn on the slot's `BindingKind`, which lives
+there:
 
-Nothing is unsafe there: WebGPU validates `maxUniformBufferBindingSize` and
-`maxStorageBufferBindingSize` itself at `createBindGroup`, so the refusal
-arrives, through `Device::take_error` rather than from the call — the same
-exception `create_pipeline_layout` already documents.
-`Device::create_bind_group` says so.
+- **A binding range against `Limits::max_uniform_buffer_range` /
+  `max_storage_buffer_range`.** The ceiling depends on whether the slot is a
+  uniform or a storage binding. Sizes are now resolvable, so
+  `BindingResource::WHOLE_BUFFER` — the commoner spelling, and the reason this
+  looked impossible before — is no longer the obstacle. Nothing is unsafe
+  meanwhile: WebGPU validates `maxUniformBufferBindingSize` and
+  `maxStorageBufferBindingSize` itself at `createBindGroup`, so the refusal
+  arrives through `Device::take_error` rather than from the call — the same
+  exception `create_pipeline_layout` documents, and `Device::create_bind_group`
+  says so.
+- **A writable storage binding of host-visible memory** (see the entry below).
+  This one needs the layout's `read_only` flag _and_ the buffer's
+  `MemoryLocation`, which is why `BufferState` was narrowed to a bare size:
+  storing the location with no way to read the slot kind would have been a field
+  nothing reads.
 
-Closing it means the encoder keeping a handle→size table for buffers it created,
-which is state this backend has deliberately not had. Worth doing only if a
-second obligation wants the same table; one caller's convenience does not pay
-for a mirror of the browser's own bookkeeping.
-
-## Three backends keep their own copy of the image rules (2026-08-24)
-
-`ImageDesc::check` now lives on the seam (`crcbl-hal/src/resource.rs`), lifted
-verbatim out of the null backend — the reference the others are compared
-against, so the messages had to stay exact — and called by the null backend and
-by `crcbl-webgpu`. `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` each still carry a
-hand-written copy of the same rules in their own `create_image`, with their own
-wording (`crcbl-vk/src/device.rs` opens with "ImageDesc::extent {:?} has a zero
-dimension" where the seam says "image extent must be non-zero in every
-dimension").
-
-Consolidating them is the obvious next step and was deliberately not done here.
-The cost is not the call: it is that each of those three has tests asserting its
-own sentences, and `crcbl-mtl` and `crcbl-dx12` cannot be run on this machine,
-so the wording change lands as a CI round trip per backend. Doing it well means
-one backend per slice, its own tests updated in the same change, and the
-agnostic suite asserting the shared wording afterwards.
-
-**What each copy might not have** was not audited — this entry is about the
-duplication, not about a specific missing rule. Checking whether the three
-copies agree with the seam's set, rule for rule, is itself worth a slice: two
-copies is already the bug, and three have had every opportunity to drift.
-
-## The WSI swapchain-format check has no e2e, and WebGPU has no check (2026-08-24)
-
-`SwapchainDesc::format` "must be one of `SurfaceCaps::formats`" is now refused
-by `crcbl-vk` on both its paths (`check_swapchain_format` in
-`crcbl-vk/src/swapchain.rs`, called from `build_offscreen_ring` and from
-`build_swapchain`), joining the null, Metal and D3D12 backends. Two gaps are
-left, and neither is a bug in what shipped:
-
-- **The WSI call site is not reached by any test.** The agnostic
-  `a_swapchain_format_the_surface_does_not_offer_is_refused` in
-  `crates/crcbl/tests/hal_seam_e2e.rs` runs against an offscreen surface,
-  because that suite is offscreen by construction; `run-wayland-e2e.sh` and
-  `run-x11-e2e.sh` do reach a real surface but only ever with a format that
-  passes. So the shared helper is unit-tested
-  (`a_format_the_surface_does_not_offer_is_refused_by_name`) and the WSI arm is
-  one line calling it against `surface_formats`, the same function
-  `build_surface_caps` uses — which is why it was extracted rather than
-  re-derived. Covering it properly means a windowed harness that asks for a
-  format it knows the surface lacks, which is a new mode on those scripts.
-- **`crcbl-webgpu::create_swapchain` validates nothing at all** — not the
-  format, not the extent, which the seam refuses on every other backend
-  (`a_zero_extent_swapchain_is_refused_with_a_reason`). It allocates a handle,
-  encodes `CreateSwapchain` and answers `Ok`. Neither is caught by the seam
-  suite, which is a native binary and cannot reach this backend. Unlike the
-  buffer-table cases, the format one looks cheap: `Instance::surface_caps`
-  already answers a real `SurfaceCaps` over the channel, so the device caching
-  the caps for the surface it was opened against would be enough. The extent
-  needs nothing at all. Worth a slice of its own; it was not this one.
+What that table costs: one `Vec` of `(binding, BindingKind)` per live layout,
+inserted at `create_bind_group_layout` and removed at its destroy. It is more
+than the two scalar tables this device already keeps, but it is the same shape,
+and it is now two obligations rather than one — which was the stated condition
+for building it. The argument against is unchanged and still real: it mirrors
+bookkeeping the browser also keeps, and the browser catches one of the two rules
+on its own.
 
 ## Two backends still take a writable storage binding of host memory (2026-08-24)
 
@@ -6163,18 +6124,21 @@ this entry — by `crcbl-vk` (`write_descriptors`, covered by
 - **`crcbl-mtl`** (`binding.rs`, the buffer arm of its bind-group builder) —
   DEFERRED, so this is a record, not a task. Metal has no such restriction of
   its own, so a caller who gets this wrong sees it only on D3D12.
-- **`crcbl-webgpu`** (`hal::device::create_bind_group`) — blocked on the same
-  missing state as the range check above: the encoder holds no handle→buffer
-  table, so it cannot look up the location a handle was created with. The
-  browser catches **half** of it by accident, and the halves are worth telling
-  apart, because `MEMORY_LOCATION_USAGE` in `web/engine/gpu-replay.js` maps the
-  two host locations to different bits. `HostReadback` becomes `MAP_READ`, which
-  the specification lets carry `COPY_DST` and nothing else, so
-  `MAP_READ | STORAGE` is refused at `createBuffer` — arriving as a usage error
-  rather than as this rule, and one call earlier than the seam states it.
-  `HostUpload` becomes `COPY_DST`, so `COPY_DST | STORAGE` is an ordinary legal
-  WebGPU buffer and the writable binding is accepted in full. That is the case a
-  caller would ship and only discover on D3D12.
+- **`crcbl-webgpu`** (`hal::device::create_bind_group`) — blocked on the bind
+  group layout table the entry above describes, not on the buffer table, which
+  now exists. Reading the buffer's location is no longer the hard half; reading
+  the slot's `read_only` flag is, and that lives in a layout this device keeps
+  no record of. (An earlier version of this entry named the buffer table as the
+  blocker. That was half right and is corrected here.) The browser catches
+  **half** of it by accident, and the halves are worth telling apart, because
+  `MEMORY_LOCATION_USAGE` in `web/engine/gpu-replay.js` maps the two host
+  locations to different bits. `HostReadback` becomes `MAP_READ`, which the
+  specification lets carry `COPY_DST` and nothing else, so `MAP_READ | STORAGE`
+  is refused at `createBuffer` — arriving as a usage error rather than as this
+  rule, and one call earlier than the seam states it. `HostUpload` becomes
+  `COPY_DST`, so `COPY_DST | STORAGE` is an ordinary legal WebGPU buffer and the
+  writable binding is accepted in full. That is the case a caller would ship and
+  only discover on D3D12.
 
 **This is the second obligation asking for that table**, which the range-check
 entry named as the condition for building it: make it handle→{size, location}

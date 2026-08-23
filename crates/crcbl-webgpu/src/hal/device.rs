@@ -317,6 +317,23 @@ pub struct WebGpuDevice {
     /// What this device remembers about each live swapchain, keyed by handle
     /// bits. See [`SwapchainState`].
     swapchains: Mutex<HashMap<u64, SwapchainState>>,
+    /// The size of each live buffer, keyed by handle bits.
+    ///
+    /// Exactly [`query_sets`](Self::query_sets)' reason, for exactly its class
+    /// of question: the browser is not needed to know how big a buffer this
+    /// device asked for. That makes a write or a readback past the end of one
+    /// decidable here rather than a frame away, which is what
+    /// [`write_buffer`](Device::write_buffer) and
+    /// [`request_readback`](Device::request_readback) use it for.
+    ///
+    /// **Two further seam rules want a second table, not this one.** A binding
+    /// range against
+    /// [`Limits::max_uniform_buffer_range`](crcbl_hal::Limits::max_uniform_buffer_range)
+    /// and a writable storage binding of host-visible memory both turn on the
+    /// *slot's* [`BindingKind`](crcbl_hal::BindingKind), which lives in the bind
+    /// group layout — and this device keeps no layout table, so it cannot tell
+    /// a uniform binding from a storage one. `docs/backlog.md` carries that.
+    buffers: Mutex<HashMap<u64, u64>>,
 }
 
 /// What a live swapchain leaves in this device between calls.
@@ -357,7 +374,46 @@ impl WebGpuDevice {
             query_reads: Mutex::new(HashMap::new()),
             errors: Mutex::new(ErrorQueue::default()),
             swapchains: Mutex::new(HashMap::new()),
+            buffers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Refuses a range that runs past the end of the buffer it names.
+    ///
+    /// An unknown handle is [`HalError::InvalidHandle`], not a pass: the
+    /// alternative is skipping the rule for exactly the descriptors most likely
+    /// to be wrong, and every other backend answers a destroyed or foreign
+    /// buffer handle that way.
+    ///
+    /// `what` names the call, because a caller reading "128 bytes at offset
+    /// 1024 of a 512-byte buffer" needs to know which of its two range-taking
+    /// calls produced it.
+    fn check_buffer_range(
+        &self,
+        what: &str,
+        buffer: BufferHandle,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), HalError> {
+        let capacity = self
+            .buffers
+            .lock()
+            .expect("the buffer map was poisoned")
+            .get(&buffer.to_bits())
+            .copied()
+            .ok_or_else(|| HalError::invalid_handle("buffer", buffer))?;
+        let end = offset.checked_add(size).ok_or_else(|| {
+            HalError::InvalidDescriptor(format!(
+                "{what} names {size} bytes at offset {offset}, which runs past the end of the u64 \
+                 address space"
+            ))
+        })?;
+        if end > capacity {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{what} names {size} bytes at offset {offset} of a {capacity}-byte buffer"
+            )));
+        }
+        Ok(())
     }
 
     /// A clone of the channel this device encodes through, for inspecting the
@@ -705,12 +761,20 @@ impl Device for WebGpuDevice {
         let handle: BufferHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_buffer(handle, desc)));
+        self.buffers
+            .lock()
+            .expect("the buffer map was poisoned")
+            .insert(handle.to_bits(), desc.size);
         Ok(handle)
     }
 
     fn destroy_buffer(&self, buffer: BufferHandle) {
         self.channel
             .with(|channel| channel.encode(|stream| stream.destroy_buffer(buffer)));
+        self.buffers
+            .lock()
+            .expect("the buffer map was poisoned")
+            .remove(&buffer.to_bits());
     }
 
     fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
@@ -730,12 +794,18 @@ impl Device for WebGpuDevice {
                 data.len()
             )));
         }
+        // …and the range against the buffer itself, which this device knows
+        // because it recorded what it asked for. `queue.writeBuffer` past the
+        // end is a WebGPU validation error, so the refusal did arrive — a frame
+        // later, in the browser's words, through `take_error`.
+        self.check_buffer_range("Device::write_buffer", buffer, offset, data.len() as u64)?;
         self.channel
             .with(|channel| channel.encode(|stream| stream.write_buffer(buffer, offset, data)));
         Ok(())
     }
 
     fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
+        self.check_buffer_range("ReadbackDesc", desc.buffer, desc.offset, desc.size)?;
         let handle: ReadbackHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.request_readback(handle, desc)));
