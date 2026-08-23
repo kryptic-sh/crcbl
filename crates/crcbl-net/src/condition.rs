@@ -307,7 +307,15 @@ impl<T: Transport, C: Clock> ConditionSimulator<T, C> {
 
     /// Move all due pending messages into `self.ready`, optionally reorder,
     /// then forward them to the inner transport.
-    fn drain_pending(&mut self) {
+    ///
+    /// Forwarding stops at the first message the inner transport refuses, and
+    /// that message stays at the head of `self.ready` for the next drain. A
+    /// latency setting turns a steady stream into a burst on release, so a
+    /// bounded inner channel filling up is something this type *causes*;
+    /// dropping there would inject loss the caller never configured. The
+    /// refusal is returned rather than held: the simulator models the
+    /// conditions it was given, and a broken wire underneath is not one.
+    fn drain_pending(&mut self) -> Result<(), TransportError> {
         let now = self.clock.now();
 
         // Collect due messages via swap_remove — order of the *remaining*
@@ -332,16 +340,29 @@ impl<T: Transport, C: Clock> ConditionSimulator<T, C> {
             }
         }
 
-        // Forward to inner transport.
-        for msg in self.ready.drain(..) {
-            match msg.kind {
-                MessageKind::Reliable => {
-                    let _ = self.inner.send_reliable(msg);
-                }
-                MessageKind::Unreliable => {
-                    let _ = self.inner.send_unreliable(msg);
+        // Forward to inner transport. The clone is what lets a refused
+        // message be retried: the send consumes it and the error does not
+        // hand it back.
+        let mut forwarded = 0;
+        let mut refused = None;
+        for msg in &self.ready {
+            let sent = match msg.kind {
+                MessageKind::Reliable => self.inner.send_reliable(msg.clone()),
+                MessageKind::Unreliable => self.inner.send_unreliable(msg.clone()),
+            };
+            match sent {
+                Ok(()) => forwarded += 1,
+                Err(e) => {
+                    refused = Some(e);
+                    break;
                 }
             }
+        }
+        self.ready.drain(..forwarded);
+
+        match refused {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 }
@@ -353,6 +374,12 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
         if !self.inner.is_connected() {
             return Err(TransportError::Disconnected);
         }
+        // Flush what is already due before accepting anything new. A refusal
+        // from underneath reaches the caller only here, where it is
+        // unambiguous backpressure: this message has not been taken, so
+        // retrying it cannot duplicate it.
+        self.drain_pending()?;
+
         // The channel the caller chose is the channel the message keeps: the
         // simulator re-routes buffered messages by `kind`, so `kind` has to be
         // set here rather than trusted from the caller.
@@ -360,7 +387,6 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
 
         // Loss check (before consuming the message).
         if self.next_f64() < self.conditions.loss_rate {
-            self.drain_pending();
             return Ok(());
         }
 
@@ -373,7 +399,12 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
             self.enqueue(m);
         }
 
-        self.drain_pending();
+        // A refusal here is a delay, not a loss: the message stays in
+        // `self.ready` and every entry point drains before it does anything
+        // else, so a channel that is still full refuses again on the next
+        // call — and reports it there, where the caller has not yet handed
+        // over anything to lose.
+        let _ = self.drain_pending();
         Ok(())
     }
 
@@ -381,10 +412,11 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
         if !self.inner.is_connected() {
             return Err(TransportError::Disconnected);
         }
+        self.drain_pending()?;
+
         msg.kind = MessageKind::Unreliable;
 
         if self.next_f64() < self.conditions.loss_rate {
-            self.drain_pending();
             return Ok(());
         }
 
@@ -396,17 +428,22 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
             self.enqueue(m);
         }
 
-        self.drain_pending();
+        // A refusal here is a delay, not a loss: the message stays in
+        // `self.ready` and every entry point drains before it does anything
+        // else, so a channel that is still full refuses again on the next
+        // call — and reports it there, where the caller has not yet handed
+        // over anything to lose.
+        let _ = self.drain_pending();
         Ok(())
     }
 
     fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
-        self.drain_pending();
+        self.drain_pending()?;
         self.inner.recv_reliable()
     }
 
     fn recv(&mut self) -> Result<Option<Message>, TransportError> {
-        self.drain_pending();
+        self.drain_pending()?;
         self.inner.recv()
     }
 
@@ -446,7 +483,7 @@ fn deterministic_shuffle<T>(items: &mut [T], seed: &mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InMemoryTransport;
+    use crate::{IN_MEMORY_CHANNEL_CAPACITY, InMemoryTransport};
     use std::thread;
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -782,7 +819,7 @@ mod tests {
         // Stage the ready queue directly: the windowing is what is under test,
         // not the latency scheduling that would normally fill it.
         sim.ready.extend((0..12u8).map(msg));
-        sim.drain_pending();
+        sim.drain_pending().unwrap();
 
         let payloads: Vec<u8> = drain_all(&mut b).iter().map(|m| m.payload[0]).collect();
         assert_eq!(payloads.len(), 12);
@@ -798,6 +835,49 @@ mod tests {
                 "message {payload} moved {moved} places, past the window of 3: {payloads:?}"
             );
         }
+    }
+
+    /// Latency turns a steady stream into a burst on release, so the simulator
+    /// is what fills a bounded inner channel — and a message dropped there
+    /// would be loss the caller never configured, arriving as if the wire had
+    /// eaten it. It has to wait instead, and the refusal has to reach the
+    /// caller at the next hand-off, where nothing has been taken yet.
+    #[test]
+    fn a_full_inner_channel_delays_a_message_and_refuses_the_next() {
+        let (a, mut b) = InMemoryTransport::pair();
+        let mut sim = ConditionSimulator::new(
+            a,
+            SimConditions {
+                seed: 0,
+                ..Default::default()
+            },
+        );
+
+        for i in 0..IN_MEMORY_CHANNEL_CAPACITY {
+            sim.send_reliable(msg(i as u8))
+                .expect("the inner channel still has room");
+        }
+
+        // One past capacity. The simulator takes it — it is holding, not
+        // dropping — so the caller has nothing to retry.
+        sim.send_reliable(msg(0xAA))
+            .expect("a held message must not be reported as a failed send");
+
+        // The next hand-off has nowhere to go, and says so rather than
+        // stacking behind a queue that cannot move.
+        assert!(
+            matches!(
+                sim.send_reliable(msg(0xBB)),
+                Err(TransportError::Backpressure)
+            ),
+            "a send into a stalled queue reported success",
+        );
+
+        // Emptying the far end unblocks the held message: it was delayed.
+        assert_eq!(drain_all(&mut b).len(), IN_MEMORY_CHANNEL_CAPACITY);
+        sim.recv().expect("the channel has room again");
+        let held: Vec<u8> = drain_all(&mut b).iter().map(|m| m.payload[0]).collect();
+        assert_eq!(held, vec![0xAA], "the held message never arrived");
     }
 
     #[test]

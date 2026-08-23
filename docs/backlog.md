@@ -187,12 +187,6 @@ only input is affected. A game that read its state from snapshots would not be.
   whole `HANDSHAKE_TIMEOUT` before another is sent; at 30 % loss, sessions
   regularly fail to come up inside `IMPAIRED_HANDSHAKE_TICKS`. "Reliable" here
   means a separate queue, not delivery. `crcbl-net` / `crcbl-client`.
-- **`ConditionSimulator::drain_pending` swallows the inner transport's error**
-  on both send paths — `let _ = self.inner.send_reliable(msg)` and the
-  unreliable one beside it — so a `Backpressure` drop from a full
-  `InMemoryTransport` channel is indistinguishable from configured loss. Not
-  observed in any run here (every counter was zero), but it is a silent path.
-  `crcbl-net`.
 - **`Server` and `Client` expose no transport accessor**, so a test cannot
   degrade a link _after_ the session is up. Having one would let a measurement
   handshake cleanly and then impair, isolating gameplay from handshake noise.

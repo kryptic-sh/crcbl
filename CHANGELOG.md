@@ -512,6 +512,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`ConditionSimulator` no longer loses a message the inner transport
+  refused.** Latency turns a steady stream into a burst on release, so the
+  simulator is what fills a bounded channel — and both send paths threw the
+  result of that forwarding away, so the loss arrived looking like the
+  configured loss rate had eaten it. A refused message now stays queued and goes
+  out on the next drain, and the refusal reaches the caller at the next hand-off
+  as `TransportError::Backpressure`, where it is unambiguous: that message was
+  not taken, so retrying it cannot duplicate it. `send_reliable`,
+  `send_unreliable`, `recv` and `recv_reliable` can therefore all return an
+  error the simulator previously hid.
 - **`lantern`'s effect rows named every effect but bloom.** The row came from a
   hand-written table of three in `apps/lantern`, so a frame drawn with the bloom
   chain reported a row with no bloom in it. It now goes through
