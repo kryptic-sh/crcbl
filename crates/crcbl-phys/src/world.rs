@@ -28,10 +28,30 @@ pub struct ColliderId {
 }
 
 impl ColliderId {
-    /// The storage slot this id names. Only meaningful together with the
-    /// generation, so this stays crate-internal.
+    /// The storage slot this id names.
+    ///
+    /// A small integer to subscript a caller's own per-collider array with,
+    /// which is what a hot loop wants where a `HashMap<ColliderId, _>` would
+    /// otherwise stand: turning a query result back into "which of my bodies
+    /// is this" costs an array index rather than a hash.
+    ///
+    /// What the number does and does not promise:
+    ///
+    /// - **Bounded** by the number of slots the world has ever allocated. That
+    ///   equals [`PhysicsWorld::len`] only while nothing has been removed —
+    ///   afterwards the slot count stays where it was and `len` drops below it,
+    ///   so an array sized from `len` is too short.
+    /// - **Stable** for as long as the collider lives. Nothing compacts the
+    ///   slot array, so a collider keeps its slot however many others are added
+    ///   or removed around it.
+    /// - **Not dense** once anything has been removed: the freed slot is a hole
+    ///   until a later `add` recycles it.
+    /// - **Not an identity.** A recycled slot names a different collider, and
+    ///   only the generation the id also carries tells the two apart. Comparing
+    ///   slots is not comparing colliders; compare the ids themselves.
     #[inline]
-    pub(crate) const fn index(self) -> u32 {
+    #[must_use]
+    pub const fn index(self) -> u32 {
         self.index
     }
 
@@ -81,12 +101,28 @@ impl ColliderEntry {
 // PhysicsWorld
 // ---------------------------------------------------------------------------
 
-/// A snapshot of the broadphase's shape, from [`PhysicsWorld::broadphase_stats`].
+/// A reading of the broadphase, from [`PhysicsWorld::broadphase_stats`].
 ///
-/// The two numbers that let a structural policy (a teleport rule, a rebuild
-/// cadence) be argued from measurement: how deep the tree is, and how many
-/// nodes it holds for how many live elements. Depth is the query-cost bound;
-/// node count is the footprint, including recycled slots.
+/// Two kinds of number, read two different ways.
+///
+/// **The shape, as it is right now:** [`elements`](Self::elements),
+/// [`nodes`](Self::nodes) and [`depth`](Self::depth). These are what let a
+/// structural policy (a teleport rule, a rebuild cadence) be argued from
+/// measurement — depth is the query-cost bound, node count the footprint
+/// including recycled slots.
+///
+/// **The totals, counting up from the moment the world was created and never
+/// reset:** [`refits`](Self::refits),
+/// [`updates_without_refit`](Self::updates_without_refit) and
+/// [`rebuilds`](Self::rebuilds). There is no reset call, deliberately: take a
+/// reading either side of a phase and subtract, and the phase's own numbers
+/// come out exactly, with no second observer able to zero the counters halfway
+/// through somebody else's measurement.
+///
+/// Taking the reading is itself an event the totals see.
+/// [`PhysicsWorld::broadphase_stats`] forces the lazy rebuild, so a reading
+/// taken while the tree is dirty reports a `rebuilds` that includes the one it
+/// just caused — which is the honest number, since that rebuild happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BroadphaseStats {
     /// Live colliders (leaves) in the tree.
@@ -95,6 +131,45 @@ pub struct BroadphaseStats {
     pub nodes: usize,
     /// Longest root-to-leaf path, counted in nodes ([`Bvh::depth`]'s units).
     pub depth: usize,
+    /// Collider updates ([`PhysicsWorld::set_sphere`] and its siblings) that a
+    /// built tree absorbed in place, refitting one root-to-leaf path.
+    ///
+    /// How far the collider moved does not enter into it. [`Bvh::update_aabb`]
+    /// never refuses a new box for being far from the old one — it grows the
+    /// ancestors it walks back through — so a body that teleports across the
+    /// world is counted here too, and pays for the trip in a looser tree rather
+    /// than in a rebuild.
+    pub refits: u64,
+    /// Collider updates that did not refit, leaving the BVH absent so that the
+    /// next query rebuilds it.
+    ///
+    /// An update refits whenever the id resolves *and* the tree both exists and
+    /// still holds an element for that slot, so what lands here is an update
+    /// made with no tree to refit: before the first query, or after something
+    /// else already dropped the tree.
+    ///
+    /// Counted per update, not per rebuild — several of these before the next
+    /// query cost one rebuild between them. With [`refits`](Self::refits) it
+    /// accounts for every `set_*` call that resolved to a live collider; a call
+    /// on a stale id is counted by neither.
+    pub updates_without_refit: u64,
+    /// Full [`Bvh::build`]s performed, whether asked for by
+    /// [`PhysicsWorld::rebuild`] or forced by a query finding the tree absent.
+    ///
+    /// The number that says which of the two a phase's timing actually
+    /// measured, and the reason the other two totals are here at all.
+    pub rebuilds: u64,
+}
+
+/// The running totals [`BroadphaseStats`] hands out.
+///
+/// Separate from the stats struct because these are the world's own state,
+/// while `BroadphaseStats` is a reading of it taken alongside the tree's shape.
+#[derive(Debug, Clone, Copy, Default)]
+struct BroadphaseCounters {
+    refits: u64,
+    updates_without_refit: u64,
+    rebuilds: u64,
 }
 
 /// A spatial world that stores colliders and supports ray/sweep queries.
@@ -115,6 +190,9 @@ pub struct PhysicsWorld {
     live_count: usize,
     /// Lazily-rebuilt BVH. `None` when dirty.
     bvh: Option<Bvh>,
+    /// Refit and rebuild totals, handed out by
+    /// [`PhysicsWorld::broadphase_stats`]. Never reset.
+    counters: BroadphaseCounters,
     /// Maps collider slot index → BVH element position (`u32::MAX` for slots
     /// with no element). Populated during [`PhysicsWorld::rebuild`]. Used by
     /// update methods for O(log n) refit.
@@ -502,6 +580,7 @@ impl PhysicsWorld {
             free_slots: Vec::new(),
             live_count: 0,
             bvh: None,
+            counters: BroadphaseCounters::default(),
             bvh_slot_to_elem: Vec::new(),
             scratch: QueryScratch::new(),
         }
@@ -629,6 +708,7 @@ impl PhysicsWorld {
             self.bvh_slot_to_elem[*slot as usize] = elem_idx as u32;
         }
         self.bvh = Some(Bvh::build(elements));
+        self.counters.rebuilds += 1;
     }
 
     /// Number of colliders currently registered.
@@ -792,14 +872,21 @@ impl PhysicsWorld {
         self.colliders[slot].as_ref().map(|s| s.entry.aabb())
     }
 
-    /// The broadphase's shape, as a snapshot a game can measure a policy
-    /// against.
+    /// The broadphase's shape and its refit/rebuild totals, as a reading a
+    /// game can measure a policy against.
     ///
     /// **For diagnostics, not for the frame path.** It forces the lazy rebuild
     /// if the tree is dirty, and `Bvh::depth` walks the whole tree — `O(n)` —
     /// so this is what a teleport rule's cost/benefit is argued from, the way
     /// `docs/backlog.md`'s "A consumer cannot see the cost it is being asked to
     /// avoid" asked for, and nothing a hot loop should call.
+    ///
+    /// The forced rebuild is counted: call this on a dirty tree and the
+    /// [`rebuilds`](BroadphaseStats::rebuilds) it returns includes that one.
+    /// A caller subtracting two readings to measure a phase therefore sees the
+    /// phase it asked about *plus* whatever the first reading itself forced,
+    /// which is why the first reading is best taken with the tree already
+    /// built.
     #[must_use]
     pub fn broadphase_stats(&mut self) -> BroadphaseStats {
         self.ensure_bvh();
@@ -808,6 +895,9 @@ impl PhysicsWorld {
             elements: bvh.len(),
             nodes: bvh.node_count(),
             depth: bvh.depth(),
+            refits: self.counters.refits,
+            updates_without_refit: self.counters.updates_without_refit,
+            rebuilds: self.counters.rebuilds,
         }
     }
 
@@ -880,7 +970,10 @@ impl PhysicsWorld {
             },
             None => false,
         };
-        if !refit {
+        if refit {
+            self.counters.refits += 1;
+        } else {
+            self.counters.updates_without_refit += 1;
             self.invalidate_bvh();
         }
         true
@@ -938,8 +1031,11 @@ mod tests {
                 elements: 0,
                 nodes: 0,
                 depth: 0,
+                refits: 0,
+                updates_without_refit: 0,
+                rebuilds: 1,
             },
-            "an empty world has an empty tree"
+            "an empty world has an empty tree, built by the reading itself"
         );
 
         for x in 0..16 {
@@ -954,6 +1050,180 @@ mod tests {
         assert!(
             stats.depth >= 1,
             "a non-empty tree has a depth; got {stats:?}"
+        );
+    }
+
+    /// A line of spheres, and the ids naming them.
+    ///
+    /// One row rather than a lattice: the refit counters are about *when* the
+    /// tree is refit rather than about what it answers, so the cheapest fixture
+    /// that still gives a real tree with real ancestors to walk back through is
+    /// the right one.
+    fn line_of_spheres(n: u32) -> (PhysicsWorld, Vec<ColliderId>) {
+        let mut world = PhysicsWorld::new();
+        let ids = (0..n)
+            .map(|x| world.add_sphere(Sphere::new(DVec3::new(f64::from(x), 0.0, 0.0), 0.4)))
+            .collect();
+        (world, ids)
+    }
+
+    /// **A small move is absorbed in place: one refit, nothing invalidated,
+    /// nothing rebuilt.**
+    ///
+    /// The counters exist to answer "did that phase refit or did it rebuild",
+    /// and this is the answer they have to give for the case a game actually
+    /// runs — a body that walked a fraction of its own radius since last tick.
+    #[test]
+    fn a_small_update_is_counted_as_a_refit() {
+        let (mut world, ids) = line_of_spheres(16);
+        let before = world.broadphase_stats();
+        assert_eq!(before.rebuilds, 1, "the reading itself built the tree");
+        assert_eq!(before.refits, 0, "and nothing has been updated yet");
+
+        assert!(world.set_sphere(ids[7], Sphere::new(DVec3::new(7.05, 0.0, 0.0), 0.4)));
+
+        let after = world.broadphase_stats();
+        assert_eq!(
+            after.refits,
+            before.refits + 1,
+            "the update should have refit the tree in place; got {after:?}"
+        );
+        assert_eq!(
+            after.updates_without_refit, before.updates_without_refit,
+            "nothing should have been left for a rebuild; got {after:?}"
+        );
+        assert_eq!(
+            after.rebuilds, before.rebuilds,
+            "and no rebuild should have happened; got {after:?}"
+        );
+    }
+
+    /// **A teleport refits too — a tree is never thrown away for a move being
+    /// large.**
+    ///
+    /// [`Bvh::update_aabb`] fails only when the element index names nothing. It
+    /// has no notion of the new box escaping the old one, and grows the
+    /// ancestors it walks instead. Worth pinning rather than assuming, because
+    /// the opposite is the intuitive guess and a `refits` read under it would be
+    /// read as a rebuild that never happened. The move is checked to have
+    /// *landed* as well, so a refit that counted itself without touching the
+    /// tree fails here rather than passing quietly.
+    #[test]
+    fn a_teleport_refits_rather_than_rebuilding() {
+        let (mut world, ids) = line_of_spheres(16);
+        let before = world.broadphase_stats();
+
+        assert!(world.set_sphere(ids[7], Sphere::new(DVec3::new(0.0, 900.0, 0.0), 0.4)));
+
+        let after = world.broadphase_stats();
+        assert_eq!(
+            after.refits,
+            before.refits + 1,
+            "a teleport is still a refit; got {after:?}"
+        );
+        assert_eq!(
+            after.rebuilds, before.rebuilds,
+            "and costs no rebuild; got {after:?}"
+        );
+        assert_eq!(
+            after.updates_without_refit, before.updates_without_refit,
+            "and leaves nothing for one; got {after:?}"
+        );
+
+        assert_eq!(
+            world.overlap_sphere(DVec3::new(0.0, 900.0, 0.0), 0.1),
+            vec![ids[7]],
+            "the refit tree must answer at the new place"
+        );
+        assert!(
+            world
+                .overlap_sphere(DVec3::new(7.0, 0.0, 0.0), 0.1)
+                .is_empty(),
+            "and no longer at the old one"
+        );
+    }
+
+    /// **An update the tree cannot absorb drops it, and the next query pays for
+    /// the rebuild.**
+    ///
+    /// The state that produces it is unreachable through the public API — a
+    /// live collider whose built tree holds no element for its slot — so the
+    /// test reaches in and builds it. That state is the whole of what
+    /// `updates_without_refit` counts while a tree exists, and leaving it
+    /// unexercised would leave the invalidation branch guarded by nothing.
+    #[test]
+    fn an_update_with_no_element_to_refit_invalidates_and_the_next_query_rebuilds() {
+        let (mut world, ids) = line_of_spheres(16);
+        let before = world.broadphase_stats();
+        assert!(world.bvh.is_some(), "the reading built the tree");
+
+        world.bvh_slot_to_elem[ids[3].index() as usize] = NO_ELEMENT;
+        assert!(world.set_sphere(ids[3], Sphere::new(DVec3::new(3.0, 40.0, 0.0), 0.4)));
+        assert!(
+            world.bvh.is_none(),
+            "an update that could not refit must drop the tree rather than \
+             leave it holding the old bounds"
+        );
+
+        let after = world.broadphase_stats();
+        assert_eq!(
+            after.updates_without_refit,
+            before.updates_without_refit + 1,
+            "the update should be counted as one that did not refit; got {after:?}"
+        );
+        assert_eq!(
+            after.refits, before.refits,
+            "and must not also count as a refit; got {after:?}"
+        );
+        assert_eq!(
+            after.rebuilds,
+            before.rebuilds + 1,
+            "the reading after it should have rebuilt; got {after:?}"
+        );
+        assert_eq!(
+            after.elements, 16,
+            "and rebuilt the whole set; got {after:?}"
+        );
+
+        assert_eq!(
+            world.overlap_sphere(DVec3::new(3.0, 40.0, 0.0), 0.1),
+            vec![ids[3]],
+            "the rebuilt tree must answer at the new place"
+        );
+    }
+
+    /// **Updates made before there is a tree are counted one by one, and cost
+    /// one rebuild between them.**
+    ///
+    /// The counting rule in one test: the totals only climb, `refits` and
+    /// `updates_without_refit` between them account for every `set_*` that
+    /// resolved to a live collider, and one that resolved to nothing is counted
+    /// by neither.
+    #[test]
+    fn updates_with_no_tree_yet_are_counted_per_update_not_per_rebuild() {
+        let (mut world, ids) = line_of_spheres(16);
+        assert!(world.set_sphere(ids[0], Sphere::new(DVec3::new(0.0, 1.0, 0.0), 0.4)));
+        assert!(world.set_sphere(ids[1], Sphere::new(DVec3::new(1.0, 1.0, 0.0), 0.4)));
+
+        let stats = world.broadphase_stats();
+        assert_eq!(
+            stats.updates_without_refit, 2,
+            "one per update, with no tree to refit; got {stats:?}"
+        );
+        assert_eq!(stats.refits, 0, "nothing was refit; got {stats:?}");
+        assert_eq!(
+            stats.rebuilds, 1,
+            "and one rebuild between the two of them; got {stats:?}"
+        );
+
+        assert!(world.remove(ids[5]));
+        let before = world.broadphase_stats();
+        assert!(!world.set_sphere(ids[5], Sphere::new(DVec3::ZERO, 0.4)));
+        let after = world.broadphase_stats();
+        assert_eq!(
+            (after.refits, after.updates_without_refit),
+            (before.refits, before.updates_without_refit),
+            "a set_* on a stale id is counted by neither; got {after:?}"
         );
     }
 

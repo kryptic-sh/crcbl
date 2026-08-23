@@ -29,6 +29,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `overlap_aabb` and `sweep_sphere_excluding` no longer allocate per call —
   `cast_ray` used to build a traversal stack and a hit vector on every cast.
 
+- **A physics query result becomes an array subscript.** `ColliderId::index` is
+  public, so turning a query result back into "which of my bodies is this" costs
+  an index rather than a `HashMap` lookup. Its doc states what the slot promises
+  and what it does not: stable while the collider lives, bounded by slots ever
+  allocated rather than by `PhysicsWorld::len`, not dense once anything has been
+  removed, and not an identity — a recycled slot names a different collider and
+  only the generation parts them.
+
+- **`BroadphaseStats` says whether a phase refit or rebuilt.** Three lifetime
+  totals that never reset — `refits`, `updates_without_refit` and `rebuilds` —
+  so two readings either side of a phase subtract to that phase's own numbers.
+  Worth knowing, and now pinned by a test: `Bvh::update_aabb` never refuses a
+  new box for being far from the old one, so a body that teleports across the
+  world still refits and pays for the trip in a looser tree, not a rebuild.
+
 - **`crcbl bench --scenario phys`** times `crcbl-phys`'s broadphase on one
   thread, as three separately reported phases: building a tree over `--bodies`
   spheres, refitting it after every one of them moves a tick's worth, and then

@@ -401,3 +401,69 @@ fn world_overlap_sphere_matches_brute_force_under_churn() {
         );
     }
 }
+
+/// **A collider's slot is stable while it lives, and the slots stop being dense
+/// the moment one is freed.**
+///
+/// `ColliderId::index` is what a caller subscripts a per-collider array with
+/// instead of hashing the id, so both halves of its documented contract carry
+/// weight: an array indexed by slot reads the wrong entry if slots move, and one
+/// sized from `PhysicsWorld::len` is too short as soon as a removal leaves a
+/// hole behind it. This runs outside the crate, which is also what holds the
+/// accessor to being reachable from outside it at all.
+#[test]
+fn collider_slots_are_stable_and_stop_being_dense_after_a_removal() {
+    let mut world = PhysicsWorld::new();
+    let ids: Vec<_> = (0..8)
+        .map(|x| world.add_sphere(Sphere::new(DVec3::new(f64::from(x), 0.0, 0.0), 0.4)))
+        .collect();
+
+    let mut slots: Vec<u32> = ids.iter().map(|id| id.index()).collect();
+    let issued = slots.clone();
+    slots.sort_unstable();
+    assert_eq!(
+        slots,
+        (0..8).collect::<Vec<u32>>(),
+        "a world nothing has been removed from hands out a dense 0..n"
+    );
+
+    let boxes: Vec<_> = ids.iter().map(|&id| world.aabb_of(id)).collect();
+    assert!(world.remove(ids[3]));
+    for (i, &id) in ids.iter().enumerate() {
+        if i == 3 {
+            continue;
+        }
+        // `id.index()` is a field of a `Copy` value and cannot move, so
+        // asserting on it would assert nothing. What has to survive the removal
+        // is the *world's* side: the slot that id names still holds that
+        // collider, which is what `aabb_of` reads through.
+        assert_eq!(
+            world.aabb_of(id),
+            boxes[i],
+            "the collider at slot {} stopped resolving after a removal elsewhere",
+            issued[i]
+        );
+    }
+    assert_eq!(
+        world.aabb_of(ids[3]),
+        None,
+        "the removed id must stop resolving"
+    );
+    assert!(
+        ids[7].index() >= world.len() as u32,
+        "the hole means an array sized from len ({}) cannot hold slot {}",
+        world.len(),
+        ids[7].index()
+    );
+
+    let recycled = world.add_sphere(Sphere::new(DVec3::new(0.0, 5.0, 0.0), 0.4));
+    assert_eq!(
+        recycled.index(),
+        issued[3],
+        "the freed slot is what the next add takes"
+    );
+    assert_ne!(
+        recycled, ids[3],
+        "and the id naming it is a different id, generation being what parts them"
+    );
+}
