@@ -10906,38 +10906,20 @@ it.
   `a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd` already
   builds the window a test would need.
 
-- **A caller renders at `AcquiredFrame::extent`** is asserted by nothing at all.
-  `crates/crcbl-hal/src/swapchain.rs` states it as a caller obligation and says
-  using the requested size instead is the bug the field exists to prevent, and
-  that it only appears while a window is being dragged. The engine does adopt
-  it, but no test drives an acquire whose returned extent differs from the
-  requested one and then checks the recorded render area. On the null backend
-  the two are always equal, so the bug is structurally invisible there.
+- **A caller renders at `AcquiredFrame::extent`** — **half closed on
+  2026-08-23.** `crcbl_hal::null::Recorder::clamp_acquired_extent_to` makes the
+  acquired and configured extents disagree on the null backend, where they used
+  to be equal by construction, and
+  `a_compositors_own_extent_is_adopted_and_then_agreed_with` drives an acquire
+  through it and checks that the engine adopts the answer into both
+  `configured_extent` and `config`, then stops re-adopting once they agree.
 
-### The null backend can be resized and killed, but not clamped
-
-**Both halves of this closed.** `crcbl_hal::null::Recorder` gained
-`report_swapchain_out_of_date` and `lose_device` beside the four injectors it
-already had, and `crates/crcbl/src/engine.rs` now tests all three of its
-out-of-date arms — the acquire, the present and the pacing wait's deliberate
-no-op — plus the device-loss policy end to end through `drive`. A
-nineteen-strong mutation sweep over the hooks and those arms left no survivor.
-So `crcbl-vk` no longer carries the only test of a resize, and "this device is
-gone and stays gone" is no longer a state nothing can express.
-
-What is left is the third thing the old entry wanted from one hook and did not
-get: **an injector that makes `acquire_next_frame` hand back an extent other
-than the one configured.** The seam's obligation 3 says a caller must use the
-answer rather than the request, and `NullDevice::acquire_next_frame` says in a
-comment that it has no window system to clamp against, so it always answers with
-the configured extent. That leaves `GpuContext::acquire`'s
-`acquired.extent != self.configured_extent` branch — the one that writes the
-compositor's chosen size back into `config` so a later `resize` does not see a
-change that is not one — reachable only on a compositor that actually clamps.
-This was deliberately not built with the other two: nothing about a clamped
-extent is a _failure_, so it does not belong in the fault-injection shape those
-two took, and it wants its own decision about whether the recorder holds a clamp
-rule or a one-shot override.
+  What is still unasserted is the second half: that the **recorded render area**
+  is that extent. `crates/crcbl-hal/src/swapchain.rs` states it as a caller
+  obligation and says using the requested size instead is the bug the field
+  exists to prevent — and the injector now makes that bug expressible, so the
+  test is a matter of driving a frame and reading the recorded pass rather than
+  of building a fixture.
 
 ### No runner has two native backends, so nothing compares them directly
 
@@ -11013,24 +10995,6 @@ are printed by both harnesses and visible in the run log, and the classification
 that produces them is now documented in `docs/plan/12-testing.md`. Revisit if a
 collapse ever actually happens — at that point the floor has evidence behind it
 instead of a guess.
-
-### `GpuContext::retire_to` destroys a command buffer whether the wait was satisfied or not
-
-`crcbl/src/engine.rs`'s `retire_to` calls `wait_semaphores(…, u64::MAX)?` and
-**discards the `bool`**, then destroys the command buffer on the next line. The
-seam states that `false` is a timeout rather than an error, so on a backend that
-returns one this frees a command buffer the GPU may still be reading.
-
-Benign today for two separate reasons, and neither is a guarantee: the timeout
-is `u64::MAX`, and the null device now reaches every value a submission
-signalled rather than reporting waits satisfied unconditionally. Neither rules
-out a driver that caps a wait and answers `false` early.
-
-`crcbl-render`'s `MeshPool::flush` is the contrast — it checks the same `bool`
-and raises `UploadTimedOut`. Found while making the null backend answer
-honestly; the fix is to decide what an engine that cannot retire should do
-(raise, or wait again), which is a decision and not a transcription, so it was
-not made in that change.
 
 ### `crcbl-dx12` has no timeline-semaphore test because it has no timeline semaphore
 
