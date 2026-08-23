@@ -1130,6 +1130,27 @@ uint cluster_is_selected(ClusterSelect select, uint instance_index)
     return (!producer_expanded && container_expanded) ? 1u : 0u;
 }
 
+/// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
+/// space, built out of that transform's own upper-left 3x3.
+///
+/// `mesh.slang`'s copy, character for character, and its docs carry the whole
+/// account: this is the cofactor matrix, `det(basis)` times the inverse
+/// transpose, which is the transform a *perpendicular* needs where the bare 3x3
+/// is the one a tangent needs. `crcbl_shaders::mesh`'s
+/// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` holds the
+/// two equal, because a normal that differed between the raster path and the
+/// mesh path would be one scene lit two ways.
+///
+/// Hoisted out of the vertex loop below rather than called per vertex: the
+/// instance is fixed for the whole cluster, so this is three cross products per
+/// meshlet.
+float3x3 normal_basis(float3x3 basis)
+{
+    return float3x3(cross(basis[1], basis[2]),
+                    cross(basis[2], basis[0]),
+                    cross(basis[0], basis[1]));
+}
+
 /// One cluster of one instance, emitted — the body both mesh entry points are.
 ///
 /// `[ForceInline]`, and it is load-bearing on two of the three targets for the
@@ -1198,6 +1219,12 @@ void emit_cluster(
     // one base. `vertex_base` is the difference, and it is zero for a mesh that
     // is a single level.
     uint level_base = cluster_select[cluster_index].vertex_base;
+
+    // Once for the cluster, not once per vertex: the instance is fixed for the
+    // whole meshlet, so the three cross products are amortised over every
+    // vertex the loop below writes.
+    float3x3 normals = normal_basis((float3x3)instance.transform);
+
     for (uint v = lane; v < cluster.vertex_count; v += THREADS)
     {
         uint index = cluster_vertices[cluster.vertex_offset + v];
@@ -1208,10 +1235,10 @@ void emit_cluster(
         VertexOutput output;
         output.position = mul(frame.view_proj, world);
         output.world_position = world.xyz;
-        // The transform is rigid, so its 3x3 part is its own inverse-transpose
-        // — the obligation `GpuInstance::transform` carries, and the same line
-        // `mesh.slang`'s vertex stage writes.
-        output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
+        // Through the cofactor matrix hoisted above, which is the matrix
+        // `mesh.slang`'s vertex stage uses on the same normal — a scaled
+        // instance would otherwise light differently on the two paths.
+        output.world_normal = mul(normals, vertex.normal.xyz);
         // Under either overlay the cluster's colour replaces the vertex's,
         // which is what makes a per-cluster fact — the level a cut spans, or
         // how close to the budget each patch is — visible at all. `LOD_VIEW` is

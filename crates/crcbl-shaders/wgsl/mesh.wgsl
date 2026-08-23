@@ -131,6 +131,11 @@ struct GpuProbe_std430_0
 
 @binding(23) @group(0) var<storage, read> probes_0 : array<GpuProbe_std430_0>;
 
+fn normal_basis_0( basis_0 : mat3x3<f32>) -> mat3x3<f32>
+{
+    return mat3x3<f32>(cross(basis_0[i32(1)], basis_0[i32(2)]), cross(basis_0[i32(2)], basis_0[i32(0)]), cross(basis_0[i32(0)], basis_0[i32(1)]));
+}
+
 struct VertexOutput_0
 {
     @builtin(position) position_2 : vec4<f32>,
@@ -151,7 +156,7 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) ins
     var output_0 : VertexOutput_0;
     output_0.position_2 = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)]))));
     output_0.world_position_0 = world_0.xyz;
-    output_0.world_normal_0 = (((vertex_0.normal_0.xyz) * (mat3x3<f32>(_S1[i32(0)].xyz, _S1[i32(1)].xyz, _S1[i32(2)].xyz))));
+    output_0.world_normal_0 = (((vertex_0.normal_0.xyz) * (normal_basis_0(mat3x3<f32>(_S1[i32(0)].xyz, _S1[i32(1)].xyz, _S1[i32(2)].xyz)))));
     var _S2 : vec4<f32>;
     if((frame_0.ambient_0.w) >= 1.5f)
     {
@@ -496,8 +501,8 @@ fn probe_irradiance_0( world_position_7 : vec3<f32>,  normal_2 : vec3<f32>) -> v
     var _S37 : u32 = _S30.z;
     var _S38 : f32 = f_0.y;
     var cell_1 : GpuProbe_0 = lerp_probe_0(lerp_probe_0(lerp_probe_0(probe_at_0(vec3<u32>(_S31, _S32, _S33)), probe_at_0(vec3<u32>(_S34, _S32, _S33)), _S35), lerp_probe_0(probe_at_0(vec3<u32>(_S31, _S36, _S33)), probe_at_0(vec3<u32>(_S34, _S36, _S33)), _S35), _S38), lerp_probe_0(lerp_probe_0(probe_at_0(vec3<u32>(_S31, _S32, _S37)), probe_at_0(vec3<u32>(_S34, _S32, _S37)), _S35), lerp_probe_0(probe_at_0(vec3<u32>(_S31, _S36, _S37)), probe_at_0(vec3<u32>(_S34, _S36, _S37)), _S35), _S38), f_0.z);
-    var basis_0 : vec4<f32> = vec4<f32>(normal_2, 1.0f);
-    return max(vec3<f32>(dot(cell_1.sh_r_0, basis_0), dot(cell_1.sh_g_0, basis_0), dot(cell_1.sh_b_0, basis_0)), _S28);
+    var basis_1 : vec4<f32> = vec4<f32>(normal_2, 1.0f);
+    return max(vec3<f32>(dot(cell_1.sh_r_0, basis_1), dot(cell_1.sh_g_0, basis_1), dot(cell_1.sh_b_0, basis_1)), _S28);
 }
 
 struct FragmentOutput_0

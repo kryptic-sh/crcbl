@@ -173,8 +173,9 @@
 /// `mesh.slang`'s copy.
 struct GpuInstance
 {
-    /// Model → sector. Rigid (rotation + translation), so its upper-left 3×3
-    /// transforms normals correctly without an inverse-transpose.
+    /// Model → sector. Rotation, translation and scale, **non-uniform
+    /// included**: the raster stages carry a normal through `normal_basis`, the
+    /// upper-left 3×3's cofactor matrix, rather than through the 3×3 itself.
     float4x4 transform;
     /// Which mesh to draw: an index into `meshes` below. The vertex stage
     /// resolves this instance's base vertex through it, which is what lets one
@@ -717,9 +718,18 @@ uint group_is_expanded(float error, float3 center, float radius, float3 eye, uin
 /// early exit here even though the answer is a minimum.
 ///
 /// **In world space**, exactly as `mesh_cluster.slang`'s descent is: the
-/// sphere's centre goes through the instance's rigid transform, its radius does
-/// not, and the eye stays where it is. That is the same statement as putting the
+/// sphere's centre goes through the instance's transform, its radius does not,
+/// and the eye stays where it is. That is the same statement as putting the
 /// camera through the inverse transform, and it needs no inverse.
+///
+/// **The radius staying in mesh space is a gap under a scaled instance, not a
+/// property.** `GpuInstance::transform` may scale — see its declaration above —
+/// and a group's radius and its error are both distances in the *mesh's* own
+/// space, so a scaled instance is judged at the wrong size and selects a level
+/// to match. It is the shape of the bug `mesh_cluster.slang`'s
+/// `cluster_survives` closed one pass later with `max_stretch`. Written down
+/// rather than changed here because it costs a level and does not drop
+/// geometry, and because changing it moves every level-of-detail golden.
 uint select_level(GpuInstance instance, uint instance_index)
 {
     MeshLevels levels = mesh_levels_of(instance.mesh);

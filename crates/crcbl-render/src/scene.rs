@@ -560,8 +560,10 @@ pub struct InstanceDesc {
     /// Row 0 is the one [`mesh::GpuInstance::default`] names, so it is what an
     /// object shades through by omission — see [`SceneDesc::materials`].
     pub material: usize,
-    /// Where it is: a **rigid** model matrix, on
-    /// [`mesh::GpuInstance::transform`]'s terms.
+    /// Where it is: a model matrix, on [`mesh::GpuInstance::transform`]'s
+    /// terms — **any affine one**, non-uniform scale included, because the mesh
+    /// shaders build the normal transform out of it rather than assuming its
+    /// 3×3 is orthonormal.
     pub transform: Mat4,
 }
 

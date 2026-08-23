@@ -10848,8 +10848,16 @@ mod tests {
         ForwardRenderer::present_target(image, view, format, (64, 48))
     }
 
-    /// The spin is a rotation: no scale, no shear, so the shader's
-    /// "the 3×3 is its own inverse-transpose" assumption holds.
+    /// The spin is a rotation: no scale, no shear, so the cube neither grows
+    /// nor mirrors as it turns, and every mesh golden blessed at a `spin` is a
+    /// picture of one cube.
+    ///
+    /// That is also what keeps those goldens insensitive to `mesh.slang`'s
+    /// `normal_basis`. A matrix with orthonormal rows and a positive
+    /// determinant is its own cofactor matrix, to within a rounding step, so
+    /// the vertex stage writes the normals it wrote when it multiplied by the
+    /// bare 3×3 — see [`crcbl_shaders::mesh::GpuInstance::transform`], which no
+    /// longer requires a caller to be rigid at all.
     #[test]
     fn the_spin_matrix_stays_rigid() {
         for seconds in [0.0f32, 0.5, 3.25, 100.0] {

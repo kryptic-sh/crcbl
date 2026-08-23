@@ -311,6 +311,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Normals survive a non-uniform scale.** The mesh shaders took a normal
+  through `GpuInstance::transform`'s bare upper-left 3×3, which is the transform
+  a _tangent_ takes, and the field's doc required callers to be rigid to make
+  that true. Nothing enforced it and the engine's own scenes broke it. Both
+  raster paths now build the cofactor matrix — `normal_basis`, three cross
+  products, no extra bytes in the instance buffer — so `InstanceDesc::transform`
+  and `GpuInstance::transform` accept any affine matrix. No golden image moved:
+  the identity, a uniform scale and an axis-aligned scale on an axis-aligned
+  normal are each their own cofactor matrix once the fragment stage normalises,
+  and those are the shapes the committed frames are drawn with.
+
 - **A settings file that is not UTF-8 is reported instead of repaired.**
   `StorageSettingsFile::load` decoded with `String::from_utf8_lossy` before
   parsing, so a partial write or a foreign encoding reached the TOML parser as

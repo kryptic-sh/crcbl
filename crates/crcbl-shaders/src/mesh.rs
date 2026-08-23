@@ -464,9 +464,22 @@ impl FrameUniforms {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GpuInstance {
     /// Model → **sector**, column-major, the way [`glam::Mat4::to_cols_array`]
-    /// produces it. Must be **rigid** — rotation and translation only — because
-    /// the shader transforms normals with its 3×3 part and no
-    /// inverse-transpose.
+    /// produces it.
+    ///
+    /// **Any affine transform**: rotation, translation and scale, non-uniform
+    /// scale included. There is no rigidity obligation on a caller, because the
+    /// mesh shaders take a normal through this matrix's *cofactor* matrix
+    /// rather than through its 3×3 part — `normal_basis`, declared in both
+    /// `mesh.slang` and `mesh_cluster.slang` and held to one spelling by
+    /// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` below.
+    /// So a scaled instance shades with a normal that is still perpendicular to
+    /// its surface.
+    ///
+    /// This field used to *require* rigidity, on the grounds that the shader
+    /// transformed normals with the bare 3×3. Nothing enforced it and the
+    /// engine's own scenes broke it — `crcbl::screenshot`'s `Scene::Ao` trough
+    /// and `Scene::Probes` room are each an open box under a non-uniform scale
+    /// — so the shader learned the transform a normal actually needs instead.
     ///
     /// Sector-local and `f32` rather than world-space and `f64` because that is
     /// what makes delta upload survive camera motion: an object that does not
@@ -2501,6 +2514,185 @@ mod tests {
                 let quarters = vertex.uv[axis] * OPEN_BOX_SUBDIVISIONS as f32;
                 assert_eq!(quarters, quarters.trunc(), "uv {:?}", vertex.uv);
                 assert!((0.0..=1.0).contains(&vertex.uv[axis]), "uv {:?}", vertex.uv);
+            }
+        }
+    }
+    /// `normal_basis`, character for character, as both mesh shaders must
+    /// declare it.
+    ///
+    /// The signature and body only — the doc comment above each copy is
+    /// deliberately not compared, on
+    /// `crcbl_shaders::cluster_select`'s terms for `projected_error`: each file
+    /// says why *it* has the copy, and holding two explanations to one wording
+    /// buys nothing.
+    const NORMAL_BASIS: &str = concat!(
+        "float3x3 normal_basis(float3x3 basis)\n",
+        "{\n",
+        "    return float3x3(cross(basis[1], basis[2]),\n",
+        "                    cross(basis[2], basis[0]),\n",
+        "                    cross(basis[0], basis[1]));\n",
+        "}\n",
+    );
+
+    /// `normal_basis` in Rust, transcribed from [`NORMAL_BASIS`] above.
+    ///
+    /// Slang's `basis[i]` is a **row** and [`glam::Mat3`] is column-major, so
+    /// the rows come out through one transpose and the cofactor rows go back in
+    /// through another. That convention is not recalled: it was read off the
+    /// WGSL `slangc` emits for `m[0]`, which is the column of a `mat3x3<f32>`
+    /// holding what Slang wrote as a row.
+    fn normal_basis(basis: glam::Mat3) -> glam::Mat3 {
+        let rows = basis.transpose();
+        glam::Mat3::from_cols(
+            rows.y_axis.cross(rows.z_axis),
+            rows.z_axis.cross(rows.x_axis),
+            rows.x_axis.cross(rows.y_axis),
+        )
+        .transpose()
+    }
+
+    /// **Both mesh shaders build the normal transform with one function.**
+    ///
+    /// `mesh.slang`'s vertex stage and `mesh_cluster.slang`'s mesh stage draw
+    /// the same instances of the same meshes; a normal that differed between
+    /// them would be one scene lit two ways, and which way depended on whether
+    /// the device reported a mesh stage. Equal text cannot differ under any
+    /// input, which is the stronger of the two assertions available here.
+    ///
+    /// The second half is what stops a shader declaring the function and never
+    /// calling it: a copy of `normal_basis` sitting beside a
+    /// `mul((float3x3)instance.transform, vertex.normal…)` would pass a
+    /// declaration check and light exactly as wrongly as before.
+    #[test]
+    fn the_two_mesh_shaders_build_the_normal_basis_with_one_function() {
+        for (name, source) in [
+            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+            ),
+        ] {
+            assert!(
+                source.contains(NORMAL_BASIS),
+                "{name} does not carry this exact function, so the two geometry paths can \
+                 light one scaled instance two ways:\n{NORMAL_BASIS}"
+            );
+            assert!(
+                source.contains("normal_basis((float3x3)instance.transform)"),
+                "{name} declares `normal_basis` and never builds one from an instance \
+                 transform, so the declaration is decoration"
+            );
+            assert!(
+                !source.contains("mul((float3x3)instance.transform, vertex.normal"),
+                "{name} still takes a normal through the bare 3x3, which is the transform a \
+                 tangent takes and not the one a normal takes"
+            );
+        }
+    }
+
+    /// **A normal taken through `normal_basis` stays perpendicular to its
+    /// surface under a non-uniform scale; one taken through the bare 3×3 does
+    /// not.**
+    ///
+    /// The observable is the dot product of the shaded world normal with a
+    /// world-space *tangent* of the face it came off. A normal is defined by
+    /// being perpendicular to those, so that dot is zero for a correct normal
+    /// under any transform, and the vector `fragmentMain` hands to `dot(N, L)`
+    /// is exactly this one. Nothing in this workspace can read it off a pixel —
+    /// this crate has no backend and `crcbl-render`'s tests have none either —
+    /// so this evaluates the shader's rule rather than the shader.
+    ///
+    /// The case is `Scene::Ao`'s own `6 × 2 × 1.6` under a rotation, on a face
+    /// that is not axis aligned. Both halves are needed to see the bug at all:
+    /// an axis-aligned scale leaves an axis-aligned normal on its own axis,
+    /// which is why the engine's own troughs shade correctly today and why the
+    /// false claim survived. A glTF node with a rotation and a scale is the
+    /// shipped case that does not — `crcbl_scene::gltf_render` reports one as a
+    /// `scale` skip.
+    ///
+    /// Four assertions, and the first two are what stop the third passing on a
+    /// rule that does nothing.
+    #[test]
+    fn the_normal_basis_keeps_a_normal_perpendicular_under_a_non_uniform_scale() {
+        let model = glam::Mat4::from_quat(glam::Quat::from_axis_angle(
+            glam::Vec3::new(0.3, 0.8, 0.5).normalize(),
+            0.7,
+        )) * glam::Mat4::from_scale(glam::Vec3::new(6.0, 2.0, 1.6));
+        let basis = glam::Mat3::from_mat4(model);
+        let built = normal_basis(basis);
+
+        // 1. The cross-product spelling really is the cofactor matrix, checked
+        //    against `det * inverse^T` — which glam computes a different way, so
+        //    a transposed or miscycled row cannot agree with it by accident.
+        let reference = basis.inverse().transpose() * basis.determinant();
+        for (index, (a, b)) in built
+            .to_cols_array()
+            .iter()
+            .zip(reference.to_cols_array().iter())
+            .enumerate()
+        {
+            assert!(
+                (a - b).abs() < 1e-3 * b.abs().max(1.0),
+                "element {index} of the cofactor matrix is {a}, not {b}"
+            );
+        }
+
+        // An oblique face, of the kind the pyramid has and the open box does
+        // not, and two independent directions in its tangent plane.
+        let normal = glam::Vec3::new(0.9, 0.8, 0.9).normalize();
+        let u = normal.cross(glam::Vec3::X).normalize();
+        let v = normal.cross(u).normalize();
+        let bare = (basis * normal).normalize();
+        let corrected = (built * normal).normalize();
+
+        let mut worst_bare = 0.0f32;
+        for tangent in [u, v] {
+            let world_tangent = (basis * tangent).normalize();
+            worst_bare = worst_bare.max(bare.dot(world_tangent).abs());
+            // 3. The corrected normal is perpendicular to the transformed
+            //    surface, which is the property the whole change is for.
+            assert!(
+                corrected.dot(world_tangent).abs() < 1e-6,
+                "`normal_basis` left the normal {} off perpendicular",
+                corrected.dot(world_tangent)
+            );
+        }
+        // 2. And the bare 3×3 is a long way off it, so the check above has
+        //    something it could fail.
+        assert!(
+            worst_bare > 0.5,
+            "the bare 3×3 leaves the normal only {worst_bare} off perpendicular here, so this \
+             case cannot tell the two rules apart"
+        );
+
+        // 4. **The identity is its own cofactor matrix, exactly.** This is why
+        //    the change moved no golden image: `apps/lantern`, `apps/quarry` and
+        //    `crcbl::screenshot`'s dunes patch all place their instances at the
+        //    identity, so the vertex stage writes the numbers it always wrote.
+        assert_eq!(
+            normal_basis(glam::Mat3::IDENTITY).to_cols_array(),
+            glam::Mat3::IDENTITY.to_cols_array()
+        );
+
+        // And the two other shapes the committed goldens are drawn with: a
+        // uniform scale, and an axis-aligned scale on an axis-aligned normal.
+        // Both give a *normalized* normal equal to the one the bare 3×3 gave,
+        // which is the rest of that no-rebless claim.
+        for scale in [
+            glam::Vec3::splat(8.0),
+            glam::Vec3::new(6.0, 2.0, 1.6),
+            glam::Vec3::splat(0.3),
+        ] {
+            let diagonal = glam::Mat3::from_diagonal(scale);
+            let cofactor = normal_basis(diagonal);
+            for axis in [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z] {
+                for face in [axis, -axis] {
+                    assert_eq!(
+                        (cofactor * face).normalize(),
+                        (diagonal * face).normalize(),
+                        "a {scale:?} scale moved the {face:?} face's normal"
+                    );
+                }
             }
         }
     }

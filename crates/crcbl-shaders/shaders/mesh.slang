@@ -418,8 +418,9 @@ static const float LOD_VIEW = 1.5;
 /// consumes it.
 struct GpuInstance
 {
-    /// Model → sector. Rigid (rotation + translation), so its upper-left 3×3
-    /// transforms normals correctly without an inverse-transpose.
+    /// Model → sector. Rotation, translation and scale, **non-uniform
+    /// included**: the raster stages carry a normal through `normal_basis`, the
+    /// upper-left 3×3's cofactor matrix, rather than through the 3×3 itself.
     float4x4 transform;
     /// Which mesh to draw: an index into `meshes` below. The vertex stage
     /// resolves this instance's base vertex through it, which is what lets one
@@ -886,6 +887,55 @@ Texture2D<float> ambient_occlusion;
 [[vk::binding(23, 0)]]
 StructuredBuffer<GpuProbe> probes;
 
+/// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
+/// space, built out of that transform's own upper-left 3×3.
+///
+/// **The cofactor matrix**: row `i` is the cross product of the other two rows
+/// of `basis`, in cyclic order, and that matrix is `det(basis)` times the
+/// inverse transpose. The inverse transpose is what a normal needs and the 3×3
+/// is not — a normal is *perpendicular* to a surface, and only a transform that
+/// preserves angles carries a perpendicular the way it carries a tangent. The
+/// determinant is a scalar factor, and `fragmentMain` normalises what it is
+/// handed, so a positive one never reaches the shading.
+///
+/// **The identity is its own cofactor matrix, exactly** — the cross products of
+/// the axis triple are the triple back, with nothing to round — and so is a
+/// uniform scale, and an axis-aligned scale on an axis-aligned normal, once
+/// `fragmentMain` has normalised. Those are the shapes this engine's own scenes
+/// place instances at, which is why this replaced the bare 3×3 with every
+/// golden still matching; `crcbl_shaders::mesh`'s
+/// `the_normal_basis_keeps_a_normal_perpendicular_under_a_non_uniform_scale`
+/// asserts each of them.
+///
+/// **A cofactor matrix rather than the inverse transpose itself**, for two
+/// reasons that are not style. It needs no division, so a nearly singular
+/// transform yields a small vector rather than an enormous one; and where the
+/// determinant is negative — a mirroring transform, which flips the winding —
+/// the cofactor flips the normal onto the side the flipped winding put the
+/// surface on, where the inverse transpose alone leaves it pointing into the
+/// object. This is `graphitemaster/normals_revisited`'s result.
+///
+/// A transform whose determinant is *zero* has flattened the mesh into a plane,
+/// and this returns a zero row for each axis that went with it. Those faces
+/// have no area in the flattened mesh and raster no fragments, so the
+/// `normalize` in `fragmentMain` is never reached with the zero.
+///
+/// **Not a second matrix in `GpuInstance`.** An inverse transpose stored per
+/// instance is more of the buffer that the cull pass streams and the instance
+/// pool re-uploads on every move, for a value that is a function of a matrix
+/// already in the record. Computing it here spends three cross products instead
+/// of that bandwidth, and it cannot fall out of step with the transform it is
+/// built from. `mesh_cluster.slang` carries this function too, and
+/// `crcbl_shaders::mesh`'s
+/// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` is what
+/// holds the two spellings equal.
+float3x3 normal_basis(float3x3 basis)
+{
+    return float3x3(cross(basis[1], basis[2]),
+                    cross(basis[2], basis[0]),
+                    cross(basis[0], basis[1]));
+}
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -940,11 +990,12 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     VertexOutput output;
     output.position = mul(frame.view_proj, world);
     output.world_position = world.xyz;
-    // The transform is rigid, so its 3×3 part is orthonormal and is its own
-    // inverse-transpose. The renderer states that as an obligation on
-    // `GpuInstance::transform` rather than shipping a second matrix per
-    // instance that nothing needs until non-uniform scale exists.
-    output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
+    // **Through the cofactor matrix, not through the 3×3 itself.** The 3×3 is
+    // the transform a tangent takes; a normal is the perpendicular to those,
+    // and a non-uniform scale moves the two apart. `normal_basis` is the matrix
+    // that keeps them together, and it is built here rather than uploaded, so
+    // `GpuInstance` grows nothing.
+    output.world_normal = mul(normal_basis((float3x3)instance.transform), vertex.normal.xyz);
     // **No cluster here, and that is the honest picture.** These two paths
     // select one level per *instance*, so there is neither a per-cluster level
     // to tint by nor a per-cluster projected error to shade by; a flat grey says

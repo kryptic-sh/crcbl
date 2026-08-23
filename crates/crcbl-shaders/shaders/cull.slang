@@ -65,8 +65,9 @@
 /// `mesh.slang`'s copy.
 struct GpuInstance
 {
-    /// Model → sector. Rigid (rotation + translation), so its upper-left 3×3
-    /// transforms normals correctly without an inverse-transpose.
+    /// Model → sector. Rotation, translation and scale, **non-uniform
+    /// included**: the raster stages carry a normal through `normal_basis`, the
+    /// upper-left 3×3's cofactor matrix, rather than through the 3×3 itself.
     float4x4 transform;
     /// Which mesh to draw: an index into `meshes` below. The vertex stage
     /// resolves this instance's base vertex through it, which is what lets one
