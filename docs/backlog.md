@@ -48,10 +48,25 @@ work afterwards, and neither can start before it.
   `save list|dump|diff|restore` — but `dump` is specified to render RON and this
   tree has no RON reader, which is its own open decision below. `sim` and
   `settings` were the other two of these and both shipped on 2026-08-23.
-- **Profile rebind storage and glyph hints.** `ActionMap::rebind` mutates in
-  memory and nothing serialises it; `crcbl-store` has no profile or binding type
-  at all, and its only cross-session helper is the samples' high-score number.
-  `crcbl-input` contains no glyph anything.
+- **Profile rebind storage and glyph hints, and the order they have to land
+  in.** `ActionMap::rebind` mutates in memory and nothing serialises it;
+  `crcbl-store` has no profile or binding type at all, and its only
+  cross-session helper is the samples' high-score number. `crcbl-input` contains
+  no glyph anything.
+
+  **Persistence is not the slice to start with**, checked 2026-08-23:
+  `ActionMap::rebind` has **no caller anywhere outside its own crate**, so
+  storing what it produces would be a format, a layer and a merge rule with
+  nothing to read them — the same objection that keeps the Fetch `AssetSource`
+  unshipped. The rebind UI is P10's, and persistence lands with it, driven by
+  what it actually needs to write. Worth knowing before then:
+  `docs/plan/19-input.md` puts rebinds in "the profile (topic 14, RON) as diffs
+  over game defaults", so as written this row is **blocked on the RON decision**
+  — while the settings stack already in the tree would carry an
+  `[input.bindings]` table today, with `crcbl settings get|set` working on it
+  for free. That is a fork worth taking deliberately rather than by default,
+  because it moves a file topic 14 owns.
+
 - **Client tick alignment.** No lead, no EWMA server-time estimate, no rate
   correction. `crcbl-client` advances playback at a constant rate, which is an
   interpolation buffer and what its own header calls it. Blocked behind the
