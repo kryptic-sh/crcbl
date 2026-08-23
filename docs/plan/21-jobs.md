@@ -276,7 +276,15 @@ rather than designed: under `node:worker_threads`, three workers instantiated
 the same module against one shared memory and each executed Rust — shared-heap
 allocation, a shared `AtomicU32`, and a per-worker `thread_local` all behaved,
 and the main thread's own `thread_local` survived. Each worker needs its
-`__stack_pointer` set and `__wasm_init_tls` called before it runs anything.
+`__stack_pointer` set and `__wasm_init_tls` called before it runs anything. Do
+not expect either omission to announce itself. Skipping `__wasm_init_tls`
+sometimes traps and sometimes does not: `__tls_base`'s initial value is a layout
+accident, measured at 1048576 in one build — where it collides with the initial
+`__stack_pointer` and the corruption trapped — and at zero in another, where
+every worker's thread-locals aliased one harmless address and a
+`const`-initialised `thread_local!` read and wrote it without complaint.
+Skipping the `__stack_pointer` write is silently wrong in the same way. Both
+have to be gated by observing separation directly.
 
 **Two facts from that session belong in this plan, not only in the backlog.**
 First, `Mutex` and `Condvar` work across workers, which is what decides whether
