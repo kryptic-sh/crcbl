@@ -4512,6 +4512,65 @@ async function main() {
     );
   }
   {
+    // **A destroy of an ACQUIRED image lets the slot go and leaves the texture
+    // alone.** An offscreen swapchain's ring is `imageCount` textures this
+    // replayer created once and hands out in turn, so the handle an acquire
+    // files is **borrowed**: destroying the texture under it takes a slot the
+    // engine is still being given every few frames, and every later frame drawn
+    // into that slot goes to a destroyed texture. The engine retires an
+    // acquired pair at the next acquire — it must, or the tables grow by one
+    // per frame — so this is the ordinary path rather than a corner.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(createOffscreenSurface, 2n));
+    replayer.replay(frameOf(swapchainOffscreen, 3n));
+    // The textures themselves, off the swapchain the replayer built — `device`'s
+    // `createdTextures` is the descriptors it was asked for, not the objects.
+    const ring = replayer.swapchains.get(createSwapchain.swapchain)?.ring ?? [];
+    replayer.replay(
+      frameOf({ ...acquireNextFrame, swapchain: createSwapchain.swapchain }, 4n)
+    );
+    const acquired = replayer.images.get(acquireNextFrame.image);
+    replayer.replay(
+      frameOf({ ...destroyImage, image: acquireNextFrame.image }, 5n)
+    );
+    check(
+      acquired === ring[0] &&
+        ring.every((texture) => texture.destroys === 0) &&
+        replayer.images.get(acquireNextFrame.image) === undefined &&
+        replayer.images.size === 0 &&
+        replayer.takeError() === null,
+      `DestroyImage on an acquired ring slot forgets the handle and keeps the texture (${ring.map((texture) => texture.destroys).join(',')} destroys, ${replayer.images.size} held)`
+    );
+    // And the ring is still a ring: the next acquire hands out the slot after
+    // the one just forgotten, rather than failing on a destroyed texture.
+    replayer.replay(
+      frameOf({ ...acquireNextFrame, swapchain: createSwapchain.swapchain }, 6n)
+    );
+    check(
+      replayer.images.get(acquireNextFrame.image) === ring[1] &&
+        replayer.takeError() === null,
+      `and the ring keeps turning after it (${replayer.images.get(acquireNextFrame.image) === ring[1]})`
+    );
+  }
+  {
+    // **The swapchain still owns them**, so releasing it is what destroys the
+    // ring — the arm that fails if "borrowed" were read as "never destroyed".
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(createOffscreenSurface, 2n));
+    replayer.replay(frameOf(swapchainOffscreen, 3n));
+    const ring = replayer.swapchains.get(createSwapchain.swapchain)?.ring ?? [];
+    replayer.replay(
+      frameOf({ ...acquireNextFrame, swapchain: createSwapchain.swapchain }, 4n)
+    );
+    replayer.replay(
+      frameOf({ ...destroySwapchain, swapchain: createSwapchain.swapchain }, 5n)
+    );
+    check(
+      ring.length > 0 && ring.every((texture) => texture.destroys === 1),
+      `DestroySwapchain destroys the ring it made (${ring.map((texture) => texture.destroys).join(',')})`
+    );
+  }
+  {
     // **A destroy of an empty slot**, which the fixture's own carries: its
     // handle is one no create in the corpus ever used.
     const { replayer } = await readyWithDevice();

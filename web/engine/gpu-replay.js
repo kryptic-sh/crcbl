@@ -2853,6 +2853,27 @@ export class Replayer {
    * @type {HandleTable<GPUTexture>}
    */
   #images = new HandleTable();
+
+  /**
+   * Every texture that belongs to a swapchain rather than to a handle.
+   *
+   * `crcbl-vk` carries the same fact as a `swapchain_owned` flag on its image
+   * entries, and for the same reason: an acquired frame is filed under a handle
+   * the engine minted, but the object behind it is **borrowed** — a canvas
+   * texture the browser expires by itself, or one slot of an offscreen ring
+   * this replayer will hand out again a few frames later. A `DestroyImage`
+   * naming one of those may forget the handle and must not call `destroy()`:
+   * doing it to a ring slot wrecks the ring, which the engine goes on drawing
+   * into.
+   *
+   * A `WeakSet` because membership is a property of the texture and outlives
+   * every handle that ever named it, and because a canvas hands out a fresh
+   * texture per frame — a set that kept them would be the leak this exists to
+   * help stop.
+   *
+   * @type {WeakSet<GPUTexture>}
+   */
+  #swapchainImages = new WeakSet();
   /**
    * The `GPUTextureView` behind each live image-view handle.
    *
@@ -4309,6 +4330,8 @@ export class Replayer {
       }
     }
     this.#images.insert(command.image, texture);
+    // Borrowed, not owned — see {@link Replayer#swapchainImages}.
+    this.#swapchainImages.add(texture);
     // NAMED RATHER THAN DEFAULTED, AND THAT IS THE sRGB ENCODE. A canvas is
     // configured with a linear base format — `configure` refuses an `-srgb` one
     // — so a defaulted view is linear and every pass above the seam, which
@@ -4572,7 +4595,15 @@ export class Replayer {
    * @param {{ image: { index: number, generation: number } }} command
    */
   #destroyImage(command) {
-    this.#images.remove(command.image)?.destroy();
+    const texture = this.#images.remove(command.image);
+    // A swapchain's own texture is released by its swapchain and by nothing
+    // else. Destroying an offscreen ring slot here would take a texture the
+    // engine is still being handed every few frames; a canvas texture expires
+    // on its own when the task that acquired it returns, so there is nothing to
+    // release either. Both are the handle being forgotten and no more.
+    if (texture !== undefined && !this.#swapchainImages.has(texture)) {
+      texture.destroy();
+    }
   }
 
   /**
