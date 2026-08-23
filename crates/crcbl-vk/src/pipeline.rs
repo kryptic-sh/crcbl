@@ -48,8 +48,8 @@ use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, ComputePipelineDesc,
     ComputePipelineHandle, DeviceCaps, Features, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    HalError, PipelineLayoutDesc, PipelineLayoutHandle, SamplerDesc, SamplerHandle, ShaderEntry,
-    ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages,
+    HalError, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, SamplerDesc, SamplerHandle,
+    ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages,
 };
 
 use crate::conv;
@@ -1217,7 +1217,29 @@ fn write_descriptors(
                 // release driver does not. `WHOLE_BUFFER` is resolved into what
                 // it actually covers first — it is the commoner spelling, and
                 // it carries no number to compare.
-                let (raw, length) = inner.buffer_raw_and_size(state, buffer)?;
+                let (raw, length, location) = inner.buffer_raw_size_and_location(state, buffer)?;
+                // A buffer a shader *writes* must live in device-local memory:
+                // D3D12's upload and readback heaps refuse
+                // `ALLOW_UNORDERED_ACCESS` at creation, so the seam states the
+                // rule for every backend rather than letting one of them be the
+                // only place it holds. Vulkan itself is happy to bind a
+                // host-visible buffer to a writable storage slot, which is
+                // exactly why nothing here caught it.
+                if let BindingKind::StorageBuffer {
+                    read_only: false, ..
+                } = slot.kind
+                    && !matches!(location, MemoryLocation::DeviceLocal)
+                {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "binding {} is a writable storage buffer and was given a {location:?} \
+                         buffer; a buffer a shader writes must be MemoryLocation::DeviceLocal, \
+                         because D3D12's upload and readback heaps refuse \
+                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS at creation and pin the \
+                         resource to a state a shader cannot write from. Read-only storage \
+                         bindings of a host-visible buffer are unaffected",
+                        entry.binding
+                    )));
+                }
                 let ceiling = match slot.kind {
                     BindingKind::UniformBuffer { .. } => {
                         Some(inner.caps.limits.max_uniform_buffer_range)

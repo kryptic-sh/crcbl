@@ -389,3 +389,102 @@ fn a_uniform_binding_over_the_range_limit_is_refused() {
 
     headless.finish();
 }
+
+/// A writable storage binding of a host-visible buffer, against a driver.
+///
+/// `BufferDesc::memory` states the rule: a buffer a shader writes must be
+/// `MemoryLocation::DeviceLocal`, because D3D12's upload and readback heaps
+/// refuse `ALLOW_UNORDERED_ACCESS` at creation. Vulkan has no such restriction
+/// — a `HostUpload` buffer bound to a writable storage slot is accepted by the
+/// driver and by the validation layer, which is exactly why nothing here
+/// caught it and why the refusal has to be `crcbl-vk`'s own.
+///
+/// The read-only arm is not decoration: the seam's rule is about *writable*
+/// slots, and a check that refused every host-visible storage binding would
+/// pass the first assertion while breaking staging readback. Asserting the
+/// acceptance is what tells the two apart.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_writable_storage_binding_refuses_host_visible_memory() {
+    let headless = Headless::open_for_triangle();
+    let device = headless.device.as_ref();
+
+    let layout_of = |read_only| {
+        device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("one storage buffer"),
+                entries: &[crcbl_hal::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: crcbl_hal::ShaderStages::COMPUTE,
+                    kind: crcbl_hal::BindingKind::StorageBuffer {
+                        read_only,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: crcbl_hal::BindingFlags::empty(),
+                }],
+            })
+            .expect("a single storage binding")
+    };
+    let buffer_of = |memory| {
+        device
+            .create_buffer(&crcbl_hal::BufferDesc {
+                label: Some("storage"),
+                size: 256,
+                usage: crcbl_hal::BufferUsage::STORAGE,
+                memory,
+            })
+            .expect("a storage buffer")
+    };
+    let group_of = |layout, buffer| {
+        device.create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: None,
+            layout,
+            entries: &[crcbl_hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::Buffer {
+                    buffer,
+                    offset: 0,
+                    size: crcbl_hal::BindingResource::WHOLE_BUFFER,
+                },
+            }],
+            variable_count: None,
+        })
+    };
+
+    let writable = layout_of(false);
+    let read_only = layout_of(true);
+    let upload = buffer_of(crcbl_hal::MemoryLocation::HostUpload);
+    let readback = buffer_of(crcbl_hal::MemoryLocation::HostReadback);
+    let device_local = buffer_of(crcbl_hal::MemoryLocation::DeviceLocal);
+
+    for (buffer, what) in [(upload, "HostUpload"), (readback, "HostReadback")] {
+        let error = group_of(writable, buffer).expect_err("a shader cannot write host memory");
+        assert!(
+            matches!(error, crcbl_hal::HalError::InvalidDescriptor(_)),
+            "{what}: {error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("binding 0"), "{what}: {text}");
+        assert!(text.contains(what), "{what}: {text}");
+        assert!(text.contains("DeviceLocal"), "{what}: {text}");
+
+        // The same buffer in a read-only slot is untouched by the rule.
+        let group = group_of(read_only, buffer).expect("a read-only storage binding is fine");
+        device.destroy_bind_group(group);
+    }
+
+    // …and the writable slot still accepts the memory it is for.
+    let group =
+        group_of(writable, device_local).expect("device-local memory is what the rule asks for");
+    device.destroy_bind_group(group);
+
+    device.destroy_buffer(upload);
+    device.destroy_buffer(readback);
+    device.destroy_buffer(device_local);
+    device.destroy_bind_group_layout(writable);
+    device.destroy_bind_group_layout(read_only);
+
+    headless.finish();
+}

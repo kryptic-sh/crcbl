@@ -16,6 +16,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` refuses a writable storage binding of a host-visible buffer.**
+  `BufferDesc::memory` has always said that a buffer a shader writes must be
+  `MemoryLocation::DeviceLocal` — D3D12's upload and readback heaps refuse
+  `ALLOW_UNORDERED_ACCESS` at creation — but only the null and D3D12 backends
+  enforced it. Vulkan accepted a `HostUpload` or `HostReadback` buffer in a
+  `BindingKind::StorageBuffer { read_only: false }` slot: the driver allows it
+  and the validation layer reports nothing, so the same descriptor was a caller
+  bug on two backends and a working binding on Vulkan that would fail on D3D12.
+  `create_bind_group` now answers `HalError::InvalidDescriptor` naming the
+  binding and the location it was given. Read-only storage bindings of a
+  host-visible buffer are unaffected, and callers who already respected the
+  documented rule see no change. `crcbl-mtl` and `crcbl-webgpu` still do not
+  enforce it; `docs/backlog.md` carries both.
+
 - **`crcbl-webgpu` refuses a zero-size buffer, which the seam has always said it
   must.** `BufferDesc::size` is documented "must be non-zero", and the null,
   Vulkan, Metal and D3D12 backends each answered `HalError::InvalidDescriptor`

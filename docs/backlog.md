@@ -6054,6 +6054,42 @@ which is state this backend has deliberately not had. Worth doing only if a
 second obligation wants the same table; one caller's convenience does not pay
 for a mirror of the browser's own bookkeeping.
 
+## Two backends still take a writable storage binding of host memory (2026-08-24)
+
+`BufferDesc::memory` states the rule: a buffer a shader writes must be
+`MemoryLocation::DeviceLocal`, because D3D12's upload and readback heaps refuse
+`ALLOW_UNORDERED_ACCESS` at creation and pin the resource to a state a shader
+cannot write from. It is now enforced by the null backend
+(`check_shader_writable_memory`), by `crcbl-dx12` (`binding.rs`) and — as of
+this entry — by `crcbl-vk` (`write_descriptors`, covered by
+`a_writable_storage_binding_refuses_host_visible_memory` in
+`crates/crcbl-vk/tests/vk_e2e/pipeline.rs`). Two backends do not:
+
+- **`crcbl-mtl`** (`binding.rs`, the buffer arm of its bind-group builder) —
+  DEFERRED, so this is a record, not a task. Metal has no such restriction of
+  its own, so a caller who gets this wrong sees it only on D3D12.
+- **`crcbl-webgpu`** (`hal::device::create_bind_group`) — blocked on the same
+  missing state as the range check above: the encoder holds no handle→buffer
+  table, so it cannot look up the location a handle was created with. The
+  browser catches **half** of it by accident, and the halves are worth telling
+  apart, because `MEMORY_LOCATION_USAGE` in `web/engine/gpu-replay.js` maps the
+  two host locations to different bits. `HostReadback` becomes `MAP_READ`, which
+  the specification lets carry `COPY_DST` and nothing else, so
+  `MAP_READ | STORAGE` is refused at `createBuffer` — arriving as a usage error
+  rather than as this rule, and one call earlier than the seam states it.
+  `HostUpload` becomes `COPY_DST`, so `COPY_DST | STORAGE` is an ordinary legal
+  WebGPU buffer and the writable binding is accepted in full. That is the case a
+  caller would ship and only discover on D3D12.
+
+**This is the second obligation asking for that table**, which the range-check
+entry named as the condition for building it: make it handle→{size, location}
+and both checks land together. That is the argument for doing it; it is still a
+mirror of bookkeeping the browser also keeps, and still wants a decision.
+
+No test anywhere exercised this rule before the Vulkan one above — verified by
+searching the workspace for both backends' error wording, which appears only in
+their own `src/`. That is why the gap survived on three backends at once.
+
 ## What the three `crcbl-shell` fixes left uncovered (2026-08-23)
 
 The X11 `wait_events` sleep, the Wayland `global_remove` gap and the uncapped
