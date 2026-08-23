@@ -12377,17 +12377,48 @@ camera. What is left is one performance gap and one level-of-detail gap.
   can no longer lose a cluster that faces the camera. What is left is
   performance: those instances are culled by the bounding sphere alone.
 
-  Closing _that_ needs a bound on how far a cone opens under a linear map, and
-  the tempting one is wrong to ship without a proof. `tan θ' ≤ κ tan θ` with
-  `κ = σ_max/σ_min` is exact when the cone axis lies along a singular direction
-  and was not shown to hold in general; the bound that _is_ provable —
-  `tan θ' ≤ κ sin θ / (cos θ − κ sin θ)` — degenerates to "no cull" for the
-  angles real clusters have, and does not reduce to `θ' = θ` at `κ = 1`, so it
-  would have taken culling away from rigid instances too. Whoever picks this up:
-  derive the bound, then bound `κ` itself in the shader, where today only
-  `σ_max` is available (`max_stretch`) and `σ_max³/|det|` is the cheap
-  over-estimate. `crcbl_scene::gltf_render`'s `scale` skip should stop warning
-  about missing geometry once that lands.
+  Closing _that_ needs a bound on how far a cone opens under a linear map. Two
+  were tried and rejected here — `tan θ' ≤ κ tan θ` (exact only when the axis
+  lies along a singular direction, never shown in general) and
+  `tan θ' ≤ κ sin θ / (cos θ − κ sin θ)` (provable, but degenerate for real
+  cluster angles and not reducing to `θ' = θ` at `κ = 1`).
+
+  **The right one is the tangent half-angle bound**, found 2026-08-23:
+
+  ```text
+  tan(θ'/2) ≤ κ · tan(θ/2),   κ = σ_max/σ_min
+  ```
+
+  It reduces to `θ' = θ` at `κ = 1` exactly, is linear in κ for small angles
+  rather than degenerate, and it is the classical angular-distortion bound for
+  an invertible linear map rather than something invented here. **Checked
+  numerically before being written down**: 200 000 random (matrix, vector pair)
+  trials with singular values spread over `e^±2.5` gave a maximum
+  `tan(θ'/2) / (κ tan(θ/2))` of **0.9994**, so it holds and is tight rather than
+  loose. A second run sampled a million normals inside random cones, carried
+  them through the **cofactor** matrix — normals are covectors, and
+  `κ(cofactor) = κ(B)` because the cofactor's singular values are
+  `|det B| / σ_i` — and found **zero** violations of the widened cone, the worst
+  case landing 0.0016 rad inside it.
+
+  What is left is engineering, not mathematics:
+  - **κ in the shader.** Only `σ_max` is cheap today (`max_stretch`).
+    `σ_max³/|det B|` bounds κ from above and needs nothing new, but it is weak
+    where it matters: a 2:1 scale has `κ = 2` and that estimate says `8/2 = 4`,
+    which widens a 30° cone to 94° — past the 90° where a cone test can refuse
+    anything at all. The exact κ from the eigenvalues of `BᵀB` (closed-form
+    symmetric 3×3) keeps the same cone at 56°, which still culls.
+  - **Where to compute it.** `cluster_survives` runs per (cluster, instance) and
+    the basis is per instance, so the eigen-solve either repeats per cluster —
+    tens of flops against traffic already being paid — or moves to `draw_gen`,
+    which already runs once per visible instance and would have to carry the
+    number across in a buffer.
+  - **The axis must go through the cofactor**, not the bare 3×3 it uses now.
+    `normal_basis` already exists in `mesh_cluster.slang`; the current spelling
+    is correct only because the similarity gate makes the two agree up to scale.
+
+  `crcbl_scene::gltf_render`'s `scale` skip should stop warning about missing
+  geometry once that lands.
 
   **Coverage:** the fix is exercised by the oracle's own test and by the text
   test holding the shader's `SIMILARITY_TOLERANCE` to `crcbl-shaders`'. No GPU
