@@ -269,7 +269,7 @@ pub enum Scene {
     /// threshold-free chain needs to show itself. The patch is one material row
     /// away from the floor it sits on — the same mesh, the same plane, the same
     /// normal, the same sun — differing only in a base-colour factor of
-    /// [`BLOOM_EMITTER_GAIN`], so it is HDR-bright while nothing else in the
+    /// `BLOOM_EMITTER_GAIN`, so it is HDR-bright while nothing else in the
     /// frame is and it lights nothing around it.
     ///
     /// **It sits off the frame's centre on the `+X` side**, which is what gives
