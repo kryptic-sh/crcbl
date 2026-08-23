@@ -90,6 +90,23 @@ else
     fi
 fi
 
+# **And in CI the backend has to be the one that can be validated.** The two
+# validation passes in `cli_e2e.rs` return early on any other backend — there is
+# no layer to ask — and an early return is a pass, so dropping
+# `CRCBL_CLI_E2E_BACKEND` from the job would leave this suite green while
+# checking nothing about the layer at all. The line below it already says which
+# backend ran; this is what makes the wrong answer fail rather than print.
+#
+# A developer's machine keeps the null default, which is the whole point of the
+# CLI/headless pillar: `crcbl new` has to work where there is no driver.
+if [ -n "${CI:-}" ] && [ "${CRCBL_CLI_E2E_BACKEND:-null}" != "vk" ]; then
+    echo "crcbl e2e: CRCBL_CLI_E2E_BACKEND is '${CRCBL_CLI_E2E_BACKEND:-null}' and this is" >&2
+    echo "           CI, which sets it to vk on purpose — the scaffold has to meet a real" >&2
+    echo "           driver and a real validation layer here, and on any other backend the" >&2
+    echo "           suite's validation passes return early and count as passes." >&2
+    exit 1
+fi
+
 cd "$REPO_ROOT"
 OUTPUT="${RUNTIME_DIR}/nextest.log"
 set +e
