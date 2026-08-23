@@ -1623,6 +1623,54 @@ fn a_read_only_depth_attachment_uses_the_read_state() {
     assert_eq!(depth_barrier.from, ResourceState::DepthStencilWrite);
 }
 
+/// Two read-only depth passes in a row still need a barrier between them.
+///
+/// "Read-only" describes the depth *test*: an attachment in that state still
+/// performs its store op when the pass ends, so back-to-back passes write the
+/// image twice. A graph that treated `DepthStencilRead` as a pure read would
+/// see read→read, skip the barrier, and leave a write-after-write with nothing
+/// ordering it.
+#[test]
+fn back_to_back_read_only_depth_passes_are_still_ordered() {
+    let harness = Harness::open();
+    let pool = TransientPool::new();
+    let mut graph = harness.graph();
+    let color = graph.create_image("color", scene_color());
+    let depth = graph.create_image("depth", scene_depth());
+
+    graph
+        .add_render_pass("prepass")
+        .clear_color(color, [0.0; 4])
+        .depth(
+            depth,
+            crcbl_hal::LoadOp::Clear,
+            crcbl_hal::StoreOp::Store,
+            crcbl_hal::ClearValue::default(),
+        )
+        .execute(|_| {});
+    for pass in ["grid", "overlay"] {
+        graph
+            .add_render_pass(pass)
+            .color(
+                color,
+                crcbl_hal::LoadOp::Load,
+                crcbl_hal::StoreOp::Store,
+                crcbl_hal::ClearValue::default(),
+            )
+            .depth_read(depth)
+            .execute(|_| {});
+    }
+
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    let second_read = compiled.passes()[2].barriers();
+    let depth_barrier = second_read
+        .images
+        .iter()
+        .find(|barrier| barrier.to == ResourceState::DepthStencilRead)
+        .expect("a second read-only depth pass must still be ordered against the first");
+    assert_eq!(depth_barrier.from, ResourceState::DepthStencilRead);
+}
+
 /// Buffers are tracked exactly as images are, including the imported final
 /// state — which is what a P7 indirect-argument buffer will depend on.
 #[test]

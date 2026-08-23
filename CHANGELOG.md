@@ -512,6 +512,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A read-only depth attachment no longer loses the barrier that orders its
+  store.** `ResourceState::DepthStencilRead` expanded to a read-only Vulkan
+  access mask, but an attachment in that state still performs
+  `VK_ATTACHMENT_STORE_OP_STORE` when the pass ends — so when a depth-test-only
+  pass was the last to touch an image, the next frame's layout transition was a
+  write whose source scope was a pure read and could not order against it.
+  Validation reported it as a cross-submission `SYNC-HAZARD-WRITE-AFTER-WRITE`
+  with `write_barriers: 0`, and it reached every frame the viewer drew.
+  `DepthStencilRead` now carries `DEPTH_STENCIL_ATTACHMENT_WRITE`, and
+  `ResourceState::is_write` returns `true` for it, so the graph no longer elides
+  the barrier between two such passes either. No golden moved. The viewer's CI
+  step gets `CRCBL_VK_VALIDATION_FATAL` back, so all seven now have it.
 - **`ConditionSimulator` no longer loses a message the inner transport
   refused.** Latency turns a steady stream into a burst on release, so the
   simulator is what fills a bounded channel — and both send paths threw the

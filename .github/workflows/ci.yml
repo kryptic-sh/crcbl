@@ -1717,23 +1717,19 @@ jobs:
       # falling back, so this step cannot quietly become a second `Null` run —
       # the trap `hal_seam_e2e`'s backend pin exists for.
       #
-      # **`CRCBL_VK_VALIDATION_FATAL` is off here alone, and it is off because
-      # this step found a bug rather than because the gate is wrong.** With it
-      # on, fifteen of the viewer's tests fail on one
-      # `SYNC-HAZARD-WRITE-AFTER-WRITE`: a frame's layout transition of the
-      # shadow atlas and the graph transient hazards against the *previous*
-      # frame's `vkCmdEndRendering` depth write, with `write_barriers: 0` — a
-      # cross-submission hazard, which is the class no machine in this project
-      # can reproduce locally (`run-vk-e2e.sh` reports `cross-submission=no`
-      # there and `yes` here). `docs/backlog.md` carries it. The variable goes
-      # back on this step the moment that lands, and every other step keeps it,
-      # so the gate is not weakened anywhere the hazard is not.
+      # This step is the one that found the read-only depth attachment's
+      # missing write scope: with the fatal gate on it failed fifteen tests on
+      # a cross-submission `SYNC-HAZARD-WRITE-AFTER-WRITE` that no other step
+      # reaches, because the viewer's ground grid is the only pass here that
+      # tests depth without writing it and is last to touch the image. The
+      # gate stays on.
       - name: Run the viewer's suite against lavapipe
         env:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_VALIDATION: '1'
           CRCBL_VK_SYNC_VALIDATION: '1'
+          CRCBL_VK_VALIDATION_FATAL: '1'
         run: cargo test --locked --quiet --package viewer
       # The UI system's own fixture, and the only sample whose frame is a clear
       # plus `ui-composite` and nothing else — no sprite pass at all. That makes

@@ -3,52 +3,48 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### A cross-submission WAW hazard on the shadow atlas, found the day the gate landed
+### A read-only depth attachment should not store at all
 
-**The first thing `CRCBL_VK_VALIDATION_FATAL` caught, and it is a real bug.**
-Fifteen of `apps/viewer`'s tests fail on lavapipe with the fatal gate on, all on
-one message:
+The cross-submission WAW that `CRCBL_VK_VALIDATION_FATAL` found was fixed by
+telling the truth about `ResourceState::DepthStencilRead` — it carries
+`DEPTH_STENCIL_ATTACHMENT_WRITE` now, because the attachment stores. The cleaner
+answer is for it not to store: `VK_ATTACHMENT_STORE_OP_NONE` is Vulkan 1.3 core,
+and a depth-test-only pass has nothing to write back.
 
-```text
-SYNC-HAZARD-WRITE-AFTER-WRITE … vkQueueSubmit2(): Hazard WRITE_AFTER_WRITE for
-entry 0, VkCommandBuffer [viewer frame], Submitted access info
-(submitted_usage: SYNC_IMAGE_LAYOUT_TRANSITION, command: vkCmdPipelineBarrier2,
-… VkImage [graph transient], VkImage [shadow atlas] …). Access info
-(prior_usage: SYNC_LATE_FRAGMENT_TESTS_DEPTH_STENCIL_ATTACHMENT_WRITE,
-write_barriers: 0, … submit: 10, command: vkCmdEndRendering …)
-```
+- **`StoreOp::Discard` is not that answer — measured.** With `depth_read`
+  switched to `Discard`, `cargo test -p viewer` under CI's layer still failed 15
+  of 75 on the same hazard: syncval accounts `DONT_CARE` as an attachment write
+  too. Only a `None` variant removes the access, and the HAL has none.
+- **The cost is a seam change.** `StoreOp` is in `crcbl-hal`, so a new variant
+  has to be answered by `crcbl-vk`, `crcbl-webgpu`, `crcbl-mtl` and
+  `crcbl-dx12`. WebGPU spells it as omitting `depth_ops`; Metal has no no-op
+  store action, so that arm needs thought rather than a mapping — Metal and dx12
+  are deferred but must still compile. Not started.
+- **Not investigated:** whether `crcbl-dx12`'s `D3D12_RESOURCE_STATE_DEPTH_READ`
+  and `crcbl-webgpu`'s tag mapping have the same gap the Vulkan mask had. DX12
+  transitions are whole-resource so it is likely benign, and WebGPU has no
+  explicit barriers at all, but neither was checked.
 
-A frame's opening layout transition of the shadow atlas and the graph transient
-hazards against the **previous submission's** depth write, and
-`write_barriers: 0` says that write was never made available to anything.
-Execution ordering between submissions is not enough for a write-after-write:
-the transition is itself a write, so it needs the prior one available, not
-merely finished.
+### Reproducing a lavapipe CI hazard locally
 
-- **It is cross-submission, which is why no local run has ever seen it.**
-  `run-vk-e2e.sh` reports `sync-validation reach: … cross-submission=no` on this
-  project's machines and `yes` on CI, and the harness already prints a banner
-  saying the local run is the weaker one. This is the first time that gap has
-  cost something concrete.
-- **It is not new.** `CRCBL_VK_SYNC_VALIDATION=1` has been set on these steps
-  all along; nothing could fail on what it reported until the fatal gate landed,
-  so the hazard has been in every CI log and in no CI result.
-- **Where to look**: whatever computes the acquire barrier for a persistent
-  image at the top of a frame in `crcbl-render`'s graph. A per-frame transient
-  starts with no prior state, but the shadow atlas is one image reused every
-  frame, so its opening barrier's `srcStageMask`/`srcAccessMask` have to carry
-  the _previous frame's_ last usage — `LATE_FRAGMENT_TESTS` plus
-  `DEPTH_STENCIL_ATTACHMENT_WRITE` here — rather than treating the image as
-  fresh.
-- **Not reproduced locally, and that is the first thing to fix about reproducing
-  it.** Options for a local repro, none tried: run the suite under the LunarG
-  SDK's layer build rather than the distro's, which is what
-  `cross-submission=yes` depends on; or force the two frames into one submission
-  so the hazard becomes intra-submission and visible here.
-- **`CRCBL_VK_VALIDATION_FATAL` is off on the
-  `Run the viewer's suite against lavapipe` step until this lands**, and on for
-  the other six — the exception is in `ci.yml` beside that step with the reason.
-  Turning it back on is how this entry gets deleted.
+The layer _build_ decides what syncval can see, and Ubuntu's is fetchable.
+Extract `vulkan-validationlayers_1.3.275.0-1_amd64.deb` and
+`mesa-vulkan-drivers_25.2.8-0ubuntu0.24.04.2_amd64.deb` from
+`archive.ubuntu.com` — plus `libllvm20`, `libedit2` and `libxml2`, which the
+Arch host does not supply in an ABI the Ubuntu builds accept — rewrite
+`library_path` in both JSON manifests to absolute paths, then point
+`VK_LAYER_PATH`, `CRCBL_VK_ICD` and `LD_LIBRARY_PATH` at them. This reproduced
+CI run 32653884228's `SYNC-HAZARD-WRITE-AFTER-WRITE` on this machine down to
+`seq_no`, `submit` and `batch_tag`, and the fix was verified against it.
+
+- **CI's Mesa is required, not optional.** A newer lavapipe advertises
+  `VK_EXT_present_timing`, so `crcbl-vk` chains
+  `VkPhysicalDevicePresentTimingFeaturesEXT`, which the 1.3.275 layer rejects at
+  `vkCreateDevice` before a frame is drawn.
+- **The newer layer is weaker here, not stronger.** With CI's Mesa held fixed,
+  layer 1.3.275 reports the hazard and the local 1.4.357 reports nothing;
+  `run-vk-e2e.sh`'s reach line agrees, printing `cross-submission=yes` under the
+  old layer on this machine and `no` under the new one.
 
 ### A wrapped string that lost its `\` reads as a sentence with a hole in it
 
@@ -10097,19 +10093,21 @@ rather than rediscovering.
 The illegal _commands_ are still caught by the validation layer at record time.
 The illegal _pass bookkeeping_ is caught nowhere.
 
-## Vulkan's cross-submission barriers are unverified on this machine
+## Vulkan's cross-submission barriers need CI's layer, not CI
 
-`run-vk-e2e.sh` reports its own reach, and on a local run it prints
+`run-vk-e2e.sh` reports its own reach, and with the installed layer a local run
+prints
 `sync-validation reach: record-time=yes one-submission=yes cross-submission=no`.
-So a green local run against radv says nothing about a missing barrier _between_
-submissions, which is the class every missing cross-frame barrier falls into.
-CI's layer configuration has caught one that a local run cannot see.
+So a green local run says nothing about a missing barrier _between_ submissions,
+which is the class every missing cross-frame barrier falls into — but the
+missing half is the layer build, not the machine, and it can be fetched. See
+"Reproducing a lavapipe CI hazard locally" above.
 
 Neither environment subsumes the other: the local run has a real driver, a
-discrete GPU and a real async-compute queue that CI has never had; CI has the
-cross-submission checking. Treat "green locally" as insufficient for anything
-touching barriers, and rely on `cargo nextest run -p crcbl-render` for that
-class — it compiles consecutive frames against one pool and needs no layer.
+discrete GPU and a real async-compute queue that CI has never had. Treat "green
+locally with the installed layer" as insufficient for anything touching
+barriers, and rely on `cargo nextest run -p crcbl-render` for that class — it
+compiles consecutive frames against one pool and needs no layer.
 
 ### Two things DX1 decided that a later slice may have to undo
 

@@ -368,6 +368,12 @@ impl ResourceState {
     ///
     /// Read→read transitions need no barrier at all, so a graph asks this to
     /// skip emitting one.
+    ///
+    /// [`Self::DepthStencilRead`] counts as a write, which its name argues
+    /// against: "read-only" there describes the depth *test*, and an
+    /// attachment in that state still stores at the end of the pass. Two such
+    /// passes in a row hazard against each other, so the barrier between them
+    /// is not the one to skip.
     #[must_use]
     pub const fn is_write(self) -> bool {
         matches!(
@@ -376,6 +382,7 @@ impl ResourceState {
                 | Self::ShaderReadWrite
                 | Self::ColorAttachment
                 | Self::DepthStencilWrite
+                | Self::DepthStencilRead
                 | Self::TransferDst
         )
     }
@@ -993,6 +1000,9 @@ mod tests {
         assert!(ResourceState::ColorAttachment.is_write());
         assert!(ResourceState::TransferDst.is_write());
         assert!(ResourceState::ShaderReadWrite.is_write());
+        // Its name argues the other way, and the store op decides: an
+        // attachment left in this state writes the image when the pass ends.
+        assert!(ResourceState::DepthStencilRead.is_write());
         assert!(!ResourceState::ShaderRead.is_write());
         assert!(!ResourceState::IndirectArgument.is_write());
         assert!(!ResourceState::Undefined.is_write());

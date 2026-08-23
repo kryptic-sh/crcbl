@@ -675,9 +675,16 @@ pub fn state_masks(state: ResourceState) -> StateMasks {
         // resource: harmless over-sync, and wrong the day P7 samples the depth
         // buffer, because the *right* answer then is `ShaderRead`, not a
         // depth-attachment state with a shader stage bolted on.
+        // The write bit is not a mistake: "read-only" describes the depth
+        // *test*, and an attachment in this state still performs its store op
+        // at `vkCmdEndRendering`, which syncval accounts as
+        // `SYNC_LATE_FRAGMENT_TESTS_DEPTH_STENCIL_ATTACHMENT_WRITE`. Without
+        // it the next barrier over that image has a read-only source scope and
+        // cannot order against the store — a write-after-write with
+        // `write_barriers: 0`.
         ResourceState::DepthStencilRead => (
             S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
-            A::DEPTH_STENCIL_ATTACHMENT_READ,
+            A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
             L::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         ),
         ResourceState::TransferSrc => (S::ALL_TRANSFER, A::TRANSFER_READ, L::TRANSFER_SRC_OPTIMAL),
