@@ -49,8 +49,11 @@
 
 pub mod cluster_dag;
 pub mod gltf_check;
-#[cfg(test)]
-mod gltf_fixture;
+// Fixtures, not engine surface: `pub` only so a gate in another crate can
+// generate the `.glb` it needs, and only when it asks for the feature. The
+// module's own header says what that exposes and what it leaves `pub(crate)`.
+#[cfg(any(test, feature = "gltf-fixture"))]
+pub mod gltf_fixture;
 pub mod gltf_import;
 #[cfg(feature = "render")]
 pub mod gltf_render;

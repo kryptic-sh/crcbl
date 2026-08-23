@@ -61,17 +61,31 @@ cd "$REPO_ROOT"
 
 SAMPLE_FRAMES=120
 
+# The one model this gate opens, written into the display's own scratch
+# directory by `generate_viewer_model` below just before the loop runs.
+#
+# The name is letters and a dot deliberately: `viewer` makes the file's own
+# directory the asset root and the file's name the asset key, and its `USAGE`
+# says an asset key holds only letters, digits, `.`, `_` and `-`. `RUNTIME_DIR`
+# is `mktemp -d -t`'s, so the path carries no spaces — which the table below
+# needs, since it splits each entry on whitespace.
+VIEWER_MODEL="${RUNTIME_DIR}/triangle.glb"
+
 # Each sample and the window size it asks for, one line each so a sample that
 # changes its own default fails on its own rather than being covered by a
 # constant shared with the others. These are measured from the runs, not read
 # off the `--size` help text — writing this list is what caught `bare` opening
 # at 640x480 while the shared `--size` line in its own help said 960x720.
 #
-# Every binary in `apps/` that opens a window, less two: `sandbox`, which
-# `run-x11-e2e.sh` already drives windowed and asserts far more of, and
-# `viewer`, which takes a model path and has no committed `.glb` to open — see
-# `docs/backlog.md` for what closing that needs. `render-harness` is a library
-# and `sim` is a headless determinism harness, so neither has a window to open.
+# Every binary in `apps/` that opens a window, less one: `sandbox`, which
+# `run-x11-e2e.sh` already drives windowed and asserts far more of.
+# `render-harness` is a library and `sim` is a headless determinism harness, so
+# neither has a window to open.
+#
+# Anything after the extent is handed to the sample itself. `viewer` is the only
+# entry that needs it — it takes the model as a positional argument — so the
+# table stays one line per sample rather than growing a second shape for one
+# member.
 SAMPLES=(
     "asteroids 960x720"
     "bare 960x720"
@@ -81,9 +95,32 @@ SAMPLES=(
     "hud 960x720"
     "lantern 960x720"
     "quarry 960x720"
+    "viewer 960x720 ${VIEWER_MODEL}"
 )
 
-# `run_sample <name> <WxH>`
+# Write the model `viewer` opens, and stop the gate if it is not a document this
+# engine can read back.
+#
+# `crcbl-scene`'s `gltf-fixture` feature is what builds it: the same triangle
+# that crate's own tests import, through the same code, so a fixture that stops
+# being valid glTF fails in the crate that owns glTF instead of reaching
+# `viewer` as a confusing load error. Committing a `.glb` was the alternative
+# and is the thing that module exists to avoid — a binary container is a fixture
+# nobody reviewing a change can read.
+#
+# The writer refuses to overwrite anything, which is why the path is a fresh one
+# under `RUNTIME_DIR` on every run, and it re-imports what it wrote before it
+# exits 0.
+generate_viewer_model() {
+    echo "crcbl e2e: writing ${VIEWER_MODEL} from crcbl-scene's gltf-fixture triangle"
+    cargo run --locked --quiet --package crcbl-scene --features gltf-fixture \
+        --example write-triangle-glb -- "$VIEWER_MODEL"
+    echo "crcbl e2e: viewer opens $(basename "$VIEWER_MODEL"), $(wc -c <"$VIEWER_MODEL") bytes, from ${RUNTIME_DIR}"
+}
+
+# `run_sample <name> <WxH> [sample args...]`
+#
+# Everything after the extent goes to the sample ahead of the shared flags.
 #
 # The failure discipline is `run_sandbox`'s in `run-x11-e2e.sh`: the run itself
 # is the only thing inside `set +e`, the status comes off `PIPESTATUS` rather
@@ -91,6 +128,7 @@ SAMPLES=(
 # before it exits.
 run_sample() {
     local sample="$1" want_extent="$2"
+    shift 2
     local log="${RUNTIME_DIR}/${sample}.log"
 
     echo "crcbl e2e: running ${sample} windowed against Xvfb on the vk GPU backend"
@@ -98,7 +136,7 @@ run_sample() {
     CRCBL_SHELL=x11 \
     CRCBL_VK_VALIDATION=1 \
     CRCBL_LOG="${CRCBL_E2E_SAMPLE_LOG:-info}" \
-        cargo run --locked --quiet --package "$sample" -- \
+        cargo run --locked --quiet --package "$sample" -- "$@" \
         --backend vk --frames "$SAMPLE_FRAMES" 2>&1 | tee "$log"
     local status=${PIPESTATUS[0]}
     set -e
@@ -182,9 +220,13 @@ run_sample() {
 # gate is for, so with no loader there is nothing left worth running.
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
+    generate_viewer_model
     for entry in "${SAMPLES[@]}"; do
-        read -r sample extent <<<"$entry"
-        run_sample "$sample" "$extent"
+        # Name, extent, and whatever else the entry carries for the sample
+        # itself — an array rather than three `read` variables so a sample with
+        # no extra arguments passes none rather than an empty string.
+        read -r -a fields <<<"$entry"
+        run_sample "${fields[@]}"
     done
     echo "crcbl e2e: ${#SAMPLES[@]} samples ran windowed against Xvfb on ${DISPLAY}"
 else

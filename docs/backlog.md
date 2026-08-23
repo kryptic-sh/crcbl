@@ -6013,17 +6013,17 @@ What it does **not** reach, stated rather than left to be discovered:
   manager, no null backend. `run-x11-e2e.sh` covers those shapes for the
   `sandbox` and for nothing else, so a sample whose fullscreen path broke would
   still fail no job.
-- **`viewer` has no windowed gate**, and cannot get one as the repo stands: it
-  takes a model path (`viewer model.glb`) and no `.glb` is committed anywhere
-  outside `target/`. Closing it means deciding where that model comes from, and
-  neither option is free: committing a small `.glb` puts a blob in the tree that
-  nobody reviewing a change can read — the objection `crcbl-scene`'s
-  `gltf_fixture` module header already states — while generating one at gate
-  time means reaching a builder that does not exist outside tests. Both
-  spellings are `#[cfg(test)]`: `crcbl-scene`'s `gltf_fixture` and
-  `gltf_e2e.rs`'s own `quad_glb`, so the generate route means widening one of
-  them into a real API or writing a third copy. `sandbox` stays out on purpose:
-  `run-x11-e2e.sh` already drives it windowed and asserts more of it.
+- **`sandbox` stays out on purpose**: `run-x11-e2e.sh` already drives it
+  windowed and asserts more of it.
+- **The model `viewer` opens is a generated triangle, not a real-world `.glb`.**
+  `crcbl-scene`'s `gltf-fixture` feature writes the same one-triangle document
+  that crate's own tests import — no textures, no skins, no animations, no
+  `MSFT_lod`, one material. So the gate proves `viewer` reaches a swapchain on
+  X11 with a document loaded, and proves nothing about the Blender, Sketchfab
+  and Khronos files `docs/plan/sample/05-viewer.md` says the sample exists for.
+- **Nothing `viewer` is actually for is exercised.** No orbit, no `I` listing,
+  no `W`/`N` views, no F11, no re-export watch: it runs the same fixed frame
+  count the other eight do and exits.
 - **The adapter is still lavapipe, not a real one.** Under Xvfb Mesa reports no
   DRI3, RADV refuses to present and the run falls back to `llvmpipe` — locally
   and on CI alike — and the gate deliberately asserts nothing about which

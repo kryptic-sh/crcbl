@@ -10,27 +10,56 @@
 //! [`triangle_json`] is a single triangle: three vertices carrying positions,
 //! normals and `TEXCOORD_0`, three `u16` indices, one material, and two nodes
 //! so that transform composition has a parent to compose with. Malformed cases
-//! are that document with one thing altered, through [`replacing`], which
+//! are that document with one thing altered, through `replacing`, which
 //! refuses to alter nothing.
 //!
-//! [`lod_glb`] is the second shape, for [`crate::lod_resolve`]: a node and a
+//! `lod_glb` is the second shape, for [`crate::lod_resolve`]: a node and a
 //! mesh per entry, so a chain of levels is a list of meshes and the names,
 //! `MSFT_lod` ids and scene membership that tie them together. It builds its
 //! buffer from the arrays it is given rather than from constants, because what
 //! its tests assert is that a level's geometry came out the same as it went
 //! in.
+//!
+//! # The `gltf-fixture` feature, and what it does *not* make public
+//!
+//! The same argument reaches outside this crate. A **gate** that has to point a
+//! tool at a `.glb` — `tools/run-samples-windowed.sh` pointing `viewer` at one
+//! — has the same two options and the same answer: a committed blob is
+//! unreadable, so the document is generated, and generating it means this
+//! builder rather than a third transcription of the glTF spec beside the two
+//! already here.
+//!
+//! So the `gltf-fixture` feature compiles this module outside `cfg(test)` and
+//! makes exactly four items public: [`triangle_json`] and its two halves,
+//! [`BIN_CHUNK_BUFFER`] and [`triangle_bin`], plus [`glb`], the container that
+//! closes them into a file. That is a whole `.glb` and nothing else. Everything
+//! the tests reach for — the malformed-case machinery, the LOD and textured
+//! shapes, the `tempfile`-backed asset directory — stays `#[cfg(test)]` and
+//! `pub(crate)`, because a caller outside this crate has no use for a document
+//! built to be refused, and because those halves are built on this crate's
+//! **dev**-dependencies, which a feature cannot turn on.
+//!
+//! **It is not part of the engine's API.** Nothing in `crcbl-scene`'s own
+//! surface takes or returns these bytes, no default build compiles them, and
+//! the feature exists so that gates and tests in other crates can ask for a
+//! document this crate already knows how to write. Treat a change to it as a
+//! change to a test helper.
 
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 use crcbl_assets::{DirSource, StorageError};
 
+#[cfg(test)]
 use crate::{GltfScene, import_gltf};
 
 /// The buffer clause of a `.glb`: the bytes are the container's `BIN` chunk, so
 /// the buffer has no `uri`.
-pub(crate) const BIN_CHUNK_BUFFER: &str = r#"{ "byteLength": 102 }"#;
+pub const BIN_CHUNK_BUFFER: &str = r#"{ "byteLength": 102 }"#;
 
 /// The buffer clause of a `.gltf`: the bytes are a file beside the document.
+#[cfg(test)]
 pub(crate) const EXTERNAL_BUFFER: &str = r#"{ "byteLength": 102, "uri": "triangle.bin" }"#;
 
 /// The bytes every accessor in [`triangle_json`] reads, in the order the buffer
@@ -42,7 +71,8 @@ pub(crate) const EXTERNAL_BUFFER: &str = r#"{ "byteLength": 102, "uri": "triangl
 /// | `36..72` | 3 × `[f32; 3]` normal |
 /// | `72..96` | 3 × `[f32; 2]` texcoord |
 /// | `96..102`| 3 × `u16` index |
-pub(crate) fn triangle_bin() -> Vec<u8> {
+#[must_use]
+pub fn triangle_bin() -> Vec<u8> {
     let mut bytes = Vec::new();
     for position in POSITIONS {
         for component in position {
@@ -70,10 +100,12 @@ pub(crate) const NORMALS: [[f32; 3]; 3] = [[0.0, 0.0, 1.0]; 3];
 pub(crate) const TEX_COORDS: [[f32; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
 pub(crate) const INDICES: [u16; 3] = [0, 1, 2];
 /// The factor `triangle_json`'s one material declares.
+#[cfg(test)]
 pub(crate) const BASE_COLOR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 
 /// The document, with `buffer` as its single buffer's JSON object.
-pub(crate) fn triangle_json(buffer: &str) -> String {
+#[must_use]
+pub fn triangle_json(buffer: &str) -> String {
     format!(
         r#"{{
   "asset": {{ "version": "2.0" }},
@@ -118,6 +150,7 @@ pub(crate) fn triangle_json(buffer: &str) -> String {
 /// matched nothing would leave the fixture valid and the "this is refused" test
 /// asserting that a well-formed document is refused — which it would then fail
 /// to do, quietly, forever.
+#[cfg(test)]
 pub(crate) fn replacing(json: &str, from: &str, to: &str) -> String {
     assert_eq!(
         json.matches(from).count(),
@@ -130,7 +163,8 @@ pub(crate) fn replacing(json: &str, from: &str, to: &str) -> String {
 /// A `.glb` container around `json`, padded exactly as the format requires:
 /// the `JSON` chunk to a multiple of four with spaces, the `BIN` chunk with
 /// zeroes.
-pub(crate) fn glb(json: &str, bin: Option<&[u8]>) -> Vec<u8> {
+#[must_use]
+pub fn glb(json: &str, bin: Option<&[u8]>) -> Vec<u8> {
     let mut json_chunk = json.as_bytes().to_vec();
     while !json_chunk.len().is_multiple_of(4) {
         json_chunk.push(b' ');
@@ -164,6 +198,7 @@ pub(crate) fn glb(json: &str, bin: Option<&[u8]>) -> Vec<u8> {
 /// Enough of a glTF to carry a LOD chain and nothing else: a name for the
 /// `name_LOD1` convention, a triangle list so a level's geometry is
 /// recognisable, and `MSFT_lod` ids for the extension half.
+#[cfg(test)]
 pub(crate) struct LodNode<'a> {
     /// The node's `name`.
     pub(crate) name: &'a str,
@@ -175,6 +210,7 @@ pub(crate) struct LodNode<'a> {
     pub(crate) lod_ids: Option<&'a str>,
 }
 
+#[cfg(test)]
 impl<'a> LodNode<'a> {
     /// A node drawing `mesh`, with no `MSFT_lod`.
     pub(crate) fn new(name: &'a str, mesh: &'a (Vec<[f32; 3]>, Vec<u32>)) -> Self {
@@ -208,6 +244,7 @@ impl<'a> LodNode<'a> {
 /// out of every scene — a loader that drew them would draw the mesh several
 /// times over — so a fixture that put every node in the scene could not
 /// exercise the case the extension is actually written for.
+#[cfg(test)]
 pub(crate) fn lod_glb(nodes: &[LodNode<'_>], scene: &[usize]) -> Vec<u8> {
     let mut bin = Vec::new();
     let mut meshes = Vec::new();
@@ -292,6 +329,7 @@ pub(crate) fn lod_glb(nodes: &[LodNode<'_>], scene: &[usize]) -> Vec<u8> {
 /// or from the wrong image is a different set of numbers rather than the same
 /// one — the argument `crcbl_render::scene::CHECKER_TEXELS` records for the
 /// engine's own page.
+#[cfg(test)]
 pub(crate) const IMAGE_TEXELS: [u8; 16] = [
     0xFF, 0x00, 0x00, 0xFF, // (0, 0) red
     0x00, 0xFF, 0x00, 0xFF, // (1, 0) green
@@ -304,6 +342,7 @@ pub(crate) const IMAGE_TEXELS: [u8; 16] = [
 /// Encoded rather than checked in, for this module's opening argument: a
 /// vendored binary is a fixture nobody reviewing a change can read, where four
 /// named texels above are.
+#[cfg(test)]
 pub(crate) fn png_bytes(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
@@ -318,6 +357,7 @@ pub(crate) fn png_bytes(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
 
 /// [`textured_parts`] closed into a `.glb`, which is what a test that does not
 /// mean to mutate the document wants.
+#[cfg(test)]
 pub(crate) fn textured_glb(image: &[u8], mime: &str, tex_coord: u32) -> Vec<u8> {
     let (json, bin) = textured_parts(image, mime, tex_coord);
     glb(&json, Some(&bin))
@@ -336,6 +376,7 @@ pub(crate) fn textured_glb(image: &[u8], mime: &str, tex_coord: u32) -> Vec<u8> 
 /// refusal test can put one thing wrong in the JSON with [`replacing`] and close
 /// it with [`glb`] afterwards — the same shape [`triangle_json`] has, and for
 /// the same reason.
+#[cfg(test)]
 pub(crate) fn textured_parts(image: &[u8], mime: &str, tex_coord: u32) -> (String, Vec<u8>) {
     let mut bin = triangle_bin();
     // The spec requires a bufferView holding image data to be four-byte aligned
@@ -397,10 +438,12 @@ pub(crate) fn textured_parts(image: &[u8], mime: &str, tex_coord: u32) -> (Strin
 /// A directory of assets, read through the real [`DirSource`] rather than a
 /// mock — so the key rule a buffer URI has to satisfy is the one that will
 /// apply in production, not one written for the test.
+#[cfg(test)]
 pub(crate) struct Assets {
     dir: tempfile::TempDir,
 }
 
+#[cfg(test)]
 impl Assets {
     pub(crate) fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -425,11 +468,13 @@ impl Assets {
 }
 
 /// Import `json` as a `.glb` whose `BIN` chunk is [`triangle_bin`].
+#[cfg(test)]
 pub(crate) fn import_glb(json: &str) -> Result<GltfScene, StorageError> {
     import_glb_bytes(&glb(json, Some(&triangle_bin())))
 }
 
 /// Import raw bytes as `meshes/model.glb`.
+#[cfg(test)]
 pub(crate) fn import_glb_bytes(bytes: &[u8]) -> Result<GltfScene, StorageError> {
     let assets = Assets::new();
     assets.write("meshes/model.glb", bytes);
@@ -438,6 +483,7 @@ pub(crate) fn import_glb_bytes(bytes: &[u8]) -> Result<GltfScene, StorageError> 
 
 /// Import `json` as `meshes/model.gltf`, with `bin` written beside it as the
 /// `triangle.bin` its buffer names.
+#[cfg(test)]
 pub(crate) fn import_gltf_text(json: &str, bin: &[u8]) -> Result<GltfScene, StorageError> {
     let assets = Assets::new();
     assets.write("meshes/model.gltf", json.as_bytes());

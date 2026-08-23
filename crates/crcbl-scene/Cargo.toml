@@ -29,6 +29,24 @@ repository.workspace = true
 [features]
 render = ["dep:crcbl-render", "dep:crcbl-sprite"]
 
+# `crcbl_scene::gltf_fixture` — the triangle document and the `.glb` container
+# this crate's own tests are built out of, compiled outside `cfg(test)` so that
+# another crate can reach them. **Not engine API.** It adds no dependency and
+# changes nothing a default build compiles; what it is for is a *gate* that has
+# to hand a real `.glb` to a tool, `tools/run-samples-windowed.sh` pointing
+# `viewer` at one being the case it was added for.
+#
+# A feature rather than a committed `.glb`, for the argument the module header
+# has always made: a binary container is a fixture nobody reviewing a change can
+# read. A feature rather than a third transcription of the glTF spec in the
+# harness, because there are two in this workspace already.
+#
+# It cannot turn on the `tempfile`/`png` halves of that module — those are
+# **dev**-dependencies, and a feature does not reach them — which is the same
+# line the module draws for its own reasons: only the four items that make one
+# whole document become public.
+gltf-fixture = []
+
 [dependencies]
 # The IO seam every byte arrives through, and `StorageError`, which is this
 # crate's error type too — a glTF that will not parse is a `StorageError::Other`
@@ -66,6 +84,16 @@ crcbl-sprite = { workspace = true, features = ["load"], optional = true }
 # bytes, so every storage variant but `Other` is unreachable from it and
 # `Other(String)` would erase which caller bug it hit.
 thiserror = { workspace = true }
+
+# The writer half of the `gltf-fixture` feature: it puts those bytes on disk and
+# reads them back through `import_gltf` before it says it worked. An example
+# rather than a `[[bin]]` because nothing installs it and nothing links it — it
+# exists to be run by a harness — and `required-features` keeps it out of a
+# default build entirely, so a `cargo build` that never asked for the fixture
+# never compiles it.
+[[example]]
+name = "write-triangle-glb"
+required-features = ["gltf-fixture"]
 
 [lints]
 workspace = true

@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-scene` has a `gltf-fixture` feature.** It compiles
+  `crcbl_scene::gltf_fixture`'s triangle document and `.glb` container outside
+  `cfg(test)` so another crate can build one — `BIN_CHUNK_BUFFER`,
+  `triangle_bin`, `triangle_json` and `glb`, which together make one whole
+  document and nothing more. It adds no dependency and changes nothing a default
+  build compiles. **Not engine API**: it exists so a harness that has to hand a
+  real `.glb` to a tool has one without a binary blob being committed, and
+  `tools/run-samples-windowed.sh` now runs `viewer` windowed against what the
+  `write-triangle-glb` example writes.
+
 - **`crcbl sim` runs the determinism harness.**
   `crcbl sim [--ticks N] [--tick-rate HZ] [--seed SEED] [--json]` simulates a
   headless server over a seed-generated world and prints
