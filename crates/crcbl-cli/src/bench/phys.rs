@@ -83,8 +83,6 @@
 //! reason; the drift is two independent values in `[-1, 1]` instead, which is
 //! not uniform over a circle and does not need to be.
 
-use std::collections::HashMap;
-
 use std::time::Instant;
 
 use crcbl::core::rand::{hash_u64, hash_unit};
@@ -165,7 +163,7 @@ pub(super) struct Run {
     /// Nanoseconds per timed query pass, ascending.
     query: Vec<u64>,
     /// What one query pass answers, verified against [`serial_answers`].
-    answers: Answers,
+    answers: Tally,
     /// Results the warm-up's query passes returned, summed.
     ///
     /// A sum of what those passes *answered* rather than a count of how many
@@ -179,21 +177,14 @@ pub(super) struct Run {
     broadphase: BroadphaseStats,
 }
 
-/// How much one query pass answered, and in what shape.
+/// How much one query pass answered, in what shape, and from which bodies.
 ///
 /// Cheap enough to compute on every pass, warm-up included: one add and one
-/// mix per query, and nothing per result. `shape` folds each query's result
-/// count **in query order**, so a pass that answered the right total across
-/// the wrong queries does not match.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Tally {
-    /// Results returned, summed over every query in the pass.
-    results: u64,
-    /// Each query's result count, folded in query order.
-    shape: u64,
-}
-
-/// A [`Tally`] plus the fold over *which* bodies answered.
+/// mix per query, and one array index and one add per result. `shape` folds
+/// each query's result count **in query order**, so a pass that answered the
+/// right total across the wrong queries does not match; `checksum` folds the
+/// bodies themselves, so a pass that answered the right counts from the wrong
+/// bodies does not either.
 ///
 /// The per-query part of `checksum` is an order-independent sum, because the
 /// order a query returns its neighbours in is the BVH's traversal order and
@@ -202,10 +193,12 @@ struct Tally {
 /// than its answer. Across queries the fold *is* ordered, because the query
 /// order is the body order and nothing about the tree may change it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Answers {
-    /// The cheap summary, so a timed pass can be held to it.
-    tally: Tally,
-    /// The identity fold. See the type's own docs.
+struct Tally {
+    /// Results returned, summed over every query in the pass.
+    results: u64,
+    /// Each query's result count, folded in query order.
+    shape: u64,
+    /// Which bodies answered. See the type's own docs.
     checksum: u64,
 }
 
@@ -252,8 +245,8 @@ fn mark(index: u64) -> u64 {
 ///
 /// A body overlaps itself, so a correct pass answers at least one result per
 /// query and `results` is never below `centres.len()`.
-fn serial_answers(centres: &[DVec3]) -> Answers {
-    let mut answers = Answers::default();
+fn serial_answers(centres: &[DVec3]) -> Tally {
+    let mut tally = Tally::default();
     for &centre in centres {
         let query = Sphere::new(centre, QUERY_RADIUS);
         let mut results = 0u64;
@@ -264,14 +257,41 @@ fn serial_answers(centres: &[DVec3]) -> Answers {
                 neighbours = neighbours.wrapping_add(mark(index as u64));
             }
         }
-        answers.tally.results += results;
-        answers.tally.shape = hash_u64(answers.tally.shape, results);
-        answers.checksum = hash_u64(answers.checksum, neighbours);
+        tally.results += results;
+        tally.shape = hash_u64(tally.shape, results);
+        tally.checksum = hash_u64(tally.checksum, neighbours);
     }
-    answers
+    tally
+}
+
+/// What each collider slot contributes to a query that answers with it.
+///
+/// Indexed by [`ColliderId::index`], which is why the timed loop can fold
+/// *which* bodies answered without a `HashMap` in it: a result becomes an
+/// array subscript. Sized from the largest slot the run was handed rather
+/// than from the body count, because the two are equal only while nothing
+/// has been removed and that is `PhysicsWorld`'s contract, not this
+/// scenario's to assume.
+///
+/// Two live colliders never share a slot — `crcbl-phys`'
+/// `collider_slots_are_stable_and_stop_being_dense_after_a_removal` is what
+/// holds that — so nothing here re-checks it.
+fn marks_by_slot(ids: &[ColliderId]) -> Vec<u64> {
+    let slots = || ids.iter().map(|id| id.index() as usize);
+    let mut marks = vec![0u64; slots().max().map_or(0, |max| max + 1)];
+    for (index, slot) in slots().enumerate() {
+        marks[slot] = mark(index as u64);
+    }
+    marks
 }
 
 /// One untimed pass through the broadphase, folding *which* bodies answered.
+///
+/// The same fold the timed loop runs, kept separate because this one also
+/// proves every result names a collider the run added — a check that needs
+/// the slot table's bounds and would be a branch per result in the timed
+/// path. Once this pass has passed, the timed loop's subscript is in range
+/// by construction.
 ///
 /// # Errors
 ///
@@ -280,37 +300,31 @@ fn serial_answers(centres: &[DVec3]) -> Answers {
 /// from — a ghost, and not something to fold into a checksum.
 fn full_answers(
     world: &mut PhysicsWorld,
-    ids: &[ColliderId],
+    marks: &[u64],
     centres: &[DVec3],
-) -> Result<Answers, Failure> {
-    let index_of: HashMap<ColliderId, u64> = ids
-        .iter()
-        .enumerate()
-        .map(|(index, &id)| (id, index as u64))
-        .collect();
-
+) -> Result<Tally, Failure> {
     let mut scratch = QueryScratch::new();
     let mut out = Vec::new();
-    let mut answers = Answers::default();
+    let mut tally = Tally::default();
 
     let queries = world.overlap_queries();
     for &centre in centres {
         queries.overlap_sphere_into(centre, QUERY_RADIUS, &mut scratch, &mut out);
         let mut neighbours = 0u64;
         for id in &out {
-            let Some(&index) = index_of.get(id) else {
+            let Some(&mark) = marks.get(id.index() as usize) else {
                 return Err(Failure::new(
                     "a query answered with a collider this run never added: the tree no \
                      longer describes the world it was built from",
                 ));
             };
-            neighbours = neighbours.wrapping_add(mark(index));
+            neighbours = neighbours.wrapping_add(mark);
         }
-        answers.tally.results += out.len() as u64;
-        answers.tally.shape = hash_u64(answers.tally.shape, out.len() as u64);
-        answers.checksum = hash_u64(answers.checksum, neighbours);
+        tally.results += out.len() as u64;
+        tally.shape = hash_u64(tally.shape, out.len() as u64);
+        tally.checksum = hash_u64(tally.checksum, neighbours);
     }
-    Ok(answers)
+    Ok(tally)
 }
 
 /// Refuses a query pass that did not answer what the serial scan answers.
@@ -338,13 +352,20 @@ fn expect_answers(phase: &str, produced: Tally, expected: Tally) -> Result<(), F
             produced.results, expected.results
         )));
     }
-    if produced.shape == expected.shape {
+    if produced.shape != expected.shape {
+        return Err(Failure::new(format!(
+            "{phase} answered the right {} results across the wrong queries: its per-query \
+             counts fold to {} where the scan's fold to {}",
+            produced.results, produced.shape, expected.shape
+        )));
+    }
+    if produced.checksum == expected.checksum {
         return Ok(());
     }
     Err(Failure::new(format!(
-        "{phase} answered the right {} results across the wrong queries: its per-query \
-         counts fold to {} where the scan's fold to {}",
-        produced.results, produced.shape, expected.shape
+        "{phase} answered the right {} results in the right shape and from the wrong \
+         bodies: its identity fold is {} where the scan's is {}",
+        produced.results, produced.checksum, expected.checksum
     )))
 }
 
@@ -365,7 +386,7 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
         .map(|(index, &centre)| drifted(index, centre))
         .collect();
 
-    let (answers, broadphase) = verify(&resting, &moved)?;
+    let answers = verify(&resting, &moved)?;
 
     let mut ids: Vec<ColliderId> = Vec::with_capacity(args.bodies);
     let mut build = Vec::with_capacity(args.iterations);
@@ -375,6 +396,7 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
     let mut timed_results = 0u64;
     let mut scratch = QueryScratch::new();
     let mut out = Vec::new();
+    let mut broadphase: Option<BroadphaseStats> = None;
 
     for iteration in 0..args.warmup.saturating_add(args.iterations) {
         let mut world = PhysicsWorld::new();
@@ -404,30 +426,61 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
         }
 
         // ── query ──────────────────────────────────────────────────────
+        // The identity fold is inside the timer: one array index and one add
+        // per result, which is what `ColliderId::index` being public buys —
+        // the `HashMap` this scenario refused to put here is gone.
+        //
+        // It is not free, and pretending otherwise would be the kind of
+        // claim this file exists to avoid. Measured 2026-08-23 on an x86-64
+        // release build at the default arena: the query phase's p50 rose
+        // from ~504 to ~515 microseconds, about two percent, with the two
+        // sets of runs not overlapping. That cost is paid identically by
+        // every run, so it does not disturb a comparison between runs, and
+        // it buys the one failure the totals cannot see: the right number of
+        // results, in the right per-query shape, from the wrong bodies.
+        let marks = marks_by_slot(&ids);
         let mut tally = Tally::default();
         let started = Instant::now();
         {
             let queries = world.overlap_queries();
             for &centre in &moved {
                 queries.overlap_sphere_into(centre, QUERY_RADIUS, &mut scratch, &mut out);
+                let mut neighbours = 0u64;
+                for id in &out {
+                    neighbours = neighbours.wrapping_add(marks[id.index() as usize]);
+                }
                 let results = out.len() as u64;
                 tally.results += results;
                 tally.shape = hash_u64(tally.shape, results);
+                tally.checksum = hash_u64(tally.checksum, neighbours);
             }
         }
         let queried = nanos(started.elapsed());
 
         if iteration < args.warmup {
-            expect_answers("a warm-up query pass", tally, answers.tally)?;
+            expect_answers("a warm-up query pass", tally, answers)?;
             warmup_results += tally.results;
         } else {
-            expect_answers("a timed query pass", tally, answers.tally)?;
+            expect_answers("a timed query pass", tally, answers)?;
             timed_results += tally.results;
             build.push(built);
             refit.push(refitted);
             query.push(queried);
+            // Read after the query pass, so the tree is current and this does
+            // not force a rebuild of its own. Overwritten each iteration: the
+            // reading wanted is one iteration's, and every iteration builds
+            // the same world from the same crowd. Reading the *verify* pass's
+            // world instead would report a tree the timings never touched.
+            broadphase = Some(world.broadphase_stats());
         }
     }
+
+    let Some(broadphase) = broadphase else {
+        return Err(Failure::new(
+            "no timed iteration ran, so there is no tree to report: `--iterations` must be \
+             at least one",
+        ));
+    };
 
     build.sort_unstable();
     refit.sort_unstable();
@@ -455,7 +508,7 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
 ///
 /// [`Failure`] if a body cannot be moved, if the pass does not answer what
 /// the serial scan answers, or if the tree does not hold every body.
-fn verify(resting: &[DVec3], moved: &[DVec3]) -> Result<(Answers, BroadphaseStats), Failure> {
+fn verify(resting: &[DVec3], moved: &[DVec3]) -> Result<Tally, Failure> {
     let expected = serial_answers(moved);
 
     let mut world = PhysicsWorld::new();
@@ -467,19 +520,8 @@ fn verify(resting: &[DVec3], moved: &[DVec3]) -> Result<(Answers, BroadphaseStat
         return Err(stale_id_failure());
     }
 
-    let produced = full_answers(&mut world, &ids, moved)?;
-    expect_answers(
-        "the broadphase's query pass",
-        produced.tally,
-        expected.tally,
-    )?;
-    if produced.checksum != expected.checksum {
-        return Err(Failure::new(format!(
-            "the broadphase folded {} where a scan with no tree in it folds {}: the two \
-             answered the same number of results and not the same ones",
-            produced.checksum, expected.checksum
-        )));
-    }
+    let produced = full_answers(&mut world, &marks_by_slot(&ids), moved)?;
+    expect_answers("the broadphase's query pass", produced, expected)?;
 
     let broadphase = world.broadphase_stats();
     if broadphase.elements != ids.len() {
@@ -490,7 +532,7 @@ fn verify(resting: &[DVec3], moved: &[DVec3]) -> Result<(Answers, BroadphaseStat
             ids.len()
         )));
     }
-    Ok((produced, broadphase))
+    Ok(produced)
 }
 
 /// Every body moved, answering whether all of them resolved.
@@ -525,7 +567,7 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
     let (query_line, query_fields) = timing("query", &run.query);
 
     let queries = args.bodies as u64;
-    let per_query = run.answers.tally.results as f64 / queries as f64;
+    let per_query = run.answers.results as f64 / queries as f64;
 
     let human = format!(
         "{}: {} bodies of radius {} in a {} x {} arena, queried at radius {}, {} timed \
@@ -537,6 +579,8 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
          answers: {} results over {queries} queries, {per_query:.2} per query — read the \
          query line against this, not against the body count\n\
          broadphase: {} elements, {} nodes, depth {}\n\
+         one iteration: {} refits, {} updates left for a rebuild, {} tree builds — the \
+         build phase is one of them, so a refit phase that rebuilt shows a second\n\
          warm-up: {} iterations, {} results answered and then discarded\n\
          checksum: {}",
         args.scenario.name(),
@@ -548,10 +592,13 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
         args.iterations,
         args.warmup,
         environment_line(),
-        run.answers.tally.results,
+        run.answers.results,
         run.broadphase.elements,
         run.broadphase.nodes,
         run.broadphase.depth,
+        run.broadphase.refits,
+        run.broadphase.updates_without_refit,
+        run.broadphase.rebuilds,
         args.warmup,
         run.warmup_results,
         run.answers.checksum,
@@ -585,7 +632,7 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
                 "answers",
                 Json::Object(vec![
                     ("queries", Json::Number(queries as i64)),
-                    ("results", Json::Number(run.answers.tally.results as i64)),
+                    ("results", Json::Number(run.answers.results as i64)),
                     ("results_per_query", Json::Float(per_query as f32)),
                 ]),
             ),
@@ -595,6 +642,12 @@ pub(super) fn report(args: &BenchArgs, run: &Run) -> Outcome {
                     ("elements", Json::Number(run.broadphase.elements as i64)),
                     ("nodes", Json::Number(run.broadphase.nodes as i64)),
                     ("depth", Json::Number(run.broadphase.depth as i64)),
+                    ("refits", Json::Number(run.broadphase.refits as i64)),
+                    (
+                        "updates_without_refit",
+                        Json::Number(run.broadphase.updates_without_refit as i64),
+                    ),
+                    ("rebuilds", Json::Number(run.broadphase.rebuilds as i64)),
                 ]),
             ),
             ("warmup_results", Json::Number(run.warmup_results as i64)),
@@ -650,6 +703,7 @@ mod tests {
         let expected = Tally {
             results: 1_190,
             shape: 0xabcd,
+            checksum: 0x5eed,
         };
         let Err(failure) = expect_answers("a timed query pass", Tally::default(), expected) else {
             panic!("a pass that answered nothing has to fail the run");
@@ -683,10 +737,11 @@ mod tests {
         let expected = Tally {
             results: 1_190,
             shape: 0xabcd,
+            checksum: 0x5eed,
         };
         let reordered = Tally {
-            results: expected.results,
             shape: 0x1234,
+            ..expected
         };
         let Err(failure) = expect_answers("a timed query pass", reordered, expected) else {
             panic!("the right total across the wrong queries has to fail the run");
@@ -700,12 +755,29 @@ mod tests {
         // And a pass one result short, which the totals catch on their own.
         let short = Tally {
             results: expected.results - 1,
-            shape: expected.shape,
+            ..expected
         };
         let Err(failure) = expect_answers("a timed query pass", short, expected) else {
             panic!("a short pass has to fail the run");
         };
         assert!(failure.message.contains("1189"), "{}", failure.message);
+
+        // And the right counts in the right shape from the wrong bodies,
+        // which only the identity fold can see. This is the case the timed
+        // loop could not catch until it folded identity itself.
+        let impostors = Tally {
+            checksum: expected.checksum ^ 1,
+            ..expected
+        };
+        let Err(failure) = expect_answers("a timed query pass", impostors, expected) else {
+            panic!("the right shape from the wrong bodies has to fail the run");
+        };
+        assert!(
+            failure.message.contains("from the wrong \nbodies")
+                || failure.message.contains("from the wrong bodies"),
+            "{}",
+            failure.message
+        );
     }
 
     /// **The broadphase answers exactly what a scan with no tree answers.**
@@ -726,15 +798,50 @@ mod tests {
 
         let expected = serial_answers(&moved);
         assert!(
-            expected.tally.results > BODIES as u64,
+            expected.results > BODIES as u64,
             "every body answers its own query, so a fixture worth checking has to answer \
              more than {BODIES} results; it answered {}",
-            expected.tally.results
+            expected.results
         );
 
-        let (produced, broadphase) = verify(&resting, &moved).expect("a verified pass");
+        let produced = verify(&resting, &moved).expect("a verified pass");
         assert_eq!(produced, expected);
-        assert_eq!(broadphase.elements, BODIES);
+    }
+
+    /// **One timed iteration refits every body and rebuilds once, and the run
+    /// says so.**
+    ///
+    /// The reported tree is the last *timed* iteration's, not the
+    /// verification pass's, so these counters describe the world the three
+    /// timings came from. What they say is the answer to the question the
+    /// refit phase's number cannot answer on its own — a refit phase that had
+    /// been rebuilding would show it here as a second rebuild rather than as
+    /// a slower microsecond figure that looks like every other slow figure.
+    ///
+    /// One rebuild, because the build phase's `overlap_queries` is what
+    /// builds the tree; `bodies` refits, because `set_sphere` on a built tree
+    /// always refits; nothing left over, because an update only skips the
+    /// refit when there is no tree to refit.
+    #[test]
+    fn the_reported_tree_is_the_timed_iterations_and_says_it_refit() {
+        let run = measure(&args(BODIES, DENSE, 2, 1)).expect("a run");
+        assert_eq!(
+            run.broadphase.elements, BODIES,
+            "the reported tree must hold the whole crowd"
+        );
+        assert_eq!(
+            run.broadphase.refits, BODIES as u64,
+            "one iteration moves every body once, and a built tree refits every time"
+        );
+        assert_eq!(
+            run.broadphase.updates_without_refit, 0,
+            "every update had a tree to refit"
+        );
+        assert_eq!(
+            run.broadphase.rebuilds, 1,
+            "only the build phase builds; reading the stats after the query pass must not \
+             force a second one"
+        );
     }
 
     /// **The density control changes the answers, and the timing follows.**
@@ -751,15 +858,15 @@ mod tests {
         let sparse = measure(&args(BODIES, SPARSE, 2, 0)).expect("a run");
 
         assert!(
-            dense.answers.tally.results > sparse.answers.tally.results,
+            dense.answers.results > sparse.answers.results,
             "{} results in a {DENSE} x {DENSE} arena is not more than {} in a \
              {SPARSE} x {SPARSE} one",
-            dense.answers.tally.results,
-            sparse.answers.tally.results
+            dense.answers.results,
+            sparse.answers.results
         );
         // Every body still answers its own query at any density, so the
         // sparse run is a real pass and not an empty one.
-        assert!(sparse.answers.tally.results >= BODIES as u64);
+        assert!(sparse.answers.results >= BODIES as u64);
         assert_ne!(
             dense.answers.checksum, sparse.answers.checksum,
             "two densities that fold the same checksum are not two densities"
@@ -781,7 +888,7 @@ mod tests {
         let iterations = 4;
         let warmup = 3;
         let warmed = measure(&args(BODIES, DENSE, iterations, warmup)).expect("a run");
-        let per_pass = warmed.answers.tally.results;
+        let per_pass = warmed.answers.results;
 
         assert_eq!(warmed.warmup_results, warmup as u64 * per_pass);
         assert_eq!(warmed.timed_results, iterations as u64 * per_pass);
@@ -878,7 +985,7 @@ mod tests {
             Json::Number(BODIES as i64),
             "one query per body"
         );
-        assert_eq!(answers[1].1, Json::Number(run.answers.tally.results as i64));
+        assert_eq!(answers[1].1, Json::Number(run.answers.results as i64));
 
         for phase in ["build:", "refit:", "query:", "answers:", "broadphase:"] {
             assert!(outcome.human.contains(phase), "{}", outcome.human);

@@ -58,6 +58,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   right total across the wrong queries fails the run instead of reporting a fast
   number.
 
+  Every timed pass now folds _which_ bodies answered, not just how many — the
+  case a total and a per-query shape cannot see. Measured cost of putting that
+  in the timed loop: about two percent on the query phase, paid identically by
+  every run. The output also reports one iteration's refits, updates left for a
+  rebuild, and tree builds, so a run says whether its refit phase refit.
+
 - **`crcbl bench --scenario jobs`** times `crcbl_jobs::Pool::par_for` over a
   fixed synthetic workload and reports it as a distribution: p50, p95, p99 and
   max, never a mean, with the pool's own counters beside them and the

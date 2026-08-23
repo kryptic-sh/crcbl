@@ -59,40 +59,28 @@ Recommendation, not taken without the owner: 3, then 1, then 2 — and only afte
 an ECS benchmark scenario exists to measure against, for the reason the
 profiling plan gives about numbers that cannot be compared.
 
-### The phys bench still checks identity only once, and now it need not
+### A refit-only tree degrades as its elements travel, and nothing measures it
 
-`crcbl bench --scenario phys` folds _which_ bodies answered in one untimed pass;
-every timed pass is held only to the result total and the per-query shape. The
-reason was that `ColliderId` could not become an array subscript outside
-`crcbl-phys`. That is fixed — `ColliderId::index` is public as of 9eebe1f — so
-the fold can move into every timed pass with a dense array index and no
-`HashMap` in the timed path. Not done in the same slice because `crcbl-phys` and
-`crcbl-cli` were separate write sets. Small, and it closes the one case a timed
-pass still cannot catch: the same total, from different bodies.
+`Bvh::update_aabb` never re-picks a leaf's place — its own doc says callers
+whose elements travel should remove and re-insert instead, and nothing in the
+engine does. So a tree that only ever refits grows looser the further its
+elements get from where they were inserted, and the query cost follows.
 
-### The bench's refit phase measures a refit, and there is no rebuild to tell it from
+This was written down as "the refit phase cannot tell a refit from a rebuild",
+on the assumption that a body escaping its fitted bounds forces a rebuild. It
+does not: `update_aabb` returns `false` only when the element index names
+nothing live, and there is no containment test anywhere in it. A teleport across
+the world refits exactly like a footstep.
 
-Recorded here on 2026-08-23 as "the refit phase cannot tell a refit from a
-rebuild", on the assumption that `PhysicsWorld::set_sphere` invalidates the tree
-when a body moves outside its fitted bounds. **It does not, and no such path
-exists.** `Bvh::update_aabb` returns `false` only when the element index names
-nothing live; it has no containment test at all and grows the ancestors it walks
-back through. A teleport across the world refits exactly like a footstep.
-
-So the scenario's refit phase is measuring a refit, always, and the question the
-entry asked is answered rather than open. `BroadphaseStats::refits`,
-`updates_without_refit` and `rebuilds` (9eebe1f) are what let a caller confirm
-that rather than assume it, and the bench does not yet print them — a line
-beside its timing would make each run say which it measured. That is the
-remaining work here, and it is small.
-
-**What is genuinely open underneath it:** a tree that only ever refits, never
-re-picks a leaf's place, degrades as its elements travel — `update_aabb`'s own
-doc says callers whose elements travel should remove and re-insert instead, and
-nothing in the engine does. The bench can now show this: run the refit phase for
-many ticks of drift and watch `depth` and the query timing move while `rebuilds`
-stays flat. Nobody has, and the drift-per-tick the scenario uses is one tick's
-worth rather than a thousand.
+What is now possible and not done: `crcbl bench --scenario phys` reports one
+iteration's refits and tree builds, so the degradation is measurable — run the
+refit phase for many ticks of accumulated drift and watch `depth` and the query
+timing move while the build count stays flat. The scenario drifts each body one
+tick's worth from rest and rebuilds the world every iteration, so it currently
+measures the _fresh_ tree, never the aged one. Making that a parameter is a
+small change; deciding what the engine should do about the answer — a
+remove-and-reinsert rule, a rebuild cadence, a teleport threshold — is not, and
+needs the measurement first.
 
 ### The phys bench's default is a debug-build size, and its guard is quadratic
 
