@@ -10586,6 +10586,115 @@ async function main() {
     );
   }
 
+  // ---- what the replayer is still holding ---------------------------------
+  //
+  // `Replayer#liveObjects` is `crcbl-vk`'s teardown warning on this side of the
+  // seam: the kinds whose tables are not empty, with how many, so that a caller
+  // that created something and never destroyed it is named rather than counted.
+  // `web/tools/browser-e2e.mjs` reads it off a real demo after a real shutdown;
+  // what is checked here is the part a browser is not needed for, and the part a
+  // browser cannot check at all — that the counts follow the tables *down* as
+  // well as up.
+  //
+  // THE EMPTY ANSWER IS THE ONE THAT HAS TO BE EARNED. A method that always
+  // answered `[]` would pass every "nothing leaked" check ever written against
+  // it, so the empty case is never asserted on its own below: each one is
+  // reached by filling the tables first and then emptying them again.
+  {
+    const { replayer } = await readyWithDevice();
+    checkEqual(
+      replayer.liveObjects(),
+      [],
+      'a replayer that has opened a device and created nothing is holding nothing'
+    );
+
+    // Three buffers and a sampler: two kinds, so the answer is a list rather
+    // than a number, and unequal counts, so the order it promises is testable.
+    const sampler = handle(9001, 1);
+    replayer.replay(frameOf(deviceLocalBuffer, 900n));
+    replayer.replay(frameOf(hostUploadBuffer, 901n));
+    replayer.replay(frameOf({ ...hostReadbackBuffer, size: 64n }, 902n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CreateSampler',
+          sampler,
+          label: null,
+          magFilter: 'Linear',
+          minFilter: 'Linear',
+          mipFilter: 'Linear',
+          addressMode: ['ClampToEdge', 'ClampToEdge', 'ClampToEdge'],
+          lodMin: 0,
+          lodMax: LOD_NO_LIMIT,
+          anisotropy: 1,
+          compare: null,
+        },
+        903n
+      )
+    );
+    checkEqual(
+      replayer.liveObjects(),
+      [
+        { kind: 'buffers', count: 3 },
+        { kind: 'samplers', count: 1 },
+      ],
+      'the kinds it holds are named with their counts, the biggest first'
+    );
+
+    // Down again, one kind at a time, so that a count read from somewhere other
+    // than the table it claims to be reading cannot keep up.
+    replayer.replay(
+      frameOf({ ...destroyBuffer, buffer: deviceLocalBuffer.buffer }, 904n)
+    );
+    replayer.replay(
+      frameOf({ ...destroyBuffer, buffer: hostUploadBuffer.buffer }, 905n)
+    );
+    checkEqual(
+      replayer.liveObjects(),
+      [
+        { kind: 'buffers', count: 1 },
+        { kind: 'samplers', count: 1 },
+      ],
+      'destroying two of the three buffers takes the buffer count down with them'
+    );
+    replayer.replay(
+      frameOf({ ...destroyBuffer, buffer: hostReadbackBuffer.buffer }, 906n)
+    );
+    checkEqual(
+      replayer.liveObjects(),
+      [{ kind: 'samplers', count: 1 }],
+      'a kind whose last object is destroyed drops out of the list rather than reading zero'
+    );
+
+    // **THE COVERAGE GUARD.** `liveObjects` finds its kinds by calling every
+    // accessor on the prototype and keeping the ones that answer a
+    // `HandleTable`, so a table with no getter is a kind it silently cannot
+    // count — and a kind silently not counted reads as "nothing leaked". This
+    // is the one shape of that mistake there is, and it is checkable: the number
+    // of tables the class declares, read out of its own source, against the
+    // number the prototype hands back.
+    const proto = Object.getPrototypeOf(replayer);
+    const reachable = Object.entries(
+      Object.getOwnPropertyDescriptors(proto)
+    ).filter(
+      ([, descriptor]) =>
+        typeof descriptor.get === 'function' &&
+        descriptor.get.call(replayer) instanceof HandleTable
+    );
+    const source = await readFile(
+      new URL('../engine/gpu-replay.js', import.meta.url),
+      'utf8'
+    );
+    const declared = source.match(/= new HandleTable\(\);/g) ?? [];
+    checkEqual(
+      reachable.length,
+      declared.length,
+      `every HandleTable the replayer declares is reachable through a getter, so liveObjects can count it (${reachable
+        .map(([kind]) => kind)
+        .join(', ')})`
+    );
+  }
+
   // ---- a frame with nothing in it is not an error -------------------------
   // `takeCommandStream` answers `null` when no channel is installed, and an
   // empty `commands` array when a frame encoded nothing. Both are ordinary.

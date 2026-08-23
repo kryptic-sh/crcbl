@@ -16,7 +16,7 @@
 // a WebGPU device and puts pixels on the canvas. A black canvas passes every
 // check those two can make.
 //
-// WHAT IT ASSERTS. Eight groups, printed in order:
+// WHAT IT ASSERTS. Nine groups, printed in order:
 //
 //   A  the platform — `navigator.gpu`, an adapter, **that this browser can
 //      report canvas pixels at all** (see below; this one is not a formality),
@@ -38,7 +38,13 @@
 //   H  the reporting channels are open — three of the checks above assert a
 //      *silence*, and a closed channel reports silence too. This group breaks
 //      each of the three on purpose and asserts the break was seen. It runs
-//      last so that it cannot dirty the silences it is proving
+//      after every check whose silence it is proving, so it cannot dirty one
+//   I  the demo lets go of what it took — the replayer's handle tables, read
+//      after the demo has been stopped through its own button. `crcbl-vk`
+//      names every object a caller never destroyed at device teardown and its
+//      e2e runners fail on that line; this is the same question asked of the
+//      browser side, whose tables are the handle table `crcbl-webgpu` has
+//      instead of one of its own. It runs after group H because it ends the run
 //
 // THE READBACK IS THE PART THAT NEEDED PROVING. Three ways to get a WebGPU
 // canvas's pixels into JS look equivalent and are not, measured on Chromium 150
@@ -3015,12 +3021,114 @@ try {
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.
+  //
+  // **BEFORE GROUP I AND NOT AFTER**, because that group stops the demo: a
+  // shot taken past it is a picture of a torn-down game, which is the one
+  // frame nobody is asking about. The page log is written after it instead,
+  // so that whatever the teardown says lands in the file too.
   const png = await evaluate(
     page,
     `document.getElementById('canvas').toDataURL().slice(22)`
   );
   const shotPath = join(OUT, `${SLUG}-${chosen.mode}.png`);
   writeFileSync(shotPath, Buffer.from(png, 'base64'));
+
+  group('I — the demo lets go of what it took');
+
+  // `crcbl-vk`'s teardown warning, asked of the browser side.
+  //
+  // `crates/crcbl-vk/src/device.rs`'s `Drop for DeviceInner` names every object
+  // a caller never destroyed, by kind and count, and the vk e2e runners fail on
+  // that line rather than logging it. `crcbl-dx12` and `crcbl-mtl` carry the
+  // same warning. `crcbl-webgpu` has none — but the browser side of it is a
+  // handle table like any other, one per kind, and an object the stream created
+  // and never destroyed is a slot still occupied. `Replayer#liveObjects` reads
+  // those tables; this is the gate that asks.
+  //
+  // **IT RUNS FOR EVERY DEMO**, and last, for two reasons of its own. Every
+  // demo, because the question is about the engine's own resource discipline
+  // rather than about anything one game does — a leak on the acquire path
+  // belongs to all of them and a leak in a game's own pipelines belongs to one,
+  // and a per-demo count is what tells those apart. Last, because it stops the
+  // demo, and every check above needs a demo that is still running.
+  const naming = (held) =>
+    held.map(({ kind, count }) => `${count} ${kind}`).join(', ');
+
+  // **THE OBSERVATION IS CHECKED BEFORE THE VERDICT IS READ OFF IT.** The
+  // failure that costs the most here is not a leak: it is `liveObjects()`
+  // answering an empty list because it is reading nothing — a renamed getter, a
+  // handle to a replayer that never replayed, an `evaluate` that came back
+  // `undefined`. Every one of those reads as a clean teardown, which is the
+  // exact shape of check this repository keeps throwing out. So the first thing
+  // asked is whether it can see anything at all, of a demo that has been
+  // rendering for the whole run and therefore certainly holds a surface, a
+  // swapchain and the pipelines it drew with.
+  const heldRunning = await evaluate(page, `crcbl.gpu.replayer.liveObjects()`);
+  const observing =
+    Array.isArray(heldRunning) &&
+    heldRunning.length > 0 &&
+    heldRunning.every(
+      (entry) => typeof entry?.kind === 'string' && entry.count > 0
+    );
+  check(
+    'I',
+    'the replayer can say what it is holding while the demo runs',
+    observing,
+    observing
+      ? naming(heldRunning)
+      : `liveObjects() answered ${JSON.stringify(heldRunning)} for a demo that ` +
+          'has been rendering all run — the leak check below would read that as ' +
+          'a clean teardown, so it is not one'
+  );
+
+  // **THE PAGE'S OWN STOP BUTTON, AND NOT `crcbl.exports`.** `demo.js` wires it
+  // to `shell.requestClose()`, which asks the engine to close the way a
+  // compositor's close button does on the desktop: the next `api.frame()` runs
+  // `Flow::Stop`, tears the loop down and reports STOPPED, and `pumpGpu()` runs
+  // *after* that call in the same iteration — so any command the teardown
+  // encodes is drained before the loop ends. Reaching past the page to the wasm
+  // exports would skip that drain and blame the engine for a frame the shim
+  // never delivered.
+  //
+  // Not `pagehide` either, which is the other teardown `demo.js` has: it calls
+  // `api.shutdown()` with no frame left to follow it, so nothing pumps what the
+  // teardown wrote and the tables could not empty however clean the engine was.
+  await evaluate(page, `(document.getElementById('stop').click(), true)`);
+  const settledStop = await until(async () => {
+    const status = await evaluate(page, `crcbl.status()`);
+    // 4 is STATUS_STOPPED and 5 STATUS_FAILED; both are terminal, so stop
+    // asking, and the check below still insists on 4.
+    return [4, 5].includes(status) ? { status } : null;
+  });
+  const shutDown = check(
+    'I',
+    'the demo shuts down when its own stop button is pressed',
+    settledStop?.status === 4,
+    settledStop?.status === 4
+      ? 'STATUS_STOPPED'
+      : settledStop?.status === 5
+        ? `status 5 (FAILED) — ${await evaluate(page, `document.getElementById('detail')?.textContent ?? ''`)}`
+        : `status ${(await evaluate(page, `crcbl.status()`)) ?? 'unreadable'} after ` +
+          `${TIMEOUT_MS} ms — the demo never reached a terminal state`
+  );
+
+  const heldAfter = await evaluate(page, `crcbl.gpu.replayer.liveObjects()`);
+  const stillHeld = Array.isArray(heldAfter)
+    ? heldAfter.reduce((total, entry) => total + entry.count, 0)
+    : -1;
+  check(
+    'I',
+    'the demo destroyed every GPU object it created',
+    shutDown && stillHeld === 0,
+    !shutDown
+      ? 'the demo never stopped, so nothing here is a verdict about its teardown'
+      : stillHeld === 0
+        ? 'every handle table is empty'
+        : `${stillHeld} object(s) still held after shutdown (${naming(heldAfter)})` +
+          ' — see crcbl-vk\'s "still alive at device teardown" warning for the' +
+          ' same finding on the same engine'
+  );
+
   writeFileSync(
     join(OUT, `${SLUG}-${chosen.mode}.log`),
     consoleLines.join('\n')

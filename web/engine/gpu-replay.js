@@ -3303,6 +3303,62 @@ export class Replayer {
   }
 
   /**
+   * Every kind this replayer is still holding objects of, with how many, the
+   * biggest first.
+   *
+   * `crcbl-vk`'s `DeviceInner::drop` seen from this side, and built for the
+   * same reader: a caller that took something and never let go of it, named by
+   * kind because a bare count says something leaked and nothing about where to
+   * look. The counts are the tables' own {@link HandleTable#size} read at the
+   * moment of the call — there is no second ledger to fall out of step with
+   * them, which is the failure a hand-kept tally of creates minus destroys has.
+   *
+   * **THE KINDS COME FROM THE GETTERS RATHER THAN FROM A LIST WRITTEN HERE**,
+   * and that is the whole design. A list of the tables would be a second thing
+   * to remember to add to, and the way it fails — a kind quietly missing from
+   * every count — reads as "nothing leaked" rather than as a mistake. So this
+   * asks the prototype instead: every accessor on it is called, and the ones
+   * that answer a {@link HandleTable} are the kinds. A table reachable through
+   * a getter is therefore counted by construction, and the only table this
+   * cannot see is one no reader can see either.
+   *
+   * `kind` IS THE PROPERTY NAME, not prose — `imageViews` rather than "image
+   * view" — because it is what a reader types next: `replayer.imageViews` in a
+   * console, or `crcbl.gpu.replayer.imageViews` on a demo page, is the step
+   * after reading the count, and a prettier noun would have to be translated
+   * back before it could be used.
+   *
+   * **KINDS WEBGPU HAS NO `destroy()` FOR ARE COUNTED LIKE THE REST** — views,
+   * samplers, bind groups and their layouts, shader modules, pipeline layouts,
+   * pipelines. A `GPUTextureView` is collected when the last reference to it
+   * goes, so nothing is *lost* by holding one; but this table IS the last
+   * reference, and it is held because a stream created the object and never
+   * said it was finished with it. That is the same fact about the caller as a
+   * leaked buffer, differing only in what it costs, and a reader chasing an
+   * unbounded table needs to see it. What the count means is therefore "still
+   * held", and whether a given kind's entry also costs device memory is the
+   * kind's own question.
+   *
+   * @returns {{ kind: string, count: number }[]}
+   */
+  liveObjects() {
+    /** @type {{ kind: string, count: number }[]} */
+    const held = [];
+    for (const [kind, descriptor] of Object.entries(
+      Object.getOwnPropertyDescriptors(Replayer.prototype)
+    )) {
+      if (typeof descriptor.get !== 'function') continue;
+      const table = descriptor.get.call(this);
+      if (!(table instanceof HandleTable) || table.size === 0) continue;
+      held.push({ kind, count: table.size });
+    }
+    // Biggest first, because the biggest is the one that is growing; ties by
+    // name so that two runs of the same page print the same line.
+    held.sort((a, b) => b.count - a.count || (a.kind < b.kind ? -1 : 1));
+    return held;
+  }
+
+  /**
    * How many out-of-band errors this file's own callers have not taken yet.
    *
    * The gate's cursor, not the engine's: a `TakeError` carrying errors to wasm

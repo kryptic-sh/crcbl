@@ -61,6 +61,18 @@
 #   `crcbl-vk`'s `validation_gate` had to grow after a green suite turned out to
 #   be reading a log sink nobody installed. The guard below insists it ran.
 #
+#   And it is the only gate on **what the WebGPU backend never let go of**.
+#   `crcbl-vk` warns at device teardown for every object a caller never
+#   destroyed, named by kind, and its e2e runners fail on that line;
+#   `crcbl-dx12` and `crcbl-mtl` carry the same warning. `crcbl-webgpu` is a
+#   command stream with no pools to warn about — but the browser side of it is a
+#   handle table per kind, and an object the stream created and never destroyed
+#   is a slot still occupied. `web/tools/gpu-replay.mjs` proves that reading
+#   against a stub — the counts follow the tables down as well as up — and
+#   nothing anywhere reads them off a running engine, so group I here — the demo
+#   stopped through its own button, then `Replayer#liveObjects` asked what is
+#   left — is the whole of that gate. The guard below insists it ran.
+#
 #   It is **not** the gate on `crcbl-webgpu`'s command stream. Those are the
 #   PROBE groups in `web/tools/probe-groups.mjs`, driven by
 #   `web/run-probe-e2e.sh` against a page with no engine running on it. This
@@ -435,6 +447,22 @@ CHANNELS="$(grep -F 'a deliberate uncaught exception reaches the page-error chan
 if [ -z "$CHANNELS" ]; then
     echo "crcbl web e2e: the driver never provoked its own reporting channels;" >&2
     echo "               the three silences it asserts are unproven, and a closed channel reports silence too" >&2
+    exit 1
+fi
+
+# And for group I, which is the only gate anywhere on what `crcbl-webgpu` never
+# let go of. `crcbl-vk` warns at device teardown for every object a caller never
+# destroyed and its e2e runners fail on that line; `crcbl-dx12` and `crcbl-mtl`
+# carry the same warning. The browser side has no device teardown to hang one
+# on, so this driver reads the replayer's handle tables after stopping the demo
+# instead — and a group that went missing would take the whole claim with it
+# while every other check here went on passing, because nothing else in the
+# repository looks at those tables at all. Every demo runs it. Renaming the
+# check in the driver is meant to fail here and be renamed here too.
+RELEASED="$(grep -F 'the demo destroyed every GPU object it created' "${OUTPUT}.plain" || true)"
+if [ -z "$RELEASED" ]; then
+    echo "crcbl web e2e: the driver never asked what the replayer was still holding after shutdown;" >&2
+    echo "               the handle tables in web/engine/gpu-replay.js are ungated" >&2
     exit 1
 fi
 
