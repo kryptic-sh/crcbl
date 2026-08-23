@@ -941,7 +941,18 @@ mod tests {
     /// ambient environment; the child, which finds the variable set, asserts the
     /// set one. A developer who happens to have `CRCBL_TRACE` exported runs the
     /// child arm here and the test still means something.
+    ///
+    /// # Not under miri
+    ///
+    /// Spawning a process is one of the things the interpreter does not
+    /// implement, so under miri this aborts the whole test binary rather than
+    /// failing one test — which is how it took `cron.yml`'s weekly job down
+    /// from 2026-08-17 until anybody looked. It is skipped there with a reason
+    /// rather than compiled out, so a miri run says out loud that it did not
+    /// run this. Nothing is lost: what the test checks is a name and a gate,
+    /// not memory behaviour, and the ordinary suite runs it every time.
     #[test]
+    #[cfg_attr(miri, ignore = "miri cannot spawn the child process this needs")]
     fn the_environment_variable_is_what_turns_the_gate_on() {
         // The trace is process-wide, so this takes the same lock every other
         // test here does — and then puts the gate back to where a fresh process
