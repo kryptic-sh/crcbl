@@ -735,7 +735,10 @@ impl CommandEncoder for VkCommandEncoder {
                 .image_view(view)
                 .image_layout(depth_layout(attachment.read_only))
                 .load_op(conv::load_op(attachment.depth_load))
-                .store_op(conv::store_op(attachment.depth_store))
+                .store_op(conv::depth_store_op(
+                    attachment.read_only,
+                    attachment.depth_store,
+                ))
                 .clear_value(vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         // Reversed-Z: the seam's default is `depth::CLEAR`, and
@@ -758,7 +761,10 @@ impl CommandEncoder for VkCommandEncoder {
                     .image_view(view)
                     .image_layout(depth_layout(attachment.read_only))
                     .load_op(conv::load_op(attachment.stencil_load))
-                    .store_op(conv::store_op(attachment.stencil_store))
+                    .store_op(conv::depth_store_op(
+                        attachment.read_only,
+                        attachment.stencil_store,
+                    ))
                     .clear_value(vk::ClearValue {
                         depth_stencil: vk::ClearDepthStencilValue {
                             depth: attachment.clear.depth,

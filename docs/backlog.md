@@ -3,27 +3,60 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### A read-only depth attachment should not store at all
+### DECISION NEEDED — a read-only depth state that says it writes
 
-The cross-submission WAW that `CRCBL_VK_VALIDATION_FATAL` found was fixed by
-telling the truth about `ResourceState::DepthStencilRead` — it carries
-`DEPTH_STENCIL_ATTACHMENT_WRITE` now, because the attachment stores. The cleaner
-answer is for it not to store: `VK_ATTACHMENT_STORE_OP_NONE` is Vulkan 1.3 core,
-and a depth-test-only pass has nothing to write back.
+`crcbl-vk` no longer stores a read-only depth attachment: `conv::depth_store_op`
+answers `VK_ATTACHMENT_STORE_OP_NONE` — Vulkan 1.3 core, no extension and no
+feature — whenever `crcbl_hal::DepthStencilAttachment::read_only` is set. **No
+seam change was needed**: the flag already existed and `crcbl-render`'s
+`graph.rs::attachments` already set it from the pass's own `write` flag, which
+the entry this replaces had wrong.
 
-- **`StoreOp::Discard` is not that answer — measured.** With `depth_read`
-  switched to `Discard`, `cargo test -p viewer` under CI's layer still failed 15
-  of 75 on the same hazard: syncval accounts `DONT_CARE` as an attachment write
-  too. Only a `None` variant removes the access, and the HAL has none.
-- **The cost is a seam change.** `StoreOp` is in `crcbl-hal`, so a new variant
-  has to be answered by `crcbl-vk`, `crcbl-webgpu`, `crcbl-mtl` and
-  `crcbl-dx12`. WebGPU spells it as omitting `depth_ops`; Metal has no no-op
-  store action, so that arm needs thought rather than a mapping — Metal and dx12
-  are deferred but must still compile. Not started.
-- **Not investigated:** whether `crcbl-dx12`'s `D3D12_RESOURCE_STATE_DEPTH_READ`
-  and `crcbl-webgpu`'s tag mapping have the same gap the Vulkan mask had. DX12
-  transitions are whole-resource so it is likely benign, and WebGPU has no
-  explicit barriers at all, but neither was checked.
+What is left is that `ResourceState::DepthStencilRead` still declares
+`DEPTH_STENCIL_ATTACHMENT_WRITE` in `conv::state_masks`, and
+`crcbl_hal::ResourceState::is_write` still answers `true` for it. Both are now
+conservatism rather than description, and `conv`'s
+`write_states_expand_to_write_accesses` requires the two to move together.
+
+**Measured** against CI's own layer 1.3.275 and lavapipe from Ubuntu, driving
+`cargo test -p viewer` with `CRCBL_GPU=vk` and the fatal sync gate on — the
+viewer's ground grid is the only pass in this workspace that tests depth without
+writing it and is last to touch the image:
+
+| store op | vk access mask | `is_write` | result                                          |
+| -------- | -------------- | ---------- | ----------------------------------------------- |
+| `STORE`  | write declared | `true`     | 75 passed (what ships today)                    |
+| `STORE`  | read only      | `false`    | **15 failed** — the original bug                |
+| `STORE`  | read only      | `true`     | **15 failed** — `is_write` alone never fixed it |
+| `NONE`   | read only      | `false`    | 75 passed                                       |
+| `NONE`   | read only      | `true`     | 75 passed                                       |
+
+So on Vulkan the write declaration is now unnecessary and only costs barrier
+strength on every depth-test-only pass. **The question is the other backends**,
+because `is_write` answers for all four:
+
+- **WebGPU: does not write.** `web/engine/gpu-replay.js` omits all four
+  load/store ops on a read-only plane and sets `depthReadOnly`, which the
+  specification requires.
+- **DX12: does not write.** D3D12 has no store op at all, and a depth-test-only
+  pass runs with `D3D12_DEPTH_WRITE_MASK_ZERO`. Read, not measured — there is no
+  D3D12 machine here.
+- **Metal: does write.** `MTLStoreAction` has no no-op action, so `crcbl-mtl`'s
+  `conv::store_action` can only answer `Store` or `DontCare` and the texture is
+  written back either way. Read, not measured, and Metal is deferred.
+
+Options: narrow both and accept Metal's arm being argued rather than measured;
+narrow both and give Metal's `store_action` an explicit read-only arm first; or
+leave it, at the cost of one unnecessary barrier per read-only depth pass. **Not
+decided.** Nothing is wrong today either way — the conservative answer
+over-synchronises, it does not race.
+
+**Coverage gap, stated plainly:** no committed test observes the store op
+change. With the mask's write bit in place — which is what ships — the viewer
+suite passes whether the attachment stores or not, which is why the table above
+had to vary two things at once. `conv`'s
+`a_read_only_depth_attachment_does_not_store` pins the mapping so it cannot
+silently revert, and that is all it does.
 
 ### One present-path hazard is ours and one is the layer's
 

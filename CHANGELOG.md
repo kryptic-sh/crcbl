@@ -14,6 +14,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **A depth-test-only pass no longer stores its depth attachment on Vulkan.**
+  `crcbl-vk` answers `VK_ATTACHMENT_STORE_OP_NONE` — Vulkan 1.3 core, so no
+  extension and no feature — for any attachment whose
+  `DepthStencilAttachment::read_only` is set, where it previously passed the
+  caller's `StoreOp` straight through and wrote back a buffer nothing had
+  written. The picture is unchanged, because nothing wrote: a pass that only
+  tests depth has nothing to store. `crcbl-render` already set the flag from the
+  pass's own `write` flag, so no caller changes and no other backend is
+  affected. `ResourceState::DepthStencilRead` still declares an attachment write
+  in the barrier masks — conservatism for the backends that have no such store
+  op, and `docs/backlog.md` carries the measurement and the open question.
+
 ### Added
 
 - **A binary run can prove the validation layer is _checking_, not merely

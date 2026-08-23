@@ -301,6 +301,37 @@ pub fn store_op(op: crcbl_hal::StoreOp) -> vk::AttachmentStoreOp {
     }
 }
 
+/// The store op for a **depth-stencil** attachment, which depends on more than
+/// the seam's [`StoreOp`](crcbl_hal::StoreOp).
+///
+/// A pass that only *tests* depth writes nothing back, and
+/// `VK_ATTACHMENT_STORE_OP_NONE` is how Vulkan says so. That is not cosmetic:
+/// `NONE` leaves the contents alone **and declares no
+/// `DEPTH_STENCIL_ATTACHMENT_WRITE` access**, where both other ops declare one.
+/// Synchronisation validation accounts `DONT_CARE` as an attachment write too —
+/// measured against layer 1.3.275 — so [`StoreOp::Discard`](crcbl_hal::StoreOp)
+/// is not this answer either, and only a third op removes the access.
+///
+/// Vulkan 1.3 core, promoted from `VK_EXT_load_store_op_none`, so it needs no
+/// extension and no feature: `crate::instance`'s `API_VERSION` already refuses a
+/// loader older than that.
+///
+/// [`DepthStencilAttachment::read_only`](crcbl_hal::DepthStencilAttachment::read_only)
+/// rather than the store op the caller passed, because those are different
+/// questions — a pass may read depth and store nothing, or write depth and
+/// discard it — and only the first says the attachment is not written. The
+/// contents are the same either way: nothing wrote, so preserving and storing
+/// are the same picture, and preserving where `Discard` was asked for errs
+/// towards keeping data rather than losing it.
+#[must_use]
+pub fn depth_store_op(read_only: bool, op: crcbl_hal::StoreOp) -> vk::AttachmentStoreOp {
+    if read_only {
+        vk::AttachmentStoreOp::NONE
+    } else {
+        store_op(op)
+    }
+}
+
 /// Maps a seam subresource-layers selection onto a Vulkan one.
 pub fn subresource_layers(layers: crcbl_hal::ImageSubresourceLayers) -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers {
@@ -675,13 +706,22 @@ pub fn state_masks(state: ResourceState) -> StateMasks {
         // resource: harmless over-sync, and wrong the day P7 samples the depth
         // buffer, because the *right* answer then is `ShaderRead`, not a
         // depth-attachment state with a shader stage bolted on.
-        // The write bit is not a mistake: "read-only" describes the depth
-        // *test*, and an attachment in this state still performs its store op
-        // at `vkCmdEndRendering`, which syncval accounts as
-        // `SYNC_LATE_FRAGMENT_TESTS_DEPTH_STENCIL_ATTACHMENT_WRITE`. Without
-        // it the next barrier over that image has a read-only source scope and
-        // cannot order against the store — a write-after-write with
-        // `write_barriers: 0`.
+        // **The write bit is conservatism now, not a description of this
+        // backend.** It was a description: an attachment in this state
+        // performed its store op at `vkCmdEndRendering`, which syncval accounts
+        // as `SYNC_LATE_FRAGMENT_TESTS_DEPTH_STENCIL_ATTACHMENT_WRITE`, and
+        // without the bit the next barrier over the image had a read-only
+        // source scope and could not order against that store. Since
+        // [`depth_store_op`] answers `VK_ATTACHMENT_STORE_OP_NONE` there is no
+        // store and Vulkan writes nothing — measured, and
+        // `docs/backlog.md` carries the four-cell run.
+        //
+        // It stays because `write_states_expand_to_write_accesses` requires
+        // this mask to agree with the seam's `ResourceState::is_write`, and
+        // that answers for every backend: Metal's `MTLStoreAction` has no
+        // no-op store action, so a read-only depth attachment there really does
+        // write itself back. Narrowing both together is a seam change that
+        // needs a Metal answer; the backlog holds it.
         ResourceState::DepthStencilRead => (
             S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
             A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
@@ -1033,6 +1073,59 @@ mod tests {
             vk::AttachmentStoreOp::DONT_CARE,
             "the seam calls it Discard; Vulkan spells it DONT_CARE, and \
              swapping it for STORE would make every transient attachment live"
+        );
+    }
+
+    /// A read-only depth attachment stores nothing, whatever op the caller
+    /// asked for.
+    ///
+    /// Measured against CI's own layer 1.3.275 and lavapipe, driving the
+    /// viewer's suite — whose ground grid is the only pass in this workspace
+    /// that tests depth without writing it and is last to touch the image: with
+    /// the store op left at `STORE` and this state's write bit removed, fifteen
+    /// of its seventy-five tests fail on a cross-submission
+    /// `SYNC-HAZARD-WRITE-AFTER-WRITE`; with `NONE` and no write bit, all
+    /// seventy-five pass. So neither half may move without the other, and this
+    /// is the test that goes red when one does.
+    #[test]
+    fn a_read_only_depth_attachment_does_not_store() {
+        use crcbl_hal::{ResourceState, StoreOp};
+
+        for asked in [StoreOp::Store, StoreOp::Discard] {
+            assert_eq!(
+                depth_store_op(true, asked),
+                vk::AttachmentStoreOp::NONE,
+                "read_only decides this, not the op the caller passed"
+            );
+        }
+        assert_eq!(
+            depth_store_op(false, StoreOp::Store),
+            vk::AttachmentStoreOp::STORE
+        );
+        assert_eq!(
+            depth_store_op(false, StoreOp::Discard),
+            vk::AttachmentStoreOp::DONT_CARE
+        );
+        // Three distinct values, which is the whole reason a third op was
+        // needed: two of them would have been the same declaration.
+        let mut raw = [
+            depth_store_op(true, StoreOp::Store).as_raw(),
+            depth_store_op(false, StoreOp::Store).as_raw(),
+            depth_store_op(false, StoreOp::Discard).as_raw(),
+        ];
+        raw.sort_unstable();
+        assert!(raw.windows(2).all(|pair| pair[0] != pair[1]));
+
+        // The access mask is deliberately *not* narrowed to match — see
+        // `state_masks`. This asserts that on purpose, so the day it is
+        // narrowed the reader is sent to the comment that says what else has to
+        // move with it.
+        assert!(
+            state_masks(ResourceState::DepthStencilRead)
+                .access
+                .contains(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE),
+            "still declared, because the seam's is_write answers for every \
+             backend and Metal has no no-op store action"
         );
     }
 
