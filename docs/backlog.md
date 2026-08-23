@@ -15,16 +15,19 @@ correction. What is left here is the work the corrections revealed.
 **The server consumes client input now** — shipped 2026-08-23 — and what the gap
 leaves behind is smaller than it was:
 
-- **Three samples still deliver intent through a shared cell.** `apps/breakout`
-  was converted: its `Intent` gained `from_wire`, `BreakoutModule::tick` reads
-  the bytes out of the `ClientInputs` the server hands it, and the
-  `Arc<Mutex<GameLogic>>` it shares with its module is output-only.
-  `apps/asteroids`, `apps/flappy` and `apps/horde` still write `logic.intent`
-  under a lock while also sending the same intent over the wire, where it now
-  lands in the server's queue and is dropped unread. Converting each is the same
-  three edits breakout took — a `from_wire`, a module reading `ClientInputs`,
-  and deleting the facade's write — and one converted sample was the proof, so
-  these are mechanical rather than open.
+- **Every playable sample drives its simulation from the wire.**
+  `apps/breakout`, `apps/asteroids`, `apps/flappy` and `apps/horde` each decode
+  their own intent out of the `ClientInputs` the server hands their module, and
+  the `Arc<Mutex<GameLogic>>` each shares with its module is output-only. Worth
+  keeping from the conversion: all four needed the same two fixes — send before
+  simulate, since `Client::update` is the only thing that puts input on the wire
+  and the server drains it at the top of its tick, and one tick spent on the
+  handshake at construction, since an unkeyed client silently drops what it is
+  asked to send. `apps/asteroids` additionally had to deal its board _after_
+  that tick rather than before: unlike breakout's pinned ball, its rocks drift
+  on every tick there is one, so the handshake tick moved the opening frame.
+  Nothing but the golden had pinned that board, and it has its own test now.
+
 - **`ClientToServer::Command` is still not consumed.** It is decoded, charged
   against the session's error budget if malformed, and dropped, and the code
   says why: a command is a request that has to be answered once and stay

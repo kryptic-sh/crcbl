@@ -49,6 +49,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   tells an operator. Aligning an input to the tick it names is still absent, and
   the code says so where a reader will look.
 
+- **`apps/asteroids`, `apps/flappy` and `apps/horde` play over the wire too.**
+  Each one's `Intent` gained `from_wire` and `from_inputs`, so the bytes the
+  facade hands `Client::set_input` are the bytes its module decodes out of
+  `ClientInputs` inside the server's tick, and the `Arc<Mutex<GameLogic>>` each
+  shares with its module is output-only. The decode validates rather than
+  trusts: a payload of the wrong length, or a bit outside the flag mask that
+  build defines, is refused — and horde's level-up choice field is exactly as
+  wide as its offer, held by a compile-time assertion, so no byte a peer can
+  send names an upgrade that does not exist. Frames that pile up in one tick
+  fold per field: a held direction takes the latest frame's word, an edge (fire,
+  flap, restart) survives from whichever frame raised it, and horde's choice
+  takes the first frame that names one. Each game sends before it simulates and
+  spends one tick on the handshake as it is built, so the first thing a player
+  presses is the first thing the simulation sees. `apps/asteroids` deals its
+  board after that tick: unlike breakout's, its field moves on every tick.
+
 - **`apps/breakout` plays over the wire.** Its `Intent` gained `from_wire` — the
   first decode half any sample has — and the paddle, the launch and the restart
   are driven by bytes that were sealed, sent over `InMemoryTransport`, opened

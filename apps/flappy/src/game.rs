@@ -27,8 +27,27 @@
 //! the call.
 //!
 //! [`Game`] is the client-side facade: it resolves input into an [`Intent`],
-//! advances the server and the client by exactly one tick period, and reads back
-//! what to draw.
+//! puts the intent on the wire, advances the server and the client by exactly
+//! one tick period, and reads back what to draw.
+//!
+//! # The input path is the wire and nothing else
+//!
+//! [`Intent::to_wire`] is handed to `Client::set_input`, sealed with the session
+//! key, and read back by [`Intent::from_wire`] inside [`FlappyModule::tick`],
+//! out of the [`ClientInputs`] the server hands every module. The shared cell
+//! this game and its module both hold is output-only: the module writes what it
+//! simulated and the facade reads it back to draw, and nothing travels the other
+//! way. A dropped input frame is a lost tick of intent, which is what playing
+//! over a real transport means — `InMemoryTransport` drops nothing, so a
+//! single-player session never sees one.
+//!
+//! The order in [`Game::tick`] is what keeps that free of lag: the client is
+//! updated **before** the server, because `Client::update` is the only thing
+//! that puts input on the wire and the server drains the wire at the top of its
+//! tick. Updating it afterwards would post this tick's intent to the next tick.
+//! [`Game::with_seed`] spends one tick on the handshake for the same reason — an
+//! unkeyed client drops what it is asked to send, so without it the first tap
+//! the player made would be one the simulation never heard about.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -208,10 +227,75 @@ struct Intent {
     restart: bool,
 }
 
+const INTENT_FLAP: u8 = 1 << 0;
+const INTENT_RESTART: u8 = 1 << 1;
+/// Every bit the flag byte defines. One set outside this mask is a frame
+/// something other than [`Intent::to_wire`] wrote.
+const INTENT_FLAGS: u8 = INTENT_FLAP | INTENT_RESTART;
+
 impl Intent {
-    /// The wire form handed to `Client::set_input`.
+    /// The wire form handed to `Client::set_input`: one byte of flags.
     fn to_wire(self) -> u8 {
-        u8::from(self.flap) | (u8::from(self.restart) << 1)
+        let mut flags = 0;
+        if self.flap {
+            flags |= INTENT_FLAP;
+        }
+        if self.restart {
+            flags |= INTENT_RESTART;
+        }
+        flags
+    }
+
+    /// The intent a client sealed, read back on the server's side of the wire.
+    ///
+    /// `None` for anything this build did not write: a payload that is not one
+    /// byte, or a flag outside [`INTENT_FLAGS`]. **Validated rather than
+    /// trusted**, because these are the only bytes in this game a peer chooses
+    /// — both fields are flags, so the mask is the whole of the check, and a
+    /// frame that fails it is one no wire form of this game produces.
+    fn from_wire(bytes: &[u8]) -> Option<Self> {
+        let &[flags] = bytes else {
+            return None;
+        };
+        if flags & !INTENT_FLAGS != 0 {
+            return None;
+        }
+        Some(Self {
+            flap: flags & INTENT_FLAP != 0,
+            restart: flags & INTENT_RESTART != 0,
+        })
+    }
+
+    /// Folds one server tick's worth of input frames into the intent to run it
+    /// with.
+    ///
+    /// Normally one frame arrives per tick and this is a decode. Several is a
+    /// client whose clock ran ahead of the server's — and **both of this
+    /// game's fields are edges, so both are OR-ed**: there is no held control
+    /// here to take the latest word of. A flap the player asked for in any of
+    /// those frames is one they asked for, and a later frame that says nothing
+    /// is not a release; a run that swallowed it would be one where the bird
+    /// dropped through a gap the player did flap for.
+    ///
+    /// One flap is the whole climb whichever frame raised it: [`FLAP_SPEED`]
+    /// *replaces* the vertical velocity, so two frames' worth of flap in one
+    /// tick is the same climb as one — see this module's header.
+    ///
+    /// The [`TickId`](crcbl::core::TickId) each frame carries is deliberately
+    /// unread. Lining an input up with the tick it names is a jitter buffer,
+    /// and the server has none — see [`ClientInputs`].
+    fn from_inputs(inputs: ClientInputs<'_>) -> Self {
+        let mut merged = Self::default();
+        for (_tick, data) in inputs.iter() {
+            // A frame this build cannot read is skipped rather than taken as an
+            // empty intent, which would read as the player pressing nothing.
+            let Some(frame) = Self::from_wire(data) else {
+                continue;
+            };
+            merged.flap |= frame.flap;
+            merged.restart |= frame.restart;
+        }
+        merged
     }
 }
 
@@ -240,10 +324,15 @@ pub struct PipeView {
 }
 
 /// The mutable game state the server-side module owns.
+///
+/// **Output-only, as far as [`Game`] is concerned.** The facade reads the
+/// results out of here after each server tick; what the player asked for goes
+/// the other way over the wire, not through this cell. `FlappyModule` is the
+/// only thing that mutates any of it, and it only ever does so from inside a
+/// server tick.
 #[derive(Debug)]
 struct GameLogic {
     bird: Entity,
-    intent: Intent,
     /// Refreshed each tick for the renderer, so the draw path never reaches
     /// into the physics world.
     bird_pos: DVec3,
@@ -316,9 +405,9 @@ impl GameModule for FlappyModule {
 
     fn register(&self, _world: &mut World) {}
 
-    fn tick(&mut self, world: &mut World, _inputs: ClientInputs<'_>) {
+    fn tick(&mut self, world: &mut World, inputs: ClientInputs<'_>) {
         let mut logic = lock(&self.shared);
-        run_tick(&mut logic, world);
+        run_tick(&mut logic, world, Intent::from_inputs(inputs));
     }
 }
 
@@ -330,11 +419,14 @@ fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
 }
 
 /// One tick of flappy, inside the server's tick, after physics has stepped.
-fn run_tick(logic: &mut GameLogic, world: &mut World) {
+///
+/// `intent` is what the client sent for this tick, decoded from the bytes that
+/// arrived over the transport — see [`Intent::from_inputs`]. A tick nothing
+/// arrived for runs on [`Intent::default`], which is a player pressing nothing.
+fn run_tick(logic: &mut GameLogic, world: &mut World, intent: Intent) {
     logic.ticks += 1;
     logic.cues.clear();
     let dt = world.tick_dt();
-    let intent = std::mem::take(&mut logic.intent);
     let bird = logic.bird;
 
     // --- what the button meant this tick --------------------------------
@@ -835,7 +927,8 @@ impl Game {
     /// # Errors
     ///
     /// [`GameError::Server`] if the operating system would not give the server
-    /// the entropy for a resume credential.
+    /// the entropy for a resume credential, or if the loopback session did not
+    /// come up in the handshake tick.
     ///
     /// # Panics
     ///
@@ -853,7 +946,8 @@ impl Game {
     /// # Errors
     ///
     /// [`GameError::Server`] if the operating system would not give the server
-    /// the entropy for a resume credential.
+    /// the entropy for a resume credential, or if the loopback session did not
+    /// come up in the handshake tick.
     ///
     /// # Panics
     ///
@@ -902,7 +996,6 @@ impl Game {
 
         let shared = Arc::new(Mutex::new(GameLogic {
             bird: bird_entity,
-            intent: Intent::default(),
             bird_pos: BIRD_START,
             bird_vel: DVec3::ZERO,
             state: GameState::WaitingToStart,
@@ -938,6 +1031,30 @@ impl Game {
 
         let tick_period = session.tick_period();
 
+        // **One tick spent on the handshake, before the game starts.**
+        //
+        // `Server::update` drains the transport inside `tick`, so the client's
+        // hello is not even read until a tick runs — and until the session is
+        // established the client has no key and drops every input frame it is
+        // asked to send. Spending that tick here is what makes the player's
+        // first input the first one the simulation sees: tap on the opening
+        // frame and the bird flaps on the opening tick.
+        //
+        // It costs the tick and nothing else. Nothing on this course moves
+        // until a flap starts the run — `run_tick` parks the bird back at
+        // `BIRD_START` on every `WaitingToStart` tick and the pipes are static
+        // bodies — so the world this leaves is the world the course was laid
+        // out in.
+        let sim_time = tick_period;
+        session.client_mut().update(sim_time);
+        session.server_mut().update(sim_time);
+        session.client_mut().update(sim_time);
+        if session.server().session_state() != crcbl::net::SessionState::Connected {
+            return Err(GameError::Server(
+                "the loopback session did not come up in its first tick".into(),
+            ));
+        }
+
         {
             let mut logic = lock(&shared);
             refresh_render_state(&mut logic, session.server_mut().world_mut());
@@ -949,7 +1066,7 @@ impl Game {
             session,
             shared,
             tick_period,
-            sim_time: Duration::ZERO,
+            sim_time,
             ticks_run: 0,
             pending_input: Vec::new(),
             audio: crate::audio::Audio::new(headless),
@@ -1020,24 +1137,30 @@ impl Game {
             restart: self.action_map.just_pressed(ACTION_RESTART),
         };
 
-        let ticks_before = {
-            let mut logic = lock(&self.shared);
-            // `|=` rather than `=`: an edge raised on a frame that ran no ticks
-            // must survive until a tick consumes it.
-            logic.intent.flap |= intent.flap;
-            logic.intent.restart |= intent.restart;
-            logic.ticks
-        };
-
-        self.session.client_mut().set_input(vec![intent.to_wire()]);
+        let ticks_before = lock(&self.shared).ticks;
 
         self.sim_time += self.tick_period;
-        let server_ticks = self.session.server_mut().update(self.sim_time);
+        let (server, client) = self.session.both_mut();
+
+        // The bytes are the whole input path. `Client::set_input` takes the
+        // *input data*, wrapping it in `ClientToServer::Input` itself, so this
+        // hands over the intent's own wire form rather than a whole message
+        // nested inside the data field of another.
+        client.set_input(vec![intent.to_wire()]);
+
+        // Send, simulate, then receive — and the send has to come first.
+        // `Client::update` is the only thing that puts input on the wire, and
+        // the server drains the wire at the top of its tick, so a client
+        // updated after the server would be posting this tick's intent to the
+        // next one. The second call consumes no tick (the clock has not moved
+        // between them); it is there to take the snapshot this tick produced.
+        client.update(self.sim_time);
+        let server_ticks = server.update(self.sim_time);
         debug_assert_eq!(
             server_ticks, 1,
             "one tick period in must be exactly one server tick out",
         );
-        let _alpha = self.session.client_mut().update(self.sim_time);
+        let _alpha = client.update(self.sim_time);
         self.ticks_run += 1;
 
         let (state, score, death, bird, velocity, ticks_after) = {
@@ -1173,6 +1296,7 @@ mod tests {
     use crcbl::core::FrameClock;
 
     use super::*;
+    use crcbl::core::TickId;
     use crcbl::core::time::{ManualTime, TimeSource as _};
 
     /// One entry of a script: `(tick index, key, pressed)`.
@@ -1307,6 +1431,174 @@ mod tests {
             .find(|pipe| pipe.x + PIPE_HALF_WIDTH >= game.bird.x)
             .map_or(0.0, |pipe| pipe.gap_centre);
         game.bird.y + game.bird_velocity.y * LOOKAHEAD < target - SAG
+    }
+
+    // ---- the input path ------------------------------------------------------
+
+    /// Puts one intent on the wire and runs exactly one tick of the pair.
+    ///
+    /// The whole input path and nothing beside it: no action map, no queued
+    /// event, no write to the shared cell. The same three calls in the same
+    /// order [`Game::tick`] makes, so what these tests exercise is the path the
+    /// game plays through.
+    fn send_one_tick(game: &mut Game, intent: Intent) {
+        game.sim_time += game.tick_period;
+        let (server, client) = game.session.both_mut();
+        client.set_input(vec![intent.to_wire()]);
+        client.update(game.sim_time);
+        assert_eq!(
+            server.update(game.sim_time),
+            1,
+            "one tick period in must be exactly one server tick out",
+        );
+        client.update(game.sim_time);
+    }
+
+    /// **The bird flaps on bytes that only ever existed as bytes.**
+    ///
+    /// The only thing that happens here is `Client::set_input` with one
+    /// intent's wire form and one tick of the pair. The run starting and the
+    /// bird taking [`FLAP_SPEED`] are the whole input path — encode, seal,
+    /// transport, unseal, decode, apply — and a server that drops what a client
+    /// sends leaves the bird parked at the start, because there is no other way
+    /// into this simulation.
+    #[test]
+    fn the_bird_flaps_on_an_intent_that_only_ever_travelled_as_bytes() {
+        let mut game = Game::new(true, DEFAULT_TICK_HZ).expect("a headless game always starts");
+        assert_eq!(lock(&game.shared).state, GameState::WaitingToStart);
+        assert_eq!(lock(&game.shared).bird_pos, BIRD_START);
+
+        send_one_tick(
+            &mut game,
+            Intent {
+                flap: true,
+                ..Intent::default()
+            },
+        );
+        assert_eq!(
+            lock(&game.shared).state,
+            GameState::Playing,
+            "the tap never reached the simulation",
+        );
+        let climbing = lock(&game.shared).bird_vel;
+        assert!(
+            (climbing.y - FLAP_SPEED).abs() < 1e-9,
+            "a flap is {FLAP_SPEED} up and the bird took {}",
+            climbing.y,
+        );
+
+        // And a frame that asks for nothing is not the previous one repeated:
+        // the server clears its queue every tick, so this one is a tick of
+        // gravity and nothing else.
+        send_one_tick(&mut game, Intent::default());
+        let falling = lock(&game.shared).bird_vel;
+        let want = FLAP_SPEED - GRAVITY * game.tick_dt_secs();
+        assert!(
+            (falling.y - want).abs() < 1e-9,
+            "one tick of gravity is {want} and the bird is at {}",
+            falling.y,
+        );
+        assert_eq!(
+            game.session.server().dropped_input_count(),
+            0,
+            "a frame was refused rather than applied",
+        );
+    }
+
+    /// Every intent this build can produce survives the round trip, and no two
+    /// share a wire form — a decoder that read one flag back as the other would
+    /// still round-trip an intent with both set.
+    #[test]
+    fn an_intent_survives_the_wire_in_both_directions() {
+        let mut seen = Vec::new();
+        for flags in 0..4u8 {
+            let intent = Intent {
+                flap: flags & 1 != 0,
+                restart: flags & 2 != 0,
+            };
+            let wire = intent.to_wire();
+            assert!(
+                !seen.contains(&wire),
+                "{intent:?} shares a wire form with an earlier intent",
+            );
+            seen.push(wire);
+            assert_eq!(Intent::from_wire(&[wire]), Some(intent));
+        }
+        assert_eq!(seen.len(), 4, "the loop did not cover what it claims");
+    }
+
+    /// **A frame from something that is not this build is refused.** These are
+    /// the only bytes in the game a peer chooses: the count of them and the
+    /// bits inside them.
+    #[test]
+    fn a_frame_this_build_did_not_write_is_refused() {
+        assert!(
+            Intent::from_wire(&[INTENT_FLAGS]).is_some(),
+            "every flag this build defines must decode",
+        );
+
+        // A bit outside the mask: a byte no `to_wire` of this game produces.
+        assert_eq!(Intent::from_wire(&[!INTENT_FLAGS]), None);
+        assert_eq!(Intent::from_wire(&[u8::MAX]), None);
+
+        // And the length is the other half — `set_input` takes a `Vec`, so how
+        // many bytes arrive is the peer's choice too.
+        assert_eq!(Intent::from_wire(&[]), None);
+        assert_eq!(Intent::from_wire(&[0, 0]), None);
+    }
+
+    /// Several frames in one tick — a client whose clock ran ahead — fold into
+    /// one intent, and **both fields are edges, so both survive** from whichever
+    /// frame raised them.
+    #[test]
+    fn several_frames_in_one_tick_fold_into_one_intent() {
+        let frames: Vec<(TickId, Vec<u8>)> = [
+            Intent {
+                flap: true,
+                restart: false,
+            },
+            Intent {
+                flap: false,
+                restart: true,
+            },
+            Intent::default(),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, intent)| (TickId::from_raw(i as u64), vec![intent.to_wire()]))
+        .collect();
+
+        // The last frame asks for neither and erases neither: an edge is not a
+        // held key, so a frame that does not mention one is not a release.
+        assert_eq!(
+            Intent::from_inputs(ClientInputs::new(&frames, 0)),
+            Intent {
+                flap: true,
+                restart: true,
+            },
+        );
+
+        // An unreadable frame is skipped rather than read as an empty intent.
+        let with_rubbish = vec![
+            (TickId::ZERO, vec![u8::MAX]),
+            (
+                TickId::ZERO,
+                vec![
+                    Intent {
+                        flap: true,
+                        ..Intent::default()
+                    }
+                    .to_wire(),
+                ],
+            ),
+        ];
+        assert!(Intent::from_inputs(ClientInputs::new(&with_rubbish, 0)).flap);
+
+        // A tick nothing arrived for is a player pressing nothing.
+        assert_eq!(
+            Intent::from_inputs(ClientInputs::empty()),
+            Intent::default()
+        );
     }
 
     /// The bird does not move until the player asks it to. Without this, a page

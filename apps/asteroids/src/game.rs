@@ -38,8 +38,29 @@
 //! Inside the server's tick, in [`AsteroidsModule::tick`] — the hook `crcbl-ecs`
 //! documents as running every server tick *after* the ECS schedule, which means
 //! after [`PhysicsSystem::step`] has integrated everything. [`Game`] is the
-//! client-side facade: it resolves input into an [`Intent`], advances the server
-//! and the client by exactly one tick period, and reads back what to draw.
+//! client-side facade: it resolves input into an [`Intent`], puts the intent on
+//! the wire, advances the server and the client by exactly one tick period, and
+//! reads back what to draw.
+//!
+//! # The input path is the wire and nothing else
+//!
+//! [`Intent::to_wire`] is handed to `Client::set_input`, sealed with the session
+//! key, and read back by [`Intent::from_wire`] inside [`AsteroidsModule::tick`],
+//! out of the [`ClientInputs`] the server hands every module. The shared cell
+//! this game and its module both hold is output-only: the module writes what it
+//! simulated and the facade reads it back to draw, and nothing travels the other
+//! way. A dropped input frame is a lost tick of intent, which is what playing
+//! over a real transport means — `InMemoryTransport` drops nothing, so a
+//! single-player session never sees one.
+//!
+//! The order in [`Game::tick`] is what keeps that free of lag: the client is
+//! updated **before** the server, because `Client::update` is the only thing
+//! that puts input on the wire and the server drains the wire at the top of its
+//! tick. Updating it afterwards would post this tick's intent to the next tick.
+//! [`Game::with_seed`] spends one tick on the handshake for the same reason — an
+//! unkeyed client drops what it is asked to send — and deals the board *after*
+//! that tick, because unlike breakout's this game's field moves on every tick
+//! there is one.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -476,14 +497,94 @@ struct Intent {
     restart: bool,
 }
 
+const INTENT_LEFT: u8 = 1 << 0;
+const INTENT_RIGHT: u8 = 1 << 1;
+const INTENT_THRUST: u8 = 1 << 2;
+const INTENT_FIRE: u8 = 1 << 3;
+const INTENT_RESTART: u8 = 1 << 4;
+/// Every bit the flag byte defines. One set outside this mask is a frame
+/// something other than [`Intent::to_wire`] wrote.
+const INTENT_FLAGS: u8 = INTENT_LEFT | INTENT_RIGHT | INTENT_THRUST | INTENT_FIRE | INTENT_RESTART;
+
 impl Intent {
-    /// The wire form handed to `Client::set_input`.
+    /// The wire form handed to `Client::set_input`: one byte of flags.
     fn to_wire(self) -> u8 {
-        u8::from(self.left)
-            | (u8::from(self.right) << 1)
-            | (u8::from(self.thrust) << 2)
-            | (u8::from(self.fire) << 3)
-            | (u8::from(self.restart) << 4)
+        let mut flags = 0;
+        if self.left {
+            flags |= INTENT_LEFT;
+        }
+        if self.right {
+            flags |= INTENT_RIGHT;
+        }
+        if self.thrust {
+            flags |= INTENT_THRUST;
+        }
+        if self.fire {
+            flags |= INTENT_FIRE;
+        }
+        if self.restart {
+            flags |= INTENT_RESTART;
+        }
+        flags
+    }
+
+    /// The intent a client sealed, read back on the server's side of the wire.
+    ///
+    /// `None` for anything this build did not write: a payload that is not one
+    /// byte, or a flag outside [`INTENT_FLAGS`]. **Validated rather than
+    /// trusted**, because these are the only bytes in this game a peer chooses
+    /// — every field below is a flag, so the mask is the whole of the check,
+    /// and a frame that fails it is one no wire form of this game produces.
+    fn from_wire(bytes: &[u8]) -> Option<Self> {
+        let &[flags] = bytes else {
+            return None;
+        };
+        if flags & !INTENT_FLAGS != 0 {
+            return None;
+        }
+        Some(Self {
+            left: flags & INTENT_LEFT != 0,
+            right: flags & INTENT_RIGHT != 0,
+            thrust: flags & INTENT_THRUST != 0,
+            fire: flags & INTENT_FIRE != 0,
+            restart: flags & INTENT_RESTART != 0,
+        })
+    }
+
+    /// Folds one server tick's worth of input frames into the intent to run it
+    /// with.
+    ///
+    /// Normally one frame arrives per tick and this is a decode. Several is a
+    /// client whose clock ran ahead of the server's, and then each field takes
+    /// the rule its own meaning asks for:
+    ///
+    /// * `left`, `right` and `thrust` are **held**, so the latest frame wins: a
+    ///   hand is wherever it is now, and a key released in the second frame was
+    ///   released however hard the first one was holding it.
+    /// * `fire` and `restart` are **edges**, so they are OR-ed: a trigger the
+    ///   player pulled in any of these frames is one they pulled, and a later
+    ///   frame that says nothing about it is not a release. Taking the latest
+    ///   here would silently swallow shots at exactly the moment the client is
+    ///   sending more of them than the server is consuming.
+    ///
+    /// The [`TickId`](crcbl::core::TickId) each frame carries is deliberately
+    /// unread. Lining an input up with the tick it names is a jitter buffer,
+    /// and the server has none — see [`ClientInputs`].
+    fn from_inputs(inputs: ClientInputs<'_>) -> Self {
+        let mut merged = Self::default();
+        for (_tick, data) in inputs.iter() {
+            // A frame this build cannot read is skipped rather than taken as an
+            // empty intent, which would read as the player letting go.
+            let Some(frame) = Self::from_wire(data) else {
+                continue;
+            };
+            merged.left = frame.left;
+            merged.right = frame.right;
+            merged.thrust = frame.thrust;
+            merged.fire |= frame.fire;
+            merged.restart |= frame.restart;
+        }
+        merged
     }
 }
 
@@ -590,10 +691,15 @@ pub struct Flash {
 }
 
 /// The mutable game state the server-side module owns.
+///
+/// **Output-only, as far as [`Game`] is concerned.** The facade reads the
+/// results out of here after each server tick; what the player asked for goes
+/// the other way over the wire, not through this cell. `AsteroidsModule` is the
+/// only thing that mutates any of it, and it only ever does so from inside a
+/// server tick.
 #[derive(Debug)]
 struct GameLogic {
     ship: Entity,
-    intent: Intent,
     state: GameState,
 
     /// The ship's heading, in radians, with 0 pointing along +Y.
@@ -750,9 +856,9 @@ impl GameModule for AsteroidsModule {
 
     fn register(&self, _world: &mut World) {}
 
-    fn tick(&mut self, world: &mut World, _inputs: ClientInputs<'_>) {
+    fn tick(&mut self, world: &mut World, inputs: ClientInputs<'_>) {
         let mut logic = lock(&self.shared);
-        run_tick(&mut logic, world);
+        run_tick(&mut logic, world, Intent::from_inputs(inputs));
     }
 }
 
@@ -772,10 +878,13 @@ fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
 ///   left to the edge it arrived at, hitting everything on the way.
 /// * The wrap runs **before** the overlap test, so the ship and the rocks are
 ///   compared in one frame rather than one of each.
-fn run_tick(logic: &mut GameLogic, world: &mut World) {
+///
+/// `intent` is what the client sent for this tick, decoded from the bytes that
+/// arrived over the transport — see [`Intent::from_inputs`]. A tick nothing
+/// arrived for runs on [`Intent::default`], which is a player holding nothing.
+fn run_tick(logic: &mut GameLogic, world: &mut World, intent: Intent) {
     logic.ticks += 1;
     let dt = world.tick_dt();
-    let intent = std::mem::take(&mut logic.intent);
 
     // Every angle the renderer interpolates is `(previous, current)`, and the
     // previous one is fixed here — **before** anything this tick can change a
@@ -1801,7 +1910,8 @@ impl Game {
     /// # Errors
     ///
     /// [`GameError::Server`] if the operating system would not give the server
-    /// the entropy for a resume credential.
+    /// the entropy for a resume credential, or if the loopback session did not
+    /// come up in the handshake tick.
     ///
     /// # Panics
     ///
@@ -1819,7 +1929,8 @@ impl Game {
     /// # Errors
     ///
     /// [`GameError::Server`] if the operating system would not give the server
-    /// the entropy for a resume credential.
+    /// the entropy for a resume credential, or if the loopback session did not
+    /// come up in the handshake tick.
     ///
     /// # Panics
     ///
@@ -1853,7 +1964,6 @@ impl Game {
 
         let shared = Arc::new(Mutex::new(GameLogic {
             ship: ship_entity,
-            intent: Intent::default(),
             state: GameState::WaitingToStart,
             heading: 0.0,
             prev_heading: 0.0,
@@ -1886,15 +1996,6 @@ impl Game {
             ticks: 0,
         }));
 
-        // The board exists before the first tick: the player is looking at the
-        // game while deciding whether to press anything, and an empty screen
-        // that fills in on the first shot reads as a bug.
-        {
-            let mut logic = lock(&shared);
-            place_ship(&mut logic, &mut world, DVec3::ZERO, 0.0, DVec3::ZERO);
-            deal_wave(&mut logic, &mut world);
-        }
-
         let mut session = Loopback::new(
             world,
             Box::new(AsteroidsModule {
@@ -1907,9 +2008,43 @@ impl Game {
 
         let tick_period = session.tick_period();
 
+        // **One tick spent on the handshake, before the game starts.**
+        //
+        // `Server::update` drains the transport inside `tick`, so the client's
+        // hello is not even read until a tick runs — and until the session is
+        // established the client has no key and drops every input frame it is
+        // asked to send. Spending that tick here is what makes the player's
+        // first input the first one the simulation sees: press Space on the
+        // opening frame and the game starts on the opening tick.
+        let sim_time = tick_period;
+        session.client_mut().update(sim_time);
+        session.server_mut().update(sim_time);
+        session.client_mut().update(sim_time);
+        if session.server().session_state() != crcbl::net::SessionState::Connected {
+            return Err(GameError::Server(
+                "the loopback session did not come up in its first tick".into(),
+            ));
+        }
+
+        // **The board is dealt after that tick, not before it**, and this is
+        // where this game differs from breakout. Breakout's handshake tick
+        // costs the tick and nothing else because an unlaunched ball is pinned
+        // and a paddle with no intent does not move; here a rock drifts and
+        // tumbles on every tick whatever the state, so a board dealt first
+        // would be a board one tick further along than the one the run is
+        // supposed to open on. Dealt after, the opening frame is the wave as
+        // `deal_wave` laid it out — which is what the golden pictures and what
+        // `the_opening_board_is_where_the_dealer_put_it` pins.
+        //
+        // It still exists before the first tick of *play*: the player is
+        // looking at the game while deciding whether to press anything, and an
+        // empty screen that fills in on the first shot reads as a bug.
         {
             let mut logic = lock(&shared);
-            refresh_views(&mut logic, session.server_mut().world_mut());
+            let world = session.server_mut().world_mut();
+            place_ship(&mut logic, world, DVec3::ZERO, 0.0, DVec3::ZERO);
+            deal_wave(&mut logic, world);
+            refresh_views(&mut logic, world);
         }
 
         let game = Self {
@@ -1918,7 +2053,7 @@ impl Game {
             session,
             shared,
             tick_period,
-            sim_time: Duration::ZERO,
+            sim_time,
             ticks_run: 0,
             pending_keys: Vec::new(),
             audio: crate::audio::Audio::new(headless),
@@ -1979,27 +2114,30 @@ impl Game {
             restart: self.action_map.just_pressed(ACTION_RESTART),
         };
 
-        let ticks_before = {
-            let mut logic = lock(&self.shared);
-            // Held flags are assigned; edges are `|=`, because an edge raised on
-            // a frame that ran no ticks must survive until a tick consumes it.
-            logic.intent.left = intent.left;
-            logic.intent.right = intent.right;
-            logic.intent.thrust = intent.thrust;
-            logic.intent.fire |= intent.fire;
-            logic.intent.restart |= intent.restart;
-            logic.ticks
-        };
-
-        self.session.client_mut().set_input(vec![intent.to_wire()]);
+        let ticks_before = lock(&self.shared).ticks;
 
         self.sim_time += self.tick_period;
-        let server_ticks = self.session.server_mut().update(self.sim_time);
+        let (server, client) = self.session.both_mut();
+
+        // The bytes are the whole input path. `Client::set_input` takes the
+        // *input data*, wrapping it in `ClientToServer::Input` itself, so this
+        // hands over the intent's own wire form rather than a whole message
+        // nested inside the data field of another.
+        client.set_input(vec![intent.to_wire()]);
+
+        // Send, simulate, then receive — and the send has to come first.
+        // `Client::update` is the only thing that puts input on the wire, and
+        // the server drains the wire at the top of its tick, so a client
+        // updated after the server would be posting this tick's intent to the
+        // next one. The second call consumes no tick (the clock has not moved
+        // between them); it is there to take the snapshot this tick produced.
+        client.update(self.sim_time);
+        let server_ticks = server.update(self.sim_time);
         debug_assert_eq!(
             server_ticks, 1,
             "one tick period in must be exactly one server tick out",
         );
-        let _alpha = self.session.client_mut().update(self.sim_time);
+        let _alpha = client.update(self.sim_time);
         self.ticks_run += 1;
 
         // Drained under the same lock the tick filled it under, and *before* the
@@ -2280,6 +2418,7 @@ mod tests {
     use crcbl::core::FrameClock;
 
     use super::*;
+    use crcbl::core::TickId;
     use crcbl::core::time::{ManualTime, TimeSource as _};
 
     /// One entry of a script: `(tick index, key, pressed)`.
@@ -2497,6 +2636,194 @@ mod tests {
         harness
     }
 
+    // ---- the input path ------------------------------------------------------
+
+    /// Puts one intent on the wire and runs exactly one tick of the pair.
+    ///
+    /// The whole input path and nothing beside it: no action map, no queued key
+    /// event, no write to the shared cell. The same three calls in the same
+    /// order [`Game::tick`] makes, so what these tests exercise is the path the
+    /// game plays through.
+    fn send_one_tick(game: &mut Game, intent: Intent) {
+        game.sim_time += game.tick_period;
+        let (server, client) = game.session.both_mut();
+        client.set_input(vec![intent.to_wire()]);
+        client.update(game.sim_time);
+        assert_eq!(
+            server.update(game.sim_time),
+            1,
+            "one tick period in must be exactly one server tick out",
+        );
+        client.update(game.sim_time);
+    }
+
+    /// **The ship turns on bytes that only ever existed as bytes.**
+    ///
+    /// The only thing that happens here is `Client::set_input` with an intent's
+    /// wire form and one tick of the pair. The trigger starting the run and the
+    /// heading moving are the whole input path — encode, seal, transport,
+    /// unseal, decode, apply — and a server that drops what a client sends
+    /// leaves the game on its title screen facing up, because there is no other
+    /// way into this simulation.
+    #[test]
+    fn the_ship_turns_on_an_intent_that_only_ever_travelled_as_bytes() {
+        let mut game = Game::new(true, DEFAULT_TICK_HZ).expect("a headless game always starts");
+        assert_eq!(lock(&game.shared).state, GameState::WaitingToStart);
+        assert_eq!(lock(&game.shared).heading, 0.0, "the ship opens facing up");
+
+        send_one_tick(
+            &mut game,
+            Intent {
+                fire: true,
+                ..Intent::default()
+            },
+        );
+        assert_eq!(
+            lock(&game.shared).state,
+            GameState::Playing,
+            "the trigger never reached the simulation",
+        );
+
+        send_one_tick(
+            &mut game,
+            Intent {
+                left: true,
+                ..Intent::default()
+            },
+        );
+        let step = SHIP_TURN_RATE * game.tick_dt_secs();
+        assert!(
+            (lock(&game.shared).heading - step).abs() < 1e-9,
+            "one tick of a held turn key is {step} and the ship is at {}",
+            lock(&game.shared).heading,
+        );
+
+        // And a frame that holds nothing is not the previous one repeated: the
+        // server clears its queue every tick, and this one decodes to a player
+        // holding no key at all.
+        send_one_tick(&mut game, Intent::default());
+        assert!(
+            (lock(&game.shared).heading - step).abs() < 1e-9,
+            "the ship kept turning to {} on a tick nobody asked for",
+            lock(&game.shared).heading,
+        );
+        assert_eq!(
+            game.session.server().dropped_input_count(),
+            0,
+            "a frame was refused rather than applied",
+        );
+    }
+
+    /// Every intent this build can produce survives the round trip, and no two
+    /// share a wire form — a decoder that read one flag back as another would
+    /// still round-trip an intent with everything set.
+    #[test]
+    fn an_intent_survives_the_wire_in_both_directions() {
+        let mut seen = Vec::new();
+        for flags in 0..32u8 {
+            let intent = Intent {
+                left: flags & 1 != 0,
+                right: flags & 2 != 0,
+                thrust: flags & 4 != 0,
+                fire: flags & 8 != 0,
+                restart: flags & 16 != 0,
+            };
+            let wire = intent.to_wire();
+            assert!(
+                !seen.contains(&wire),
+                "{intent:?} shares a wire form with an earlier intent",
+            );
+            seen.push(wire);
+            assert_eq!(Intent::from_wire(&[wire]), Some(intent));
+        }
+        assert_eq!(seen.len(), 32, "the loop did not cover what it claims");
+    }
+
+    /// **A frame from something that is not this build is refused.** These are
+    /// the only bytes in the game a peer chooses: the count of them and the
+    /// bits inside them.
+    #[test]
+    fn a_frame_this_build_did_not_write_is_refused() {
+        assert!(
+            Intent::from_wire(&[INTENT_FLAGS]).is_some(),
+            "every flag this build defines must decode",
+        );
+
+        // A bit outside the mask: a byte no `to_wire` of this game produces.
+        assert_eq!(Intent::from_wire(&[!INTENT_FLAGS]), None);
+        assert_eq!(Intent::from_wire(&[u8::MAX]), None);
+
+        // And the length is the other half — `set_input` takes a `Vec`, so how
+        // many bytes arrive is the peer's choice too.
+        assert_eq!(Intent::from_wire(&[]), None);
+        assert_eq!(Intent::from_wire(&[0, 0]), None);
+    }
+
+    /// Several frames in one tick — a client whose clock ran ahead — fold into
+    /// one intent: the held keys are the latest word and the edges survive from
+    /// whichever frame raised them.
+    #[test]
+    fn several_frames_in_one_tick_fold_into_one_intent() {
+        let frames: Vec<(TickId, Vec<u8>)> = [
+            Intent {
+                left: true,
+                fire: true,
+                ..Intent::default()
+            },
+            Intent {
+                right: true,
+                thrust: true,
+                ..Intent::default()
+            },
+            Intent {
+                right: true,
+                restart: true,
+                ..Intent::default()
+            },
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, intent)| (TickId::from_raw(i as u64), vec![intent.to_wire()]))
+        .collect();
+
+        // `left` and `thrust` were let go of by the last frame that mentioned
+        // them and are gone; `fire` and `restart` were raised by one frame each
+        // and both survive.
+        assert_eq!(
+            Intent::from_inputs(ClientInputs::new(&frames, 0)),
+            Intent {
+                left: false,
+                right: true,
+                thrust: false,
+                fire: true,
+                restart: true,
+            },
+        );
+
+        // An unreadable frame is skipped rather than read as an empty intent,
+        // which would be the player letting go of everything.
+        let with_rubbish = vec![
+            (TickId::ZERO, vec![u8::MAX]),
+            (
+                TickId::ZERO,
+                vec![
+                    Intent {
+                        thrust: true,
+                        ..Intent::default()
+                    }
+                    .to_wire(),
+                ],
+            ),
+        ];
+        assert!(Intent::from_inputs(ClientInputs::new(&with_rubbish, 0)).thrust);
+
+        // A tick nothing arrived for is a player holding nothing.
+        assert_eq!(
+            Intent::from_inputs(ClientInputs::empty()),
+            Intent::default()
+        );
+    }
+
     // ---- the board -----------------------------------------------------------
 
     /// A game has a board before anybody presses anything. A screen that fills
@@ -2511,6 +2838,37 @@ mod tests {
             "a wave opens with large rocks only"
         );
         harness.assert_nothing_leaked();
+    }
+
+    /// **The board the game opens on is the board the dealer laid out**, not one
+    /// a tick has already moved.
+    ///
+    /// [`Game::with_seed`] spends a tick on the handshake and deals *after* it
+    /// for exactly this reason: a rock drifts and tumbles on every tick whatever
+    /// the state, so a board dealt before that tick is a board the opening frame
+    /// shows a step into. Nothing else in this suite would notice — every other
+    /// board test asks the generator rather than the field — and the only other
+    /// thing that would is the golden, which needs a GPU.
+    #[test]
+    fn the_opening_board_is_where_the_dealer_put_it() {
+        let game = Game::new(true, DEFAULT_TICK_HZ).expect("a headless game always starts");
+        let rocks = game.rocks();
+        assert_eq!(rocks.len(), wave_rocks(0) as usize);
+        for (rock, view) in rocks.iter().enumerate() {
+            // Through the same wrap `spawn_rock` puts a spawn point through: a
+            // wave deals onto the field's border, and a border point is the
+            // opposite edge.
+            assert_eq!(
+                view.position,
+                wrap_position(wave_rock_position(game.board_seed(), 0, rock as u32)),
+                "rock {rock} had already moved when the game handed the board back",
+            );
+        }
+        assert_eq!(
+            lock(&game.shared).ship_pos,
+            DVec3::ZERO,
+            "the ship was not at the centre the board was built around",
+        );
     }
 
     /// Every rock a wave deals enters on the border, never on top of the ship.
