@@ -118,6 +118,8 @@ fn a_consumer_can_drive_a_whole_frame_by_hand() {
         &GpuContextDesc {
             label: "library seam",
             backend: BACKEND,
+            // Hermetic: nothing outside this file may decide what it draws.
+            settings: SettingsSource::None,
             ..GpuContextDesc::default()
         },
     )
@@ -210,6 +212,8 @@ fn a_resize_observed_through_pending_reaches_the_swapchain() {
         &GpuContextDesc {
             label: "resize",
             backend: BACKEND,
+            // Hermetic: nothing outside this file may decide what it draws.
+            settings: SettingsSource::None,
             ..GpuContextDesc::default()
         },
     )

@@ -60,22 +60,28 @@ const MONITOR_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// which `PassTimers` reports as one warning and then lives with.
 const LANTERN_TIMED_PASSES: u32 = MAX_TIMED_PASSES + ForwardRenderer::MAX_PASSES + 1;
 
-/// The three requested layers for `view`, given what the command line asked for.
+/// The three requested layers for `view`, given what the command line asked for
+/// and what the player's settings allow.
 ///
-/// **The camera layer is the view's and the programmatic layer is the run's**,
-/// which is the whole of `docs/plan/39-capabilities.md`'s order made visible in
-/// one function: `--no-shadows` is an instruction about this run and belongs to
-/// the layer that can move a decision either way, while "a monitor does not
-/// reflect itself" is a fact about the view and belongs to the layer above it.
-/// A run that turns reflections back on from the pause menu gets them in the
-/// frame it can see and still not in the monitor, because the two layers are
-/// resolved in that order and not merged.
-fn request_for(view: room::View, effects: RenderEffects) -> EffectRequest {
+/// **The camera layer is the view's, the video layer is the player's and the
+/// programmatic layer is the run's**, which is the whole of
+/// `docs/plan/39-capabilities.md`'s order made visible in one function:
+/// `--no-shadows` is an instruction about this run and belongs to the layer that
+/// can move a decision either way, `[engine.video]` is a standing preference and
+/// belongs to the one that may only remove, while "a monitor does not reflect
+/// itself" is a fact about the view. A run that turns reflections back on from
+/// the pause menu gets them in the frame it can see and still not in the
+/// monitor, because the layers are resolved in that order and not merged — and
+/// still not at all if the player's file switched them off, because every flag
+/// this run has only ever *removes*: `--no-*` sets the programmatic layer's off
+/// bits and nothing here forces one back on, so the video layer's clamp is the
+/// last word on an effect it took.
+fn request_for(view: room::View, video: RenderEffects, effects: RenderEffects) -> EffectRequest {
     EffectRequest {
         camera: view.stack(),
+        video,
         programmatic: EffectOverride::none()
             .force(RenderEffects::all().difference(effects), Some(false)),
-        ..EffectRequest::default()
     }
 }
 
@@ -499,8 +505,9 @@ impl Gpu {
         // Topic 39's resolution order, with two of its layers written here: the
         // camera stack is the view's and the programmatic override is the run's
         // — see [`request_for`].
-        renderer.set_effect_request(request_for(room::View::Main, effects));
-        monitor.set_effect_request(request_for(room::View::Monitor, effects));
+        let video = ctx.video_effects();
+        renderer.set_effect_request(request_for(room::View::Main, video, effects));
+        monitor.set_effect_request(request_for(room::View::Monitor, video, effects));
         // Resolved rather than requested: the device clamps last, so what the
         // panel and the summary report has to come back off the renderer.
         let paths = Paths::of(
@@ -1141,8 +1148,9 @@ mod tests {
         use crcbl::ui::{DebugModule, DebugSection};
 
         let device = RenderEffects::all();
-        let main = request_for(room::View::Main, RenderEffects::all()).resolve(device);
-        let monitor = request_for(room::View::Monitor, RenderEffects::all()).resolve(device);
+        let all = RenderEffects::all();
+        let main = request_for(room::View::Main, all, all).resolve(device);
+        let monitor = request_for(room::View::Monitor, all, all).resolve(device);
         assert!(main.contains(RenderEffects::REFLECTIONS));
         assert!(
             !monitor.contains(RenderEffects::REFLECTIONS),
@@ -1172,6 +1180,36 @@ mod tests {
         assert_eq!(row("monitor"), "shadows ao");
     }
 
+    /// **The player's `[engine.video]` clamp reaches both views, and the run's
+    /// own flags cannot lift it.**
+    ///
+    /// This is the layer `GpuContext::video_effects` feeds, and the thing it
+    /// has to survive is being handed to a run that asked for everything: a
+    /// player who switched the shadows off in their settings file gets no
+    /// shadows in the room *or* on the monitor, whatever the command line said.
+    /// Without the argument reaching `EffectRequest::video` the frame is
+    /// identical to a run with no settings file at all, which is the shape a
+    /// wiring mistake takes here.
+    #[test]
+    fn the_players_video_clamp_reaches_both_views() {
+        let device = RenderEffects::all();
+        let all = RenderEffects::all();
+        let video = all.difference(RenderEffects::SHADOWS);
+
+        let main = request_for(room::View::Main, video, all).resolve(device);
+        let monitor = request_for(room::View::Monitor, video, all).resolve(device);
+        assert_eq!(
+            main,
+            RenderEffects::AMBIENT_OCCLUSION | RenderEffects::REFLECTIONS,
+            "the settings file's clamp has to reach the room"
+        );
+        assert_eq!(
+            monitor,
+            RenderEffects::AMBIENT_OCCLUSION,
+            "and the monitor, whose camera stack drops the reflections anyway"
+        );
+    }
+
     /// **A run's `--no-*` flags reach both views, and the camera layer still
     /// separates them.**
     ///
@@ -1184,8 +1222,9 @@ mod tests {
         let device = RenderEffects::all();
         let without_shadows = RenderEffects::all().difference(RenderEffects::SHADOWS);
 
-        let main = request_for(room::View::Main, without_shadows).resolve(device);
-        let monitor = request_for(room::View::Monitor, without_shadows).resolve(device);
+        let all = RenderEffects::all();
+        let main = request_for(room::View::Main, all, without_shadows).resolve(device);
+        let monitor = request_for(room::View::Monitor, all, without_shadows).resolve(device);
         assert_eq!(
             main,
             RenderEffects::AMBIENT_OCCLUSION | RenderEffects::REFLECTIONS

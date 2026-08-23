@@ -31,7 +31,7 @@
 //! [`ForwardRenderer`]: crcbl::render::ForwardRenderer
 
 use crcbl::backend::GpuBackend;
-use crcbl::engine::{GpuContext, GpuContextDesc};
+use crcbl::engine::{GpuContext, GpuContextDesc, SettingsSource};
 use crcbl::hal::{
     BufferDesc, BufferImageCopy, BufferUsage, Extent3d, Features, GeometryPath, ImageAspect,
     ImageSubresourceLayers, MemoryLocation, ReadbackDesc, ReadbackState, ResourceState,
@@ -222,6 +222,11 @@ impl Quarry {
                 // path draws: `GeometryPath::from_features` resolves downward on
                 // a device without it.
                 optional_features: wanted,
+                // Hermetic: the default reads the player's own
+                // `~/.config/quarry/settings.toml`, so a developer who has
+                // turned an effect off in the sample would render different
+                // frames here than CI does.
+                settings: SettingsSource::None,
                 ..GpuContextDesc::default()
             },
         )
