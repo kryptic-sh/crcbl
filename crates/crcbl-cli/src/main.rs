@@ -27,6 +27,7 @@
 //! umbrella to serve it.
 
 mod args;
+mod bench;
 mod cargo;
 mod crpix_cmd;
 mod json;
@@ -57,6 +58,7 @@ fn main() -> ExitCode {
                 Command::Replay(args) => replay_cmd::run(args),
                 Command::Crpix(args) => crpix_cmd::run(args),
                 Command::Lod(args) => lod_cmd::run(args),
+                Command::Bench(args) => bench::run(args),
             };
             report::emit(name, json, result)
         }

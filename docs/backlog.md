@@ -6235,11 +6235,16 @@ most likely thing to give.
   and `sweep_bolts` (the obvious candidate) reduces into a shared hit list in an
   order the scheduler would choose, so it needs a design decision before it
   needs an API.
-- **`STEER_CHUNK` was chosen by argument, not by measurement.** Sixty-four
-  enemies a chunk keeps the split independent of the worker count and stays
-  under the pool's 1024-slot queue up to 65 536 enemies. Nothing has swept the
-  value, and the right time to is when there is a benchmark that isolates the
-  pass.
+- **`STEER_CHUNK` was chosen by argument, and the instrument to settle it now
+  exists.** Sixty-four enemies a chunk keeps the split independent of the worker
+  count and stays under the pool's queue capacity well past any crowd horde
+  draws. `crcbl bench --scenario jobs --chunk N` sweeps the same shape of pass
+  against the pool in isolation. **A debug-build sweep is not the answer**: at
+  10 000 items on this machine, 32, 64 and 128 sit within noise of each other
+  while 16 and 1024 are clearly worse, which says the current value is in the
+  flat part of the curve and nothing more. Settling it wants a `--release`
+  sweep, on more than one machine, against a workload shaped like the real
+  separation pass rather than a synthetic mix.
 
 **The atomics are checked by Miri and by nothing else.** x86-64 is
 total-store-order, so a `Release` store and a `Relaxed` one compile to the same
@@ -6305,9 +6310,22 @@ tests and not another runner.
   frightening: **waking a worker is throughput, never correctness** — the
   driving thread runs the chunks itself until they are gone, so a missed wakeup
   costs parallelism for one call and cannot hang it.
-- **Nothing benchmarks the pool in isolation.** A harness that times the pass
-  alone, and sweeps the chunk length, is what would let `STEER_CHUNK` be chosen
-  rather than argued.
+- **The pool is benchmarked in isolation now, and what is missing is a
+  baseline.** `crcbl bench --scenario jobs` times `par_for` over a fixed
+  synthetic workload, reports p50/p95/p99/max with the pool's own counters
+  beside them, and refuses a percentile below the sample count at which a
+  nearest-rank p95 is just the maximum. What it does not do is compare: there is
+  no stored baseline, no `--compare`, and no threshold — separate rows of
+  `docs/plan/40-profiling.md`'s delivery table. Until those land, two runs are
+  compared by a person reading two blocks of output.
+- **The bench's environment block has no target triple.** A binary cannot read
+  one — Cargo hands `TARGET` to build scripts and nothing else, and `std` offers
+  only `ARCH`, `OS` and `FAMILY`, which is what the block reports. A
+  `crates/crcbl-cli/build.rs` emitting `cargo::rustc-env=CRCBL_TARGET=$TARGET`
+  is the four-line fix, and it was left out of the slice that would otherwise
+  have introduced the first build script in that crate. It matters the moment
+  `--compare` exists, because refusing a baseline from different hardware is one
+  of the plan's decisions and `ARCH`/`OS` is a coarser key than a triple.
 - **A mode comparison cannot catch a defect that is symmetric across modes**,
   and this was measured rather than assumed: dropping the last chunk of every
   `par_for` leaves both worker-count tests green, because a pool with no workers

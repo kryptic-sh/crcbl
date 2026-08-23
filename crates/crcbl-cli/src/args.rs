@@ -73,6 +73,7 @@ COMMANDS:
     replay        Read a .crpl replay file and dump its metadata.
     crpix         Convert PNG frames into one .crpix sprite sheet.
     lod           Report or generate a glTF mesh's LOD chain.
+    bench         Run a fixed benchmark scenario and report its distribution.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -239,6 +240,37 @@ OPTIONS:
         --json               Emit one JSON object instead of human output.
     -h, --help               Print this text.";
 
+/// `crcbl bench --help`.
+pub const BENCH_USAGE: &str = "\
+crcbl bench — run a fixed benchmark scenario and report its distribution
+
+USAGE:
+    crcbl bench --scenario <NAME> [OPTIONS]
+
+One scenario per invocation, run headless, with the warm-up excluded from the
+statistics and the environment printed beside them — a number without the
+machine it came from is not comparable to another number.
+
+SCENARIOS:
+    jobs    `crcbl_jobs::Pool::par_for` over a fixed synthetic workload, timed
+            per call. `--workers 0` is the serial baseline the parallel numbers
+            only mean something against.
+
+OPTIONS:
+        --scenario <NAME>    Which scenario to run. Required.
+        --workers <N>        Pool worker threads. Default: one fewer than the
+                             machine's parallelism, which is what `Pool::new`
+                             asks for. 0 runs every chunk on the calling thread.
+        --items <N>          Items in the workload. Default: 10000.
+        --chunk <N>          Items per `par_for` chunk, and the thing worth
+                             sweeping. Default: 64.
+        --iterations <N>     Timed calls. Default: 200. Below 20 the run reports
+                             its maximum and no percentile.
+        --warmup <N>         Untimed calls first, excluded from the statistics
+                             and from the pool counters. Default: 20.
+        --json               Emit one JSON object instead of human output.
+    -h, --help               Print this text.";
+
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invocation {
@@ -269,6 +301,8 @@ pub enum Command {
     Crpix(CrpixArgs),
     /// A glTF mesh's LOD chain, reported or generated.
     Lod(LodArgs),
+    /// One fixed benchmark scenario, timed.
+    Bench(BenchArgs),
 }
 
 impl Command {
@@ -286,6 +320,8 @@ impl Command {
             // that varied with an inner verb would make every consumer match on
             // a set of strings that grows with the CLI.
             Self::Lod(_) => "lod",
+            // The scenario is a field of its own, for the reason above.
+            Self::Bench(_) => "bench",
         }
     }
 
@@ -299,6 +335,7 @@ impl Command {
             Self::Replay(args) => args.json,
             Self::Crpix(args) => args.json,
             Self::Lod(args) => args.json,
+            Self::Bench(args) => args.json,
         }
     }
 }
@@ -470,6 +507,102 @@ pub struct LodArgs {
     pub json: bool,
 }
 
+/// Which fixed workload `crcbl bench` runs.
+///
+/// `docs/plan/40-profiling.md` requires scenarios to be "named and fixed", so
+/// this is an enum and not a free-form string: a name that answers to nothing is
+/// refused at parse time, with the names that do listed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BenchScenario {
+    /// `crcbl_jobs::Pool::par_for` over a synthetic integer workload.
+    ///
+    /// The first one because the job system is the first thing that needs
+    /// proving — the plan's own note against this delivery row.
+    #[default]
+    Jobs,
+}
+
+impl BenchScenario {
+    /// The `--scenario` name, and the name this run is reported under.
+    ///
+    /// Exhaustive on purpose — no wildcard arm — so adding a variant is a
+    /// compile error here rather than a scenario the CLI silently cannot run.
+    /// The same arrangement as [`scene_name`], and for the same reason.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Jobs => "jobs",
+        }
+    }
+}
+
+/// Every scenario, for the name lookup and the rejection message.
+const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs];
+
+/// The scenario `name` selects, or `None` if no scenario answers to it.
+fn scenario_from_name(name: &str) -> Option<BenchScenario> {
+    SCENARIOS
+        .iter()
+        .copied()
+        .find(|&scenario| scenario.name() == name)
+}
+
+/// Every name `--scenario` takes, for the rejection message.
+///
+/// Built from [`SCENARIOS`], so the list a user is shown after a typo cannot
+/// name a scenario the parser does not accept.
+fn scenario_names() -> String {
+    SCENARIOS
+        .iter()
+        .map(|&scenario| scenario.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Items the workload holds when `--items` is not given.
+///
+/// The crowd size `docs/plan/sample/03-horde.md` sets as its exit criterion,
+/// because the pass this benchmark stands in for is horde's steering.
+const DEFAULT_BENCH_ITEMS: usize = 10_000;
+
+/// Items per chunk when `--chunk` is not given.
+///
+/// horde's `STEER_CHUNK`, which `docs/backlog.md` records as chosen by argument
+/// rather than measurement — so it is the default a sweep starts from, not a
+/// value this file is claiming is right.
+const DEFAULT_BENCH_CHUNK: usize = 64;
+
+/// Timed calls when `--iterations` is not given.
+///
+/// Comfortably above [`crcbl::core::stats::MIN_PERCENTILE_SAMPLES`], so the
+/// default invocation reports percentiles rather than explaining why it cannot.
+const DEFAULT_BENCH_ITERATIONS: usize = 200;
+
+/// Untimed calls when `--warmup` is not given.
+const DEFAULT_BENCH_WARMUP: usize = 20;
+
+/// `crcbl bench`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BenchArgs {
+    /// Which workload to run.
+    pub scenario: BenchScenario,
+    /// Pool workers, or `None` for the count `Pool::new` would pick.
+    ///
+    /// `Some(0)` is legal and is the serial baseline: every chunk runs on the
+    /// calling thread.
+    pub workers: Option<usize>,
+    /// Items in the workload. Never zero; the parser refuses it.
+    pub items: usize,
+    /// Items per `par_for` chunk. Never zero, for the same reason.
+    pub chunk: usize,
+    /// Timed calls. Never zero, for the same reason.
+    pub iterations: usize,
+    /// Untimed calls first, excluded from everything reported.
+    pub warmup: usize,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
 /// `crcbl replay --help`.
 pub const REPLAY_USAGE: &str = "\
 crcbl replay — read a .crpl replay file and dump its metadata
@@ -498,6 +631,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("replay") => parse_replay(args),
         Some("crpix") => parse_crpix(args),
         Some("lod") => parse_lod(args),
+        Some("bench") => parse_bench(args),
         Some(other) if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
@@ -1048,6 +1182,129 @@ fn parse_lod(mut args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Lod(parsed))
 }
 
+fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
+    let mut parsed = BenchArgs {
+        scenario: BenchScenario::default(),
+        workers: None,
+        items: DEFAULT_BENCH_ITEMS,
+        chunk: DEFAULT_BENCH_CHUNK,
+        iterations: DEFAULT_BENCH_ITERATIONS,
+        warmup: DEFAULT_BENCH_WARMUP,
+        json: false,
+    };
+    // Separate from `parsed.scenario`'s default so that *omitting* `--scenario`
+    // is refused rather than silently running whichever one happens to be first
+    // in `SCENARIOS`. A benchmark that ran something other than what was asked
+    // for would be the one output nobody could interpret.
+    let mut scenario = None;
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(BENCH_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--scenario") => {
+                let Some(value) = args.next() else {
+                    return bad("--scenario needs a value");
+                };
+                match value.to_str().and_then(scenario_from_name) {
+                    Some(found) => scenario = Some(found),
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "unknown scenario `{}` (known: {})",
+                            value.to_string_lossy(),
+                            scenario_names()
+                        ));
+                    }
+                }
+            }
+            Some("--workers") => match count(&mut args, "--workers") {
+                Ok(value) => parsed.workers = Some(value),
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--items") => match count(&mut args, "--items") {
+                Ok(value) => parsed.items = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--chunk") => match count(&mut args, "--chunk") {
+                Ok(value) => parsed.chunk = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--iterations") => match count(&mut args, "--iterations") {
+                Ok(value) => parsed.iterations = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--warmup") => match count(&mut args, "--warmup") {
+                Ok(value) => parsed.warmup = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some(other) => {
+                return Invocation::BadUsage(format!("`bench` has no argument `{other}`"));
+            }
+            None => {
+                return Invocation::BadUsage(format!(
+                    "`bench` has no argument `{}`",
+                    arg.to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    let Some(scenario) = scenario else {
+        return Invocation::BadUsage(format!(
+            "`bench` needs a --scenario (known: {})",
+            scenario_names()
+        ));
+    };
+    parsed.scenario = scenario;
+
+    // The three counts a zero makes meaningless, refused here rather than
+    // producing a run whose every sample is the cost of doing nothing. Zero
+    // workers and zero warm-up are both real answers and are not in this list.
+    for (value, flag, why) in [
+        (
+            parsed.items,
+            "--items",
+            "there would be nothing to run over",
+        ),
+        (
+            parsed.iterations,
+            "--iterations",
+            "there would be nothing to time",
+        ),
+        (
+            parsed.chunk,
+            "--chunk",
+            "`par_for` reads a chunk of zero as one, so ask for the length you mean",
+        ),
+    ] {
+        if value == 0 {
+            return Invocation::BadUsage(format!("`{flag}` cannot be zero: {why}"));
+        }
+    }
+
+    Invocation::Command(Command::Bench(parsed))
+}
+
+/// The next argument as a count, for the five numbers `bench` takes.
+///
+/// Separate from [`index`] because the two say different things when they
+/// refuse: an index is a position in a file's node list and a count is a size,
+/// and a message naming the wrong one sends a reader to the wrong flag.
+fn count(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<usize, String> {
+    let Some(value) = args.next() else {
+        return Err(format!("{flag} needs a count"));
+    };
+    value
+        .to_str()
+        .and_then(|text| text.parse::<usize>().ok())
+        .ok_or_else(|| {
+            format!(
+                "`{flag}` expects a whole number; got `{}`",
+                value.to_string_lossy()
+            )
+        })
+}
+
 /// The next argument as a zero-based index, for `--node` and `--primitive`.
 fn index(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<usize, String> {
     let Some(value) = args.next() else {
@@ -1241,6 +1498,7 @@ mod tests {
             vec!["crpix", "a.png", "-o", "a.crpix", "--json"],
             vec!["lod", "stats", "a.gltf", "--json"],
             vec!["lod", "gen", "a.gltf", "-o", "a.dag", "--json"],
+            vec!["bench", "--scenario", "jobs", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
@@ -1695,6 +1953,84 @@ mod tests {
         };
         assert_eq!(args.inputs, vec![PathBuf::from(weird())]);
         assert_eq!(args.output, PathBuf::from(weird()));
+    }
+
+    /// The `bench` defaults, stated as a test because they are the documented
+    /// surface — and because a sweep of `--chunk` only means something against
+    /// a starting point that is written down.
+    #[test]
+    fn bench_defaults_to_the_pass_it_stands_in_for() {
+        let Command::Bench(args) = command(&["bench", "--scenario", "jobs"]) else {
+            panic!("expected bench");
+        };
+        assert_eq!(args.scenario, BenchScenario::Jobs);
+        assert_eq!(args.items, DEFAULT_BENCH_ITEMS);
+        assert_eq!(args.chunk, DEFAULT_BENCH_CHUNK);
+        assert_eq!(args.iterations, DEFAULT_BENCH_ITERATIONS);
+        assert_eq!(args.warmup, DEFAULT_BENCH_WARMUP);
+        // `None`, not a number: the pool's own rule is what picks it, and the
+        // parser must not bake a worker count into the invocation.
+        assert_eq!(args.workers, None);
+        assert!(!args.json);
+
+        let Command::Bench(args) = command(&[
+            "bench",
+            "--scenario",
+            "jobs",
+            "--workers",
+            "0",
+            "--items",
+            "64",
+            "--chunk",
+            "8",
+            "--iterations",
+            "3",
+            "--warmup",
+            "0",
+        ]) else {
+            panic!("expected bench");
+        };
+        // Zero workers and zero warm-up are answers, not typos.
+        assert_eq!(args.workers, Some(0));
+        assert_eq!(args.warmup, 0);
+        assert_eq!((args.items, args.chunk, args.iterations), (64, 8, 3));
+    }
+
+    /// A scenario that answers to nothing is refused **by name**, with the ones
+    /// that do exist listed — and omitting `--scenario` is refused the same way
+    /// rather than running whichever happens to be first.
+    #[test]
+    fn bench_refuses_an_unknown_scenario_and_names_the_ones_that_exist() {
+        let Invocation::BadUsage(message) = parse_args(&["bench", "--scenario", "frobnicate"])
+        else {
+            panic!("an unknown scenario is a bad invocation");
+        };
+        assert!(message.contains("frobnicate"), "{message}");
+        assert!(message.contains("jobs"), "{message}");
+
+        let Invocation::BadUsage(message) = parse_args(&["bench"]) else {
+            panic!("a missing --scenario is a bad invocation");
+        };
+        assert!(message.contains("jobs"), "{message}");
+    }
+
+    /// The three counts a zero makes meaningless, each refused naming its own
+    /// flag. `--workers 0` and `--warmup 0` are in the accepted list above.
+    #[test]
+    fn bench_refuses_the_counts_a_zero_would_empty() {
+        for flag in ["--items", "--chunk", "--iterations"] {
+            let Invocation::BadUsage(message) =
+                parse_args(&["bench", "--scenario", "jobs", flag, "0"])
+            else {
+                panic!("`{flag} 0` should be a bad invocation");
+            };
+            assert!(message.contains(flag), "{message}");
+        }
+        // And a count that is not a number at all.
+        assert!(matches!(
+            parse_args(&["bench", "--scenario", "jobs", "--items", "lots"]),
+            Invocation::BadUsage(_)
+        ));
     }
 
     #[test]

@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl bench --scenario jobs`** times `crcbl_jobs::Pool::par_for` over a
+  fixed synthetic workload and reports it as a distribution: p50, p95, p99 and
+  max, never a mean, with the pool's own counters beside them and the
+  environment the numbers came from. `--workers 0` is the serial baseline the
+  parallel figures only mean something against; `--chunk`, `--items`,
+  `--iterations` and `--warmup` are the knobs. Warm-up iterations run before the
+  counters are reset and are excluded from the statistics, and the run fails
+  rather than reports if the warm-up ran no chunks. Below the sample count at
+  which a nearest-rank p95 is simply the maximum, it prints the maximum and says
+  why there is no percentile. Human output by default and `--json` on request,
+  like every other subcommand.
+
+  The workload's result is used — each item is written back, folded into a
+  checksum the output carries, and compared against a serial pass over the same
+  seeds — so an elided loop, a chunk that ran twice and a chunk that never ran
+  are each a failure rather than a fast number.
+
 - **`Pool::stats` reports what the job pool actually did**, so a phase that
   adopts `crcbl-jobs` can show the adoption helped rather than assert it.
   `PoolStats` carries the chunks the driver ran against the chunks the workers
@@ -230,6 +247,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   probe's answer, so a device without the feature cannot report as covered.
 
 ### Changed
+
+- **`percentile_of` and `MIN_PERCENTILE_SAMPLES` moved to `crcbl_core::stats`.**
+  They were private to `crcbl_ui::budget`, and `crcbl bench` asks the same
+  question of different numbers. `crcbl_ui::budget::MIN_PERCENTILE_SAMPLES` is
+  now a re-export, so no caller changes.
 
 - **The demo shim copies three buffers it used to hand a browser API directly,
   because a shared `WebAssembly.Memory` is refused where a plain one is not.**

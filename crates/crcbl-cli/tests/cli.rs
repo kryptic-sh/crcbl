@@ -138,6 +138,7 @@ fn help_and_version_exit_zero() {
         "replay",
         "crpix",
         "lod",
+        "bench",
     ] {
         let output = crcbl(temporary.path(), &[command, "--help"]);
         assert_eq!(code(&output), 0, "{command} --help");
@@ -180,6 +181,14 @@ fn a_malformed_invocation_exits_two() {
         vec!["lod", "stats", "a.gltf", "--primitive", "0"],
         vec!["lod", "stats", "a.gltf", "--node", "first"],
         vec!["lod", "stats", "a.gltf", "b.gltf"],
+        // `bench` without a scenario, with one that answers to nothing, and
+        // with the counts a zero empties. None of these runs anything.
+        vec!["bench"],
+        vec!["bench", "--scenario", "frobnicate"],
+        vec!["bench", "--scenario", "jobs", "--items", "0"],
+        vec!["bench", "--scenario", "jobs", "--chunk", "0"],
+        vec!["bench", "--scenario", "jobs", "--iterations", "0"],
+        vec!["bench", "--scenario", "jobs", "--iterations", "lots"],
     ] {
         let output = crcbl(temporary.path(), &args);
         assert_eq!(code(&output), 2, "{args:?} should be exit 2");
@@ -1414,6 +1423,128 @@ fn lod_preview_is_refused_as_missing_and_not_as_unknown() {
     assert!(json.starts_with(r#"{"ok":false,"command":"lod""#), "{json}");
     assert!(has_field(&json, "action", r#""preview""#), "{json}");
     assert!(json.contains("not implemented"), "{json}");
+}
+
+/// `crcbl bench` end to end: the distribution, the environment block the plan
+/// makes mandatory, and the pool counters that describe the timed calls alone.
+///
+/// `--workers 0` so the assertion about *which* thread ran the chunks is exact
+/// on every runner, single-core CI included; the parallel arm is covered by the
+/// subcommand's own tests, where a worker count can be demanded.
+#[test]
+fn bench_reports_a_distribution_an_environment_and_the_pools_counters() {
+    let temporary = TempDir::new("bench");
+    // Twenty iterations is exactly the count at which a nearest-rank p95 stops
+    // being the maximum, so this is the invocation where all three percentiles
+    // must appear. 512 items in chunks of 16 is 32 chunks a call.
+    let output = crcbl(
+        temporary.path(),
+        &[
+            "bench",
+            "--scenario",
+            "jobs",
+            "--workers",
+            "0",
+            "--items",
+            "512",
+            "--chunk",
+            "16",
+            "--iterations",
+            "20",
+            "--warmup",
+            "2",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = stdout(&output);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+    assert!(
+        json.starts_with(r#"{"ok":true,"command":"bench","scenario":"jobs""#),
+        "{json}"
+    );
+
+    // The environment block: a number without the machine it came from is not
+    // comparable to another number.
+    assert!(json.contains(r#""environment":{"arch":"#), "{json}");
+    for key in ["os", "family", "profile", "parallelism", "workers"] {
+        assert!(json.contains(&format!(r#""{key}":"#)), "no {key} in {json}");
+    }
+    assert!(has_field(&json, "workers", "0"), "{json}");
+
+    // p50 ≤ p95 ≤ p99 ≤ max, and no mean anywhere near them.
+    let percentiles: Vec<usize> = ["p50", "p95", "p99", "max"]
+        .iter()
+        .map(|key| numbers(&json, key)[0])
+        .collect();
+    assert!(
+        percentiles.windows(2).all(|pair| pair[0] <= pair[1]),
+        "out of order: {percentiles:?} in {json}"
+    );
+    assert!(!json.contains("mean"), "{json}");
+
+    // The warm-up ran and was excluded: two calls of 32 chunks warmed up, and
+    // the counters that survived the reset cover the twenty timed calls only.
+    assert_eq!(numbers(&json, "warmup_chunks"), vec![2 * 32]);
+    assert_eq!(numbers(&json, "chunks_run_by_driver"), vec![20 * 32]);
+    assert_eq!(numbers(&json, "chunks_run_by_workers"), vec![0]);
+}
+
+/// Human output is the default and `--json` is the opt-in, which is the CLI's
+/// global rule rather than this subcommand's own — see `bench`'s module docs for
+/// why it wins over the plan's "JSON by default".
+#[test]
+fn bench_prints_a_human_summary_unless_json_is_asked_for() {
+    let temporary = TempDir::new("bench-human");
+    let output = crcbl(
+        temporary.path(),
+        &[
+            "bench",
+            "--scenario",
+            "jobs",
+            "--workers",
+            "0",
+            "--items",
+            "128",
+            "--chunk",
+            "16",
+            "--iterations",
+            "3",
+            "--warmup",
+            "1",
+        ],
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = stdout(&output);
+    assert!(!human.starts_with('{'), "that is JSON: {human}");
+    assert!(human.contains("environment:"), "{human}");
+    assert!(human.contains("warm-up:"), "{human}");
+    // Three iterations is far below the count a p95 needs, so the run reports
+    // its maximum and says so rather than printing one number three times.
+    assert!(human.contains("no percentile"), "{human}");
+}
+
+/// An unknown scenario is a bad invocation, and it names the ones that exist —
+/// exit 2 with nothing on stdout, like every other malformed invocation.
+#[test]
+fn bench_refuses_an_unknown_scenario_by_name() {
+    let temporary = TempDir::new("bench-scenario");
+    let output = crcbl(temporary.path(), &["bench", "--scenario", "frobnicate"]);
+    assert_eq!(code(&output), 2);
+    assert!(output.stdout.is_empty(), "{}", stdout(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("frobnicate"), "{stderr}");
+    assert!(stderr.contains("jobs"), "{stderr}");
 }
 
 /// Every `"<key>":<integer>` in the object, in order.
