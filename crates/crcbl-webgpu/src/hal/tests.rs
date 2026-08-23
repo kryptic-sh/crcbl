@@ -13,10 +13,12 @@ use core::task::{Context, Poll, Waker};
 use crcbl_core::Handle;
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
-    CompositeAlpha, Device, DeviceCaps, DeviceDesc, DeviceType, Features, Format, HalError,
+    AdapterId, AdapterInfo, BackendKind, BindGroupLayoutDesc, BindGroupLayoutEntry, BindingFlags,
+    BindingKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc, CompositeAlpha,
+    ComputePipelineDesc, Device, DeviceCaps, DeviceDesc, DeviceType, Features, Format, HalError,
     Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
-    ReadbackState, SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc,
+    ReadbackState, ShaderEntry, ShaderModuleDesc, ShaderStages, SubmitInfo, SurfaceCaps,
+    SurfaceHandle, SwapchainDesc,
 };
 
 use crate::ReplyWriter;
@@ -546,6 +548,165 @@ fn a_zero_size_buffer_is_refused_without_encoding_anything() {
         "one byte must still reach the replayer, or the check above is refusing \
          every buffer and this test would not know"
     );
+}
+
+/// The seam's checks that this backend used to run nowhere at all.
+///
+/// Each is a rule `crcbl-hal` states and provides the check for, that every
+/// other backend calls and this one did not — so a descriptor breaking it was
+/// refused on four backends and encoded here. None of the three can be caught
+/// downstream: `web/engine/gpu-replay.js` re-checks only what WebGPU itself has
+/// a rule about, and WebGPU has no rule about any of these. A zero `count` and
+/// a duplicate binding are not WebGPU errors; `workgroupSize` is dropped on the
+/// wire, because `GPUComputePipelineDescriptor` has no member for it; and a
+/// module carrying only SPIR-V becomes a `createShaderModule` with empty
+/// `code`, which fails later naming neither the module nor the format shipped.
+///
+/// Every case pairs its refusal with the nearest legal descriptor, which must
+/// still encode — a check that refused everything would satisfy the first half
+/// alone, and this suite would not know.
+#[test]
+fn the_seam_checks_this_backend_skipped_now_run_before_anything_is_encoded() {
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    let entry = |binding, count, flags| BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        kind: BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        },
+        count,
+        flags,
+    };
+
+    // `check_entries`: a zero count, and a binding declared twice.
+    for (case, entries) in [
+        ("a zero count", vec![entry(0, 0, BindingFlags::empty())]),
+        (
+            "a binding declared twice",
+            vec![
+                entry(0, 1, BindingFlags::empty()),
+                entry(0, 1, BindingFlags::empty()),
+            ],
+        ),
+    ] {
+        let (channel, device) = device_on_fresh_channel();
+        let error = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("layout"),
+                entries: &entries,
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{case} is a caller bug the seam states"));
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{case}: {error}"
+        );
+        assert!(
+            names(&channel).is_empty(),
+            "{case} reached the wire: {:?}",
+            names(&channel)
+        );
+    }
+    // …and a layout that breaks neither still encodes.
+    let (channel, device) = device_on_fresh_channel();
+    device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: Some("layout"),
+            entries: &[entry(0, 1, BindingFlags::empty())],
+        })
+        .expect("one storage binding breaks no rule");
+    assert_eq!(names(&channel), vec!["CreateBindGroupLayout"]);
+
+    // `check_workgroup_size`: zero in an axis, and past this device's ceiling.
+    // The two handles are never resolved — the check runs before the descriptor
+    // is encoded, which is the property under test — but they must be handles a
+    // pool actually issued, since `from_bits` refuses a made-up bit pattern.
+    let handles = HandlePool::new();
+    let ceiling = Limits::minimum().max_compute_workgroup_size;
+    for (case, size) in [
+        ("zero in an axis", [1, 0, 1]),
+        ("past the device's ceiling", [ceiling[0] + 1, 1, 1]),
+    ] {
+        let (channel, device) = device_on_fresh_channel();
+        let error = device
+            .create_compute_pipeline(&ComputePipelineDesc {
+                label: Some("compute"),
+                layout: handles.alloc(),
+                compute: ShaderEntry {
+                    module: handles.alloc(),
+                    entry_point: "main",
+                },
+                workgroup_size: size,
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{case} launches nothing this device can run"));
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{case}: {error}"
+        );
+        assert!(
+            names(&channel).is_empty(),
+            "{case} reached the wire: {:?}",
+            names(&channel)
+        );
+    }
+    // …and the largest size the device does allow still encodes.
+    let (channel, device) = device_on_fresh_channel();
+    device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            label: Some("compute"),
+            layout: handles.alloc(),
+            compute: ShaderEntry {
+                module: handles.alloc(),
+                entry_point: "main",
+            },
+            workgroup_size: [ceiling[0], 1, 1],
+        })
+        .expect("the device's own ceiling is a size it can launch");
+    assert_eq!(names(&channel), vec!["CreateComputePipeline"]);
+
+    // A module carrying every format but the one this backend compiles.
+    let (channel, device) = device_on_fresh_channel();
+    let error = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("spirv only"),
+            spirv: &[0x0723_0203],
+            wgsl: None,
+            msl: Some("kernel void main() {}"),
+            dxil: &[],
+        })
+        .expect_err("WebGPU compiles WGSL and nothing else");
+    let HalError::ShaderCompilation(message) = &error else {
+        panic!("an unusable module is a compilation failure, not {error}");
+    };
+    // Both sides, which is what `ShaderModuleDesc::unusable` exists to say.
+    assert!(message.contains("spirv only"), "{message}");
+    assert!(message.contains("WGSL"), "{message}");
+    assert!(
+        names(&channel).is_empty(),
+        "an uncompilable module reached the wire: {:?}",
+        names(&channel)
+    );
+    // …and the same module with WGSL on it encodes.
+    device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("wgsl"),
+            spirv: &[],
+            wgsl: Some("@compute @workgroup_size(1) fn main() {}"),
+            msl: None,
+            dxil: &[],
+        })
+        .expect("WGSL is what this backend compiles");
+    assert_eq!(names(&channel), vec!["CreateShaderModule"]);
 }
 
 // ── (d) a recorded frame's command stream ──────────────────────────────────

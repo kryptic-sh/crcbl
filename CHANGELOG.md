@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-webgpu` runs three seam checks it used to run nowhere.**
+  `BindGroupLayoutDesc::check_entries` and
+  `ComputePipelineDesc::check_workgroup_size` are documented "every backend
+  calls this" and every other backend does; this one called neither, so a zero
+  binding count, a binding number declared twice, a `VARIABLE_COUNT` entry out
+  of place, a visibility naming a stage the device lacks, and a workgroup size
+  that is zero or past `Limits::max_compute_workgroup_size` were all refusals on
+  four backends and encoded commands here. Neither is catchable downstream:
+  WebGPU has no rule about most of them, and `workgroupSize` is dropped on the
+  wire because `GPUComputePipelineDescriptor` has no member for it —
+  `Command::CreateComputePipeline`'s docs claimed the replayer checked it, which
+  it never could. Third, `create_shader_module` now answers
+  `ShaderModuleDesc::unusable(ShaderSources::WGSL)` for a descriptor carrying no
+  WGSL, where it used to encode a `createShaderModule` with empty `code` and let
+  the first pipeline built on it fail with a browser message naming neither the
+  module nor the format the caller shipped.
+
 - **`crcbl-vk` refuses a swapchain format the surface does not offer.**
   `SwapchainDesc::format` is documented "must be one of `SurfaceCaps::formats`",
   and the null, Metal and D3D12 backends each answered

@@ -45,8 +45,8 @@ use crcbl_hal::{
     ImageViewHandle, MeshPipelineDesc, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle,
     PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
     ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
-    SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, Support,
-    SurfaceError, SwapchainDesc, SwapchainHandle,
+    SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderSources, SubmitInfo,
+    Support, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -859,6 +859,15 @@ impl Device for WebGpuDevice {
         // text, so its artifacts are measured against the stream's caps before
         // anything is encoded — see `super::bounds`.
         super::bounds::shader_module(desc)?;
+        // WebGPU consumes WGSL and nothing else — `createShaderModule` has one
+        // `code` member and it is WGSL text. A descriptor carrying only SPIR-V,
+        // MSL or DXIL therefore compiles nothing here, and used to be encoded
+        // anyway: the browser was handed a module with an empty `code`, and the
+        // first pipeline built on it failed with the browser's own message
+        // naming neither the module nor the format the caller actually shipped.
+        if desc.wgsl.is_none() {
+            return Err(desc.unusable(ShaderSources::WGSL));
+        }
         let handle: ShaderModuleHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_shader_module(handle, desc)));
@@ -874,6 +883,13 @@ impl Device for WebGpuDevice {
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
+        // The seam's own rules — a zero count, a binding declared twice, the
+        // `VARIABLE_COUNT` ordering, a visibility naming a stage this device
+        // has not got. `Command::CreateBindGroupLayout`'s docs already said
+        // "the `impl Device` that calls this is what runs `check_entries`",
+        // and this is that call: the replayer cannot make it, because most of
+        // these are not things WebGPU has a rule about at all.
+        desc.check_entries(&self.caps, BackendKind::WebGpu)?;
         let handle: BindGroupLayoutHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_bind_group_layout(handle, desc)));
@@ -962,6 +978,12 @@ impl Device for WebGpuDevice {
         &self,
         desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
+        // `workgroupSize` is dropped on the wire — WebGPU reads it from the
+        // module's `@workgroup_size` — so the descriptor's copy is checked
+        // here or nowhere. Nowhere is what it was: a zero or over-large size
+        // reached the browser as a pipeline built from whatever the WGSL said,
+        // silently disagreeing with what the caller asked for.
+        desc.check_workgroup_size(&self.caps.limits)?;
         let handle: ComputePipelineHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_compute_pipeline(handle, desc)));

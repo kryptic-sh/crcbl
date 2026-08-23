@@ -432,9 +432,14 @@ pub enum Command {
     /// `GPUProgrammableStage.entryPoint`.
     ///
     /// **Nothing is validated here**, which is [`Command::CreateImage`]'s rule:
+    /// The errors an unresolvable handle raises are the replayer's, because only
+    /// it faces WebGPU — but
     /// [`ComputePipelineDesc::check_workgroup_size`](crcbl_hal::ComputePipelineDesc::check_workgroup_size)
-    /// and the errors an unresolvable handle raises are the replayer's, because
-    /// only it faces WebGPU. See `web/engine/gpu-replay.js`.
+    /// is **not**, and this used to say it was. The replayer drops
+    /// `workgroupSize` deliberately (`GPUComputePipelineDescriptor` has no
+    /// member for it; WebGPU reads the shader's `@workgroup_size`), so it never
+    /// sees the number and cannot check it. The `impl Device` runs that one,
+    /// exactly as it runs `check_entries`. See `web/engine/gpu-replay.js`.
     CreateComputePipeline {
         /// Id the replayer stores the new object at.
         pipeline: ComputePipelineHandle,
