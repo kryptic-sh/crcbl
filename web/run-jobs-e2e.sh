@@ -256,6 +256,29 @@ expect_pass() {
     echo "    left alone: $1"
 }
 
+# And that a check the red run does not decide **ran at all**.
+#
+# A trap is a consequence of the corruption rather than the observation, and
+# whether one happens depends on where the corruption lands — which is a
+# property of the module's layout, not of the sabotage. So neither direction is
+# demanded, and what is demanded is that the check was reached: a check that
+# stopped being printed would otherwise satisfy nothing and be noticed by
+# nobody.
+expect_either() {
+    if ! grep -qF "ok   $1" "$red_log" && ! grep -qF "FAIL $1" "$red_log"; then
+        echo "crcbl jobs e2e: $red_label never reached this check at all:" >&2
+        echo "                 $1" >&2
+        echo "               so nothing here is a verdict about it" >&2
+        cat "$red_log" >&2
+        exit 1
+    fi
+    if grep -qF "FAIL $1" "$red_log"; then
+        echo "    also red:   $1 (a consequence, not the observation)"
+    else
+        echo "    left alone: $1"
+    fi
+}
+
 red_run() {
     red_label="--query $2"
     red_log="$RUNTIME_DIR/red-$1.log"
@@ -285,14 +308,24 @@ red_run() {
 red_run stack-pointer no-stack-pointer
 expect_fail 'no chunk found its stack array changed underneath it'
 expect_pass "no thread found another thread's value in its own thread-local"
+expect_either 'no run trapped'
 
-# A worker that never calls `__wasm_init_tls` does NOT trap here, and does not
-# clobber a stack either — `__tls_base` is left at zero and every worker's
-# thread-locals alias one address. The separation has to be observed directly.
+# A worker that never calls `__wasm_init_tls` does not clobber a stack —
+# `__tls_base` is left at zero and every worker's thread-locals alias one
+# address — so the separation has to be observed directly, which is what the
+# aliasing check does.
+#
+# **Whether it also traps is not this arm's business.** It used to be asserted
+# as "does NOT trap here", and on 2026-08-23 CI met `memory access out of
+# bounds` on that run and failed a gate about thread-locals over it. Writing
+# through a `__tls_base` of zero lands wherever the module's low addresses
+# happen to be, so the answer moves when anything linked into the artifact
+# changes size — the same reason the arm above reports its trap rather than
+# requiring it.
 red_run init-tls no-init-tls
 expect_fail "no thread found another thread's value in its own thread-local"
 expect_pass 'no chunk found its stack array changed underneath it'
-expect_pass 'no run trapped'
+expect_either 'no run trapped'
 
 # No announcement, no threads: the backend refuses every spawn, the queue stays
 # empty, and no worker exists to run a chunk. The whole run degrades onto the
