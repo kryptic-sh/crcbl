@@ -21,7 +21,7 @@
 //!
 //! # What is this sample's own
 //!
-//! **A menu whose buttons are simulation state.** The other three samples build
+//! **A menu whose buttons are simulation state.** The other games build
 //! every menu once, because a `RESUME` button says `RESUME` forever. This one's
 //! level-up panel is three upgrades drawn from the run's seed, so
 //! [`HostedGame::menu_kind`] — which the loop calls with its own `MenuSet` for
@@ -1495,7 +1495,7 @@ mod tests {
     /// **The key the button prints is the key that starts it**, through the
     /// shell, and the run really begins afterwards.
     ///
-    /// `SPACE` is what the other three samples print on their start screens and
+    /// `SPACE` is what the other games print on their start screens and
     /// what the browser gate presses. `RESTART_KEY` is `R`, so a button that
     /// worked and a hint that lied would look identical without this.
     #[test]

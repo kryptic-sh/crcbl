@@ -469,7 +469,7 @@ impl Gpu {
 // The engine's seams
 // ---------------------------------------------------------------------------
 
-// The nine forwards `crcbl::engine` calls this bundle through. Every one of
+// The forwards `crcbl::engine` calls this bundle through. Every one of
 // them is a method above; the macro is what stops a sample forgetting one.
 crcbl::impl_game_gpu!(Gpu);
 

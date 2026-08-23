@@ -919,7 +919,7 @@ fn feed_monitor<'a>(
 // The engine's seams
 // ---------------------------------------------------------------------------
 
-// The nine forwards `crcbl::engine` calls this bundle through. Every one of
+// The forwards `crcbl::engine` calls this bundle through. Every one of
 // them is a method above; the macro is what stops a sample forgetting one.
 //
 // `PolledGpu` is written out below instead of taken from

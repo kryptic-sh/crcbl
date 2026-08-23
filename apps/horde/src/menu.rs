@@ -173,7 +173,7 @@ impl MenuKind {
 /// told to draw nothing.
 pub type Menus = MenuSet<MenuKind>;
 
-/// The four menus, with nothing shown.
+/// Every menu, with nothing shown.
 ///
 /// The level-up panel is a placeholder, replaced by [`LevelUpOffer::refresh`]
 /// before it is ever shown. Built here rather than left out so `current` stays

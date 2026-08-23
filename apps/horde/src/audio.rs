@@ -17,14 +17,14 @@
 //!
 //! That is [`Audio::set_listener`], called once a frame from `crate::game`
 //! before the frame's cues are drained. [`Audio::play_at`] takes a world
-//! position and nothing else, exactly as the other three samples' does: the
+//! position and nothing else, exactly as the other games' does: the
 //! convention is a line in the frame rather than an argument on every cue.
 //!
 //! [`compute_cue`]: crcbl::audio::spatial::compute_cue
 //!
 //! # This game emits cues faster than any earlier one, so it caps its voices
 //!
-//! The other three samples raise a handful of cues a second and never think
+//! The other games raise a handful of cues a second and never think
 //! about it. Here a kill is a cue, a gem is a cue, and the gun's cooldown floor
 //! is [`crate::game::FIRE_COOLDOWN_FLOOR`] — a twentieth of a second — so a
 //! late run raises up to about forty a second and every one of them is a voice
@@ -135,8 +135,8 @@ pub struct Audio {
 /// The sample rate every cue is synthesised at.
 ///
 /// The stream resamples nothing, so a cue built at one rate and played at
-/// another is simply the wrong pitch. 48 kHz is what the other three samples
-/// use and what every device this has run on reports.
+/// another is simply the wrong pitch. 48 kHz is what the other games use and
+/// what every device this has run on reports.
 const SAMPLE_RATE: u32 = 48_000;
 
 impl Audio {

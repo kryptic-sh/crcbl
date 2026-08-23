@@ -572,7 +572,7 @@ struct PanelLayout {
 /// This is what a sample holds. Frame timing has no precondition and no
 /// configuration — every sample has a frame — so it is wired in here rather than
 /// added by each sample, which is the difference between "switching it on is one
-/// thing" and four samples each remembering to add the same module.
+/// thing" and every sample remembering to add the same module.
 ///
 /// Everything else is [`DebugOverlay::add`], called only by a sample that has
 /// the system in question.

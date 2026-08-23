@@ -9,7 +9,7 @@
 //! a **removed device** reported at whatever call comes next. That is the
 //! failure this module exists to make impossible: the arithmetic every buffer
 //! view is built from lives here, checked, in one place, rather than inline at
-//! three call sites where nothing can test it.
+//! every call site where nothing can test it.
 //!
 //! # Why it is not Windows-only
 //!

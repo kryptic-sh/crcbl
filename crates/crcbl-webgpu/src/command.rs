@@ -54,7 +54,7 @@ pub enum Command {
     /// the handle the caller allocated for it.
     ///
     /// **Only the canvas key crosses, not a [`SurfaceTarget`](crcbl_core::SurfaceTarget).**
-    /// Four of that enum's six variants carry `NonNull` pointers to platform
+    /// Most of that enum's variants carry `NonNull` pointers to platform
     /// objects, and a pointer must never be transmitted as an integer. So the
     /// encoder takes the `u32` that `Web { canvas_id }` carries and the pointer
     /// variants have nothing here to be encoded into at all.

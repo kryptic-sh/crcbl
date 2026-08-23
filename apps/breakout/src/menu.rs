@@ -147,7 +147,7 @@ impl MenuKind {
 /// told to draw nothing.
 pub type Menus = MenuSet<MenuKind>;
 
-/// The four menus, with nothing shown.
+/// Every menu, with nothing shown.
 #[must_use]
 pub fn menus() -> Menus {
     use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};

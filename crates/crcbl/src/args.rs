@@ -38,7 +38,7 @@ use std::process::ExitCode;
 use crate::backend::GpuBackend;
 use crate::engine::{FrameLimit, GpuOptions, LoopConfig, Pacing};
 
-/// The shared `OPTIONS:` block, so four help texts cannot drift.
+/// The shared `OPTIONS:` block, so the samples' help texts cannot drift.
 ///
 /// A game's `USAGE` is its own prose — its name, its tagline, its own flags —
 /// with this pasted in for the common set. Kept as one string rather than
@@ -981,8 +981,8 @@ mod tests {
         assert_eq!(common.consume("nonsense", &mut rest), Consumed::No);
     }
 
-    /// The value helpers are what stop four games spelling the same rejection
-    /// four ways.
+    /// The value helpers are what stop each sample spelling the same rejection
+    /// its own way.
     #[test]
     fn the_value_helpers_reject_what_they_should_and_pass_what_they_should() {
         let mut one = ["17".to_string()].into_iter();

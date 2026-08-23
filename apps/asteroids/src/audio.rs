@@ -119,8 +119,8 @@ pub struct Audio {
 /// The sample rate every cue is synthesised at.
 ///
 /// The stream resamples nothing, so a cue built at one rate and played at
-/// another is simply the wrong pitch. 48 kHz is what the other two samples use
-/// and what every device this has run on reports.
+/// another is simply the wrong pitch. 48 kHz is what the other games use and
+/// what every device this has run on reports.
 const SAMPLE_RATE: u32 = 48_000;
 
 /// How many cycles of the engine tone one loop of it holds.

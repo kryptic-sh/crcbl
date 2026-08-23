@@ -1381,7 +1381,7 @@ const MOVE_SECTOR: f32 = 0.382_683_43;
 ///
 /// Two jobs on one action, the way asteroids' `fire` both begins a game and
 /// deals a new one from the death screen. `R` and `Space` are both bound to it:
-/// `Space` because that is the key the other three samples' start screens print,
+/// `Space` because that is the key the other games' start screens print,
 /// and `R` because it is the one this game's death screen has always printed.
 const ACTION_RESTART: &str = "restart";
 /// The three level-up buttons, in offer order.
@@ -1479,8 +1479,8 @@ impl Intent {
 /// board is empty at `t = 0`, so a waiting state is a blank arena with a prompt
 /// on it. The user played it and asked for the screen anyway, which settles it —
 /// a demo that starts taking hit points off the player before the window has
-/// been looked at is worse than a blank arena, and four samples that open the
-/// same way is worth more than one clever exception.
+/// been looked at is worse than a blank arena, and every game opening the same
+/// way is worth more than one clever exception.
 ///
 /// So the field a player looks at here is **empty but for the player**, not
 /// frozen: there is nothing to freeze at `t = 0`, because everything on this
@@ -3517,7 +3517,7 @@ impl Game {
         //
         // The state is in the line because that is what the gate reads: "the
         // input reached the simulation" is `WaitingToStart` before the key and
-        // `Playing` after it, the same claim the other three samples make. `run`
+        // `Playing` after it, the same claim the other games make. `run`
         // is beside it for a bug report, and because it is what tells a restart
         // from a start — only a real restart edge advances it.
         //

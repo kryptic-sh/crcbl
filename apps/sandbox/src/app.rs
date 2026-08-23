@@ -195,7 +195,8 @@ impl Default for Options {
 impl Options {
     /// What the command line contributes to opening a GPU.
     ///
-    /// The same value [`crcbl::args::Common::gpu`] gives the four games.
+    /// The same value [`crcbl::args::Common::gpu`] gives every sample that
+    /// takes the shared flags.
     #[must_use]
     pub const fn gpu(&self) -> GpuOptions {
         GpuOptions {
@@ -586,8 +587,8 @@ fn render(alpha: f32) {
     let _ = alpha;
 }
 
-/// The next pacing a press of the menu's row selects: a cycle through the
-/// four variants, wrapping.
+/// The next pacing a press of the menu's row selects: a cycle through
+/// [`Pacing`]'s variants, wrapping.
 #[must_use]
 fn next_pacing(pacing: Pacing) -> Pacing {
     match pacing {

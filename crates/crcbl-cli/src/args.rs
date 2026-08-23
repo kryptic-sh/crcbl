@@ -10,7 +10,7 @@
 //!    third-party dependencies (`bitflags`, `glam`, `log`, `proptest`,
 //!    `thiserror`). `clap` with its default features brings ten to twelve
 //!    crates. It would be, by a wide margin, the largest dependency in the
-//!    engine — to parse three subcommands and nine flags.
+//!    engine — to parse this CLI's subcommands and flags.
 //! 2. **Consistency with decisions already made.** `docs/plan/15-windowing.md`
 //!    rejected `winit`, `x11rb` and `wayland-client` and this workspace
 //!    hand-wrote a Wayland protocol scanner and its own libxcb bindings rather
@@ -22,7 +22,8 @@
 //!    would supply the tokenizer, which is the part that is one `match`.
 //! 4. **What it buys is not needed yet.** Derive macros, subcommand trees,
 //!    shell completions and colourised help earn their keep at ten subcommands
-//!    with interlocking flags. At three, they are unused surface.
+//!    with interlocking flags. At the handful this CLI has, they are unused
+//!    surface.
 //!
 //! **The reconsideration point is explicit**: topic 11 schedules `scene`,
 //! `import`, `screenshot`, `sim`, `phys` and `edit` for P1–P12, several with
@@ -246,7 +247,7 @@ pub enum Invocation {
     BadUsage(String),
 }
 
-/// One of the four subcommands.
+/// One of the CLI's subcommands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Scaffold a project.

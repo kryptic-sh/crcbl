@@ -19,8 +19,8 @@
 //!
 //! Because the menu is the one picture **every sample draws and no sample
 //! owns**. `apps/*` cannot depend on each other, so the alternative is the same
-//! window frame authored three times — three times the drawing, and three games
-//! whose menus look like three different engines. `src/menu.rs` carries the
+//! window frame authored once per sample — the drawing redone every time, and
+//! menus that look like different engines. `src/menu.rs` carries the
 //! argument in full, including the option that was rejected (a shared `assets/`
 //! directory both build scripts reach into).
 //!
