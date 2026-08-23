@@ -3,10 +3,11 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### Three stale `crcbl-wgpu` mentions the comment sweep could not reach
+### The stale `crcbl-wgpu` mentions the comment sweep could not reach
 
 The 2026-08-23 sweep took the present-tense `crcbl-wgpu` references out of 38
-files. Three groups were left, deliberately:
+files, and c3aae07 retargeted the three canvas refusal strings it could not
+touch. What is left:
 
 - **`bindless_probe.slang` and `mesh_cluster.slang`** each present `crcbl-wgpu`
   as a live backend — the first says it "refuses too", the second that it "is
@@ -16,12 +17,6 @@ files. Three groups were left, deliberately:
   has changed without the manifest being regenerated", so a comment-only edit
   needs `crates/crcbl-shaders/tools/compile-shaders.sh` and a manifest commit.
   Worth doing on the next run of that script rather than on its own.
-- **Three error strings** — `crcbl-dx12`'s `instance.rs`, `crcbl-mtl`'s
-  `swapchain.rs` and `crcbl-vk`'s `instance.rs` all refuse a canvas surface with
-  some form of "a canvas is `crcbl-wgpu`'s target, not X's". These are output,
-  so they are outside a comment-only sweep, and at least one is asserted on. The
-  replacement is `crcbl-webgpu`, which is the crate that actually targets a
-  canvas now.
 - **The `Cargo.toml` comments were checked and are fine** — all six name the
   2026-08-21 deletion as a past event. No work here; recorded so the next sweep
   does not re-derive it.
