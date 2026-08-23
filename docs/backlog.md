@@ -3,6 +3,70 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Breakout over an impaired link: two breaks, and only one is the buffer
+
+`crcbl::session::Loopback::impaired` and `apps/breakout`'s `ImpairedRun` make a
+game playable over a seeded `ConditionSimulator`, and the first thing measured
+with them was breakout at latencies from 50 to 150 ms, loss from 2 to 30 %,
+jitter to 40 ms and reorder windows to 3. **The game stays playable at every
+severity run** — lives held at 3 and bricks kept breaking at 150 ms + 40 ms
+jitter + 10 % loss + reorder 3. Breakout is unusually forgiving because its
+authoritative state reaches the renderer through the shared cell rather than
+through snapshots, so server→client impairment is invisible to its gameplay and
+only input is affected. A game that read its state from snapshots would not be.
+
+- **Input frames bunch under latency, and the fold destroys them. This is the
+  jitter buffer.** At 150 ms every frame sent arrived — no loss, and
+  `Server::dropped_input_count()` zero, so the per-tick cap refused none — but
+  they arrive bunched: over 60 ticks, 7 were handed two frames and 67 none. The
+  server empties its queue at the top of each tick and hands the whole of it to
+  one `GameModule::tick`, so `Intent::from_inputs` folds both frames into one
+  intent and two ticks of a held direction become one step of paddle travel,
+  while the starved tick runs on `Intent::default()` — a player holding nothing.
+  The felt defect is a paddle that travels roughly 60 % of what was asked for.
+  `two_input_frames_in_one_tick_cost_a_tick_of_paddle_travel` pins it, and is
+  the test that should go red when a buffer lands.
+- **A launch edge lost to packet loss is lost forever, and a buffer would not
+  touch it.** The launch bit is `just_pressed`, true for one tick, so it rides
+  in exactly one datagram; `Client::set_input` replaces the pending frame on the
+  next tick with one that no longer carries it, the channel is unreliable, and
+  nothing tracks whether the server applied the edge. Measured 1 press in 20
+  lost at 2 % loss and 5 in 15 at 30 %. The frame never arrived, so there is
+  nothing to buffer: the fix is resend-until-acked, or latching the edge into
+  `pending_input` until the server acknowledges the tick that applied it.
+  `a_launch_edge_the_link_drops_is_never_resent` pins it.
+- **Reorder is a non-event.** A window of 3 against a window of 1 at the same
+  latency is inside the run-to-run noise, because `Intent::from_inputs` is
+  order-insensitive for edges (they are OR-ed) and only the held state and the
+  aim take the last word — and the window can only permute frames that were
+  already going to land in the same tick.
+- **`ConditionSimulator` schedules against `Instant::now` and has no injectable
+  clock.** So every latency measurement has to sleep in real wall time, takes
+  minutes, and is scheduler-dependent — which is why the only non-`#[ignore]`d
+  guards left behind are loss-based. A time source on the simulator is the
+  single biggest lever for turning the first finding above into a guard that is
+  both deterministic and instant. `crcbl-net`.
+- **Nothing retransmits the reliable channel.** A lost hello costs the client's
+  whole `HANDSHAKE_TIMEOUT` before another is sent; at 30 % loss, 5 of 20
+  sessions failed to come up inside 400 ticks. "Reliable" here means a separate
+  queue, not delivery. `crcbl-net` / `crcbl-client`.
+- **`ConditionSimulator::drain_pending` swallows the inner transport's error**
+  on both send paths — `let _ = self.inner.send_reliable(msg)` and the
+  unreliable one beside it — so a `Backpressure` drop from a full
+  `InMemoryTransport` channel is indistinguishable from configured loss. Not
+  observed in any run here (every counter was zero), but it is a silent path.
+  `crcbl-net`.
+- **`Server` and `Client` expose no transport accessor**, so a test cannot
+  degrade a link _after_ the session is up. Having one would let a measurement
+  handshake cleanly and then impair, isolating gameplay from handshake noise.
+- **`apps/breakout/src/game.rs` is past three thousand lines.** The
+  impaired-link harness has to live in its unit-test module — it needs the
+  private `Intent`, `Game::build` and `Game::session` — so it could not go to
+  `tests/`. Splitting the file is its own task.
+- **Not measured:** duplication (`SimConditions::duplicate_rate`), asymmetric
+  impairment (one direction only), any game other than breakout, and any link
+  where the _snapshot_ direction matters.
+
 ### The plan-document audit of 2026-08-23, and what it found
 
 Two stale claims turned up by accident in one day — `21-jobs.md` listing an ECS

@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::session::Loopback::impaired`** builds the single-player pair with
+  both directions behind `crcbl_net`'s `ConditionSimulator`, so a game can be
+  played over a link with loss, latency, jitter or reordering on it and the run
+  reproduces from one seed. The two ends are seeded differently — one seed for
+  both would sample one impairment pattern twice rather than two — and the
+  caller's seed still reproduces the whole run. `Loopback` is now generic over
+  its transport with `InMemoryTransport` as the default, so every existing
+  `Loopback::new` call site is unchanged.
+
 - **Bloom.** `docs/plan/18-render-features.md`'s P10 chain: a threshold-free
   partial-Karis downsample pyramid, a 3×3 tent upsample added back down it, and
   an additive composite, recorded between `ssr-blur` and `tonemap`.
@@ -457,6 +466,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **breakout's session handshake waits for the client, not only the server.**
+  The server considers itself connected the moment it reads the hello; the
+  client only when the result reaches it back, and until then it holds no
+  session key and discards every input frame it is asked to send. Over a
+  loopback link the two land in the same tick, so no shipped run changes; over a
+  link with a round trip on it the opening inputs were being posted into a
+  keyless client and thrown away.
 - **`crcbl lod` reports what the importer skipped.** The engine's stderr logger
   is now installed by `crcbl`'s `main` rather than by `crcbl import`, so every
   verb that drives the glTF importer surfaces its warnings — an unresolvable

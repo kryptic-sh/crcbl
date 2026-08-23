@@ -1,5 +1,7 @@
 //! The single-player session: a server and a client joined by an in-memory
-//! transport.
+//! transport — or, for a test that wants to see a game played over a link that
+//! loses things, by that transport behind a [`ConditionSimulator`]. See
+//! [`Loopback::impaired`].
 //!
 //! ```text
 //!  world ──▶ Server ──┐                    ┌──▶ Client ──▶ render state
@@ -33,7 +35,9 @@ use std::time::Duration;
 
 use crcbl_core::FrameClock;
 use crcbl_ecs::{GameModule, World};
-use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl_net::{
+    ConditionSimulator, InMemoryTransport, ProtocolCompatibility, SimConditions, Transport,
+};
 
 /// A server and its client, wired to each other and to nothing else.
 ///
@@ -42,9 +46,9 @@ use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
 /// because the three things they have to agree on are exactly what
 /// [`Loopback::new`] takes.
 #[derive(Debug)]
-pub struct Loopback {
-    server: crcbl_server::Server<InMemoryTransport>,
-    client: crcbl_client::Client<InMemoryTransport>,
+pub struct Loopback<T: Transport = InMemoryTransport> {
+    server: crcbl_server::Server<T>,
+    client: crcbl_client::Client<T>,
     tick_period: Duration,
 }
 
@@ -60,7 +64,7 @@ pub enum SessionError {
     Entropy(String),
 }
 
-impl Loopback {
+impl Loopback<InMemoryTransport> {
     /// Builds both halves and spends their first update.
     ///
     /// `world` is the server's — already populated, because the module's
@@ -92,7 +96,81 @@ impl Loopback {
         compatibility: ProtocolCompatibility,
     ) -> Result<Self, SessionError> {
         let (server_transport, client_transport) = InMemoryTransport::pair();
+        Self::join(
+            world,
+            module,
+            tick_hz,
+            compatibility,
+            server_transport,
+            client_transport,
+        )
+    }
+}
 
+/// What [`Loopback::impaired`] offsets the server end's seed by.
+///
+/// Any value that is not zero would do; this one spells `SRVR` so a seed read
+/// out of a failing run is recognisable as the derived half of the pair.
+const SERVER_SEED_SALT: u64 = 0x5352_5652;
+
+impl Loopback<ConditionSimulator<InMemoryTransport>> {
+    /// The same pair, with both directions behind a
+    /// [`ConditionSimulator`] running `conditions`.
+    ///
+    /// What it is for: every sample plays over [`InMemoryTransport`], which
+    /// drops nothing, delays nothing and reorders nothing, so a game's own
+    /// behaviour under loss or latency is exercised by no test anywhere. This
+    /// is the constructor that lets one be written — a scripted run over a
+    /// seeded impairment pattern, reproducing exactly.
+    ///
+    /// **Both ends are wrapped, and they are given different seeds.** One seed
+    /// for both starts the two directions on the same draw sequence, which is
+    /// one impairment pattern sampled twice rather than two; `conditions.seed`
+    /// is the client's and the server's is derived from it, so the caller's
+    /// single seed still reproduces the whole run.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Entropy`], exactly as [`Loopback::new`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Loopback::new`]: a zero `tick_hz`, or a `compatibility` leaving
+    /// either identifier zero.
+    pub fn impaired(
+        world: World,
+        module: Box<dyn GameModule>,
+        tick_hz: u32,
+        compatibility: ProtocolCompatibility,
+        conditions: SimConditions,
+    ) -> Result<Self, SessionError> {
+        let (server_transport, client_transport) = InMemoryTransport::pair();
+        let server_conditions = SimConditions {
+            seed: conditions.seed ^ SERVER_SEED_SALT,
+            ..conditions.clone()
+        };
+        Self::join(
+            world,
+            module,
+            tick_hz,
+            compatibility,
+            ConditionSimulator::new(server_transport, server_conditions),
+            ConditionSimulator::new(client_transport, conditions),
+        )
+    }
+}
+
+impl<T: Transport> Loopback<T> {
+    /// Builds a server and a client on the two ends of an already-paired
+    /// transport, and spends each clock's first update.
+    fn join(
+        world: World,
+        module: Box<dyn GameModule>,
+        tick_hz: u32,
+        compatibility: ProtocolCompatibility,
+        server_transport: T,
+        client_transport: T,
+    ) -> Result<Self, SessionError> {
         let mut server = crcbl_server::Server::try_new_with_compatibility(
             world,
             server_transport,
@@ -132,23 +210,23 @@ impl Loopback {
 
     /// The authoritative half.
     #[must_use]
-    pub fn server(&self) -> &crcbl_server::Server<InMemoryTransport> {
+    pub fn server(&self) -> &crcbl_server::Server<T> {
         &self.server
     }
 
     /// The authoritative half, to drive.
-    pub fn server_mut(&mut self) -> &mut crcbl_server::Server<InMemoryTransport> {
+    pub fn server_mut(&mut self) -> &mut crcbl_server::Server<T> {
         &mut self.server
     }
 
     /// The predicting half.
     #[must_use]
-    pub fn client(&self) -> &crcbl_client::Client<InMemoryTransport> {
+    pub fn client(&self) -> &crcbl_client::Client<T> {
         &self.client
     }
 
     /// The predicting half, to drive.
-    pub fn client_mut(&mut self) -> &mut crcbl_client::Client<InMemoryTransport> {
+    pub fn client_mut(&mut self) -> &mut crcbl_client::Client<T> {
         &mut self.client
     }
 
@@ -157,12 +235,7 @@ impl Loopback {
     /// A game's tick reads input into the client and time into the server in
     /// the same statement, and two separate `&mut` borrows of `self` will not
     /// let it.
-    pub fn both_mut(
-        &mut self,
-    ) -> (
-        &mut crcbl_server::Server<InMemoryTransport>,
-        &mut crcbl_client::Client<InMemoryTransport>,
-    ) {
+    pub fn both_mut(&mut self) -> (&mut crcbl_server::Server<T>, &mut crcbl_client::Client<T>) {
         (&mut self.server, &mut self.client)
     }
 }
@@ -225,6 +298,75 @@ mod tests {
                 .expect("OS entropy is available in a test process");
             assert_eq!(session.tick_period(), FrameClock::new(hz).tick_dt(), "{hz}");
         }
+    }
+
+    /// A simulator configured to impair nothing is the plain pair: the
+    /// wrapper is in the path on both ends and costs the session nothing.
+    #[test]
+    fn an_impaired_session_with_no_impairment_still_comes_up_and_replicates() {
+        let mut session = Loopback::impaired(
+            World::new(),
+            Box::new(NoopModule),
+            60,
+            COMPATIBILITY,
+            SimConditions::default(),
+        )
+        .expect("OS entropy is available in a test process");
+
+        let period = session.tick_period();
+        let mut sim_time = Duration::ZERO;
+        for _ in 0..8 {
+            sim_time += period;
+            let (server, client) = session.both_mut();
+            client.update(sim_time);
+            server.update(sim_time);
+            client.update(sim_time);
+        }
+
+        assert_eq!(
+            session.server().session_state(),
+            crcbl_net::SessionState::Connected,
+        );
+        assert!(
+            session.client().last_applied_tick().get() > 0,
+            "the client applied nothing in eight ticks over a link that impairs \
+             nothing",
+        );
+    }
+
+    /// And the conditions are actually applied, which the test above cannot
+    /// tell: a link that carries nothing never gets the two halves talking.
+    #[test]
+    fn a_link_that_drops_everything_never_establishes_the_session() {
+        let mut session = Loopback::impaired(
+            World::new(),
+            Box::new(NoopModule),
+            60,
+            COMPATIBILITY,
+            SimConditions {
+                loss_rate: 1.0,
+                ..Default::default()
+            },
+        )
+        .expect("OS entropy is available in a test process");
+
+        let period = session.tick_period();
+        let mut sim_time = Duration::ZERO;
+        for _ in 0..8 {
+            sim_time += period;
+            let (server, client) = session.both_mut();
+            client.update(sim_time);
+            server.update(sim_time);
+            client.update(sim_time);
+        }
+
+        assert_eq!(
+            session.server().session_state(),
+            crcbl_net::SessionState::Disconnected,
+            "the hello reached the server over a link that drops everything, so \
+             the simulator is not in the path",
+        );
+        assert_eq!(session.client().last_applied_tick().get(), 0);
     }
 
     /// Both halves are on the same transport pair, which is the whole point:

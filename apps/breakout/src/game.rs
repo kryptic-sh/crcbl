@@ -74,7 +74,7 @@ use crcbl::core::input::{KeyCode, PointerButton};
 use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, ActionValue, Binding, PointerAxis};
 use crcbl::math::DVec3;
-use crcbl::net::ProtocolCompatibility;
+use crcbl::net::{InMemoryTransport, ProtocolCompatibility, Transport};
 use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Transform};
 use crcbl::session::Loopback;
 
@@ -862,7 +862,7 @@ enum Queued {
     Pointer(f32),
 }
 
-pub struct Game {
+pub struct Game<T: Transport = InMemoryTransport> {
     pub paddle_entity: Entity,
     pub ball_entity: Entity,
     _walls: [Entity; 3],
@@ -873,7 +873,7 @@ pub struct Game {
     /// agree on — the tick rate, the compatibility and the transport pair —
     /// are what [`Loopback::new`] takes, and a game that holds them separately
     /// is a game that can be built with them disagreeing.
-    session: Loopback,
+    session: Loopback<T>,
     shared: Arc<Mutex<GameLogic>>,
     /// Exactly one tick period per [`Game::tick`], so the server's accumulator
     /// yields exactly one tick per call. Taken from a `FrameClock` built the
@@ -910,7 +910,7 @@ pub struct Game {
     prev_log_state: GameState,
 }
 
-impl std::fmt::Debug for Game {
+impl<T: Transport> std::fmt::Debug for Game<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Game")
             .field("paddle_entity", &self.paddle_entity)
@@ -937,7 +937,7 @@ impl std::fmt::Display for GameError {
 
 impl std::error::Error for GameError {}
 
-impl Game {
+impl Game<InMemoryTransport> {
     /// Builds the world, the physics system, the server and the client.
     ///
     /// `tick_hz` is the one simulation rate in the process: it sets the
@@ -954,6 +954,39 @@ impl Game {
     /// If `tick_hz` is zero. Callers parse it from `--tick-hz`, which rejects
     /// zero with exit 2.
     pub fn new(headless: bool, tick_hz: u32) -> Result<Self, GameError> {
+        let mut game = Self::build(headless, tick_hz, |world, module| {
+            Loopback::new(world, module, tick_hz, COMPATIBILITY)
+        })?;
+
+        // **One tick spent on the handshake, before the game starts.**
+        //
+        // `InMemoryTransport` delivers inside the tick a message is sent in,
+        // so that one tick is the whole handshake: hello up, result down,
+        // session established. It costs the tick and nothing else — an
+        // unlaunched ball is pinned at the start position and a paddle with no
+        // intent does not move, so the world it leaves is the world the board
+        // was built with.
+        if !game.handshake_tick() {
+            return Err(GameError::Server(
+                "the loopback session did not come up in its first tick".into(),
+            ));
+        }
+        Ok(game)
+    }
+}
+
+impl<T: Transport> Game<T> {
+    /// The body of every constructor: the board, the module, and a session
+    /// built by `join` over whatever transport that constructor chose.
+    ///
+    /// The session it hands back has **not** shaken hands yet. The caller
+    /// spends the ticks for that, because how many are needed — and whether
+    /// wall time has to pass between them — is a property of the link it
+    /// chose, not of the board.
+    fn build<F>(headless: bool, tick_hz: u32, join: F) -> Result<Self, GameError>
+    where
+        F: FnOnce(World, Box<dyn GameModule>) -> Result<Loopback<T>, crcbl::session::SessionError>,
+    {
         assert!(tick_hz > 0, "tick rate must be positive");
         let mut world = World::new();
 
@@ -1061,39 +1094,15 @@ impl Game {
             ticks: 0,
         }));
 
-        let mut session = Loopback::new(
+        let mut session = join(
             world,
             Box::new(BreakoutModule {
                 shared: Arc::clone(&shared),
             }),
-            tick_hz,
-            COMPATIBILITY,
         )
         .map_err(|e| GameError::Server(e.to_string()))?;
 
         let tick_period = session.tick_period();
-
-        // **One tick spent on the handshake, before the game starts.**
-        //
-        // `Server::update` drains the transport inside `tick`, so the client's
-        // hello is not even read until a tick runs — and until the session is
-        // established the client has no key and drops every input frame it is
-        // asked to send. Spending that tick here is what makes the player's
-        // first input the first one the simulation sees: press Space on the
-        // opening frame and the ball launches on the opening tick.
-        //
-        // It costs the tick and nothing else. An unlaunched ball is pinned at
-        // the start position and a paddle with no intent does not move, so the
-        // world this leaves is the world the board was built with.
-        let sim_time = tick_period;
-        session.client_mut().update(sim_time);
-        session.server_mut().update(sim_time);
-        session.client_mut().update(sim_time);
-        if session.server().session_state() != crcbl::net::SessionState::Connected {
-            return Err(GameError::Server(
-                "the loopback session did not come up in its first tick".into(),
-            ));
-        }
 
         // Fill the render buffers before the first tick: the loop's very first
         // frame runs no ticks (the clock spends it establishing its baseline)
@@ -1111,7 +1120,7 @@ impl Game {
             session,
             shared,
             tick_period,
-            sim_time,
+            sim_time: Duration::ZERO,
             ticks_run: 0,
             audio: crate::audio::Audio::new(headless),
             high_score: crate::high_score::open(headless),
@@ -1133,6 +1142,42 @@ impl Game {
             game.tick_dt_secs() * 1e3,
         );
         Ok(game)
+    }
+
+    /// Spends one tick on the handshake and reports whether the session came
+    /// up.
+    ///
+    /// Nothing but the handshake happens in it: no input is posted, the action
+    /// map is not advanced, and [`Game::ticks_run`] does not move. The
+    /// simulation still runs the tick — the paddle has no intent to act on and
+    /// the ball is not launched yet, so it leaves the board where it was.
+    ///
+    /// Until the session is established the client has no key and drops every
+    /// input frame it is asked to send, so a game that started playing before
+    /// this returned `true` would lose the player's opening inputs.
+    ///
+    /// A link with latency on it needs several of these **and needs wall time
+    /// to pass between them**: a delayed message is due at a wall-clock
+    /// instant, not after a number of ticks. Pacing them is the caller's,
+    /// which is why this spends one and reports rather than looping.
+    fn handshake_tick(&mut self) -> bool {
+        self.sim_time += self.tick_period;
+        let (server, client) = self.session.both_mut();
+        // The same order [`Game::tick`] uses, and for the same reason: the
+        // server drains the wire at the top of its tick.
+        client.update(self.sim_time);
+        server.update(self.sim_time);
+        client.update(self.sim_time);
+
+        // **Both halves, not just the server's.** The server is established
+        // the moment it reads the hello; the client only when the result
+        // reaches it back, and until then it has no key and drops every input
+        // frame it is asked to send. Over a loopback link the two happen in the
+        // same tick, and over a link with latency they are a round trip apart —
+        // where asking only the server means the opening inputs are posted into
+        // a client that throws them away.
+        self.session.server().session_state() == crcbl::net::SessionState::Connected
+            && self.session.client().session_id().is_some()
     }
 
     /// The fixed simulation step, in seconds.
@@ -1416,6 +1461,8 @@ mod tests {
     use super::*;
     use crcbl::core::TickId;
     use crcbl::core::time::{ManualTime, TimeSource as _};
+    use crcbl::net::{ConditionSimulator, SimConditions};
+    use std::time::Instant;
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];
@@ -2449,5 +2496,600 @@ mod tests {
         h.game.render_state(&mut state);
         assert_eq!(state.bricks.len(), h.game.bricks_remaining());
         assert!(state.bricks.len() < BRICK_COUNT);
+    }
+
+    // ---- playing over an impaired link --------------------------------------
+
+    /// How many ticks [`ImpairedRun`] will spend bringing a session up.
+    ///
+    /// A lost hello is not retried until the client's own handshake timeout
+    /// expires, and that timeout is measured in seconds while these ticks are
+    /// sixtieths of one — so the budget has to cover several of them or a run
+    /// that loses its first hello fails as if the link were dead.
+    const IMPAIRED_HANDSHAKE_TICKS: u32 = 400;
+
+    impl Game<ConditionSimulator<InMemoryTransport>> {
+        /// The same board and the same module, over a link running
+        /// `conditions` in both directions.
+        ///
+        /// The session is **not** shaken hands with yet: an impaired link needs
+        /// several ticks for that and needs wall time to pass between them, and
+        /// pacing them is [`ImpairedRun`]'s.
+        fn impaired(tick_hz: u32, conditions: SimConditions) -> Result<Self, GameError> {
+            Self::build(true, tick_hz, |world, module| {
+                Loopback::impaired(world, module, tick_hz, COMPATIBILITY, conditions)
+            })
+        }
+    }
+
+    /// Drives a [`Game`] over an impaired link, one tick per tick period of
+    /// **wall** time.
+    ///
+    /// [`ConditionSimulator`] schedules a delayed message against
+    /// [`Instant::now`], so latency and jitter mean something only to a run
+    /// whose ticks are spaced in real time: a loop ticking as fast as it could
+    /// would find that nothing ever came due, and would measure a dead link
+    /// rather than a slow one. Pacing to an absolute deadline off the run's
+    /// start rather than sleeping a period per tick is what keeps one slow tick
+    /// from being added to every tick after it.
+    struct ImpairedRun {
+        game: Game<ConditionSimulator<InMemoryTransport>>,
+        started: Instant,
+        paced: u32,
+        /// The direction key currently held, so a steering player sends an edge
+        /// only when it changes.
+        held: Option<KeyCode>,
+        /// Whether this link's impairments are scheduled in wall time — see
+        /// [`ImpairedRun::pace`].
+        timed: bool,
+    }
+
+    impl ImpairedRun {
+        /// The run and the ticks its handshake took, or `None` if the session
+        /// never came up inside [`IMPAIRED_HANDSHAKE_TICKS`].
+        ///
+        /// A budget rather than an unbounded wait, because a handshake that
+        /// never lands is one of the outcomes worth measuring: nothing in the
+        /// protocol retransmits one, so a link that eats a hello costs the
+        /// client's whole handshake timeout before it sends another.
+        fn try_new(conditions: SimConditions) -> Option<(Self, u32)> {
+            let timed = !conditions.latency.is_zero() || !conditions.jitter.is_zero();
+            let game =
+                Game::impaired(DEFAULT_TICK_HZ, conditions).expect("headless game always starts");
+            let mut run = Self {
+                game,
+                started: Instant::now(),
+                paced: 0,
+                held: None,
+                timed,
+            };
+            for tick in 1..=IMPAIRED_HANDSHAKE_TICKS {
+                if run.game.handshake_tick() {
+                    // The run's clock starts at the first playable tick, so the
+                    // handshake's ticks are not counted against it.
+                    run.started = Instant::now();
+                    run.paced = 0;
+                    return Some((run, tick));
+                }
+                run.pace();
+            }
+            None
+        }
+
+        fn new(conditions: SimConditions) -> Self {
+            Self::try_new(conditions)
+                .unwrap_or_else(|| {
+                    panic!("the session did not come up in {IMPAIRED_HANDSHAKE_TICKS} ticks")
+                })
+                .0
+        }
+
+        /// Sleep until the next tick is due in wall time, on the links where
+        /// that means anything.
+        ///
+        /// Only `latency` and `jitter` are scheduled against [`Instant::now`];
+        /// loss, duplication and the reorder window are decided at send time
+        /// off the seeded LCG. A run over a link with neither therefore needs
+        /// no wall time at all — which is what lets a test of one be both
+        /// quick and exactly reproducible.
+        fn pace(&mut self) {
+            if !self.timed {
+                return;
+            }
+            self.paced += 1;
+            let due = self.started + self.game.tick_period * self.paced;
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+        }
+
+        fn tick(&mut self) {
+            self.pace();
+            self.game.tick();
+        }
+
+        /// Hold `key` down and run `ticks` ticks with it held.
+        fn hold(&mut self, key: KeyCode, ticks: u32) {
+            self.game.key_event(key, true);
+            for _ in 0..ticks {
+                self.tick();
+            }
+            self.game.key_event(key, false);
+        }
+
+        /// Run `ticks` ticks with nothing held, to let whatever is still in
+        /// flight arrive.
+        fn settle(&mut self, ticks: u32) {
+            for _ in 0..ticks {
+                self.tick();
+            }
+        }
+
+        /// Tap Space, then run until the ball is away — the number of ticks it
+        /// took, or `None` if the launch never happened inside `budget`.
+        fn ticks_to_launch(&mut self, budget: u32) -> Option<u32> {
+            self.game.key_event(KeyCode::Space, true);
+            self.game.key_event(KeyCode::Space, false);
+            for tick in 1..=budget {
+                self.tick();
+                if self.game.state == GameState::Playing {
+                    return Some(tick);
+                }
+            }
+            None
+        }
+
+        /// A player who chases the ball with the paddle and serves whenever the
+        /// board is waiting, for `ticks` ticks.
+        ///
+        /// The closed loop is the point: every tick's steering decision is made
+        /// from where the ball is *now* and acted on whenever the link gets it
+        /// there, which is the thing latency actually degrades.
+        fn chase(&mut self, ticks: u32) {
+            for _ in 0..ticks {
+                if self.game.state == GameState::WaitingForLaunch {
+                    self.game.key_event(KeyCode::Space, true);
+                    self.game.key_event(KeyCode::Space, false);
+                }
+                let want = if self.game.ball_x > self.game.paddle_x() + PADDLE_HALF_WIDTH / 2.0 {
+                    Some(KeyCode::ArrowRight)
+                } else if self.game.ball_x < self.game.paddle_x() - PADDLE_HALF_WIDTH / 2.0 {
+                    Some(KeyCode::ArrowLeft)
+                } else {
+                    None
+                };
+                if want != self.held {
+                    if let Some(old) = self.held {
+                        self.game.key_event(old, false);
+                    }
+                    if let Some(new) = want {
+                        self.game.key_event(new, true);
+                    }
+                    self.held = want;
+                }
+                self.tick();
+            }
+        }
+    }
+
+    /// Ticks of a held direction key the sweep measures the paddle over.
+    const SWEEP_HELD_TICKS: u32 = 30;
+    /// Ticks the sweep then runs with nothing held, so whatever the link is
+    /// still holding has time to arrive.
+    const SWEEP_SETTLE_TICKS: u32 = 40;
+    /// Ticks a launch edge is given to reach the simulation.
+    const SWEEP_LAUNCH_BUDGET: u32 = 120;
+    /// Ticks of a ball-chasing player each case plays.
+    const SWEEP_PLAY_TICKS: u32 = 900;
+    /// The one seed every case in the sweep runs on.
+    const SWEEP_SEED: u64 = 0x0B12_3457;
+
+    fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
+
+    #[test]
+    #[ignore = "measurement sweep: prints a table, asserts nothing"]
+    fn impairment_sweep() {
+        let cases: Vec<(String, SimConditions)> = vec![
+            (
+                "perfect".into(),
+                SimConditions {
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 50".into(),
+                SimConditions {
+                    latency: ms(50),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 150".into(),
+                SimConditions {
+                    latency: ms(150),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 50 jit 10".into(),
+                SimConditions {
+                    latency: ms(50),
+                    jitter: ms(10),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 50 jit 40".into(),
+                SimConditions {
+                    latency: ms(50),
+                    jitter: ms(40),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "loss 2%".into(),
+                SimConditions {
+                    loss_rate: 0.02,
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "loss 10%".into(),
+                SimConditions {
+                    loss_rate: 0.10,
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 50 reorder 1".into(),
+                SimConditions {
+                    latency: ms(50),
+                    reorder_window: 1,
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 50 reorder 3".into(),
+                SimConditions {
+                    latency: ms(50),
+                    reorder_window: 3,
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 150 loss 2%".into(),
+                SimConditions {
+                    latency: ms(150),
+                    loss_rate: 0.02,
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 150 jit 40 loss 10%".into(),
+                SimConditions {
+                    latency: ms(150),
+                    jitter: ms(40),
+                    loss_rate: 0.10,
+                    reorder_window: 3,
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        println!(
+            "{:<24} {:>9} {:>9} {:>7} {:>6} {:>7} {:>6} {:>8}",
+            "condition", "held", "settled", "launch", "score", "bricks", "lives", "dropped"
+        );
+        for (name, conditions) in cases {
+            let mut run = ImpairedRun::new(conditions);
+            let step = PADDLE_SPEED * run.game.tick_dt_secs();
+            run.hold(KeyCode::ArrowRight, SWEEP_HELD_TICKS);
+            let held = (run.game.paddle_x() / step).round() as i64;
+            run.settle(SWEEP_SETTLE_TICKS);
+            let settled = (run.game.paddle_x() / step).round() as i64;
+            let launch = run.ticks_to_launch(SWEEP_LAUNCH_BUDGET);
+            run.chase(SWEEP_PLAY_TICKS);
+            println!(
+                "{:<24} {:>9} {:>9} {:>7} {:>6} {:>7} {:>6} {:>8}",
+                name,
+                format!("{held}/{SWEEP_HELD_TICKS}"),
+                format!("{settled}/{SWEEP_HELD_TICKS}"),
+                launch.map_or("never".to_string(), |t| t.to_string()),
+                run.game.score,
+                run.game.bricks_remaining(),
+                run.game.lives,
+                run.game.session.server().dropped_input_count(),
+            );
+        }
+    }
+
+    /// A module that records how many input frames each server tick was handed.
+    ///
+    /// Not breakout's: the question it answers is about the transport and the
+    /// server's per-tick queue, and a module that also simulated a board would
+    /// answer it through the board.
+    #[derive(Debug)]
+    struct CountingModule {
+        per_tick: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl GameModule for CountingModule {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn register(&self, _world: &mut World) {}
+
+        fn tick(&mut self, _world: &mut World, inputs: ClientInputs<'_>) {
+            self.per_tick
+                .lock()
+                .unwrap()
+                .push(inputs.iter().map(|(_, data)| data[0]).collect());
+        }
+    }
+
+    /// Where the input frames go on a link with latency on it: how many are
+    /// sent, how many the server's module is handed, and how they bunch.
+    #[test]
+    #[ignore = "measurement sweep: prints a table, asserts nothing"]
+    fn input_frame_arrivals() {
+        const SEND_TICKS: u32 = 60;
+        const SETTLE_TICKS: u32 = 60;
+
+        println!(
+            "{:<16} {:>5} {:>6} {:>5} {:>5} {:>5} {:>5} {:>20}",
+            "condition", "sent", "deliv", "cap", "rate", "auth", "err", "histogram"
+        );
+        for (name, conditions) in [
+            (
+                "perfect",
+                SimConditions {
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 50",
+                SimConditions {
+                    latency: ms(50),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lat 150",
+                SimConditions {
+                    latency: ms(150),
+                    seed: SWEEP_SEED,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let per_tick = Arc::new(Mutex::new(Vec::new()));
+            let mut session = Loopback::impaired(
+                World::new(),
+                Box::new(CountingModule {
+                    per_tick: Arc::clone(&per_tick),
+                }),
+                DEFAULT_TICK_HZ,
+                COMPATIBILITY,
+                conditions,
+            )
+            .expect("OS entropy is available in a test process");
+
+            let period = session.tick_period();
+            let started = Instant::now();
+            let mut sim_time = Duration::ZERO;
+            let mut paced = 0u32;
+            let pace = |paced: &mut u32| {
+                *paced += 1;
+                let due = started + period * *paced;
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+            };
+
+            // Bring the session up before anything is counted — both halves
+            // of it, or the frames sent while the client is still keyless are
+            // counted as the link's losses when they are the harness's.
+            while session.server().session_state() != crcbl::net::SessionState::Connected
+                || session.client().session_id().is_none()
+            {
+                sim_time += period;
+                session.client_mut().update(sim_time);
+                session.server_mut().update(sim_time);
+                session.client_mut().update(sim_time);
+                pace(&mut paced);
+            }
+            per_tick.lock().unwrap().clear();
+
+            for frame in 0..SEND_TICKS + SETTLE_TICKS {
+                sim_time += period;
+                let (server, client) = session.both_mut();
+                if frame < SEND_TICKS {
+                    client.set_input(vec![frame as u8]);
+                } else {
+                    client.set_input(Vec::new());
+                }
+                client.update(sim_time);
+                server.update(sim_time);
+                client.update(sim_time);
+                pace(&mut paced);
+            }
+
+            let counts: Vec<usize> = per_tick
+                .lock()
+                .unwrap()
+                .iter()
+                .map(std::vec::Vec::len)
+                .collect();
+            let arrived: Vec<u8> = per_tick.lock().unwrap().concat();
+            let delivered: usize = counts.iter().sum();
+            let missing: Vec<u8> = (0..SEND_TICKS as u8)
+                .filter(|f| !arrived.contains(f))
+                .collect();
+            let mut histogram = std::collections::BTreeMap::new();
+            for count in &counts {
+                *histogram.entry(*count).or_insert(0usize) += 1;
+            }
+            println!("    missing frames: {missing:?}");
+            let histogram: Vec<String> = histogram
+                .iter()
+                .map(|(frames, ticks)| format!("{frames}:{ticks}"))
+                .collect();
+            let server = session.server();
+            println!(
+                "{:<16} {:>5} {:>6} {:>5} {:>5} {:>5} {:>5} {:>20}",
+                name,
+                SEND_TICKS,
+                delivered,
+                server.dropped_input_count(),
+                server.rate_limited_message_count(),
+                server.auth_failure_count(),
+                server.processing_error_count(),
+                histogram.join(" "),
+            );
+        }
+    }
+
+    /// Launch presses the edge-loss guard sends, one per seed.
+    const EDGE_LOSS_SEEDS: u64 = 20;
+    /// The loss rate that guard runs at.
+    ///
+    /// High on purpose: the point is not what a typical link does, it is that
+    /// the outcome of a single press is decided by a single datagram, and a
+    /// rate that loses one press in three shows that with twenty of them
+    /// instead of hundreds.
+    const EDGE_LOSS_RATE: f64 = 0.30;
+
+    /// **A launch the link drops is a launch the player never made.**
+    ///
+    /// The launch bit is [`ActionMap::just_pressed`], true for exactly one
+    /// tick, so it rides in exactly one input frame — and `Client::set_input`
+    /// replaces that frame on the next tick with one that no longer carries it.
+    /// The input channel is unreliable and nothing tracks whether the server
+    /// applied the edge, so a dropped datagram drops the press outright: the
+    /// ball sits there, and the player has to press again.
+    ///
+    /// **This asserts what the game does today, and it is a measurement rather
+    /// than an endorsement.** A jitter buffer would not recover any of these —
+    /// the frame never arrived to be held onto. What would is resending an edge
+    /// until the server acknowledges the tick that applied it, or latching it
+    /// into the pending frame until then.
+    ///
+    /// [`Server::dropped_input_count`] is asserted zero so the losses are read
+    /// as the link's and not as the server's per-tick cap refusing them.
+    #[test]
+    fn a_launch_edge_the_link_drops_is_never_resent() {
+        let mut sessions = 0u32;
+        let mut lost = 0u32;
+        for seed in 0..EDGE_LOSS_SEEDS {
+            let Some((mut run, _)) = ImpairedRun::try_new(SimConditions {
+                loss_rate: EDGE_LOSS_RATE,
+                seed: SWEEP_SEED.wrapping_add(seed),
+                ..Default::default()
+            }) else {
+                // A handshake this link ate. Its own finding, and not this
+                // one's: nothing retransmits a hello either.
+                continue;
+            };
+            sessions += 1;
+            if run.ticks_to_launch(SWEEP_LAUNCH_BUDGET).is_none() {
+                lost += 1;
+            }
+            assert_eq!(
+                run.game.session.server().dropped_input_count(),
+                0,
+                "the server's per-tick cap refused a frame; these losses are \
+                 supposed to be the link's",
+            );
+        }
+
+        assert!(
+            sessions > 0,
+            "no session came up at all, so nothing was tested"
+        );
+        assert!(
+            lost > 0,
+            "all {sessions} launch presses reached the simulation over a link \
+             dropping {EDGE_LOSS_RATE} of what it carries — the edge is being \
+             resent from somewhere, which it was not when this was measured",
+        );
+        assert!(
+            lost < sessions,
+            "every one of {sessions} launch presses was lost, which is a broken \
+             harness rather than a lossy link",
+        );
+    }
+
+    /// **Two input frames in one server tick are one tick of intent.**
+    ///
+    /// The server empties its input queue at the top of every tick and hands
+    /// the whole of it to one [`GameModule::tick`], so two frames of "hold
+    /// right" fold — [`Intent::from_inputs`] — into a single [`Intent`], and
+    /// the paddle integrates one step for the two ticks the player spent
+    /// holding the key. The tick that gets nothing runs on
+    /// [`Intent::default`], a player holding nothing, and the paddle stops.
+    ///
+    /// Frames bunch like this on any link with delay on it: nothing lines an
+    /// input up with the tick it names, so two that happen to become due
+    /// together are two the module can only see at once. Over a
+    /// `ConditionSimulator` at 150 ms every frame sent arrived and the server
+    /// refused none of them — see `input_frame_arrivals` — and they still
+    /// reached the module bunched, which is the whole of the loss.
+    ///
+    /// **This asserts what the game does today.** A jitter buffer is what
+    /// changes it, and this is the test that should go red when one lands.
+    #[test]
+    fn two_input_frames_in_one_tick_cost_a_tick_of_paddle_travel() {
+        let mut game = Game::new(true, DEFAULT_TICK_HZ).expect("headless game always starts");
+        let step = PADDLE_SPEED * game.tick_dt_secs();
+        let held = Intent {
+            right: true,
+            ..Intent::default()
+        };
+
+        // The client's clock runs two ticks and the server's one, which is
+        // what a link that delivers two frames at once leaves the server
+        // holding. Both frames travel as bytes; nothing here reaches around
+        // the wire.
+        let first = game.sim_time + game.tick_period;
+        let second = first + game.tick_period;
+        {
+            let (server, client) = game.session.both_mut();
+            client.set_input(held.to_wire().to_vec());
+            client.update(first);
+            client.update(second);
+            assert_eq!(server.update(first), 1, "one period is one server tick");
+        }
+        game.sim_time = second;
+
+        assert_eq!(
+            game.session.server().dropped_input_count(),
+            0,
+            "the server refused a frame rather than folding it",
+        );
+        assert!(
+            (game.paddle_x() - step).abs() < 1e-9,
+            "two frames of a held key moved the paddle to {} — one step is \
+             {step}, two would be {}. A paddle that travelled twice means the \
+             two frames reached two ticks, which is the jitter buffer this \
+             asserts the absence of",
+            game.paddle_x(),
+            2.0 * step,
+        );
     }
 }
