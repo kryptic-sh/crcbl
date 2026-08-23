@@ -14,12 +14,32 @@ correction. What is left here is the work the corrections revealed.
 
 **The largest one: the server does not consume client input.** `crcbl-server`
 decodes an `INPUT_TAG` or `COMMAND_TAG` payload to validate it and then drops
-it, under a comment reading "P3 wires them into the simulation" — and P3 is
-marked done. So replication runs one way: the server simulates and sends, the
-client interpolates and displays, and nothing a player does reaches the
-simulation. That is a phase-sized gap, not a slice, and it is the reason several
-smaller rows below cannot be closed on their own — there is nothing for a jitter
-buffer to key or for a lead to align.
+it. So replication runs one way: the server simulates and sends, the client
+interpolates and displays, and nothing a player does reaches the simulation.
+That is a phase-sized gap, not a slice, and it is the reason several smaller
+rows below cannot be closed on their own — there is nothing for a jitter buffer
+to key or for a lead to align. (The comment claiming "P3 wires them into the
+simulation" is gone; the code now says what it does.)
+
+**The decision the first slice of it rests on**, so whoever starts does not have
+to re-derive it: `ClientToServer::Input` carries a `TickId` and an opaque
+`Vec<u8>` — the engine has no idea what a game's input means — so the server can
+only _hold_ input and hand it over. Three shapes, and the trade-off is where the
+game-specific part lives:
+
+- **A bounded per-session queue on `Server`, read through an accessor.**
+  Smallest, and the queue needs a cap of its own — the number of frames is the
+  peer's choice, which is the same multiplier `fd::Writes` and
+  `Device::MAX_PENDING_OFFERS` are capped against. Nothing consumes it on the
+  day it lands, which is the argument against.
+- **An ECS resource the schedule sees**, inserted before each tick's systems
+  run, so a game reads its own input in a system like any other state. Fits the
+  simulation model and needs `World` to carry resources for it.
+- **A callback the host registers**, which keeps the engine out of the decision
+  entirely and makes the server's loop re-entrant into game code.
+
+Whichever is picked, the jitter buffer and the client's tick lead are the same
+work afterwards, and neither can start before it.
 
 **What each corrected row leaves owed**, in the order a reader would meet them:
 

@@ -274,8 +274,15 @@ impl<T: Transport> Server<T> {
                 Ok(ack) => self.session.handle_ack(ack.sector, ack.tick),
                 Err(_) => self.processing_error_count += 1,
             },
-            // Inputs are decoded to validate them and discarded — P3 wires
-            // them into the simulation.
+            // **Decoded to validate the frame, then discarded.** Nothing
+            // consumes client input yet: the server simulates its own world and
+            // sends snapshots, and a client's input reaches no system. The
+            // decode is still worth doing — a malformed frame counts against
+            // this session's error budget, which is what stops a peer sending
+            // rubbish cheaply — but a caller must not read this as input being
+            // applied. `docs/backlog.md` carries what closing it needs and the
+            // choice it rests on; the comment here used to promise "P3 wires
+            // them into the simulation", and P3 is done.
             Some(crcbl_net::codec::INPUT_TAG | crcbl_net::codec::COMMAND_TAG) => {
                 if crcbl_net::decode_client_to_server(&payload).is_err() {
                     self.processing_error_count += 1;
