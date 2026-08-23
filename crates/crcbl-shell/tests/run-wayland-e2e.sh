@@ -126,6 +126,33 @@ SANDBOX_BORDERLESS="1920x1080"
 # test.
 SANDBOX_FRAMES=120
 
+# `assert_nothing_left_alive <log> <what>`
+#
+# **What the sandbox was still holding when its device went away.** `crcbl-vk`
+# warns at teardown for every object nobody destroyed, naming the kinds, and a
+# warning fails nothing. `run-vk-e2e.sh` reads that line for its own suite and
+# `tools/run-samples-windowed.sh` reads it for every sample — and that runner
+# leaves the sandbox to the two shell harnesses, so without this half of the
+# sandbox's runs are unasked. It matters here in particular: these are the runs
+# that change display mode and present mode, which is where a swapchain rebuild
+# leaks if it leaks at all.
+#
+# The null backend has no such reporter, so this is a `vk` question and the grep
+# simply finds nothing on the other one.
+assert_nothing_left_alive() {
+    local log="$1" what="$2" leaks
+    leaks="$(grep -F 'object(s) still alive at device teardown' "$log" || true)"
+    [ -z "$leaks" ] && return 0
+    echo "crcbl e2e: ${what} destroyed its device with objects still alive:" >&2
+    while IFS= read -r line; do
+        echo "               $line" >&2
+    done <<<"$leaks"
+    echo "           The sandbox's own teardown reporter wrote that. Destroy them" >&2
+    echo "           where they were made rather than leaving the line in a log." >&2
+    sway_log_tail
+    exit 1
+}
+
 # `run_sandbox <backend> [windowed|fullscreen]`
 run_sandbox() {
     local backend="$1"
@@ -163,6 +190,7 @@ run_sandbox() {
     # Only a backend that attaches buffers has a window the compositor can have
     # an opinion about — see the header above.
     if [ "$backend" = "null" ]; then
+        assert_nothing_left_alive "$SANDBOX_LOG" "the sandbox"
         echo "crcbl e2e: the sandbox presented $SANDBOX_FRAMES frames on wayland/null \
 (no mode assertion: nothing is mapped)"
         return
@@ -268,8 +296,9 @@ path was NOT exercised, only the absent-capability path" >&2
         sway_log_tail
         exit 1
     fi
+    assert_nothing_left_alive "$SANDBOX_LOG" "the sandbox"
     echo "crcbl e2e: the sandbox presented $SANDBOX_FRAMES frames \
-$want_mode at $want_extent on wayland/$backend"
+$want_mode at $want_extent on wayland/$backend, nothing left alive"
 }
 
 # How many frames the paced pass presents, and at what rate. Small, because
@@ -374,8 +403,9 @@ swapchain on a different present mode" >&2
         sway_log_tail
         exit 1
     fi
+    assert_nothing_left_alive "$log" "the paced sandbox"
     echo "crcbl e2e: the sandbox ran on ${log_pacing} pacing at $PACED_FPS fps on wayland/$backend, \
-measuring ${mean_ms} ms a frame"
+measuring ${mean_ms} ms a frame, nothing left alive"
 }
 
 # Vulkan first, and only when there is a loader to run it on: this harness is
@@ -512,7 +542,9 @@ run_sandbox_toggle() {
         sway_log_tail
         exit 1
     fi
-    echo "crcbl e2e: F11 took the sandbox to $SANDBOX_BORDERLESS borderless on wayland/$backend"
+    assert_nothing_left_alive "$SANDBOX_LOG" "the sandbox, after F11"
+    echo "crcbl e2e: F11 took the sandbox to $SANDBOX_BORDERLESS borderless on wayland/$backend, \
+nothing left alive"
 }
 
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \

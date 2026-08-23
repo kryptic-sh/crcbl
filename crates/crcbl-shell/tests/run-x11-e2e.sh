@@ -148,6 +148,33 @@ SANDBOX_WINDOWED="1280x720"
 SANDBOX_BORDERLESS="${SCREEN%x*}"
 
 # `run_sandbox <backend> [windowed|fullscreen]`
+# `assert_nothing_left_alive <log> <what>`
+#
+# **What the sandbox was still holding when its device went away.** `crcbl-vk`
+# warns at teardown for every object nobody destroyed, naming the kinds, and a
+# warning fails nothing. `run-vk-e2e.sh` reads that line for its own suite and
+# `tools/run-samples-windowed.sh` reads it for every sample — and that runner
+# deliberately leaves the sandbox to this one, so without this the sandbox is
+# the single windowed binary nobody asks. It matters here in particular: this is
+# the run that resizes and changes display mode, which is where a swapchain
+# rebuild leaks if it leaks at all.
+#
+# The null backend has no such reporter, so this is a `vk` question and the grep
+# simply finds nothing on the other one.
+assert_nothing_left_alive() {
+    local log="$1" what="$2" leaks
+    leaks="$(grep -F 'object(s) still alive at device teardown' "$log" || true)"
+    [ -z "$leaks" ] && return 0
+    echo "crcbl e2e: ${what} destroyed its device with objects still alive:" >&2
+    while IFS= read -r line; do
+        echo "               $line" >&2
+    done <<<"$leaks"
+    echo "           The sandbox's own teardown reporter wrote that. Destroy them" >&2
+    echo "           where they were made rather than leaving the line in a log." >&2
+    log_tail
+    exit 1
+}
+
 run_sandbox() {
     local backend="$1"
     local mode="${2:-windowed}"
@@ -202,7 +229,9 @@ run_sandbox() {
         log_tail
         exit 1
     fi
-    echo "crcbl e2e: $how on x11/$backend"
+    assert_nothing_left_alive "$SANDBOX_LOG" "the sandbox"
+
+    echo "crcbl e2e: $how on x11/$backend, nothing left alive"
 }
 
 # The X11 half of the `F11` pass — see `run_sandbox_toggle` in
@@ -345,7 +374,8 @@ run_sandbox_toggle() {
     exec 9>&-
     wait "$keys_pid" || true
     rm -f "$keys_in"
-    echo "crcbl e2e: $how, and the summary read 'at ${want_extent}, ${want_mode}' on x11/$backend"
+    assert_nothing_left_alive "$SANDBOX_LOG" "the sandbox, after F11"
+    echo "crcbl e2e: $how, and the summary read 'at ${want_extent}, ${want_mode}' on x11/$backend, nothing left alive"
 }
 
 # See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a
