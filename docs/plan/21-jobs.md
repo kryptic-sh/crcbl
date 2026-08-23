@@ -416,12 +416,28 @@ gate is a gate.
   `cargo miri test -p crcbl-jobs` in `cron.yml`, which models memory ordering
   more thoroughly than any test on x86-64 can — a `Release` store and a
   `Relaxed` one compile identically there, so Miri is load-bearing rather than
-  supplementary. Two gaps follow: an ordering regression can sit on `main` for
-  up to a week, and **nothing runs the primitives on a weakly-ordered machine**
-  — an aarch64 runner would be independent evidence and GitHub offers one.
-- **Finding 1's threaded-wasm measurement is not currently reproducible.** It
-  reports a clean build on `nightly-2026-07-02` with `-Z build-std`, which needs
-  `rust-src`; that component is not installed on that toolchain today and the
-  build fails with `library/Cargo.lock does not exist`. The finding stands as a
-  measurement that was taken; the work is blocked until the component is added.
-  `docs/backlog.md` carries the unblock command.
+  supplementary. One gap follows: an ordering regression can sit on `main` for
+  up to a week.
+
+  This bullet used to name a second gap — that nothing runs the primitives on a
+  weakly-ordered machine, and an aarch64 runner would be independent evidence.
+  **That was tested on 2026-08-23 and it is not true that a runner would give
+  evidence.** `build + test (macos-latest)` is aarch64 and already runs the two
+  concurrent tests. A throwaway branch weakened both orderings at once — the
+  ring's `tail` store `Release` → `Relaxed`, the mailbox's handoff swap `AcqRel`
+  → `Relaxed` — and the whole run went **green**, with both tests logging `PASS`
+  rather than being skipped. Twenty thousand iterations on Apple silicon
+  surfaced nothing. So the aarch64 leg is reassurance, and Miri is not merely
+  load-bearing but the only thing holding these orderings. If that coverage is
+  wanted for real the instrument is a targeted stress harness — many short runs
+  under interleaving pressure, with a failure counter — not another runner.
+
+- ~~Finding 1's threaded-wasm measurement is not currently reproducible.~~
+  **Reproducible since 2026-08-22**, when `rust-src` was added to
+  `nightly-2026-07-02`, and reproduced on 2026-08-23. It is now a command anyone
+  can run rather than a measurement someone once took:
+  `./web/build.sh --threads` builds every demo crate that way and gates each
+  artifact's worker-capable surface with
+  `web/tools/check-exports.mjs --threads`. No CI job runs it — no runner has the
+  nightly — so it is a local gate, in the same position as
+  `web/run-browser-e2e.sh`.
