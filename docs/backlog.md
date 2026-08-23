@@ -6362,15 +6362,60 @@ thing to give — horde works around it by handing `Pool::with_workers` an
     path already use, and the reason no engine crate depends on `wasm-bindgen`.
     A `web-sys`/`js-sys` backend would be a new dependency in a wasm graph that
     currently has zero third-party crates, which is the user's call.
-  - **The demos are built without atomics**, so the worker path cannot be
-    exercised by the existing site at all. Proving it needs a threaded artifact
-    the `DEMOS` loop in `web/build.sh` does not build, and
-    `wasm-bindgen --target web` has to emit glue that accepts a shared
-    `WebAssembly.Memory` — untested here against the pinned 0.2.126 CLI.
+  - **The site's demos are still built without atomics**, so the worker path
+    cannot be exercised by anything a browser loads. `web/build.sh --threads`
+    now builds the worker-capable artifact for every demo crate into
+    `target/wasm-threaded/`, gated per demo by
+    `web/tools/check-exports.mjs --threads`; nothing publishes it. It could not
+    be published as things stand: `web/tools/wasm-loader.js` passes an empty
+    import object on purpose, and `web/tools/smoke.mjs` stubs a memory of one
+    page — run against a threaded artifact it stops at
+    `LinkError: … memory import has 1 pages which is smaller than the declared initial of 20`.
+    Whoever writes the worker backend owns that half too — a loader that
+    constructs the shared memory, and a page that only uses it when
+    `crossOriginIsolated`.
   - **The fallback has to be automatic and loud**, because every GitHub Pages
     visitor is in the non-isolated state. The observable to assert is the one
     `apps/horde`'s determinism tests already use — `pool.workers()` and two
     distinct thread ids — not "a worker backend was selected".
+
+  **What the threaded gate does and does not catch** (measured 2026-08-23 while
+  adding `--threads` to `web/build.sh` and `web/tools/check-exports.mjs`; each
+  flag below was tested by rebuilding `horde` without it):
+  - **`+mutable-globals` is asserted and cannot be made to fail.** Dropping it
+    from `-C target-feature` changes nothing — the artifact still exports a
+    `__stack_pointer` JS can write, and the gate is green. Forcing the opposite,
+    `-mutable-globals`, does not produce a weaker artifact either: `rust-lld`
+    refuses to link,
+    `mutable global exported but 'mutable-globals' feature not present in inputs: __stack_pointer`.
+    With `--no-check-features` added to suppress that, the global is still
+    mutable and still writable. The check's _mechanism_ does have teeth —
+    writing an immutable global throws
+    `TypeError: Can't set the value of an immutable global`, verified against
+    `__tls_size` on a good artifact — but on this toolchain no flag combination
+    was found that makes `__stack_pointer` fail it. Treat the flag as belt and
+    braces rather than as something the gate is guarding.
+  - **`--shared-memory` cannot be dropped on its own.** Without it `rust-lld`
+    does not synthesise `__wasm_init_tls`, `__tls_size` or `__tls_align` at all,
+    so the link fails on the `--export` of them before an artifact exists. The
+    isolated red check meant dropping those three exports as well, and then the
+    gate reports the unshared memory by name. Worth knowing before concluding
+    the flags are independent: they are not.
+  - **`--max-memory` and `--export=__heap_base` are passed and not asserted.**
+    The first is only reachable as the maximum the gate reads back out of the
+    import; the second nothing looks at. A build that dropped
+    `--export=__heap_base` passes this gate, so whoever needs that symbol for
+    the bootstrap has to add the assertion with it.
+  - **No CI job runs `--threads`,** by the same reasoning as
+    `web/run-browser-e2e.sh`: it is a local gate, and the `rust-src` component
+    it needs is installed on this machine and on no runner. The note above about
+    `components: rust-src` is what a CI job would owe.
+  - **Nothing runs a threaded demo artifact in a Worker.** The gate instantiates
+    it once, on the main thread, against a shared memory it constructs, and
+    writes `__stack_pointer`. The correction above is explicit that a worker
+    gate has to make a worker _use_ its stack — that was done once by hand
+    against the throwaway probe crate and is not a gate anywhere, least of all
+    for the demos.
 
 ## The private-item doc gate only ever runs on Linux
 

@@ -31,8 +31,28 @@
 // second sample in the repo makes the first one's check fail, which is exactly
 // what happened when flappy landed.
 //
+// `--threads` checks the *other* artifact — the one `web/build.sh --threads`
+// builds, which a Web Worker can attach to. Rules 1 and 2 are unchanged there;
+// rules 3 and 4 are replaced, because a threaded module does not own its memory
+// and therefore does not export it:
+//
+//   3'. `env.memory` is **imported**, and imported as a **shared** memory. A
+//       worker cannot attach to a memory the module owns — only to one the host
+//       constructs and every instance imports.
+//   4'. That import is the **only** one. Rule 4 is narrowed rather than
+//       relaxed: the memory is the one thing that cannot be an export, and
+//       anything else crossing into wasm fails here exactly as it does above.
+//
+//   plus the symbols a worker brings itself up on: `__wasm_init_tls` as a
+//   function, `__tls_base`/`__tls_size`/`__tls_align`/`__stack_pointer` as
+//   globals, and `__stack_pointer` **writable from JS** — checked by writing
+//   it, since a worker that cannot set its own stack runs on the main thread's.
+//   Every one of those names a link argument, because that is what a reader can
+//   act on.
+//
 // Usage:
 //   node web/tools/check-exports.mjs <path-to.wasm> --sample <name> [--quiet]
+//   node web/tools/check-exports.mjs <path-to.wasm> --sample <name> --threads
 
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -133,16 +153,274 @@ function belongsToAnotherSample(file, sample) {
   return match !== null && match[1] !== sample;
 }
 
+/** The globals a worker reads or sets while bringing itself up. Each is
+ * exported by a `-C link-arg=--export=<name>` of its own. */
+const WORKER_GLOBALS = [
+  '__tls_base',
+  '__tls_size',
+  '__tls_align',
+  '__stack_pointer',
+];
+
+/**
+ * One LEB128-encoded `u32`, and where the next byte is.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} at
+ * @returns {[number, number]}
+ */
+function readVarU32(bytes, at) {
+  let value = 0;
+  for (let shift = 0; shift < 35; shift += 7) {
+    const byte = bytes[at];
+    at += 1;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return [value >>> 0, at];
+  }
+  throw new Error('check-exports: LEB128 u32 longer than five bytes');
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {number} at start of a `limits`
+ * @returns {number} the byte after it
+ */
+function skipLimits(bytes, at) {
+  const flags = bytes[at];
+  at += 1;
+  [, at] = readVarU32(bytes, at);
+  if ((flags & 0x01) !== 0) [, at] = readVarU32(bytes, at);
+  return at;
+}
+
+/**
+ * The limits `env.memory` is imported with, decoded out of the binary.
+ *
+ * `WebAssembly.Module.imports()` reports the module, the name and the kind and
+ * stops there — whether a memory import is **shared** is not in it, and that is
+ * the property the whole worker story stands on. So the import section is read
+ * directly: WebAssembly core binary format, section id 2, whose entries end in
+ * a `limits` whose flag byte carries `0x01` for "has a maximum" and `0x02` for
+ * "shared".
+ *
+ * @param {Uint8Array} bytes the whole `.wasm` file
+ * @returns {{ shared: boolean, minimum: number, maximum: number | undefined }
+ *   | undefined} `undefined` when there is no `env.memory` import to describe.
+ */
+function importedMemoryLimits(bytes) {
+  const text = new TextDecoder();
+  let at = 8; // the magic number and the version
+  while (at < bytes.length) {
+    const id = bytes[at];
+    at += 1;
+    let size;
+    [size, at] = readVarU32(bytes, at);
+    if (id !== 2) {
+      at += size;
+      continue;
+    }
+    let count;
+    [count, at] = readVarU32(bytes, at);
+    for (let i = 0; i < count; i += 1) {
+      let length;
+      [length, at] = readVarU32(bytes, at);
+      const module = text.decode(bytes.subarray(at, at + length));
+      at += length;
+      [length, at] = readVarU32(bytes, at);
+      const name = text.decode(bytes.subarray(at, at + length));
+      at += length;
+      const kind = bytes[at];
+      at += 1;
+      if (kind === 0x00) {
+        [, at] = readVarU32(bytes, at); // a function: its type index
+      } else if (kind === 0x01) {
+        at = skipLimits(bytes, at + 1); // a table: a reftype, then limits
+      } else if (kind === 0x02) {
+        const flags = bytes[at];
+        at += 1;
+        let minimum;
+        [minimum, at] = readVarU32(bytes, at);
+        let maximum;
+        if ((flags & 0x01) !== 0) [maximum, at] = readVarU32(bytes, at);
+        if (module === 'env' && name === 'memory') {
+          return { shared: (flags & 0x02) !== 0, minimum, maximum };
+        }
+      } else if (kind === 0x03) {
+        at += 2; // a global: a valtype and a mutability byte
+      } else {
+        return undefined; // an import kind this decoder does not know
+      }
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * What a Web Worker needs from the artifact, and the link argument behind each.
+ *
+ * Nothing here can be inferred from the non-threaded checks: that build imports
+ * nothing, exports its memory, and has none of these symbols, and it still
+ * builds and runs perfectly well single-threaded. Every assertion below is
+ * therefore about a flag someone can drop without anything else noticing.
+ *
+ * @param {WebAssembly.Module} module
+ * @param {Uint8Array} bytes the same artifact, unparsed
+ * @param {WebAssembly.ModuleImportDescriptor[]} imports
+ * @param {WebAssembly.ModuleExportDescriptor[]} exportList
+ * @returns {Promise<{ failures: string[], notes: string[] }>}
+ */
+async function workerSurface(module, bytes, imports, exportList) {
+  /** @type {string[]} */
+  const failures = [];
+  /** @type {string[]} */
+  const notes = [];
+
+  const isMemoryImport = (
+    /** @type {WebAssembly.ModuleImportDescriptor} */ i
+  ) => i.module === 'env' && i.name === 'memory' && i.kind === 'memory';
+
+  // **`env.memory` is the only import allowed, and it is required.** The
+  // non-threaded rule — nothing at all — is narrowed here rather than lifted:
+  // the memory is the one thing a shared build cannot express as an export,
+  // and anything else crossing into wasm is the same failure it is there.
+  const stray = imports.filter((i) => !isMemoryImport(i));
+  if (stray.length > 0) {
+    failures.push(
+      `the artifact imports ${stray.length} thing(s) besides \`env.memory\`:\n` +
+        stray.map((i) => `    ${i.module}.${i.name}  (${i.kind})`).join('\n') +
+        '\n    A threaded artifact imports its memory and nothing else.'
+    );
+  }
+
+  const limits = importedMemoryLimits(bytes);
+  if (!imports.some(isMemoryImport)) {
+    failures.push(
+      'the artifact does not import `env.memory`, so no worker can attach to it.\n' +
+        '    A module that owns its memory cannot share that memory with a second\n' +
+        '    instance; only a memory the host built and every instance imports is\n' +
+        '    shared. Add `-C link-arg=--import-memory`.'
+    );
+  } else if (limits === undefined) {
+    failures.push(
+      'the import section does not decode: `env.memory` is in the JS view of the\n' +
+        '    imports but not in the bytes this check reads. That is a bug in\n' +
+        '    `importedMemoryLimits`, not in the artifact.'
+    );
+  } else if (!limits.shared) {
+    failures.push(
+      'the artifact imports `env.memory`, but not as a **shared** memory.\n' +
+        '    An unshared import gives each worker its own heap, which is not\n' +
+        '    threading. Add `-C link-arg=--shared-memory` (and the\n' +
+        '    `-C link-arg=--max-memory=…` a shared memory has to declare).'
+    );
+  }
+
+  const kindOf = new Map(exportList.map((e) => [e.name, e.kind]));
+  if (kindOf.get('__wasm_init_tls') !== 'function') {
+    failures.push(
+      `\`__wasm_init_tls\` is ${kindOf.get('__wasm_init_tls') ?? 'not exported'}, not a function.\n` +
+        '    A worker calls it before it runs any Rust; without the call the first\n' +
+        '    thread-local access traps. Add\n' +
+        '    `-C link-arg=--export=__wasm_init_tls`.'
+    );
+  }
+  for (const name of WORKER_GLOBALS) {
+    if (kindOf.get(name) !== 'global') {
+      failures.push(
+        `\`${name}\` is ${kindOf.get(name) ?? 'not exported'}, not a global.\n` +
+          `    Add \`-C link-arg=--export=${name}\`.`
+      );
+    }
+  }
+
+  // **Written, not read.** A global's mutability is not in the JS export
+  // descriptor at all, and the failure this catches — a build without
+  // `+mutable-globals` — is precisely one where the symbol is present and the
+  // assignment does not take. `WebAssembly.Global`'s setter throws on an
+  // immutable global, so both halves are covered by trying it.
+  //
+  // Instantiating is also the only thing that proves the module *runs* against
+  // a memory it does not own: its data segments are copied in by the start
+  // function, out of the `SharedArrayBuffer` constructed right here.
+  if (limits !== undefined && kindOf.get('__stack_pointer') === 'global') {
+    const memory = new WebAssembly.Memory({
+      initial: limits.minimum,
+      maximum: limits.maximum,
+      shared: limits.shared,
+    });
+    // A `LinkError` here is the artifact's failure, not this tool's: an import
+    // it cannot satisfy, or a memory whose shared-ness does not match. Caught
+    // and reported, because a stack trace out of a gate says nothing about
+    // which flag produced it.
+    let instance;
+    try {
+      instance = await WebAssembly.instantiate(module, { env: { memory } });
+    } catch (error) {
+      return {
+        failures: [
+          ...failures,
+          `the artifact does not instantiate against the memory it asks for: ${error}`,
+        ],
+        notes,
+      };
+    }
+    const stackPointer = /** @type {WebAssembly.Global} */ (
+      instance.exports.__stack_pointer
+    );
+    const before = stackPointer.value;
+    // Any value that is not the one already there: a global that silently
+    // ignores the write must not read as one that took it.
+    const probe = before - 16;
+    let wrote = true;
+    try {
+      stackPointer.value = probe;
+    } catch (error) {
+      wrote = false;
+      failures.push(
+        `\`__stack_pointer\` cannot be written from JS: ${error}\n` +
+          '    Every worker sets its own stack before it runs anything, so a\n' +
+          '    read-only one is unusable. It is exported mutable by\n' +
+          '    `-C target-feature=+mutable-globals`.'
+      );
+    }
+    if (wrote && stackPointer.value !== probe) {
+      failures.push(
+        `\`__stack_pointer\` did not take a write: set ${probe}, read back ${stackPointer.value}.`
+      );
+    }
+    notes.push(
+      `memory:          env.memory, ${limits.shared ? 'shared' : 'NOT shared'}, ` +
+        `${limits.minimum}..${limits.maximum ?? 'unbounded'} pages` +
+        `, buffer is a ${memory.buffer.constructor.name}`
+    );
+    // `?.` on every one of these: the report runs on a failing artifact too,
+    // and a missing export has already been reported by name above. Reading it
+    // here regardless turns that named failure into a stack trace.
+    const global = (/** @type {string} */ name) =>
+      /** @type {WebAssembly.Global | undefined} */ (instance.exports[name])
+        ?.value ?? 'absent';
+    notes.push(
+      `worker surface:  __tls_size=${global('__tls_size')}, ` +
+        `__tls_align=${global('__tls_align')}, ` +
+        `__stack_pointer ${wrote ? 'writable' : 'READ-ONLY'}`
+    );
+  }
+
+  return { failures, notes };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const quiet = args.includes('--quiet');
+  const threads = args.includes('--threads');
   const positional = args.filter((a) => !a.startsWith('--'));
   const sampleFlag = args.indexOf('--sample');
   const wasmPath = positional.find((a) => a !== args[sampleFlag + 1]);
   const sample = sampleFlag >= 0 ? args[sampleFlag + 1] : undefined;
   if (!wasmPath || !sample) {
     console.error(
-      'usage: node web/tools/check-exports.mjs <path-to.wasm> --sample <name> [--quiet]'
+      'usage: node web/tools/check-exports.mjs <path-to.wasm> --sample <name> [--quiet] [--threads]'
     );
     process.exit(2);
   }
@@ -154,10 +432,10 @@ async function main() {
     process.exit(2);
   }
 
-  const module = new WebAssembly.Module(await readFile(wasmPath));
-  const exported = new Set(
-    WebAssembly.Module.exports(module).map((e) => e.name)
-  );
+  const bytes = await readFile(wasmPath);
+  const module = new WebAssembly.Module(bytes);
+  const exportList = WebAssembly.Module.exports(module);
+  const exported = new Set(exportList.map((e) => e.name));
   const imports = WebAssembly.Module.imports(module);
 
   const allDeclared = await collect(
@@ -207,30 +485,41 @@ async function main() {
     );
   }
 
-  if (!exported.has('memory')) {
-    failures.push(
-      'the artifact does not export `memory`; every ABI here is an offset into it'
-    );
-  }
+  /** @type {string[]} */
+  let notes = [];
+  if (threads) {
+    // The two rules below are about the artifact the site ships. A threaded
+    // one answers a different question — see the header — and the checks above
+    // this point, which are about `__crcbl_*` symbols, apply to both.
+    const surface = await workerSurface(module, bytes, imports, exportList);
+    failures.push(...surface.failures);
+    notes = surface.notes;
+  } else {
+    if (!exported.has('memory')) {
+      failures.push(
+        'the artifact does not export `memory`; every ABI here is an offset into it'
+      );
+    }
 
-  // **Empty, and that is the assertion.** This used to hold the two
-  // `__wbindgen_*` placeholders and the glue module wasm-bindgen rewrote them
-  // to, because `wgpu` reached WebGPU through `web-sys` and every artifact
-  // imported ~340 functions from it. `crcbl-wgpu` is a
-  // `cfg(not(target_arch = "wasm32"))` dependency of the umbrella now, nothing
-  // in a browser build reaches `web-sys`, and the check therefore says what the
-  // engine always meant: **this module imports nothing at all.** An import of
-  // any kind, from any module, fails here.
-  const ALLOWED_IMPORT_MODULES = new Set();
-  const strayModules = [...new Set(imports.map((i) => i.module))].filter(
-    (m) => !ALLOWED_IMPORT_MODULES.has(m)
-  );
-  if (strayModules.length > 0) {
-    failures.push(
-      `the artifact imports from ${strayModules.length} module(s): ${strayModules.join(', ')}.\n` +
-        '    The engine ABI is exports-plus-polling, so a browser artifact imports nothing.\n' +
-        `    See \`apps/${sample}/src/web.rs\`.`
+    // **Empty, and that is the assertion.** This used to hold the two
+    // `__wbindgen_*` placeholders and the glue module wasm-bindgen rewrote them
+    // to, because `wgpu` reached WebGPU through `web-sys` and every artifact
+    // imported ~340 functions from it. `crcbl-wgpu` is a
+    // `cfg(not(target_arch = "wasm32"))` dependency of the umbrella now, nothing
+    // in a browser build reaches `web-sys`, and the check therefore says what the
+    // engine always meant: **this module imports nothing at all.** An import of
+    // any kind, from any module, fails here.
+    const ALLOWED_IMPORT_MODULES = new Set();
+    const strayModules = [...new Set(imports.map((i) => i.module))].filter(
+      (m) => !ALLOWED_IMPORT_MODULES.has(m)
     );
+    if (strayModules.length > 0) {
+      failures.push(
+        `the artifact imports from ${strayModules.length} module(s): ${strayModules.join(', ')}.\n` +
+          '    The engine ABI is exports-plus-polling, so a browser artifact imports nothing.\n' +
+          `    See \`apps/${sample}/src/web.rs\`.`
+      );
+    }
   }
 
   if (!quiet) {
@@ -241,6 +530,7 @@ async function main() {
     console.log(
       `imports:         ${imports.length} from ${[...new Set(imports.map((i) => i.module))].join(', ')}`
     );
+    for (const note of notes) console.log(note);
     console.log(`declared in Rust: ${declared.size}`);
     console.log(`called by the shim: ${used.size}`);
     list(

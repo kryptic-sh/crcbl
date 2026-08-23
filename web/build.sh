@@ -8,6 +8,7 @@
 #
 #   ./web/build.sh                 # build everything into target/site
 #   ./web/build.sh --serve         # …and serve it on http://localhost:8000
+#   ./web/build.sh --threads       # build the worker-capable artifacts instead
 #
 # Serving matters: ES modules and `WebAssembly.instantiateStreaming` do not work
 # from `file://`, and OPFS needs a secure context, which `localhost` is.
@@ -24,6 +25,37 @@ SITE="${SITE_DIR:-$REPO/target/site}"
 PROFILE="${PROFILE:-release}"
 TARGET=wasm32-unknown-unknown
 
+# `--threads` only. A second toolchain pinned by date, in the shape the
+# `decoder-fuzz` job already uses: `-Z build-std` is nightly-only, and
+# `rust-toolchain.toml` pins an exact stable on purpose — its own comment calls
+# a floating channel a broken promise.
+NIGHTLY=nightly-2026-07-02
+THREADED_DIR="${THREADED_TARGET_DIR:-$REPO/target/wasm-threaded}"
+# The ceiling the shared memory declares. A shared memory must have one, and
+# `web/tools/check-exports.mjs --threads` instantiates against the limits it
+# reads out of the artifact rather than repeating this number.
+THREADED_MAX_MEMORY_BYTES=1073741824
+
+SERVE=0
+THREADS=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --serve)
+      SERVE=1
+      shift
+      ;;
+    --threads)
+      THREADS=1
+      shift
+      ;;
+    *)
+      echo "crcbl web build: unknown argument: $1" >&2
+      echo "usage: ./web/build.sh [--serve] [--threads]" >&2
+      exit 2
+      ;;
+  esac
+done
+
 # Every wasm-ready sample: crate name, lib name, and where it goes in the site.
 # One row per demo — a new sample is a line here and a directory under
 # `web/demos/`.
@@ -36,6 +68,114 @@ DEMOS=(
   "lantern:crcbl_lantern:demos/lantern"
   "quarry:crcbl_quarry:demos/quarry"
 )
+
+profile_flag=()
+[ "$PROFILE" = "release" ] && profile_flag=(--release)
+
+# THE THREADED ARTIFACT IS A SEPARATE BUILD, AND DELIBERATELY NOT ON THE SITE.
+#
+# `--threads` builds the same demo crates a second way: atomic instructions, a
+# shared memory the *host* constructs, and the TLS and stack symbols a worker
+# needs to bring itself up. It writes to `$THREADED_DIR` rather than
+# `target/$TARGET/`, so the two artifacts coexist; one directory holding both
+# would rebuild everything on every alternation, because the flags differ.
+#
+# NOTHING IS PUBLISHED BY THIS MODE. The artifact imports `env.memory`, and
+# neither of the two things that instantiate a site artifact can satisfy that:
+# `web/tools/wasm-loader.js` passes an empty import object on purpose, and
+# `web/tools/smoke.mjs` synthesises a stub memory of a single page. Each is a
+# `LinkError` on a threaded module rather than a threaded demo. There is no
+# worker backend behind `crcbl-jobs`'s `Spawn` seam yet either; what this mode
+# produces is the artifact such a backend needs, gated symbol by symbol by
+# `web/tools/check-exports.mjs --threads`.
+#
+# IT IS NOT PART OF THE PAGES BUILD AND CANNOT BECOME ONE. GitHub Pages sends
+# no COOP/COEP pair, so a `SharedArrayBuffer` cannot exist on the published
+# site and a threaded artifact could never be instantiated there.
+# `web/tools/serve.mjs` does send both, which is what makes this testable
+# locally at all. See `docs/backlog.md`.
+if [ "$THREADS" = "1" ]; then
+  if [ "$SERVE" = "1" ]; then
+    echo "crcbl web build: --threads builds artifacts only; there is no site to --serve" >&2
+    exit 2
+  fi
+
+  # Without these, both failures arrive as an opaque cargo error: a toolchain
+  # rustup does not have, or a `-Z build-std` that cannot find std's sources and
+  # never names the component that would fix it.
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "crcbl web build: rustup not found; --threads needs the $NIGHTLY toolchain" >&2
+    exit 1
+  fi
+  if ! rustup toolchain list | grep -q "^$NIGHTLY"; then
+    echo "crcbl web build: toolchain $NIGHTLY is not installed" >&2
+    echo "    rustup toolchain install $NIGHTLY --component rust-src" >&2
+    exit 1
+  fi
+  if ! rustup component list --toolchain "$NIGHTLY" --installed | grep -qx rust-src; then
+    echo "crcbl web build: $NIGHTLY has no rust-src component" >&2
+    echo "    -Z build-std recompiles std with +atomics and needs its sources" >&2
+    echo "    rustup component add rust-src --toolchain $NIGHTLY" >&2
+    exit 1
+  fi
+
+  # Every flag here is asserted against the built artifact by
+  # `check-exports.mjs --threads`, which names the one that is missing:
+  #
+  #   +atomics,+bulk-memory  the atomic instructions and `memory.init`
+  #   +mutable-globals       a `__stack_pointer` JS is allowed to write
+  #   --shared-memory        the memory is shared; without it a worker gets its
+  #                          own copy rather than the module's heap
+  #   --import-memory        the host constructs that memory and the module
+  #                          imports it. A module that *owns* its memory cannot
+  #                          hand it to a worker at all, and that is what a
+  #                          build with only the target features produces.
+  #   --max-memory           a shared memory must declare a maximum
+  #   --export=__wasm_init_tls, __tls_base, __tls_size, __tls_align
+  #                          a worker sets its own TLS block up before it runs
+  #                          any Rust; skipping the call traps immediately
+  #   --export=__stack_pointer  wasm globals are per-instance, so a worker that
+  #                          does not set this one runs on the main thread's
+  #                          stack region — and only code that *uses* its stack
+  #                          can tell the difference
+  #   --export=__heap_base   where the module's own allocator region begins,
+  #                          which is what the stack and TLS block are cut from
+  threaded_rustflags=(
+    "-C target-feature=+atomics,+bulk-memory,+mutable-globals"
+    "-C link-arg=--shared-memory"
+    "-C link-arg=--import-memory"
+    "-C link-arg=--max-memory=$THREADED_MAX_MEMORY_BYTES"
+    "-C link-arg=--export=__wasm_init_tls"
+    "-C link-arg=--export=__tls_base"
+    "-C link-arg=--export=__tls_size"
+    "-C link-arg=--export=__tls_align"
+    "-C link-arg=--export=__stack_pointer"
+    "-C link-arg=--export=__heap_base"
+  )
+
+  echo "==> threaded build: $NIGHTLY, -Z build-std=std,panic_abort, into $THREADED_DIR"
+  for row in "${DEMOS[@]}"; do
+    IFS=: read -r crate lib _ <<<"$row"
+    echo "==> cargo +$NIGHTLY build --lib -p $crate --target $TARGET ($PROFILE, threaded)"
+    # `RUSTFLAGS` rather than a `[target]` table: it has to apply to the std
+    # units `-Z build-std` compiles too, which is the whole reason std is being
+    # rebuilt.
+    (cd "$REPO" && RUSTFLAGS="${threaded_rustflags[*]}" cargo "+$NIGHTLY" build \
+      --locked --lib -p "$crate" --target "$TARGET" "${profile_flag[@]}" \
+      --target-dir "$THREADED_DIR" -Z build-std=std,panic_abort)
+
+    echo "==> checking the worker-capable surface"
+    node "$REPO/web/tools/check-exports.mjs" \
+      "$THREADED_DIR/$TARGET/$PROFILE/$lib.wasm" --sample "$crate" --threads --quiet
+  done
+
+  echo "==> $THREADED_DIR/$TARGET/$PROFILE"
+  for row in "${DEMOS[@]}"; do
+    IFS=: read -r _ lib _ <<<"$row"
+    echo "    $lib.wasm"
+  done
+  exit 0
+fi
 
 # NO wasm-bindgen. This script used to run it over every artifact, and the pin
 # it needed — the CLI version has to equal the `wasm-bindgen` crate the build
@@ -85,9 +225,6 @@ node "$REPO/web/tools/build-pages.mjs" "$SITE"
   cp "$REPO/web/$file" "$SITE/$file"
 done
 
-profile_flag=()
-[ "$PROFILE" = "release" ] && profile_flag=(--release)
-
 # THERE IS NO BACKEND CHOICE HERE ANY MORE, AND THAT IS THE POINT.
 #
 # This used to read `CRCBL_WEB_BACKEND` and pass `--features crcbl/webgpu` for
@@ -129,6 +266,6 @@ done
 echo "==> $SITE"
 find "$SITE" -type f | sed "s|$SITE/|    |" | sort
 
-if [ "${1:-}" = "--serve" ]; then
+if [ "$SERVE" = "1" ]; then
   exec node "$REPO/web/tools/serve.mjs" "$SITE" --port "${PORT:-8000}"
 fi

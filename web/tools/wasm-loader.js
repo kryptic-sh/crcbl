@@ -56,7 +56,11 @@ async function instantiate(source) {
   // The import object is empty on purpose. The engine's ABI is
   // exports-plus-polling — nothing crosses into wasm except through a call on
   // an export — and `web/tools/check-exports.mjs` fails the build if an import
-  // ever appears, so an artifact that needed one would not reach a page.
+  // ever appears in a site artifact, so one that needed an import would not
+  // reach a page. `web/build.sh --threads` does build an artifact that imports
+  // `env.memory` — a shared memory is one the host constructs, so there is no
+  // other shape for it — and nothing publishes that artifact: this loader
+  // passes no memory and could not instantiate it.
   const imports = {};
   // `instantiateStreaming` needs `Content-Type: application/wasm`;
   // `web/tools/serve.mjs` sends it, and so does GitHub Pages. The buffered path

@@ -240,8 +240,14 @@ all runs here. What it cannot see, a black canvas included, is what
   correction settles it. **Locally is different**: `web/tools/serve.mjs` sends
   both headers, so a site served by `build.sh --serve` or by the browser gate
   _is_ cross-origin isolated, and the gate asserts that rather than assuming it.
-  That is what makes a threaded wasm build testable at all — the build itself is
-  not here yet; see `docs/backlog.md`.
+  That is what makes a threaded wasm build testable at all. **The build is here
+  now**: `./web/build.sh --threads` produces worker-capable artifacts under
+  `target/wasm-threaded/`, and `tools/check-exports.mjs --threads` gates the
+  surface a worker needs — a shared `env.memory` import, `__wasm_init_tls`, and
+  the TLS and stack globals. Nothing publishes them and nothing loads them: the
+  site's artifacts are still the single-threaded ones, and **the worker backend
+  behind `crcbl-jobs`'s `Spawn` seam does not exist** — `default_spawner` still
+  yields `Inline` on wasm. See `docs/backlog.md`.
 - **No pointer lock, no clipboard, no IME.** The Web shell backend clears those
   capability bits; there is nothing for a shim to wire.
 - **No service worker, no offline cache.** The site is static files.
