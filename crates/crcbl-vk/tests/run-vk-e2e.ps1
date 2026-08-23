@@ -297,6 +297,24 @@ try {
 
     Write-Host "crcbl vk e2e: $ran tests ran against a real Vulkan implementation"
 
+    # **The teardown leak report, read rather than left in the log.** `crcbl-vk`
+    # warns when a device is destroyed with objects still alive, naming their
+    # kinds and formats — and a warning fails nothing, so the leaks it found the
+    # afternoon it learned to name them were found by a person reading a job
+    # log. The expectation is zero lines: every test in this suite destroys what
+    # it creates, so a line here names a test that stopped doing so. Same check
+    # as `run-vk-e2e.sh`'s, and the two have to move together.
+    $leaks = [regex]::Matches($plain, '.*object\(s\) still alive at device teardown.*')
+    if ($leaks.Count -gt 0) {
+        Write-Host 'crcbl vk e2e: a device was destroyed with objects still alive:'
+        foreach ($leak in $leaks) { Write-Host "                $($leak.Value)" }
+        Write-Error ('crcbl vk e2e: the suite''s own teardown reporter wrote those lines. ' +
+            'Destroy the objects in the test that made them rather than leaving the line ' +
+            'in the log for somebody to notice.')
+        exit 1
+    }
+    Write-Host 'crcbl vk e2e: every device was destroyed with nothing left alive'
+
     # How far this machine's validation layer can see. A hazard inside one
     # command buffer is caught while it is recorded; a hazard spanning two
     # *submissions* can only be caught at submit, and layer builds differ in

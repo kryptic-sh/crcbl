@@ -289,6 +289,30 @@ fi
 
 echo "crcbl vk e2e: $RAN tests ran against a real Vulkan implementation"
 
+# **The teardown leak report, read rather than left in the log.** `crcbl-vk`
+# warns when a device is destroyed with objects still alive, naming their kinds
+# and formats — and a warning fails nothing, so the four real leaks it found the
+# afternoon it learned to name them were found by a person reading a job log.
+# Nothing re-read one since, which means a leak introduced tomorrow warns and
+# passes.
+#
+# The expectation is zero lines, not a judgement call: every test in this suite
+# destroys what it creates, so a line here names a test that stopped doing so. A
+# test that must leave an object alive — one asserting a refusal has nothing to
+# destroy — has to be given its own expectation deliberately rather than hiding
+# inside a warning nobody reads.
+LEAKS="$(grep -F 'object(s) still alive at device teardown' "${OUTPUT}.plain" || true)"
+if [ -n "$LEAKS" ]; then
+    echo "crcbl vk e2e: a device was destroyed with objects still alive:" >&2
+    echo "$LEAKS" | sed 's/^/                /' >&2
+    echo "              The suite's own teardown reporter wrote that. Destroy the" >&2
+    echo "              objects in the test that made them — the kinds and formats" >&2
+    echo "              above are what it saw — rather than leaving the line in the" >&2
+    echo "              log for somebody to notice." >&2
+    exit 1
+fi
+echo "crcbl vk e2e: every device was destroyed with nothing left alive"
+
 # How far this machine's validation layer can see. The suite measures it; this
 # is what turns the measurement into something a reader cannot miss.
 REACH="$(grep -Eo 'sync-validation reach: .*' "${OUTPUT}.plain" | tail -1 || true)"

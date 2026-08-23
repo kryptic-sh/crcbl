@@ -657,11 +657,22 @@ than it sounds and is worth saying so: the warning does not fail a job, so a
 green run never proves it and the log has to be read — which is the only reason
 the Metal one was found rather than sitting there.
 
-**Nothing re-reads these logs on its own.** A leak introduced tomorrow warns and
-passes. Making it fail is a real option and is not taken: the suites
-deliberately leave objects alive in places (a test asserting a refusal has
-nothing to destroy), so a hard failure needs a per-suite expectation before it
-can exist.
+**`run-vk-e2e.sh` and `run-vk-e2e.ps1` now fail on the line**, which is the
+per-suite expectation this entry said was needed: `crcbl-vk`'s suite destroys
+what it creates, so zero lines is the expectation and a line names a test that
+stopped doing so. Shown red by deleting one `destroy_buffer` from
+`vk_e2e/compute.rs`, which produced
+`crcbl-vk: 1 object(s) still alive at device teardown (1 buffer)` twice and exit
+1; the same run is green with it back. The `.ps1` copy's regex was exercised
+both ways under `pwsh` rather than only parsed, since no Windows runner is
+reachable here.
+
+**The other three runners still only warn.** `run-dx12-e2e.sh` and
+`run-mtl-e2e.sh` are on deferred backends and their expectation has not been
+established on a machine here, so gating them would pin a failure nobody is
+positioned to clear; `crcbl-webgpu` has no such reporter at all, for the
+structural reason above. Whoever un-defers a backend should add the same three
+lines to its runner.
 
 ### `render_e2e` never runs against dx12's own e2e job, and that hid a step
 
