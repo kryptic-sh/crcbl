@@ -87,8 +87,40 @@
 //! submitted message is delivered by the messenger dispatch, which is a
 //! different mechanism from the validation the layer would otherwise be doing.
 //! What proves *that* is a real violation, and the ones the core checks own are
-//! recorded into a command buffer: `tests/vk_e2e/validation_gate.rs`, which an
-//! instance opening has no device to do.
+//! recorded into a command buffer — the next section.
+//!
+//! # Proving the layer is checking
+//!
+//! [`PROVOKE_VALIDATION_ENV_VAR`] asks a debug build to record one deliberate
+//! specification violation of its own: a `vkCmdCopyBuffer` whose region is
+//! larger than either buffer — the `VUID-vkCmdCopyBuffer-size-*` pair, the same
+//! violation `tests/vk_e2e/validation_gate.rs` commits — into a command buffer
+//! that is ended and destroyed **without ever being submitted**. Only a
+//! *core check* produces that message, so the setting the section above found a
+//! submitted message travelling straight through, `VALIDATE_CORE=false`,
+//! silences this one while the layer still loads, still prints
+//! `announce_messenger`'s line and still delivers the self-test. That
+//! difference is the whole point of it: it is the hole the report half cannot
+//! see into.
+//!
+//! It fires **after the first present** rather than as the instance opens, from
+//! `crate::device`, which is where there is a device and a queue to record
+//! on. By then a whole frame has been recorded, submitted and presented, so a
+//! messenger that stopped calling back after start-up fails this too. Recording
+//! and dropping — rather than submitting — is what keeps a deliberate violation
+//! from being undefined behaviour some driver has to survive; the sibling test's
+//! own header records what an oversized render area did to lavapipe.
+//!
+//! # What neither of the two settles
+//!
+//! **Which severity the record carried.** An error reported as a warning still
+//! matches the `(ERROR|WARN)` pattern the shell harnesses grep for, so neither
+//! variable says the severity mapping above is right.
+//!
+//! **That checking is still happening at frame 300.** The provocation is a
+//! one-shot at the first present, which is one frame later than the self-test
+//! and no further; a layer that stopped checking halfway through a run would
+//! pass both.
 
 use core::ffi::{CStr, c_void};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -121,6 +153,14 @@ pub const FATAL_VALIDATION_ENV_VAR: &str = "CRCBL_VK_VALIDATION_FATAL";
 /// that proves is written down. A release build says it heard the request and
 /// cannot honour it.
 pub const SELF_TEST_VALIDATION_ENV_VAR: &str = "CRCBL_VK_VALIDATION_SELF_TEST";
+
+/// Set to a truthy value to have a **debug** build record one deliberate
+/// specification violation after its first present, so whatever reads the run's
+/// log can tell a layer that is *checking* from one that merely loaded. See the
+/// module's "Proving the layer is checking", which is also where the limit of
+/// what that proves is written down. A release build says it heard the request
+/// and cannot honour it.
+pub const PROVOKE_VALIDATION_ENV_VAR: &str = "CRCBL_VK_VALIDATION_PROVOKE";
 
 /// How severe a message the layer emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -413,6 +453,26 @@ pub(crate) fn validation_self_test_wanted() -> bool {
 
 /// The pure half of [`validation_self_test_wanted`]; see [`validation_policy`].
 const fn validation_self_test_policy(override_: Option<bool>) -> bool {
+    match override_ {
+        Some(explicit) => explicit,
+        None => false,
+    }
+}
+
+/// Whether a run was asked to prove the layer is *checking*, not merely loaded.
+///
+/// The *request*, not the answer, for the reason
+/// [`validation_self_test_wanted`] gives: a release build has to be able to say
+/// it heard a request it cannot honour, and whether it can is a `cfg` on
+/// `VkDevice`'s provocation rather than a value.
+#[must_use]
+pub(crate) fn validation_provocation_wanted() -> bool {
+    validation_provocation_policy(env_flag(PROVOKE_VALIDATION_ENV_VAR))
+}
+
+/// The pure half of [`validation_provocation_wanted`]; see
+/// [`validation_policy`].
+const fn validation_provocation_policy(override_: Option<bool>) -> bool {
     match override_ {
         Some(explicit) => explicit,
         None => false,
@@ -872,6 +932,13 @@ mod tests {
         assert!(!validation_self_test_policy(None));
         assert!(validation_self_test_policy(Some(true)));
         assert!(!validation_self_test_policy(Some(false)));
+
+        // And so is the provocation, on the same two gates: a debug build that
+        // was not asked records nothing, and a release build has no
+        // `provoke_validation` to record with whatever this answers.
+        assert!(!validation_provocation_policy(None));
+        assert!(validation_provocation_policy(Some(true)));
+        assert!(!validation_provocation_policy(Some(false)));
     }
 
     /// The user-data pointer round trip. If `into_raw`/`from_raw` ever stop

@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A binary run can prove the validation layer is _checking_, not merely
+  loaded.** `CRCBL_VK_VALIDATION_PROVOKE=1` asks a **debug** build of `crcbl-vk`
+  to record one deliberate specification violation — a `vkCmdCopyBuffer` region
+  larger than either of the two 64-byte buffers it is given — into a command
+  buffer that is ended and destroyed **without ever being submitted**, at the
+  first successful `Device::present`. Only a _core check_ produces that message,
+  which is what the self-test above cannot ask: a submitted message is delivered
+  whatever the layer's checks are set to, so a layer running with
+  `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` loads, prints
+  `crcbl-vk: validation enabled (…)`, delivers the self-test and reports nothing
+  at all — measured, and now the difference a run can see. After a present
+  rather than at `VkInstance::open` for a second reason: a whole frame has by
+  then been recorded, submitted and presented, so a messenger that went quiet
+  after start-up fails it too. Recorded and dropped, so no driver ever executes
+  the undefined behaviour; harmless with no layer loaded, and with
+  `CRCBL_VK_VALIDATION_FATAL=1` the resulting error rides the ordinary
+  `Device::take_error` path and ends the run. **Off by default on every
+  profile**, and `#[cfg(debug_assertions)]` besides — a release build logs that
+  it heard the request and cannot honour it. No shell harness sets it yet;
+  `docs/backlog.md` says what each would need.
+
 - **A binary run can prove its own validation check is able to fail.**
   `CRCBL_VK_VALIDATION_SELF_TEST=1` asks a **debug** build of `crcbl-vk` to put
   one synthetic message (`CRCBL-VALIDATION-SELF-TEST`, `ERROR`, `VALIDATION`)

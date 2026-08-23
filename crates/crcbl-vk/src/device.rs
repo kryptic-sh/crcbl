@@ -53,7 +53,7 @@ use crcbl_hal::{
 use crate::adapter::AdapterRecord;
 use crate::command::VkCommandEncoder;
 use crate::conv;
-use crate::debug::VALIDATION_LAYER;
+use crate::debug::{self, VALIDATION_LAYER};
 use crate::deletion::RetireQueue;
 use crate::instance::{InstanceInner, next_owner_id};
 use crate::mem::{self, MemoryRequest};
@@ -366,6 +366,15 @@ pub(crate) struct DeviceInner {
     /// display on its own. So the loop being genuinely closed is something
     /// only the backend can report, and this is where it reports it.
     first_present_wait: Once,
+    /// Fires the deliberate violation
+    /// [`PROVOKE_VALIDATION_ENV_VAR`](crate::debug::PROVOKE_VALIDATION_ENV_VAR)
+    /// asks for, once, at the first present that succeeded.
+    ///
+    /// A [`Once`] rather than a flag because [`Device::present`] takes `&self`
+    /// and two threads may well be presenting two swapchains: the point of the
+    /// provocation is one violation in the log, and a race that recorded two —
+    /// or none — would be a worse answer than the question deserves.
+    first_validation_provocation: Once,
     pub(crate) debug_ext: Option<ext::debug_utils::Device>,
     pub(crate) caps: DeviceCaps,
     /// `VkPhysicalDeviceLimits::timestampPeriod`, the nanoseconds one tick of
@@ -915,6 +924,7 @@ impl VkDevice {
             mesh_shader_ext,
             first_display_timing: Once::new(),
             first_present_wait: Once::new(),
+            first_validation_provocation: Once::new(),
             debug_ext,
             caps: DeviceCaps {
                 features: granted,
@@ -2930,6 +2940,11 @@ impl Device for VkDevice {
             {
                 entry.next_offscreen = (index + 1) % entry.images.len() as u32;
             }
+            // A ring's present is still a present: a frame was recorded,
+            // submitted and advanced past. The lock goes first because the
+            // provocation takes it again.
+            drop(state);
+            self.provoke_validation_once(queue);
             return Ok(());
         }
 
@@ -2973,7 +2988,7 @@ impl Device for VkDevice {
         if numbered && result.is_ok() {
             entry.record_presented(requested_id);
         }
-        match result {
+        let outcome = match result {
             Ok(false) => Ok(()),
             // A suboptimal present is not an error and there is nowhere in the
             // seam to return it from here — so it is remembered and reported by
@@ -2983,7 +2998,14 @@ impl Device for VkDevice {
                 Ok(())
             }
             Err(error) => Err(conv::surface_error("vkQueuePresentKHR", error)),
+        };
+        // The state lock is not reentrant and the provocation creates buffers
+        // and an encoder, every one of which takes it.
+        drop(state);
+        if outcome.is_ok() {
+            self.provoke_validation_once(queue);
         }
+        outcome
     }
 
     /// `vkWaitForPresentKHR`, on a device that has
@@ -3101,7 +3123,146 @@ fn present_wait_ns(timeout: Duration) -> u64 {
     u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// Says that a requested validation provocation did not happen, and why.
+///
+/// The same voice, and the same reason, as `crate::instance`'s warning for a
+/// self-test it could not inject: a run that asked for this and did not get it
+/// must not be indistinguishable from one that got it and heard nothing back,
+/// because those two are exactly the readings this variable exists to separate.
+fn provocation_unavailable(why: &str) {
+    crcbl_core::log::warn!(
+        "crcbl-vk: {} asked for a validation provocation and none was recorded: {why}",
+        debug::PROVOKE_VALIDATION_ENV_VAR
+    );
+}
+
 impl VkDevice {
+    /// Fires the deliberate violation
+    /// [`PROVOKE_VALIDATION_ENV_VAR`](crate::debug::PROVOKE_VALIDATION_ENV_VAR)
+    /// asks for, once per device, at the first present that succeeded.
+    ///
+    /// Off unless that variable is set; `crate::debug`'s "Proving the layer is
+    /// checking" is what it settles and what it does not. **Here rather than at
+    /// `VkInstance::open`**, where its sibling the self-test lives, because the
+    /// message it provokes is one only a *core check* emits, the core checks
+    /// that own it read a command buffer, and a command buffer needs a device
+    /// and a queue. **After a present rather than at `open`** for a second
+    /// reason: by then a frame has been recorded, submitted and presented, so a
+    /// messenger that went quiet after start-up fails this too.
+    ///
+    /// **The variable is read inside the [`Once`], not before it.** This runs on
+    /// every present of every build, and `std::env::var` takes a lock and
+    /// allocates — so reading it here first would put both on the frame loop's
+    /// hot path to answer a question whose answer cannot change. Past the first
+    /// present `Once::call_once` is an acquire load, whether or not the
+    /// provocation ever ran.
+    fn provoke_validation_once(&self, queue: QueueHandle) {
+        self.inner.first_validation_provocation.call_once(|| {
+            if debug::validation_provocation_wanted() {
+                self.provoke_validation(queue);
+            }
+        });
+    }
+
+    /// Records one `vkCmdCopyBuffer` that overruns both its buffers, ends the
+    /// command buffer, and throws all three away without submitting anything.
+    ///
+    /// **`#[cfg(debug_assertions)]` as well as the variable, and the two gates
+    /// answer different questions**, exactly as `debug::submit_self_test_message`'s
+    /// pair do. The variable is a harness asking for the violation now; the
+    /// `cfg` is why a shipped binary cannot be asked for one at all — a release
+    /// build that could be told to record a deliberate specification violation
+    /// is one that anything able to set an environment variable could point at
+    /// a driver.
+    ///
+    /// The violation is `tests/vk_e2e/validation_gate.rs`'s, and it is chosen
+    /// there for the reason that decides it here too: the
+    /// `VUID-vkCmdCopyBuffer-size-*` pair is caught while the command is being
+    /// **recorded**, so the buffer is destroyed having never been submitted and
+    /// no driver ever executes the undefined behaviour. That test's header
+    /// records what an earlier oversized render area did to lavapipe. (Which
+    /// digits the pair carries is the layer build's business — 1.4.357 says
+    /// `-00115` and `-00116` — so nothing here greps for them.)
+    ///
+    /// Nothing here fails the run on its own account — reporting is the layer's
+    /// job, and a violation the layer ignores is the answer, not an error. A
+    /// step that could not be taken is logged instead.
+    #[cfg(debug_assertions)]
+    fn provoke_validation(&self, queue: QueueHandle) {
+        /// Both buffers, deliberately far smaller than the copy.
+        const SIZE: u64 = 64;
+        /// The copy, which fits in neither of them. That is the violation.
+        const OVERRUN: u64 = 4096;
+
+        let small = |label| {
+            self.create_buffer(&BufferDesc {
+                label: Some(label),
+                size: SIZE,
+                usage: crcbl_hal::BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+        };
+        let source = match small("provoked violation (src)") {
+            Ok(handle) => handle,
+            Err(error) => {
+                provocation_unavailable(&format!("its source buffer failed: {error}"));
+                return;
+            }
+        };
+        let destination = match small("provoked violation (dst)") {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.destroy_buffer(source);
+                provocation_unavailable(&format!("its destination buffer failed: {error}"));
+                return;
+            }
+        };
+
+        let mut encoder = self.create_command_encoder(&CommandEncoderDesc {
+            label: Some("provoked violation"),
+            queue,
+        });
+        // Ahead of the recording, so that the layer's complaint lands under it
+        // and a reader meeting one of these lines without the other knows which
+        // half is missing.
+        //
+        // It deliberately does **not** spell the offending entry point or its
+        // VUIDs. A harness greps this log for the layer's own complaint, and a
+        // line of ours carrying the same word would answer that grep by itself
+        // — a run where the layer said nothing would then read exactly like one
+        // where it spoke, which is the whole distinction being drawn here.
+        crcbl_core::log::info!(
+            "crcbl-vk: {} records a deliberate {OVERRUN}-byte copy between two {SIZE}-byte \
+             buffers, after the first present; a layer that is checking reports the copy-size \
+             violation below this line, and one that is merely loaded says nothing",
+            debug::PROVOKE_VALIDATION_ENV_VAR
+        );
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: source,
+            src_offset: 0,
+            dst: destination,
+            dst_offset: 0,
+            size: OVERRUN,
+        });
+        match encoder.finish() {
+            // Never submitted: the violation has already been reported by the
+            // time this hands the buffer straight back.
+            Ok(commands) => self.destroy_command_buffer(commands),
+            Err(error) => provocation_unavailable(&format!(
+                "the command buffer it recorded into could not be ended: {error}"
+            )),
+        }
+        self.destroy_buffer(source);
+        self.destroy_buffer(destination);
+    }
+
+    /// A release build's answer: it heard the request and cannot honour it.
+    /// See the debug arm above for why it does not carry the provocation.
+    #[cfg(not(debug_assertions))]
+    fn provoke_validation(&self, _queue: QueueHandle) {
+        provocation_unavailable("this is a release build, which does not carry the provocation");
+    }
+
     /// Builds a swapchain — WSI or offscreen ring — without touching the tables
     /// the caller will store it in.
     fn build_swapchain(

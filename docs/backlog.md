@@ -146,36 +146,46 @@ refused at `VkInstance::open` rather than passing having checked nothing, which
 - **`ValidationSink::CAPACITY` bounds what the drain can hand back.** Past it
   only the counters grow. Not practical while the first error stops the run, but
   it is a cap rather than "every error forever".
-- **Nothing proves the layer is _checking_ during a sample run.**
-  `CRCBL_VK_VALIDATION_SELF_TEST` closed the report half: the three harnesses
-  now each set it and require their own validation check to come back red, so
-  that check has been watched failing. The checking half is untouched, and the
-  two read alike. Measured on layer 1.4.357: a message submitted through
-  `vkSubmitDebugUtilsMessageEXT` still reaches the messenger with
-  `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false`, with
-  `VK_KHRONOS_VALIDATION_DISABLES=VK_VALIDATION_FEATURE_DISABLE_ALL`, with
-  `MESSAGE_ID_FILTER` naming the id and with
-  `DEBUG_ACTION=VK_DBG_LAYER_ACTION_IGNORE`; only `VK_LOADER_LAYERS_DISABLE`
-  stops it, and that already fails the "validation enabled" grep. The same
-  `VALIDATE_CORE=false` makes `validation_gate.rs`'s
-  `a_deliberate_violation_is_caught_by_the_layer` fail while
-  `tools/run-samples-windowed.sh` stays green — so a layer that loads, prints
-  the line, delivers submitted messages and validates nothing passes every pass
-  in all three harnesses. The layer's stateless parameter checks are not
-  governed by `validate_core` either (a zero `messageSeverity` produced
-  `VUID-vkSubmitDebugUtilsMessageEXT-messageSeverity-parameter` with the setting
-  both ways), so no instance-level provocation asks the question. **Closing it
-  needs a core-check violation inside a binary run** — a debug-only, env-gated
-  equivalent of `validation_gate.rs`'s oversized `copy_buffer_to_buffer`,
-  recorded and dropped without submitting, from somewhere that has a device.
-  That changes which crate owns the hook, which is why it was not done with the
-  report half.
+- **No harness sets `CRCBL_VK_VALIDATION_PROVOKE` yet.** `crcbl-vk` now records
+  a deliberate out-of-bounds `vkCmdCopyBuffer` at the first successful
+  `VkDevice::present` when that variable is set — a core-check violation from
+  inside a running frame loop, which is what a submitted self-test message could
+  never be — and `validation_gate.rs`'s
+  `the_provocation_fires_at_the_first_present_and_the_layer_answers` proves it
+  fires. The four shell gates that run a **binary** under the layer
+  (`tools/run-samples-windowed.sh`, `run-x11-e2e.sh`, `run-wayland-e2e.sh`, and
+  `run-vk-e2e.sh`'s sandbox pass) still set only
+  `CRCBL_VK_VALIDATION_SELF_TEST`, so none of them fails yet on a layer that
+  loads and checks nothing. The pass each one needs: set the variable, and
+  require **the layer's own `CopyBuffer` complaint** in the log — never
+  `crcbl-vk`'s own `CRCBL_VK_VALIDATION_PROVOKE records …` line, which
+  deliberately names neither the entry point nor the VUIDs, because a grep its
+  own log line answers is exactly the green light wired to nothing this closes.
+  Measured 2026-08-23 on layer 1.4.357, sandbox `--headless --backend vk`: with
+  `CRCBL_VK_VALIDATION=1 CRCBL_VK_VALIDATION_PROVOKE=1` the log carries
+  `VUID-vkCmdCopyBuffer-size-00115`/`-00116` on radv **and** on lavapipe (the
+  command buffer is dropped unsubmitted, so neither driver executes it and both
+  runs still exit 0); adding `VK_KHRONOS_VALIDATION_VALIDATE_CORE=false` removes
+  both lines while `crcbl-vk: validation enabled (` is still printed and the
+  self-test's submitted message still arrives. That pair is the hole, before and
+  after.
+- **The provocation is a one-shot at the first present.** It is one frame
+  further into the run than the self-test was and no further, so a layer that
+  stopped checking at frame 2 — or a messenger that went quiet then — still
+  passes everything here. Firing it periodically was considered and left out:
+  every firing dirties the report, so a repeat would have to be counted rather
+  than merely absent, which is a bigger change than the hole justifies today.
+- **`CRCBL_VK_VALIDATION_PROVOKE` exported across the vk e2e suite reddens it,
+  by design.** Every other test in that suite ends in `Headless::finish`, which
+  asserts a clean report, and the provocation dirties the report of any device
+  that presents. That is why the new test re-executes the test binary in a child
+  process with the variable set (the shape `crcbl_core::trace`'s
+  `the_environment_variable_is_what_turns_the_gate_on` uses) rather than calling
+  `set_var`. Surprising, not a bug: a developer who exports the variable and
+  runs the suite gets a dozen unrelated failures.
 - **Severity mis-mapping is outside the self-test.** An error reported as a
   warning still matches the harnesses' `(ERROR|WARN)` pattern, so the new pass
   says nothing about which severity the record carried.
-- **The self-test injects at `VkInstance::open`, so it says nothing about the
-  frame loop.** A messenger that stops calling back after the first frame would
-  leave every pass green.
 - **`Device::take_error`'s wording attributes the injected message to the
   layer.** With `CRCBL_VK_VALIDATION_FATAL=1` alongside the self-test the run
   dies with `VK_LAYER_KHRONOS_validation reported CRCBL-VALIDATION-SELF-TEST`,
