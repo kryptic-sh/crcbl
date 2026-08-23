@@ -189,6 +189,13 @@ fn a_malformed_invocation_exits_two() {
         vec!["bench", "--scenario", "jobs", "--chunk", "0"],
         vec!["bench", "--scenario", "jobs", "--iterations", "0"],
         vec!["bench", "--scenario", "jobs", "--iterations", "lots"],
+        vec!["bench", "--scenario", "phys", "--bodies", "0"],
+        vec!["bench", "--scenario", "phys", "--extent", "0"],
+        // A flag that belongs to the other scenario, either way round: it is
+        // refused rather than ignored, because a run that quietly dropped a
+        // density would still print a plausible distribution.
+        vec!["bench", "--scenario", "phys", "--workers", "2"],
+        vec!["bench", "--scenario", "jobs", "--extent", "12"],
     ] {
         let output = crcbl(temporary.path(), &args);
         assert_eq!(code(&output), 2, "{args:?} should be exit 2");
@@ -1534,6 +1541,184 @@ fn bench_prints_a_human_summary_unless_json_is_asked_for() {
     assert!(human.contains("no percentile"), "{human}");
 }
 
+/// `crcbl bench --scenario phys` end to end: three distributions, the answer
+/// size that explains the third of them, and the tree they all ran against.
+///
+/// The counts are the point of every assertion here. Nothing below asserts a
+/// duration: what is pinned is that each phase produced a full percentile set,
+/// that the query phase answered exactly as many results in the timed passes as
+/// in the warm-up passes it excluded, and that the tree held the whole crowd.
+#[test]
+fn bench_phys_reports_three_distributions_and_the_answers_beside_them() {
+    let temporary = TempDir::new("bench-phys");
+    // Twenty iterations is exactly the count at which a nearest-rank p95 stops
+    // being the maximum, so this is the invocation where all three percentiles
+    // must appear — for each of the three phases.
+    let bodies = 300;
+    let iterations = 20;
+    let warmup = 2;
+    let output = crcbl(
+        temporary.path(),
+        &[
+            "bench",
+            "--scenario",
+            "phys",
+            "--bodies",
+            &bodies.to_string(),
+            "--extent",
+            "16",
+            "--iterations",
+            &iterations.to_string(),
+            "--warmup",
+            &warmup.to_string(),
+            "--json",
+        ],
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = stdout(&output);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+    assert!(
+        json.starts_with(r#"{"ok":true,"command":"bench","scenario":"phys""#),
+        "{json}"
+    );
+
+    // The environment block: a number without the machine it came from is not
+    // comparable to another number. No worker count, because this scenario runs
+    // on the calling thread and a field describing a pool it never built would
+    // be reporting something that was never measured.
+    assert!(json.contains(r#""environment":{"arch":"#), "{json}");
+    for key in ["os", "family", "profile"] {
+        assert!(json.contains(&format!(r#""{key}":"#)), "no {key} in {json}");
+    }
+    assert!(!json.contains(r#""workers""#), "{json}");
+
+    // Three phases, in build/refit/query order, each a full distribution.
+    assert!(
+        json.contains(r#""timing":{"build":{"#),
+        "the phases are not in order: {json}"
+    );
+    for key in ["p50", "p95", "p99", "max"] {
+        assert_eq!(
+            numbers(&json, key).len(),
+            3,
+            "{key} should appear once per phase: {json}"
+        );
+    }
+    for phase in ["build", "refit", "query"] {
+        assert!(json.contains(&format!(r#""{phase}":{{"#)), "{json}");
+    }
+    // p50 <= p95 <= p99 <= max, within each phase, and no mean beside them.
+    for phase in 0..3 {
+        let ladder: Vec<usize> = ["p50", "p95", "p99", "max"]
+            .iter()
+            .map(|key| numbers(&json, key)[phase])
+            .collect();
+        assert!(
+            ladder.windows(2).all(|pair| pair[0] <= pair[1]),
+            "phase {phase} is out of order: {ladder:?} in {json}"
+        );
+    }
+    assert!(!json.contains("mean"), "{json}");
+
+    // The answer size, which is what makes the query timing readable. One query
+    // per body, and more results than queries — a crowd where every query found
+    // only itself would be a fixture with no neighbourhood in it.
+    assert_eq!(numbers(&json, "queries"), vec![bodies]);
+    let results = numbers(&json, "results")[0];
+    assert!(results > bodies, "{results} results over {bodies} queries");
+    assert!(floats(&json, "results_per_query")[0] > 1.0, "{json}");
+
+    // The tree held the whole crowd, so the queries answered for the crowd that
+    // was placed rather than for part of it.
+    assert_eq!(numbers(&json, "elements"), vec![bodies]);
+
+    // The warm-up ran and was excluded: every pass answers the same results, so
+    // both totals are that number times the passes each half ran.
+    assert_eq!(numbers(&json, "warmup_results"), vec![warmup * results]);
+    assert_eq!(numbers(&json, "timed_results"), vec![iterations * results]);
+
+    // A full 64-bit fold, carried as a *string* so a consumer reading JSON
+    // numbers as doubles cannot round the low bits off the one field whose whole
+    // job is to compare exactly.
+    let checksum = field_values(&json, "checksum").next().expect("a checksum");
+    assert!(
+        checksum.starts_with('"') && checksum.ends_with('"'),
+        "the checksum is a JSON number and will be rounded: {checksum}"
+    );
+    assert!(
+        checksum.trim_matches('"').parse::<u64>().is_ok(),
+        "{checksum}"
+    );
+}
+
+/// **The same crowd in a smaller arena answers more per query**, which is the
+/// fact `docs/backlog.md` says a scale number is meaningless without.
+///
+/// Two runs at one body count, and the assertions are on the *answers*: a
+/// timing assertion is not a test, and the reason this scenario reports its
+/// answer size is precisely so the two query numbers can be read against
+/// something that is not the body count.
+#[test]
+fn bench_phys_answers_more_per_query_in_a_denser_arena() {
+    let temporary = TempDir::new("bench-phys-density");
+    let bodies = "300";
+    let run = |extent: &str| {
+        let output = crcbl(
+            temporary.path(),
+            &[
+                "bench",
+                "--scenario",
+                "phys",
+                "--bodies",
+                bodies,
+                "--extent",
+                extent,
+                "--iterations",
+                "3",
+                "--warmup",
+                "1",
+                "--json",
+            ],
+        );
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout(&output)
+    };
+
+    let dense = run("12");
+    let sparse = run("96");
+    let neighbours = |json: &str| floats(json, "results_per_query")[0];
+    assert!(
+        neighbours(&dense) > neighbours(&sparse),
+        "{} per query at extent 12 is not more than {} at extent 96",
+        neighbours(&dense),
+        neighbours(&sparse)
+    );
+    // Both are real passes: every body answers its own query at any density.
+    assert!(neighbours(&sparse) >= 1.0, "{sparse}");
+    // The same crowd either way — the extent moves where the bodies are, never
+    // how many there are.
+    assert_eq!(numbers(&dense, "elements"), numbers(&sparse, "elements"));
+
+    // And two densities that folded one checksum would not be two densities.
+    let checksum = |json: &str| {
+        field_values(json, "checksum")
+            .next()
+            .expect("a checksum")
+            .to_string()
+    };
+    assert_ne!(checksum(&dense), checksum(&sparse));
+}
+
 /// An unknown scenario is a bad invocation, and it names the ones that exist —
 /// exit 2 with nothing on stdout, like every other malformed invocation.
 #[test]
@@ -1544,7 +1729,9 @@ fn bench_refuses_an_unknown_scenario_by_name() {
     assert!(output.stdout.is_empty(), "{}", stdout(&output));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("frobnicate"), "{stderr}");
-    assert!(stderr.contains("jobs"), "{stderr}");
+    for scenario in ["jobs", "phys"] {
+        assert!(stderr.contains(scenario), "{stderr}");
+    }
 }
 
 /// Every `"<key>":<integer>` in the object, in order.

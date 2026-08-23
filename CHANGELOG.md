@@ -29,6 +29,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `overlap_aabb` and `sweep_sphere_excluding` no longer allocate per call —
   `cast_ray` used to build a traversal stack and a hit vector on every cast.
 
+- **`crcbl bench --scenario phys`** times `crcbl-phys`'s broadphase on one
+  thread, as three separately reported phases: building a tree over `--bodies`
+  spheres, refitting it after every one of them moves a tick's worth, and then
+  one overlap query per body. `--extent` is the density control — the same crowd
+  in a smaller square arena — and the run reports the neighbours per query it
+  actually found, so the query timing can be read against the answer size rather
+  than against the body count. A flag belonging to the other scenario is refused
+  by name rather than ignored.
+
+  Every pass, warm-up included, is held against an `O(bodies²)` scan with no
+  tree in it: a pass that answered nothing, answered short, or answered the
+  right total across the wrong queries fails the run instead of reporting a fast
+  number.
+
 - **`crcbl bench --scenario jobs`** times `crcbl_jobs::Pool::par_for` over a
   fixed synthetic workload and reports it as a distribution: p50, p95, p99 and
   max, never a mean, with the pool's own counters beside them and the

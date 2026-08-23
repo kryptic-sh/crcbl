@@ -255,21 +255,44 @@ SCENARIOS:
     jobs    `crcbl_jobs::Pool::par_for` over a fixed synthetic workload, timed
             per call. `--workers 0` is the serial baseline the parallel numbers
             only mean something against.
+    phys    `crcbl_phys`'s broadphase at scale, on one thread: building a tree
+            over N spheres, refitting it after every one of them moves a tick's
+            worth, and then N sphere overlaps, one per body. The three phases
+            are timed and reported separately.
 
-OPTIONS:
+OPTIONS (both scenarios):
         --scenario <NAME>    Which scenario to run. Required.
+        --iterations <N>     Timed iterations — a `par_for` call for `jobs`, one
+                             build, refit and query pass for `phys`.
+                             Default: 200. Below 20 the run reports its maximum
+                             and no percentile.
+        --warmup <N>         Untimed iterations first, excluded from the
+                             statistics. Default: 20.
+        --json               Emit one JSON object instead of human output.
+    -h, --help               Print this text.
+
+OPTIONS (jobs):
         --workers <N>        Pool worker threads. Default: one fewer than the
                              machine's parallelism, which is what `Pool::new`
                              asks for. 0 runs every chunk on the calling thread.
         --items <N>          Items in the workload. Default: 10000.
         --chunk <N>          Items per `par_for` chunk, and the thing worth
                              sweeping. Default: 64.
-        --iterations <N>     Timed calls. Default: 200. Below 20 the run reports
-                             its maximum and no percentile.
-        --warmup <N>         Untimed calls first, excluded from the statistics
-                             and from the pool counters. Default: 20.
-        --json               Emit one JSON object instead of human output.
-    -h, --help               Print this text.";
+
+OPTIONS (phys):
+        --bodies <N>         Sphere colliders in the world, and therefore also
+                             the number of overlap queries a pass runs.
+                             Default: 2000.
+        --extent <UNITS>     Side of the square arena they are placed in, in
+                             whole world units. Default: 48. This is the density
+                             control: the same body count in a smaller arena is
+                             a denser crowd, more neighbours per query, and a
+                             slower query phase — the run reports the neighbours
+                             it actually found, so the two numbers can be read
+                             together.
+
+A flag that belongs to one scenario is refused on the other rather than
+ignored.";
 
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -520,6 +543,13 @@ pub enum BenchScenario {
     /// proving — the plan's own note against this delivery row.
     #[default]
     Jobs,
+    /// `crcbl_phys`'s broadphase — build, refit and overlap — on one thread.
+    ///
+    /// The second one because `docs/plan/ROADMAP.md`'s P8 proposes adopting
+    /// that broadphase onto `crcbl-jobs`, and nothing has ever timed it. See
+    /// `crate::bench::phys` for what the fixture is and why density is a
+    /// parameter of it rather than a detail.
+    Phys,
 }
 
 impl BenchScenario {
@@ -532,12 +562,27 @@ impl BenchScenario {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Jobs => "jobs",
+            Self::Phys => "phys",
         }
     }
 }
 
 /// Every scenario, for the name lookup and the rejection message.
-const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs];
+const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs, BenchScenario::Phys];
+
+/// Which scenario each of `bench`'s per-scenario flags belongs to.
+///
+/// A table rather than a `match` in the parser so the refusal message can name
+/// the owner, and so the two halves of the help text have one list behind them.
+/// `--iterations`, `--warmup` and `--json` are absent because every scenario
+/// reads them.
+const SCENARIO_FLAGS: &[(&str, BenchScenario)] = &[
+    ("--workers", BenchScenario::Jobs),
+    ("--items", BenchScenario::Jobs),
+    ("--chunk", BenchScenario::Jobs),
+    ("--bodies", BenchScenario::Phys),
+    ("--extent", BenchScenario::Phys),
+];
 
 /// The scenario `name` selects, or `None` if no scenario answers to it.
 fn scenario_from_name(name: &str) -> Option<BenchScenario> {
@@ -581,6 +626,26 @@ const DEFAULT_BENCH_ITERATIONS: usize = 200;
 /// Untimed calls when `--warmup` is not given.
 const DEFAULT_BENCH_WARMUP: usize = 20;
 
+/// Sphere colliders the `phys` scenario builds a tree over when `--bodies` is
+/// not given.
+///
+/// Not [`DEFAULT_BENCH_ITEMS`]'s ten thousand, and the difference is the point:
+/// one `phys` iteration is `bodies` inserts, `bodies` moves and `bodies` overlap
+/// queries, and the run's answer guard is an `O(bodies²)` scan on top. Two
+/// thousand is the largest round number whose default invocation still finishes
+/// in a couple of seconds in a checked build — sweep upwards from it on an
+/// optimised one.
+pub const DEFAULT_BENCH_BODIES: usize = 2_000;
+
+/// Side of the square arena, in whole world units, when `--extent` is not given.
+///
+/// Chosen so the default invocation reports a handful of neighbours per query —
+/// the sparse end of what `apps/horde` sees, and the density its steering pass
+/// was written against. `docs/backlog.md` is explicit that a body count without
+/// a density is not a number anybody can use, so this has a default only so that
+/// `--bodies` alone means something; a run that cares sets both.
+pub const DEFAULT_BENCH_EXTENT: usize = 48;
+
 /// `crcbl bench`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BenchArgs {
@@ -595,6 +660,12 @@ pub struct BenchArgs {
     pub items: usize,
     /// Items per `par_for` chunk. Never zero, for the same reason.
     pub chunk: usize,
+    /// Colliders the `phys` scenario builds, moves and queries. Never zero.
+    pub bodies: usize,
+    /// Side of the square arena those colliders are placed in, in whole world
+    /// units. Never zero: an arena of no extent stacks the whole crowd on one
+    /// point, which the parser refuses.
+    pub extent: usize,
     /// Timed calls. Never zero, for the same reason.
     pub iterations: usize,
     /// Untimed calls first, excluded from everything reported.
@@ -1188,6 +1259,8 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
         workers: None,
         items: DEFAULT_BENCH_ITEMS,
         chunk: DEFAULT_BENCH_CHUNK,
+        bodies: DEFAULT_BENCH_BODIES,
+        extent: DEFAULT_BENCH_EXTENT,
         iterations: DEFAULT_BENCH_ITERATIONS,
         warmup: DEFAULT_BENCH_WARMUP,
         json: false,
@@ -1197,6 +1270,11 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
     // in `SCENARIOS`. A benchmark that ran something other than what was asked
     // for would be the one output nobody could interpret.
     let mut scenario = None;
+    // Which of the per-scenario flags were *given*, so that one belonging to the
+    // other scenario is refused rather than ignored — `parse_lod`'s rule, for
+    // its reason: a flag that silently does nothing teaches that it works, and
+    // here it would teach that a density was applied when it was not.
+    let mut given: Vec<&str> = Vec::new();
 
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -1218,15 +1296,38 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
                 }
             }
             Some("--workers") => match count(&mut args, "--workers") {
-                Ok(value) => parsed.workers = Some(value),
+                Ok(value) => {
+                    parsed.workers = Some(value);
+                    given.push("--workers");
+                }
                 Err(message) => return Invocation::BadUsage(message),
             },
             Some("--items") => match count(&mut args, "--items") {
-                Ok(value) => parsed.items = value,
+                Ok(value) => {
+                    parsed.items = value;
+                    given.push("--items");
+                }
                 Err(message) => return Invocation::BadUsage(message),
             },
             Some("--chunk") => match count(&mut args, "--chunk") {
-                Ok(value) => parsed.chunk = value,
+                Ok(value) => {
+                    parsed.chunk = value;
+                    given.push("--chunk");
+                }
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--bodies") => match count(&mut args, "--bodies") {
+                Ok(value) => {
+                    parsed.bodies = value;
+                    given.push("--bodies");
+                }
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--extent") => match count(&mut args, "--extent") {
+                Ok(value) => {
+                    parsed.extent = value;
+                    given.push("--extent");
+                }
                 Err(message) => return Invocation::BadUsage(message),
             },
             Some("--iterations") => match count(&mut args, "--iterations") {
@@ -1257,9 +1358,25 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
     };
     parsed.scenario = scenario;
 
-    // The three counts a zero makes meaningless, refused here rather than
-    // producing a run whose every sample is the cost of doing nothing. Zero
-    // workers and zero warm-up are both real answers and are not in this list.
+    // A flag that belongs to the scenario that was *not* asked for, refused by
+    // name and pointed at the one that reads it. Driven from `SCENARIO_FLAGS`
+    // rather than from `given`, so a flag the table forgot is a flag no arm
+    // above can have pushed.
+    for &(flag, owner) in SCENARIO_FLAGS {
+        if owner != scenario && given.contains(&flag) {
+            return Invocation::BadUsage(format!(
+                "`{flag}` is a `{}` option and this run is `--scenario {}`",
+                owner.name(),
+                scenario.name()
+            ));
+        }
+    }
+
+    // The counts a zero makes meaningless, refused here rather than producing a
+    // run whose every sample is the cost of doing nothing. Zero workers and zero
+    // warm-up are both real answers and are not in this list. A zero on a flag
+    // the chosen scenario does not read was already refused above, so every
+    // entry here is reachable only for the scenario that owns it.
     for (value, flag, why) in [
         (
             parsed.items,
@@ -1275,6 +1392,17 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
             parsed.chunk,
             "--chunk",
             "`par_for` reads a chunk of zero as one, so ask for the length you mean",
+        ),
+        (
+            parsed.bodies,
+            "--bodies",
+            "an empty world has no tree to build and nothing to query",
+        ),
+        (
+            parsed.extent,
+            "--extent",
+            "an arena of no extent stacks the whole crowd on one point, so every query \
+             answers with every body",
         ),
     ] {
         if value == 0 {
@@ -1499,6 +1627,7 @@ mod tests {
             vec!["lod", "stats", "a.gltf", "--json"],
             vec!["lod", "gen", "a.gltf", "-o", "a.dag", "--json"],
             vec!["bench", "--scenario", "jobs", "--json"],
+            vec!["bench", "--scenario", "phys", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
@@ -2011,18 +2140,162 @@ mod tests {
         let Invocation::BadUsage(message) = parse_args(&["bench"]) else {
             panic!("a missing --scenario is a bad invocation");
         };
-        assert!(message.contains("jobs"), "{message}");
+        for scenario in SCENARIOS {
+            assert!(message.contains(scenario.name()), "{message}");
+        }
+    }
+
+    /// **Every scenario in the table is reachable, answers to a distinct name,
+    /// and is named in the help.**
+    ///
+    /// Driven through the real parser rather than through [`scenario_from_name`]
+    /// for the reason
+    /// `every_scene_in_the_table_is_reachable_and_the_default_is_still_the_cube`
+    /// gives: a table entry the `--scenario` arm never consults would pass a
+    /// direct call and fail here. The help check is what stops [`BENCH_USAGE`] —
+    /// a literal, because `concat!` takes literals — drifting from
+    /// [`SCENARIOS`], and it is the same guard the `--scene` list has.
+    #[test]
+    fn every_bench_scenario_is_reachable_distinctly_named_and_documented() {
+        for &scenario in SCENARIOS {
+            let name = scenario.name();
+            let Command::Bench(args) = command(&["bench", "--scenario", name]) else {
+                panic!("expected bench");
+            };
+            assert_eq!(args.scenario, scenario, "--scenario {name}");
+            assert!(
+                BENCH_USAGE.contains(name),
+                "`bench --help` does not name the scenario `{name}`:\n{BENCH_USAGE}"
+            );
+        }
+
+        // Distinct names, because [`scenario_from_name`] takes the first match:
+        // two scenarios sharing one word would make the second unreachable
+        // while every assertion above still passed.
+        let mut names: Vec<&str> = SCENARIOS.iter().map(|&s| s.name()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two scenarios answer to one --scenario");
+    }
+
+    /// The `phys` defaults, stated as a test for
+    /// `bench_defaults_to_the_pass_it_stands_in_for`'s reason — and because
+    /// `docs/backlog.md` is explicit that a body count without a density is not
+    /// a number anybody can use, so the density the default run reports at has
+    /// to be written down somewhere that fails when it moves.
+    #[test]
+    fn bench_phys_defaults_to_a_crowd_at_a_stated_density() {
+        let Command::Bench(args) = command(&["bench", "--scenario", "phys"]) else {
+            panic!("expected bench");
+        };
+        assert_eq!(args.scenario, BenchScenario::Phys);
+        assert_eq!(args.bodies, DEFAULT_BENCH_BODIES);
+        assert_eq!(args.extent, DEFAULT_BENCH_EXTENT);
+        // Shared with `jobs` rather than twinned, so a sweep of one scenario's
+        // sample count is a sweep of the other's.
+        assert_eq!(args.iterations, DEFAULT_BENCH_ITERATIONS);
+        assert_eq!(args.warmup, DEFAULT_BENCH_WARMUP);
+
+        let Command::Bench(args) = command(&[
+            "bench",
+            "--scenario",
+            "phys",
+            "--bodies",
+            "500",
+            "--extent",
+            "12",
+            "--iterations",
+            "3",
+            "--warmup",
+            "0",
+        ]) else {
+            panic!("expected bench");
+        };
+        assert_eq!((args.bodies, args.extent), (500, 12));
+        assert_eq!((args.iterations, args.warmup), (3, 0));
+
+        // The help quotes each default as a literal, so it is pinned to the
+        // constant it describes — `the_screenshot_help_names_the_real_size_cap`
+        // and for the same reason: `BENCH_USAGE` is a literal, because
+        // `concat!` takes literals, so nothing else can stop the two drifting.
+        //
+        // Searched inside the `phys` section rather than the whole page, and
+        // for the whole `Default: N.` phrase: a bare `48` or `64` appears in the
+        // other scenario's options too, and an assertion that a number is
+        // *somewhere* on the page passes for a default that moved.
+        let phys_options = BENCH_USAGE
+            .split_once("OPTIONS (phys):")
+            .expect("the help has a phys section")
+            .1;
+        for value in [DEFAULT_BENCH_BODIES, DEFAULT_BENCH_EXTENT] {
+            assert!(
+                phys_options.contains(&format!("Default: {value}.")),
+                "`bench --help` does not name the default {value}:\n{phys_options}"
+            );
+        }
+
+        // And a count flag with nothing after it is exit 2, not a default.
+        for argv in [
+            vec!["bench", "--scenario", "phys", "--bodies"],
+            vec!["bench", "--scenario", "phys", "--extent"],
+            vec!["bench", "--scenario", "phys", "--bodies", "lots"],
+        ] {
+            assert!(
+                matches!(parse_args(&argv), Invocation::BadUsage(_)),
+                "{argv:?} should be a bad invocation"
+            );
+        }
+    }
+
+    /// **A flag that belongs to one scenario is refused on the other, by name,
+    /// and pointed at the scenario that reads it.**
+    ///
+    /// `parse_lod`'s rule and its reason: a flag that silently does nothing
+    /// teaches that it works. Here it would teach that a density was applied to
+    /// a `jobs` run, or that a worker count changed a `phys` one — and the run
+    /// would print a plausible distribution either way.
+    ///
+    /// Driven from [`SCENARIO_FLAGS`] so a flag added to the table without an
+    /// arm to accept it fails here too.
+    #[test]
+    fn a_bench_flag_is_refused_on_the_scenario_that_does_not_read_it() {
+        for &(flag, owner) in SCENARIO_FLAGS {
+            for &scenario in SCENARIOS {
+                let argv = vec!["bench", "--scenario", scenario.name(), flag, "1"];
+                if scenario == owner {
+                    assert!(
+                        matches!(parse_args(&argv), Invocation::Command(_)),
+                        "{argv:?} is the scenario that owns {flag}"
+                    );
+                    continue;
+                }
+                let Invocation::BadUsage(message) = parse_args(&argv) else {
+                    panic!("{argv:?} should be a bad invocation");
+                };
+                assert!(message.contains(flag), "{message}");
+                assert!(message.contains(owner.name()), "{message}");
+                assert!(message.contains(scenario.name()), "{message}");
+            }
+        }
     }
 
     /// The three counts a zero makes meaningless, each refused naming its own
     /// flag. `--workers 0` and `--warmup 0` are in the accepted list above.
     #[test]
     fn bench_refuses_the_counts_a_zero_would_empty() {
-        for flag in ["--items", "--chunk", "--iterations"] {
+        for (scenario, flag) in [
+            ("jobs", "--items"),
+            ("jobs", "--chunk"),
+            ("jobs", "--iterations"),
+            ("phys", "--bodies"),
+            ("phys", "--extent"),
+            ("phys", "--iterations"),
+        ] {
             let Invocation::BadUsage(message) =
-                parse_args(&["bench", "--scenario", "jobs", flag, "0"])
+                parse_args(&["bench", "--scenario", scenario, flag, "0"])
             else {
-                panic!("`{flag} 0` should be a bad invocation");
+                panic!("`--scenario {scenario} {flag} 0` should be a bad invocation");
             };
             assert!(message.contains(flag), "{message}");
         }
