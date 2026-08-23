@@ -578,6 +578,15 @@ read `50 tests ran` and the run failed with
 `validation_gate.rs`'s sync-hazard probe, is a deliberate env switch CI sets in
 nine places and is left alone.
 
+**The other half of the same question — a loop that asserts over a collection
+that could be empty — was swept on 2026-08-23 and is clean.** Every `for` inside
+a test fn in `crates/crcbl/tests`, `crates/crcbl-vk/tests` and
+`crates/crcbl-shell/tests` iterates either a literal array (`near_wall`, `open`,
+`aside`, `expected` and the tuple lists beside them) or a range, so none can
+match nothing and pass. Worth re-running the same way when a suite starts
+iterating something a device produced: a readback of no clusters, a query set of
+no results, a list of no monitors.
+
 **Fixed by subtracting the feature**, which manufactures the lesser device
 instead of waiting for hardware — the move `mesh.rs` already used to reach
 `GeometryPath::IndirectPerBatch`:
