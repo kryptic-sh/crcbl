@@ -33,10 +33,12 @@
 //!
 //! Also the plan's: "a benchmark pins everything it can and records everything
 //! it cannot … a number without those is not comparable to another number." What
-//! this scenario can pin, it pins — a fixed seed, a fixed item count, a fixed
-//! chunk length, a fixed round count, integer arithmetic throughout. What it
-//! cannot, it reports: the machine's architecture and OS, the build profile, the
-//! parallelism the spawner offered, and the worker count the pool actually got.
+//! a scenario can pin, it pins — a fixed seed, fixed sizes, a fixed round
+//! count, integer arithmetic throughout. What none of them can, this module
+//! reports for all of them: the machine's architecture and OS, and the build
+//! profile. A scenario appends what only it must report — `jobs` adds the
+//! parallelism the spawner offered and the worker count the pool actually got;
+//! `phys` has neither, because it opens no pool.
 //!
 //! **There is no adapter, backend or driver version**, because nothing here
 //! opens a device; inventing those fields so the block resembles the plan's
@@ -186,7 +188,7 @@ fn profile() -> &'static str {
     }
 }
 
-/// Nanoseconds as the microseconds one `par_for` call lands at.
+/// Nanoseconds as the microseconds a scenario's timed sample lands at.
 fn micros(nanos: u64) -> String {
     format!("{:.3} µs", nanos as f64 / 1.0e3)
 }

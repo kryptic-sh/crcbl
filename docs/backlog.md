@@ -59,46 +59,40 @@ Recommendation, not taken without the owner: 3, then 1, then 2 — and only afte
 an ECS benchmark scenario exists to measure against, for the reason the
 profiling plan gives about numbers that cannot be compared.
 
-### The phys bench's identity check is untimed, and `ColliderId::index` is why
+### The phys bench still checks identity only once, and now it need not
 
-`crcbl bench --scenario phys` checks _which_ bodies each query answered — but
-only in one untimed pass, not in every timed one. `ColliderId::index` is
-`pub(crate)` in `crcbl-phys`'s `world.rs` and `ColliderId` is not `Ord`, so
-outside the crate a result can only become a body index through a
-`HashMap<ColliderId, u64>`. A hash lookup per result inside the timed query
-phase would put a `HashMap` inside a number attributed to the broadphase, which
-is the one thing that scenario exists not to do. Every timed pass is still held
-to the result total and the per-query shape, so a pass that answered short or
-answered across the wrong queries fails; only "the same total, from different
-bodies" is unchecked per iteration.
+`crcbl bench --scenario phys` folds _which_ bodies answered in one untimed pass;
+every timed pass is held only to the result total and the per-query shape. The
+reason was that `ColliderId` could not become an array subscript outside
+`crcbl-phys`. That is fixed — `ColliderId::index` is public as of 9eebe1f — so
+the fold can move into every timed pass with a dense array index and no
+`HashMap` in the timed path. Not done in the same slice because `crcbl-phys` and
+`crcbl-cli` were separate write sets. Small, and it closes the one case a timed
+pass still cannot catch: the same total, from different bodies.
 
-A public accessor — or `Ord`, so results could be sorted — turns the fold into a
-dense array index and moves the identity check into every pass. Small change,
-and `crcbl-phys` was outside the write set of the slice that found it.
+### The bench's refit phase measures a refit, and there is no rebuild to tell it from
 
-### The phys bench's refit phase cannot tell a refit from a rebuild
+Recorded here on 2026-08-23 as "the refit phase cannot tell a refit from a
+rebuild", on the assumption that `PhysicsWorld::set_sphere` invalidates the tree
+when a body moves outside its fitted bounds. **It does not, and no such path
+exists.** `Bvh::update_aabb` returns `false` only when the element index names
+nothing live; it has no containment test at all and grows the ancestors it walks
+back through. A teleport across the world refits exactly like a footstep.
 
-`PhysicsWorld::set_sphere` refits in place when `Bvh::update_aabb` accepts the
-new bounds and silently invalidates the tree when it does not, so the
-`overlap_queries()` that follows may be a full rebuild. Nothing outside
-`crcbl-phys` can distinguish the two, which makes the reported refit timing
-honest — it is what a caller pays — but not diagnostic: a run cannot say whether
-it measured refitting or rebuilding, and a regression that flipped every update
-to a rebuild would show only as a slower number.
+So the scenario's refit phase is measuring a refit, always, and the question the
+entry asked is answered rather than open. `BroadphaseStats::refits`,
+`updates_without_refit` and `rebuilds` (9eebe1f) are what let a caller confirm
+that rather than assume it, and the bench does not yet print them — a line
+beside its timing would make each run say which it measured. That is the
+remaining work here, and it is small.
 
-A pair of counters on `BroadphaseStats` — refits accepted against tree
-invalidations — would make the roadmap's "refit cost" row answerable rather than
-merely measurable, and the bench would print them beside the timing the way the
-`jobs` scenario prints `Pool::stats`.
-
-### `crcbl-cli`'s `bench.rs` holds two scenarios and should split before a third
-
-The file is now about 1600 lines with `jobs` and `mod phys` in it, sharing only
-`timing`, `base_environment`, `profile`, `micros`, `nanos` and `PERCENTILES`.
-The seam is already visible in the shape of the file: `bench/mod.rs` for the
-shared reporting, `bench/jobs.rs` and `bench/phys.rs` for the scenarios. Doing
-it was outside the write set of the slice that added the second one. The third
-scenario should not land in this file.
+**What is genuinely open underneath it:** a tree that only ever refits, never
+re-picks a leaf's place, degrades as its elements travel — `update_aabb`'s own
+doc says callers whose elements travel should remove and re-insert instead, and
+nothing in the engine does. The bench can now show this: run the refit phase for
+many ticks of drift and watch `depth` and the query timing move while `rebuilds`
+stays flat. Nobody has, and the drift-per-tick the scenario uses is one tick's
+worth rather than a thousand.
 
 ### The phys bench's default is a debug-build size, and its guard is quadratic
 

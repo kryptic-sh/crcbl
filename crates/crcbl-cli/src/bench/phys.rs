@@ -44,7 +44,7 @@
 //!   it is what a caller pays.
 //! * **query** — `bodies` sphere overlaps, one per body, at its own position:
 //!   the shape `apps/horde`'s separation pass runs, through
-//!   [`OverlapQueries::overlap_sphere_into`] with a [`QueryScratch`], which is
+//!   `OverlapQueries::overlap_sphere_into` with a [`QueryScratch`], which is
 //!   the form P8's parallel adoption will use.
 //!
 //! **There is no threading here and that is deliberate**: a pool in the middle
