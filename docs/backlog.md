@@ -1457,9 +1457,7 @@ be built already, which is why the list says what was checked and when:
   an RX 7900 XTX on 2026-08-19: _"an imported glTF drew its own texture on vk"_,
   via `crates/crcbl/tests/run-gltf-e2e.sh`.
 
-  What the sample still needs from this area is narrower than a slice: the
-  converter has no _app_ consumer, since `gltf_e2e` is a test. That is V-F5's
-  job (opening a file) rather than a missing bridge.
+  `apps/viewer` is now its app consumer, so nothing is left owed here.
 
   Checked at the same time, and also still open then: **V-F2** — since built, as
   `crcbl_render::orbit` — and **V-F4**, where nothing in `crates/` mentions hot
@@ -1475,7 +1473,10 @@ be built already, which is why the list says what was checked and when:
   the milestone actually asks for is a **recording** of the Blender loop, and
   nobody has made one. It also remains the app's own poll rather than P9's
   reload: `crcbl-assets` has no reload of its own.
-- **V-F5 — opening a file.** Path argument natively, drop target in the browser.
+- **V-F5 — opening a file. Half done.** The path argument is native and required
+  — `apps/viewer/src/args.rs`, with a second path refused rather than silently
+  ignored. The browser half is not written: nothing under `web/` listens for
+  `dragover` or `drop`, so there is no way to hand the wasm build a file at all.
 
 Then **V-S**, the sample itself, against the plan's own exit criteria: ≥90% of
 the Khronos glTF-Sample-Models suite loads without crashing, unsupported
@@ -1537,9 +1538,12 @@ The seven are three different things:
   limit in `USAGE`, which today only states the rule and not that it will refuse
   the file. The middle one looks right and is the most work.
 
-The second half of that — stopping an animation the importer already ignores
-from killing the parse — has shipped. **Reporting `extensionsRequired` by name
-has not**, and it is what the second exit criterion needs.
+Both halves of that have shipped: `parse_without_animations` stops an animation
+the importer already ignores from killing the parse, and
+`warn_unsupported_extensions` names every `extensionsRequired` entry this
+importer cannot honour. What the second exit criterion still lacks is a check
+that those messages are _actionable_ against real documents rather than fixtures
+— see the paragraph below.
 
 **The other two exit criteria are still unmeasured.** The skip messages are
 asserted by `app::tests`' `skip_report` cases, which is the message's _shape_
@@ -2110,9 +2114,13 @@ Two gaps remain in the same bug class:
   happens" mechanism that broke on WebGPU — but every GPU suite here creates
   `SurfaceTarget::Offscreen`, whose ring uses real sRGB resources and never
   exercises the cast. `crcbl-mtl`'s `CAMetalLayer` path versus its offscreen
-  ring is the same shape. **No windowed GPU e2e exists on any backend** and
-  there is no compositor in the test environment, so closing this needs a
-  windowed harness, not another assertion.
+  ring is the same shape. **A windowed harness now exists, and only on vk**:
+  `tools/run-samples-windowed.sh` and
+  `crates/crcbl-shell/tests/run-{x11,wayland}-e2e.sh` drive real surfaces
+  against a real compositor, but neither backend under discussion has a runner
+  that can reach one here. Both are DEFERRED, so this stays open by that
+  decision rather than for want of a harness shape — the shape is settled and
+  the vk copy is the template.
 
 ### The apt cache does not close the mirror window
 
@@ -11428,12 +11436,16 @@ sampler filters nearest — a filtered read of a page with no mips buys a shimme
 rather than a smoother picture. The first minified material texture is what
 makes the compute pass worth writing.
 
-**Nothing imports a texture.** `crcbl-scene` parses glTF materials and this
-slice did not wire it. An application can now author layers — `PageDesc` at its
-own extent, `push_layer` per layer — but it has to produce the texels itself:
-the demo's are `crcbl_render::scene`'s `CHECKER_TEXELS` and whatever
-`PageDesc::opaque_white` writes into layer 0. Wiring an importer needs a
-decoder, a page allocator and a lifetime story for a layer, which is P9's.
+**glTF base-colour import landed; every other map is still unimported.**
+`crcbl-scene`'s `gltf_render` decodes the `baseColorTexture` of every material
+that names one, resamples them onto one square extent (`MAX_PAGE_EXTENT`) with
+an alpha-weighted box filter in linear light, and hands back a `PageDesc` plus
+the per-material layer indices. `PageDesc::UNTEXTURED_LAYER` is what a material
+with no texture — or one that would not decode — keeps, so the surface shades by
+its factors rather than black, and every skip is logged. What is not imported is
+everything the single texture column cannot hold: normal, metallic-roughness and
+emissive maps, each of which needs a second page for the reason the first bullet
+gives.
 
 **A material is a start-up write.** `MaterialTable` is one host-visible buffer
 with no ring — the mesh table's shape, not `InstancePool`'s — because nothing
@@ -11835,9 +11847,10 @@ in every job including the ones that need nothing, and is invisible to the
 
 ### glTF import: what the first half left, and what it found upstream
 
-`crcbl_scene::import_gltf` parses; nothing uploads. Written down here because
-each item below is a decision or a gap rather than a line of work someone can
-pick up from the code alone.
+`crcbl_scene::import_gltf` parses and `gltf_render::build_render_scene` turns
+the result into a `SceneDesc` the renderer draws — `apps/viewer` is the caller.
+Written down here because each item below is a decision or a gap rather than a
+line of work someone can pick up from the code alone.
 
 **`gltf` 1.4.1 panics on malformed input, in two places, and both were
 reproduced rather than inferred.** `gltf_json::mesh::primitive_validate_hook`
@@ -11856,24 +11869,23 @@ several of them (buffer views inside their buffers, accessor spans inside their
 views, indices inside their own vertex array) are things `gltf` never checked at
 all. Not reported upstream yet; that is the open action.
 
-**A scaled glTF node produces a non-rigid `GltfInstance::transform`, and
-`GpuInstance::transform` requires rigid.** The shader transforms normals with
-the matrix's 3×3 part and no inverse-transpose, so a node with non-uniform scale
-would light wrongly once uploaded. The importer preserves the scale deliberately
-— dropping it here would take the choice away.
+**A scaled glTF node is passed through with its scale, and reported.** The
+importer preserves the scale deliberately — dropping it here would take the
+choice away — and `build_render_scene` emits a `Skip` naming the node and logs
+it. Baking at import was rejected because it loses instancing of one mesh at
+several scales, and refusing the node outright would fail files that are
+otherwise fine, which is the opposite of what the viewer needs.
 
-**Picked, and it was a fourth option: pass the matrix through and report
-non-uniform scale loudly.** `build_render_scene` emits a `Skip` naming the node
-and logs it; the object still draws, and only its lighting is wrong. Uniform
-scale is exact, because the mesh shader normalises the interpolated normal, so
-the defect is confined to genuinely non-uniform nodes. Baking at import was
-rejected for the reason above — it loses instancing of one mesh at several
-scales — and refusing the node outright would fail files that are otherwise
-fine, which is the opposite of what the viewer needs.
-
-**Still owed if a real file needs it:** a per-instance normal matrix (a wider
-`GpuInstance`) is the only way to make non-uniform scale actually correct.
-Nothing has asked yet; the skip makes it visible when something does.
+**Both defects the skip was written for are now closed in the shaders, and the
+skip stayed for the third.** Shading is exact under any affine transform, since
+both mesh shaders take the normal through `normal_basis`, the cofactor matrix;
+and no cluster facing the camera can be rejected, since `cluster_survives` skips
+the normal-cone test unless the transform preserves angles. What is left is
+throughput — such an instance is culled by its bounding sphere alone — which is
+what the skip now says, and what "What a scaled instance still costs the mesh
+path" carries the bound for. A per-instance normal matrix, once considered the
+fix here, is **not** needed: the cofactor is computed in the shader from the
+transform already uploaded.
 
 **Malformed files are `StorageError::Other(String)`.** That is deliberate reuse
 — a second error enum beside `StorageError` would make every caller of the
@@ -12447,19 +12459,20 @@ All were real, all are fixed, and all three are invisible to a mouse:
 ## What `crcbl lod` left owed
 
 - **`preview` needs a scene that can draw an imported mesh, and none exists.**
-  `crcbl::screenshot::Scene` is a closed enum of three built-in scenes and
+  `crcbl::screenshot::Scene` is a closed enum of built-in scenes and
   `OffscreenSetup::open` takes one of them, so "render this glTF at this level"
   is a new capability rather than a delta on `crcbl screenshot`. That is the
   prerequisite, and it is also what a golden frame per LOD level would need.
-- **`crates/crcbl-shaders/tools/cook-clusters.rs` duplicates
-  `ClusterDag::cook()`.** The transcription now lives on the type in
-  `crcbl-scene`, where both callers can reach it; the example still has its own
-  private copy and should call the method instead. One file, mechanical.
+  `apps/viewer` draws an imported file and could be the place this lands
+  instead, at the cost of a windowed app in a bake tool's path.
 - **`stats` only reports nodes the scene draws.** A mesh no node instantiates is
   invisible to it; `--node` reaches any node in the table.
-- **The importer's skip warnings are invisible from the CLI**, which installs no
-  logger — a primitive dropped for not being a triangle list is silent, and only
-  total emptiness is caught.
+- **The importer's skip warnings are invisible from `crcbl lod`**, which
+  installs no logger — a primitive dropped for not being a triangle list is
+  silent, and only total emptiness is caught. `crcbl import` fixed its own half
+  by calling `crcbl::core::log::init_logging()` in `import_cmd.rs`; `lod_cmd.rs`
+  should do the same, or the call should move to the one place both enter
+  through.
 - **`gen` writes one DAG per file**, so a multi-primitive mesh takes one run per
   primitive.
 - **The asset-key rule bites on the command line.**
@@ -12469,9 +12482,12 @@ All were real, all are fixed, and all three are invisible to a mouse:
 - **The stall fixture is empirical**: `grid(56)` stalls twice on this decimator
   where `grid(48)` and `grid(64)` do not. The test says so and says to pick
   another fixture rather than delete the check if the decimator changes.
-- **`crates/crcbl-cli/src/args.rs` is 1592 lines** and its own docs say to take
-  `clap` and delete it "when this file passes roughly two hundred lines of
-  `match`" — a line it was well past before this added 285 more.
+- **`crates/crcbl-cli/src/args.rs` is far past the size its own docs set as the
+  reconsideration point.** The module header says to take `clap` and delete the
+  module "when this file passes roughly two hundred lines of `match`", and every
+  subcommand added since has widened the gap. The decision is recorded there
+  with its four grounds; what is owed is re-reading them against the file as it
+  now stands.
 
 ## What the light list left owed
 
@@ -12481,15 +12497,9 @@ recorded in `docs/plan/18-render-features.md`. What is left:
 - **Both closed**: `Scene::Spot` draws a cone and asserts its shape by pixels,
   and the froxel bound is a cone as well as a sphere (144 froxels to 91 on a
   narrow spot, every golden unmoved).
-- **The CLI's `--scene` knows only `cube`, `sprite` and `ui`**, so `Dunes`,
-  `Lights` and `Spot` are reachable only from the test suite, and
-  `run-cross-backend-e2e.sh` therefore does not cover them.
 - **`spot_cone` is a linear ramp in cosine space, not a smoothstep** — worth
   knowing before someone "fixes" the falloff to match a description that was
   never in the code.
-- **Spot shadows landed; point-light shadows are what is left.** The atlas is a
-  fixed grid and the rule for which lights get maps is `shadow::Selection`. See
-  "What punctual-light shadows left owed" below.
 - **`mesh.png`, `mesh_ortho.png` and `mesh_second.png` differ from what this
   machine's lavapipe produces** by exactly one channel level across 80–96 % of
   pixels, comfortably inside tolerance. **Pre-existing** — identical before and
@@ -13220,17 +13230,19 @@ diagnosing the code.
 
 ## Profiling and benchmarking: decisions taken 2026-08-13, before any code
 
-`docs/plan/40-profiling.md` is new and specifies the whole thing; it is a
-cross-cutting track in the roadmap alongside CLI, testing, audio, persistence,
-debug tools and pixel art. Nothing is implemented. The decisions, so they are
-not re-argued when a slice starts:
+`docs/plan/40-profiling.md` specifies the whole thing; it is a cross-cutting
+track in the roadmap alongside CLI, testing, audio, persistence, debug tools and
+pixel art. `crcbl_core::trace` has since landed — see below — and nothing else
+in the plan has. The decisions, so they are not re-argued when a slice starts:
 
 - **Trace export is Chrome Trace Event JSON**, which Perfetto and
-  `chrome://tracing` both read. Text, no dependency, and `crcbl-cli` already has
-  JSON machinery. **Tracy was considered and declined for now**: it is a client
-  library, therefore a new dependency and the user's call, and its wire protocol
-  is not something to hand-roll. If it is wanted later it is an optional feature
-  over the same span data rather than a second instrumentation pass.
+  `chrome://tracing` both read. Still unwritten: `crcbl_core::trace::Snapshot`
+  has `report()`, a human summary, and no JSON emitter. Text, no dependency, and
+  `crcbl-cli` already has JSON machinery. **Tracy was considered and declined
+  for now**: it is a client library, therefore a new dependency and the user's
+  call, and its wire protocol is not something to hand-roll. If it is wanted
+  later it is an optional feature over the same span data rather than a second
+  instrumentation pass.
 - **Spans are always compiled and gated at runtime by an atomic**, not compiled
   out behind a feature. A profiler you have to rebuild to use is one nobody
   turns on mid-investigation, and a build that changes what it measures is the
@@ -13804,16 +13816,18 @@ lives in `crcbl_shaders::meshlet`, the builder stayed in `crcbl-scene` and
 re-exports it, and `crcbl-render` gained no dependency on `crcbl-scene`. What is
 left:
 
-- **Only `apps/sandbox` constructs a `ForwardRenderer`, so only sandbox has a
-  mesh to draw.** Worth knowing before reading too much into which samples
-  select which `GeometryPath`: `EmitTail::from_caps` is the sole reader of
-  `geometry_path()` in `crcbl-render`, the sprite pass records a plain
-  `encoder.draw` and the UI pass a plain `encoder.draw_indexed`, and neither
-  branches on a selector. The other samples ask for `MESH_SHADER` to satisfy
-  sample rule 12 and to make the downgrade line name it — not for speed.
-  Measured on horde at 10 000 instances: no difference, with the between-arm gap
-  smaller than the within-arm spread. §3.5's exit criterion is about meshlets
-  and cluster LOD, which none of these samples have.
+- **A sprite-only sample's `GeometryPath` selection says nothing about it.**
+  `apps/sandbox`, `quarry`, `lantern` and `viewer` all construct a
+  `ForwardRenderer` and have meshes to draw; the 2D samples do not. Worth
+  knowing before reading too much into which of those select which path:
+  `EmitTail::from_caps` is the sole reader of `geometry_path()` in
+  `crcbl-render`, the sprite pass records a plain `encoder.draw` and the UI pass
+  a plain `encoder.draw_indexed`, and neither branches on a selector. A 2D
+  sample asks for `MESH_SHADER` to satisfy sample rule 12 and to make the
+  downgrade line name it — not for speed. Measured on horde at 10 000 instances:
+  no difference, with the between-arm gap smaller than the within-arm spread.
+  §3.5's exit criterion is about meshlets and cluster LOD, which `quarry` is the
+  sample that actually has.
 - **`apps/hud` reports `IndirectPerBatch` / `ArrayPages` on an RX 7900 XTX**,
   which sample rule 12 arguably forbids. Its `desc()` omits `GPU_DRIVEN`
   deliberately — nothing in it issues an indirect draw, and it builds neither
@@ -14349,7 +14363,8 @@ point. **Nothing was retuned.**
   at 0.40 m, 95.6 at 0.30 m, 83.4 at 0.20 m. A 16% cut where two walls close
   most of the hemisphere, against the 25% a single wall gives. Not chased: it is
   in the sunlit part of the floor, so ambient is a smaller share of the pixel
-  there, and separating the two needs the AO-off frame nothing can produce yet.
+  there, and separating the two needs an AO-off frame of the same view, which
+  `--no-ao` can now produce.
 - **`DEPTH_TOLERANCE_RADII` finally has something to be measured against, and
   shows no halo at it.** The room puts two surfaces one to two metres apart in
   view depth inside one kernel footprint at three places: the metal block's
@@ -14359,11 +14374,14 @@ point. **Nothing was retuned.**
   57.0 in two. So the depth-aware blur is not smearing a near surface's
   occlusion onto a far one at 2.0 radii.
 - **That is an upper bound on the artefact, not a tuning measurement, and the
-  reason is the missing toggle.** Every number here is AO folded into a shaded
-  pixel. Isolating the term needs the same frame with the occlusion pass off,
-  which is the first row of the lantern entry above. Until that exists,
-  `DEPTH_TOLERANCE_RADII` can be said not to be _visibly_ wrong and cannot be
-  said to be right.
+  measurement that would settle it has still not been taken.** Every number here
+  is AO folded into a shaded pixel. Isolating the term needs the same frame with
+  the occlusion pass off and a per-pixel difference against it. The toggle that
+  blocked this exists now — `--no-ao` in `apps/lantern/src/args.rs` and the `AO`
+  row in `menu.rs` — so the work is takeable: run the golden projection twice,
+  difference the two frames, and re-read the corner and the silhouette-edge
+  profiles on the isolated term. Until someone does, `DEPTH_TOLERANCE_RADII` can
+  be said not to be _visibly_ wrong and cannot be said to be right.
 - **A finding worth more than any of them: the sun's shadow bias contaminates
   the floor's occlusion profile near a wall.** The first profile taken —
   approaching the `-x` wall — read 49 at 0.8 m and 138 at 0.25 m, which is
@@ -14809,31 +14827,6 @@ finds.
 effect set, `EffectRequest` carries the three requested layers,
 `EffectRequest::resolve` applies the order, and `ForwardRenderer::begin_frame`
 resolves once per frame and freezes the answer. What follows is what that left.
-
-### One of the four toggle layers has no source in the tree
-
-`EffectRequest::video` is a field nothing but a test writes. It is present
-because the _order_ is what was built — a resolution point missing one of its
-inputs cannot be shown to apply them in the right order — and
-`crcbl_render::effects`' module docs carry a table saying which are wired.
-
-`EffectRequest::camera` has a source as of `apps/lantern`'s in-scene monitor: a
-`ForwardRenderer` per view, each holding the request its own view asked for, and
-`room::MONITOR_STACK` is the monitor view's. It is **not** the render-stack RON
-topic 18 describes — nothing in this workspace reads or writes RON, there is no
-`ron` dependency and no `.ron` file — and that remains a real difference: a RON
-file would let a stack be authored without a recompile. Left as a separate
-question rather than folded into this one, because the layer it would feed now
-has a consumer either way.
-
-- **`[engine.video]` is wired now, and `apps/lantern` consumes it.**
-  `GpuContext` reads the player's `settings.toml` while it opens and
-  `GpuContext::effect_request` hands the layer over;
-  `crcbl::settings::VIDEO_KEYS` is the one place a key is spelled, and the
-  schema question resolved to a `(key, bit)` table rather than a `serde`
-  section, so `crcbl-store` still has no idea what an effect is. Where the file
-  lives is `GpuContextDesc::label`'s directory, the same name the samples
-  already give `Backing::platform`.
 
 ### The device-capability clamp is real and its rule set is empty
 
@@ -15575,51 +15568,6 @@ none, and the failure it prevents already fails loudly in the Pages job on every
 pull request. Worth revisiting if the tag table grows to the full surface and
 the two tables start being edited in separate sessions.
 
-## The command stream is driven, but only the probe puts anything in it
-
-`web/engine/demo.js`'s frame loop drains the stream, replays it and delivers
-replies, on every frame of every demo. The only thing that ever encodes into it
-is `crcbl-webgpu`'s probe, which the browser gate drives; in an ordinary page
-`len` answers 0 and the loop costs one integer call. That is the intended state
-rather than an unfinished edge, but it is worth writing down so nobody reads the
-wiring as a working backend.
-
-- **No HAL implementation writes through `StreamChannel::encode`.** The probe's
-  shim calls `crcbl_webgpu::web::install` and nothing else does. This ends when
-  the WebGPU backend lands.
-- **"Encoding moves the buffer" is documented, not tested.** The stable half —
-  that `release` does not move it — is asserted. Forcing a `Vec` realloc
-  deterministically is allocator-dependent, so the moving half rests on the
-  documented rule that a JS view must not outlive the frame it decoded.
-
-### The umbrella's re-export is not what keeps the symbols
-
-`crates/crcbl/src/lib.rs` re-exports `crcbl_webgpu as webgpu` on wasm32, and
-that re-export is **not** required for the exports to reach the artifact.
-Measured: a build with the dependency alone and one with the dependency plus the
-re-export produce a byte-identical `crcbl_breakout.wasm` — compared with `cmp`,
-not a diff wrapper — and `cargo machete` stays green either way.
-
-It is kept so the crate is genuinely named by something rather than the ABI
-resting on rustc keeping an rlib's `#[unsafe(no_mangle)]` symbols when nothing
-references it, which `web/tools/check-exports.mjs`'s own header calls
-unguaranteed. Deleting it is safe today, and `check-exports` is what would
-notice the day that stops being true.
-
-### Prettier rewrites unrelated lines in workflow YAML
-
-Running `prettier --write` on `.github/workflows/pages.yml` reflows unrelated
-double-quoted scalars to single quotes. The repo has no prettier config and no
-prettier step in CI, so on YAML it is a formatter that only ever produces
-drive-by diffs. Either adopt it for YAML with a config that settles quote style,
-or keep it to markdown, where the project rule already puts it. Left alone for
-now; the rewrites were reverted by hand.
-
-### Not verified
-
-- The stream exports on any target other than `wasm32-unknown-unknown` release.
-  They are `cfg`-gated off elsewhere by design, so there is nothing to run.
-
 ## What the reply channel still owes
 
 Both directions now run under the real browser gate: `web/engine/demo.js`'s loop
@@ -15687,116 +15635,6 @@ The macOS and Windows **runtime** behaviour of the new registry entry. `crcbl`,
 `crcbl-mtl` and `crcbl-dx12` all type-check clean against `aarch64-apple-darwin`
 and `x86_64-pc-windows-msvc`, but no test ran on either platform; that verdict
 only comes from CI.
-
-## The stream carries adapters, a device and a surface; the backend does not exist
-
-A browser enumerates adapters, opens a device and resolves a real canvas into a
-`GPUCanvasContext`, all through the stream and all proven by groups G and H of
-the browser gate. What stands between that and `crcbl::backend` accepting
-`webgpu`:
-
-- **Something that owns a frame loop.** `open` must resolve after at least one
-  round trip. `web/engine/demo.js`'s loop now drains, replays and delivers, so
-  the page's half exists — but it is the demo's loop, and a backend that only
-  works inside `bootDemo` is not a backend. What is owed is the same three steps
-  driven by something the backend constructs.
-- **`impl Instance`, `impl PendingDevice`, `impl Device`.** Each is deliberately
-  absent rather than stubbed, and `instance.rs` and `device.rs` argue why in
-  their module docs: an impl written before the commands exist is a wall of
-  methods that compile and answer nothing, and a `PendingDevice::poll` with no
-  `Device` behind it can only ever answer `Pending`, which passes any test that
-  polls a few times and gives up.
-- **The feature intersection**, which has its own entry below.
-
-### The browser golden gate is wired, and two scenes are excused by name
-
-`web/run-render-harness-e2e.sh` now runs in `pages.yml` on Linux, with
-`--expect-fail ssr,ui`. It is the only check in the tree comparing the browser's
-_pixels_ against the same references the native suites use — the gap the sRGB
-bug went through, since the goldens covered the offscreen path that already
-worked and the browser gate read only text.
-
-**The comparison is deterministic across machines, which was not assumed.** The
-first green CI run reported the same pixel counts as the local one to the digit
-— `ssr` 25611 differing and 459 over tolerance, `ui` 3872 and 506. So hosted
-SwiftShader and local Chromium agree exactly, the expected-fail list is not
-machine-specific noise, and a future change to either scene will move the
-numbers rather than drift them.
-
-**The two exclusions are not a suppression.** A listed scene that starts
-_passing_ fails the run and says the list is stale, so the moment a driver
-update or a fix makes either match, CI forces the list to be updated. Both print
-their full numbers on every green run: `ssr` 58 gross pixels and ssim 0.988822,
-`ui` 506 and ssim 0.983257.
-
-**What is still owed, and it is a measurement rather than a decision:**
-
-- **macOS and Windows need one run each to write their lists from.** The
-  mechanism is exact in both directions, so a guessed list fails either as a
-  regression or as a stale entry — correct behaviour, but not a way to learn.
-  Note the Windows probe's four expected failures do **not** transfer: those are
-  a canvas readback stranding the queue behind it, and this harness never
-  touches a canvas.
-- ~~`ui` has never been checked on real hardware~~ — **measured, and both scenes
-  pass.** Driving the same harness against this machine's discrete adapter
-  instead of SwiftShader gives **11 of 11**: `ui` at max channel delta **1**
-  with **zero** pixels over tolerance, and `ssr` at max delta 9 with zero
-  grossly wrong. So neither is a backend defect — **the WebGPU backend draws
-  every one of the eleven goldens correctly on real hardware**, and both
-  exclusions are properties of the software rasteriser CI has to use.
-
-  Two things follow. The `--expect-fail ssr,ui` list is a statement about
-  SwiftShader, not about `crcbl-webgpu`, and it should empty the day a hardware
-  runner exists — which the mechanism will force, since a listed scene that
-  passes fails the run. And the harness pins `swiftshader` deliberately: a
-  golden comparison must not leave the rasteriser to the machine, so this was
-  measured by patching a copy and restoring it, not by changing the gate.
-
-### REVERSED IN FACT — the probe was going to be deleted and became the gate
-
-This entry used to say: `crcbl-webgpu`'s probe, its `__crcbl_web_gpu_probe_*`
-exports and `web/engine/gpu-probe.js` exist only so the round trip is observable
-before a backend exists, and **delete all three when the backend installs its
-own** — because a second way to drive the stream survives by accident and then
-has to be kept working.
-
-**The opposite happened, and deliberately.** The probe page now carries 25
-groups (`G` through `AE`), runs in three CI jobs across Linux, macOS and
-Windows, and is the **only** gate on this backend's seam — the native suite is a
-native binary and cannot reach a browser at all. Group AB opens a real
-`WebGpuDevice` and holds its whole `supports()` matrix against `DIVERGENCES`,
-which is the browser counterpart of the native parity report and the only thing
-checking those declarations anywhere.
-
-**So the original reasoning was right about the risk and wrong about the
-remedy.** A second way to drive the stream did survive — and it turned out to be
-the one that could reach the platforms the engine actually ships on. The demo
-gates assert log lines and HUD text; the probe asserts bytes.
-
-**What is still true from the old entry**, and worth keeping: the probe refuses
-when anything else has installed a channel, so the two ways of driving the
-stream cannot both be live at once. That is what has kept it from being a second
-maintenance burden rather than a second gate.
-
-### One command is answered exactly once
-
-`drain_replies` refuses a second reply for a sequence, in the same buffer or a
-later one, so an enumeration yields one adapter. That fits WebGPU, where
-`requestAdapter()` grants one or none. A backend that must report several needs
-a counted-list reply shape rather than several replies.
-
-This entry used to end by complaining that `Reply::Adapter`'s doc said "one
-entry of an enumeration", implying the forbidden thing. It does not any more —
-the `NoAdapter` doc beside it now says "an enumeration is _one_ reply" and gives
-the refusal that enforces it — so that half is closed and only the design note
-above is worth keeping.
-
-### Not verified
-
-The round trip on hardware Chromium, on Firefox, or on a browser whose
-`adapter.info` is populated differently. The gate ran under SwiftShader in Xvfb.
-The name check compares against the same browser, so it holds wherever it runs —
-but nowhere else has run it.
 
 ## The adapter reply is not filtered, though the mapping is now gated
 
@@ -16026,39 +15864,6 @@ Whether `Features::DEBUG_MARKERS` genuinely reaches a capture tool in every
 browser. It is granted unconditionally on the grounds that `pushDebugGroup` is
 core WebGPU, matching what `crcbl-wgpu` did before it was deleted, but nothing
 was measured.
-
-## The device request round-trips; `PendingDevice` is still not implemented
-
-`PendingDevice::poll` returns `DeviceRequestState`, whose `Ready` arm carries a
-`Box<dyn Device>`. With no `Device` impl, `poll` could only ever answer
-`Pending` — a device request that is never ready, on a trait whose contract is
-that it eventually is, and it would pass any test that polls a few times and
-gives up. So the state machine is exposed as `crcbl_webgpu::DeviceProbe`
-instead, and `poll` becomes `absorb` plus a match when `Device` lands.
-
-- **Device loss has no reply.** `GPUDevice.lost` and `uncapturederror` belong to
-  `Device::take_error`; nothing listens for either and there is no tag for them.
-  Deliberate — nothing holds a device long enough to lose one — and a different
-  event from a request that failed.
-- **One device is implied, not enforced.** No command carries a device id. The
-  owner side-table that answers `HalError::ForeignObject` is owed the moment a
-  second device exists, which the HAL's own docs warn about because two pools
-  genuinely issue identical handle bits.
-- **`compatible_surface` crosses and is refused**, loudly, because the replayer
-  has no surface table. `create_surface`, `destroy_surface` and `surface_caps`
-  are still unencoded — the last piece before `impl Instance`.
-- **The "not a copy of its adapter" check degrades on a floor-level adapter**
-  and says so in its detail rather than failing. Forcing a machine-independent
-  difference would need requestable limits on the wire, which `DeviceDesc` does
-  not carry.
-- **The refusal message names bit indices, not flag names** (`bit 9`), because a
-  copy of `Features`'s names in JS would be a second table to keep in step. The
-  names reach a log through the `Features` word the reply carries.
-- **Coverage:** no test opens two devices, and the gate ran only under
-  SwiftShader here — hardware failed the readback control on this machine, which
-  is the documented Xvfb-plus-hardware row rather than a regression.
-- **Pre-existing drift, untouched:** `web/tools/browser-e2e.mjs`'s header still
-  says "Five groups" while A through G exist.
 
 ## Left over from packing draw args into eight storage buffers
 

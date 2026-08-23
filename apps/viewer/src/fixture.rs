@@ -76,13 +76,14 @@ const POINTS_MODE: &str = r#""mode": 0, "#;
 
 /// A `.glb` whose one node scales its axes unequally.
 ///
-/// **A document that loads, draws, and still lost something.** The conversion
-/// places the instance — the geometry is in the right place and lights
-/// correctly — and reports a `scale` skip, because the mesh path's per-cluster
-/// back-face cull carries a cone axis through the bare 3×3, so a scaled
-/// instance can have clusters rejected while they face the camera. That is the
-/// case a listing panel is really for: a file that looks like it arrived intact
-/// and did not.
+/// **A document that loads and draws, and still has something to report.** The
+/// conversion places the instance — the geometry is in the right place and
+/// lights correctly — and reports a `scale` skip, because a scaled cone is no
+/// longer a cone, so the mesh path skips the per-cluster back-face test for
+/// this instance and culls it by its bounding sphere alone. Nothing is
+/// missing; it costs more to draw than its geometry says it should. That is
+/// the case a listing panel is really for: a file that arrived intact and
+/// still has a caveat attached.
 #[must_use]
 pub fn skewed_glb() -> Vec<u8> {
     document(

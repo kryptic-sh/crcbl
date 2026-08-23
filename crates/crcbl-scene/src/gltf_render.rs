@@ -739,26 +739,25 @@ fn place_instances(scene: &GltfScene, slots: &Slots, skips: &mut Skips<'_>) -> V
             None => format!("node {node}"),
         };
         if let Some(ratio) = non_uniform_scale(&transform) {
-            // Not refused: the object draws and shades correctly, and what is
-            // left is a cull that can drop part of it. Refusing the node
-            // outright would lose all of it.
-            //
-            // The shading half of this warning is gone — `mesh.slang` and
+            // Not refused, and nothing about it is now wrong: both halves of
+            // this warning have been closed in the shaders. `mesh.slang` and
             // `mesh_cluster.slang` take a normal through `normal_basis`, the
-            // cofactor matrix, which is exact under any affine transform. What
-            // is left is `cluster_survives`, which carries a cluster's *cone
-            // axis* through the bare 3×3 and leaves its half-angle alone: a
-            // scaled instance can have a cluster rejected as back-facing while
-            // it holds a triangle facing the camera. `docs/backlog.md` carries
-            // what closing it needs.
+            // cofactor matrix, which is exact under any affine transform; and
+            // `cluster_survives` skips the normal-cone test outright unless the
+            // transform preserves angles, so no cluster facing the camera can
+            // be rejected. What is left is throughput — such an instance is
+            // culled by its bounding sphere alone. Reported because a file that
+            // draws more slowly than its geometry says it should is worth
+            // knowing about, and `docs/backlog.md` carries the bound that would
+            // let the cone test run on it.
             skips.push(
                 "scale",
                 at(),
                 format!(
                     "its world transform scales axes unequally (longest ÷ shortest = \
-                     {ratio:.3}); it draws and lights correctly, and the mesh path's \
-                     per-cluster back-face cull carries the cone axis through the 3×3 \
-                     unchanged, so parts of it may go missing"
+                     {ratio:.3}); it draws and lights correctly, and the mesh path \
+                     culls it by its bounding sphere alone because a scaled cone is \
+                     no longer a cone, so it costs more to draw than it should"
                 ),
             );
         }
