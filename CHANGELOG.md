@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-webgpu` holds a buffer binding to its slot's range ceiling and to the
+  memory a shader may write.** Both rules turn on the slot's `BindingKind`,
+  which lives in the bind group layout, so the device now records the buffer
+  bindings of each live layout alongside the buffer sizes and locations it
+  already kept. A binding over `Limits::max_uniform_buffer_range` or
+  `max_storage_buffer_range` — including through
+  `BindingResource::WHOLE_BUFFER`, which is resolved against the recorded size —
+  and a `HostUpload` or `HostReadback` buffer in a
+  `StorageBuffer { read_only: false }` slot are now
+  `HalError::InvalidDescriptor` from `create_bind_group`. The first used to
+  arrive a frame later as WebGPU's own `maxUniformBufferBindingSize` error
+  through `Device::take_error`; the second arrived nowhere at all, because
+  `COPY_DST | STORAGE` is an ordinary legal WebGPU buffer and only D3D12 refuses
+  it. A bind group naming a binding its layout does not declare, or a layout or
+  buffer handle this device did not issue, is refused too.
+
 - **`crcbl-webgpu` refuses a write or a readback past the end of its buffer.**
   `Device::write_buffer` checked only that its end address fits a `u64`, and
   `Device::request_readback` checked nothing, so a range past the end of the

@@ -38,15 +38,16 @@ use std::sync::Mutex;
 
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
-    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, Capability,
-    CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
-    ComputePipelineHandle, Device, DeviceCaps, DeviceRequestState, DisplayTiming, Features,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageViewDesc,
-    ImageViewHandle, MeshPipelineDesc, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle,
-    PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
-    ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
-    SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderSources, SubmitInfo,
-    Support, SurfaceError, SwapchainDesc, SwapchainHandle,
+    BindGroupLayoutDesc, BindGroupLayoutHandle, BindingKind, BindingResource, BufferDesc,
+    BufferHandle, Capability, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
+    ComputePipelineDesc, ComputePipelineHandle, Device, DeviceCaps, DeviceRequestState,
+    DisplayTiming, Features, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc,
+    ImageHandle, ImageViewDesc, ImageViewHandle, MemoryLocation, MeshPipelineDesc, PendingDevice,
+    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle,
+    QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc,
+    SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderSources, SubmitInfo, Support, SurfaceError, SwapchainDesc,
+    SwapchainHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -317,23 +318,38 @@ pub struct WebGpuDevice {
     /// What this device remembers about each live swapchain, keyed by handle
     /// bits. See [`SwapchainState`].
     swapchains: Mutex<HashMap<u64, SwapchainState>>,
-    /// The size of each live buffer, keyed by handle bits.
+    /// The size and memory location of each live buffer, keyed by handle bits.
     ///
     /// Exactly [`query_sets`](Self::query_sets)' reason, for exactly its class
     /// of question: the browser is not needed to know how big a buffer this
-    /// device asked for. That makes a write or a readback past the end of one
-    /// decidable here rather than a frame away, which is what
-    /// [`write_buffer`](Device::write_buffer) and
-    /// [`request_readback`](Device::request_readback) use it for.
+    /// device asked for, or where it asked for it to live. Three seam rules are
+    /// decidable from those two and nothing else — a write or readback past the
+    /// end, a binding range against the slot's ceiling, and a writable storage
+    /// binding of host-visible memory.
+    buffers: Mutex<HashMap<u64, BufferState>>,
+    /// The kind of each binding in each live bind group layout, keyed by the
+    /// layout's handle bits.
     ///
-    /// **Two further seam rules want a second table, not this one.** A binding
-    /// range against
-    /// [`Limits::max_uniform_buffer_range`](crcbl_hal::Limits::max_uniform_buffer_range)
-    /// and a writable storage binding of host-visible memory both turn on the
-    /// *slot's* [`BindingKind`](crcbl_hal::BindingKind), which lives in the bind
-    /// group layout — and this device keeps no layout table, so it cannot tell
-    /// a uniform binding from a storage one. `docs/backlog.md` carries that.
-    buffers: Mutex<HashMap<u64, u64>>,
+    /// The other half of the two binding rules: their ceilings and their
+    /// memory requirement both turn on whether the *slot* is a uniform buffer,
+    /// a read-only storage buffer or a writable one, and that is stated in the
+    /// layout rather than in the bind group. Only the buffer kinds are kept —
+    /// an image or sampler binding has no rule here to answer, so filing it
+    /// would be state nothing reads.
+    layouts: Mutex<HashMap<u64, Vec<(u32, BindingKind)>>>,
+}
+
+/// What this device remembers about a buffer it created.
+///
+/// Only the two fields a rule asks about. The usage flags are not here because
+/// no rule this device can decide asks about them, and the replayer holds its
+/// own copy of the whole descriptor either way.
+#[derive(Clone, Copy, Debug)]
+struct BufferState {
+    /// [`BufferDesc::size`](crcbl_hal::BufferDesc::size), as asked for.
+    size: u64,
+    /// [`BufferDesc::memory`](crcbl_hal::BufferDesc::memory), as asked for.
+    memory: MemoryLocation,
 }
 
 /// What a live swapchain leaves in this device between calls.
@@ -375,7 +391,88 @@ impl WebGpuDevice {
             errors: Mutex::new(ErrorQueue::default()),
             swapchains: Mutex::new(HashMap::new()),
             buffers: Mutex::new(HashMap::new()),
+            layouts: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Holds every buffer binding in a bind group to the two rules its slot
+    /// carries: the range ceiling for its kind, and — for a slot a shader
+    /// writes — device-local memory.
+    ///
+    /// Both need the slot's [`BindingKind`], which is in the *layout*, and the
+    /// buffer's size and location, which are in the buffer. This device records
+    /// both, so both are decidable here; before it did, neither was decidable
+    /// at all and the descriptor went to the wire.
+    ///
+    /// A layout or a buffer this device did not issue is
+    /// [`HalError::InvalidHandle`], and a binding the layout does not declare
+    /// is [`HalError::InvalidDescriptor`] — a miss must not be a pass, or the
+    /// rule is skipped for exactly the descriptors most likely to be wrong.
+    fn check_buffer_bindings(&self, desc: &BindGroupDesc<'_>) -> Result<(), HalError> {
+        let slots = self
+            .layouts
+            .lock()
+            .expect("the layout map was poisoned")
+            .get(&desc.layout.to_bits())
+            .cloned()
+            .ok_or_else(|| HalError::invalid_handle("bind group layout", desc.layout))?;
+        let buffers = self.buffers.lock().expect("the buffer map was poisoned");
+        for entry in desc.entries {
+            let BindingResource::Buffer {
+                buffer,
+                offset,
+                size,
+            } = entry.resource
+            else {
+                continue;
+            };
+            let Some((_, kind)) = slots.iter().find(|(binding, _)| *binding == entry.binding)
+            else {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} is given a buffer, and its layout declares no buffer at that \
+                     binding",
+                    entry.binding
+                )));
+            };
+            let state = *buffers
+                .get(&buffer.to_bits())
+                .ok_or_else(|| HalError::invalid_handle("buffer", buffer))?;
+            let ceiling = match kind {
+                BindingKind::UniformBuffer { .. } => self.caps.limits.max_uniform_buffer_range,
+                BindingKind::StorageBuffer { .. } => self.caps.limits.max_storage_buffer_range,
+                _ => unreachable!("only buffer kinds are filed in the layout table"),
+            };
+            // `WHOLE_BUFFER` is the commoner spelling and carries no number to
+            // compare, so it is resolved into what it actually covers first —
+            // which is the whole reason a size table was needed for this.
+            let bound = if size == BindingResource::WHOLE_BUFFER {
+                state.size.saturating_sub(offset)
+            } else {
+                size
+            };
+            if bound > ceiling {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} is given {bound} bytes of a buffer, over this device's \
+                     {ceiling}-byte limit for {kind:?}",
+                    entry.binding
+                )));
+            }
+            if let BindingKind::StorageBuffer {
+                read_only: false, ..
+            } = kind
+                && !matches!(state.memory, MemoryLocation::DeviceLocal)
+            {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} is a writable storage buffer and was given a {:?} buffer; a \
+                     buffer a shader writes must be MemoryLocation::DeviceLocal, because D3D12's \
+                     upload and readback heaps refuse D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS \
+                     at creation and pin the resource to a state a shader cannot write from. \
+                     Read-only storage bindings of a host-visible buffer are unaffected",
+                    entry.binding, state.memory
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Refuses a range that runs past the end of the buffer it names.
@@ -401,7 +498,8 @@ impl WebGpuDevice {
             .expect("the buffer map was poisoned")
             .get(&buffer.to_bits())
             .copied()
-            .ok_or_else(|| HalError::invalid_handle("buffer", buffer))?;
+            .ok_or_else(|| HalError::invalid_handle("buffer", buffer))?
+            .size;
         let end = offset.checked_add(size).ok_or_else(|| {
             HalError::InvalidDescriptor(format!(
                 "{what} names {size} bytes at offset {offset}, which runs past the end of the u64 \
@@ -764,7 +862,13 @@ impl Device for WebGpuDevice {
         self.buffers
             .lock()
             .expect("the buffer map was poisoned")
-            .insert(handle.to_bits(), desc.size);
+            .insert(
+                handle.to_bits(),
+                BufferState {
+                    size: desc.size,
+                    memory: desc.memory,
+                },
+            );
         Ok(handle)
     }
 
@@ -968,15 +1072,39 @@ impl Device for WebGpuDevice {
         let handle: BindGroupLayoutHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_bind_group_layout(handle, desc)));
+        // Only the buffer slots: they are the ones `create_bind_group` has a
+        // rule to answer about, and an image or sampler entry filed here would
+        // be state nothing reads.
+        self.layouts
+            .lock()
+            .expect("the layout map was poisoned")
+            .insert(
+                handle.to_bits(),
+                desc.entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry.kind,
+                            BindingKind::UniformBuffer { .. } | BindingKind::StorageBuffer { .. }
+                        )
+                    })
+                    .map(|entry| (entry.binding, entry.kind))
+                    .collect(),
+            );
         Ok(handle)
     }
 
     fn destroy_bind_group_layout(&self, layout: BindGroupLayoutHandle) {
         self.channel
             .with(|channel| channel.encode(|stream| stream.destroy_bind_group_layout(layout)));
+        self.layouts
+            .lock()
+            .expect("the layout map was poisoned")
+            .remove(&layout.to_bits());
     }
 
     fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
+        self.check_buffer_bindings(desc)?;
         let handle: BindGroupHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_bind_group(handle, desc)));

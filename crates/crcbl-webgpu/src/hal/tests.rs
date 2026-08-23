@@ -13,12 +13,13 @@ use core::task::{Context, Poll, Waker};
 use crcbl_core::Handle;
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, BindGroupLayoutDesc, BindGroupLayoutEntry, BindingFlags,
-    BindingKind, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc, CompositeAlpha,
-    ComputePipelineDesc, Device, DeviceCaps, DeviceDesc, DeviceType, Extent3d, Features, Format,
-    HalError, ImageDesc, ImageType, ImageUsage, Instance, Limits, MemoryLocation, PendingDevice,
-    PresentMode, QueueKind, ReadbackDesc, ReadbackState, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc,
+    AdapterId, AdapterInfo, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc,
+    BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
+    BufferUsage, CommandEncoderDesc, CompositeAlpha, ComputePipelineDesc, Device, DeviceCaps,
+    DeviceDesc, DeviceType, Extent3d, Features, Format, HalError, ImageDesc, ImageType, ImageUsage,
+    Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
+    ReadbackState, ShaderEntry, ShaderModuleDesc, ShaderStages, SubmitInfo, SurfaceCaps,
+    SurfaceHandle, SwapchainDesc,
 };
 
 use crate::ReplyWriter;
@@ -940,6 +941,157 @@ fn a_write_or_readback_past_the_end_of_its_buffer_is_refused() {
         matches!(error, HalError::InvalidHandle { .. }),
         "a stale handle is stale, not a bad descriptor: {error}"
     );
+}
+
+/// The two binding rules that need the layout's `BindingKind` and the buffer's
+/// size and location together, neither of which this backend used to keep.
+///
+/// A range over the slot's ceiling is what WebGPU calls
+/// `maxUniformBufferBindingSize` and validates itself, so that one did arrive —
+/// through `take_error`, a frame late, rather than from the call. The
+/// device-local rule has no WebGPU equivalent at all: the browser is happy to
+/// bind a `COPY_DST | STORAGE` buffer to a writable slot, so a caller who got
+/// it wrong found out on D3D12 or not at all.
+///
+/// `WHOLE_BUFFER` is the arm that decides whether the size table was worth
+/// keeping: it is the commoner spelling and carries no number, so before there
+/// was a size to resolve it against, checking explicit sizes alone would have
+/// been a guard that misses most bindings.
+#[test]
+fn a_buffer_binding_is_held_to_its_slots_ceiling_and_memory() {
+    let (channel, device) = device_on_fresh_channel();
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    // `Limits::minimum` puts the uniform ceiling at 64 KiB and the storage one
+    // far above it, which is why the ceiling arms use a uniform slot.
+    let ceiling = Limits::minimum().max_uniform_buffer_range;
+    let layout_of = |kind| {
+        device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("one buffer"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    kind,
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                }],
+            })
+            .expect("one buffer binding")
+    };
+    let buffer_of = |size, memory| {
+        device
+            .create_buffer(&BufferDesc {
+                size,
+                memory,
+                ..buffer_desc()
+            })
+            .expect("a buffer")
+    };
+    let group_of = |layout, buffer, offset, size| {
+        device.create_bind_group(&BindGroupDesc {
+            label: None,
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: BindingResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                },
+            }],
+            variable_count: None,
+        })
+    };
+
+    let uniform = layout_of(BindingKind::UniformBuffer { dynamic: false });
+    let writable = layout_of(BindingKind::StorageBuffer {
+        read_only: false,
+        dynamic: false,
+    });
+    let read_only = layout_of(BindingKind::StorageBuffer {
+        read_only: true,
+        dynamic: false,
+    });
+    let small = buffer_of(4096, MemoryLocation::DeviceLocal);
+    let over = buffer_of(ceiling + 4096, MemoryLocation::DeviceLocal);
+    let upload = buffer_of(4096, MemoryLocation::HostUpload);
+    let readback = buffer_of(4096, MemoryLocation::HostReadback);
+    let encoded = names(&channel).len();
+
+    // An explicit range one byte over the uniform ceiling…
+    let error = group_of(uniform, small, 0, ceiling + 1)
+        .expect_err("a range over the ceiling is not a binding this device can make");
+    assert!(
+        format!("{error}").contains(&ceiling.to_string()),
+        "the refusal names the limit: {error}"
+    );
+    // …and the same ceiling reached through `WHOLE_BUFFER`, which is the arm a
+    // size table exists for.
+    let error = group_of(uniform, over, 0, BindingResource::WHOLE_BUFFER)
+        .expect_err("a whole buffer over the ceiling is over it too");
+    assert!(
+        format!("{error}").contains(&ceiling.to_string()),
+        "the whole-buffer arm names the limit: {error}"
+    );
+
+    for (case, buffer) in [("HostUpload", upload), ("HostReadback", readback)] {
+        let error = group_of(writable, buffer, 0, BindingResource::WHOLE_BUFFER)
+            .expect_err("a shader cannot write host-visible memory");
+        let text = format!("{error}");
+        assert!(text.contains(case), "{case}: {text}");
+        assert!(text.contains("DeviceLocal"), "{case}: {text}");
+
+        // The same buffer in a read-only slot is untouched by the rule.
+        group_of(read_only, buffer, 0, BindingResource::WHOLE_BUFFER)
+            .expect("a read-only storage binding of host memory is fine");
+    }
+
+    // A binding the layout does not declare is a caller bug, not a pass.
+    let error = device
+        .create_bind_group(&BindGroupDesc {
+            label: None,
+            layout: uniform,
+            entries: &[BindGroupEntry {
+                binding: 7,
+                array_index: 0,
+                resource: BindingResource::Buffer {
+                    buffer: small,
+                    offset: 0,
+                    size: BindingResource::WHOLE_BUFFER,
+                },
+            }],
+            variable_count: None,
+        })
+        .expect_err("binding 7 is not in a layout that declares only binding 0");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error}");
+
+    // Nothing refused reached the wire — only the four accepted bind groups
+    // (two read-only arms) and the creates before them.
+    let after = names(&channel);
+    assert_eq!(
+        after.iter().filter(|n| **n == "CreateBindGroup").count(),
+        2,
+        "only the two read-only arms may have encoded: {after:?}"
+    );
+    assert_eq!(
+        after.len(),
+        encoded + 2,
+        "a refused binding must not reach the wire: {after:?}"
+    );
+
+    // …and an ordinary in-range device-local binding still encodes.
+    group_of(uniform, small, 0, BindingResource::WHOLE_BUFFER)
+        .expect("4096 bytes of device-local memory is an ordinary uniform binding");
+    assert_eq!(names(&channel).len(), encoded + 3);
 }
 
 // ── (d) a recorded frame's command stream ──────────────────────────────────
