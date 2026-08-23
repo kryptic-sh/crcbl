@@ -1573,7 +1573,7 @@ fn import_reports_what_a_document_holds() {
     }
 }
 
-/// What the importer skipped arrives as a warning on stderr, because this verb
+/// What the importer skipped arrives as a warning on stderr, because `main`
 /// installs the engine logger — the "report what was imported/skipped" half of
 /// `docs/plan/11-cli-headless.md`. A skip is not a failure: the run exits 0 and
 /// the image the file names is still counted.
@@ -1598,6 +1598,39 @@ fn import_warns_about_what_it_skipped_and_still_counts_it() {
     assert!(has_field(&json, "materials", "3"), "{json}");
     assert!(has_field(&json, "images", "2"), "{json}");
     assert!(has_field(&json, "nodes", "1"), "{json}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for image in ["decal", "grime"] {
+        assert!(
+            stderr.contains(image),
+            "the importer's skip warning did not reach the terminal: {stderr}"
+        );
+    }
+    assert!(stderr.contains("skipping image"), "{stderr}");
+}
+
+/// The same warnings reach `crcbl lod`, which drives the same importer.
+///
+/// The logger is installed by `main` rather than by a verb precisely so that
+/// this holds for every verb that imports, not only the one someone remembered.
+/// A refusal is the harder case and the one asserted here: this document has no
+/// mesh, so `lod stats` exits 1 — and the two images it could not read are still
+/// named, because the skip happened before the refusal and is what tells a user
+/// their textures were never going to arrive either.
+#[test]
+fn lod_warns_about_what_the_importer_skipped() {
+    let temporary = TempDir::new("lod-skip");
+    let file = temporary.path().join("absent.gltf");
+    std::fs::write(
+        &file,
+        r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"spare"}],
+"images":[{"name":"decal","uri":"decal.png"},{"name":"grime","uri":"grime.png"}]}"#,
+    )
+    .expect("the document is written");
+
+    let output = crcbl(temporary.path(), &["lod", "stats", arg(&file)]);
+    assert_eq!(code(&output), 1, "a document with no mesh has no LOD chain");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     for image in ["decal", "grime"] {

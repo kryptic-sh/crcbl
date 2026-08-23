@@ -20,14 +20,15 @@
 //!
 //! `crates/crcbl-scene/src/gltf_import.rs` already warns, through
 //! `crcbl_core::log`, for every unsupported extension, every image whose URI
-//! will not resolve and every primitive that is not a triangle list. So this
-//! verb installs the stderr logger and lets those lines reach the terminal
-//! during the import, rather than capturing them into a skip list of its own: a
-//! second mechanism for something the engine already reports would go stale the
-//! first time the importer learned to warn about something new.
+//! will not resolve and every primitive that is not a triangle list. `main`
+//! installs the stderr logger before any verb runs, so those lines reach the
+//! terminal during the import rather than being captured into a skip list of
+//! this verb's own: a second mechanism for something the engine already
+//! reports would go stale the first time the importer learned to warn about
+//! something new.
 //!
-//! Installing the logger also prints its own start-up banner to stderr. That is
-//! the logger's contract, not this verb's output — everything a consumer reads,
+//! The logger also prints its own start-up banner to stderr. That is the
+//! logger's contract, not this verb's output — everything a consumer reads,
 //! human line or `--json` object, is on stdout.
 
 use std::fmt::Write as _;
@@ -46,10 +47,6 @@ use crate::report::{Failure, Outcome};
 /// [`Failure`] if the path names no readable asset, or if the importer refuses
 /// the document.
 pub fn run(args: &ImportArgs) -> Result<Outcome, Failure> {
-    // Before the import, so the importer's own warnings about what it skipped
-    // are on the terminal by the time the counts are. See the module docs.
-    crcbl::core::log::init_logging();
-
     let scene = open(&args.file)?;
     let counts = Counts::of(&scene);
 
@@ -261,7 +258,7 @@ mod tests {
 
     /// An image the document names and the directory does not have is a *skip*,
     /// not a failure: the import succeeds, the image is still counted, and the
-    /// reason went to the logger this verb installs. See the module docs.
+    /// reason went to the logger `main` installs. See the module docs.
     #[test]
     fn an_unresolvable_image_is_skipped_rather_than_fatal() {
         let directory = scratch("skip");

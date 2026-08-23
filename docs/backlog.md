@@ -12467,12 +12467,6 @@ All were real, all are fixed, and all three are invisible to a mouse:
   instead, at the cost of a windowed app in a bake tool's path.
 - **`stats` only reports nodes the scene draws.** A mesh no node instantiates is
   invisible to it; `--node` reaches any node in the table.
-- **The importer's skip warnings are invisible from `crcbl lod`**, which
-  installs no logger — a primitive dropped for not being a triangle list is
-  silent, and only total emptiness is caught. `crcbl import` fixed its own half
-  by calling `crcbl::core::log::init_logging()` in `import_cmd.rs`; `lod_cmd.rs`
-  should do the same, or the call should move to the one place both enter
-  through.
 - **`gen` writes one DAG per file**, so a multi-primitive mesh takes one run per
   primitive.
 - **The asset-key rule bites on the command line.**

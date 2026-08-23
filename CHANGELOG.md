@@ -457,6 +457,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl lod` reports what the importer skipped.** The engine's stderr logger
+  is now installed by `crcbl`'s `main` rather than by `crcbl import`, so every
+  verb that drives the glTF importer surfaces its warnings — an unresolvable
+  image URI, a required extension this importer lacks, a primitive that is not a
+  triangle list. `crcbl lod` previously ran the same importer in silence, and a
+  document whose textures were never going to load looked identical to one whose
+  did.
 - **A WebGPU frame gives back the handles it acquires.** `acquire_next_frame`
   minted a fresh image and image-view handle every frame and never retired the
   pair from the frame before, so a browser-side handle table grew for as long as

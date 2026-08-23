@@ -50,6 +50,16 @@ use crate::args::{Command, Invocation};
 use crate::report::EXIT_USAGE;
 
 fn main() -> ExitCode {
+    // Before any verb runs, so that a verb calling into the engine gets the
+    // engine's own warnings on stderr rather than silence. `import` and `lod`
+    // both drive `crcbl_scene`'s importer, which warns about every unsupported
+    // extension, unresolvable image URI and non-triangle primitive it skipped;
+    // installing the logger per verb is how one of them ended up with those
+    // warnings and the other without. Everything a consumer reads — human line
+    // or `--json` object — is on stdout, so the logger's banner and lines do
+    // not collide with it.
+    crcbl::core::log::init_logging();
+
     // `args_os`, not `args`: the latter panics on an argument that is not valid
     // Unicode, and `--path`, `--engine`, `-o` and `replay`'s file all take
     // paths, which on Linux are bytes. See `args`'s module docs.
