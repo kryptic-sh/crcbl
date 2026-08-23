@@ -16398,11 +16398,13 @@ What is left is only what the suite cannot reach:
 
 - **`crcbl-webgpu` is not in the agnostic suite** (it is a native binary), so
   its half is covered by `a_present_with_no_acquired_frame_is_refused` in that
-  crate's own `hal::tests`. Its refusal is also narrower — it retires the
-  acquired pair at the next acquire rather than at the present, so it does not
-  catch the same frame presented twice. Closing that means reworking when the
-  pair is retired, which is what keeps the replayer holding one pair per
-  swapchain rather than one per frame ever drawn.
+  crate's own `hal::tests`. It now refuses everything the others do, including
+  the same frame presented twice — the concern that reworking when the pair is
+  retired would be needed turned out to be a false constraint: the pair and the
+  fact of having presented it have different lifetimes, so
+  `SwapchainState::presented` records the second without disturbing the first.
+  **Worth remembering as a shape**: "these two facts are stored in one place on
+  the other backends" is not a reason they must be here.
 - **CI answered the reconfigure question the same day it was asked.** The new
   agnostic test went red on `dx12 e2e (software adapter)` and green on Metal:
   `crcbl-mtl` clears the slot, `crcbl-dx12` did not. Its `reconfigure_swapchain`

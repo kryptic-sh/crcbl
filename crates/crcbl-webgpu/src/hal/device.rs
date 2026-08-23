@@ -373,6 +373,17 @@ struct SwapchainState {
     /// one entry per rendered frame for as long as it runs. Remembering the
     /// pair is what lets the next acquire retire it.
     acquired: Option<(ImageHandle, ImageViewHandle)>,
+    /// Whether the pair in [`acquired`](Self::acquired) has already been
+    /// presented.
+    ///
+    /// **Separate from the pair because the two have different lifetimes.**
+    /// Every other backend takes its acquire slot at the present, which is what
+    /// lets it refuse the same frame twice; this one cannot, because the pair
+    /// has a second job — the next acquire retires it, and a pair taken at the
+    /// present would leave the replayer's image and image-view tables growing
+    /// by one entry per frame again. So the pair stays and this flag records
+    /// what happened to it.
+    presented: bool,
 }
 
 impl WebGpuDevice {
@@ -1508,6 +1519,7 @@ impl Device for WebGpuDevice {
                 SwapchainState {
                     extent: desc.extent,
                     acquired: None,
+                    presented: false,
                 },
             );
         Ok(handle)
@@ -1530,6 +1542,7 @@ impl Device for WebGpuDevice {
             .or_insert(SwapchainState {
                 extent: desc.extent,
                 acquired: None,
+                presented: false,
             });
         state.extent = desc.extent;
         // The pair a reconfigure leaves behind is the same one an acquire
@@ -1637,7 +1650,12 @@ impl Device for WebGpuDevice {
                 .lock()
                 .expect("the swapchain map was poisoned");
             match swapchains.get_mut(&swapchain.to_bits()) {
-                Some(state) => (state.extent, state.acquired.replace((image, view))),
+                Some(state) => {
+                    // A fresh frame, so it has not been presented — the flag
+                    // travels with the pair it describes.
+                    state.presented = false;
+                    (state.extent, state.acquired.replace((image, view)))
+                }
                 // A handle this device never created, or one already destroyed.
                 // The acquire still goes on the stream — the replayer is the
                 // one that decides what an unknown swapchain is — and there is
@@ -1679,27 +1697,32 @@ impl Device for WebGpuDevice {
         // on three backends and an encoded command here — where the replayer
         // then presents a canvas whose texture this swapchain never handed out.
         //
-        // **What this catches, and what it cannot.** The pair is retired at the
+        // **The pair cannot be the whole answer here.** It is retired at the
         // *next* acquire rather than at the present — see `acquire_next_frame`,
         // which is what keeps the replayer holding one pair per swapchain
-        // instead of one per frame ever drawn — so `Some` here means "an
+        // instead of one per frame ever drawn — so `Some` alone means "an
         // acquire has happened since this swapchain was configured", not "a
-        // frame is outstanding". That catches a present before any acquire, and
-        // a present after a `reconfigure_swapchain` cleared the pair and
-        // destroyed the image behind it, which is the use-after-free of the
-        // two. It does **not** catch presenting the same frame twice; on the
-        // other three backends it does, because they take the slot at present.
-        // `docs/backlog.md` carries the difference.
-        let acquired = self
-            .swapchains
-            .lock()
-            .expect("the swapchain map was poisoned")
-            .get(&present.swapchain.to_bits())
-            .is_some_and(|state| state.acquired.is_some());
-        if !acquired {
-            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
-                "present without a matching acquire_next_frame".to_string(),
-            )));
+        // frame is outstanding". `SwapchainState::presented` is the other half,
+        // and with it this refuses everything the backends that take their slot
+        // at present refuse: a present before any acquire, a present after a
+        // `reconfigure_swapchain` destroyed the image behind the pair, and the
+        // same frame presented twice.
+        {
+            let mut swapchains = self
+                .swapchains
+                .lock()
+                .expect("the swapchain map was poisoned");
+            let ready = swapchains
+                .get_mut(&present.swapchain.to_bits())
+                .filter(|state| state.acquired.is_some() && !state.presented);
+            match ready {
+                Some(state) => state.presented = true,
+                None => {
+                    return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                        "present without a matching acquire_next_frame".to_string(),
+                    )));
+                }
+            }
         }
         self.channel
             .with(|channel| channel.encode(|stream| stream.present(present)));

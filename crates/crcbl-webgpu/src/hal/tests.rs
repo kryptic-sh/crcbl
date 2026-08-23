@@ -1159,6 +1159,21 @@ fn a_present_with_no_acquired_frame_is_refused() {
     present_now().expect("an acquired frame is one to present");
     assert!(names(&channel).contains(&"Present"));
 
+    // …and only once. The pair stays filed until the next acquire retires it,
+    // so `SwapchainState::presented` is what makes a second present a refusal
+    // here, where the other backends simply take their slot.
+    let error = present_now().expect_err("that frame has already been presented");
+    assert!(
+        format!("{error}").contains("without a matching acquire_next_frame"),
+        "{error}"
+    );
+
+    // A fresh acquire clears it again.
+    device
+        .acquire_next_frame(swapchain)
+        .expect("a second acquire");
+    present_now().expect("a newly acquired frame is one to present");
+
     // …and a reconfigure clears it again, which is the use-after-free arm: the
     // image that pair named has been destroyed by the reconfigure.
     device

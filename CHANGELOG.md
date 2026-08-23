@@ -43,11 +43,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the replayer went on to present a canvas whose texture the swapchain had never
   handed out. The arm that matters is a present after `reconfigure_swapchain`,
   which clears the acquired pair _and destroys the image behind it_ — a
-  use-after-free that used to reach the browser as an ordinary command. Note the
-  refusal is narrower here than on the other three: this backend retires the
-  acquired pair at the next acquire rather than at the present, so it catches a
-  present before any acquire and a present after a reconfigure, but not the same
-  frame presented twice.
+  use-after-free that used to reach the browser as an ordinary command. A
+  present before any acquire and the same frame presented twice are refused too,
+  so the rule reads the same here as everywhere else. Getting the last of those
+  took a second piece of state rather than the acquired pair alone: the pair has
+  a second job — the next acquire retires it, and taking it at the present would
+  put the replayer's image and image-view tables back to growing by one entry
+  per frame — so `SwapchainState` records separately whether it has been
+  presented.
 
 - **`crcbl-vk` refuses an image with zero mip levels**, which it silently
   accepted and then clamped to one on the way to `vkCreateImage`. The seam and
