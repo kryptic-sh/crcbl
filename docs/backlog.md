@@ -62,17 +62,26 @@ left, none of them a defect anybody saw:
   this suite on this machine at all — `crcbl-webgpu` reaches a device only on
   `wasm32` and refuses to open natively, which the existing shadow tests hit the
   same way — so those arms are CI's word alone.
-- **The seven-tile region was never actually shrunk back to six.** Every
-  assertion was shown to go red, but the strongest sabotage —
-  `crcbl_shaders::mesh::SHADOW_LIGHT_TILES` back to `SHADOW_POINT_FACES` — needs
-  edits across `crcbl-shaders`' Rust constants and two `.slang` sources, a new
-  atlas shape to satisfy the
-  `ATLAS_COLUMNS * ATLAS_ROWS == CASCADES + LIGHT_TILES` assertion, and
-  regenerated MSL and DXIL. The proxy used instead was widening the spot's
-  `outer_angle` past `MAX_SPOT_HALF_ANGLE` so `can_be_shadowed` refuses it a
-  tile: that produces the same observable — the tile past the point light's cube
-  left at the reversed-Z clear — and does fail the assertion. It is the same
-  failure by a different cause, not the cause itself.
+- ~~The seven-tile region was never actually shrunk back to six.~~ **Run
+  2026-08-23, and both tests catch it.** The sabotage is the real one:
+  `SHADOW_LIGHT_TILES` 7 → 6 with the grid back to 4 × 2 so
+  `ATLAS_COLUMNS * ATLAS_ROWS == CASCADES + LIGHT_TILES` still holds, all four
+  target sets regenerated with the pinned compilers. Same nextest filter both
+  ways, so a failure cannot be a mis-selection: **sabotaged, 2 selected and 2
+  failed; restored, 2 selected and 2 passed.** The shading half failed with
+  `the spot's caster must darken the floor under its cone, but that band measures 107.9 with the caster and 109.3 without it`,
+  which is the shape that matters — the tile assertion alone could be satisfied
+  by an atlas nothing samples.
+
+  Two things about running it are worth keeping. Wrap the sabotage in a shell
+  `trap … EXIT` that reverses the edits and regenerates, so a timeout or a kill
+  cannot leave the tree sabotaged. And drive the tests through
+  `crates/crcbl/tests/run-forward-e2e.sh` rather than a hand-written
+  `cargo test`: the suite is behind `--features forward-e2e`, so an invocation
+  that omits it reports `running 0 tests` and exits **0**. That happened on the
+  first attempt here and read exactly like a pass. The script passes
+  `--no-tests fail` for that reason.
+
 - **The depth-range check inside the atlas test was not red-checked.**
   `every depth is in 0..1` cannot be made to fail without breaking a projection;
   it is the same assertion the two tests beside it carry, and the written-texel
