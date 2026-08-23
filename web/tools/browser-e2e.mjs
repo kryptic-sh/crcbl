@@ -798,6 +798,19 @@ const PROVOCATION = 'crcbl-e2e-deliberate';
 const PROVOCATION_MS = 5_000;
 
 /**
+ * The substring every backend's teardown-leak warning carries.
+ *
+ * `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` write it from their device's
+ * destructor and `crcbl-webgpu` writes it from `Replayer#replay` when the
+ * command stream ends; `crates/crcbl-vk/tests/run-vk-e2e.sh`,
+ * `crates/crcbl-shell/tests/run-x11-e2e.sh`, `run-wayland-e2e.sh`,
+ * `tools/run-samples-windowed.sh` and `web/run-browser-e2e.sh` each fail a run
+ * on it. One literal so that one grep covers all four backends — which is why
+ * it is a constant here rather than a phrase typed into a filter.
+ */
+const TEARDOWN_LEAK = 'object(s) still alive at device teardown';
+
+/**
  * Whether a 404 is the *page* asking for an asset it did not get.
  *
  * The pages declare `/favicon.svg`, which exists, so this is the belt to that
@@ -3175,6 +3188,48 @@ try {
           ' — see crcbl-vk\'s "still alive at device teardown" warning for the' +
           ' same finding on the same engine'
   );
+
+  // **THE ENGINE'S OWN REPORTER, ASKED WHETHER IT RAN.** The check above is
+  // this harness reading the tables; the one below is about the page reporting
+  // for itself, with nothing driving it. `Replayer#replay` warns
+  // `N object(s) still alive at device teardown (…)` — the line `crcbl-vk`,
+  // `crcbl-dx12` and `crcbl-mtl` each write from their device's destructor, and
+  // the line every e2e runner greps — when the stream ends holding anything, and
+  // `web/run-browser-e2e.sh` fails this run on it exactly as `run-vk-e2e.sh`
+  // does.
+  //
+  // **THAT GREP CANNOT PROVE ITSELF**, which is the whole reason this check
+  // exists. A clean run produces no line, and so does a run where the reporter
+  // never fired at all: a `WebGpuDevice::drop` that did not `retain`, a shim
+  // that stopped pumping, a final frame that threw. `Replayer#teardownReport` is
+  // the receipt that tells those apart — `null` until the stream ends, and then
+  // the list it reported on, empty or not. A gate reading only the console is
+  // the "green light wired to nothing" this group was built to remove.
+  const teardownReport = shutDown
+    ? await evaluate(page, `crcbl.gpu.replayer.teardownReport`)
+    : null;
+  check(
+    'I',
+    'the engine reported for itself that its command stream ended',
+    Array.isArray(teardownReport),
+    !shutDown
+      ? 'the demo never stopped, so its stream never ended'
+      : Array.isArray(teardownReport)
+        ? teardownReport.length === 0
+          ? 'the stream ended holding nothing, and said so'
+          : `the stream ended holding ${naming(teardownReport)}`
+        : 'teardownReport is null after a demo that stopped — the stream never ' +
+          'reported its own end, so the "still alive at device teardown" line ' +
+          'web/run-browser-e2e.sh greps for could never have been written'
+  );
+
+  // Lifted out of the page log and onto this run's own output, because the
+  // shell wrapper greps what it can see. The page log is written below and is
+  // the fuller record; these are the lines that fail the run.
+  for (const line of consoleLines.filter((line) =>
+    line.includes(TEARDOWN_LEAK)
+  ))
+    console.log(`web e2e: ${line}`);
 
   writeFileSync(
     join(OUT, `${SLUG}-${chosen.mode}.log`),

@@ -57,10 +57,24 @@ import { StreamReader } from './gpu-stream.js';
  * a frame left unreleased is one the next frame appends to, so a shim that gave
  * up on a corrupt stream would meet the same bytes again forever.
  *
+ * `streamEnded` says this frame is the last one — the run's teardown, drained.
+ * It is read *after* the release and not before, because the release is the
+ * event: `crates/crcbl-webgpu/src/web.rs` parks a strong handle on the channel
+ * when the last encoder drops, and handing the buffer back is what lets that
+ * handle go. Asking first would answer `false` on the one frame it matters for.
+ *
+ * **It cannot be inferred from a length of zero**, which is the reason the
+ * export exists at all: `__crcbl_web_gpu_stream_len` answers `0` for a page that
+ * started before the engine did *and* for a run that has finished, so a shim
+ * watching only the length cannot tell a run that has not begun from one that is
+ * over. `Replayer#replay` reads this flag as the cue to report what the browser
+ * side is still holding, which is `crcbl-vk`'s device-teardown warning asked on
+ * this side of the seam.
+ *
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @returns {{ baseSequence: bigint, commands: object[] } | null}
+ * @returns {{ baseSequence: bigint, commands: object[], streamEnded: boolean } | null}
  * @throws {import('./gpu-stream.js').StreamDecodeError} Whatever the buffer's
  *   contents produce. The two halves of this format are hand-written, so this
  *   is a bug in one of them rather than a condition to recover from.
@@ -74,6 +88,8 @@ export function takeCommandStream({ exports, memory }) {
   if (len === 0) return null;
   const ptr = exports.__crcbl_web_gpu_stream_ptr();
 
+  /** @type {{ baseSequence: bigint, commands: object[], streamEnded: boolean }} */
+  let frame;
   try {
     // THE VIEW. Built after the pointer call, used before anything calls back
     // into wasm, and not stored.
@@ -86,10 +102,16 @@ export function takeCommandStream({ exports, memory }) {
     ) {
       commands.push(next.command);
     }
-    return { baseSequence: reader.baseSequence, commands };
+    frame = { baseSequence: reader.baseSequence, commands, streamEnded: false };
   } finally {
     exports.__crcbl_web_gpu_stream_release();
   }
+  // After the release, for the reason in this function's docs. A decode that
+  // threw never gets here, and that is deliberate: the frame's own destroys did
+  // not all run, so what the tables hold would name the throw's casualties as
+  // things the engine leaked.
+  frame.streamEnded = exports.__crcbl_web_gpu_stream_ended() === 1;
+  return frame;
 }
 
 /**

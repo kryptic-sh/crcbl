@@ -10754,6 +10754,119 @@ async function main() {
     );
   }
 
+  // ---- the teardown report, and the receipt that proves it ran ------------
+  //
+  // `Replayer#replay` warns when the stream ends holding objects, in the words
+  // `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` each use from their device's
+  // destructor — `N object(s) still alive at device teardown (…)` — so that the
+  // one grep every e2e runner already carries covers this backend too. The
+  // event is `takeCommandStream`'s `streamEnded`, which is
+  // `__crcbl_web_gpu_stream_ended` read after the release that let a retained
+  // channel go; here it is set on the frame directly, the transport's own half
+  // being `web/tools/stream-transport.mjs`'s.
+  //
+  // THE LINE IS ASSERTED WHOLE, NOT SEARCHED FOR. The runners match a literal
+  // substring of it, so a rewording that reads just as well to a person is a
+  // gate that silently stops matching, and that is the failure this block is
+  // for rather than a stylistic preference.
+  {
+    const { replayer } = await readyWithDevice();
+    const sampler = handle(9101, 1);
+    replayer.replay(frameOf(deviceLocalBuffer, 950n));
+    replayer.replay(frameOf(hostUploadBuffer, 951n));
+    replayer.replay(
+      frameOf(
+        {
+          name: 'CreateSampler',
+          sampler,
+          label: null,
+          magFilter: 'Linear',
+          minFilter: 'Linear',
+          mipFilter: 'Linear',
+          addressMode: ['ClampToEdge', 'ClampToEdge', 'ClampToEdge'],
+          lodMin: 0,
+          lodMax: LOD_NO_LIMIT,
+          anisotropy: 1,
+          compare: null,
+        },
+        952n
+      )
+    );
+    check(
+      replayer.teardownReport === null,
+      'a run still going has no teardown report'
+    );
+
+    const warned = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => warned.push(args.join(' '));
+    try {
+      replayer.replay({ baseSequence: 953n, commands: [], streamEnded: true });
+      // Again, because the pump asks every frame and a diagnostic that repeats
+      // is one that stops being read. The ABI makes a second ended frame
+      // impossible — a channel that has been let go answers a length of zero —
+      // so this is the belt to that brace.
+      replayer.replay({ baseSequence: 954n, commands: [], streamEnded: true });
+    } finally {
+      console.warn = realWarn;
+    }
+    checkEqual(
+      warned,
+      [
+        'crcbl-webgpu: 3 object(s) still alive at device teardown ' +
+          '(2 buffers, 1 samplers)',
+      ],
+      'the stream ending names what is left, once, in the words the other three backends use'
+    );
+    checkEqual(
+      replayer.teardownReport,
+      [
+        { kind: 'buffers', count: 2 },
+        { kind: 'samplers', count: 1 },
+      ],
+      'and the report is kept, so a gate can read what it saw rather than an absence'
+    );
+  }
+
+  // ---- a clean teardown is silent, and says so out loud -------------------
+  //
+  // THE HALF THAT HAS TO BE EARNED. Silence is what a reporter that never ran
+  // produces too — a `streamEnded` that never arrives, a `retain` that did not
+  // fire — so "no warning" is not evidence of a clean run on its own. The
+  // receipt is: an empty array is a reporter that looked, and `null` is one that
+  // did not. `web/tools/browser-e2e.mjs` asserts on it for that reason.
+  //
+  // The destroy rides on the ending frame itself, which is where the ordering
+  // is decided: a run's last commands are its teardown, so a reporter that
+  // counted before replaying them would name every object the run cleaned up
+  // correctly.
+  {
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(deviceLocalBuffer, 960n));
+    const warned = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => warned.push(args.join(' '));
+    try {
+      replayer.replay({
+        baseSequence: 961n,
+        commands: [{ ...destroyBuffer, buffer: deviceLocalBuffer.buffer }],
+        streamEnded: true,
+      });
+    } finally {
+      console.warn = realWarn;
+    }
+    checkEqual(
+      warned,
+      [],
+      'a run that destroyed what it made warns about nothing'
+    );
+    checkEqual(
+      replayer.teardownReport,
+      [],
+      'and the empty report is the evidence that it was asked at all'
+    );
+  }
+
   // ---- a frame with nothing in it is not an error -------------------------
   // `takeCommandStream` answers `null` when no channel is installed, and an
   // empty `commands` array when a frame encoded nothing. Both are ordinary.

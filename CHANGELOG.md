@@ -16,6 +16,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-webgpu` reports what the browser never let go of at teardown.** The
+  other three backends warn from their device's destructor —
+  `N object(s) still alive at device teardown (…)` — and their e2e runners fail
+  on that line; a command stream has no destructor to hang it on, so the report
+  is made where the objects actually live. A new wasm export,
+  `__crcbl_web_gpu_stream_ended`, answers `1` once the release that drained the
+  run's last frame has let the retained channel go — which a stream length of
+  zero cannot say, since that is also what a page sees before the engine boots.
+  `takeCommandStream` reads it and marks the frame, and the replayer writes the
+  same line, in the same words, **after** that frame's own destroys have run.
+  `Replayer#teardownReport` is the receipt: `null` until the stream ends, then
+  the list it reported on, so a clean run can be told from a reporter that never
+  fired. `web/run-browser-e2e.sh` fails on the line, as `run-vk-e2e.sh` does.
+
 - **A player's `[engine.video]` settings reach every sample that has effects to
   clamp.** `lantern` already did; `viewer`, `quarry` and `sandbox` now hand
   `GpuContext::effect_request` to their renderer as it opens, and `viewer`

@@ -64,14 +64,22 @@
 #   And it is the only gate on **what the WebGPU backend never let go of**.
 #   `crcbl-vk` warns at device teardown for every object a caller never
 #   destroyed, named by kind, and its e2e runners fail on that line;
-#   `crcbl-dx12` and `crcbl-mtl` carry the same warning. `crcbl-webgpu` is a
-#   command stream with no pools to warn about — but the browser side of it is a
-#   handle table per kind, and an object the stream created and never destroyed
-#   is a slot still occupied. `web/tools/gpu-replay.mjs` proves that reading
-#   against a stub — the counts follow the tables down as well as up — and
-#   nothing anywhere reads them off a running engine, so group I here — the demo
-#   stopped through its own button, then `Replayer#liveObjects` asked what is
-#   left — is the whole of that gate. The guard below insists it ran.
+#   `crcbl-dx12` and `crcbl-mtl` carry the same warning. `crcbl-webgpu` has no
+#   device teardown on the Rust side to hang one on — it is a command stream —
+#   but the browser side of it is a handle table per kind, and an object the
+#   stream created and never destroyed is a slot still occupied. So the warning
+#   is written there instead: `Replayer#replay` in `web/engine/gpu-replay.js`
+#   emits the same line, in the same words, when the stream ends.
+#
+#   This script therefore gates it twice, and the two are not the same check.
+#   The grep near the bottom fails the run on that line, exactly as
+#   `run-vk-e2e.sh` does. Group I in the driver — the demo stopped through its
+#   own button, then `Replayer#liveObjects` and `Replayer#teardownReport` asked
+#   what is left and whether anything asked at all — is what stops that grep
+#   from being a pattern that can never match: a clean run is silent and so is a
+#   reporter that never fired. `web/tools/gpu-replay.mjs` covers the reading
+#   itself against a stub, the counts following the tables down as well as up.
+#   The guards below insist both halves ran.
 #
 #   It is **not** the gate on `crcbl-webgpu`'s command stream. Those are the
 #   PROBE groups in `web/tools/probe-groups.mjs`, driven by
@@ -466,6 +474,56 @@ if [ -z "$RELEASED" ]; then
     exit 1
 fi
 
+# And the named guard for the half of group I that is about the *engine*
+# reporting for itself rather than about this harness reading its tables. The
+# grep below is the gate proper; this is what makes the grep worth having.
+#
+# A clean run writes no teardown line, and so does a run whose reporter never
+# fired at all — a `WebGpuDevice::drop` that did not park the channel, a shim
+# that stopped pumping, a last frame that threw. The driver's check reads
+# `Replayer#teardownReport`, which is `null` in the second case and an empty
+# list in the first, so it is the one thing that can tell them apart. Without it
+# the grep below is a green light wired to nothing. Renaming the check in the
+# driver is meant to fail here and be renamed here too.
+REPORTED="$(grep -F 'the engine reported for itself that its command stream ended' "${OUTPUT}.plain" || true)"
+if [ -z "$REPORTED" ]; then
+    echo "crcbl web e2e: the driver never asked whether the command stream reported its own end;" >&2
+    echo "               the teardown warning in web/engine/gpu-replay.js is ungated, and the" >&2
+    echo "               leak grep below cannot tell a clean run from a reporter that never ran" >&2
+    exit 1
+fi
+
+# **The teardown leak report, read rather than left in the log**, spelled the
+# way `crates/crcbl-vk/tests/run-vk-e2e.sh` spells it and matching the same
+# literal. `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` each warn from their device's
+# destructor for every object a caller never destroyed; `crcbl-webgpu` has no
+# device teardown on the Rust side, so `Replayer#replay` warns from the browser
+# when the command stream ends — and a warning fails nothing, which is how the
+# four leaks the vk line found the afternoon it landed were found by a person
+# reading a job log.
+#
+# The lines come from the page's own console, which `web/tools/browser-e2e.mjs`
+# records and echoes onto its output above the page log it writes; they are not
+# this script's reading of anything.
+#
+# The expectation is zero lines, not a judgement call: a demo that stops through
+# its own button has torn down everything it built, so a line here names an
+# object the engine or the game stopped destroying.
+LEAKS="$(grep -F 'object(s) still alive at device teardown' "${OUTPUT}.plain" || true)"
+if [ -n "$LEAKS" ]; then
+    echo "crcbl web e2e: the command stream ended with objects still alive:" >&2
+    while IFS= read -r line; do
+        echo "                $line" >&2
+    done <<<"$LEAKS"
+    echo "              The engine's own teardown reporter wrote that, from" >&2
+    echo "              web/engine/gpu-replay.js. The kinds above are property" >&2
+    echo "              names on the replayer, so crcbl.gpu.replayer.<kind> in a" >&2
+    echo "              console is the next step. Destroy them where they were" >&2
+    echo "              created rather than leaving the line in the log for" >&2
+    echo "              somebody to notice." >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2
@@ -488,4 +546,5 @@ echo "crcbl web e2e: $RAN checks ran in a real browser, ${CONFIG#running against
 # claims left here, and the per-check lines above name the key where there was
 # one.
 echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, and drew moving frames"
+echo "crcbl web e2e: its command stream ended with nothing left alive"
 echo "crcbl web e2e:${ISOLATION#*ok  }"

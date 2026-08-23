@@ -163,6 +163,34 @@ ones that survive a boundary that only opens once a frame.
 `Instance::request_device` already yields a `PendingDevice` with its own `poll`,
 and buffer mapping is already `request_readback` plus `poll_readback`.
 
+### When the stream ends, and who says what leaked
+
+A run's last commands are its teardown, and on the web that is the one frame the
+transport can lose: `GpuContext::destroy` encodes every destroy into the buffer
+and then drops the device, which holds the last `Rc` on the channel. The bytes
+go with it one call before the page's next drain. `web::retain` parks a strong
+handle at that drop and `__crcbl_web_gpu_stream_release` — the shim saying it
+has the bytes — is what lets the handle go.
+
+That release is therefore an event nothing else on this ABI marks: **the page
+now has everything it will ever be sent.** It cannot be inferred from a length
+of zero, because zero is also what a page sees before the engine boots. So it is
+its own export, `__crcbl_web_gpu_stream_ended`, and the shim reads it after the
+release rather than before.
+
+What it is for is the leak report. `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` each
+warn from their device's destructor for every object a caller never destroyed —
+`N object(s) still alive at device teardown (…)` — and every e2e runner in the
+repository fails on that literal. This backend has no such destructor to hang
+one on, and it does not need one: the objects the stream created live in the
+browser's handle tables, so the report belongs there. `Replayer#replay` writes
+the same line, in the same words, when the frame it has just replayed says the
+stream ended — after the frame's own destroys have run, so a clean teardown is
+counted as clean.
+
+The words are load-bearing rather than stylistic: one grep is meant to cover all
+four backends, and a rewording is a gate that silently stops matching.
+
 ## Wire conventions
 
 Inherited wholesale from `crcbl-net`'s `codec.rs`, which is the house style and

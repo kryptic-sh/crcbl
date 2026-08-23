@@ -2785,6 +2785,27 @@ export class Replayer {
    */
   #lost = null;
   /**
+   * What was still in the handle tables when the stream ended, or `null` while
+   * it has not.
+   *
+   * `crcbl-vk`'s `DeviceInner::drop` keeps no such field because it has a
+   * destructor to hang the report on; this side has no device teardown to
+   * observe, so the wasm ABI's `__crcbl_web_gpu_stream_ended` is the event and
+   * this is where the answer it produced is kept.
+   *
+   * **AN EMPTY ARRAY IS NOT `null` AND THE DIFFERENCE IS THE POINT.** `[]` is a
+   * run that ended holding nothing — the good outcome, and the only evidence
+   * anywhere that the reporter ran at all. `null` is a run that has not ended,
+   * *or* one whose teardown never reached this side: a `retain` that did not
+   * fire, a shim that stopped pumping, a final frame that threw part-way. Those
+   * two facts read identically off the warning alone, because the warning is
+   * silence in both cases, which is why `web/tools/browser-e2e.mjs` asserts on
+   * this field rather than on the absence of a console line.
+   *
+   * @type {{ kind: string, count: number }[] | null}
+   */
+  #teardown = null;
+  /**
    * The canvases a `CreateSurface` may name, by the key it names them with.
    *
    * `SurfaceTarget::Web` is "an integer key into the shell's JS-side canvas
@@ -3380,6 +3401,21 @@ export class Replayer {
   }
 
   /**
+   * What {@link Replayer#liveObjects} answered when the stream ended, or `null`
+   * while it has not ended.
+   *
+   * The reporter's receipt. An empty array is a run that finished holding
+   * nothing; `null` is a run that has not finished — or one whose teardown never
+   * arrived here at all, which is the failure a reader of the console warning
+   * cannot tell from success, since both are silence. See the field's own docs.
+   *
+   * @type {{ kind: string, count: number }[] | null}
+   */
+  get teardownReport() {
+    return this.#teardown;
+  }
+
+  /**
    * How many out-of-band errors this file's own callers have not taken yet.
    *
    * The gate's cursor, not the engine's: a `TakeError` carrying errors to wasm
@@ -3474,7 +3510,10 @@ export class Replayer {
    * never once they have finished. Nothing here awaits, and nothing blocks the
    * frame.
    *
-   * @param {{ baseSequence: bigint, commands: object[] }} frame What
+   * A frame whose `streamEnded` is true is the run's last, and this is where
+   * that is acted on — see {@link Replayer#reportTeardown}.
+   *
+   * @param {{ baseSequence: bigint, commands: object[], streamEnded?: boolean }} frame What
    *   `takeCommandStream` returned. `null` is accepted and does nothing, which
    *   is what that function answers when no channel is installed.
    * @throws {ReplayError} On the first command this replayer cannot execute.
@@ -3492,25 +3531,71 @@ export class Replayer {
     // stream, so scoping here would be a stack push, a pop and a round trip to
     // the GPU process sixty times a second to ask about commands that were
     // never issued.
-    if (commands.length === 0) return;
-    // THE SCOPES ARE OPENED BEFORE THE FIRST COMMAND AND CLOSED AFTER THE LAST,
-    // WHICH IS WHAT MAKES THE ATTRIBUTION A SEQUENCE RANGE. See
-    // {@link Replayer#openErrorScopes}. `null` means this flush is unscoped —
-    // no device yet, or a device that is already lost — and its errors reach
-    // the `uncapturederror` listener as they always have.
-    const scoped = this.#openErrorScopes();
-    try {
-      this.#replayEach(baseSequence, commands);
-    } finally {
-      // IN A `finally` BECAUSE THE SCOPE STACK IS THE DEVICE'S, NOT THIS CALL'S.
-      // `replay` throws on a `ReplayError` and on a `SurfaceError`, and a throw
-      // that left three scopes pushed would leave them there for the life of the
-      // page — every later flush nesting three more, and every one of those
-      // capturing errors nothing will ever pop.
-      if (scoped !== null) {
-        this.#closeErrorScopes(scoped, baseSequence, commands.length);
+    if (commands.length > 0) {
+      // THE SCOPES ARE OPENED BEFORE THE FIRST COMMAND AND CLOSED AFTER THE
+      // LAST, WHICH IS WHAT MAKES THE ATTRIBUTION A SEQUENCE RANGE. See
+      // {@link Replayer#openErrorScopes}. `null` means this flush is unscoped —
+      // no device yet, or a device that is already lost — and its errors reach
+      // the `uncapturederror` listener as they always have.
+      const scoped = this.#openErrorScopes();
+      try {
+        this.#replayEach(baseSequence, commands);
+      } finally {
+        // IN A `finally` BECAUSE THE SCOPE STACK IS THE DEVICE'S, NOT THIS
+        // CALL'S. `replay` throws on a `ReplayError` and on a `SurfaceError`,
+        // and a throw that left three scopes pushed would leave them there for
+        // the life of the page — every later flush nesting three more, and every
+        // one of those capturing errors nothing will ever pop.
+        if (scoped !== null) {
+          this.#closeErrorScopes(scoped, baseSequence, commands.length);
+        }
       }
     }
+    // AFTER THE COMMANDS AND NOT BEFORE: this frame is the teardown, so its own
+    // destroys are what empty the tables, and counting first would name every
+    // object the run cleaned up correctly. Deliberately outside the `try` above
+    // as well — a frame that threw part-way left destroys unrun, and blaming the
+    // engine for what the throw stranded is worse than saying nothing.
+    if (frame.streamEnded) this.#reportTeardown();
+  }
+
+  /**
+   * Says what this replayer is still holding now that the stream has ended.
+   *
+   * **`crcbl-vk`'s `DeviceInner::drop` warning, from the other side of the
+   * seam, and worded identically on purpose.** `crcbl-vk`, `crcbl-dx12` and
+   * `crcbl-mtl` each log `N object(s) still alive at device teardown (…)` from
+   * their device's destructor, and their e2e runners fail the run on that
+   * literal substring. `crcbl-webgpu` is a command stream with no pools to warn
+   * about — but these handle tables are where the objects that stream created
+   * actually live, so this is where the same question has an answer, and the
+   * line is spelled the same way so that one grep covers all four backends.
+   *
+   * The kinds are {@link Replayer#liveObjects}'s own, which are property names
+   * rather than prose — `textures`, not "texture" — because they are what a
+   * reader types next: `crcbl.gpu.replayer.textures` in a console is the step
+   * after reading the count.
+   *
+   * **ONCE, NOT ONCE A FRAME.** The `#teardown` guard is what makes that true
+   * of this method; the ABI makes it true anyway, since a channel that has been
+   * let go answers a length of zero and `takeCommandStream` stops returning
+   * frames at all. Both, because a reporter that repeats is how a diagnostic
+   * stops being read.
+   */
+  #reportTeardown() {
+    if (this.#teardown !== null) return;
+    const held = this.liveObjects();
+    this.#teardown = held;
+    if (held.length === 0) return;
+    const total = held.reduce((sum, entry) => sum + entry.count, 0);
+    const named = held.map(({ kind, count }) => `${count} ${kind}`).join(', ');
+    // `console.warn` for the reason `storage.js` and `audio.js` use it: it is
+    // what the page's log carries and what `web/tools/browser-e2e.mjs` records
+    // through `Runtime.consoleAPICalled`. The prefix is the crate's name, as the
+    // other three backends' lines carry theirs.
+    console.warn(
+      `crcbl-webgpu: ${total} object(s) still alive at device teardown (${named})`
+    );
   }
 
   /**

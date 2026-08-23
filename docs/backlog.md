@@ -759,68 +759,34 @@ hand; that is the right cost for this, not a standing gate.
 form the tree can confirm — say, always with its module path. That is a writing
 convention, and worth proposing only if this rots again.
 
-### Three backends report a leak at device teardown; `crcbl-webgpu` does not
+### Two of the four teardown reporters only warn, and both are deferred
 
-`crcbl-vk` has always warned about objects a caller never destroyed, and on
-2026-08-19 it learned to name their kinds and formats — which found four real
-leaks the same afternoon (two in `hal_seam_e2e`, two in `crcbl-vk`'s own mesh
-tests, all fixed). `crcbl-dx12` and `crcbl-mtl` now carry the same warning.
-`crcbl-webgpu` does not, and the reason is structural:
+All four backends now say what a caller never destroyed. `crcbl-vk`,
+`crcbl-dx12` and `crcbl-mtl` warn from their device's destructor —
+`N object(s) still alive at device teardown (…)` — and `crcbl-webgpu`, which has
+no destructor to hang it on because it is a command stream, reports from the
+browser side where the objects actually live, in the same words so one grep
+covers all four.
 
-- **`crcbl-mtl` now has one**, added 2026-08-20: `impl Drop for DeviceInner`
-  counting the same kinds dx12 does, plus `swapchains`, which dx12 has no pool
-  for. Metal objects are ARC-managed through `objc2`, so dropping the pools
-  releases them and nothing is leaked in the C sense — but a caller that forgets
-  `destroy_image` holds a texture for the device's whole life, and until now
-  nothing said so. It takes no wait first, unlike dx12's, because an
-  `MTLCommandBuffer` retains every resource it references — the same fact
-  `crcbl_mtl::device`'s header gives as the reason there is no deletion queue.
-  **It has now run, and it found one on its first pass.**
-  `swapchain::tests::a_swapchain_from_another_device_is_foreign` opened two
-  devices, created a ring on each and destroyed neither, so run 32366511311's
-  `mtl e2e (macos-latest)` log carries
-  `crcbl-mtl: 5 object(s) still alive at device teardown (2 image, 2 image view, 1 swapchain)`
-  **twice**, once per device. Fixed by returning each ring to the device that
-  made it, before the assertion rather than after — a failing assertion would
-  otherwise take the cleanup with it. That is the only such line anywhere in
-  that job's 2.5 million, so nothing else in the Metal suites leaks what this
-  reporter can see.
+**Two of the four runners fail on the line**: `run-vk-e2e.sh` (and its `.ps1`
+twin, exercised both ways under `pwsh` since no Windows runner is reachable
+here) and `web/run-browser-e2e.sh`. **`run-dx12-e2e.sh` and `run-mtl-e2e.sh`
+still only warn**, because their expectation has never been established on a
+machine here and gating them would pin a failure nobody is positioned to clear.
+Whoever un-defers either backend adds the same grep block to its runner.
 
-  Worth noting how it became visible: the report is a `log::warn!`, and until
-  `instance::tests::open` installed a sink the facade dropped it. The reporter
-  and the sink landed within an hour of each other and neither would have shown
-  this on its own.
+A warning that does not fail a job is only as good as the reading: the one time
+this found something —
+`swapchain::tests::a_swapchain_from_another_device_is_foreign` opening two
+devices and destroying neither ring, on run 32366511311's
+`mtl e2e (macos-latest)` — it was found by reading 2.5 million log lines, not by
+a red job. It is fixed; nothing else in the Metal suites leaks what that
+reporter can see.
 
-- **`crcbl-webgpu` has no pools of this shape**, being a command stream rather
-  than a handle table, so the check does not translate. What the equivalent
-  would be — the browser side reporting objects the stream never freed — is not
-  designed.
-
-**All three reporters have now run and been read, in one sweep over run
-32366511311's job logs.** `vk e2e (lavapipe)`, `dx12 e2e (software adapter)` and
-`wgpu e2e (lavapipe, Xvfb)` carry **no**
-`object(s) still alive at device teardown` line at all; `mtl e2e (macos-latest)`
-carried two, from the one test named above, now fixed. That is a weaker result
-than it sounds and is worth saying so: the warning does not fail a job, so a
-green run never proves it and the log has to be read — which is the only reason
-the Metal one was found rather than sitting there.
-
-**`run-vk-e2e.sh` and `run-vk-e2e.ps1` now fail on the line**, which is the
-per-suite expectation this entry said was needed: `crcbl-vk`'s suite destroys
-what it creates, so zero lines is the expectation and a line names a test that
-stopped doing so. Shown red by deleting one `destroy_buffer` from
-`vk_e2e/compute.rs`, which produced
-`crcbl-vk: 1 object(s) still alive at device teardown (1 buffer)` twice and exit
-1; the same run is green with it back. The `.ps1` copy's regex was exercised
-both ways under `pwsh` rather than only parsed, since no Windows runner is
-reachable here.
-
-**The other three runners still only warn.** `run-dx12-e2e.sh` and
-`run-mtl-e2e.sh` are on deferred backends and their expectation has not been
-established on a machine here, so gating them would pin a failure nobody is
-positioned to clear; `crcbl-webgpu` has no such reporter at all, for the
-structural reason above. Whoever un-defers a backend should add the same three
-lines to its runner.
+Worth keeping from how it became visible: the report is a `log::warn!`, and
+until `instance::tests::open` installed a sink the facade dropped it. The
+reporter and the sink landed within an hour of each other and neither would have
+shown it alone.
 
 ### `render_e2e` never runs against dx12's own e2e job, and that hid a step
 

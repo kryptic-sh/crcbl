@@ -111,12 +111,22 @@ function checkEqual(actual, expected, what) {
  *
  * @param {Uint8Array} stream
  */
-function readyInstance(stream) {
+function readyInstance(stream, { retained = false } = {}) {
   const memory = new WebAssembly.Memory({ initial: 1 });
   new Uint8Array(memory.buffer, STREAM_PTR, stream.length).set(stream);
-  const calls = { len: 0, ptr: 0, release: 0 };
+  const calls = { len: 0, ptr: 0, release: 0, ended: 0 };
   /** Cleared by `release`, as `StreamWriter::clear` does. */
   let live = stream.length;
+  /**
+   * What `release_retained` decides, stood up here.
+   *
+   * A channel with a handle parked on it — a run whose last encoder dropped
+   * with its teardown still in the buffer — is let go by the first `release`,
+   * and that is the moment `stream_ended` starts answering `1`. Without
+   * `retained` there is nothing parked, so no `release` ever ends anything,
+   * which is the ordinary frame.
+   */
+  let ended = false;
   const exports = {
     __crcbl_web_gpu_stream_len: () => {
       calls.len += 1;
@@ -129,7 +139,12 @@ function readyInstance(stream) {
     __crcbl_web_gpu_stream_release: () => {
       calls.release += 1;
       live = HEADER_BYTES;
+      if (retained) ended = true;
       return 1;
+    },
+    __crcbl_web_gpu_stream_ended: () => {
+      calls.ended += 1;
+      return ended ? 1 : 0;
     },
   };
   return { memory, exports, calls };
@@ -143,7 +158,7 @@ function readyInstance(stream) {
  */
 function notReadyInstance() {
   const memory = new WebAssembly.Memory({ initial: 1 });
-  const calls = { len: 0, ptr: 0, release: 0 };
+  const calls = { len: 0, ptr: 0, release: 0, ended: 0 };
   const exports = {
     __crcbl_web_gpu_stream_len: () => {
       calls.len += 1;
@@ -155,6 +170,10 @@ function notReadyInstance() {
     },
     __crcbl_web_gpu_stream_release: () => {
       calls.release += 1;
+      return 0;
+    },
+    __crcbl_web_gpu_stream_ended: () => {
+      calls.ended += 1;
       return 0;
     },
   };
@@ -355,8 +374,8 @@ async function main() {
   // is one the next frame appends to, and the buffer only grows.
   checkEqual(
     ready.calls,
-    { len: 1, ptr: 1, release: 1 },
-    'one length, one pointer and one release per frame'
+    { len: 1, ptr: 1, release: 1, ended: 1 },
+    'one length, one pointer, one release and one end-of-run question per frame'
   );
   check(
     ready.exports.__crcbl_web_gpu_stream_len() === HEADER_BYTES,
@@ -402,7 +421,7 @@ async function main() {
   // exist is a call wasm has to answer for no reason.
   checkEqual(
     early.calls,
-    { len: 1, ptr: 0, release: 0 },
+    { len: 1, ptr: 0, release: 0, ended: 0 },
     'not-ready is settled by the length alone'
   );
 
@@ -413,12 +432,12 @@ async function main() {
   const idleFrame = takeCommandStream(idle);
   checkEqual(
     idleFrame,
-    { baseSequence: 0n, commands: [] },
+    { baseSequence: 0n, commands: [], streamEnded: false },
     'an installed channel with nothing recorded is an empty frame, not null'
   );
   checkEqual(
     idle.calls,
-    { len: 1, ptr: 1, release: 1 },
+    { len: 1, ptr: 1, release: 1, ended: 1 },
     'and it is released like any other'
   );
 
@@ -441,6 +460,42 @@ async function main() {
   check(
     broken.calls.release === 1,
     'a frame that threw mid-decode is released anyway'
+  );
+  check(
+    broken.calls.ended === 0,
+    'and is not asked whether the run is over — its own destroys did not all run, ' +
+      "so what the tables hold is the throw's doing rather than the engine's"
+  );
+
+  // ---- the last frame of a run says that it is the last -------------------
+  // The teardown signal, and the reason it is a separate export. A run's final
+  // commands are its destroys; `crates/crcbl-webgpu/src/web.rs` parks a strong
+  // handle on the channel when the last encoder drops, and the `release` that
+  // hands those bytes over is what lets the handle go. `stream_len` is `0` on
+  // both sides of a run, so the length cannot carry this.
+  const ordinary = readyInstance(fixture);
+  check(
+    takeCommandStream(ordinary)?.streamEnded === false,
+    'an ordinary frame is not the end of the run'
+  );
+
+  const last = readyInstance(fixture, { retained: true });
+  const lastFrame = takeCommandStream(last);
+  check(
+    lastFrame?.streamEnded === true,
+    `the frame that drained a retained channel says the run is over (got ${lastFrame?.streamEnded})`
+  );
+  check(
+    lastFrame?.commands.length === COMMAND_COUNT,
+    'and it carries its commands like any other frame, which is what the ' +
+      'teardown report is counted after'
+  );
+  // ASKED AFTER THE RELEASE, NOT BEFORE. The release is the event: a shim that
+  // asked first would read `0` on the one frame the answer matters for, and the
+  // teardown would never be reported at all.
+  check(
+    last.exports.__crcbl_web_gpu_stream_ended() === 1,
+    'the question is settled by the release the transport had already made'
   );
 
   // ---- replies cross the other way, into a buffer that just moved ----------

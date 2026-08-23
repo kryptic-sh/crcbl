@@ -24,6 +24,7 @@
 //! | [`__crcbl_web_gpu_stream_len`](shim::__crcbl_web_gpu_stream_len) | `() -> i32` | Bytes of encoded stream waiting, header included, or `0` when there is no channel to ask. The **readiness** test. |
 //! | [`__crcbl_web_gpu_stream_ptr`](shim::__crcbl_web_gpu_stream_ptr) | `() -> i32` | Where those bytes start, or `0` when there is no channel to ask. |
 //! | [`__crcbl_web_gpu_stream_release`](shim::__crcbl_web_gpu_stream_release) | `() -> i32` | The shim has finished with the buffer: drop the commands and begin the next frame's. `1`, or `0` when there is no channel to ask. |
+//! | [`__crcbl_web_gpu_stream_ended`](shim::__crcbl_web_gpu_stream_ended) | `() -> i32` | `1` once a [`retain`]ed channel has been let go — the run's teardown has been drained and no frame will follow it. `0` before that, and again after the next [`install`]. |
 //! | [`__crcbl_web_gpu_reply_capacity`](shim::__crcbl_web_gpu_reply_capacity) | `() -> i32` | The most bytes of replies wasm will accept in one buffer ([`MAX_REPLY_BYTES`](crate::tag::MAX_REPLY_BYTES)), or `0` when there is no channel. The **readiness** test for this direction. |
 //! | [`__crcbl_web_gpu_reply_pending`](shim::__crcbl_web_gpu_reply_pending) | `() -> i32` | Bytes committed and not yet drained by the engine; `0` when there are none, or no channel. |
 //! | [`__crcbl_web_gpu_reply_buffer`](shim::__crcbl_web_gpu_reply_buffer) | `(i32) -> i32` | Size the reply buffer to `len` bytes and return its address, or `0`. **May grow wasm memory** — the only export here that can. |
@@ -38,6 +39,19 @@
 //! direction's, for the same shape of reason: an installed channel always
 //! answers [`MAX_REPLY_BYTES`](crate::tag::MAX_REPLY_BYTES), which is never zero,
 //! and `pending` cannot serve because zero there is the ordinary case.
+//!
+//! `stream_ended` is the only export here that reports a *lifetime* rather than
+//! a buffer, and it exists because nothing else can tell the two silences apart.
+//! `stream_len` answers `0` both for a shim that started before the engine did
+//! and for a run that has finished, so a shim watching only the length cannot
+//! say which side of the run it is on. See [`retain`] for why the last frame of
+//! a run needs keeping alive at all; this is the other end of that mechanism —
+//! the moment the parked handle goes is the moment the page has everything it
+//! will ever be sent, and the browser side is where the objects that stream
+//! created actually live. `web/engine/gpu-replay.js` reads it as the cue to
+//! report whatever its handle tables are still holding, which is
+//! `crcbl-vk`'s `DeviceInner::drop` warning arriving from the other side of the
+//! seam.
 //!
 //! ## Buffer ownership
 //!
@@ -106,6 +120,11 @@
 //!    [`drain_replies`](StreamChannel::drain_replies), which decodes the
 //!    committed bytes and frees the buffer for the next commit.
 //!
+//! 7. Once — after the `release` that consumed the run's last frame —
+//!    `stream_ended()` answers `1`. It is the shim's cue that no frame will
+//!    follow, and the only one there is: `stream_len` is back to `0`, which is
+//!    the same number it answered before the engine booted.
+//!
 //! Sequence numbers survive a `release`, because [`StreamWriter::clear`] keeps
 //! the counter where it is. They have to: an error raised by a replayed command
 //! surfaces a frame or more after the frame that encoded it, so a counter that
@@ -120,7 +139,7 @@
 //! | --- | --- | --- |
 //! | no channel installed (`stream_len` and `reply_capacity` are `0`) | nothing this frame; ask again next | nothing; the engine has not installed one yet |
 //! | the channel was dropped mid-run | as above — every export goes back to `0` | nothing; the exports hold a [`Weak`] and stop finding it |
-//! | the last encoder drops with a teardown on the stream | drains it on the next pump, then the handle goes | nothing; [`retain`] parked the channel and `stream_release` let it go |
+//! | the last encoder drops with a teardown on the stream | drains it on the next pump, then the handle goes | nothing; [`retain`] parked the channel and `stream_release` let it go, which is what `stream_ended` then answers `1` for |
 //! | decoding a frame throws | release anyway, then report | the next frame starts from a clean buffer instead of the shim re-throwing on the same bytes forever |
 //! | the shim stops releasing | — | `stream_len` climbs and never falls |
 //! | `reply_buffer` answers `0` | hold the replies; try again next frame | nothing yet; the replies are still in JS |
@@ -164,7 +183,7 @@
 //! `web/tools/stream-transport.mjs` drives it against a synthetic
 //! `WebAssembly.Memory` holding the committed fixtures.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::{Rc, Weak};
 
@@ -501,6 +520,15 @@ thread_local! {
     /// A strong handle onto the installed channel, parked so the shim can still
     /// drain a stream whose last encoder has gone. See [`retain`].
     static RETAINED: RefCell<Option<Rc<StreamChannel>>> = const { RefCell::new(None) };
+
+    /// Whether the parked handle above has been let go — the run is over and
+    /// the shim has everything it will ever be sent. See
+    /// [`__crcbl_web_gpu_stream_ended`](shim::__crcbl_web_gpu_stream_ended).
+    ///
+    /// A [`Cell`] and not a [`RefCell`]: it holds a `bool` with no borrow to
+    /// fail, so the entry point that reads it cannot answer "no channel" for a
+    /// reason that has nothing to do with there being one.
+    static ENDED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Keep the installed channel alive until the shim has taken what is on it.
@@ -542,8 +570,19 @@ pub fn retain() -> bool {
 }
 
 /// Let go of a handle [`retain`] parked, if there is one.
+///
+/// **The one place the stream is known to be over**, and therefore where
+/// [`__crcbl_web_gpu_stream_ended`](shim::__crcbl_web_gpu_stream_ended) is armed:
+/// a parked handle means an encoder dropped with a teardown still in the buffer,
+/// and taking it means the shim has just drained that buffer. Nothing is left to
+/// encode into it and nothing holds it. Called on every
+/// [`__crcbl_web_gpu_stream_release`](shim::__crcbl_web_gpu_stream_release), so
+/// the `is_some` is what makes it fire once rather than once a frame.
 fn release_retained() {
     let parked = RETAINED.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()));
+    if parked.is_some() {
+        ENDED.with(|ended| ended.set(true));
+    }
     drop(parked);
 }
 
@@ -562,6 +601,11 @@ pub fn install(channel: &Rc<StreamChannel>) -> bool {
             return false;
         }
         *slot = Rc::downgrade(channel);
+        // A stream that has not started has not ended. Cleared here rather than
+        // left standing so that a second app booting into the same page — the
+        // window [`retain`] documents — is not told at once that its stream is
+        // already over.
+        ENDED.with(|ended| ended.set(false));
         true
     })
 }
@@ -699,6 +743,30 @@ pub mod shim {
         cleared
     }
 
+    /// Whether the run is over: `1` once a retained channel has been let go.
+    ///
+    /// **The teardown signal, and the only one on this ABI.** A run's last
+    /// commands are its destroys; [`super::retain`] parks the channel so they
+    /// survive their encoder, and the
+    /// [`release`](__crcbl_web_gpu_stream_release) that drains them is what lets
+    /// that handle go. This answers `1` from that moment — so the shim learns
+    /// that the frame it has just decoded is the last one, rather than inferring
+    /// it from a `__crcbl_web_gpu_stream_len` of `0`, which is also what a page
+    /// that started before the engine sees.
+    ///
+    /// It is a state and not an event: reading it does not clear it, and it
+    /// stays `1` until [`super::install`] puts a new channel in. A shim that
+    /// asks once per frame therefore sees it go true on exactly the frame the
+    /// last buffer was released and cannot miss it by asking late.
+    ///
+    /// `0` for a run that ended without a `retain` — an app that dropped its
+    /// channel with nothing on it — because there was no last frame to hand
+    /// over and nothing to report about.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_stream_ended() -> u32 {
+        u32::from(super::ENDED.with(|ended| ended.get()))
+    }
+
     /// The most bytes of replies wasm will accept in one buffer.
     ///
     /// [`tag::MAX_REPLY_BYTES`], or `0` when there
@@ -761,7 +829,9 @@ pub mod shim {
 
 #[cfg(test)]
 mod tests {
-    use super::shim::{__crcbl_web_gpu_stream_len, __crcbl_web_gpu_stream_release};
+    use super::shim::{
+        __crcbl_web_gpu_stream_ended, __crcbl_web_gpu_stream_len, __crcbl_web_gpu_stream_release,
+    };
     use super::{StreamChannel, install, is_installed, retain, uninstall};
     use crate::tag;
 
@@ -814,6 +884,12 @@ mod tests {
         );
         assert!(is_installed(), "a retained channel is a live channel");
 
+        assert_eq!(
+            __crcbl_web_gpu_stream_ended(),
+            0,
+            "the teardown has been encoded, not yet handed over"
+        );
+
         assert_eq!(__crcbl_web_gpu_stream_release(), 1);
         assert_eq!(
             __crcbl_web_gpu_stream_len(),
@@ -821,6 +897,66 @@ mod tests {
             "the release was the last handle, so the channel goes with it"
         );
         assert!(!is_installed());
+        assert_eq!(
+            __crcbl_web_gpu_stream_ended(),
+            1,
+            "and that release is the moment the page has everything it will be sent"
+        );
+        assert_eq!(
+            __crcbl_web_gpu_stream_ended(),
+            1,
+            "reading it does not clear it: a shim that asks twice is told twice"
+        );
+        uninstall();
+    }
+
+    /// **A run in progress is not a run that ended**, which is the half that
+    /// decides whether the signal is worth anything: `stream_len` answers `0`
+    /// before the engine boots *and* after the run is over, so a flag that were
+    /// true for an ordinary frame would report a teardown once a frame.
+    #[test]
+    fn an_ordinary_frames_release_does_not_end_the_stream() {
+        let channel = Rc::new(StreamChannel::new());
+        assert!(install(&channel));
+        assert_eq!(__crcbl_web_gpu_stream_ended(), 0, "nothing has ended yet");
+
+        assert_eq!(channel.encode(|stream| stream.draw(0..3, 0..1)), Some(0));
+        assert_eq!(__crcbl_web_gpu_stream_release(), 1);
+        assert_eq!(
+            __crcbl_web_gpu_stream_ended(),
+            0,
+            "a frame was handed over; the run is still going"
+        );
+        assert!(is_installed());
+
+        drop(channel);
+        assert_eq!(
+            __crcbl_web_gpu_stream_ended(),
+            0,
+            "a channel dropped with nothing parked had no last frame to hand over"
+        );
+        uninstall();
+    }
+
+    /// **A fresh install is a fresh run.** The window [`retain`] documents — a
+    /// second app booting into a page whose first run has just ended — would
+    /// otherwise be told at once that its own stream was already over.
+    #[test]
+    fn installing_again_clears_the_ended_flag() {
+        let first = Rc::new(StreamChannel::new());
+        assert!(install(&first));
+        assert!(retain());
+        drop(first);
+        assert_eq!(__crcbl_web_gpu_stream_release(), 1);
+        assert_eq!(__crcbl_web_gpu_stream_ended(), 1);
+
+        let second = Rc::new(StreamChannel::new());
+        assert!(install(&second), "the first run let its channel go");
+        assert_eq!(
+            __crcbl_web_gpu_stream_ended(),
+            0,
+            "the new run has not ended"
+        );
         uninstall();
     }
 
