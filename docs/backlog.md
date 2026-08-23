@@ -61,10 +61,14 @@ work afterwards, and neither can start before it.
   and no last-N ring, and nothing on any platform spawns an input thread. Worth
   knowing that `crcbl_jobs::default_spawner` has exactly one caller in the tree
   and it is `apps/horde`'s steering pool.
-- **One line per sample, now that `[engine.video]` is read.** `GpuContext` reads
-  the player's settings while it opens, but only `apps/lantern` builds an
-  `EffectRequest` at all, so no shipped sample's frame changes until each hands
-  `ctx.effect_request()` to its renderer.
+- **One line per sample, now that `apps/lantern` honours `[engine.video]`.**
+  `GpuContext` reads the player's settings while it opens and lantern passes the
+  layer through `request_for`, but it is the only sample that builds an
+  `EffectRequest` at all — every other one draws with the renderer's default, so
+  a player's settings file cannot move its frame. Whether that is a gap depends
+  on whether a sample with no shadows, AO or reflections in it should still
+  carry the wiring; the cheap version is `ctx.effect_request()` handed to the
+  renderer at open, which is one line each.
 - **`GameModule` in `apps/lantern` and `apps/quarry`.** Neither implements it
   and neither claims an exemption for it, while `apps/viewer`'s absence is
   sanctioned in its own docs. Either they adopt it or they say why not — and
@@ -14691,10 +14695,11 @@ file would let a stack be authored without a recompile. Left as a separate
 question rather than folded into this one, because the layer it would feed now
 has a consumer either way.
 
-- **`[engine.video]` is wired now.** `GpuContext` reads the player's
-  `settings.toml` while it opens and `GpuContext::effect_request` hands the
-  layer over; `crcbl::settings::VIDEO_KEYS` is the one place a key is spelled,
-  and the schema question resolved to a `(key, bit)` table rather than a `serde`
+- **`[engine.video]` is wired now, and `apps/lantern` consumes it.**
+  `GpuContext` reads the player's `settings.toml` while it opens and
+  `GpuContext::effect_request` hands the layer over;
+  `crcbl::settings::VIDEO_KEYS` is the one place a key is spelled, and the
+  schema question resolved to a `(key, bit)` table rather than a `serde`
   section, so `crcbl-store` still has no idea what an effect is. Where the file
   lives is `GpuContextDesc::label`'s directory, the same name the samples
   already give `Backing::platform`.
