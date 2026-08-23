@@ -12700,6 +12700,44 @@ four against a bound of 22), and the once-per-`PassTimers` warning is the
 backstop if one ever is. The alternative was every sample writing
 `MAX_TIMED_PASSES + 1`, which is the guessing this constant exists to end.
 
+## DECISION NEEDED — P6A cannot start until a wasm runtime is approved
+
+`docs/plan/16-wasm-modules.md` settles the design question and not the
+procurement one: the host is **`wasmtime` behind a `WasmHost` seam**, openly a
+pragmatic exception to the from-scratch rule (a correct JIT is a multi-year
+project and not this project's learning goal), configured with NaN
+canonicalisation on, fuel or epoch limits, and no WASI. The browser needs none
+of it — there the browser _is_ the runtime, and modules instantiate through the
+same import surface — so a wasm build never carries the crate.
+
+**What is not decided is whether to take the dependency.** There is no
+`wasmtime` in `Cargo.lock` and adding one is the user's call, so P6A
+(breakout-as-`.wasm`, exit criterion "state hash == static build, native +
+browser") is blocked on an answer rather than on effort. It is the next unticked
+roadmap phase after P6 that is not Metal, dx12 or a second lighting
+implementation.
+
+The options, and what each costs:
+
+- **Take `wasmtime`.** The plan's own choice. Heavyweight — it pulls Cranelift
+  and a large transitive graph — but it is the runtime everyone else in this
+  ecosystem uses, and the seam is ours, so a replacement later is a swap rather
+  than a rewrite.
+- **Take a small interpreter instead** (`wasmi` is the usual one). Far lighter
+  and pure Rust; slower by roughly the margin an interpreter is slower than a
+  JIT, which matters because the exit criterion is a **perf** comparison against
+  the static build as well as a state hash. Still a new dependency, so it needs
+  the same answer.
+- **Write the interpreter.** The plan says explicitly this is a post-MVP
+  learning exercise, not a prerequisite, and doing it now buys a phase's delay
+  for something the seam was designed to make replaceable.
+- **Defer P6A** and take P8, P9 or S4's viewer next. Nothing else in the roadmap
+  depends on the module host; it is a capability, not a foundation.
+
+Not measured, and it would inform the first two: what `wasmtime` actually adds
+to build time and binary size in this workspace. Nobody has tried it, because
+trying it is the thing that needs approval.
+
 ## Sidecar meta RON: three items now want it, and the workspace has no RON reader
 
 `docs/plan/06-assets-scenes.md` and topic 25 both assume a `crate.glb.meta.ron`
