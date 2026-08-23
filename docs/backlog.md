@@ -6522,12 +6522,12 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   Not covered, stated as gaps rather than excused: **Firefox and WebKit** — the
   structured clone of a `WebAssembly.Module` into a `Worker` and the
   `Atomics.wait` main-thread rule are the two places engines have differed, and
-  neither has been tried; **CI** — the gate is local-only for the same reason
-  `--threads` is, the pinned `nightly-2026-07-02` with `rust-src` that no runner
-  has; **macOS and Windows** — `browser-launch.mjs` handles both and nothing has
-  run there. Pointing it at another browser is one environment variable
-  (`CRCBL_CHROMIUM`), so the Firefox answer is cheap and worth having before
-  anyone relies on the backend.
+  neither has been tried; **CI** — `ci.yml`'s `jobs-worker-e2e` runs
+  `run-jobs-e2e.sh` on `ubuntu-latest`, and nothing runs
+  `run-horde-threads-e2e.sh` anywhere but here; **macOS and Windows** —
+  `browser-launch.mjs` handles both and nothing has run there. Pointing it at
+  another browser is one environment variable (`CRCBL_CHROMIUM`), so the Firefox
+  answer is cheap and worth having before anyone relies on the backend.
 
 - **`check-exports.mjs` still does not see `web/jobs/main.js`.** The tool scans
   `web/engine` (its `JS_SHARED`) plus the demo's own `main.js` for `.__crcbl_…`
@@ -6590,12 +6590,21 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   red check meant dropping those three exports as well, and then the gate
   reports the unshared memory by name. The flags are not independent.
 
-- **No CI job runs `--threads` or the worker gate**, by the same reasoning as
-  `web/run-browser-e2e.sh`: they are local gates, and the `rust-src` component
-  they need is installed on this machine and on no runner. The only
-  `nightly-2026-07-02` in `ci.yml` is the `decoder-fuzz` job, which does not
-  build threaded wasm and correctly does not ask for the component. A CI job
-  that did would owe `components: rust-src` on its `setup-rust-toolchain`.
+- **The horde gate is still local-only; the jobs gate is not.** `ci.yml`'s
+  `jobs-worker-e2e` job installs `nightly-2026-07-02` with
+  `components: rust-src` and runs `web/run-jobs-e2e.sh`, which brings the
+  threaded artifact up through `web/build.sh --threads --gate-only` — so
+  `worker-gate.mjs` rides along with it — and then drives the browser page and
+  its four red checks. What it does not cover is `web/run-horde-threads-e2e.sh`:
+  that one needs a WebGPU device under Xvfb and the whole `--threads` site
+  rather than one example, so it is a second job with a real cost rather than a
+  flag on this one. **The criterion "a sample's sim runs off the main thread in
+  a browser" is therefore proven on this machine and in no CI job**, and a
+  regression in the horde half is found by whoever next runs it.
+- **`jobs-worker-e2e`'s timeout is a ceiling, not a budget.** Nothing has
+  measured a cold `-Z build-std` wasm32 build on a runner; the local run with
+  warm target directories takes 22 s end to end, which says nothing about the
+  first one. Read the first green run and tighten it.
 
 ## The private-item doc gate only ever runs on Linux
 

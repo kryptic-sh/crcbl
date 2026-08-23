@@ -390,6 +390,60 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The one job in this file that builds a *worker-capable* wasm artifact, and
+  # the reason it did not exist until now is a rustup component: `web/build.sh
+  # --threads` refuses by name without `rust-src`, because `-Z build-std` has
+  # no std sources to compile without it. The nightly is pinned in
+  # `web/build.sh`; the two spellings have to move together.
+  #
+  # NO Xvfb AND NO GPU, unlike every other browser step in this repository.
+  # There is no canvas on the page this drives — the claims are about threads,
+  # stacks and thread-locals — so headless Chrome is the whole environment.
+  #
+  # `web/run-jobs-e2e.sh` builds what it drives, which is two artifacts: the
+  # threaded one through `web/build.sh --threads --gate-only` (which also runs
+  # `web/tools/worker-gate.mjs` under real `node:worker_threads`, so that gate
+  # comes with this job rather than needing one of its own) and a plain build of
+  # the same example as the negative control. Then it runs its four red checks,
+  # and fails if any of them does not break the assertion it is meant to break.
+  jobs-worker-e2e:
+    name: threaded wasm + worker gate (linux)
+    # A cold run compiles std for wasm32 before it drives anything, and nobody
+    # has measured that here — this is a ceiling, and the first green run is
+    # what should replace it with a budget.
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-07-02
+          target: wasm32-unknown-unknown
+          components: rust-src
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: jobs-worker-e2e
+      # No npm step and no `node_modules`: the gate's tools are hand-written
+      # ESM, and the DevTools client needs the global `WebSocket` Node 22 added.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      # A missing browser must not be mistaken for a failing gate, so it is
+      # named, executed and printed before anything drives it.
+      - name: Check the browser gate's assumptions
+        run: |
+          set -euo pipefail
+          browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -z "$browser" ]; then
+            echo "::error::no Chrome or Chromium on this runner. The image is assumed to ship /usr/bin/google-chrome."
+            exit 1
+          fi
+          echo "browser: $browser ($("$browser" --version))"
+          echo "CRCBL_CHROMIUM=$browser" >> "$GITHUB_ENV"
+      - name: Drive the Web Worker spawn backend in a real browser
+        run: ./web/run-jobs-e2e.sh
+
   # Linux is the developer's daily driver, so it carries the full gate.
   test-linux:
     name: test (linux)
