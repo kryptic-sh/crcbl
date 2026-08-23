@@ -1503,6 +1503,28 @@ mod tests {
                 std::thread::yield_now();
             }
         });
+
+        // **A call that cannot leave the calling thread**, because the driver's
+        // share of the one above is whatever the workers did not get to first.
+        // Two workers took all eight chunks of it on a Windows runner and left
+        // `chunks_run_by_driver` at zero, which failed this test's own
+        // precondition rather than the reset it is about. A single chunk takes
+        // `par_for`'s inline path by construction, so this counter moves on
+        // every machine.
+        //
+        // Asserted as a delta rather than left to the loop below, because on a
+        // machine where the driver *does* get chunks off the deque that loop
+        // passes either way — it did here with this increment deleted. Only the
+        // driver writes this counter and only this thread drives, so `+ 1` is
+        // exact rather than a lower bound.
+        let before = pool.stats().chunks_run_by_driver;
+        let whole = items.len();
+        pool.par_for(&mut items, whole, |_, chunk| chunk[0] += 1);
+        assert_eq!(
+            pool.stats().chunks_run_by_driver,
+            before + 1,
+            "the inline path did not count its chunk to the driver",
+        );
         wait_until_parked(&pool);
 
         let stats = pool.stats();
