@@ -43,12 +43,11 @@ work afterwards, and neither can start before it.
 
 **What each corrected row leaves owed**, in the order a reader would meet them:
 
-- **`crcbl save` and `crcbl settings` are unbuilt verbs.** `crcbl-store`'s
-  `save.rs` and `settings.rs` exist with no CLI reaching them, and
-  `14-persistence.md`'s exit criteria assume both —
-  `save list|dump|diff|restore` and `settings get|set|list`. Each is a small
-  slice on its own. `crcbl sim` was the third of these and shipped on
-  2026-08-23.
+- **`crcbl save` is an unbuilt verb, and blocked.** `crcbl-store`'s `save.rs`
+  has no CLI reaching it and `14-persistence.md`'s exit criteria assume
+  `save list|dump|diff|restore` — but `dump` is specified to render RON and this
+  tree has no RON reader, which is its own open decision below. `sim` and
+  `settings` were the other two of these and both shipped on 2026-08-23.
 - **Profile rebind storage and glyph hints.** `ActionMap::rebind` mutates in
   memory and nothing serialises it; `crcbl-store` has no profile or binding type
   at all, and its only cross-session helper is the samples' high-score number.
