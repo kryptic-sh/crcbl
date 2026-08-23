@@ -311,6 +311,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`FrameClock::new` names a tick rate it cannot run.** A rate over 1 GHz
+  truncates to a zero-nanosecond period, and the panic came from `with_period`
+  blaming a `Duration` the caller never wrote. It is now rejected in `new`, by
+  the rate, and the `# Panics` section says so.
+
 - **A bind group covering more of a buffer than the slot allows is refused.**
   `Limits::max_uniform_buffer_range` and `Limits::max_storage_buffer_range` were
   reported by every backend and checked by none, so an over-long binding was

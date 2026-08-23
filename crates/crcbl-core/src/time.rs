@@ -319,10 +319,18 @@ impl FrameClock {
     ///
     /// # Panics
     ///
-    /// If `tick_hz` is zero.
+    /// If `tick_hz` is zero, or over one tick per nanosecond — the period below
+    /// is truncating integer nanoseconds, so a rate past 1 GHz rounds to a
+    /// period of zero and there is no clock to build. It used to reach
+    /// [`with_period`](Self::with_period) and fail there, blaming a period the
+    /// caller never passed.
     #[must_use]
     pub fn new(tick_hz: u32) -> Self {
         assert!(tick_hz > 0, "tick rate must be positive");
+        assert!(
+            tick_hz <= 1_000_000_000,
+            "tick rate must be at most 1 GHz, not {tick_hz} Hz"
+        );
         // Truncating division leaves the step slightly short of 1/hz (16.666666
         // ms instead of 16.666667 ms at 60 Hz). The *simulation* is unaffected
         // — its second is 60 steps by definition — and wall-clock drift is
@@ -735,6 +743,24 @@ mod tests {
     #[should_panic(expected = "tick rate must be positive")]
     fn zero_tick_rate_is_rejected() {
         let _ = FrameClock::new(0);
+    }
+
+    /// The other end of the rate range, which used to fail as a period.
+    ///
+    /// One tick per nanosecond is the last rate with a period to round to; the
+    /// next one up truncates to zero nanoseconds, and the clock that came back
+    /// blamed `with_period` for a `Duration` the caller had not written.
+    #[test]
+    #[should_panic(expected = "tick rate must be at most 1 GHz")]
+    fn a_tick_rate_finer_than_a_nanosecond_is_rejected() {
+        let _ = FrameClock::new(1_000_000_001);
+    }
+
+    /// …and exactly 1 GHz still builds, so the bound above is the right one.
+    #[test]
+    fn one_tick_per_nanosecond_is_the_fastest_clock() {
+        let clock = FrameClock::new(1_000_000_000);
+        assert_eq!(clock.tick_dt(), Duration::from_nanos(1));
     }
 
     #[test]
