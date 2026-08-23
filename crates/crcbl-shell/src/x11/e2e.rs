@@ -119,6 +119,15 @@ fn load_test_lib() -> Option<TestLib> {
     }
 }
 
+/// The most events one [`Shell::pump`](crate::Shell::pump) of the X11 backend
+/// will interpret, re-exported so a test can send more than that without
+/// guessing the number.
+///
+/// A burst past it is the one case where the connection's descriptor stops
+/// being the whole truth about what is pending — see
+/// [`burst`](Peer::burst).
+pub const MAX_EVENTS_PER_PUMP: usize = super::input::MAX_EVENTS_PER_PUMP;
+
 /// One payload the peer is offering on the clipboard.
 struct Offer {
     target: u32,
@@ -437,6 +446,51 @@ impl Peer {
             );
         }
         self.flush();
+    }
+
+    /// Sends `count` client messages straight at `xid`'s client.
+    ///
+    /// The one thing a test cannot produce from inside the shell: **more
+    /// events than one `pump` will interpret**. `SendEvent` with an empty
+    /// event mask delivers to the client that created the window whatever it
+    /// selected for, so `count` is exactly how many events that client's
+    /// connection receives.
+    ///
+    /// The message type is this harness's own atom, which nothing handles: the
+    /// backend reads the type, finds it is not `WM_PROTOCOLS`, and drops it.
+    /// The burst is therefore silent — it moves the event *count* without
+    /// adding a single [`ShellEvent`](crate::ShellEvent) to whatever the test
+    /// is really asserting on.
+    pub fn burst(&mut self, xid: u32, count: usize) {
+        let flood = self.atom("CRCBL_E2E_BURST");
+        let message = ffi::ClientMessageEvent {
+            response_type: ffi::event::CLIENT_MESSAGE,
+            format: 32,
+            sequence: 0,
+            window: xid,
+            type_: flood,
+            data: [0; 5],
+        };
+        for _ in 0..count {
+            // SAFETY: the connection and window are live, and `SendEvent` reads
+            // exactly the 32 bytes a `ClientMessageEvent` is.
+            unsafe {
+                (self.lib.send_event)(
+                    self.connection,
+                    0,
+                    xid,
+                    0,
+                    ptr::from_ref(&message).cast::<c_char>(),
+                );
+            }
+        }
+        self.flush();
+        // A flush only hands the requests to the socket. A **round trip** is
+        // what makes the server have executed them: it answers this connection
+        // in request order, so a reply to something sent afterwards cannot
+        // arrive until every message above has been delivered. Without it the
+        // caller would be racing the server for its own burst.
+        let _ = self.window_origin(xid);
     }
 
     /// Where someone else's window sits on the screen.

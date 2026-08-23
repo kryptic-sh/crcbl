@@ -172,7 +172,7 @@ pub(crate) use crate::linux::{keymap, xkb};
 #[cfg(feature = "wayland-e2e")]
 pub mod e2e;
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::ptr::{self, NonNull};
 use core::time::Duration;
 use std::collections::VecDeque;
@@ -1228,6 +1228,62 @@ struct Conn {
     sink: *mut Sink,
 }
 
+/// A global this backend binds exactly **one** of.
+///
+/// [`Conn`]'s fields are bare pointers with no memory of where they came from,
+/// and `wl_registry.global_remove` names only a registry id — so a shell that
+/// wants to let go of a withdrawn global has to have written the two down
+/// together. That is what [`WaylandShell::singletons`] holds and this names.
+///
+/// `wl_output` and `wl_seat` are not here: a compositor advertises many of
+/// each, so they are kept in [`Output`] and [`Seat`] with their own `global`
+/// fields, and removed one instance at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Singleton {
+    Compositor,
+    WmBase,
+    Viewporter,
+    FractionalScaleManager,
+    XdgOutputManager,
+    DecorationManager,
+    RelativePointerManager,
+    PointerConstraints,
+    DataDeviceManager,
+}
+
+impl Singleton {
+    /// The [`Conn`] field this global is kept in.
+    fn slot(self, conn: &mut Conn) -> &mut *mut WlProxy {
+        match self {
+            Self::Compositor => &mut conn.compositor,
+            Self::WmBase => &mut conn.wm_base,
+            Self::Viewporter => &mut conn.viewporter,
+            Self::FractionalScaleManager => &mut conn.fractional_scale_manager,
+            Self::XdgOutputManager => &mut conn.xdg_output_manager,
+            Self::DecorationManager => &mut conn.decoration_manager,
+            Self::RelativePointerManager => &mut conn.relative_pointer_manager,
+            Self::PointerConstraints => &mut conn.pointer_constraints,
+            Self::DataDeviceManager => &mut conn.data_device_manager,
+        }
+    }
+
+    /// The interface's own name, taken from the generated descriptor rather
+    /// than spelled again here.
+    fn interface(self) -> &'static CStr {
+        match self {
+            Self::Compositor => wl_compositor::NAME,
+            Self::WmBase => xdg_wm_base::NAME,
+            Self::Viewporter => wp_viewporter::NAME,
+            Self::FractionalScaleManager => wp_fractional_scale_manager_v1::NAME,
+            Self::XdgOutputManager => zxdg_output_manager_v1::NAME,
+            Self::DecorationManager => zxdg_decoration_manager_v1::NAME,
+            Self::RelativePointerManager => zwp_relative_pointer_manager_v1::NAME,
+            Self::PointerConstraints => zwp_pointer_constraints_v1::NAME,
+            Self::DataDeviceManager => wl_data_device_manager::NAME,
+        }
+    }
+}
+
 impl Conn {
     /// The event queue, as a mutable reference.
     ///
@@ -1823,9 +1879,16 @@ pub struct WaylandShell {
     /// being fed into pipes a peer is reading. Both are serviced once per
     /// [`pump`](Shell::pump) and neither ever blocks; see [`fd`].
     transfers: Vec<Transfer>,
-    writes: Vec<fd::Writing>,
+    writes: fd::Writes,
     /// Reads accepted while the clipboard was not readable; see [`HeldRead`].
     held: Vec<HeldRead>,
+    /// The registry name every bound [`Singleton`] came from.
+    ///
+    /// Written by [`bind_global`](Self::bind_global) and read by
+    /// [`withdraw_singleton`](Self::withdraw_singleton), which is the only way
+    /// a `global_remove` — an integer and nothing else — can be matched to the
+    /// proxy it withdrew.
+    singletons: Vec<(u32, Singleton)>,
     queue: VecDeque<ShellEvent>,
     /// The epoch every event timestamp is measured from.
     time: TimeBase,
@@ -1914,8 +1977,9 @@ impl WaylandShell {
             next_device_id: 1,
             next_request_id: 1,
             transfers: Vec::new(),
-            writes: Vec::new(),
+            writes: fd::Writes::new(),
             held: Vec::new(),
+            singletons: Vec::new(),
             queue: VecDeque::new(),
             time: TimeBase::now(),
             caps: ShellCaps::empty(),
@@ -2058,7 +2122,7 @@ impl WaylandShell {
         let registry = self.conn.registry;
         /// Binds a global into a field of [`Conn`], at the version we cap it to.
         macro_rules! bind {
-            ($field:ident, $module:path, $version:expr) => {{
+            ($field:ident, $module:path, $version:expr, $slot:expr) => {{
                 use $module as target;
                 if self.conn.$field.is_null() {
                     // SAFETY: `registry` is live, and `bind` marshals the
@@ -2066,52 +2130,81 @@ impl WaylandShell {
                     self.conn.$field = unsafe {
                         wl_registry::bind(registry, name, &target::INTERFACE, version.min($version))
                     };
+                    if !self.conn.$field.is_null() {
+                        // Which registry name this slot was filled from, so a
+                        // later `global_remove` can be matched to it — see
+                        // [`withdraw_singleton`](Self::withdraw_singleton).
+                        self.singletons.push((name, $slot));
+                    }
                 }
             }};
         }
         match interface {
-            "wl_compositor" => bind!(compositor, wl_compositor, COMPOSITOR_VERSION),
+            "wl_compositor" => bind!(
+                compositor,
+                wl_compositor,
+                COMPOSITOR_VERSION,
+                Singleton::Compositor
+            ),
             "xdg_wm_base" => {
                 // Only watch the proxy the *first* time. A compositor may
                 // advertise two globals of the same interface, and re-watching
                 // an already-bound one pushed a duplicate into `Sink::objects`
                 // and made libwayland log "proxy already has a dispatcher".
                 let fresh = self.conn.wm_base.is_null();
-                bind!(wm_base, xdg_wm_base, WM_BASE_VERSION);
+                bind!(wm_base, xdg_wm_base, WM_BASE_VERSION, Singleton::WmBase);
                 if fresh {
                     let proxy = self.conn.wm_base;
                     self.conn.watch(proxy, ObjectKind::WmBase);
                 }
             }
-            "wp_viewporter" => bind!(viewporter, wp_viewporter, 1),
+            "wp_viewporter" => bind!(viewporter, wp_viewporter, 1, Singleton::Viewporter),
             "wp_fractional_scale_manager_v1" => {
-                bind!(fractional_scale_manager, wp_fractional_scale_manager_v1, 1);
+                bind!(
+                    fractional_scale_manager,
+                    wp_fractional_scale_manager_v1,
+                    1,
+                    Singleton::FractionalScaleManager
+                );
             }
             "zxdg_output_manager_v1" => {
                 bind!(
                     xdg_output_manager,
                     zxdg_output_manager_v1,
-                    XDG_OUTPUT_VERSION
+                    XDG_OUTPUT_VERSION,
+                    Singleton::XdgOutputManager
                 );
             }
             "zxdg_decoration_manager_v1" => {
                 bind!(
                     decoration_manager,
                     zxdg_decoration_manager_v1,
-                    DECORATION_VERSION
+                    DECORATION_VERSION,
+                    Singleton::DecorationManager
                 );
             }
             "zwp_relative_pointer_manager_v1" => {
-                bind!(relative_pointer_manager, zwp_relative_pointer_manager_v1, 1);
+                bind!(
+                    relative_pointer_manager,
+                    zwp_relative_pointer_manager_v1,
+                    1,
+                    Singleton::RelativePointerManager
+                );
             }
             "zwp_pointer_constraints_v1" => {
-                bind!(pointer_constraints, zwp_pointer_constraints_v1, 1);
+                bind!(
+                    pointer_constraints,
+                    zwp_pointer_constraints_v1,
+                    1,
+                    Singleton::PointerConstraints
+                );
             }
             "wl_data_device_manager" => {
                 bind!(
                     data_device_manager,
                     wl_data_device_manager,
-                    DATA_DEVICE_VERSION
+                    DATA_DEVICE_VERSION,
+                    Singleton::DataDeviceManager
                 );
             }
             "wl_output" => {
@@ -2191,6 +2284,96 @@ impl WaylandShell {
             }
             _ => {}
         }
+    }
+
+    /// Lets go of a singleton global the compositor has withdrawn.
+    ///
+    /// **A withdrawn global is not a dead session, and the proxy must not stay
+    /// in its slot.** `wl_registry.global_remove` says the bound object is
+    /// inert from that point: requests to it are ignored. It is not null,
+    /// though, so [`bind_global`](Self::bind_global)'s `is_null` guard would
+    /// refuse to bind the *replacement* a compositor advertises when the same
+    /// interface comes back — and every later request would go to the inert
+    /// object. Clearing the slot is the whole of what makes a re-advertisement
+    /// bind, and it is why the call sites that marshal on these read them for
+    /// null: after this, "the compositor has one" is a question with two
+    /// answers again.
+    ///
+    /// **Objects already created from the global are not affected**, which is
+    /// each protocol's own wording for its destructor and the reason a window
+    /// survives its factory going away. What a withdrawal costs is the ability
+    /// to make *new* ones until it returns.
+    ///
+    /// [`caps`](Shell::caps) is latched at [`open`](Self::open) and is
+    /// deliberately not recomputed here: the seam requires a capability set
+    /// that does not move under a caller. So a withdrawal is never a bit going
+    /// out. The two requests that cannot be served without their global —
+    /// [`create_window`](Shell::create_window) and
+    /// [`clipboard_offer`](Shell::clipboard_offer) — fail by name instead;
+    /// the optional ones (a decoration, a viewport, a pointer constraint) go
+    /// on reporting the capability and quietly doing nothing, which is what
+    /// the inert proxy did before this and is a gap this does not close.
+    fn withdraw_singleton(&mut self, name: u32) {
+        let Some(index) = self.singletons.iter().position(|(bound, _)| *bound == name) else {
+            return;
+        };
+        let (_, slot) = self.singletons.remove(index);
+        // Taken out of the slot first: both destructors below free the proxy,
+        // and a copy left in `Conn` would be a dangling pointer for whatever
+        // reads the field next.
+        let proxy = core::mem::replace(slot.slot(&mut self.conn), ptr::null_mut());
+        match slot {
+            // Neither has a destructor at the version this backend binds —
+            // `wl_compositor.release` arrived in 7 and
+            // `wl_data_device_manager.release` in 4, and see
+            // [`COMPOSITOR_VERSION`] for why the cap is what the code
+            // implements. The compositor keeps the object until the connection
+            // closes, which is the same bargain `Drop` already makes for them.
+            Singleton::Compositor | Singleton::DataDeviceManager => self.conn.destroy(proxy),
+            // `xdg_wm_base.destroy` is a **protocol error** — `defunct_surfaces`,
+            // which disconnects the client — while any `xdg_surface` made from
+            // it is still alive, and every open window holds one. So the
+            // destructor is sent only when there are none, and the proxy is
+            // dropped client-side otherwise.
+            Singleton::WmBase => {
+                if self.windows.is_empty() {
+                    // SAFETY: `proxy` is live on this connection and
+                    // `destroy` is `xdg_wm_base`'s own destructor.
+                    unsafe { self.conn.release(proxy, xdg_wm_base::destroy) };
+                } else {
+                    self.conn.destroy(proxy);
+                }
+            }
+            // The rest each say, in their own protocol, that destroying the
+            // manager leaves the objects it created alone.
+            // SAFETY: `proxy` is live on this connection and each destructor is
+            // its own interface's.
+            Singleton::Viewporter => unsafe { self.conn.release(proxy, wp_viewporter::destroy) },
+            Singleton::FractionalScaleManager => unsafe {
+                self.conn
+                    .release(proxy, wp_fractional_scale_manager_v1::destroy);
+            },
+            Singleton::XdgOutputManager => unsafe {
+                self.conn.release(proxy, zxdg_output_manager_v1::destroy);
+            },
+            Singleton::DecorationManager => unsafe {
+                self.conn
+                    .release(proxy, zxdg_decoration_manager_v1::destroy);
+            },
+            Singleton::RelativePointerManager => unsafe {
+                self.conn
+                    .release(proxy, zwp_relative_pointer_manager_v1::destroy);
+            },
+            Singleton::PointerConstraints => unsafe {
+                self.conn
+                    .release(proxy, zwp_pointer_constraints_v1::destroy);
+            },
+        }
+        self.conn.flush();
+        crcbl_core::log::warn!(
+            "the compositor withdrew {}; it will be bound again if it is re-advertised",
+            slot.interface().to_string_lossy()
+        );
     }
 
     /// Gives every seat a `wl_data_device`, once there is a manager to make one
@@ -2319,13 +2502,19 @@ impl WaylandShell {
                     if let Some(index) = self.seats.iter().position(|seat| seat.global == name) {
                         self.remove_seat(index);
                     }
+                    self.withdraw_singleton(name);
                 }
                 RawEvent::Ping { serial } => {
                     // Answer or be killed: a compositor that does not get a
-                    // pong marks the client unresponsive.
-                    // SAFETY: `wm_base` is live whenever a ping can arrive on it.
-                    unsafe { xdg_wm_base::pong(self.conn.wm_base, serial) };
-                    self.conn.flush();
+                    // pong marks the client unresponsive. Nothing to answer
+                    // with once the global has been withdrawn, and a request
+                    // marshalled on the null that leaves behind would take the
+                    // process down instead.
+                    if !self.conn.wm_base.is_null() {
+                        // SAFETY: `wm_base` is live and is what the ping arrived on.
+                        unsafe { xdg_wm_base::pong(self.conn.wm_base, serial) };
+                        self.conn.flush();
+                    }
                 }
                 RawEvent::OutputGeometry { output, x, y } => {
                     if let Some(output) = self.output_mut(output) {
@@ -4127,18 +4316,7 @@ impl WaylandShell {
 
             // Writes first: a read of our own selection cannot progress until
             // the bytes it is waiting for have been put in the pipe.
-            let mut index = 0;
-            while index < self.writes.len() {
-                let (state, progressed) = self.writes[index].service(now);
-                moved |= progressed;
-                if state == fd::State::Pending {
-                    index += 1;
-                } else {
-                    // Dropping the writer closes the descriptor, which is the
-                    // end-of-file the peer reads as "that was all".
-                    self.writes.remove(index);
-                }
-            }
+            moved |= self.writes.service(now);
 
             let mut finished = Vec::new();
             let mut index = 0;
@@ -4450,9 +4628,25 @@ impl Shell for WaylandShell {
         let app_id = CString::new(desc.app_id)
             .map_err(|_| ShellError::InvalidDescriptor("app_id contains a NUL byte".to_string()))?;
 
-        // SAFETY: the compositor and wm_base globals are live for the shell's
-        // lifetime, checked non-null in `open`. Each request creates the next
-        // object in the stack, and every pointer is checked before use.
+        // `open` refuses a compositor that has neither, but a global can also
+        // be **withdrawn** mid-session — see
+        // [`withdraw_singleton`](Self::withdraw_singleton). Marshalling a
+        // request on a null proxy is a segfault inside libwayland, so the two
+        // this window is built out of are read for null here rather than
+        // assumed.
+        if self.conn.compositor.is_null() {
+            return Err(ShellError::WindowCreation(
+                "the compositor withdrew wl_compositor".to_string(),
+            ));
+        }
+        if self.conn.wm_base.is_null() {
+            return Err(ShellError::WindowCreation(
+                "the compositor withdrew xdg_wm_base".to_string(),
+            ));
+        }
+        // SAFETY: both globals were just checked non-null. Each request creates
+        // the next object in the stack, and every pointer is checked before
+        // use.
         let (surface, xdg, toplevel) = unsafe {
             let surface = wl_compositor::create_surface(self.conn.compositor);
             if surface.is_null() {
@@ -4931,6 +5125,14 @@ impl Shell for WaylandShell {
         self.window(window)?;
         if !self.caps.contains(ShellCaps::CLIPBOARD) {
             return Err(Self::unsupported("clipboard"));
+        }
+        // The capability is latched and the seat's `wl_data_device` outlives
+        // its manager, so neither of those answers whether the manager is
+        // still there; a withdrawn one is null and must not be marshalled on.
+        if self.conn.data_device_manager.is_null() {
+            return Err(ShellError::Backend(
+                "the compositor withdrew wl_data_device_manager".to_string(),
+            ));
         }
         let index = *self
             .seats_for_window(window)

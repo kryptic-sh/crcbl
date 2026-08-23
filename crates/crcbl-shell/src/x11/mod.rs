@@ -735,6 +735,15 @@ pub struct X11Shell {
     caps: ShellCaps,
     /// Whether a window manager was running at startup.
     has_window_manager: bool,
+    /// Whether the last drain stopped at its per-pump cap with libxcb's own
+    /// event queue possibly still holding decoded events.
+    ///
+    /// The connection's descriptor cannot answer that question:
+    /// `xcb_poll_for_event` drains the *socket* into that queue, so a burst
+    /// past the cap leaves events waiting behind a descriptor with nothing
+    /// readable on it. [`wait_events`](Shell::wait_events) reads this instead
+    /// of sleeping on the poll; see [`input`].
+    undrained_events: bool,
     lost: Option<String>,
 }
 
@@ -890,6 +899,7 @@ impl X11Shell {
             time: TimeBase::now(),
             caps: ShellCaps::empty(),
             has_window_manager,
+            undrained_events: false,
             lost: None,
         };
         shell.monitors = shell.enumerate_monitors();

@@ -310,6 +310,97 @@ impl Writing {
     }
 }
 
+/// The payloads being fed into descriptors peers were handed, as a bounded
+/// list.
+///
+/// One `wl_data_source.send` is one entry: the compositor brokered a pipe and
+/// this process owes it the selection. Several at once is ordinary — a peer
+/// that wants two formats asks twice, and a paste of our own selection is one
+/// more — so this is a list; it is a *type* rather than a bare `Vec` because
+/// how many entries it may hold is part of what it is.
+#[derive(Debug)]
+pub struct Writes {
+    pending: Vec<Writing>,
+}
+
+impl Writes {
+    /// The most payloads one selection may have in flight at once.
+    ///
+    /// Each costs a full copy of the offered bytes, held until the peer
+    /// finishes reading or the transfer idles out — and **the peer decides how
+    /// many times to ask**. `wl_data_offer.receive` in a loop, answered
+    /// faithfully, multiplies the selection by that peer's descriptor limit,
+    /// which is a memory multiplier chosen by another process. A real paste
+    /// asks once per format.
+    ///
+    /// The sibling bounds on the same conversation are
+    /// [`Offer::MAX_OFFER_MIMES`](super::data::Offer::MAX_OFFER_MIMES),
+    /// [`Device::MAX_PENDING_OFFERS`](super::data::Device::MAX_PENDING_OFFERS)
+    /// and [`MAX_BYTES`], which bounds each payload rather than their number.
+    pub const MAX_PENDING_WRITES: usize = 8;
+
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    /// Whether anything is in flight.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// How many payloads are in flight.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Takes on one payload, or refuses it at
+    /// [`MAX_PENDING_WRITES`](Self::MAX_PENDING_WRITES).
+    ///
+    /// The **newest** is refused rather than the oldest evicted: the entries
+    /// already here are the ones a peer is reading, and abandoning one of those
+    /// would truncate a paste that was arriving. Dropping the refused
+    /// [`Writing`] closes its descriptor, which the peer reads as the end of an
+    /// empty payload — an answer, where a request left unanswered is a peer
+    /// blocked on a pipe until its own timeout.
+    pub fn push(&mut self, writing: Writing) {
+        if self.pending.len() >= Self::MAX_PENDING_WRITES {
+            crcbl_core::log::warn!(
+                "a peer has more clipboard reads open than this client will \
+                 hold at once; the newest was answered with nothing"
+            );
+            return;
+        }
+        self.pending.push(writing);
+    }
+
+    /// Moves every payload as far as its pipe will take without blocking, and
+    /// drops the ones that finished or failed.
+    ///
+    /// Returns whether any byte moved; see [`Reading::service`] for why the
+    /// caller needs to know.
+    pub fn service(&mut self, now_nanos: u64) -> bool {
+        let mut moved = false;
+        let mut index = 0;
+        while index < self.pending.len() {
+            let (state, progressed) = self.pending[index].service(now_nanos);
+            moved |= progressed;
+            if state == State::Pending {
+                index += 1;
+            } else {
+                // Dropping the writer closes the descriptor, which is the
+                // end-of-file the peer reads as "that was all".
+                self.pending.remove(index);
+            }
+        }
+        moved
+    }
+}
+
 /// [`TIMEOUT`] in nanoseconds, saturating.
 fn deadline_nanos() -> u64 {
     u64::try_from(TIMEOUT.as_nanos()).unwrap_or(u64::MAX)
@@ -458,6 +549,49 @@ mod tests {
             now(),
         );
         assert_eq!(writing.service(now()).0, State::Failed);
+    }
+
+    #[test]
+    fn a_peer_cannot_make_this_client_hold_one_copy_per_request() {
+        // Every `wl_data_source.send` is a peer asking for the selection
+        // again, and answering one costs a copy of it held until the read
+        // finishes. Nothing in the protocol limits how many times a peer may
+        // ask, so this is a peer asking far more often than any paste does.
+        let payload = b"crcbl selection".to_vec();
+        let mut writes = Writes::new();
+        let mut readers = Vec::new();
+        for _ in 0..Writes::MAX_PENDING_WRITES + 4 {
+            let (reader, writer) = std::io::pipe().expect("pipe");
+            readers.push(Reading::new(
+                File::from(std::os::fd::OwnedFd::from(reader)),
+                now(),
+            ));
+            writes.push(Writing::new(
+                File::from(std::os::fd::OwnedFd::from(writer)),
+                payload.clone(),
+                now(),
+            ));
+        }
+        assert_eq!(
+            writes.len(),
+            Writes::MAX_PENDING_WRITES,
+            "asking more times must not buy more copies"
+        );
+
+        // What a refused request gets: the descriptor closed, which the peer
+        // reads as an empty payload. The alternative is a peer blocked on a
+        // pipe nobody owns any more until its own timeout runs out.
+        let (state, moved) = readers[Writes::MAX_PENDING_WRITES].service(now());
+        assert_eq!(state, State::Done, "the refused peer was answered");
+        assert!(!moved, "with nothing");
+
+        // And the requests it did take are answered in full, which is what says
+        // the cap refused the newest rather than corrupting the queue.
+        assert!(writes.service(now()), "the payloads went into the pipes");
+        assert!(writes.is_empty(), "and every one of them finished");
+        let mut first = readers.remove(0);
+        assert_eq!(first.service(now()).0, State::Done);
+        assert_eq!(first.take(), payload);
     }
 
     #[test]

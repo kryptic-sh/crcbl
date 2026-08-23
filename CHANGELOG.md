@@ -311,6 +311,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A window survives a compositor withdrawing a global.** Wayland's
+  `global_remove` was handled for `wl_output` and `wl_seat` only, so every
+  singleton — `wl_compositor`, `xdg_wm_base`, the viewporter, the decoration and
+  pointer managers, `wl_data_device_manager` — kept a non-null but inert proxy.
+  A compositor re-advertising the interface could not rebind it, and the next
+  `create_window` marshalled on a destroyed object and disconnected the client.
+  Each is now let go the way its own protocol allows, and rebinds when it comes
+  back; `create_window` and `clipboard_offer` fail by name while it is gone.
+
+- **X11 `wait_events` no longer sleeps with events already decoded.** A burst
+  past the per-pump cap leaves the remainder inside libxcb's own queue, and the
+  connection's descriptor has nothing readable for them — so a caller that waits
+  for input slept out its whole timeout with events in hand. It now returns at
+  once when the last drain stopped at the cap.
+
+- **A peer cannot make the clipboard hold one copy of the selection per
+  request.** Each `wl_data_source.send` cost a full copy held until the transfer
+  finished or idled out, uncapped, with the number of requests chosen by the
+  peer. Eight at a time now, refusing the newest — which closes its descriptor,
+  so the peer reads an empty payload instead of blocking on a pipe.
+
 - **Normals survive a non-uniform scale.** The mesh shaders took a normal
   through `GpuInstance::transform`'s bare upper-left 3×3, which is the transform
   a _tangent_ takes, and the field's doc required callers to be rigid to make

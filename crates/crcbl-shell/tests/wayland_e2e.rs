@@ -21,7 +21,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crcbl_shell::wayland_test_support::{DragSource, VirtualInput};
+use crcbl_shell::wayland_test_support::{DragSource, GlobalHotplug, VirtualInput};
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalSize, Modifiers,
     MonitorInfo, PhysicalSize, PointerButton, PointerMode, ScrollDelta, Shell, ShellBackend,
@@ -949,6 +949,97 @@ fn a_second_window_is_configured_independently() {
     assert!(session.shell.window_state(first).is_err());
     assert!(session.shell.window_state(second).is_ok());
     session.shell.destroy_window(second).expect("destroy");
+}
+
+/// A global the compositor withdraws is let go of, and binding it again when it
+/// returns keeps the session.
+///
+/// `wl_registry.global_remove` leaves the bound object inert: the compositor
+/// ignores requests to it, and a client that keeps the proxy in its slot has a
+/// factory that silently makes nothing. Worse, the slot being non-null is what
+/// [`GlobalHotplug`]'s backend uses to decide a global is already bound, so the
+/// *replacement* the compositor advertises would never be taken up — leaving a
+/// shell that can never open another window on a connection that is otherwise
+/// perfectly healthy.
+///
+/// `xdg_wm_base` is the one to test it on because it is the global a window is
+/// made of, and because letting go of it is the case with a trap in it: its own
+/// destructor is a protocol error while any `xdg_surface` is still alive, so a
+/// backend that tidied up the obvious way would disconnect the client — the
+/// exact failure it was trying to avoid. The window created before the
+/// withdrawal is still here at the end for that reason.
+///
+/// See [`GlobalHotplug`] for what is synthetic here: the two registry events,
+/// and nothing else. Every proxy is real and so is the compositor.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_withdrawn_global_is_bound_again_when_the_compositor_re_advertises_it() {
+    let mut hotplug =
+        GlobalHotplug::open().expect("the harness exported WAYLAND_DISPLAY for a live sway");
+    let mut events = Vec::new();
+    let size = LogicalSize::new(320.0, 240.0);
+
+    let before = hotplug
+        .shell()
+        .create_window(&desc("crcbl e2e hotplug", size))
+        .expect("create_window");
+    hotplug.shell().pump(&mut |event| events.push(event));
+
+    let (name, version) = hotplug
+        .withdraw("xdg_wm_base")
+        .expect("a shell that opened at all has xdg_wm_base bound");
+    hotplug.shell().pump(&mut |event| events.push(event));
+
+    // Let go of: the request that needs the global fails **by name**, rather
+    // than marshalling on an object the compositor has retired.
+    let refused = hotplug
+        .shell()
+        .create_window(&desc("crcbl e2e refused", size));
+    assert!(
+        matches!(&refused, Err(ShellError::WindowCreation(detail)) if detail.contains("xdg_wm_base")),
+        "expected a named refusal while the global is gone, got {refused:?}"
+    );
+    // And the window that already existed is not collateral: its own objects
+    // outlive the factory, which is what `xdg_wm_base.destroy`'s
+    // `defunct_surfaces` error exists to protect.
+    hotplug
+        .shell()
+        .set_title(before, "crcbl e2e hotplug, still here")
+        .expect("the window from before the withdrawal is still live");
+
+    // The same global, back again.
+    hotplug.readvertise(name, "xdg_wm_base", version);
+    hotplug.shell().pump(&mut |event| events.push(event));
+
+    let after = hotplug
+        .shell()
+        .create_window(&desc("crcbl e2e rebound", size))
+        .expect("the global is back, so a window can be made again");
+    // The end of the story, and the only part a client cannot fake: the
+    // compositor configures the new window. That answer arrives over the
+    // connection this whole exercise could have cost us, through an
+    // `xdg_surface` made by the global that was rebound.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        hotplug.shell().pump(&mut |event| events.push(event));
+        if hotplug
+            .shell()
+            .window_state(after)
+            .is_ok_and(|state| state.is_configured())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for the rebound window's first \
+             configure; events so far: {:?}",
+            events.iter().map(ShellEvent::name).collect::<Vec<_>>()
+        );
+        hotplug.shell().wait_events(Some(Duration::from_millis(20)));
+    }
+
+    hotplug.shell().destroy_window(after).expect("destroy");
+    hotplug.shell().destroy_window(before).expect("destroy");
 }
 
 // ---------------------------------------------------------------------------

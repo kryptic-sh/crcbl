@@ -506,8 +506,13 @@ impl Shell for X11Shell {
     /// without the cap an editor idling with `timeout: None` would sleep
     /// straight through a stalled paste's timeout and never answer it, which is
     /// obligation 4 violated by omission.
+    ///
+    /// It returns immediately when the last drain stopped at its per-pump cap:
+    /// those events are in libxcb's queue with nothing left on the socket, so
+    /// the poll below would sleep on a descriptor that will never become
+    /// readable for them. See [`undrained_events`](X11Shell::undrained_events).
     fn wait_events(&mut self, timeout: Option<Duration>) {
-        if self.lost.is_some() {
+        if self.lost.is_some() || self.undrained_events {
             return;
         }
         let mut deadline = timeout;
@@ -517,10 +522,10 @@ impl Shell for X11Shell {
         let timeout_ms = deadline.map_or(-1, |deadline| {
             c_int::try_from(deadline.as_millis()).unwrap_or(c_int::MAX)
         });
-        // Everything libxcb had queued was drained by the last `pump`, so the
-        // descriptor is the whole truth about whether anything is pending. The
-        // answer is discarded on purpose: `wait_events` is advisory, and
-        // `pump` is what delivers.
+        // Nothing is left in libxcb's queue — the early return above is what
+        // makes that true — so the descriptor is the whole truth about whether
+        // anything is pending. The answer is discarded on purpose:
+        // `wait_events` is advisory, and `pump` is what delivers.
         let _ = ffi::poll_readable(self.conn.fd, timeout_ms);
     }
 

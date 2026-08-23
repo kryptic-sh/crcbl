@@ -5569,6 +5569,36 @@ which is state this backend has deliberately not had. Worth doing only if a
 second obligation wants the same table; one caller's convenience does not pay
 for a mirror of the browser's own bookkeeping.
 
+## What the three `crcbl-shell` fixes left uncovered (2026-08-23)
+
+The X11 `wait_events` sleep, the Wayland `global_remove` gap and the uncapped
+clipboard copies are fixed. Four things around them are not, and the first is a
+correction a later reader needs.
+
+- **The X11 mechanism needs its round-trip clause.** A burst on its own does
+  _not_ reach the bug: libxcb reads the socket a buffer at a time, so the
+  remainder stays _on the socket_ where a descriptor poll finds it. It takes a
+  **round trip** — libxcb queues every event it reads on the way to a reply — to
+  get more than a pump's worth decoded at once. Measured: with the round trip
+  and without the fix, `wait_events(Some(2s))` slept 2.002 s. The e2e test
+  carries the round trip for that reason, and a reader who drops it will
+  conclude the bug is unreachable.
+- **The `SourceSend` wiring is not covered end to end.** `fd::Writes`' cap is
+  unit-tested; that the clipboard path pushes through it rests on the compiler
+  and the existing e2e clipboard tests. A real one needs a second-connection
+  peer issuing more `wl_data_offer.receive` calls than the cap and never reading
+  — the Wayland harness has `DragSource` and no clipboard-reading peer.
+- **The compositor half of a withdrawal is unexercised.** sway removes nothing
+  but `wl_output` and `wl_seat`, so the e2e test pushes the two registry events
+  into the decoded queue itself; the proxies, the rebind and the compositor's
+  reply are real, and only libwayland's decoding of those two events is skipped.
+  A full test needs a scriptable compositor.
+- **Latched caps stay stale after a withdrawal.** `POINTER_LOCK`, `DRAG_DROP`
+  and friends stay set while the global is gone, and those calls quietly do
+  nothing — the same as the inert proxy did before. `withdraw_singleton`'s doc
+  says so. Not fixed because the seam requires a capability set that does not
+  move under a caller; changing that is a seam decision, not a backend one.
+
 ## The 2026-08-01 full-workspace review, aggregated (2026-08-22)
 
 **The review document is deleted.** The earlier decision — recorded below as "a
@@ -5600,25 +5630,6 @@ nothing.
   `kAudioDevicePropertyPreferredChannelLayout` on macOS, ALSA/PulseAudio channel
   maps on Linux) or a user-facing speaker-layout setting the mixer pans into.
   Nobody has asked for surround yet.
-- **X11 `wait_events` can sleep with events already decoded**
-  (`crates/crcbl-shell/src/x11/shell.rs`). `collect_events` drains libxcb's
-  queue _and_ the socket via `xcb_poll_for_event`, then stops at
-  `MAX_EVENTS_PER_PUMP`. A burst past that cap leaves the remainder in libxcb's
-  internal queue, and `wait_events` then polls only the connection fd — which is
-  not readable, because the socket was already drained. Its comment still
-  asserts the opposite as fact.
-- **Wayland `global_remove` is handled for `wl_output` and `wl_seat` only**
-  (`crates/crcbl-shell/src/wayland/mod.rs`). A compositor removing and
-  re-advertising `xdg_wm_base` leaves a non-null dead proxy, and `bind_global`'s
-  `is_null()` guard then refuses to re-bind; the next `create_window` marshals
-  on a destroyed object, which disconnects the client.
-- **One clipboard payload copy per `wl_data_source.send`, uncapped**
-  (`crates/crcbl-shell/src/wayland/mod.rs`). Each `receive` costs a `to_vec()`
-  held in `self.writes` until the transfer completes or idles out — a
-  peer-controlled multiplier bounded only by their fd limit. Notable because the
-  sibling findings in the same sweep were all fixed _with_ caps
-  (`Offer::MAX_OFFER_MIMES`, `Device::MAX_PENDING_OFFERS`, `fd::MAX_BYTES`), so
-  this is a gap in a finished sweep rather than a decision.
 - **X11 `refresh_of` re-issues a full screen-resources round trip per CRTC**
   (`crates/crcbl-shell/src/x11/monitors.rs`) — six monitors cost twelve extra
   synchronous round trips on connect and on every RandR change. The sibling

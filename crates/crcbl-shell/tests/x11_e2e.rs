@@ -36,7 +36,7 @@
 
 use std::time::{Duration, Instant};
 
-use crcbl_shell::x11_test_support::Peer;
+use crcbl_shell::x11_test_support::{MAX_EVENTS_PER_PUMP, Peer};
 use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, CloseReply, CursorIcon, DisplayMode, KeyCode,
     LogicalSize, MimeType, Modifiers, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
@@ -1591,6 +1591,84 @@ fn warping_the_pointer_moves_it() {
         .shell
         .set_cursor(window, Some(CursorIcon::Crosshair))
         .expect("shape");
+}
+
+/// A burst past the per-pump cap does not leave `wait_events` asleep on events
+/// that have already been decoded.
+///
+/// The backend drains the *socket* into libxcb's own event queue and stops at
+/// [`MAX_EVENTS_PER_PUMP`]. Everything over the cap is then sitting in that
+/// queue behind a descriptor with nothing readable on it — so a `wait_events`
+/// that polls only the connection sleeps for its whole timeout with events
+/// waiting, and an editor idling at zero frames per second does not see them
+/// until the user does something else.
+///
+/// The setup is the case that actually produces it, and the round trip in the
+/// middle is load-bearing rather than decoration. libxcb reads the socket a
+/// buffer at a time, so a burst on its own leaves the remainder *on the
+/// socket*, where a poll finds it and the backend is never caught out — with
+/// the round trip taken out, an unfixed backend passes this test. What fills
+/// the queue instead is a reply being waited for: libxcb queues every event it
+/// reads on the way to one, and `create_window` ends in a `GetGeometry`.
+///
+/// The second half is what makes the first half mean anything: once the queue
+/// is empty the same wait *does* sleep, so the quick return above was the cap
+/// being noticed rather than a display that is merely chatty.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_burst_past_the_pump_cap_does_not_leave_wait_events_asleep() {
+    /// How far past the cap the burst goes. Anything over one is enough; this
+    /// is wide enough that the arrival of an unrelated event cannot close the
+    /// gap.
+    const OVER_CAP: usize = 64;
+    /// What a wait on a quiet descriptor costs. Long enough that a backend
+    /// which sleeps through it cannot be mistaken for a slow runner.
+    const SLEEP: Duration = Duration::from_secs(2);
+    /// The control wait: short enough to keep the test quick, long enough to be
+    /// far outside the cost of the call itself.
+    const CONTROL: Duration = Duration::from_millis(400);
+
+    let mut session = Session::open();
+    let window = session.window(&desc("burst"));
+    session.settle();
+    let xid = session.xid(window);
+
+    session.peer.burst(xid, MAX_EVENTS_PER_PUMP + OVER_CAP);
+    let probe = session
+        .shell
+        .create_window(&WindowDesc {
+            visible: false,
+            ..desc("burst probe")
+        })
+        .expect("create_window");
+    session.windows.push(probe);
+
+    // Interprets the cap and leaves the rest in libxcb's queue, with nothing
+    // left on the socket for a poll to find.
+    session.pump();
+
+    let started = Instant::now();
+    session.shell.wait_events(Some(SLEEP));
+    let waited = started.elapsed();
+    assert!(
+        waited < SLEEP / 4,
+        "wait_events slept {waited:?} of {SLEEP:?} with more than a pump's \
+         worth of events already decoded"
+    );
+
+    // And now the control. The remainder is interpreted, the display is quiet,
+    // and the same call sleeps — which is what says the return above came from
+    // the events that were pending and not from a descriptor that is readable
+    // whatever happens.
+    session.settle();
+    let started = Instant::now();
+    session.shell.wait_events(Some(CONTROL));
+    let waited = started.elapsed();
+    assert!(
+        waited >= CONTROL / 2,
+        "with nothing pending, wait_events returned after {waited:?} of \
+         {CONTROL:?} — the quick return above proves nothing"
+    );
 }
 
 // ---------------------------------------------------------------------------

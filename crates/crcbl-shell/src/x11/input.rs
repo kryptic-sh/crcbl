@@ -110,7 +110,11 @@ impl X11Shell {
             batch.push(bytes);
             // A pathological peer could in principle keep the queue non-empty
             // forever; `pump` promises to be finite, so the batch is bounded.
+            // Whatever is left over is left in *libxcb's* queue rather than on
+            // the socket, which no descriptor poll can see — so the cap is
+            // recorded for `wait_events`.
             if batch.len() >= MAX_EVENTS_PER_PUMP {
+                self.undrained_events = true;
                 break;
             }
         }
@@ -119,6 +123,7 @@ impl X11Shell {
 
     /// Drains the connection and queues the [`ShellEvent`]s it produced.
     pub(super) fn drain(&mut self) {
+        self.undrained_events = false;
         let batch = self.collect_events();
         let mut index = 0;
         while index < batch.len() {
@@ -676,7 +681,7 @@ impl X11Shell {
 /// would otherwise keep the loop inside one frame indefinitely. Whatever is
 /// left is drained on the next call, which is what the socket would have done
 /// anyway.
-const MAX_EVENTS_PER_PUMP: usize = 4096;
+pub(super) const MAX_EVENTS_PER_PUMP: usize = 4096;
 
 /// Whether these two events are an auto-repeat pair.
 ///

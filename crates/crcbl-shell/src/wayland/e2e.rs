@@ -70,6 +70,7 @@ use super::protocol::wayland::{
     wl_data_device, wl_data_device_manager, wl_data_source, wl_pointer, wl_registry, wl_seat,
     wl_shm, wl_shm_pool, wl_surface,
 };
+use super::{RawEvent, WaylandShell};
 use crate::{PhysicalSize, Shell, ShellError, WindowId};
 
 unsafe extern "C" {
@@ -1098,6 +1099,106 @@ impl Drop for DragSource {
             (self.lib.proxy_destroy)(self.state.registry);
             (self.lib.display_flush)(self.display);
         }
+    }
+}
+
+/// A shell whose **registry globals can be taken away and given back**.
+///
+/// The one part of a compositor this suite otherwise cannot play. A global is
+/// withdrawn with `wl_registry.global_remove` when a compositor stops offering
+/// an interface — a session-wide protocol being disabled, a nested compositor
+/// restarting the half of itself that implements it — and re-advertised when it
+/// comes back. `sway`, which is what the harness runs, never does either for
+/// anything but `wl_output` and `wl_seat`, so there is no way to provoke it
+/// from the outside and no way to test the backend's answer without this.
+///
+/// **What is synthetic and what is not.** The two registry events are pushed
+/// straight into the decoded-event queue, so libwayland's own decoding of them
+/// is the only step skipped; from there the backend's real handlers run against
+/// real, live proxies on a real connection to `sway` — the withdrawal really
+/// destroys the bound object, and the re-advertisement really binds the global
+/// again from that compositor's registry. What the compositor believes is the
+/// difference: it still has the global it was told went away. That makes the
+/// *client's* half of the contract testable — let go, refuse by name, rebind,
+/// keep the connection — and leaves the compositor's half to a compositor that
+/// does it.
+///
+/// It owns the shell rather than borrowing one because the backend type is
+/// crate-private: [`shell`](Self::shell) is how a test drives it, and it is the
+/// same `dyn Shell` every other test in the suite uses.
+pub struct GlobalHotplug {
+    shell: WaylandShell,
+}
+
+impl core::fmt::Debug for GlobalHotplug {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GlobalHotplug")
+            .field("shell", &self.shell)
+            .finish()
+    }
+}
+
+impl GlobalHotplug {
+    /// Connects a shell of its own, exactly as [`crate::open`] would.
+    ///
+    /// # Errors
+    ///
+    /// Whatever connecting reports; see [`crate::open_backend`].
+    pub fn open() -> Result<Self, ShellError> {
+        Ok(Self {
+            shell: WaylandShell::open()?,
+        })
+    }
+
+    /// The shell under test.
+    pub fn shell(&mut self) -> &mut dyn Shell {
+        &mut self.shell
+    }
+
+    /// Withdraws the global named `interface`, as a compositor removing it
+    /// would.
+    ///
+    /// Returns what it takes to bring the same one back — the registry name it
+    /// was bound from, and **the version the proxy was actually bound at**,
+    /// which is a version this compositor is known to offer. Guessing one
+    /// higher than the global really has is a protocol error that disconnects
+    /// the client, so it is read off the live object rather than assumed.
+    ///
+    /// `None` when this backend has no such global bound, which is the honest
+    /// answer for a compositor that never advertised it.
+    ///
+    /// The event is queued, not applied: the backend processes it in the next
+    /// [`Shell::pump`], which is where a real one would
+    /// have arrived.
+    pub fn withdraw(&mut self, interface: &str) -> Option<(u32, u32)> {
+        let (name, slot) = self
+            .shell
+            .singletons
+            .iter()
+            .copied()
+            .find(|(_, slot)| slot.interface().to_bytes() == interface.as_bytes())?;
+        let proxy = *slot.slot(&mut self.shell.conn);
+        // SAFETY: the slot is non-null while it is in `singletons` — nothing
+        // records a global it failed to bind — and the connection is open.
+        let version = unsafe { ffi::proxy_version(proxy) };
+        self.shell
+            .conn
+            .sink()
+            .events
+            .push(RawEvent::GlobalRemove { name });
+        Some((name, version))
+    }
+
+    /// Advertises a global, as a compositor that has one again would.
+    ///
+    /// `name` and `version` are what [`withdraw`](Self::withdraw) returned, so
+    /// this is the same global coming back rather than an invented one.
+    pub fn readvertise(&mut self, name: u32, interface: &str, version: u32) {
+        self.shell.conn.sink().events.push(RawEvent::Global {
+            name,
+            interface: interface.to_string(),
+            version,
+        });
     }
 }
 
