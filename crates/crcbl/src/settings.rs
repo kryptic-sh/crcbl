@@ -62,16 +62,33 @@ pub const VIDEO_KEYS: [(&str, RenderEffects); 3] = [
 /// [`EffectRequest::video`](crcbl_render::EffectRequest::video).
 ///
 /// [`RenderEffects::all`] for a stack that says nothing, and one bit fewer for
-/// each key present and `false`. A key holding something that is not a boolean
-/// — `shadows = "off"` in a hand-edited file — reads as absent, which is
+/// each key present and `false`.
+///
+/// # A line that does nothing says so
+///
+/// A key holding something that is not a boolean — `shadows = "off"` in a
+/// hand-edited file — leaves its effect standing, which is
 /// [`SettingsStack::get`]'s own rule for a value it cannot deserialize and the
-/// safe direction for a layer that may only remove.
+/// safe direction for a layer that may only remove. It also **warns**, naming
+/// the key: silence there is a player who wrote a line, saw no change, and has
+/// nothing to read that would tell them why. A key that is simply absent is not
+/// a mistake and does not warn.
 #[must_use]
 pub fn video_effects(stack: &SettingsStack) -> RenderEffects {
     let mut allowed = RenderEffects::all();
     for (key, effect) in VIDEO_KEYS {
-        if stack.get::<bool>(&format!("{VIDEO_NAMESPACE}.{key}")) == Some(false) {
-            allowed.remove(effect);
+        let dotted = format!("{VIDEO_NAMESPACE}.{key}");
+        match stack.get::<bool>(&dotted) {
+            Some(false) => allowed.remove(effect),
+            Some(true) => {}
+            // Present, and not something this layer can read. `get` has already
+            // searched every layer for a `bool`, so nothing below answered
+            // either.
+            None if stack.contains(&dotted) => crcbl_core::log::warn!(
+                "settings: `{dotted}` is not true or false, so it does nothing; \
+                 the effect stays as the game asked for it"
+            ),
+            None => {}
         }
     }
     allowed
@@ -197,13 +214,57 @@ mod tests {
         }
     }
 
-    /// **A value of the wrong type reads as absent**, so a hand-edited file
-    /// cannot switch an effect off by accident — and cannot fail the start-up
-    /// either.
+    /// **A value of the wrong type clamps nothing and warns, naming the key.**
+    ///
+    /// A hand-edited file cannot switch an effect off by accident and cannot
+    /// fail the start-up either — and the player who wrote the line hears
+    /// about it, because a setting that silently does nothing is
+    /// indistinguishable from an engine that ignores the file.
     #[test]
-    fn a_key_holding_something_that_is_not_a_boolean_clamps_nothing() {
+    fn a_key_holding_something_that_is_not_a_boolean_clamps_nothing_and_warns() {
+        let capture = crcbl_core::log::capture();
         let stack = stack_from(&format!("[{VIDEO_NAMESPACE}]\nshadows = \"off\"\n"));
         assert_eq!(video_effects(&stack), RenderEffects::all());
+
+        let warned: Vec<_> = capture
+            .records()
+            .into_iter()
+            .filter(|record| record.message.contains("engine.video.shadows"))
+            .collect();
+        assert_eq!(
+            warned.len(),
+            1,
+            "exactly the key that could not be read: {:?}",
+            capture.records()
+        );
+        assert_eq!(warned[0].level, crcbl_core::log::Level::Warn);
+    }
+
+    /// **The keys that read cleanly are silent**, so the warning above stays
+    /// worth reading.
+    ///
+    /// Every arm of the ordinary path: absent, `true`, `false`, and a section
+    /// holding a key this layer does not own. A warning that fires for a file
+    /// with nothing wrong with it is one a player learns to ignore, and then
+    /// the one that matters is ignored too.
+    #[test]
+    fn a_settings_file_this_layer_can_read_warns_about_nothing() {
+        let capture = crcbl_core::log::capture();
+        for toml in [
+            String::new(),
+            format!("[{VIDEO_NAMESPACE}]\nshadows = false\n"),
+            format!("[{VIDEO_NAMESPACE}]\nreflections = true\n"),
+            format!("[{VIDEO_NAMESPACE}]\nvsync = \"sometimes\"\n"),
+        ] {
+            let _ = video_effects(&stack_from(&toml));
+        }
+        let records = capture.records();
+        assert!(
+            records
+                .iter()
+                .all(|record| record.level != crcbl_core::log::Level::Warn),
+            "nothing here is a mistake this layer can see: {records:?}"
+        );
     }
 
     /// **The highest layer wins, in both directions.**

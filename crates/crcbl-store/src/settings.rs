@@ -314,10 +314,20 @@ impl SettingsStack {
     // ── Reading ─────────────────────────────────────────────────────────
 
     /// Get a typed value by dotted key path, searching layers from highest
-    /// priority to lowest. Returns `None` if no layer defines the key or if
-    /// the value cannot be deserialized into `T`.
+    /// priority to lowest. `None` if no layer defines the key.
     ///
     /// Key path examples: `"engine.video.vsync"`, `"game.difficulty"`.
+    ///
+    /// # A value of the wrong type is skipped, not fatal, and not the end
+    ///
+    /// A layer whose value will not deserialize into `T` — `vsync = "on"` in a
+    /// hand-edited file — is passed over and the search **continues
+    /// downward**, so the layer beneath still answers. That is the useful
+    /// direction for a user file sitting over a game's defaults: a typo costs
+    /// the player their override rather than the key. It also means a `None`
+    /// here does not tell a caller that the key is absent; use
+    /// [`contains`](Self::contains) for that, which is the pair a caller needs
+    /// to warn about a value it could not read.
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         for layer in self.layers.iter().rev() {
             // A layer without a table is skipped, not treated as the end of
@@ -330,6 +340,24 @@ impl SettingsStack {
             }
         }
         None
+    }
+
+    /// Whether any layer defines `key` at all, whatever type it holds.
+    ///
+    /// The half [`get`](Self::get) cannot answer: a `None` from it means "no
+    /// layer had a value of this type", which a key that is missing and a key
+    /// holding `"off"` where a `bool` belongs produce alike. A caller that
+    /// wants to tell a player their settings file has a line in it that does
+    /// nothing needs both — and it is here rather than at the call site
+    /// because the merged tables are private and a caller outside this crate
+    /// cannot reach a `toml::Value` without naming the parser this crate
+    /// exists to keep to itself.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.layers
+            .iter()
+            .filter_map(SettingsLayer::table)
+            .any(|table| get_dotted(table, key).is_some())
     }
 
     /// Get a whole section (namespace) as a typed struct.
@@ -628,6 +656,60 @@ mod tests {
 
         assert_eq!(stack.get::<String>("a").as_deref(), Some("1"));
         assert_eq!(stack.get::<String>("b"), None);
+    }
+
+    /// **`contains` answers for a key `get` cannot read**, which is the whole
+    /// reason it exists: a value of the wrong type and a key that was never
+    /// written both make `get::<bool>` return `None`, and only one of them is
+    /// something to tell a player about.
+    #[test]
+    fn contains_separates_a_wrong_typed_key_from_a_missing_one() {
+        let mut stack = SettingsStack::new();
+        let mut table = toml::Table::new();
+        set_dotted(
+            &mut table,
+            "engine.video.shadows",
+            toml::Value::String("off".into()),
+        )
+        .unwrap();
+        stack.add(SettingsLayer::UserFile(StorageSettingsFile {
+            data: table,
+            dirty: false,
+        }));
+
+        assert_eq!(stack.get::<bool>("engine.video.shadows"), None);
+        assert!(
+            stack.contains("engine.video.shadows"),
+            "the key is in the file, it just does not hold a bool"
+        );
+        assert!(
+            !stack.contains("engine.video.reflections"),
+            "a key nobody wrote is not present"
+        );
+        assert!(
+            !stack.contains("engine.video.shadows.deeper"),
+            "a path through a scalar is not a key"
+        );
+    }
+
+    /// **A key is present if *any* layer has it**, not only the top one.
+    ///
+    /// The arm that fails if the search stops at the highest-priority layer:
+    /// an engine default the user's file never mentions is still a key this
+    /// stack defines, and reporting it as absent would have a caller warn
+    /// about a line it can read perfectly well.
+    #[test]
+    fn contains_searches_every_layer() {
+        let mut stack = SettingsStack::new();
+        stack.add(SettingsLayer::EngineDefaults(make_table(&[("a", "1")])));
+        stack.add(SettingsLayer::UserFile(StorageSettingsFile {
+            data: make_table(&[("b", "2")]),
+            dirty: false,
+        }));
+
+        assert!(stack.contains("a"), "a key only the bottom layer defines");
+        assert!(stack.contains("b"), "a key only the top layer defines");
+        assert!(!stack.contains("c"));
     }
 
     #[test]
