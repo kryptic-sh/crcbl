@@ -35,9 +35,10 @@
 //! cross-backend equivalent of a Vulkan validation layer, so [`Headless::finish`]
 //! asserts on [`Device::take_error`] instead — the seam's own out-of-band error
 //! channel. It is not the same instrument and this file does not pretend it is:
-//! on wgpu and WebGPU it is where a failure the return value did not carry
-//! actually arrives, and on Vulkan, Metal and D3D12 the trait's default answers
-//! `None` because those backends report through their return values.
+//! on WebGPU it is where a failure the return value did not carry actually
+//! arrives; on Vulkan it answers only when `CRCBL_VK_VALIDATION_FATAL` is set,
+//! and on Metal and D3D12 the trait's default answers `None` because those
+//! backends report through their return values.
 //!
 //! So a test whose evidence is a return value or a byte moved here and its
 //! copies were deleted. Two obligations are different: 1 (a device outliving its
@@ -2047,8 +2048,9 @@ fn presenting_a_swapchain_without_an_acquire_is_refused() {
 /// is forbidden is every third answer: another [`HalError`] variant, a panic out
 /// of the backend, or an `Ok` covering a layout the API underneath rejected —
 /// which is what [`Headless::finish`]'s
-/// [`take_error`](crcbl::hal::Device::take_error) check catches, since on wgpu
-/// and WebGPU that is where such an acceptance surfaces.
+/// [`take_error`](crcbl::hal::Device::take_error) check catches, since WebGPU —
+/// and Vulkan under `CRCBL_VK_VALIDATION_FATAL` — is where such an acceptance
+/// surfaces.
 ///
 /// # Why the wide fixture, and why the numbers are printed
 ///

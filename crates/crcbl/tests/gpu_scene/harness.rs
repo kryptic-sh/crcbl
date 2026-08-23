@@ -28,8 +28,9 @@
 //!   validation report. There is no cross-backend equivalent of a Vulkan
 //!   validation layer; the seam's own out-of-band error channel is what every
 //!   backend has. `tests/hal_seam_e2e.rs` records the same substitution and the
-//!   same caveat: on wgpu and WebGPU this is where a failure the return value
-//!   did not carry actually arrives, and on Vulkan, Metal and D3D12 the trait's
+//!   same caveat: on WebGPU this is where a failure the return value did not
+//!   carry actually arrives; on Vulkan it answers only when
+//!   `CRCBL_VK_VALIDATION_FATAL` is set, and on Metal and D3D12 the trait's
 //!   default answers `None`.
 //!
 //! [`select_adapter`] prints a `<SUITE>: device on adapter …` line, and that

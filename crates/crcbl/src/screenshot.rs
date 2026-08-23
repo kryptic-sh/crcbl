@@ -2302,6 +2302,20 @@ pub enum OffscreenError {
         height: u32,
     },
 
+    /// A failure the device reported out of band, drained by [`OffscreenSetup::finish`].
+    ///
+    /// The Vulkan validation layer arrives here: a specification violation the
+    /// driver accepted returns success from the call that committed it —
+    /// `vkCmdDraw` has no return value — and the message lands on the debug
+    /// messenger afterwards, so a caller watching return values sees a healthy
+    /// device and a frame that is not legal. [`crate::engine`]'s frame loop
+    /// already drains [`Device::take_error`] every frame; a screenshot never
+    /// runs that loop, which left the offscreen path the one place a frame could
+    /// be illegal and still be saved, compared against a golden, and reported as
+    /// a pass.
+    #[error("the device reported out of band: {0}")]
+    DeviceReported(String),
+
     /// The readback did not land within [`READBACK_DEADLINE`].
     ///
     /// A `Result` rather than a panic because the CLI's contract is exit 1 with
@@ -2956,6 +2970,11 @@ impl OffscreenSetup {
     /// caller about to save the pixels as a golden image needs to be told
     /// before it trusts them. The teardown still runs either way; the failure
     /// is reported after it.
+    ///
+    /// [`OffscreenError::DeviceReported`] if the device reported a failure its
+    /// return values did not carry. Same reason, one layer out: pixels produced
+    /// by commands the validation layer refused are not evidence about anything,
+    /// and this is the only moment the offscreen path asks.
     pub fn finish(mut self) -> Result<(), OffscreenError> {
         let idle = self.device.wait_idle();
         // After the wait, because both of these hand handles back to a device
@@ -2966,9 +2985,19 @@ impl OffscreenSetup {
         self.pool.destroy(self.device.as_ref());
         self.device.destroy_swapchain(self.swapchain);
         self.instance.destroy_surface(self.surface);
+        // After the teardown and before the device goes: the destruction order
+        // above is itself something the layer is watching, so asking any earlier
+        // would report on the frames and miss the release.
+        let reported = self.device.take_error();
         drop(self.device);
         drop(self.instance);
-        idle.map_err(OffscreenError::Hal)
+        // A device lost outranks it: it explains every other symptom, including
+        // any message the layer produced on the way down.
+        idle.map_err(OffscreenError::Hal)?;
+        match reported {
+            Some(message) => Err(OffscreenError::DeviceReported(message)),
+            None => Ok(()),
+        }
     }
 }
 

@@ -529,6 +529,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The three offscreen GPU suites now fail when the device reports a failure
+  its return values did not carry.** `render_e2e`, `tiling_e2e` and `gltf_e2e`
+  were the lavapipe CI steps a Vulkan validation error could not fail: a frame
+  the layer had already refused was compared against its golden, matched, and
+  exited 0. `OffscreenSetup::finish` drains `Device::take_error` after the
+  teardown and reports it as the new `OffscreenError::DeviceReported`, and the
+  suites assert on it through a shared `tests/offscreen/verdict.rs` fixture
+  whose `Drop` also prints the device's verdict when a test panics before
+  reaching `finish`. `apps/lantern`'s golden test and the screenshot CLI get the
+  same check, since both go through `finish`. Verified with
+  `CRCBL_VK_VALIDATION_SELF_TEST=1` against CI's own layer: all three exited 0
+  before and fail now, and all three stay green with nothing injected.
 - **`ConditionSimulator`'s reliable channel is now actually reliable.** It
   implements `Transport`, whose `send_reliable` promises ordered, lossless
   delivery, and it was applying its loss, duplication and reorder draws to both

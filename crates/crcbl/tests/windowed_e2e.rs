@@ -30,9 +30,10 @@
 //! * The instrument for "the frames presented cleanly" is
 //!   [`VkInstance::validation_report`], which is a `crcbl-vk` type. There is no
 //!   cross-backend equivalent — the seam's `Device::take_error` answers `None`
-//!   on Vulkan by construction, because this backend reports through its return
-//!   values — so a version of this file that could not name the backend could
-//!   not make the assertion the whole windowed path most needs.
+//!   on Vulkan unless `CRCBL_VK_VALIDATION_FATAL` is set, and even then it hands
+//!   back one error at a time rather than the whole report — so a version of
+//!   this file that could not name the backend could not make the assertion the
+//!   whole windowed path most needs.
 //! * Naming the type *is* the backend pin, and a stronger one than an
 //!   environment variable: there is no configuration under which this binary
 //!   silently exercises something else.

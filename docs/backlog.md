@@ -78,19 +78,10 @@ Every step of the `vk e2e (lavapipe)` job now sets `CRCBL_VK_VALIDATION`,
 seven that ran a sample binary did, and the rest inherited validation from the
 debug build profile — reported to a log and fatal to nothing. All fifteen were
 run locally against CI's own layer 1.3.275 and Mesa 25.2.8 with the full gate
-on, and all fifteen are green. Two gaps are left.
+on, all fifteen are green, and all fifteen were probed with
+`CRCBL_VK_VALIDATION_SELF_TEST=1` — which injects one `ERROR` through the
+messenger — to confirm each can still go red. One gap is left.
 
-- **Three suites cannot fail on a device error at all.** Probed with
-  `CRCBL_VK_VALIDATION_SELF_TEST=1` (which injects one `ERROR` through the
-  messenger) plus `CRCBL_VK_VALIDATION_FATAL=1`, twelve of the fifteen harnesses
-  went red and these three exited 0: `run-render-e2e.sh` (`--test render_e2e`),
-  `run-tiling-e2e.sh` (`tiling_e2e`) and `run-gltf-e2e.sh` (`gltf_e2e`). None of
-  those three test files calls `assert_clean` or `take_error` anywhere — they
-  open a device, draw frames on a real driver, and never ask the layer whether
-  the frames were legal. The shape of the fix is
-  `crates/crcbl/tests/gpu_scene/harness.rs`'s `Headless::finish`, which the
-  suites that do go red use. Setting the variable on those steps is therefore
-  correct and currently buys nothing.
 - **The Windows leg is not gated.** `vk e2e (lavapipe, windows)` runs
   `run-forward-e2e.sh` with no validation variables. Its layer build is not one
   any machine in this project can install, so whether it reports what Ubuntu's

@@ -38,6 +38,21 @@ use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 use crcbl_golden::{ChannelOrder, Image};
 use crcbl_greybox::{GreyboxColor, greybox_color_material, greybox_page, quad};
 
+/// What this binary calls itself in the lines [`Offscreen`] prints.
+///
+/// Read by `tests/offscreen/verdict.rs`, which is shared with `render_e2e.rs`
+/// and `gltf_e2e.rs` and therefore cannot name any of them.
+const SUITE: &str = "crcbl tiling e2e";
+
+// The teardown, out of `tests/offscreen/` rather than in here, because the other
+// two suites tear the same fixture down and a second copy is a second place a
+// fix has to land. That directory holds no `main.rs`, so Cargo builds no target
+// of its own from it.
+#[path = "offscreen/verdict.rs"]
+mod verdict;
+
+use verdict::Offscreen;
+
 /// The square offscreen frame each surface is drawn into, in pixels.
 ///
 /// 512 so that even the 2 m surface — whose one-metre tile is half the frame —
@@ -158,7 +173,7 @@ fn tiled_surface_cells(size_m: f32) -> usize {
     // and on a runner nobody can log into that output is the whole diagnosis.
     crcbl::core::log::init_logging();
 
-    let mut setup = OffscreenSetup::open_forward(EDGE, EDGE, move |device, queue, format| {
+    let setup = OffscreenSetup::open_forward(EDGE, EDGE, move |device, queue, format| {
         let scene = SceneDesc {
             meshes: vec![MeshDesc {
                 label: "tiled floor".into(),
@@ -202,12 +217,17 @@ fn tiled_surface_cells(size_m: f32) -> usize {
         })
     })
     .unwrap_or_else(|why| panic!("a GPU backend opens for the tiling test: {why}"));
+    let mut setup = Offscreen::guard(SUITE, setup);
 
     assert_pins_arrived(&setup);
 
     let format = setup.format();
     let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
-    setup.finish().expect("the device reaches idle");
+    // Before the cell count is read off the frame: a device lost during the
+    // frame, and a specification violation the layer refused, both surface here
+    // and nowhere else — so a run that counted cells first would report a wrong
+    // picture where the real answer is that the frame was never legal.
+    setup.finish();
 
     let order = match format {
         Format::Bgra8Unorm | Format::Bgra8UnormSrgb => ChannelOrder::Bgra,

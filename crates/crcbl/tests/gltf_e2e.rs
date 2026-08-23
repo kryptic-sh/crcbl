@@ -48,6 +48,21 @@ use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 use crcbl_assets::DirSource;
 use crcbl_golden::{ChannelOrder, Image};
 
+/// What this binary calls itself in the lines [`Offscreen`] prints.
+///
+/// Read by `tests/offscreen/verdict.rs`, which is shared with `render_e2e.rs`
+/// and `tiling_e2e.rs` and therefore cannot name any of them.
+const SUITE: &str = "crcbl gltf e2e";
+
+// The teardown, out of `tests/offscreen/` rather than in here, because the other
+// two suites tear the same fixture down and a second copy is a second place a
+// fix has to land. That directory holds no `main.rs`, so Cargo builds no target
+// of its own from it.
+#[path = "offscreen/verdict.rs"]
+mod verdict;
+
+use verdict::Offscreen;
+
 /// The square offscreen frame the quad is drawn into, in pixels.
 ///
 /// Even, so the four quadrants are the same size, and large enough that the
@@ -344,7 +359,7 @@ fn draw_the_imported_quad() -> Image {
         "one node draws the one primitive"
     );
 
-    let mut setup = OffscreenSetup::open_forward(EDGE, EDGE, move |device, queue, format| {
+    let setup = OffscreenSetup::open_forward(EDGE, EDGE, move |device, queue, format| {
         let mut renderer = ForwardRenderer::with_scene(device, queue, format, &converted.scene)?;
         for instance in &converted.instances {
             renderer
@@ -377,12 +392,17 @@ fn draw_the_imported_quad() -> Image {
         })
     })
     .unwrap_or_else(|why| panic!("a GPU backend opens for the glTF test: {why}"));
+    let mut setup = Offscreen::guard(SUITE, setup);
 
     assert_pins_arrived(&setup);
 
     let format = setup.format();
     let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
-    setup.finish().expect("the device reaches idle");
+    // Before a hue is read out of a quadrant: a device lost during the frame,
+    // and a specification violation the layer refused, both surface here and
+    // nowhere else — so a run that sampled the pixels first would report a wrong
+    // colour where the real answer is that the frame was never legal.
+    setup.finish();
 
     let order = match format {
         Format::Bgra8Unorm | Format::Bgra8UnormSrgb => ChannelOrder::Bgra,

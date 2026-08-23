@@ -79,6 +79,21 @@ use crcbl::hal::{Features, Format, GeometryPath};
 use crcbl::screenshot::{OffscreenSetup, Scene};
 use crcbl_golden::{ChannelOrder, Golden, Image};
 
+/// What this binary calls itself in the lines [`Offscreen`] prints.
+///
+/// Read by `tests/offscreen/verdict.rs`, which is shared with `tiling_e2e.rs`
+/// and `gltf_e2e.rs` and therefore cannot name any of them.
+const SUITE: &str = "crcbl render e2e";
+
+// The teardown, out of `tests/offscreen/` rather than in here, because the other
+// two suites tear the same fixture down and a second copy is a second place a
+// fix has to land. That directory holds no `main.rs`, so Cargo builds no target
+// of its own from it.
+#[path = "offscreen/verdict.rs"]
+mod verdict;
+
+use verdict::Offscreen;
+
 /// The size the goldens were blessed at.
 ///
 /// The same 256x192 the cross-backend harness and `crcbl-vk`'s mesh suite use,
@@ -2107,8 +2122,9 @@ fn draw_scene_and_match_its_golden(
     // `Debug` and escape the newlines out of the adapter listing a pin miss
     // carries — on a runner nobody can log into, that listing is the whole
     // diagnosis.
-    let mut setup = OffscreenSetup::open(extent.0, extent.1, scene)
+    let setup = OffscreenSetup::open(extent.0, extent.1, scene)
         .unwrap_or_else(|why| panic!("a GPU backend opens for the {golden} scene: {why}"));
+    let mut setup = Offscreen::guard(SUITE, setup);
 
     let backend = setup.backend();
     let caps = setup.caps();
@@ -2182,11 +2198,12 @@ fn draw_scene_and_match_its_golden(
 
     let format = setup.format();
     let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
-    // Before any assertion: `finish` waits the device idle, and a device lost
-    // during the frame surfaces there and nowhere else — so a run that panicked
-    // on the pixels first would report a wrong picture where the real answer is
-    // that the GPU never finished drawing it.
-    setup.finish().expect("the device reaches idle");
+    // Before any assertion: `finish` waits the device idle and asks the device
+    // what it saw, and a device lost during the frame — or a frame the
+    // validation layer refused — surfaces there and nowhere else. A run that
+    // panicked on the pixels first would report a wrong picture where the real
+    // answer is that the GPU never legally drew it.
+    setup.finish();
 
     assert_eq!(
         (width, height),
@@ -2374,8 +2391,9 @@ fn draw_scene_on_every_geometry_path(
         OffscreenSetup::OPTIONAL_FEATURES.union(mesh_stage),
         OffscreenSetup::OPTIONAL_FEATURES.difference(mesh_stage),
     ] {
-        let mut setup = OffscreenSetup::open_with(EXTENT.0, EXTENT.1, scene, optional)
+        let setup = OffscreenSetup::open_with(EXTENT.0, EXTENT.1, scene, optional)
             .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
         let path = setup.caps().geometry_path();
         let offers_mesh = setup
             .adapter()
@@ -2399,7 +2417,7 @@ fn draw_scene_on_every_geometry_path(
         let ((width, height), pixels) = setup
             .draw_and_readback()
             .unwrap_or_else(|why| panic!("the {name} frame renders on {path:?}: {why}"));
-        setup.finish().expect("the device reaches idle");
+        setup.finish();
 
         assert_eq!((width, height), EXTENT, "{path:?} drew a different extent");
         frames.push((
@@ -2971,8 +2989,9 @@ fn the_ui_panel_is_painted_and_the_bar_blends_over_two_backgrounds(image: &Image
 fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
     crcbl_core::log::init_logging();
 
-    let mut setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
+    let setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
         .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
+    let mut setup = Offscreen::guard(SUITE, setup);
     eprintln!(
         "crcbl render e2e: culling counters on {backend}, {path:?}",
         backend = setup.backend(),
@@ -3031,5 +3050,5 @@ fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
         "the report names frame {cull_frame} on a run that has drawn {rendered}: {counters:?}",
     );
 
-    setup.finish().expect("the device reaches idle");
+    setup.finish();
 }
