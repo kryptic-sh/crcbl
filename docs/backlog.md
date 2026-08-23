@@ -12407,7 +12407,17 @@ camera. What is left is one performance gap and one level-of-detail gap.
     where it matters: a 2:1 scale has `κ = 2` and that estimate says `8/2 = 4`,
     which widens a 30° cone to 94° — past the 90° where a cone test can refuse
     anything at all. The exact κ from the eigenvalues of `BᵀB` (closed-form
-    symmetric 3×3) keeps the same cone at 56°, which still culls.
+    symmetric 3×3) keeps the same cone at 56°, which still culls. Measured over
+    20 000 random bases with singular values spread over `e^±1.2`: the cheap
+    estimate widens a 30° cone past 90° in **66.6%** of them, while the exact κ
+    still refuses something in **57.8%**.
+  - **The eigen-solve has to over-estimate, not just be accurate.** Smith's
+    trigonometric closed form in `f32` came within `5.5e-3` relative on the
+    eigenvalues and `2.7e-3` on κ over that same sweep — accurate, but a κ that
+    lands _under_ the true one widens the cone too little and drops geometry
+    that faces the camera, which is the defect this whole entry exists to have
+    fixed. Whoever implements it inflates κ by a margin covering that error and
+    says which measurement the margin came from.
   - **Where to compute it.** `cluster_survives` runs per (cluster, instance) and
     the basis is per instance, so the eigen-solve either repeats per cluster —
     tens of flops against traffic already being paid — or moves to `draw_gen`,
