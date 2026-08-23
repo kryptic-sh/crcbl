@@ -415,3 +415,47 @@ if ! cargo run --locked --quiet --package sandbox -- \
     exit 1
 fi
 echo "crcbl vk e2e: both backends are selectable from one binary"
+
+# And a run that asked for validation to be able to fail it, on a machine where
+# it cannot, **refuses to start**.
+#
+# `CRCBL_VK_VALIDATION_FATAL=1` is what the seven `ci.yml` steps set, and
+# without the layer it would be satisfied by nothing at all: no messenger, no
+# errors, exit 0, and a step reporting that a sample drew cleanly under a
+# validation gate that was never there. The refusal is the only thing standing
+# between that variable and a green light wired to nothing, so it is asserted
+# here rather than trusted.
+#
+# `VK_LAYER_PATH` at an empty directory is how the layer is hidden — the
+# loader's own mechanism, so this proves the real path rather than a test hook.
+# The layer is genuinely installed on any machine that got this far, which is
+# what makes the assertion meaningful: the run below fails *because of the
+# variable*, not because the box is bare.
+echo "crcbl vk e2e: running the sandbox with a fatal validation gate it cannot honour"
+NO_LAYERS="$(mktemp -d -t crcbl-vk-no-layers.XXXXXX)"
+REFUSAL_LOG="$(mktemp -t crcbl-vk-refusal.XXXXXX.log)"
+set +e
+VK_LAYER_PATH="$NO_LAYERS" CRCBL_VK_VALIDATION=1 CRCBL_VK_VALIDATION_FATAL=1 \
+    cargo run --locked --quiet --package sandbox -- \
+    --headless --backend vk --frames 5 >"$REFUSAL_LOG" 2>&1
+REFUSAL_STATUS=$?
+set -e
+rmdir "$NO_LAYERS"
+if [ "$REFUSAL_STATUS" -eq 0 ]; then
+    echo "crcbl vk e2e: the sandbox ran to completion with CRCBL_VK_VALIDATION_FATAL=1" >&2
+    echo "              and no validation layer to honour it, so that variable can be" >&2
+    echo "              set on a machine without the layer and change nothing — which" >&2
+    echo "              is what it exists to stop" >&2
+    cat "$REFUSAL_LOG" >&2
+    rm -f "$REFUSAL_LOG"
+    exit 1
+fi
+if ! grep -qF "CRCBL_VK_VALIDATION_FATAL=1 cannot be honoured" "$REFUSAL_LOG"; then
+    echo "crcbl vk e2e: the sandbox failed with the fatal gate unavailable, but not" >&2
+    echo "              for that reason — so this proves nothing about the refusal" >&2
+    cat "$REFUSAL_LOG" >&2
+    rm -f "$REFUSAL_LOG"
+    exit 1
+fi
+rm -f "$REFUSAL_LOG"
+echo "crcbl vk e2e: a fatal validation gate that cannot be honoured refuses to open"

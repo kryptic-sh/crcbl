@@ -29,7 +29,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   validation itself is on, so a developer's `cargo run` still reaches the frame
   that caused the error. `ValidationSink::take_error` is the new drain;
   `ValidationSink::report` is unaffected and still shows every message, taken or
-  not.
+  not. **A run that asks for the gate and cannot have it is refused**:
+  `VkInstance::open` returns `OpenError::FatalValidationUnavailable` when the
+  variable is set and the layer is not installed, rather than starting with the
+  gate silently absent. Every other caller still gets the existing warning and a
+  working engine.
 - **`crcbl-vk` says out loud when validation is on, and the harnesses that run a
   binary now fail on what it reports.** A run with `CRCBL_VK_VALIDATION=1` logs
   `crcbl-vk: validation enabled (VK_LAYER_KHRONOS_validation), …` at info from

@@ -9,23 +9,12 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 `run-x11-e2e.sh` and `run-wayland-e2e.sh` fail on what the layer reports; and
 `CRCBL_VK_VALIDATION_FATAL=1` routes an error through `Device::take_error` so
 the engine's frame loop fails the run, which is what the seven `ci.yml` steps
-now set. `crates/crcbl/tests/windowed_e2e.rs` was already covered by
+now set — and a run that asks for that gate on a machine without the layer is
+refused at `VkInstance::open` rather than passing having checked nothing, which
+`run-vk-e2e.sh` asserts by hiding the layer with `VK_LAYER_PATH`.
+`crates/crcbl/tests/windowed_e2e.rs` was already covered by
 `ValidationReport::assert_clean`. What is left:
 
-- **The fatal gate is silent when the layer is absent.**
-  `InstanceInner::fatal_validation` is
-  `validation_enabled && fatal_validation_wanted()`, so on an image without
-  `VK_LAYER_KHRONOS_validation` the seven CI steps pass having checked nothing.
-  `VkInstance::open` already warns ("requested but is not installed"), and the
-  three shell harnesses assert `announce_messenger`'s line before believing a
-  clean log — but none of the six `cargo run` steps greps anything. Options: (a)
-  have those steps grep for that line, (b) make `CRCBL_VK_VALIDATION_FATAL=1`
-  plus a missing layer a hard failure in `VkInstance::open`, (c) rely on the
-  shell harnesses. **(b) is the one that cannot be forgotten**, and it is what
-  the variable already means: a run that asked for a fatal gate and did not get
-  one is a run whose result is worthless. Not done because it changes what a
-  missing layer costs, which is a decision. Verified the layer is present
-  locally (spec 1.4.357); **not** verified on CI's lavapipe image.
 - **Warnings are outside the binary gate, deliberately.** `Severity::Warning` is
   never returned by `ValidationSink::take_error`; only `assert_clean` and the
   shell-log greps fail on one. Killing a correct-but-slow frame is a worse

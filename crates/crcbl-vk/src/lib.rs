@@ -293,6 +293,10 @@ mod tests {
                     }
                     OpenError::Instance(_) => assert!(text.contains("vkCreateInstance"), "{text}"),
                     OpenError::NoAdapters => assert!(text.contains("no physical device"), "{text}"),
+                    OpenError::FatalValidationUnavailable(layer, var) => {
+                        assert!(text.contains(layer), "{text}");
+                        assert!(text.contains(var), "{text}");
+                    }
                 }
             }
         }

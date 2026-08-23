@@ -388,6 +388,24 @@ pub enum OpenError {
     /// The loader works but enumerated no physical device.
     #[error("the Vulkan loader found no physical device")]
     NoAdapters,
+
+    /// A run asked for validation to be able to fail it, and the layer that
+    /// would do the failing is not installed.
+    ///
+    /// The one place a missing layer is fatal, and it is fatal because of what
+    /// was asked for rather than because the layer is missing: a caller who set
+    /// [`debug::FATAL_VALIDATION_ENV_VAR`] said the run's result is only worth
+    /// having if a specification violation could have stopped it. Opening
+    /// anyway would hand back exactly the green-light-wired-to-nothing that
+    /// variable exists to remove — and silently, since the only other signal is
+    /// a warning nothing in a CI step reads. Every other caller still gets the
+    /// warning and a working engine.
+    #[error(
+        "{0} is not installed, so {1}=1 cannot be honoured; install it (Arch: \
+         vulkan-validation-layers, Debian/Ubuntu: vulkan-validationlayers) or \
+         unset the variable"
+    )]
+    FatalValidationUnavailable(&'static str, &'static str),
 }
 
 impl From<OpenError> for HalError {
@@ -461,10 +479,22 @@ impl VkInstance {
             );
         }
         let validation_enabled = want_validation && validation_available;
+        if debug::fatal_validation_wanted() && !validation_enabled {
+            // **The one case where a missing layer is fatal.** Everywhere else
+            // the warning above is the whole answer, because a machine without
+            // the layers package must still run the engine. Here the caller has
+            // said the run's result is only worth having if a violation could
+            // have stopped it, and opening anyway would return a green light
+            // wired to nothing — which is what the seven CI steps setting this
+            // variable would then be.
+            return Err(OpenError::FatalValidationUnavailable(
+                debug::VALIDATION_LAYER,
+                debug::FATAL_VALIDATION_ENV_VAR,
+            ));
+        }
         // `&&` rather than the flag alone so that the field answers the question
         // a reader has — "will an error stop this run" — instead of the one the
-        // environment answered. Without the layer there is nothing to report,
-        // and the warning above has already said so.
+        // environment answered. The refusal above is what makes the two agree.
         let fatal_validation = validation_enabled && debug::fatal_validation_wanted();
 
         // Only ever the intersection of wanted and available. Requesting an
