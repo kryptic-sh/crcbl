@@ -105,15 +105,15 @@ on the hot path.
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                         | Roadmap phase                                           |
-| ------------------------------------------------------------- | ------------------------------------------------------- |
-| `StorageSource` + settings layers (engine.video/audio/input)  | P2 (with the sim core; settings needed by first sample) |
-| Save/load container over snapshots + atomic writes + autosave | P2 (thin layer over the same phase's SnapshotWriter)    |
-| Profiles (high scores, binds)                                 | P4 (breakout ships with a high score)                   |
-| `crcbl save`/`settings` CLI, save diff                        | P2, grows                                               |
-| OPFS wasm backend                                             | P5                                                      |
-| Settings UI screen (engine-provided, CSS-styled, reusable)    | P10                                                     |
-| towers: mid-run save/resume incl. co-op world save            | S6                                                      |
+| Slice                                                                                                                                                                                                                                                                              | Roadmap phase                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `StorageSource` + settings layers (engine.video/audio/input)                                                                                                                                                                                                                       | P2 (with the sim core; settings needed by first sample) |
+| Save/load container over snapshots + atomic writes + autosave                                                                                                                                                                                                                      | P2 (thin layer over the same phase's SnapshotWriter)    |
+| Profiles (high scores, binds)                                                                                                                                                                                                                                                      | P4 (breakout ships with a high score)                   |
+| `crcbl save`/`settings` CLI, save diff — **not built**: neither verb is parsed and `crcbl-cli` has no module for either. `crcbl-store`'s `save.rs` and `settings.rs` exist and nothing in the CLI reaches them. Said P2 until 2026-08-23; the exit criteria below still assume it. | unbuilt                                                 |
+| OPFS wasm backend                                                                                                                                                                                                                                                                  | P5                                                      |
+| Settings UI screen (engine-provided, CSS-styled, reusable)                                                                                                                                                                                                                         | P10                                                     |
+| towers: mid-run save/resume incl. co-op world save                                                                                                                                                                                                                                 | S6                                                      |
 
 ## Exit criteria (MVP)
 

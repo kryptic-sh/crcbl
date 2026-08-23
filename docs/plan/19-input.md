@@ -133,15 +133,15 @@ assignment is post-MVP but the device-id plumbing supports it from day one.
 
 ## Delivery
 
-| Slice                                                           | Phase                                             |
-| --------------------------------------------------------------- | ------------------------------------------------- |
-| Action layer (actions, patterns, contexts, RON maps) + kb/mouse | P2 (replaces the raw-input pipeline plan there)   |
-| Profile rebind storage + glyph hints                            | P4                                                |
-| Rebind UI in settings screen; input inspector                   | P10                                               |
-| Gamepad: evdev (Linux) + Web Gamepad API                        | P10                                               |
-| Gamepad: XInput / GameController                                | P14                                               |
-| On-screen touch controls (UI-widget virtual device)             | **Built** — `crcbl_ui::touch`, `Binding::Virtual` |
-| Local-multiplayer device assignment, haptics                    | post-MVP                                          |
+| Slice                                                                                                                                                                                                                                                                                                                                      | Phase                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| Action layer (actions, patterns, contexts, RON maps) + kb/mouse                                                                                                                                                                                                                                                                            | P2 (replaces the raw-input pipeline plan there)   |
+| Profile rebind storage + glyph hints — **neither built**, checked 2026-08-23: `crcbl-store` has no profile or binding type (its only cross-session helper is `record.rs`, one number for the samples' high scores) and `crcbl-input` contains no glyph anything. `ActionMap::rebind` exists and is in-memory only — nothing serialises it. | unbuilt                                           |
+| Rebind UI in settings screen; input inspector                                                                                                                                                                                                                                                                                              | P10                                               |
+| Gamepad: evdev (Linux) + Web Gamepad API                                                                                                                                                                                                                                                                                                   | P10                                               |
+| Gamepad: XInput / GameController                                                                                                                                                                                                                                                                                                           | P14                                               |
+| On-screen touch controls (UI-widget virtual device)                                                                                                                                                                                                                                                                                        | **Built** — `crcbl_ui::touch`, `Binding::Virtual` |
+| Local-multiplayer device assignment, haptics                                                                                                                                                                                                                                                                                               | post-MVP                                          |
 
 Samples: breakout onward consume actions from S1 — proving the layer before
 gamepads even exist. What breakout actually declares is `left` and `right` as

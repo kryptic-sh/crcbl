@@ -297,13 +297,13 @@ contributing the target upstream is a legitimate option if it stalls.
 
 ## Delivery
 
-| Slice                                                                     | Phase                                                    |
-| ------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Remove `Features::TIER_A` and `RendererTier`; fix `DeviceDesc::default()` | **Built** — `crcbl_hal::caps`, `DeviceDesc`              |
-| Derived path selectors + the resolution point + downgrade logging         | **Built** — `crcbl_hal::caps`, `crcbl_hal::downgrades`   |
-| `MESH_SHADER` / `RAY_QUERY` / `ACCELERATION_STRUCTURE` flags reported     | **Built** — `crcbl_hal::caps`, `crcbl-vk`'s `adapter.rs` |
-| Toggle layering (settings ← camera stack ← programmatic)                  | **Built** — `crcbl_render::effects`; see above           |
-| Settings-screen exposure of the video toggles                             | P10                                                      |
+| Slice                                                                     | Phase                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Remove `Features::TIER_A` and `RendererTier`; fix `DeviceDesc::default()` | **Built** — `crcbl_hal::caps`, `DeviceDesc`                                                                                                                                                                                                                           |
+| Derived path selectors + the resolution point + downgrade logging         | **Built** — `crcbl_hal::caps`, `crcbl_hal::downgrades`                                                                                                                                                                                                                |
+| `MESH_SHADER` / `RAY_QUERY` / `ACCELERATION_STRUCTURE` flags reported     | **Built** — `crcbl_hal::caps`, `crcbl-vk`'s `adapter.rs`                                                                                                                                                                                                              |
+| Toggle layering (settings ← camera stack ← programmatic)                  | **Built, less the settings layer** — `crcbl_render::effects` resolves the order, and its own table marks the `[engine.video]` row unwired: `crcbl_store::settings` reads that namespace and nothing builds a stack at startup, so the field has no source but a test. |
+| Settings-screen exposure of the video toggles                             | P10                                                                                                                                                                                                                                                                   |
 
 **The timing was deliberate and it was then.** `RendererTier` was consumed by
 log lines, `Debug` impls, tests and one device request; nothing in the renderer

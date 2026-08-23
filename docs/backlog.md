@@ -3,6 +3,70 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The plan-document audit of 2026-08-23, and what it found
+
+Two stale claims turned up by accident in one day — `21-jobs.md` listing an ECS
+access seam that was never reserved, and the P8 row promising sleeping and
+islands that belong to wave 2 — so the delivery tables were audited as a set.
+Every finding below was checked against the tree twice, once by the audit and
+once again before the correcting edit, and each document now carries its own
+correction. What is left here is the work the corrections revealed.
+
+**The largest one: the server does not consume client input.** `crcbl-server`
+decodes an `INPUT_TAG` or `COMMAND_TAG` payload to validate it and then drops
+it, under a comment reading "P3 wires them into the simulation" — and P3 is
+marked done. So replication runs one way: the server simulates and sends, the
+client interpolates and displays, and nothing a player does reaches the
+simulation. That is a phase-sized gap, not a slice, and it is the reason several
+smaller rows below cannot be closed on their own — there is nothing for a jitter
+buffer to key or for a lead to align.
+
+**What each corrected row leaves owed**, in the order a reader would meet them:
+
+- **`crcbl sim` and `crcbl save`/`settings` are unbuilt verbs.** The CLI parses
+  eight and none of them is these. `apps/sim` is the determinism harness and is
+  a separate binary; `crcbl-store`'s `save.rs` and `settings.rs` exist with no
+  CLI reaching them. Each is a small slice on its own, and `14-persistence.md`'s
+  exit criteria still assume both.
+- **Profile rebind storage and glyph hints.** `ActionMap::rebind` mutates in
+  memory and nothing serialises it; `crcbl-store` has no profile or binding type
+  at all, and its only cross-session helper is the samples' high-score number.
+  `crcbl-input` contains no glyph anything.
+- **Client tick alignment.** No lead, no EWMA server-time estimate, no rate
+  correction. `crcbl-client` advances playback at a constant rate, which is an
+  interpolation buffer and what its own header calls it. Blocked behind the
+  server consuming input at all.
+- **The input thread and the stacked `InputTickState`.** It is a flat
+  `Vec<(String, ActionValue)>`; there is no stacking, no accumulate-then-swap
+  and no last-N ring, and nothing on any platform spawns an input thread. Worth
+  knowing that `crcbl_jobs::default_spawner` has exactly one caller in the tree
+  and it is `apps/horde`'s steering pool.
+- **The settings layer of the effect stack.** `crcbl_render::effects` resolves
+  the layering correctly and its own table already marks `[engine.video]`
+  unwired: `crcbl_store::settings` reads that namespace and nothing builds a
+  stack at startup, so the field has no source but a test. Small.
+- **`GameModule` in `apps/lantern` and `apps/quarry`.** Neither implements it
+  and neither claims an exemption for it, while `apps/viewer`'s absence is
+  sanctioned in its own docs. Either they adopt it or they say why not — and
+  which of those is right depends on whether an acceptance fixture with no
+  gameplay counts as a sample for that rule, which the samples overview leaves
+  ambiguous.
+- **Skinned-aware LOD.** `crcbl_scene::lod_resolve` says the hierarchy is over
+  the bind pose and nothing there skins. Sidecar overrides were withdrawn by
+  `25-lod.md`'s own text, so that half of the row was work the document had
+  already cancelled.
+
+**What the audit could not cover, stated as a gap:** the documents whose
+progress is dated prose rather than a table (`03`, `05`, `06`), the ones with no
+done-markers at all (`00`, `01`, `04`, `07`, `08`, `15`, `41`, `42`), and the
+future-work lists with no phase marked past (`17`, `20`, `24`, `26`–`38`).
+Nothing in those was contradicted; nothing in most of them was checkable either.
+
+**And what it checked and found sound**, so the next audit need not repeat it:
+`02`'s four shader-portability rules, `12`'s P0–P4 rows, `13`'s P4A, `18`'s P7B
+goldens, `22`, `39`'s first three rows, `40`'s first row, and the ROADMAP's P5B,
+P7, P7B, S4, S4B, S4C and its e2e-harness table.
+
 ### What P8 actually still owes, measured
 
 The roadmap's P8 row reads "Phys slice 3: batch queries at scale, sleeping and

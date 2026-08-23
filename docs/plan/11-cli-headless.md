@@ -46,9 +46,12 @@ Project lifecycle:
   headless = server + no client; server-only = dedicated server.
 - `crcbl build [--target wasm]` — build the project. **`--target wasm` is
   recognized and refused**, pointing at `web/build.sh` instead: a browser bundle
-  is a Cargo build plus a version-matched `wasm-bindgen`, the shim, the shader
-  artifacts and the site layout, and a `crcbl build` that shelled out to Cargo
-  alone would exit 0 having produced something no page can load.
+  is a Cargo build plus the loader shim, the shader artifacts and the site
+  layout, and a `crcbl build` that shelled out to Cargo alone would exit 0
+  having produced something no page can load. The reason used to name a
+  version-matched `wasm-bindgen`; that left with `crcbl-wgpu` on 2026-08-21 and
+  `web/build.sh` now says the tool cannot even run, its one product having been
+  replaced by `web/tools/wasm-loader.js`.
 
 Content pipeline (agent/CI workhorses):
 
@@ -95,15 +98,15 @@ Editor session control:
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                        | Roadmap phase |
-| ------------------------------------------------------------ | ------------- |
-| `crcbl-cli` scaffold: `new`, `run`, `build`                  | **Built**     |
-| Offscreen render + `screenshot`                              | **Built**     |
-| `replay` (metadata report), `crpix`, `lod stats`/`gen`       | **Built**     |
-| `sim`/`--hash` (headless server, input scripts)              | P2            |
-| `import`                                                     | P9            |
-| `scene` batch ops + `edit --serve` (editor command protocol) | P12           |
-| `phys --check`                                               | P3–P11 grow   |
+| Slice                                                                                                                                                                                                                                                                  | Roadmap phase |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `crcbl-cli` scaffold: `new`, `run`, `build`                                                                                                                                                                                                                            | **Built**     |
+| Offscreen render + `screenshot`                                                                                                                                                                                                                                        | **Built**     |
+| `replay` (metadata report), `crpix`, `lod stats`/`gen`                                                                                                                                                                                                                 | **Built**     |
+| `sim`/`--hash` (headless server, input scripts) — **not built**: the CLI parses eight verbs and `sim` is not one of them; the determinism harness is the separate `apps/sim` binary. This row said P2 until 2026-08-23, and the prose above it already said otherwise. | unbuilt       |
+| `import`                                                                                                                                                                                                                                                               | P9            |
+| `scene` batch ops + `edit --serve` (editor command protocol)                                                                                                                                                                                                           | P12           |
+| `phys --check`                                                                                                                                                                                                                                                         | P3–P11 grow   |
 
 ## Exit criteria (MVP)
 
