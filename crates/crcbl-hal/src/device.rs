@@ -889,9 +889,26 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
 
     /// Creates a query set.
     ///
+    /// # A set of no queries is never created
+    ///
+    /// [`QuerySetDesc::count`](crate::QuerySetDesc::count) of zero is refused
+    /// by every backend, and this is the contract rather than four
+    /// coincidences: each API forbids it for its own reason — WebGPU's
+    /// `GPUQuerySetDescriptor.count` has a minimum of one, Metal's
+    /// `newBufferWithLength:options:` returns nil for a zero-length buffer —
+    /// and a handle to such a set would be one whose every read is out of
+    /// range, so the failure would surface at the read rather than at the
+    /// mistake.
+    ///
+    /// Which refusal a caller gets when the device *also* lacks the feature is
+    /// deliberately not specified: backends check the two in different orders,
+    /// and both answers are refusals of a set that must not exist.
+    ///
     /// # Errors
     ///
     /// [`HalError::Unsupported`] if the device lacks the corresponding feature.
+    /// [`HalError::InvalidDescriptor`] for a `count` of zero on a device that
+    /// has the feature.
     fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError>;
 
     /// Destroys a query set.

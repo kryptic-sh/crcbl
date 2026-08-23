@@ -68,5 +68,9 @@ pub struct QuerySetDesc<'a> {
     /// What it measures.
     pub kind: QueryKind,
     /// How many queries it holds. Query indices are `0..count`.
+    ///
+    /// Never zero: see
+    /// [`Device::create_query_set`](crate::Device::create_query_set), which
+    /// refuses one on every backend.
     pub count: u32,
 }

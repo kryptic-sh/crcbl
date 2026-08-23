@@ -643,6 +643,53 @@ fn a_device_without_mesh_shader_refuses_a_mesh_pipeline() {
     assert!(what.contains("MESH_SHADER"), "{what}");
 }
 
+/// A query set of no queries is refused, and refused as a bad descriptor
+/// rather than as a missing capability.
+///
+/// Every backend in the workspace refuses this, each for its own API's reason,
+/// and until 2026-08-23 the seam did not say so and nothing checked it — a
+/// contract held by four coincidences. The handle such a call would return
+/// names a set whose every read is out of range, so the mistake would surface
+/// at the read instead of at the descriptor.
+///
+/// The device is opened *with* the feature, because that is the case with one
+/// right answer: without it, backends check the count and the capability in
+/// different orders and either refusal is correct.
+#[test]
+fn a_query_set_of_no_queries_is_refused_as_a_bad_descriptor() {
+    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    caps.features |= Features::TIMESTAMP_QUERY;
+    let instance = NullInstance::new(caps);
+    let device = instance
+        .create_device(&DeviceDesc {
+            optional_features: caps.features,
+            ..DeviceDesc::for_adapter(AdapterId(0))
+        })
+        .expect("the preset opens");
+    assert!(
+        device.caps().supports(Features::TIMESTAMP_QUERY),
+        "the fixture must have the feature, or this checks the wrong refusal"
+    );
+
+    let desc = |count| QuerySetDesc {
+        label: Some("pass timers"),
+        kind: QueryKind::Timestamp,
+        count,
+    };
+    let set = device
+        .create_query_set(&desc(2))
+        .expect("a set of two queries is fine on this device");
+    device.destroy_query_set(set);
+
+    let error = device
+        .create_query_set(&desc(0))
+        .expect_err("a set of no queries must not be created");
+    assert!(
+        matches!(error, HalError::InvalidDescriptor(_)),
+        "a zero count is a bad descriptor, not an absent capability: {error:?}"
+    );
+}
+
 /// A device that does not report [`Features::COMPUTE`] refuses a compute
 /// pipeline, and takes a graphics one from the same module and layout.
 ///

@@ -7075,6 +7075,19 @@ fn exercise_timestamp_resolve(
 /// `first_query + out.len() <= count` bound, so a statistics pool cannot be read
 /// through this seam at all: that wants a seam change and is left named here
 /// rather than papered over with a read that only looks like one.
+/// The descriptor no backend may accept: a set of no queries.
+///
+/// A named helper because the exercise asks for it twice — once on a device
+/// that has the capability and once on a device that does not — and the two
+/// calls must differ in nothing but that.
+fn zero_query_desc(kind: QueryKind) -> QuerySetDesc<'static> {
+    QuerySetDesc {
+        label: Some("a query set of no queries"),
+        kind,
+        count: 0,
+    }
+}
+
 fn exercise_query_set_creation(headless: &Headless, kind: QueryKind) -> Exercise {
     let device = headless.device.as_ref();
     let set = match device.create_query_set(&QuerySetDesc {
@@ -7083,8 +7096,37 @@ fn exercise_query_set_creation(headless: &Headless, kind: QueryKind) -> Exercise
         count: CREATED_QUERIES,
     }) {
         Ok(set) => set,
-        Err(error) => return Exercise::Refused(error),
+        Err(error) => {
+            // A device that cannot make this kind of set still must not make a
+            // set of no queries. Which refusal it gives is unspecified here —
+            // backends check the count and the capability in different orders —
+            // so only "not created" is asserted.
+            assert!(
+                device.create_query_set(&zero_query_desc(kind)).is_err(),
+                "{kind:?}: this backend refused a {CREATED_QUERIES}-query set and then created \
+                 one of no queries at all. Every read of that handle is out of range."
+            );
+            return Exercise::Refused(error);
+        }
     };
+
+    // On a device that *can* make the set, the seam names the answer: a zero
+    // count is a bad descriptor, not an absent capability. Every backend
+    // refuses it for its own API's reason — WebGPU's `count` has a minimum of
+    // one, Metal's zero-length buffer comes back nil — and until this assertion
+    // existed nothing held them to agreeing.
+    match device.create_query_set(&zero_query_desc(kind)) {
+        Err(HalError::InvalidDescriptor(_)) => {}
+        Ok(_) => panic!(
+            "{kind:?}: this backend created a query set of no queries. Its handle names a set \
+             whose every read is out of range, so the mistake would surface at the read."
+        ),
+        Err(error) => panic!(
+            "{kind:?}: a query set of no queries was refused with {error}, where the seam \
+             documents InvalidDescriptor. This device has the capability, so a caller cannot \
+             tell a bad count from a missing feature if both answer the same way."
+        ),
+    }
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some("query set exercise"),
