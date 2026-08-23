@@ -174,7 +174,8 @@ impl AudioStream {
             // anything — see its docs for why that is the only routing cpal's
             // channel *count* supports.
             crcbl_core::log::warn!(
-                "audio device reports {channels} channels; the mixer is {CHANNELS}-channel, so                  the first two carry the output and the remaining {} stay silent",
+                "audio device reports {channels} channels; the mixer is {CHANNELS}-channel, \
+                 so the first two carry the output and the remaining {} stay silent",
                 channels - CHANNELS
             );
         }

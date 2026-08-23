@@ -1722,11 +1722,15 @@ mod tests {
             .collect();
         assert!(
             live.is_empty(),
-            "these parity blockers are on backends nobody deferred, so they are work that is              actually owed rather than parked: {live:?}. Say which in the report instead of              leaving them to be read as more deferred rows"
+            "these parity blockers are on backends nobody deferred, so they are work that \
+             is actually owed rather than parked: {live:?}. Say which in the report \
+             instead of leaving them to be read as more deferred rows"
         );
         assert!(
             parity_blockers().next().is_some(),
-            "there are no parity blockers left at all, which makes the assertion above vacuous.              The deferral note on DEFERRED_BACKENDS and this test have outlived their subject"
+            "there are no parity blockers left at all, which makes the assertion above \
+             vacuous. The deferral note on DEFERRED_BACKENDS and this test have \
+             outlived their subject"
         );
     }
 
