@@ -146,7 +146,20 @@ jobs:
       # changes, trigger it deliberately with `gh workflow run cron.yml` instead
       # of waiting for a Monday to tell you.
       - run: cargo miri setup
+      # **`--tests`, and it is load-bearing rather than tidy.** Without it cargo
+      # also *builds* every example of every crate named here, and
+      # `crcbl-jobs`' `web_worker_gate` is a `cdylib` — which miri's target does
+      # not support, so the whole step died on
+      # `cannot produce cdylib for crcbl-jobs` before interpreting a single
+      # test. Measured: with `--tests` the set of test binaries is byte-for-byte
+      # the same list (three integration targets and six libs), so nothing that
+      # was being interpreted stopped being interpreted; the only thing dropped
+      # is an example nobody was running.
+      #
+      # This is the hazard above happening again, one week later: the example
+      # landed on 2026-08-23 with the Web Worker spawn backend, and a weekly job
+      # would have reported it next Monday at the earliest.
       - name: Interpret the seam and container crates
         run: >-
-          cargo miri test -p crcbl-core -p crcbl-hal -p crcbl-ecs -p crcbl-store
-          -p crcbl-ui -p crcbl-jobs
+          cargo miri test --tests -p crcbl-core -p crcbl-hal -p crcbl-ecs -p
+          crcbl-store -p crcbl-ui -p crcbl-jobs
