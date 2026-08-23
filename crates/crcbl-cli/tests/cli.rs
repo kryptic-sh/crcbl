@@ -139,6 +139,7 @@ fn help_and_version_exit_zero() {
         "crpix",
         "lod",
         "bench",
+        "sim",
     ] {
         let output = crcbl(temporary.path(), &[command, "--help"]);
         assert_eq!(code(&output), 0, "{command} --help");
@@ -198,6 +199,23 @@ fn a_malformed_invocation_exits_two() {
         vec!["bench", "--scenario", "phys", "--workers", "2"],
         vec!["bench", "--scenario", "jobs", "--extent", "12"],
         vec!["bench", "--scenario", "jobs", "--ticks", "8"],
+        // `sim`'s tick rate, at both ends and in every unparseable shape. Zero
+        // used to divide by zero computing the tick period and abort with exit
+        // 101 rather than the contracted exit 2; one above the cap truncates
+        // the same division to a zero-nanosecond period.
+        vec!["sim", "--tick-rate", "0"],
+        vec!["sim", "--tick-rate", "1000000001"],
+        vec!["sim", "--tick-rate", "-1"],
+        vec!["sim", "--tick-rate", "banana"],
+        vec!["sim", "--tick-rate"],
+        vec!["sim", "--ticks", "banana"],
+        vec!["sim", "--seed", "banana"],
+        vec!["sim", "--nonsense"],
+        // The scene and the input script topic 11 sketches and this tree does
+        // not have: refused by name, not ignored.
+        vec!["sim", "towers.scene"],
+        vec!["sim", "--input", "script.ron"],
+        vec!["sim", "--hash"],
     ] {
         let output = crcbl(temporary.path(), &args);
         assert_eq!(code(&output), 2, "{args:?} should be exit 2");
@@ -1817,6 +1835,183 @@ fn bench_refuses_an_unknown_scenario_by_name() {
     for scenario in ["jobs", "phys"] {
         assert!(stderr.contains(scenario), "{stderr}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// sim — the determinism harness
+// ---------------------------------------------------------------------------
+//
+// These were `apps/sim/tests/headless.rs` until the harness moved behind the
+// `crcbl sim` verb, and they are the same tests against the same contract: the
+// arguments, the exit codes and the one-line output. They are here rather than
+// in the subcommand's own `#[cfg(test)]` module for the reason this file exists
+// at all — the compiled binary is what CI and a developer actually invoke, and
+// only a separate target can spawn it.
+//
+// The determinism harness had no tests at all before that file was written,
+// which is how `--tick-rate 0` survived: it parsed cleanly and then divided by
+// zero computing the tick period, aborting with exit 101 rather than the
+// documented exit 2. `a_malformed_invocation_exits_two` above is where that
+// case now lives, alongside every other verb's.
+
+/// `hash:<hex> ticks:<n> final_tick:<n>` — the whole output contract.
+///
+/// Panics rather than returning an `Option` for each field, so a run that
+/// printed something else fails naming what it printed instead of making every
+/// assertion downstream vacuous.
+fn sim_parts(line: &str) -> (String, u64, u64) {
+    let mut hash = None;
+    let mut ticks = None;
+    let mut final_tick = None;
+    for field in line.split_whitespace() {
+        match field.split_once(':') {
+            Some(("hash", v)) => hash = Some(v.to_owned()),
+            Some(("ticks", v)) => ticks = v.parse().ok(),
+            Some(("final_tick", v)) => final_tick = v.parse().ok(),
+            _ => {}
+        }
+    }
+    (
+        hash.unwrap_or_else(|| panic!("no hash in {line:?}")),
+        ticks.unwrap_or_else(|| panic!("no ticks in {line:?}")),
+        final_tick.unwrap_or_else(|| panic!("no final_tick in {line:?}")),
+    )
+}
+
+#[test]
+fn sim_default_run_exits_zero_and_prints_its_contract() {
+    let temporary = TempDir::new("sim");
+    let output = crcbl(temporary.path(), &["sim"]);
+    assert_eq!(
+        code(&output),
+        0,
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (hash, ticks, final_tick) = sim_parts(&stdout(&output));
+    assert_eq!(hash.len(), 16, "hash is 16 hex digits: {hash}");
+    assert_eq!(ticks, 1_000);
+    assert_eq!(final_tick, 1_000);
+}
+
+/// **The two numbers must agree.** The loop used to break out of the tick drain
+/// the moment the budget was met, leaving whole ticks in the accumulator that
+/// the clock had already counted — so a determinism harness could report a tick
+/// count and a final tick that differed for a reason unrelated to determinism.
+#[test]
+fn sim_tick_count_and_final_tick_always_agree() {
+    let temporary = TempDir::new("sim-agree");
+    for n in ["1", "7", "60", "997"] {
+        let output = crcbl(temporary.path(), &["sim", "--ticks", n]);
+        assert_eq!(code(&output), 0);
+        let (_, ticks, final_tick) = sim_parts(&stdout(&output));
+        assert_eq!(ticks, n.parse::<u64>().unwrap(), "--ticks {n}");
+        assert_eq!(final_tick, ticks, "--ticks {n}");
+    }
+}
+
+/// Same input, same hash — the property the harness exists to assert.
+#[test]
+fn sim_same_input_produces_the_same_hash() {
+    let temporary = TempDir::new("sim-determinism");
+    let run = |args: &[&str]| stdout(&crcbl(temporary.path(), args));
+
+    let first = run(&["sim", "--ticks", "500", "--seed", "42"]);
+    let second = run(&["sim", "--ticks", "500", "--seed", "42"]);
+    assert_eq!(first, second);
+
+    let other_seed = run(&["sim", "--ticks", "500", "--seed", "43"]);
+    assert_ne!(
+        sim_parts(&first).0,
+        sim_parts(&other_seed).0,
+        "a different seed must build a different world",
+    );
+
+    let other_length = run(&["sim", "--ticks", "501", "--seed", "42"]);
+    assert_ne!(
+        sim_parts(&first).0,
+        sim_parts(&other_length).0,
+        "the hash must depend on how long the world ran",
+    );
+}
+
+/// The tick rate changes the clock, not the number of ticks: the harness
+/// advances by exactly one period per iteration at any rate.
+#[test]
+fn sim_tick_rate_does_not_change_the_tick_count() {
+    let temporary = TempDir::new("sim-rate");
+    for rate in ["1", "30", "60", "240"] {
+        let output = crcbl(
+            temporary.path(),
+            &["sim", "--ticks", "100", "--tick-rate", rate],
+        );
+        assert_eq!(code(&output), 0, "--tick-rate {rate}");
+        let (_, ticks, final_tick) = sim_parts(&stdout(&output));
+        assert_eq!((ticks, final_tick), (100, 100), "--tick-rate {rate}");
+    }
+}
+
+/// `sim --help` documents the contract a script parses, not just its flags.
+///
+/// The per-command help sweep in `help_and_version_exit_zero` already proves
+/// every verb's `--help` exits 0; this is the part specific to `sim`, and it
+/// includes what the verb deliberately does *not* take, so a reader is not left
+/// looking for the scene argument topic 11 sketches.
+#[test]
+fn sim_help_documents_the_contract_and_what_it_does_not_take() {
+    let temporary = TempDir::new("sim-help");
+    let help = crcbl(temporary.path(), &["sim", "--help"]);
+    assert_eq!(code(&help), 0);
+    let text = stdout(&help);
+    for needle in [
+        "--ticks",
+        "--tick-rate",
+        "--seed",
+        "hash:<hex> ticks:<n> final_tick:<n>",
+        "script.ron",
+        "--hash",
+    ] {
+        assert!(text.contains(needle), "no `{needle}` in:\n{text}");
+    }
+}
+
+/// A zero-tick run is a legal degenerate case, not a crash.
+#[test]
+fn sim_zero_ticks_is_a_run_of_length_zero() {
+    let temporary = TempDir::new("sim-zero");
+    let output = crcbl(temporary.path(), &["sim", "--ticks", "0"]);
+    assert_eq!(code(&output), 0);
+    let (_, ticks, final_tick) = sim_parts(&stdout(&output));
+    assert_eq!((ticks, final_tick), (0, 0));
+}
+
+/// `--json` is the design rule topic 11 states for every subcommand, and what
+/// it emits is the human line's three fields under stable keys — the hash
+/// spelled identically, so a consumer holding both can compare them.
+#[test]
+fn sim_json_carries_the_same_hash_the_human_line_prints() {
+    let temporary = TempDir::new("sim-json");
+    let args = ["sim", "--ticks", "64", "--seed", "9", "--tick-rate", "120"];
+    let human = stdout(&crcbl(temporary.path(), &args));
+    let (hash, ticks, final_tick) = sim_parts(&human);
+
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let output = crcbl(temporary.path(), &json_args);
+    assert_eq!(code(&output), 0);
+    let json = stdout(&output);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+    assert!(json.starts_with(r#"{"ok":true,"command":"sim""#), "{json}");
+    assert!(has_field(&json, "hash", &format!("\"{hash}\"")), "{json}");
+    assert!(has_field(&json, "ticks", &ticks.to_string()), "{json}");
+    assert!(
+        has_field(&json, "final_tick", &final_tick.to_string()),
+        "{json}"
+    );
+    // The inputs come back with the answer, so one `--json` line is a complete
+    // record of the run rather than something to be read beside its command.
+    assert!(has_field(&json, "seed", r#""9""#), "{json}");
+    assert!(has_field(&json, "tick_rate", "120"), "{json}");
 }
 
 /// Every `"<key>":<integer>` in the object, in order.

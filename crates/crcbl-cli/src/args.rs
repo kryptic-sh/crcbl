@@ -74,6 +74,7 @@ COMMANDS:
     crpix         Convert PNG frames into one .crpix sprite sheet.
     lod           Report or generate a glTF mesh's LOD chain.
     bench         Run a fixed benchmark scenario and report its distribution.
+    sim           Run the determinism harness and print its state hash.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -304,6 +305,44 @@ OPTIONS (phys):
 A flag that belongs to one scenario is refused on the other rather than
 ignored.";
 
+/// `crcbl sim --help`.
+///
+/// The three defaults and the tick-rate range are written here as literals,
+/// because a `const &str` cannot interpolate — `concat!` takes literals. They
+/// are pinned to [`DEFAULT_SIM_TICKS`], [`DEFAULT_SIM_TICK_RATE`],
+/// [`DEFAULT_SIM_SEED`] and [`MAX_TICK_RATE`] by
+/// `the_sim_help_names_the_real_defaults_and_the_tick_rate_cap`, which is the
+/// only thing that can stop the two drifting — the same arrangement
+/// [`BENCH_USAGE`] and [`SCREENSHOT_USAGE`] have.
+pub const SIM_USAGE: &str = "\
+crcbl sim — the determinism harness
+
+USAGE:
+    crcbl sim [OPTIONS]
+
+Runs a headless server simulation for N ticks over a seed-generated world and
+prints the world's state hash. Same input, same hash, and the tick loop is
+provably deterministic; a hash that moves between two runs of one build is the
+harness reporting exactly what it exists to catch.
+
+The world comes from --seed and from nothing else. `docs/plan/11-cli-headless.md`
+sketches `crcbl sim <scene> --input script.ron`, and neither half is built: this
+tree has no scene file format and no RON reader, so there is nothing for a scene
+argument to name and no script to replay. Both are refused rather than ignored.
+There is no --hash flag either — the hash is the output.
+
+OPTIONS:
+        --ticks <N>        Ticks to simulate. Default: 1000. Zero is a legal
+                           run of length zero, not an error.
+        --tick-rate <HZ>   Server tick rate, 1..=1000000000. Default: 60. It
+                           sets the clock's period and never the tick count.
+        --seed <SEED>      World-generation seed. Default: 0.
+        --json             Emit one JSON object instead of human output.
+    -h, --help             Print this text.
+
+OUTPUT:
+    hash:<hex> ticks:<n> final_tick:<n>";
+
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invocation {
@@ -336,6 +375,8 @@ pub enum Command {
     Lod(LodArgs),
     /// One fixed benchmark scenario, timed.
     Bench(BenchArgs),
+    /// The determinism harness: N ticks of a seed-generated world, hashed.
+    Sim(SimArgs),
 }
 
 impl Command {
@@ -355,6 +396,7 @@ impl Command {
             Self::Lod(_) => "lod",
             // The scenario is a field of its own, for the reason above.
             Self::Bench(_) => "bench",
+            Self::Sim(_) => "sim",
         }
     }
 
@@ -369,6 +411,7 @@ impl Command {
             Self::Crpix(args) => args.json,
             Self::Lod(args) => args.json,
             Self::Bench(args) => args.json,
+            Self::Sim(args) => args.json,
         }
     }
 }
@@ -700,6 +743,46 @@ pub struct BenchArgs {
     pub json: bool,
 }
 
+/// The highest tick rate whose period is at least one nanosecond.
+///
+/// `1_000_000_000 / tick_rate` is integer division: above this it truncates to
+/// zero, and `FrameClock::with_period` refuses a zero period. A zero rate used
+/// to parse cleanly and then divide by zero computing the period, aborting with
+/// exit 101 instead of the documented exit 2. Rejecting the whole range here
+/// makes both ends a bad invocation rather than an assert.
+pub const MAX_TICK_RATE: u32 = 1_000_000_000;
+
+/// Ticks `crcbl sim` runs when `--ticks` is not given.
+pub const DEFAULT_SIM_TICKS: u64 = 1_000;
+
+/// The tick rate `crcbl sim` clocks at when `--tick-rate` is not given.
+///
+/// The server's own rate, so the default run is the loop a game actually has.
+pub const DEFAULT_SIM_TICK_RATE: u32 = 60;
+
+/// The world seed `crcbl sim` builds from when `--seed` is not given.
+pub const DEFAULT_SIM_SEED: u64 = 0;
+
+/// `crcbl sim`.
+///
+/// There is no scene and no input script: `docs/plan/11-cli-headless.md`
+/// sketches both and this tree has neither a scene file format nor a RON
+/// reader, so the world is generated from [`seed`](Self::seed) alone. See
+/// [`SIM_USAGE`], which says so where a user reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SimArgs {
+    /// Ticks to run. Zero is a legal run of length zero.
+    pub ticks: u64,
+    /// Clock rate in hertz. Always in `1..=`[`MAX_TICK_RATE`]; the parser
+    /// refuses everything else, because a zero period is an assert several
+    /// layers down rather than a message.
+    pub tick_rate: u32,
+    /// World-generation seed.
+    pub seed: u64,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
 /// `crcbl replay --help`.
 pub const REPLAY_USAGE: &str = "\
 crcbl replay — read a .crpl replay file and dump its metadata
@@ -729,6 +812,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("crpix") => parse_crpix(args),
         Some("lod") => parse_lod(args),
         Some("bench") => parse_bench(args),
+        Some("sim") => parse_sim(args),
         Some(other) if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
@@ -1453,6 +1537,90 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Bench(parsed))
 }
 
+fn parse_sim(mut args: impl Iterator<Item = OsString>) -> Invocation {
+    let mut parsed = SimArgs {
+        ticks: DEFAULT_SIM_TICKS,
+        tick_rate: DEFAULT_SIM_TICK_RATE,
+        seed: DEFAULT_SIM_SEED,
+        json: false,
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(SIM_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--ticks") => match whole(&mut args, "--ticks") {
+                Ok(value) => parsed.ticks = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            // The range is enforced at parse time, at both ends: zero divides
+            // by zero computing the period and anything above `MAX_TICK_RATE`
+            // truncates the period to zero nanoseconds, and `FrameClock::
+            // with_period` asserts on the result. Exit 2 with a message beats
+            // exit 101 with a backtrace.
+            Some("--tick-rate") => match whole(&mut args, "--tick-rate") {
+                Ok(value) => {
+                    let rate = u32::try_from(value)
+                        .ok()
+                        .filter(|rate| (1..=MAX_TICK_RATE).contains(rate));
+                    match rate {
+                        Some(rate) => parsed.tick_rate = rate,
+                        None => {
+                            return Invocation::BadUsage(format!(
+                                "`--tick-rate` expects a rate in 1..={MAX_TICK_RATE}; got `{value}`"
+                            ));
+                        }
+                    }
+                }
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--seed") => match whole(&mut args, "--seed") {
+                Ok(value) => parsed.seed = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some(other) if other.starts_with('-') => {
+                return Invocation::BadUsage(format!("`sim` has no option `{other}`"));
+            }
+            // A positional, which topic 11 sketches as the scene to simulate.
+            // Refused with the reason rather than as an unknown option: the
+            // difference between "not yet" and "typo", the same distinction
+            // `Target::Wasm` and `LodAction::Preview` are parsed to make.
+            _ => {
+                return Invocation::BadUsage(format!(
+                    "`sim` takes no scene: the world is generated from --seed, because this \
+                     tree has no scene file format to load `{}` from",
+                    arg.to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    Invocation::Command(Command::Sim(parsed))
+}
+
+/// The next argument as a whole number, for the three values `sim` takes.
+///
+/// Separate from [`count`] because these are `u64` and not `usize`: `--seed` is
+/// an opaque sixty-four-bit value and `--ticks` is a tick budget, and neither is
+/// a size that has to fit in a host pointer. Parsing them as `usize` would make
+/// a thirty-two-bit host refuse seeds that a sixty-four-bit one accepts, and two
+/// machines disagreeing about which seeds exist is precisely what a determinism
+/// harness must not do.
+fn whole(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<u64, String> {
+    let Some(value) = args.next() else {
+        return Err(format!("{flag} needs a number"));
+    };
+    value
+        .to_str()
+        .and_then(|text| text.parse::<u64>().ok())
+        .ok_or_else(|| {
+            format!(
+                "`{flag}` expects a whole number; got `{}`",
+                value.to_string_lossy()
+            )
+        })
+}
+
 /// The next argument as a count, for the numbers `bench` takes.
 ///
 /// Separate from [`index`] because the two say different things when they
@@ -1668,6 +1836,7 @@ mod tests {
             vec!["lod", "gen", "a.gltf", "-o", "a.dag", "--json"],
             vec!["bench", "--scenario", "jobs", "--json"],
             vec!["bench", "--scenario", "phys", "--json"],
+            vec!["sim", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
@@ -2357,6 +2526,120 @@ mod tests {
             parse_args(&["bench", "--scenario", "jobs", "--items", "lots"]),
             Invocation::BadUsage(_)
         ));
+    }
+
+    /// `sim`'s defaults, and the range its tick rate is held to.
+    ///
+    /// The defaults are pinned because they are the invocation every recorded
+    /// hash was produced by: a default that moved would silently reprice every
+    /// `hash:… ticks:1000` anybody has written down.
+    #[test]
+    fn sim_defaults_to_a_thousand_ticks_at_the_server_rate() {
+        let Command::Sim(args) = command(&["sim"]) else {
+            panic!("expected sim");
+        };
+        assert_eq!(args.ticks, DEFAULT_SIM_TICKS);
+        assert_eq!(args.tick_rate, DEFAULT_SIM_TICK_RATE);
+        assert_eq!(args.seed, DEFAULT_SIM_SEED);
+        assert!(!args.json);
+
+        let Command::Sim(args) = command(&[
+            "sim",
+            "--ticks",
+            "7",
+            "--tick-rate",
+            "240",
+            "--seed",
+            "18446744073709551615",
+        ]) else {
+            panic!("expected sim");
+        };
+        // A seed no `usize` is guaranteed to hold, taken whole — see [`whole`].
+        assert_eq!((args.ticks, args.tick_rate, args.seed), (7, 240, u64::MAX));
+    }
+
+    /// Both ends of the tick-rate range, refused at parse time.
+    ///
+    /// Zero used to divide by zero computing the period and abort with exit 101
+    /// rather than the contracted exit 2; one above [`MAX_TICK_RATE`] truncates
+    /// the same division to a zero-nanosecond period, which `FrameClock::
+    /// with_period` asserts on. Both are bad invocations here.
+    #[test]
+    fn sim_refuses_a_tick_rate_that_has_no_period() {
+        for rate in ["0", "1000000001", "4294967296", "-1", "banana"] {
+            assert!(
+                matches!(
+                    parse_args(&["sim", "--tick-rate", rate]),
+                    Invocation::BadUsage(_)
+                ),
+                "`--tick-rate {rate}` should be a bad invocation"
+            );
+        }
+        for rate in ["1", "1000000000"] {
+            let Command::Sim(args) = command(&["sim", "--tick-rate", rate]) else {
+                panic!("`--tick-rate {rate}` is inside the range");
+            };
+            assert_eq!(args.tick_rate.to_string(), rate);
+        }
+        // A flag with nothing after it is exit 2, not a default.
+        for argv in [
+            vec!["sim", "--ticks"],
+            vec!["sim", "--tick-rate"],
+            vec!["sim", "--seed"],
+            vec!["sim", "--ticks", "banana"],
+            vec!["sim", "--seed", "banana"],
+        ] {
+            assert!(
+                matches!(parse_args(&argv), Invocation::BadUsage(_)),
+                "{argv:?} should be a bad invocation"
+            );
+        }
+    }
+
+    /// A scene argument and `--input` are refused by name rather than ignored:
+    /// `docs/plan/11-cli-headless.md` sketches both, this tree has neither a
+    /// scene format nor a RON reader, and a positional silently dropped would
+    /// print a hash for a world nobody asked for.
+    #[test]
+    fn sim_refuses_the_scene_and_the_input_script_it_does_not_have() {
+        for argv in [vec!["sim", "--input", "script.ron"], vec!["sim", "--hash"]] {
+            assert!(
+                matches!(parse_args(&argv), Invocation::BadUsage(_)),
+                "{argv:?} should be a bad invocation"
+            );
+        }
+        // The positional says *why* rather than reporting an unknown option,
+        // and it quotes what was typed so the message is about this run.
+        let Invocation::BadUsage(message) = parse_args(&["sim", "towers.scene"]) else {
+            panic!("a scene argument should be a bad invocation");
+        };
+        assert!(message.contains("towers.scene"), "{message}");
+        assert!(message.contains("--seed"), "{message}");
+    }
+
+    /// The help quotes each default and the tick-rate cap as literals, so they
+    /// are pinned to the constants they describe — `the_screenshot_help_names_
+    /// the_real_size_cap`'s arrangement, for its reason: [`SIM_USAGE`] is a
+    /// literal because `concat!` takes literals, so nothing else can stop the
+    /// two drifting.
+    #[test]
+    fn the_sim_help_names_the_real_defaults_and_the_tick_rate_cap() {
+        for value in [
+            format!("Default: {DEFAULT_SIM_TICKS}."),
+            format!("Default: {DEFAULT_SIM_TICK_RATE}."),
+            format!("Default: {DEFAULT_SIM_SEED}."),
+            format!("1..={MAX_TICK_RATE}"),
+        ] {
+            assert!(
+                SIM_USAGE.contains(&value),
+                "`sim --help` does not name `{value}`:\n{SIM_USAGE}"
+            );
+        }
+        // And the output contract, which the docs and every consumer read.
+        assert!(
+            SIM_USAGE.contains("hash:<hex> ticks:<n> final_tick:<n>"),
+            "{SIM_USAGE}"
+        );
     }
 
     #[test]

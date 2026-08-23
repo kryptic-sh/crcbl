@@ -122,8 +122,10 @@ engine is not on crates.io yet, so a generated project has to point at one.
 binary wants to be on `PATH`.
 
 The other commands: `build`, `screenshot` (offscreen render to a PNG), `replay`
-(dump a `.crpl` replay's metadata), `crpix` (PNG frames into one sprite sheet)
-and `lod` (report or generate a glTF mesh's LOD chain). Every one of them takes
+(dump a `.crpl` replay's metadata), `crpix` (PNG frames into one sprite sheet),
+`lod` (report or generate a glTF mesh's LOD chain), `bench` (one fixed workload,
+timed and reported as a distribution) and `sim` (the determinism harness: N
+ticks of a seed-generated world, and its state hash). Every one of them takes
 `--json`.
 
 ### The demo site
@@ -154,7 +156,6 @@ built it.
 | `lantern`        | the lighting acceptance fixture: one room, every effect                | ✓              |
 | `viewer`         | a glTF model viewer, and the asset pipeline's acceptance test          |                |
 | `bare`           | the engine as a plain library, with a hand-written loop                |                |
-| `crcbl-sim`      | the determinism harness: headless server simulation                    |                |
 | `render-harness` | drives the golden scenes through a browser GPU for the parity gate     |                |
 
 ## Testing

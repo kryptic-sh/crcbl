@@ -22,8 +22,8 @@ regression (same severity as a sample linking `crcbl-vk` directly).
 
 **What the binary parses today** — `crates/crcbl-cli/src/args.rs`'s `Command` is
 the list, and it is not the one this section describes: `new`, `run`, `build`,
-`screenshot`, `replay`, `crpix` and `lod`. Three of those are not sketched
-anywhere below and are worth naming here:
+`screenshot`, `replay`, `crpix`, `lod`, `bench` and `sim`. Several of those are
+not sketched anywhere below and are worth naming here:
 
 - `crcbl replay <FILE> [--json]` — read a `.crpl` recording and report its
   metadata. Topic 22 owns it, and owns the subverbs it does not yet have.
@@ -33,10 +33,13 @@ anywhere below and are worth naming here:
 - `crcbl lod stats|gen <FILE>` — report a glTF mesh's resolved LOD chain, saying
   per level whether the geometry came from the file or the cluster DAG, or
   generate one.
+- `crcbl bench --scenario <NAME>` — run one fixed, named workload headless and
+  report its distribution beside the machine it ran on.
+  `docs/plan/40-profiling.md` owns it.
 
-Everything below that is not in that list — `scene`, `import`, `sim`, `phys`,
-`edit` — is unbuilt. They are kept as the specification they always were; the
-parser rejects those words today.
+Everything below that is not in that list — `scene`, `import`, `phys`, `edit` —
+is unbuilt. They are kept as the specification they always were; the parser
+rejects those words today.
 
 Project lifecycle:
 
@@ -69,9 +72,20 @@ Content pipeline (agent/CI workhorses):
 
 Simulation & verification:
 
-- `crcbl sim <scene> --ticks N [--input script.ron] [--hash]` — run the headless
-  server N ticks, optionally replaying an input script, print the state hash
-  (the stage 4 determinism harness as a CLI command).
+- `crcbl sim [--ticks N] [--tick-rate HZ] [--seed S]` — **built.** Runs the
+  headless server tick loop over a seed-generated world and prints
+  `hash:<hex> ticks:<n> final_tick:<n>`; same input, same hash. This is the
+  stage 4 determinism harness, and it is a CLI verb rather than a binary of its
+  own — `apps/sim` was deleted on 2026-08-23 and its tests moved to
+  `crates/crcbl-cli/tests/cli.rs`.
+
+  **It takes no scene and no input script.** The sketch above was
+  `crcbl sim <scene> --ticks N [--input script.ron] [--hash]`, and neither the
+  scene argument nor `--input` is built: this tree has no scene file format and
+  no RON reader, so there is nothing for a scene to name and no script to
+  replay. Both are refused by name rather than ignored. `--hash` is not a flag
+  either — the hash is the output. The world comes from `--seed` alone.
+
 - `crcbl phys <scene> --check` — physics sanity suite against a scene (overlaps
   at rest, NaN scan, island stats).
 
@@ -88,9 +102,10 @@ Editor session control:
   human tables otherwise. Exit codes are meaningful (0 ok, 1 command failed, 2
   bad invocation).
 - **Everything scriptable is testable**: `crcbl screenshot` is the golden-image
-  smoke primitive and CI uses it, including in the cross-backend compare. The
-  determinism half is `apps/sim` rather than a `crcbl sim` verb — see the note
-  at the top of this section.
+  smoke primitive and CI uses it, including in the cross-backend compare, and
+  `crcbl sim` is the determinism primitive beside it. Both are verbs of the one
+  binary: a capability that needed a second binary built to reach it would be
+  the same architecture regression as one that needed the GUI.
 - **Agent-friendly**: stdin batch mode, stable JSON schemas, no interactive
   prompts unless a TTY is detected (and never required).
 - Offscreen rendering rides the normal HAL (surface-less device + readback), so
@@ -98,24 +113,24 @@ Editor session control:
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                                                                                                                                                                                                                                  | Roadmap phase |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| `crcbl-cli` scaffold: `new`, `run`, `build`                                                                                                                                                                                                                            | **Built**     |
-| Offscreen render + `screenshot`                                                                                                                                                                                                                                        | **Built**     |
-| `replay` (metadata report), `crpix`, `lod stats`/`gen`                                                                                                                                                                                                                 | **Built**     |
-| `sim`/`--hash` (headless server, input scripts) — **not built**: the CLI parses eight verbs and `sim` is not one of them; the determinism harness is the separate `apps/sim` binary. This row said P2 until 2026-08-23, and the prose above it already said otherwise. | unbuilt       |
-| `import`                                                                                                                                                                                                                                                               | P9            |
-| `scene` batch ops + `edit --serve` (editor command protocol)                                                                                                                                                                                                           | P12           |
-| `phys --check`                                                                                                                                                                                                                                                         | P3–P11 grow   |
+| Slice                                                                                                                                                                                                                                        | Roadmap phase |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `crcbl-cli` scaffold: `new`, `run`, `build`                                                                                                                                                                                                  | **Built**     |
+| Offscreen render + `screenshot`                                                                                                                                                                                                              | **Built**     |
+| `replay` (metadata report), `crpix`, `lod stats`/`gen`                                                                                                                                                                                       | **Built**     |
+| `sim` — the determinism harness behind a verb: `--ticks`, `--tick-rate`, `--seed`, `--json`. **The scene argument and `--input script.ron` are not built** and are refused by name; there is no scene format and no RON reader in this tree. | **Built**     |
+| `import`                                                                                                                                                                                                                                     | P9            |
+| `scene` batch ops + `edit --serve` (editor command protocol)                                                                                                                                                                                 | P12           |
+| `phys --check`                                                                                                                                                                                                                               | P3–P11 grow   |
 
 ## Exit criteria (MVP)
 
 - A scripted session — `crcbl new` → `crcbl import` → `crcbl scene spawn …` →
-  `crcbl screenshot` → `crcbl sim --hash` — builds and verifies a small scene
-  with **zero GUI launches**.
+  `crcbl screenshot` → `crcbl sim` — builds and verifies a small scene with
+  **zero GUI launches**.
 - The towers map is _modifiable_ from the CLI (spawn a tower plot, move a
   spawner) and the result opens correctly in the GUI editor with intact undo
   history.
-- All sample CI determinism + golden-image checks run through the CLI. (The
-  golden-image half does; the determinism half runs `apps/sim`, and moving it
-  behind a `crcbl sim` verb is what closes this criterion.)
+- All sample CI determinism + golden-image checks run through the CLI. Both
+  halves do: `crcbl screenshot` for the golden images, `crcbl sim` for the
+  determinism hash.
