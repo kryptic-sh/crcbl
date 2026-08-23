@@ -773,7 +773,9 @@ convention, and worth proposing only if this rots again.
 ### What bloom's slice left open (2026-08-23)
 
 The chain is built, gated by a golden and a within-frame ratio, and green on
-radv and lavapipe. Three things it did not settle:
+radv, on lavapipe and — since `Scene::Bloom` joined `apps/render-harness`'s
+`SCENES` — in a real browser through `crcbl-webgpu`, against the same golden.
+Three things it did not settle:
 
 - **Nothing gates the Karis average except the golden.** The whole point of the
   partial-Karis weighting is that it kills a firefly — a single blown-out texel

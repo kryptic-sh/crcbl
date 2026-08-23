@@ -31,7 +31,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `bloom_up` and `bloom_composite`; new fixture `Scene::Bloom` and the `bloom`
   golden, whose check compares the floor beside the emitter against its mirror
   on the other side of the frame, so a chain that returned its input or a
-  uniform blur cannot pass it.
+  uniform blur cannot pass it. The browser gate draws it too — `bloom` is in
+  `apps/render-harness`'s scene list, so `crcbl-webgpu` renders the chain in a
+  real browser and is held against the same golden Vulkan is.
 
 - **The server consumes client input.** `Server` holds the input frames that
   arrived since the last tick — each with the `TickId` its client stamped it

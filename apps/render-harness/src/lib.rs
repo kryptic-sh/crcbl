@@ -135,6 +135,7 @@ const SCENES: &[(Scene, &str)] = &[
     (Scene::Ao, "ao"),
     (Scene::Ssr, "ssr"),
     (Scene::Probes, "probes"),
+    (Scene::Bloom, "bloom"),
     (Scene::Ui, "ui"),
 ];
 
