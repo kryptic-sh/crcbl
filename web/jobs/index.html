@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>crcbl worker-backend gate</title>
+    <style>
+      body {
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        margin: 2rem;
+        color: #ddd;
+        background: #111;
+      }
+      pre {
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>crcbl worker-backend gate</h1>
+    <p>
+      A page with <strong>no engine and no canvas</strong>. It loads the
+      worker-backend gate artifact, announces itself through
+      <code>__crcbl_web_jobs_host_ready</code>, drains the spawn queue
+      <code>crcbl_jobs::workers</code> fills, and brings a real
+      <code>Worker</code> up on each request — the five-step sequence
+      <code>crates/crcbl-jobs/src/workers.rs</code> specifies.
+    </p>
+    <p>
+      There is nothing to look at. The verdict is read out of
+      <code>window.jobsResult</code> by <code>web/tools/jobs-e2e.mjs</code> over
+      the DevTools protocol; the list below is the same thing for a human who
+      opened the page by hand. This page is never published — its artifact
+      imports a shared memory, which cannot exist on an origin that sends no
+      COOP/COEP pair.
+    </p>
+    <pre id="log">starting…</pre>
+    <!-- Built next to this page by the gate; see web/run-jobs-e2e.sh. -->
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

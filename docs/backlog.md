@@ -6339,8 +6339,10 @@ thing to give — horde works around it by handing `Pool::with_workers` an
 `Inline` spawner when `--workers 0` is asked for, which is a caller saying
 "threads, but none" through the only channel there is.
 
-- **Cross-origin isolation is proved locally, and no page uses it yet.** The
-  isolation half is done: `web/tools/serve.mjs` sends
+- **Cross-origin isolation is proved locally, and one page now uses it.**
+  `web/jobs/index.html`, driven by `web/run-jobs-e2e.sh`, is the consumer: it
+  constructs a shared `WebAssembly.Memory`, which is refused outright without
+  the pair. The isolation half was already done: `web/tools/serve.mjs` sends
   `Cross-Origin-Opener-Policy: same-origin` and
   `Cross-Origin-Embedder-Policy: require-corp`, `web/build.sh --serve` runs it,
   and `run-browser-e2e.sh` refuses a run whose output does not contain the
@@ -6361,22 +6363,31 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   the bootstrap is no longer an open question and the paragraphs arguing it have
   been deleted rather than annotated.
 
-- **`Pool` cannot be driven from the browser's main thread, and the spawn queue
-  can.** This is the sharpest consequence of the backend landing, and it is not
-  something the backend can fix. `Pool::par_for` takes `Shared::sleep` — a
-  `std::sync::Mutex` — on every submission, and `pool::work` takes it and waits
-  on `Condvar` before parking; both lower to `Atomics.wait` on wasm, which
-  **throws** on a browser main thread rather than blocking. So the topology
-  `21-jobs.md` settled (the game worker owns the pool, main forwards and
-  presents) is not a preference, it is the only arrangement that runs.
-  `crcbl_jobs::workers`'s own queue is deliberately different: it is taken with
+- **`Pool` CAN be driven from the browser's main thread, measured — which
+  contradicts what this entry used to predict, and the prediction's reasoning is
+  still sound.** The argument was: `Pool::par_for` takes `Shared::sleep` (a
+  `std::sync::Mutex`) on every submission and `pool::work` waits on `Condvar`
+  before parking; on `wasm + atomics` std's `Mutex::lock` reaches `futex_wait`
+  (`sys/sync/mutex/futex.rs`, then `sys/pal/wasm/atomics/futex.rs`), which is
+  `memory_atomic_wait32`, which a browser main thread **throws** on rather than
+  blocking in.
+
+  **What actually happens, 2026-08-23, Chromium 151, `web/run-jobs-e2e.sh`
+  against `web_worker_gate.wasm`:** 3000 `par_for` calls driven from the page's
+  main thread with eight workers up and parking between calls, no trap, every
+  checksum right. The reconciliation is that `Mutex::lock`'s fast path is one
+  `compare_exchange` and only a **losing** one reaches `futex_wait`, so the trap
+  needs the driver to lose a race for `sleep` against a worker on its way to
+  park. That window is real and this workload does not hit it. **So this is "not
+  observed", not "cannot happen"** — a heavier or differently shaped consumer
+  could still find it, and a trap is fatal to the frame rather than slow. The
+  topology `21-jobs.md` settled (the game worker owns the pool, main forwards
+  and presents) is still the arrangement to prefer; it is no longer the only one
+  known to run.
+
+  `crcbl_jobs::workers`'s own queue never had the question: it is taken with
   `Mutex::try_lock` in a spin (`workers::hold`), never `lock`, precisely so the
-  drain half is legal on main. **Traced through std's sources, not observed** —
-  `sys/sync/mutex/futex.rs` is the `wasm + atomics` arm, its `lock` reaches
-  `futex_wait` and `sys/pal/wasm/atomics/futex.rs` turns that into
-  `memory_atomic_wait32`, while its `try_lock` is one `compare_exchange` with no
-  futex path. Node lets its main thread block, so no local gate can show the
-  trap; the browser is where it would.
+  drain half is legal on main.
 
 - **A worker that skips `__wasm_init_tls` does not necessarily trap, which
   corrects the entry that used to sit here.** Measured against
@@ -6399,7 +6410,10 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   that works is `gate_tls_shared` — a thread-local holding **the caller's own
   frame address**, so a thread that finds an address its stack could not have
   produced is reading someone else's TLS. Anyone writing another TLS assertion
-  should start there.
+  should start there. **Confirmed again in Chromium**, 2026-08-23: with
+  `?no-init-tls` the browser gate reports no trap, no clobbered stack and a
+  green checksum, and `gate_tls_shared` is the one assertion that goes red. Five
+  runs, the same result each time.
 
 - **The handle in the spawn ABI is a table index, not a pointer, and that was a
   deliberate departure.** The design sketched here previously said to double-box
@@ -6434,23 +6448,84 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   covered is a host that announces itself and then cannot deliver — the queue
   grows and nothing complains.
 
-- **No page implements the worker shim, so nothing on the site uses any of
-  this.** The demos' artifacts are still the single-threaded ones and
-  `Spawn::threaded()` answers false in a browser today, which is why
-  `bash web/build.sh` is unchanged by the backend landing. Whoever adds the shim
-  owns: a loader that constructs the shared memory (`wasm-loader.js` passes an
-  empty import object on purpose), the drain loop on the page, and the
-  `crossOriginIsolated` check in front of both. `web/tools/worker-gate.mjs` is
-  the drain loop written once already and is the thing to copy.
+- **A page implements the worker shim now; no _demo_ does, and wiring them is
+  blocked on a decision rather than on effort.** `web/jobs/host.js` is the host
+  half — announce, drain, allocate a stack and a TLS block, start one `Worker`
+  per request — and `web/jobs/worker.js` is the bring-up. `web/run-jobs-e2e.sh`
+  drives them in Chromium. The demos' artifacts are still the single-threaded
+  ones, nothing in `web/engine/` calls any of this, and `Spawn::threaded()`
+  answers false on the site.
 
-- **The gate is node, and node is not a browser.** `worker-gate.mjs` uses
-  `node:worker_threads`, so what it proves is the bootstrap sequence — a
-  structured-cloned `WebAssembly.Module`, one shared memory, per-instance
-  globals. It is **not** evidence that a browser `Worker` accepts a cloned
-  module on all three engines, nor that `Atomics.wait` behaves as it does here:
-  node lets its main thread block and a browser does not. The local
-  `crossOriginIsolated` gate means the browser question can be asked without
-  touching Pages, and nobody has.
+  **What wiring the demos would cost, and why it was left.** A threaded demo
+  needs a loader that constructs the shared memory, and
+  `web/tools/wasm-loader.js` is _copied into the site_ as each demo's
+  `<lib>.js`, so changing it changes the published site's bytes;
+  `web/engine/demo.js` is copied too. So there is no way to wire the shared demo
+  path without either changing what `bash web/build.sh` produces or keeping a
+  second copy of the loader and the boot sequence for a threaded site — and a
+  second copy of `demo.js` is exactly the duplication that file exists to have
+  removed. Which of those two to pay is the first question, and it belongs to
+  whoever owns the published site.
+
+  **And there would be nothing to assert.** A sample's browser ABI reports a
+  status code, an error string and a log queue; none of them can say which
+  thread ran a chunk. `apps/horde`'s `steer_enemies` is the one sample consumer
+  of `Pool::par_for`, and a run with workers and a run without produce the same
+  frames by construction — that is the determinism rule, not a defect. Proving
+  "a sample's sim runs off the main thread" therefore needs an observable in
+  `apps/horde`'s own `__crcbl_horde_*` surface (a thread count, or the pool's
+  worker count), which is an export shipped to every visitor. `web/jobs/` drives
+  `crates/crcbl-jobs/examples/web_worker_gate.rs` instead, precisely because an
+  example cannot reach a site artifact by any route.
+
+- **The browser gate exists, and covers one engine on one platform.**
+  `web/run-jobs-e2e.sh` runs `web/jobs/` in headless Chromium and asserts a
+  chunk ran on a thread that is not the driver, on its own stack and with its
+  own thread-locals — plus the four things node cannot reach (a `Worker` taking
+  a cloned `WebAssembly.Module`, the shared memory existing at all, the main
+  thread driving the pool, and a non-threaded artifact being refused workers).
+  Measured on **Chromium 151, Linux, this machine only**.
+
+  Not covered, stated as gaps rather than excused: **Firefox and WebKit** — the
+  structured clone of a `WebAssembly.Module` into a `Worker` and the
+  `Atomics.wait` main-thread rule are the two places engines have differed, and
+  neither has been tried; **CI** — the gate is local-only for the same reason
+  `--threads` is, the pinned `nightly-2026-07-02` with `rust-src` that no runner
+  has; **macOS and Windows** — `browser-launch.mjs` handles both and nothing has
+  run there. Pointing it at another browser is one environment variable
+  (`CRCBL_CHROMIUM`), so the Firefox answer is cheap and worth having before
+  anyone relies on the backend.
+
+- **`check-exports.mjs` does not see `web/jobs/`, so the browser gate's own
+  symbol names are gated only by itself.** The tool scans `web/engine` (its
+  `JS_SHARED`) plus the demo's own `main.js` for `.__crcbl_…` uses and fails
+  when one is missing from the artifact. `web/jobs/host.js` and
+  `web/jobs/worker.js` call six of the eight `__crcbl_web_jobs_*` exports and
+  are outside that scan. A typo there fails the browser gate loudly and
+  immediately, so nothing is silently uncovered — but adding `web/jobs` to
+  `JS_SHARED` would also make every demo artifact assert the jobs ABI it already
+  exports, which is a strictly larger check for one line. Left out to keep this
+  slice's diff to what it needed; considered, not declined.
+
+- **Neither `web_worker_gate.wasm` has `check-exports.mjs` over it, and
+  `--gate-only` is where that becomes visible.** `check-exports.mjs --threads`
+  runs once per _demo_ inside `web/build.sh --threads`; the gate example has
+  never been one of its subjects, and `--gate-only` skips the demo loop, so a
+  `web/run-jobs-e2e.sh` run reaches the browser having export-checked nothing.
+  What covers the threaded one instead is `worker-gate.mjs`, which `--gate-only`
+  does still run: it refuses an artifact that does not import a shared
+  `env.memory` and then _uses_ `__stack_pointer`, `__wasm_init_tls`,
+  `__tls_size` and `__tls_align`, so every symbol the link arguments ask for is
+  exercised rather than merely listed. The plain artifact — the negative control
+  — is covered by nothing but the page loading it; if its `gate_*` exports
+  stopped being emitted the failure would read as "the refusal check is wrong"
+  rather than "the artifact is empty".
+
+- **`crcbl_jobs::workers`'s module docs still name only the node gate.** The
+  last line of that module's header says "`web/tools/worker-gate.mjs` is that
+  sequence, run against a real artifact"; `web/run-jobs-e2e.sh` is now that
+  sequence in a browser and should be named beside it. Not done here because
+  this slice's write set was `web/` only.
 
 - **`--export=__heap_base` is passed, asserted by nothing, and used by
   nothing.** The backend allocates worker stacks and TLS blocks from Rust's own

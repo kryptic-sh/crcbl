@@ -45,9 +45,16 @@
 // browser in the loop, and the bootstrap it exercises is the same one: a
 // structured-cloned `WebAssembly.Module`, one shared `WebAssembly.Memory`, and
 // per-instance globals. What it is NOT evidence for is that a browser `Worker`
-// accepts a cloned module on all three engines, or that `Atomics.wait` behaves
-// the way it does here — node lets its main thread block and a browser does
-// not. See `docs/backlog.md`.
+// accepts a cloned module, that the shared memory can be constructed at all —
+// which is a property of the *document* rather than of the build — or that
+// `Atomics.wait` behaves the way it does here, since node lets its main thread
+// block and a browser does not.
+//
+// `web/run-jobs-e2e.sh` asks all of those in Chromium, against this same
+// artifact and the same five-step sequence, so this file and that one are the
+// two halves rather than a gate and a copy of it. It runs where a browser is
+// available; this runs inside `web/build.sh --threads` on every machine that
+// builds the artifacts, including the ones with no browser at all.
 //
 // Usage:
 //   node web/tools/worker-gate.mjs <path-to.wasm> [--workers N]

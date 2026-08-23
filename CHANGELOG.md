@@ -16,6 +16,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The Web Worker spawn backend now runs in a real browser, and
+  `web/run-jobs-e2e.sh` is the gate that says so.** `crcbl_jobs::workers` has
+  had the queue-and-drain ABI and a `node:worker_threads` gate over it since it
+  landed; what did not exist was a page. `web/jobs/` is that page — `host.js`
+  announces the host through `__crcbl_web_jobs_host_ready`, drains the spawn
+  queue, and starts one `Worker` per request; `worker.js` is the five-step
+  bring-up (instantiate against the shared memory, write `__stack_pointer`, call
+  `__wasm_init_tls`, report, enter) `crates/crcbl-jobs/src/workers.rs`
+  specifies. The gate asserts a chunk ran on a thread that is not the driver, on
+  a stack of its own and with thread-locals of its own, in headless Chromium.
+
+  **Four claims are only answerable in a browser**, and this is now the only
+  place any of them is asked: that a `Worker` takes a structured-cloned
+  `WebAssembly.Module` and a shared `WebAssembly.Memory`; that the memory can be
+  constructed at all, which is a property of the document rather than of the
+  build; that a page's **main thread** survives driving a pool whose workers
+  park on `memory.atomic.wait32` — measured at 3000 `par_for` calls with eight
+  workers up, with no trap, where `docs/backlog.md` had predicted one; and that
+  a **non-threaded** artifact, the shape every published one has, is refused
+  workers rather than announced. Four red switches in the page's query string
+  break one step each, and the script insists the right assertion went red and
+  the others did not.
+
+  `web/build.sh --threads --gate-only` builds just the artifact the browser run
+  drives, so it costs one `-Z build-std` example rather than seven demo builds.
+  **`bash web/build.sh` is byte-for-byte unchanged** — `web/jobs` is pruned from
+  its copy, because a page loading an artifact that imports a shared
+  `env.memory` could only fail on an origin that sends no COOP/COEP pair, which
+  is every GitHub Pages origin. The demos themselves are still single-threaded
+  and unchanged.
+
 - **`crcbl_lantern::room::spot` puts a spot light in lantern's room**, and
   `room::lights` is the one list both of the sample's views and its golden suite
   feed to `set_lights` — the sample used to spell `[room::lamp(t)]` at each of

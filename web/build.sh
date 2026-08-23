@@ -9,6 +9,7 @@
 #   ./web/build.sh                 # build everything into target/site
 #   ./web/build.sh --serve         # …and serve it on http://localhost:8000
 #   ./web/build.sh --threads       # build the worker-capable artifacts instead
+#   ./web/build.sh --threads --gate-only   # …only the worker-backend gate one
 #
 # Serving matters: ES modules and `WebAssembly.instantiateStreaming` do not work
 # from `file://`, and OPFS needs a secure context, which `localhost` is.
@@ -38,6 +39,7 @@ THREADED_MAX_MEMORY_BYTES=1073741824
 
 SERVE=0
 THREADS=0
+GATE_ONLY=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --serve)
@@ -48,13 +50,32 @@ while [ "$#" -gt 0 ]; do
       THREADS=1
       shift
       ;;
+    --gate-only)
+      GATE_ONLY=1
+      shift
+      ;;
     *)
       echo "crcbl web build: unknown argument: $1" >&2
-      echo "usage: ./web/build.sh [--serve] [--threads]" >&2
+      echo "usage: ./web/build.sh [--serve] [--threads [--gate-only]]" >&2
       exit 2
       ;;
   esac
 done
+
+# `--gate-only` narrows the threaded build to the one artifact
+# `web/run-jobs-e2e.sh` drives, so a browser run does not pay for seven
+# `-Z build-std` demo builds it never loads. It means nothing on its own: the
+# default build has no gate artifact to be the only thing in it.
+#
+# It skips `check-exports.mjs --threads` with the demo loop, because that check
+# has always been per demo and the gate example was never one of its subjects.
+# What still runs is `worker-gate.mjs`, which refuses an artifact with no shared
+# `env.memory` and then *uses* every symbol the link arguments below ask for —
+# so `--gate-only` narrows the surface checked, not the artifact under it.
+if [ "$GATE_ONLY" = "1" ] && [ "$THREADS" = "0" ]; then
+  echo "crcbl web build: --gate-only only makes sense with --threads" >&2
+  exit 2
+fi
 
 # Every wasm-ready sample: crate name, lib name, and where it goes in the site.
 # One row per demo — a new sample is a line here and a directory under
@@ -92,8 +113,13 @@ profile_flag=()
 # for a host to drain; `crates/crcbl-jobs/examples/web_worker_gate.rs` is a
 # `cdylib` that exercises it, and `web/tools/worker-gate.mjs` brings real
 # `node:worker_threads` workers up through the ABI and asserts they run Rust on
-# stacks and thread-locals of their own. That is the only place any of this is
-# actually executed rather than checked by symbol.
+# stacks and thread-locals of their own.
+#
+# `web/run-jobs-e2e.sh` does the same thing in a real browser, off `--gate-only`
+# below, and is the only gate for the parts node cannot reach: a browser
+# `Worker` taking a structured-cloned module, a shared memory the *document*
+# has to earn, and a page's main thread driving a pool whose workers park on
+# `memory.atomic.wait32`.
 #
 # IT IS NOT PART OF THE PAGES BUILD AND CANNOT BECOME ONE. GitHub Pages sends
 # no COOP/COEP pair, so a `SharedArrayBuffer` cannot exist on the published
@@ -161,6 +187,7 @@ if [ "$THREADS" = "1" ]; then
 
   echo "==> threaded build: $NIGHTLY, -Z build-std=std,panic_abort, into $THREADED_DIR"
   for row in "${DEMOS[@]}"; do
+    if [ "$GATE_ONLY" = "1" ]; then break; fi
     IFS=: read -r crate lib _ <<<"$row"
     echo "==> cargo +$NIGHTLY build --lib -p $crate --target $TARGET ($PROFILE, threaded)"
     # `RUSTFLAGS` rather than a `[target]` table: it has to apply to the std
@@ -189,6 +216,7 @@ if [ "$THREADS" = "1" ]; then
 
   echo "==> $THREADED_DIR/$TARGET/$PROFILE"
   for row in "${DEMOS[@]}"; do
+    if [ "$GATE_ONLY" = "1" ]; then break; fi
     IFS=: read -r _ lib _ <<<"$row"
     echo "    $lib.wasm"
   done
@@ -233,8 +261,15 @@ node "$REPO/web/tools/build-pages.mjs" "$SITE"
 # `run-browser-e2e.sh` when the browser gate landed, and shipped it to the
 # demo site. A prune that has to be extended by hand every time a script is
 # added is one that will be wrong again.
+# `./jobs` is pruned with the build tooling rather than published with `./probe`
+# and `./harness`, and it is the one directory here whose absence is a
+# *correctness* requirement instead of tidiness: that page loads an artifact
+# that imports a shared `env.memory`, which cannot exist on an origin sending no
+# COOP/COEP pair. Published, it would be a page on the demo site that can only
+# fail. `web/run-jobs-e2e.sh` assembles its own site for it.
 (cd "$REPO/web" && find . \
   -path ./tools -prune -o \
+  -path ./jobs -prune -o \
   -path ./pages -prune -o \
   -path ./templates -prune -o \
   -name '*.sh' -prune -o \

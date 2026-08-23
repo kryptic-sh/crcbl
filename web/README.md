@@ -24,6 +24,9 @@ framework that owns policy — and it applies here for the same reason.
 | `engine/audio-worklet.js` | the `AudioWorkletProcessor` itself                                         |
 | `engine/log.js`           | drains the engine's log queue into the console                             |
 | `demos/<name>/main.js`    | that sample's `__crcbl_<name>_*` symbols and its two status strings        |
+| `jobs/host.js`            | the host half of `crcbl_jobs::workers` — announce, drain, start workers    |
+| `jobs/worker.js`          | the worker half: instantiate, stack, TLS, enter                            |
+| `jobs/main.js`            | the page that drives them, and the checks it publishes                     |
 | `tools/serve.mjs`         | the static server, and the COOP/COEP pair that buys `SharedArrayBuffer`    |
 | `tools/check-exports.mjs` | the JS↔wasm symbol contract check                                          |
 | `tools/smoke.mjs`         | runs the artifact's boot sequence under node                               |
@@ -230,17 +233,58 @@ missing from the third is a failure. It also asserts `memory` is exported and
 that the module imports nothing outside the loader's own module — which today
 means nothing at all, since no artifact imports anything.
 
-`worker-gate.mjs` is the gate over the Web Worker spawn backend, and the only
-thing anywhere that executes it. `./web/build.sh --threads` builds
-`crates/crcbl-jobs/examples/web_worker_gate.rs` as a threaded `cdylib` and
-drives it: the host announces itself through `__crcbl_web_jobs_host_ready`, a
-`Pool` spawns through the seam, each queued request is drained with
+`worker-gate.mjs` is the node half of the gate over the Web Worker spawn backend
+— `./web/run-jobs-e2e.sh` is the browser half, below. `./web/build.sh --threads`
+builds `crates/crcbl-jobs/examples/web_worker_gate.rs` as a threaded `cdylib`
+and drives it: the host announces itself through `__crcbl_web_jobs_host_ready`,
+a `Pool` spawns through the seam, each queued request is drained with
 `__crcbl_web_jobs_take`, and a `node:worker_threads` worker instantiates against
 the same shared memory, writes `__stack_pointer`, calls `__wasm_init_tls` and
 enters `__crcbl_web_jobs_entry`. It asserts that a chunk ran on a thread that is
 not the driver, on a **stack of its own** and with **thread-locals of its own**
 — both of which fail silently rather than loudly, which is why the gate has
 `--no-stack-pointer` and `--no-init-tls` switches that must turn it red.
+
+## Checking the worker backend in a browser
+
+`run-jobs-e2e.sh` is the only place `crcbl_jobs::workers` runs where it is meant
+to run. It builds the gate artifact, assembles a site of its own, and drives
+`web/jobs/index.html` in headless Chromium:
+
+```sh
+./web/run-jobs-e2e.sh              # build the artifacts, then the browser run
+./web/run-jobs-e2e.sh --no-build   # drive what is already built
+```
+
+No Xvfb, no GPU, no canvas — the page opens no device and draws nothing. What it
+asks that `worker-gate.mjs` cannot:
+
+- a browser `Worker` takes a structured-cloned `WebAssembly.Module` and a shared
+  `WebAssembly.Memory`;
+- that memory can be constructed at all, which is a property of the **document**
+  rather than of the build. It is the `crossOriginIsolated` half of
+  `tools/serve.mjs`, and it is why nothing threaded is publishable;
+- a page's **main thread** survives driving a pool whose workers park on
+  `memory.atomic.wait32`. Node lets its main thread block and a browser traps
+  instead, so no gate there can show it. Measured here: 3000 `par_for` calls
+  from the main thread with eight workers up, no trap;
+- a **non-threaded** artifact — the shape every published one has — is refused
+  workers. Announcing one would make `Spawn::threaded` answer true where no
+  worker could ever start, which is the one failure that makes the backend lie
+  rather than degrade, so the page loads a plain build of the same example
+  alongside the threaded one and asserts the refusal.
+
+Four red switches ride in the query string, and the script runs every one of
+them and insists the right assertion went red — and that the others did not.
+`?no-init-tls` is the reason that pairing exists: skipping `__wasm_init_tls`
+does **not** trap in this artifact, so the assertion that catches it is the one
+about thread-locals holding a frame address their own stack could not have
+produced, and a gate that waited for an exception would pass the broken build.
+
+`web/jobs/` is pruned from `build.sh`'s copy rather than published beside
+`probe/` and `harness/`. That is a correctness requirement, not tidiness: the
+page loads an artifact importing a shared `env.memory`, which cannot exist on an
+origin that sends no COOP/COEP pair.
 
 `smoke.mjs` goes further and _runs_ the module: it instantiates the deployed
 artifact under node with every import stubbed to throw, and drives the
@@ -264,11 +308,12 @@ all runs here. What it cannot see, a black canvas included, is what
   `target/wasm-threaded/`, and `tools/check-exports.mjs --threads` gates the
   surface a worker needs — a shared `env.memory` import, `__wasm_init_tls`, and
   the TLS and stack globals. **The backend behind `crcbl-jobs`'s `Spawn` seam
-  exists now too** — `default_spawner` yields `Workers` on wasm — but nothing
-  publishes or loads a threaded artifact: the site's artifacts are still the
-  single-threaded ones, and no page implements the worker shim yet, so
-  `Spawn::threaded()` answers `false` there and every demo runs exactly as it
-  did. See `docs/backlog.md`.
+  exists now too** — `default_spawner` yields `Workers` on wasm — and
+  `web/jobs/` is a page that drives it end to end in a real browser, gated by
+  `./web/run-jobs-e2e.sh`. **The demos are still not part of that**: the site's
+  artifacts are the single-threaded ones, nothing in `engine/` implements the
+  shim, and `Spawn::threaded()` answers `false` there, so every demo runs
+  exactly as it did. See `docs/backlog.md` for what wiring them would cost.
 - **No pointer lock, no clipboard, no IME.** The Web shell backend clears those
   capability bits; there is nothing for a shim to wire.
 - **No service worker, no offline cache.** The site is static files.
