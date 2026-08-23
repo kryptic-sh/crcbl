@@ -769,7 +769,13 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// is the buffer's size less the offset: an over-large buffer bound whole is
     /// refused, and the same buffer bound in pieces is not. Vulkan states both
     /// as VUIDs rather than as errors, so this is the seam turning what would be
-    /// undefined behaviour into a refusal a caller can act on.
+    /// undefined behaviour into a refusal a caller can act on. `crcbl-webgpu`
+    /// is the exception on *where* it arrives, as it is for
+    /// [`create_pipeline_layout`](Device::create_pipeline_layout): its device is
+    /// an encoder holding no buffer sizes to measure a `WHOLE_BUFFER` binding
+    /// against, and WebGPU validates the same two limits itself at
+    /// `createBindGroup`, so there the refusal surfaces through
+    /// [`take_error`](Device::take_error).
     fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError>;
 
     /// Updates entries of an existing bind group in place.

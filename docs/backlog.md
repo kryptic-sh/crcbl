@@ -5548,6 +5548,27 @@ confirmed; the rest of this file assumes them.
   Preserves sample rule 7 and demonstrates the matchmaker and rating curve; only
   the transport is absent.
 
+## `crcbl-webgpu` cannot pre-check a buffer binding's range (2026-08-23)
+
+The two range limits — `Limits::max_uniform_buffer_range` and
+`max_storage_buffer_range` — are now enforced at `create_bind_group` by the null
+backend and by `crcbl-vk` (`write_descriptors`, which the update path shares).
+`crcbl-webgpu` cannot join them: its device is a command-stream encoder that
+holds no buffer sizes, so `BindingResource::WHOLE_BUFFER` — the commoner
+spelling — has nothing to resolve against, and a check of explicit sizes alone
+would be a guard that misses most bindings.
+
+Nothing is unsafe there: WebGPU validates `maxUniformBufferBindingSize` and
+`maxStorageBufferBindingSize` itself at `createBindGroup`, so the refusal
+arrives, through `Device::take_error` rather than from the call — the same
+exception `create_pipeline_layout` already documents.
+`Device::create_bind_group` says so.
+
+Closing it means the encoder keeping a handle→size table for buffers it created,
+which is state this backend has deliberately not had. Worth doing only if a
+second obligation wants the same table; one caller's convenience does not pay
+for a mirror of the browser's own bookkeeping.
+
 ## The 2026-08-01 full-workspace review, aggregated (2026-08-22)
 
 **The review document is deleted.** The earlier decision — recorded below as "a
