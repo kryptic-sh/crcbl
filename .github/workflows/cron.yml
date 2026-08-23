@@ -68,8 +68,15 @@ jobs:
   # target may need it and it costs nothing.
   #
   # Re-add a crate here when it grows unsafe, not by default. `crcbl-ecs` is kept
-  # despite also counting 0 because it interprets in about six seconds and its
-  # containers are where unsafe would first appear.
+  # despite also counting 0 because it interprets in seconds and its containers
+  # are where unsafe would first appear — but only since its churn soak was
+  # excluded. `crates/crcbl-ecs/tests/churn_soak.rs` carries `#![cfg(not(miri))]`
+  # and says why at length: thousands of ticks of spawn/despawn against hash maps
+  # is seconds of ordinary execution and did not finish in fifty minutes under
+  # the interpreter, against this job's whole one-hour budget. **A test that lands
+  # in one of these crates and runs for seconds natively is the thing to watch
+  # for**; that one arrived on 2026-08-22 and was found only because the job was
+  # triggered by hand.
   #
   # `crcbl-jobs` is the one whose unsafe is *concurrent* rather than merely
   # aliasing, and it is what turns this job from a nice-to-have into the only

@@ -48,6 +48,26 @@
 //! so what a tick does depends on [`SEED`] and that tick's index alone —
 //! nothing is carried from the ticks before it. Failure messages name the tick
 //! and the seed; re-running the test replays exactly the same sequence.
+//!
+//! # Not under miri
+//!
+//! `crcbl-ecs` is one of the crates `.github/workflows/cron.yml` interprets, and
+//! its own note says the crate is kept there "despite also counting 0 [unsafe]
+//! because it interprets in about six seconds". This file is what stops that
+//! being true: [`TICKS`] ticks of spawn/despawn churn against hash maps is
+//! seconds of ordinary execution and **did not finish in fifty minutes** under
+//! the interpreter on the machine it was measured on, against a job whose whole
+//! budget is an hour.
+//!
+//! Excluding it costs nothing this job is for. There is no `unsafe` in
+//! `crcbl-ecs` at all — the census in that workflow counts zero — so there is no
+//! aliasing or undefined behaviour here for miri to find; what it would be doing
+//! is re-running assertions that `test-linux` already runs on every commit, at
+//! roughly ten thousand times the cost. Scaling [`TICKS`] down instead was the
+//! alternative and it is worse: the expected spawn, despawn and peak counts are
+//! derived from it, so a miri-sized run would be a second set of hand-computed
+//! numbers to keep true.
+#![cfg(not(miri))]
 
 use std::collections::HashSet;
 
