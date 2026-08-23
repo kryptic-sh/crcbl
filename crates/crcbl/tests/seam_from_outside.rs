@@ -38,15 +38,21 @@ use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameBudget, FrameOutcome, GameLoop, GpuContext, GpuContextDesc,
     GpuError, Handled, LoopError, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MenuPump, ModeRequest, Pending,
-    PointerCapture, accept_close, drive, open_window, run_ticks, wait_for_configure,
+    PointerCapture, SettingsSource, accept_close, drive, open_window, run_ticks,
+    wait_for_configure,
 };
 use crcbl::hal::{CommandEncoderDesc, ResourceState};
 use crcbl::prelude::*;
-use crcbl::render::{ImportedImage, InitialClaim, RenderGraph, TransientPool};
+use crcbl::render::{
+    EffectOverride, EffectRequest, ImportedImage, InitialClaim, RenderEffects, RenderGraph,
+    TransientPool,
+};
 use crcbl::shell::{
     DisplayMode, HeadlessShell, PhysicalSize, Shell, ShellBackend, WindowDesc, WindowId,
     open_backend,
 };
+use crcbl::store::settings::SETTINGS_FILE;
+use crcbl::store::{MemoryStorage, StorageSource};
 
 /// The device this suite opens: no driver, available everywhere CI runs.
 const BACKEND: Option<GpuBackend> = Some(GpuBackend::Null);
@@ -441,4 +447,245 @@ fn the_loops_vocabulary_is_public() {
 
     let _ = Duration::from_millis(1);
     let _ = MENU_DOWN_KEY;
+}
+
+// ---- the player's video settings ------------------------------------------
+
+/// A settings source holding `toml` at the file the engine's start-up reads.
+///
+/// [`MemoryStorage`] rather than a temporary directory: what is being exercised
+/// is the read, and a suite that reached the real filesystem would answer
+/// differently on a machine whose `~/.config` already has one of these.
+fn settings_file(toml: &str) -> MemoryStorage {
+    let storage = MemoryStorage::new();
+    storage
+        .write(std::path::Path::new(SETTINGS_FILE), toml.as_bytes())
+        .expect("memory storage accepts every write");
+    storage
+}
+
+/// One forward frame on a context opened with `settings`: what it resolved to,
+/// and the passes it declared, in order.
+///
+/// The whole start-up, from a shell to a compiled frame — `GpuContext::open` is
+/// what reads the settings, so a helper that called the reader directly would
+/// prove nothing about whether opening a context runs it.
+fn a_frame_opened_with(settings: SettingsSource<'_>) -> (RenderEffects, Vec<String>) {
+    let (mut shell, window, _clock) = windowed();
+    let mut events = 0;
+    let extent =
+        wait_for_configure(shell.as_mut(), window, &mut events).expect("headless configures");
+
+    let mut gpu = GpuContext::open(
+        shell.as_ref(),
+        window,
+        extent,
+        &GpuContextDesc {
+            label: "library seam",
+            backend: BACKEND,
+            settings,
+            ..GpuContextDesc::default()
+        },
+    )
+    .expect("the null backend opens everywhere");
+
+    let mut renderer = ForwardRenderer::new(gpu.device(), gpu.queue(), gpu.format())
+        .expect("the null backend builds every pipeline");
+    // The one line a game writes. Everything the player asked for is already in
+    // the context by now.
+    renderer.set_effect_request(gpu.effect_request());
+
+    let mut pool = TransientPool::new();
+    let acquired = gpu
+        .acquire()
+        .expect("acquire")
+        .expect("the null swapchain always yields an image");
+    renderer
+        .begin_frame(
+            gpu.device(),
+            &Camera::default(),
+            &DirectionalLight::default(),
+            acquired.extent,
+        )
+        .expect("the frame's uniform and instance writes");
+
+    let labels = {
+        let mut graph = RenderGraph::new(gpu.queue());
+        let target = graph.import_image(
+            "swapchain",
+            ImportedImage {
+                image: acquired.image,
+                view: acquired.view,
+                format: gpu.format(),
+                extent: acquired.extent,
+                initial: ResourceState::Undefined,
+                claim: InitialClaim::Acquired,
+                final_state: ResourceState::Present,
+            },
+        );
+        renderer.add_passes(&mut graph, &pool, target, acquired.extent);
+        let compiled = graph.compile(&pool).expect("a legal frame");
+        let labels: Vec<String> = compiled
+            .passes()
+            .iter()
+            .map(|pass| pass.label().to_string())
+            .collect();
+        let mut encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
+            label: Some("library seam forward frame"),
+            queue: gpu.queue(),
+        });
+        compiled
+            .execute(gpu.device(), &mut pool, encoder.as_mut(), None)
+            .expect("execute");
+        let command_buffer = encoder.finish().expect("a recorded command buffer");
+        gpu.submit_and_present(&acquired, command_buffer)
+            .expect("present");
+        labels
+    };
+
+    let effects = renderer.effects();
+    gpu.drain().expect("the frame retires");
+    renderer.destroy(gpu.device());
+    pool.destroy(gpu.device());
+    gpu.destroy().expect("the device is released");
+    shell.destroy_window(window).expect("the window goes away");
+    (effects, labels)
+}
+
+/// **A settings file that switches an effect off produces a frame with fewer
+/// passes**, through the engine's own start-up and nothing hand-assembled.
+///
+/// The observable is the compiled pass list rather than the resolved set,
+/// because the thing that could otherwise be true is that the read happened,
+/// the request was stored, and every pass ran anyway — a frame that reports the
+/// right effects and draws all of them.
+///
+/// The two effects are checked by name and the third by arithmetic: a cascade's
+/// cull passes are labelled exactly as the camera's, so `SHADOWS` has no unique
+/// label to look for. What it does have is a frame that is strictly shorter and
+/// keeps the `shadow` pass itself, which is what writes the clear every
+/// comparison reads as "fully lit".
+#[test]
+fn a_settings_file_switching_an_effect_off_is_a_frame_with_fewer_passes() {
+    let (all_on, every_pass) = a_frame_opened_with(SettingsSource::None);
+    assert_eq!(
+        all_on,
+        RenderEffects::all(),
+        "a run with no settings at all has to be the every-effect frame, or the \
+         comparisons below are against the wrong control"
+    );
+
+    for (toml, gone) in [
+        (
+            "ambient_occlusion = false",
+            ["ssao", "ssao-blur"].as_slice(),
+        ),
+        ("reflections = false", ["ssr", "ssr-blur"].as_slice()),
+    ] {
+        let storage = settings_file(&format!("[engine.video]\n{toml}\n"));
+        let (effects, labels) = a_frame_opened_with(SettingsSource::Source(&storage));
+        assert_ne!(effects, all_on, "{toml}: the player's row did nothing");
+        let expected: Vec<String> = every_pass
+            .iter()
+            .filter(|label| !gone.contains(&label.as_str()))
+            .cloned()
+            .collect();
+        assert_eq!(
+            labels, expected,
+            "{toml}: the frame must lose {gone:?}, gain nothing in their place, and keep \
+             every other pass"
+        );
+    }
+
+    let storage = settings_file("[engine.video]\nshadows = false\n");
+    let (effects, labels) = a_frame_opened_with(SettingsSource::Source(&storage));
+    assert_eq!(
+        effects,
+        RenderEffects::all().difference(RenderEffects::SHADOWS)
+    );
+    assert!(
+        labels.len() < every_pass.len(),
+        "shadows off recorded {} passes and the every-effect frame {} — the culls the \
+         atlas needs are still in the frame",
+        labels.len(),
+        every_pass.len()
+    );
+    assert!(
+        labels.iter().any(|label| label == "shadow"),
+        "the atlas pass is what writes the clear a shadow comparison reads as fully lit, \
+         so switching shadows off must not take it out"
+    );
+}
+
+/// **The player's layer clamps downward only, and the order around it holds.**
+///
+/// Every arm starts from a request the *start-up* built — the settings file is
+/// read by `GpuContext::open` and nothing here writes
+/// [`EffectRequest::video`](crcbl::render::EffectRequest::video) by hand, which
+/// is the difference between testing the resolution order and testing this
+/// layer's source.
+#[test]
+fn the_video_layer_clamps_downward_and_the_order_around_it_holds() {
+    let all = RenderEffects::all();
+    let storage = settings_file("[engine.video]\nshadows = false\nreflections = true\n");
+
+    let (mut shell, window, _clock) = windowed();
+    let mut events = 0;
+    let extent =
+        wait_for_configure(shell.as_mut(), window, &mut events).expect("headless configures");
+    let gpu = GpuContext::open(
+        shell.as_ref(),
+        window,
+        extent,
+        &GpuContextDesc {
+            label: "library seam",
+            backend: BACKEND,
+            settings: SettingsSource::Source(&storage),
+            ..GpuContextDesc::default()
+        },
+    )
+    .expect("the null backend opens everywhere");
+
+    let request = gpu.effect_request();
+    assert_eq!(
+        request.video,
+        all.difference(RenderEffects::SHADOWS),
+        "the file's one `false` is the whole of what the player asked for"
+    );
+
+    // **Downward only.** The file asks for reflections and the view does not
+    // draw them, so the frame does not — the arm that fails if the two are
+    // unioned rather than intersected.
+    let monitor = EffectRequest {
+        camera: all.difference(RenderEffects::REFLECTIONS),
+        ..request
+    };
+    assert_eq!(
+        monitor.resolve(all),
+        all.difference(RenderEffects::SHADOWS)
+            .difference(RenderEffects::REFLECTIONS),
+        "a settings file must not add an effect the view never asked for"
+    );
+
+    // **The override still escapes the player's clamp**, which is what a game
+    // with its own quality logic is for.
+    let forced = EffectRequest {
+        programmatic: EffectOverride::none().force(RenderEffects::SHADOWS, Some(true)),
+        ..request
+    };
+    assert_eq!(
+        forced.resolve(all),
+        all,
+        "the override is applied after the video clamp, so it can restore what it took"
+    );
+
+    // **And the device still clamps last and absolutely.**
+    assert_eq!(
+        forced.resolve(all.difference(RenderEffects::SHADOWS)),
+        all.difference(RenderEffects::SHADOWS),
+        "no toggle may conjure an effect the device has no way to draw"
+    );
+
+    gpu.destroy().expect("the device is released");
+    shell.destroy_window(window).expect("the window goes away");
 }

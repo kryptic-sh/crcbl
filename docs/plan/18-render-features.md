@@ -900,10 +900,12 @@ dispatches them cannot disagree.
   with the ray-traced variants, which `LightingPath` selects.
 - **Camera stack** is a field nothing writes: there is no render-stack RON, and
   nothing in the workspace reads or writes RON at all.
-- **`[engine.video]`** is a field nothing writes either, and it is closer than
-  the row above: `crcbl_store::settings::SettingsStack` reads that namespace
-  today. What is missing is a schema and a startup that builds a stack — nothing
-  in `crates/` or `apps/` constructs one. See `docs/backlog.md`.
+- **`[engine.video]`** is wired: `GpuContext` reads the player's settings file
+  while it opens — `SettingsSource::Platform` by default, so every sample and
+  the `crcbl new` scaffold get it without asking — and
+  `GpuContext::effect_request` hands the layer to a renderer built on that
+  context. `crcbl::settings`' `VIDEO_KEYS` is the one place a key is spelled,
+  and a key that is absent clamps nothing, because this layer may only remove.
 
 ## Interactions (kept honest)
 

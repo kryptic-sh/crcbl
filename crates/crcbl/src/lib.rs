@@ -247,6 +247,8 @@ pub mod perf;
 
 pub mod session;
 
+pub mod settings;
+
 // Deliberately **not** gated to `wasm32`, even though only a browser build calls
 // it: the log queue is plain Rust with no web dependency, and gating it would
 // put its tests on the one target the test suite never runs. Each sample's

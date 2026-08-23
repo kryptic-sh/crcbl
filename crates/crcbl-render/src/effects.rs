@@ -36,7 +36,7 @@
 //! | Layer | Source | Wired |
 //! | --- | --- | --- |
 //! | [`EffectRequest::camera`] | the view's own render stack | yes — a renderer per view, each with its own request |
-//! | [`EffectRequest::video`] | `[engine.video]` | **no** — `crcbl_store::settings` reads that namespace and nothing builds a stack at startup |
+//! | [`EffectRequest::video`] | `[engine.video]` | yes — `crcbl`'s start-up reads it: `GpuContextDesc::settings`, `GpuContext::effect_request` |
 //! | [`EffectRequest::programmatic`] | game code | yes — [`ForwardRenderer::set_effect_request`] |
 //! | the device clamp | [`crcbl_hal::DeviceCaps`] | yes, and it removes nothing — see [`ForwardRenderer::device_effects`] |
 //!
@@ -51,10 +51,20 @@
 //! it hangs in draws them, from one device, in one graph, through this one
 //! function.
 //!
-//! The remaining unwired row is a field nothing but a test writes, and it is
-//! here rather than left out because the *order* is the thing being built: a
-//! resolution point missing one of its four inputs cannot be shown to apply them
-//! in the right order, and adding it later would move every caller.
+//! Every row has a source now. The `[engine.video]` one arrives through the
+//! umbrella rather than through this crate, because it has to: the keys are a
+//! settings question and `crcbl-render` has no storage, so `crcbl::settings`
+//! owns the one table mapping a key to a [`RenderEffects`] bit and
+//! `crcbl::engine::GpuContext` does the read while it opens. A context is what
+//! every sample and every `crcbl new` scaffold already opens before it builds a
+//! renderer, which is what makes the layer free rather than opt-in, and the
+//! read is infallible — a player with no settings file, and a platform that
+//! names no settings directory, both mean "the player has not asked for less".
+//!
+//! **What a context reads is a ceiling, not a request.** `effect_request`
+//! returns this struct with [`video`](EffectRequest::video) filled in and the
+//! other two at their defaults, so a caller with a per-view stack writes
+//! `EffectRequest { camera, ..ctx.effect_request() }` and keeps both.
 //!
 //! [`ForwardRenderer::set_effect_request`]: crate::ForwardRenderer::set_effect_request
 //! [`ForwardRenderer::device_effects`]: crate::ForwardRenderer::device_effects
@@ -189,9 +199,15 @@ pub struct EffectRequest {
     /// reflections off gets none, and a player who turned them on gets them
     /// where the view asked for them.
     ///
-    /// **Nothing sets this today.** `crcbl_store::settings::SettingsStack` reads
-    /// the `[engine.video]` namespace and no startup builds one. See this
-    /// module's table.
+    /// **`crcbl`'s start-up is what sets it**: `crcbl::settings::VIDEO_KEYS` is
+    /// the one place a key is spelled, `crcbl::engine::GpuContext` reads the
+    /// namespace through `crcbl_store::settings::SettingsStack` while it opens,
+    /// and `GpuContext::effect_request` is what a renderer built on that context
+    /// is handed. See this module's table.
+    ///
+    /// [`RenderEffects::all`] is "the player has said nothing", which is what a
+    /// missing key, a missing file and a missing settings directory all produce
+    /// — a clamp that removes nothing rather than a frame with no effects in it.
     pub video: RenderEffects,
     /// What this **moment** calls for, from game code.
     pub programmatic: EffectOverride,

@@ -42,6 +42,14 @@ use serde::de::DeserializeOwned;
 
 use crate::{StorageError, StorageSource};
 
+/// The file the user settings layer lives in, inside an application's own
+/// storage.
+///
+/// Named here rather than at each call site because it is the one thing a
+/// player, a settings screen and a start-up have to agree on: a second spelling
+/// is a game that reads one file and writes another.
+pub const SETTINGS_FILE: &str = "settings.toml";
+
 // ── Layer types ─────────────────────────────────────────────────────────────
 
 /// A single layer in the settings stack.
@@ -99,6 +107,21 @@ pub struct StorageSettingsFile {
 }
 
 impl StorageSettingsFile {
+    /// A layer holding nothing: what [`load`](Self::load) produces for a path
+    /// with no file at it.
+    ///
+    /// What [`SettingsStack::platform`] falls back to when the file could not
+    /// be read at all — a layer that answers `None` for every key, so the
+    /// defaults below it decide, rather than no user layer at all, which would
+    /// make [`SettingsStack::set`] fail for the rest of the session.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            data: toml::Table::new(),
+            dirty: false,
+        }
+    }
+
     /// Load settings from `path` in `storage`. If the file does not exist,
     /// returns an empty (defaults-only) table.
     ///
@@ -183,6 +206,94 @@ impl SettingsStack {
     /// Create an empty settings stack.
     pub fn new() -> Self {
         Self { layers: Vec::new() }
+    }
+
+    /// The stack a game starts with: the player's own [`SETTINGS_FILE`] where
+    /// this platform keeps it, and no other layer.
+    ///
+    /// Natively that is [`SETTINGS_FILE`] under
+    /// [`NativeStorage::config_root`](crate::NativeStorage::config_root) —
+    /// **read without creating the directory**, so a start-up that finds no
+    /// settings file leaves the machine as it found it. In a browser it is the
+    /// Origin Private File System store the shim installed, which is the same
+    /// rule [`Backing::platform`](crate::record::Backing::platform) applies to
+    /// a record, in the same two arms.
+    ///
+    /// # Nothing here is a start-up failure
+    ///
+    /// A player who has never opened a settings screen has no file; a platform
+    /// may name no settings directory; a page may have no store installed yet;
+    /// and a hand-edited file can be unreadable or not be TOML. Every one of
+    /// those produces an **empty user layer** — so every key reads as absent
+    /// and whatever the caller layers underneath decides — and the last two
+    /// also log, because they are a machine's problem rather than a new
+    /// player's.
+    ///
+    /// # One layer, and it is the top one
+    ///
+    /// [`add`](Self::add) appends, and a later layer wins, so anything added to
+    /// the stack this returns would sit **above** the player's file and beat
+    /// it. A caller that wants engine or game defaults underneath assembles the
+    /// stack itself instead — [`new`](Self::new), the default tables, then
+    /// `SettingsLayer::UserFile(StorageSettingsFile::load(..))` last.
+    #[must_use]
+    pub fn platform(app_name: &str) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let file = match crate::NativeStorage::config_root(app_name) {
+            Some(root) => Self::user_file(&crate::NativeStorage::at(root)),
+            None => {
+                crcbl_core::log::warn!(
+                    "settings: this platform names no config directory; \
+                     {SETTINGS_FILE} will not be read"
+                );
+                StorageSettingsFile::empty()
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let file = {
+            let _ = app_name;
+            match crate::web::opfs::installed() {
+                Some(store) => Self::user_file(store.as_ref()),
+                None => {
+                    crcbl_core::log::info!(
+                        "settings: no OPFS store installed; {SETTINGS_FILE} will not be read"
+                    );
+                    StorageSettingsFile::empty()
+                }
+            }
+        };
+
+        let mut stack = Self::new();
+        stack.add(SettingsLayer::UserFile(file));
+        stack
+    }
+
+    /// The same one-layer stack over a [`StorageSource`] the caller already
+    /// has.
+    ///
+    /// What [`platform`](Self::platform) is once the platform question has been
+    /// answered, and what a test — or a game that keeps its settings somewhere
+    /// of its own — asks for directly. One layer, and the top one, on
+    /// [`platform`](Self::platform)'s terms.
+    #[must_use]
+    pub fn from_storage(storage: &dyn StorageSource) -> Self {
+        let mut stack = Self::new();
+        stack.add(SettingsLayer::UserFile(Self::user_file(storage)));
+        stack
+    }
+
+    /// [`SETTINGS_FILE`] out of `storage`, or an empty layer and a log line.
+    fn user_file(storage: &dyn StorageSource) -> StorageSettingsFile {
+        match StorageSettingsFile::load(storage, Path::new(SETTINGS_FILE)) {
+            Ok(file) => file,
+            Err(error) => {
+                crcbl_core::log::warn!(
+                    "settings: {SETTINGS_FILE} could not be read ({error}); \
+                     starting from defaults"
+                );
+                StorageSettingsFile::empty()
+            }
+        }
     }
 
     /// Add a layer. Layers added later have higher priority.
@@ -647,6 +758,75 @@ mod tests {
         assert!(text.contains("not UTF-8"), "{text}");
         assert!(text.contains("settings.toml"), "{text}");
         assert!(text.contains("offset 20"), "{text}");
+    }
+
+    /// **A file that is not TOML is an empty layer, not a refused start-up.**
+    ///
+    /// The arm a hand-edited `settings.toml` reaches. [`StorageSettingsFile::load`]
+    /// reports it — that is what its own test asserts — and this is the layer
+    /// above deciding the game still starts, with every key reading as absent.
+    #[test]
+    fn a_settings_file_that_is_not_toml_leaves_an_empty_layer_behind() {
+        let storage = crate::MemoryStorage::new();
+        storage
+            .write(Path::new(SETTINGS_FILE), b"this is not [ toml")
+            .expect("memory storage accepts every write");
+        // The premise: the loader really does refuse this one.
+        assert!(
+            StorageSettingsFile::load(&storage, Path::new(SETTINGS_FILE)).is_err(),
+            "the fixture has to be a file the loader rejects"
+        );
+
+        let stack = SettingsStack::from_storage(&storage);
+        assert_eq!(
+            stack.len(),
+            1,
+            "the user layer is still there to be written to"
+        );
+        assert_eq!(
+            stack.get::<bool>("engine.video.shadows"),
+            None,
+            "a broken file must read as absent, not as a value"
+        );
+    }
+
+    /// **A start-up that finds no settings file leaves the machine as it found
+    /// it.**
+    ///
+    /// [`SettingsStack::platform`] runs on every start-up of every game, so a
+    /// `mkdir` in it would create a config directory on every machine that has
+    /// never had one — including every CI runner and every test process. The
+    /// check is the directory's absence *after* the read, which is what
+    /// [`NativeStorage::config_root`](crate::NativeStorage::config_root) exists
+    /// for.
+    #[test]
+    fn a_platform_stack_for_an_app_with_no_file_is_empty_and_creates_nothing() {
+        // A name nothing owns, so the answer cannot be a real game's settings.
+        let app = "crcbl-settings-platform-test-no-such-app";
+        let root = crate::NativeStorage::config_root(app);
+
+        let stack = SettingsStack::platform(app);
+        assert_eq!(
+            stack.len(),
+            1,
+            "the user layer is present whether or not its file was"
+        );
+        assert_eq!(
+            stack.get::<bool>("engine.video.shadows"),
+            None,
+            "a player with no settings file has said nothing about any key"
+        );
+
+        // `None` is a platform that names no config directory at all, which is
+        // an arm this suite can reach on a machine with no HOME — and there is
+        // then nothing that could have been created.
+        if let Some(root) = root {
+            assert!(
+                !root.exists(),
+                "reading settings created {}",
+                root.display()
+            );
+        }
     }
 
     #[test]

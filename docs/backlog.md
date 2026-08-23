@@ -61,10 +61,10 @@ work afterwards, and neither can start before it.
   and no last-N ring, and nothing on any platform spawns an input thread. Worth
   knowing that `crcbl_jobs::default_spawner` has exactly one caller in the tree
   and it is `apps/horde`'s steering pool.
-- **The settings layer of the effect stack.** `crcbl_render::effects` resolves
-  the layering correctly and its own table already marks `[engine.video]`
-  unwired: `crcbl_store::settings` reads that namespace and nothing builds a
-  stack at startup, so the field has no source but a test. Small.
+- **One line per sample, now that `[engine.video]` is read.** `GpuContext` reads
+  the player's settings while it opens, but only `apps/lantern` builds an
+  `EffectRequest` at all, so no shipped sample's frame changes until each hands
+  `ctx.effect_request()` to its renderer.
 - **`GameModule` in `apps/lantern` and `apps/quarry`.** Neither implements it
   and neither claims an exemption for it, while `apps/viewer`'s absence is
   sanctioned in its own docs. Either they adopt it or they say why not — and
@@ -14691,15 +14691,13 @@ file would let a stack be authored without a recompile. Left as a separate
 question rather than folded into this one, because the layer it would feed now
 has a consumer either way.
 
-- **`[engine.video]`.** Closer, and the gap is smaller than it looks.
-  `crcbl_store::settings::SettingsStack` implements the whole four-layer TOML
-  resolution and `get_section::<T>("engine.video")` is one call. What is missing
-  is a _schema_ (no `VideoSettings` type exists; the namespace appears only in
-  doc comments and unit-test strings) and a _startup_ — nothing in `crates/` or
-  `apps/` constructs a `SettingsStack`, opens a `StorageSource` or names a
-  `settings.toml`. Wiring it is a decision about where the file lives and which
-  binaries load one, which is topic 14's P10 settings-screen slice rather than a
-  renderer change. Deliberately left rather than invented for one sample.
+- **`[engine.video]` is wired now.** `GpuContext` reads the player's
+  `settings.toml` while it opens and `GpuContext::effect_request` hands the
+  layer over; `crcbl::settings::VIDEO_KEYS` is the one place a key is spelled,
+  and the schema question resolved to a `(key, bit)` table rather than a `serde`
+  section, so `crcbl-store` still has no idea what an effect is. Where the file
+  lives is `GpuContextDesc::label`'s directory, the same name the samples
+  already give `Backing::platform`.
 
 ### The device-capability clamp is real and its rule set is empty
 
@@ -14734,8 +14732,11 @@ effect on. The first rule that fires arrives with the ray-traced variants, which
   exercises the runner's own path and not one below it, which
   `--force-geometry indirect-per-batch --force-binding array-pages` now makes
   possible and no job does.
-- **The `[engine.video]` and camera layers are untested against a real source**,
-  because they have none. What is tested is the order, with values a test wrote.
+- **The camera layer is still untested against a real source**, because it has
+  none — there is no render-stack RON and nothing reads one. `[engine.video]` no
+  longer belongs in that sentence: `seam_from_outside.rs` drives it from a real
+  `StorageSource` through a real `GpuContext` and asserts the frame loses the
+  passes the file switched off.
 - **`EffectOverride::force(.., None)` — releasing an override — has no caller
   outside its unit test.** It is there because a settings row returning to
   "auto" is the obvious consumer and leaving the tri-state out would have made

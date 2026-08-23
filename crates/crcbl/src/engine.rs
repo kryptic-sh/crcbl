@@ -111,9 +111,12 @@ use crcbl_hal::{
     SwapchainDesc, SwapchainHandle,
 };
 use crcbl_hal::{Device, Instance};
+use crcbl_render::{EffectRequest, RenderEffects};
 use crcbl_shell::{
     CloseReply, DisplayMode, PhysicalSize, PointerMode, Shell, ShellError, ShellEvent, WindowId,
 };
+use crcbl_store::StorageSource;
+use crcbl_store::settings::SettingsStack;
 
 use crate::backend::GpuBackend;
 
@@ -592,10 +595,49 @@ struct PendingScreenshot {
     extent: (u32, u32),
 }
 
+/// Where a run's `[engine.video]` settings are read from.
+///
+/// The [`GpuContextDesc::settings`] field, and the thing that makes
+/// `docs/plan/39-capabilities.md`'s player layer real: a context reads the
+/// player's quality settings while it is opening, and
+/// [`GpuContext::effect_request`] hands them to whatever renderer is built on
+/// it. **Nothing here is fallible** — see [`SettingsSource::Platform`].
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SettingsSource<'a> {
+    /// The player's own settings file, where this platform keeps it — the
+    /// directory [`GpuContextDesc::label`] names, natively.
+    ///
+    /// The default, so a game gets its player's video settings without asking
+    /// for them. A player who has never opened a settings screen has no file,
+    /// and a file that a text editor broke is not readable: both are an empty
+    /// settings stack, every key absent, and every effect left standing. See
+    /// [`SettingsStack::platform`], which is what this arm calls.
+    #[default]
+    Platform,
+    /// A source the caller supplies — a browser store, a dedicated server's
+    /// configuration directory, a test's own storage.
+    Source(&'a dyn StorageSource),
+    /// No settings at all: every effect this run draws is the camera stack's
+    /// and the device's business.
+    ///
+    /// What a run that must not depend on whoever's home directory it is
+    /// executing in asks for — a golden-image comparison, a benchmark, a
+    /// determinism harness. [`Platform`](Self::Platform) is the right answer
+    /// for anything with a player in front of it.
+    None,
+}
+
 /// What [`GpuContext::open`] should ask the device for.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuContextDesc<'a> {
-    /// Debug label for the device and the swapchain.
+    /// The game's name: the debug label for the device and the swapchain, and
+    /// — under [`SettingsSource::Platform`] — the directory its settings file
+    /// is read from.
+    ///
+    /// One field for both because they are one fact, and every sample already
+    /// passes its own name here. It is the same spelling the samples give
+    /// [`crcbl_store::record::Backing::platform`]: a bare lowercase name, which
+    /// is what becomes `~/.config/<label>/` on Linux.
     pub label: &'a str,
     /// Which backend to open, or `None` to let `crcbl::backend`'s own table
     /// choose.
@@ -612,6 +654,13 @@ pub struct GpuContextDesc<'a> {
     /// the swapchain: the mode is a swapchain property and cannot be edited in
     /// place.
     pub pacing: Pacing,
+    /// Where this run's `[engine.video]` quality settings come from.
+    ///
+    /// Read once, while the context opens; [`GpuContext::effect_request`] is
+    /// the answer. Defaults to [`SettingsSource::Platform`], which is what
+    /// makes the layer free for every sample and every `crcbl new` scaffold —
+    /// none of them names this field.
+    pub settings: SettingsSource<'a>,
 }
 
 impl Default for GpuContextDesc<'_> {
@@ -654,6 +703,26 @@ impl Default for GpuContextDesc<'_> {
                 | Features::PRESENT_FEEDBACK
                 | Features::PRESENT_TIMING,
             pacing: Pacing::default(),
+            settings: SettingsSource::default(),
+        }
+    }
+}
+
+impl SettingsSource<'_> {
+    /// The effects the player allows, read now.
+    ///
+    /// `RenderEffects::all()` whenever there is nothing to read — no source, no
+    /// file, no settings directory — because this layer may only clamp
+    /// downward, so "the player has said nothing" and "the player allows
+    /// everything" are the same answer. `crate::settings` is where the keys
+    /// live.
+    fn video_effects(self, app_name: &str) -> RenderEffects {
+        match self {
+            Self::Platform => crate::settings::video_effects(&SettingsStack::platform(app_name)),
+            Self::Source(storage) => {
+                crate::settings::video_effects(&SettingsStack::from_storage(storage))
+            }
+            Self::None => RenderEffects::all(),
         }
     }
 }
@@ -745,6 +814,14 @@ pub struct GpuContext {
     /// The frame this run was asked to write out, until it has been written.
     #[cfg(not(target_arch = "wasm32"))]
     screenshot: Option<ScreenshotRequest>,
+    /// What `[engine.video]` allowed when this context opened, from
+    /// [`GpuContextDesc::settings`].
+    ///
+    /// Read once rather than per frame: a settings file the player edits mid-run
+    /// is not something a frame should notice, and a settings *screen* applies
+    /// its rows through the renderer's own request. See
+    /// [`GpuContext::effect_request`].
+    video_effects: RenderEffects,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -792,6 +869,10 @@ pub struct PendingGpuContext {
     /// Carried from the desc because the swapchain is built at the end of the
     /// open, several polls after the caller handed it over.
     pacing: Pacing,
+    /// The `[engine.video]` read, done when the open was *started* rather than
+    /// when it finishes: it touches storage, and a browser drives the polls
+    /// below from a frame callback that has no time for one.
+    video_effects: RenderEffects,
 }
 
 impl PendingGpuContext {
@@ -855,13 +936,7 @@ impl PendingGpuContext {
                             log::info!("hal: this device does not have {absent}");
                         }
                         return GpuContext::finish(
-                            instance,
-                            surface,
-                            adapter,
-                            config,
-                            device,
-                            self.extent,
-                            self.pacing,
+                            instance, surface, adapter, config, device, self,
                         )
                         .map(Some);
                     }
@@ -954,6 +1029,7 @@ impl GpuContext {
             required_features: desc.required_features,
             optional_features: desc.optional_features,
             pacing: desc.pacing,
+            video_effects: desc.settings.video_effects(desc.label),
         };
         loop {
             if let Some(context) = pending.poll()? {
@@ -1013,6 +1089,7 @@ impl GpuContext {
             required_features: desc.required_features,
             optional_features: desc.optional_features,
             pacing: desc.pacing,
+            video_effects: desc.settings.video_effects(desc.label),
         })
     }
 
@@ -1127,15 +1204,20 @@ impl GpuContext {
     }
 
     /// Builds the context once the device has arrived.
+    /// `open` is the request being finished — everything decided before the
+    /// device arrived and still needed after it: the extent, the pacing and the
+    /// player's video settings. Carried as the object rather than unpacked into
+    /// three more parameters, because the next thing start-up learns early and
+    /// uses late would be a fourth.
     fn finish(
         instance: Box<dyn Instance>,
         surface: SurfaceHandle,
         adapter: crcbl_hal::AdapterId,
         config: SwapchainConfig,
         device: Box<dyn Device>,
-        extent: (u32, u32),
-        pacing: Pacing,
+        open: &PendingGpuContext,
     ) -> Result<Self, GpuError> {
+        let (extent, pacing) = (open.extent, open.pacing);
         let queue = device
             .queue(QueueKind::Graphics)
             .ok_or(GpuError::Unusable("no graphics queue"))?;
@@ -1197,6 +1279,7 @@ impl GpuContext {
             presented: 0,
             #[cfg(not(target_arch = "wasm32"))]
             screenshot: None,
+            video_effects: open.video_effects,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
         })
@@ -1251,6 +1334,41 @@ impl GpuContext {
     #[must_use]
     pub const fn extent(&self) -> (u32, u32) {
         self.configured_extent
+    }
+
+    /// What the player's `[engine.video]` section allowed, read while this
+    /// context opened.
+    ///
+    /// [`RenderEffects::all`] for a run whose player has said nothing, which is
+    /// every run under [`SettingsSource::None`] and every player who has not
+    /// written a settings file. This layer only clamps downward, so this is a
+    /// *ceiling*, never a request — see [`EffectRequest::video`].
+    #[must_use]
+    pub const fn video_effects(&self) -> RenderEffects {
+        self.video_effects
+    }
+
+    /// The effect request a renderer built on this context should start from.
+    ///
+    /// ```ignore
+    /// let mut renderer =
+    ///     ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &scene)?;
+    /// renderer.set_effect_request(ctx.effect_request());
+    /// ```
+    ///
+    /// The `[engine.video]` layer filled in and the other two left at their
+    /// defaults, because they are not this context's to answer: the camera
+    /// layer belongs to the view the renderer draws — a render-to-texture
+    /// monitor wants a different one from the frame it hangs in, from this one
+    /// device — and the programmatic layer is whatever the game decides later.
+    /// A caller with an opinion about either writes
+    /// `EffectRequest { camera, ..ctx.effect_request() }`.
+    #[must_use]
+    pub fn effect_request(&self) -> EffectRequest {
+        EffectRequest {
+            video: self.video_effects,
+            ..EffectRequest::default()
+        }
     }
 
     /// What the caller asked for, [`Pacing::Auto`] included.
@@ -7791,6 +7909,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features,
             pacing,
+            video_effects: RenderEffects::all(),
         };
         let gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8527,6 +8646,10 @@ mod tests {
             required_features: Features::empty(),
             optional_features: Features::empty(),
             pacing: Pacing::Vsync,
+            // A unit test is a run with no player: reading whoever's real
+            // settings file would make this suite's answer depend on the
+            // machine it ran on.
+            video_effects: RenderEffects::all(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8645,6 +8768,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: Features::empty(),
             pacing: Pacing::default(),
+            video_effects: RenderEffects::all(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8774,6 +8898,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: Features::empty(),
             pacing: Pacing::default(),
+            video_effects: RenderEffects::all(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8882,6 +9007,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: Features::empty(),
             pacing: Pacing::default(),
+            video_effects: RenderEffects::all(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8990,6 +9116,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: optional,
             pacing,
+            video_effects: RenderEffects::all(),
         };
         let gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {

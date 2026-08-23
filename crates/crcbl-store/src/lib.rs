@@ -166,14 +166,30 @@ pub struct NativeStorage {
 }
 
 impl NativeStorage {
+    /// Where `app_name`'s config directory **would** be, creating nothing.
+    ///
+    /// [`config`](Self::config) is the same answer plus the `mkdir`, and a
+    /// caller that is only going to *read* wants this one: a start-up that
+    /// looks for a settings file the player never wrote must not leave a
+    /// directory behind on every machine that has never had one. Split out so
+    /// that the two callers share the one statement of where the platform keeps
+    /// this — a second `dirs::config_dir().join(..)` is a second place for the
+    /// answer to drift.
+    ///
+    /// `None` where the platform will not name a config directory at all, which
+    /// includes `wasm32`: [`dirs`] has no browser to ask.
+    #[must_use]
+    pub fn config_root(app_name: &str) -> Option<PathBuf> {
+        Some(dirs::config_dir()?.join(app_name))
+    }
+
     /// Create a storage root under a platform-standard config directory.
     ///
     /// `app_name` is used as a subdirectory name, e.g. `~/.config/<app_name>/`.
     /// The directory is created (including parents) on construction.
     pub fn config(app_name: &str) -> Result<Self, StorageError> {
-        let base = dirs::config_dir()
+        let root = Self::config_root(app_name)
             .ok_or_else(|| StorageError::Other("no config directory found".into()))?;
-        let root = base.join(app_name);
         std::fs::create_dir_all(&root).map_err(|e| StorageError::from_io(&root, e))?;
         Ok(Self { root })
     }

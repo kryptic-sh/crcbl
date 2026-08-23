@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A player's `[engine.video]` settings now reach the frame.** `GpuContext`
+  reads the player's `settings.toml` while it opens — `SettingsSource::Platform`
+  by default, from the directory `GpuContextDesc::label` names, so a game gets
+  this without asking — and `GpuContext::effect_request` hands the layer to a
+  renderer built on that context. `crcbl::settings::VIDEO_KEYS` is the one place
+  a key is spelled (`shadows`, `ambient_occlusion`, `reflections` under
+  `[engine.video]`), and the layer only ever clamps downward: a key that is
+  absent, `true`, or holding something that is not a boolean all leave the
+  effect standing, so a settings file cannot switch on what the view never asked
+  for. `SettingsSource::None` is what a run with no player — a golden
+  comparison, a benchmark, a determinism harness — asks for instead.
+  `crcbl-store` gained `SettingsStack::platform`, `SettingsStack::from_storage`
+  and `NativeStorage::config_root`, which resolves the platform config directory
+  without creating it.
+
 - **X11 answers ICCCM's `MULTIPLE` selection target.** A peer that wants several
   formats can write one `ATOM_PAIR` list and ask once, instead of a
   `ConvertSelection` per format; each pair is converted into the property that
