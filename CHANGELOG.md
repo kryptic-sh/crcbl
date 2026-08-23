@@ -18,7 +18,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **`crcbl-webgpu` refuses a present with no frame to present.** `crcbl-vk`,
   `crcbl-mtl` and `crcbl-dx12` all answer "present without a matching
-  acquire_next_frame"; this backend answered `Ok` and encoded the command, so
+  `acquire_next_frame`"; this backend answered `Ok` and encoded the command, so
   the replayer went on to present a canvas whose texture the swapchain had never
   handed out. The arm that matters is a present after `reconfigure_swapchain`,
   which clears the acquired pair _and destroys the image behind it_ — a
