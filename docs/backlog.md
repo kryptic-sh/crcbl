@@ -1581,13 +1581,19 @@ held the same way. What is left, in the order it is worth taking:
   doc explained versions 4, 3 and 2 while the constant read 5; the reason for 5
   lived only in `tag.rs`. The value agreed, so no guard could catch it. This is
   the residue after a mirror is checked, and noticing it is the only defence.
-- **`js_mirror` is `#[cfg(test)]`, so `cargo doc` never resolves its links** —
-  and the same blindness hides pre-existing unresolved intra-doc links in
-  `probe.rs` (`Support`, `StencilOp`) and `writer.rs` (`StencilOp`,
-  `Self::set_stencil_reference`). CI's rustdoc does not pass
-  `--document-private-items`, so nothing sees them. Running it that way is how
-  they were found; whether the gate should is a separate question, because that
-  flag also surfaces the ~73 diagnostics the doc-gate entry already records.
+- **`js_mirror` is `#[cfg(test)]`, so `cargo doc` resolves none of its links** —
+  rustdoc does not build test code, so every link inside it is unchecked by any
+  gate, and the mirror is exactly the module whose prose names items on both
+  sides of the boundary.
+
+  What this entry used to say alongside that is **no longer true and was worth
+  re-checking**: the four unresolved links it named in `probe.rs` (`Support`,
+  `StencilOp`) and `writer.rs` (`StencilOp`, `Self::set_stencil_reference`) are
+  fixed, and the `rustdoc` job does pass both flags that find them — it runs
+  `cargo doc --workspace --exclude crcbl-vk --exclude crcbl-cli --target wasm32-unknown-unknown --document-private-items`
+  under `RUSTDOCFLAGS: -D warnings`, which covers this crate's wasm half.
+  Re-verified 2026-08-23 by running that command for `-p crcbl-webgpu`: exit 0.
+
 - **`FileMirror::opaque` is now empty for both files.** The machinery stays
   because it is what makes `js_decls` total, but nothing exercises it, so it is
   a path that could rot without anything noticing.
