@@ -3,6 +3,53 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### A cross-submission WAW hazard on the shadow atlas, found the day the gate landed
+
+**The first thing `CRCBL_VK_VALIDATION_FATAL` caught, and it is a real bug.**
+Fifteen of `apps/viewer`'s tests fail on lavapipe with the fatal gate on, all on
+one message:
+
+```text
+SYNC-HAZARD-WRITE-AFTER-WRITE … vkQueueSubmit2(): Hazard WRITE_AFTER_WRITE for
+entry 0, VkCommandBuffer [viewer frame], Submitted access info
+(submitted_usage: SYNC_IMAGE_LAYOUT_TRANSITION, command: vkCmdPipelineBarrier2,
+… VkImage [graph transient], VkImage [shadow atlas] …). Access info
+(prior_usage: SYNC_LATE_FRAGMENT_TESTS_DEPTH_STENCIL_ATTACHMENT_WRITE,
+write_barriers: 0, … submit: 10, command: vkCmdEndRendering …)
+```
+
+A frame's opening layout transition of the shadow atlas and the graph transient
+hazards against the **previous submission's** depth write, and
+`write_barriers: 0` says that write was never made available to anything.
+Execution ordering between submissions is not enough for a write-after-write:
+the transition is itself a write, so it needs the prior one available, not
+merely finished.
+
+- **It is cross-submission, which is why no local run has ever seen it.**
+  `run-vk-e2e.sh` reports `sync-validation reach: … cross-submission=no` on this
+  project's machines and `yes` on CI, and the harness already prints a banner
+  saying the local run is the weaker one. This is the first time that gap has
+  cost something concrete.
+- **It is not new.** `CRCBL_VK_SYNC_VALIDATION=1` has been set on these steps
+  all along; nothing could fail on what it reported until the fatal gate landed,
+  so the hazard has been in every CI log and in no CI result.
+- **Where to look**: whatever computes the acquire barrier for a persistent
+  image at the top of a frame in `crcbl-render`'s graph. A per-frame transient
+  starts with no prior state, but the shadow atlas is one image reused every
+  frame, so its opening barrier's `srcStageMask`/`srcAccessMask` have to carry
+  the _previous frame's_ last usage — `LATE_FRAGMENT_TESTS` plus
+  `DEPTH_STENCIL_ATTACHMENT_WRITE` here — rather than treating the image as
+  fresh.
+- **Not reproduced locally, and that is the first thing to fix about reproducing
+  it.** Options for a local repro, none tried: run the suite under the LunarG
+  SDK's layer build rather than the distro's, which is what
+  `cross-submission=yes` depends on; or force the two frames into one submission
+  so the hazard becomes intra-submission and visible here.
+- **`CRCBL_VK_VALIDATION_FATAL` is off on the
+  `Run the viewer's suite against lavapipe` step until this lands**, and on for
+  the other six — the exception is in `ci.yml` beside that step with the reason.
+  Turning it back on is how this entry gets deleted.
+
 ### What the validation gate still cannot see
 
 `crcbl-vk` announces its messenger; `tools/run-samples-windowed.sh`,
@@ -258,40 +305,6 @@ left:
   a demo down and booted another inside the same frame would be told the slot is
   taken. No page does — `web/engine/demo.js` boots once — and the alternative is
   discarding a teardown to make room for a boot. Documented on `retain` itself.
-
-### The probe gate does not pass on this machine, and CI's does
-
-`web/run-probe-e2e.sh` reports **83/87 locally**, with groups X, Y, Z and AA —
-the presented canvas frame, the reconfigured canvas frame, the padded-stride
-indirect draw and the depth plane — all failing the same way:
-
-```
-state FAILED, 0 bytes … — the device was lost: destroyed: Device was destroyed.
-```
-
-Measured 2026-08-23. What is known:
-
-- **It is not this session's WebGPU work.** Reproduced with
-  `crates/crcbl-webgpu/src/{hal/device.rs,hal/channel.rs,web.rs}` and
-  `web/engine/gpu-replay.js` restored to their content at commit `ba556c2`, with
-  a full `--build`, and the four groups failed identically.
-- **It is not the adapter.** `--adapter swiftshader` fails the same four, in the
-  same way, as `auto` does on the RX 7900 XTX.
-- **CI does not see it.** The Pages workflow runs this gate on three runners and
-  was green on the same tree.
-- The script's own header documents a _different_ hardware symptom for group X
-  alone — transparent black with "[Invalid Texture] is invalid due to a previous
-  error", 86/87 — so that row does not describe this, and the row's count is now
-  stale for this machine either way.
-- The page log ends with a 404 for a resource the run does not name. Whether
-  that is the cause or an unrelated fetch was not chased.
-
-**Nothing was changed for it.** It is a local-environment finding — most likely
-the browser this machine resolves versus the runners' — and the cost of leaving
-it is that the probe gate cannot be used as a local check: a real regression in
-those four groups would land in a run that is already red. Whoever picks it up
-starts by naming the local browser build and comparing it against the version
-the Pages job installs.
 
 ### What `crcbl settings` does not do (2026-08-23)
 
@@ -829,10 +842,10 @@ grep -rniE '(e?println)!\(.*(skip|cannot run|unreachable here)' --include='*.rs'
 ```
 
 **Re-run 2026-08-23, and that query's hits are gated now rather than counted.**
-Seven tests in `crcbl-vk`'s suite return early when the device reports no
-`TASK_SHADER` — the amplification stage is their whole subject — and nextest
+The mesh-path tests in `crcbl-vk`'s suite return early when the device reports
+no `TASK_SHADER` — the amplification stage is their whole subject — and nextest
 counts each early return as a pass, so an adapter that stopped reporting the
-feature would take the mesh path out of the run and leave `50 tests ran`
+feature would take the mesh path out of the run and leave the test total
 unchanged. `run-vk-e2e.sh` and `run-vk-e2e.ps1` count those lines: a banner on a
 developer's machine, `exit 1` under `CI`, which is the loader probe's own shape.
 Shown red by making one test return early unconditionally — the summary still
