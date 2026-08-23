@@ -464,6 +464,38 @@ So the choice is boilerplate against a dependency, with no safety difference —
 which is a smaller question than it looked, and is why it is stated plainly
 rather than argued.
 
+### DECISION NEEDED — how the glTF corpus becomes a gate
+
+The importer's 98.3% against `KhronosGroup/glTF-Sample-Assets` is a hand-run
+shell loop from 2026-08-19, recorded further down this file. Nothing stops it
+regressing: `crates/crcbl/tests/gltf_e2e.rs` is one synthetic textured quad, and
+`docs/plan/12-testing.md` asks for a "Khronos samples subset **vendored**" that
+does not exist — the repository holds zero `.gltf` or `.glb` files, on purpose.
+Turning the measurement into a gate is cheap in code and needs a call on where
+the models come from:
+
+- **(a) Vendor a pinned subset.** A dozen or two models committed in a corpus
+  directory beside `crcbl-scene`'s own tests, so the gate is hermetic, runs
+  offline, and a regression is bisectable against the exact bytes. The cost is
+  binary blobs in a tree that has none, which is the objection `gltf_fixture`'s
+  header states in as many words — and these are blobs nobody can shrink, since
+  the point is that they are real files.
+- **(b) Download at gate time**, pinned to a commit of `glTF-Sample-Assets` and
+  sparse-checked to a named list. Nothing is vendored and the corpus can grow by
+  editing a list, at the cost of a network fetch in CI — a new failure mode for
+  a job, and one that reads as a red gate rather than as an outage.
+- **(c) Leave it a local script** that takes a corpus directory a developer
+  already has. Honest about what it is, and it is the shape this file elsewhere
+  calls out as a trap: a runner no workflow invokes is a test that executes
+  nowhere, which is exactly how `run-gltf-e2e.sh` sat until 2026-08-20.
+
+**(b) is what the hand-run actually did**, so it is the smallest step from
+measurement to gate; **(a)** is the only one that is hermetic. Whichever lands
+forces the two content-policy questions recorded with the measurement below — a
+document whose required extension this importer lacks (18 of the 116 load
+anyway), and the non-ASCII asset key that refuses `Unicode❤♻Test` — because a
+gate has to assert an expected outcome for each.
+
 ### Which suite runs on which backend, measured
 
 Read out of `ci.yml` by mapping every `run: …run-*.sh` step to the `CRCBL_GPU`
