@@ -326,16 +326,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Every timed pass now folds _which_ bodies answered, not just how many — the
   case a total and a per-query shape cannot see. Measured cost of putting that
   in the timed loop: about two percent on the query phase, paid identically by
-  every run. The output also reports one iteration's refits, updates left for a
-  rebuild, and tree builds, so a run says whether its refit phase refit.
+  every run — a debug-build figure, and the one number in this entry that has
+  not been re-taken on a release build. The output also reports one iteration's
+  refits, updates left for a rebuild, and tree builds, so a run says whether its
+  refit phase refit.
 
   `--ticks` ages the tree before the query phase: N drift-and-refit steps, the
   last one timed, defaulting to 1 so an existing invocation reports what it
   always did. It answers a question nobody had measured — a BVH that only ever
-  refits never re-picks a leaf, so at 2000 bodies the reported depth, node count
-  and build count are identical at 1 tick and at 100000, while the cost of a
-  query result rises 15-fold. The refit phase itself stays flat, so a game would
-  see this in its broadphase queries and never in its physics tick.
+  refits never re-picks a leaf. Measured on a release build at `--bodies 2000`,
+  `--iterations 20`, two runs each: the tree is structurally identical at 1 tick
+  and at 100000 (3999 nodes, depth 12, one build, both runs), while the query
+  phase's p50 rises from 0.65 ms to 5.27 ms — a little over eight-fold — and it
+  does that while answering **less**, 3.977 neighbours per query against 5.962.
+  A crowd that has walked away from its tree costs more per answer and gives
+  fewer. The refit phase does not follow: its p50 falls from 0.125 ms to 0.099
+  ms over the same span. So a game would see this in its broadphase queries and
+  never in its physics tick.
 
 - **`crcbl bench --scenario jobs`** times `crcbl_jobs::Pool::par_for` over a
   fixed synthetic workload and reports it as a distribution: p50, p95, p99 and

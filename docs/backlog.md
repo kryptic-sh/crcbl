@@ -609,8 +609,21 @@ that it shares no structure with the thing it checks. If the quadratic cost ever
 actually blocks a sweep, the honest fix is to check a sampled subset of queries
 exactly rather than to check every query approximately.
 
-**Not verified for this scenario:** any non-Linux target, and every number in
-its commit message and changelog entry is from a debug build.
+**Not verified for this scenario:** any non-Linux target.
+
+**The changelog's `--ticks` numbers were re-taken on a release build,
+2026-08-24**, because a performance figure from a checked build is not a
+performance figure. They moved: the query phase's p50 rises a little over
+eight-fold from 1 tick to 100000 at `--bodies 2000`, where the debug run had
+said fifteen. The structural half was unaffected — 3999 nodes, depth 12, one
+build, at both tick counts — and the refit phase turned out not to be flat but
+to get _cheaper_, 0.125 ms to 0.099 ms. Two runs of twenty iterations each side,
+agreeing to within 0.07 on the ratio. One number in that entry is still a debug
+figure and says so: the ~2% cost of folding which bodies answered, which cannot
+be re-taken without removing the fold from the bench.
+
+The commit message's numbers were left alone — history is history, and a commit
+message cannot be corrected without rewriting it.
 
 ### What the corner post's slice did not cover
 
