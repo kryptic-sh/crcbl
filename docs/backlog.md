@@ -3812,6 +3812,30 @@ in `tests/hal_seam_e2e.rs`, on every backend and in both directions:
   itself: `acquire_next_frame` answers `None` for both kinds, so nothing
   observes it.
 
+**The two ways out were checked on 2026-08-23 and both are closed**, so this is
+not a slice waiting to be written:
+
+- **A cross-queue data observable.** Signal a binary semaphore from a transfer
+  or compute submission, wait on it from a graphics submission, and read back
+  what the first one wrote. The seam expresses it — `submit` takes a
+  `QueueHandle` and `SubmitInfo` carries waits and signals, and `crcbl-vk`
+  reports whatever queue families the device has. What it cannot do is **go
+  red**: without the wait the second submission races the first rather than
+  reliably reading stale data, so the guard would pass or fail by timing. That
+  is the same objection `hal_seam_e2e`'s `Unexercised` reason already makes, and
+  making it probabilistic by padding the first submission with slow work would
+  be a flaky test dressed as a guard. The instrument for this class is Vulkan's
+  **synchronisation validation**, which is a separate open item here — see the
+  entry on the two-submission hazard this machine's layer cannot see.
+- **A CPU signal, the way `TimelineWaitBeforeSignal` is exercised.** Closed by
+  the seam's own contract: `Device::signal_semaphore` documents
+  `HalError::Unsupported` for a binary semaphore, "which has no value to
+  signal". There is no host-side gate to open.
+
+So a binary semaphore's only real observable in this design is WSI acquire, and
+the agnostic suite is headless. **Closing this row means a windowed exercise or
+sync validation, not a cleverer headless test.**
+
 ### Four mesh tests stayed on Vulkan, and one degrades quietly
 
 The mesh cluster split; what stayed did so for a reason worth keeping written
