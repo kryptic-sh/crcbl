@@ -237,6 +237,18 @@ jobs:
       - run:
           cargo doc --workspace --all-features --no-deps --locked
           --document-private-items
+      # **The one target the two passes above cannot reach.**
+      # `crates/crcbl-cli`'s binary sets `doc = false`, because it and the
+      # `crcbl` umbrella library would both write `target/doc/crcbl/index.html`
+      # (rust-lang/cargo#6313) — so `--workspace` documents not one line of the
+      # CLI, and every doc comment in it has been unchecked since the flag went
+      # in. Naming the target explicitly documents it anyway, into that same
+      # colliding path, which costs nothing here: no step in this job publishes
+      # what it generated. The first run found an unclosed HTML tag in
+      # `lod_cmd.rs`.
+      - run:
+          cargo rustdoc --locked --all-features -p crcbl-cli --bin crcbl --
+          --document-private-items -D warnings
 
   machete:
     name: cargo-machete (unused deps)

@@ -117,7 +117,8 @@ fn open(file: &Path) -> Result<GltfScene, Failure> {
         .map_err(|error| Failure::new(format!("cannot import {}: {error}", file.display())))
 }
 
-/// `<index> `<name>`` for a node, or just the index when the file named none.
+/// ``<index> `<name>` `` for a node, or just the index when the file named
+/// none.
 fn node_label(scene: &GltfScene, node: usize) -> String {
     match scene
         .nodes()

@@ -256,11 +256,7 @@ actually blocks a sweep, the honest fix is to check a sampled subset of queries
 exactly rather than to check every query approximately.
 
 **Not verified for this scenario:** any non-Linux target, and every number in
-its commit message and changelog entry is from a debug build. `cargo doc` never
-reaches the module at all — the `crcbl` binary sets `doc = false` in
-`crates/crcbl-cli/Cargo.toml` because it would collide with the umbrella
-library's docs — so its intra-doc links are unchecked by construction, for the
-whole CLI and not just this file.
+its commit message and changelog entry is from a debug build.
 
 ### What the corner post's slice did not cover
 
