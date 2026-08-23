@@ -413,6 +413,27 @@ impl WebGpuDevice {
     }
 }
 
+impl Drop for WebGpuDevice {
+    /// Keeps the command stream alive until the shim has read it.
+    ///
+    /// **A run's last commands are its teardown, and this is the drop that
+    /// would lose them.** `GpuContext::destroy` destroys the swapchain, the
+    /// surface and everything the game built, all of it encoded into the
+    /// channel — and then drops the device, which on the web holds the last
+    /// `Rc` on that channel. The buffer went with it one call before the page's
+    /// next drain, so the replayer never heard that any of it went away and
+    /// went on holding every object the run had created: measured in a browser
+    /// as 60 objects still filed after breakout's own stop button, with the
+    /// replayed-command count unmoved across the shutdown.
+    ///
+    /// [`crate::web::retain`] parks a handle the shim's next
+    /// `stream_release` lets go of. Off the web it does nothing, there being no
+    /// shim to drain anything.
+    fn drop(&mut self) {
+        self.channel.retain_for_drain();
+    }
+}
+
 impl Device for WebGpuDevice {
     fn backend(&self) -> BackendKind {
         BackendKind::WebGpu

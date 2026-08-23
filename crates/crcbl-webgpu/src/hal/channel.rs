@@ -90,6 +90,28 @@ impl SharedChannel {
     /// keeps. Off the web there is no shim, so this touches the handle and
     /// answers `true`: nothing to install, and not a failure to report. The
     /// browser wiring proper is a later slice.
+    /// Park a strong handle on this channel so the shim can drain what is on
+    /// it after the last encoder is gone.
+    ///
+    /// [`crate::web::retain`] is the whole of it, and the reason lives there:
+    /// a run's teardown is encoded and *then* the device drops, which on the
+    /// web frees the buffer one call before the shim would have read it.
+    ///
+    /// Off the web there is no shim and no thread-local, so this touches the
+    /// handle and answers `true` — the same shape [`install`](Self::install)
+    /// has, and for the same reason.
+    pub fn retain_for_drain(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::web::retain()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = &self.0;
+            true
+        }
+    }
+
     pub fn install(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {

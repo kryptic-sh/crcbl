@@ -120,6 +120,7 @@
 //! | --- | --- | --- |
 //! | no channel installed (`stream_len` and `reply_capacity` are `0`) | nothing this frame; ask again next | nothing; the engine has not installed one yet |
 //! | the channel was dropped mid-run | as above — every export goes back to `0` | nothing; the exports hold a [`Weak`] and stop finding it |
+//! | the last encoder drops with a teardown on the stream | drains it on the next pump, then the handle goes | nothing; [`retain`] parked the channel and `stream_release` let it go |
 //! | decoding a frame throws | release anyway, then report | the next frame starts from a clean buffer instead of the shim re-throwing on the same bytes forever |
 //! | the shim stops releasing | — | `stream_len` climbs and never falls |
 //! | `reply_buffer` answers `0` | hold the replies; try again next frame | nothing yet; the replies are still in JS |
@@ -496,6 +497,54 @@ thread_local! {
     /// Thread-local because whichever thread the engine runs on is the one the
     /// shim calls, and a second one must not see the first's channel.
     static CHANNEL: RefCell<Weak<StreamChannel>> = const { RefCell::new(Weak::new()) };
+
+    /// A strong handle onto the installed channel, parked so the shim can still
+    /// drain a stream whose last encoder has gone. See [`retain`].
+    static RETAINED: RefCell<Option<Rc<StreamChannel>>> = const { RefCell::new(None) };
+}
+
+/// Keep the installed channel alive until the shim has taken what is on it.
+///
+/// **The last thing a run encodes is its teardown, and a `Weak` loses exactly
+/// that.** A shutdown destroys the swapchain, the surface and everything the
+/// game built, all of it encoded into this buffer — and then drops the device,
+/// which is the last handle. The bytes are freed with it, one call before the
+/// shim's next drain, so the replayer never hears that any of it went away and
+/// holds every object the run created for as long as the page lives.
+///
+/// So a dropping encoder parks a strong handle here, and
+/// [`__crcbl_web_gpu_stream_release`](shim::__crcbl_web_gpu_stream_release) —
+/// the shim saying it has the bytes — is what lets it go. Nothing else is kept
+/// alive: the channel is one buffer, and the objects it named are the
+/// replayer's.
+///
+/// Returns whether there was a channel to retain. Retaining twice is the same
+/// as retaining once.
+///
+/// # While one is parked, [`install`] refuses
+///
+/// A retained channel is a live channel, so a second app booting in the same
+/// page before the shim has drained is told the slot is taken. That window is
+/// one drain long — the shim pumps every frame — and the alternative is
+/// discarding a teardown to make room for a boot.
+pub fn retain() -> bool {
+    let channel = CHANNEL.with(|slot| slot.try_borrow().ok().and_then(|slot| slot.upgrade()));
+    let Some(channel) = channel else {
+        return false;
+    };
+    RETAINED.with(|slot| match slot.try_borrow_mut() {
+        Ok(mut slot) => {
+            *slot = Some(channel);
+            true
+        }
+        Err(_) => false,
+    })
+}
+
+/// Let go of a handle [`retain`] parked, if there is one.
+fn release_retained() {
+    let parked = RETAINED.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()));
+    drop(parked);
 }
 
 /// Make `channel` the one the `__crcbl_web_gpu_*` entry points reach.
@@ -640,10 +689,14 @@ pub mod shim {
     /// frame used.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_stream_release() -> u32 {
-        with_stream_mut(0, |stream| {
+        let cleared = with_stream_mut(0, |stream| {
             stream.clear();
             1
-        })
+        });
+        // The shim has the bytes, so a handle parked by `retain` — a teardown
+        // whose encoder is already gone — has nothing left to keep alive.
+        super::release_retained();
+        cleared
     }
 
     /// The most bytes of replies wasm will accept in one buffer.
@@ -703,5 +756,80 @@ pub mod shim {
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub extern "C" fn __crcbl_web_gpu_reply_commit(len: u32) -> u32 {
         with_replies_mut(0, |replies| u32::from(replies.commit(len as usize)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shim::{__crcbl_web_gpu_stream_len, __crcbl_web_gpu_stream_release};
+    use super::{StreamChannel, install, is_installed, retain, uninstall};
+    use crate::tag;
+
+    use std::rc::Rc;
+
+    /// **Dropping the last handle takes the stream with it**, which is the
+    /// mechanism the retain exists for rather than a bug of its own.
+    ///
+    /// Stated as its own test because the fix below is only meaningful against
+    /// it: with the app's `Rc` gone the `Weak` finds nothing, so bytes already
+    /// encoded — a teardown's, in the case that matters — are unreadable and
+    /// unrecoverable.
+    #[test]
+    fn a_stream_whose_last_handle_dropped_cannot_be_read() {
+        let channel = Rc::new(StreamChannel::new());
+        assert!(install(&channel));
+        assert_eq!(channel.encode(|stream| stream.draw(0..3, 0..1)), Some(0));
+        assert!(__crcbl_web_gpu_stream_len() as usize > tag::HEADER_BYTES);
+
+        drop(channel);
+        assert_eq!(
+            __crcbl_web_gpu_stream_len(),
+            0,
+            "no channel, and a length of zero is how the shim is told so"
+        );
+        uninstall();
+    }
+
+    /// **A retained stream outlives its last handle, and the shim's release is
+    /// what lets it go.**
+    ///
+    /// The teardown case end to end: the run encodes its destroys, the last
+    /// encoder drops, and the page's next pump still finds the bytes. Then the
+    /// release — the shim saying it has them — drops the parked handle, and the
+    /// channel is gone for good rather than kept for the life of the page.
+    #[test]
+    fn a_retained_stream_survives_its_last_handle_until_the_shim_takes_it() {
+        let channel = Rc::new(StreamChannel::new());
+        assert!(install(&channel));
+        assert_eq!(channel.encode(|stream| stream.draw(0..3, 0..1)), Some(0));
+        let encoded = __crcbl_web_gpu_stream_len() as usize;
+        assert!(encoded > tag::HEADER_BYTES);
+
+        assert!(retain(), "there is a channel to retain");
+        drop(channel);
+        assert_eq!(
+            __crcbl_web_gpu_stream_len() as usize,
+            encoded,
+            "the same bytes, after the handle that encoded them is gone"
+        );
+        assert!(is_installed(), "a retained channel is a live channel");
+
+        assert_eq!(__crcbl_web_gpu_stream_release(), 1);
+        assert_eq!(
+            __crcbl_web_gpu_stream_len(),
+            0,
+            "the release was the last handle, so the channel goes with it"
+        );
+        assert!(!is_installed());
+        uninstall();
+    }
+
+    /// **Retaining with nothing installed reports it**, rather than parking a
+    /// handle onto nothing and answering as if it had.
+    #[test]
+    fn retaining_without_a_channel_says_so() {
+        uninstall();
+        assert!(!retain());
+        assert!(!is_installed());
     }
 }
