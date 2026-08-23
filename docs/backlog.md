@@ -3,23 +3,6 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### P7B's exit criterion is met and the ROADMAP row is still unticked
-
-`apps/lantern`'s room now has a corner post standing in `room::spot`'s cone
-(`room::POST_MIN`/`POST_MAX`), so all three of its lights cast a shadow a camera
-can see, and `apps/lantern/tests/golden.rs` measures the third one two ways: a
-ratio inside one frame (`SPOT_SHADOW_RATIO`, run at both extents and on both
-capability arms) and a shadows-on/shadows-off lift (`SPOT_SHADOW_LIFT`). Both
-were red-checked by leaving the post resident and unplaced, on radv and on
-lavapipe, and both went red.
-
-**What is left is one line in `docs/plan/ROADMAP.md`.** That file was outside
-the write set of the change that added the post, so the P7B row still reads
-"what is left is not the engine but the room" — which is no longer true. Whoever
-ticks it should read the row's exit criterion against
-`room::the_downlight_casts_a_shadow_of_the_corner_post` and the two golden
-claims rather than taking this entry's word for it.
-
 ### What the corner post's slice did not cover
 
 - **Only radv and lavapipe drew it.** `apps/lantern/tests/golden/room.png` and
@@ -6614,11 +6597,6 @@ thing to give — horde works around it by handing `Pool::with_workers` an
   build threaded wasm and correctly does not ask for the component. A CI job
   that did would owe `components: rust-src` on its `setup-rust-toolchain`.
 
-- **Nothing runs a threaded _demo_ artifact in a Worker.** The gate runs the
-  `crcbl-jobs` example, which links the same backend but none of the engine.
-  `check-exports.mjs --threads` still only instantiates a demo once, on the main
-  thread. A demo in a worker needs the page shim above first.
-
 ## The private-item doc gate only ever runs on Linux
 
 `ci.yml`'s `rustdoc` job is `runs-on: ubuntu-latest`, so
@@ -11560,41 +11538,75 @@ construction. Evidence: in run 31454155654, message 597 — the gate's own
 deliberate violation — appears exactly once, inside the expected panic of the
 test that raises it, and that test passed.
 
-## The base-colour page is still `ArrayPages`; the backend blocker under it is gone
+## DECISION NEEDED — bindless is a Vulkan-only path now, so what does P7 owe?
 
 `docs/plan/03-gpu-driven-rendering.md` §3.2's texture half is implemented as one
 `Texture2DArray` page — `crcbl_render::forward`'s `base_color_page`, bound at
 `mesh.slang` binding 7, with `GpuMaterial::base_color_texture` selecting a
 layer. `BindingModel::Bindless` — one runtime-sized array _of descriptors_,
-indexed per fragment — is still not implemented, but the reason has changed and
-the old reason is worth not re-deriving.
+indexed per fragment — is not implemented, and `docs/plan/ROADMAP.md`'s P7 row
+still owes a bindless page.
 
-**What was blocking it is fixed.** `crcbl-wgpu` could not fill an array binding
-at all: `create_bind_group` keyed every entry on `binding` alone and
-`BindGroupEntry::array_index` appeared nowhere in the crate, so a bindless slice
-would have selected the bindless path on wgpu (it reports `DESCRIPTOR_INDEXING`)
-and then failed to build the group. `crcbl-wgpu`'s binding module (deleted
-2026-08-21) now does the bucketing, and
-`a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot` reads
-both elements out of a two-texture array on lavapipe. Every backend honours
-`array_index`.
+**The reason it is owed has changed, and the change is what needs a decision.**
+When the row was written the blocker was a backend defect in `crcbl-wgpu`, which
+could not fill an array binding at all; that crate was deleted 2026-08-21 and
+the defect with it. What replaced it is not a defect and cannot be fixed:
+`crcbl-webgpu`'s `Capability::BindlessDescriptorArray` answers
+`Support::No("WebGPU has no binding arrays at all")`
+(`crates/crcbl-webgpu/src/hal/device.rs`), because a `GPUBindGroupLayoutEntry`
+carries a binding, a visibility and one resource layout, and no count.
+`crcbl_hal::DIVERGENCES` carries it as `DivergenceKind::ApiAbsence`, which
+`is_blocker()` answers `false` for — so it is not a parity blocker and never
+becomes one; it is a permanent absence. `crcbl-vk` reports it gated on
+`Features::DESCRIPTOR_INDEXING`.
 
-**What is left is above the seam, and it is a real slice.** Nothing selects
-`BindingModel::Bindless` — `crcbl_render::forward` builds one page
-unconditionally. Going bindless means a descriptor array whose length is a
-runtime bound, a per-material index into it that is a descriptor slot rather
-than a layer, `BindingFlags::VARIABLE_COUNT` and `BindGroupDesc::variable_count`
-actually being used (WebGPU bind groups are immutable, so there is no
-update-after-bind path and the seam's streaming bindless write is create-only in
-the browser — a page of descriptors that grows as content loads has to be
-rebuilt rather than written into), and a `mesh.slang` that declares the array.
-The two paths then have to render the same frame, which is the observable.
+So under the Vulkan-and-WebGPU-only rule, a bindless slice builds a path that
+one of the two active backends can never take, and the other backend's frame
+would be produced by different code — which is the arrangement the parity
+mechanism exists to avoid.
 
-**What bindless buys**, so the case stays on the record: a page is one image, so
-its layers share an extent, a format and a mip count. A descriptor array lifts
-all three, which is what real imported content needs. Until then the engine has
-one page of one size, which is enough for the observable and not enough for a
-game.
+**What bindless actually buys**, because that is what any replacement has to
+deliver: a page is one image, so its layers share an extent, a format and a mip
+count. Real imported content does not. Every option below is judged on whether
+it lifts those three.
+
+**Option A — implement `BindingModel::Bindless` as a second, Vulkan-only path.**
+Selected by `caps.binding_model()`, so a WebGPU run keeps `ArrayPages`. Cost: a
+descriptor array with a runtime bound, `BindingFlags::VARIABLE_COUNT` and
+`BindGroupDesc::variable_count` used for the first time, a per-material index
+that is a descriptor slot rather than a layer, a second `mesh.slang` arm, and
+two paths that must render the same frame — a new cross-path observable on top
+of the cross-backend one. Lifts all three constraints, on Vulkan only. Against:
+it is the only place in the renderer where the two active backends would run
+structurally different shading code, and the browser — the platform whose
+content is most likely to be imported — is the one that does not get it.
+
+**Option B — leave `ArrayPages` and re-scope P7's row.** Strike the bindless
+page from P7's owed list, keep the capability declared and exercised by
+`hal_seam_e2e`'s `exercise_bindless_descriptor_array` (which is a seam test, not
+a renderer path), and say in the row that the renderer is `ArrayPages` on both
+active backends by choice. Cost: nothing built; the three constraints stay, so
+imported content still has to be conformed to one page. Honest, and it leaves
+the engine unable to draw a scene whose textures differ in size.
+
+**Option C — several `ArrayPages`, bucketed by extent/format/mip class.** One
+`Texture2DArray` binding per bucket in `mesh.slang`, and
+`GpuMaterial::base_color_texture` splits into a bucket and a layer. Lifts the
+same three constraints for any content that falls into one of the buckets, needs
+no descriptor arrays, and runs identically on both active backends — so the
+frame stays one code path and the existing cross-backend goldens keep their
+meaning. Against: the bucket count is fixed when the shader is compiled, not at
+runtime, so this is "N size classes", not "any texture"; content outside every
+bucket still has to be rescaled or re-encoded. The ceiling is the
+sampled-texture limit — WebGPU's default `maxSampledTexturesPerShaderStage` is
+16 and `mesh.slang` already declares three (base colour, shadow atlas, ambient
+occlusion), which has not been checked against a real adapter's reported limit.
+
+**Not yet measured, and it would decide between B and C:** what the samples and
+`crates/crcbl/tests/render_e2e.rs` fixtures actually feed the page today, and
+how many distinct extent/format/mip classes an imported glTF scene produces.
+Nobody has counted. C is only worth its bindings if that number is small and
+stable.
 
 ## What the shadow LOD bias left, and two stale docs
 
