@@ -315,6 +315,37 @@ if [ -n "$LEAKS" ]; then
 fi
 echo "crcbl vk e2e: every device was destroyed with nothing left alive"
 
+# **A test that returned early is not a test that passed.** Seven tests in this
+# suite open a device asking for `TASK_SHADER` and return early when it is
+# absent, printing why — the amplification stage is what they exercise and there
+# is nothing to exercise without it. Each of those early returns is counted by
+# nextest as a pass, so an adapter that stopped reporting the feature would take
+# the whole mesh path out of this run and leave the summary unchanged.
+#
+# radv and lavapipe both report it, which are the two implementations this suite
+# runs against, so a line here is a finding rather than a fact of life. It is a
+# banner on a developer's machine — somebody on other hardware is not wrong to
+# run this — and a failure under `CI`, exactly as the loader probe below is, for
+# `docs/plan/12-testing.md`'s reason: a silently-skipped e2e job is worse than no
+# job.
+SKIPS="$(grep -c 'no TASK_SHADER on this device' "${OUTPUT}.plain" || true)"
+if [ "$SKIPS" -gt 0 ]; then
+    echo "crcbl vk e2e: ############################################################" >&2
+    echo "crcbl vk e2e: # $SKIPS MESH-PATH TEST(S) RETURNED EARLY AND COUNTED AS PASSES.  #" >&2
+    echo "crcbl vk e2e: ############################################################" >&2
+    echo "crcbl vk e2e: This device reports no TASK_SHADER, so every test whose" >&2
+    echo "              subject is the amplification stage exercised nothing. The" >&2
+    echo "              count above is how many, and the suite's own lines say" >&2
+    echo "              which." >&2
+    if [ -n "${CI:-}" ]; then
+        echo "crcbl vk e2e: ...and this is CI, where both implementations this job" >&2
+        echo "              runs against report the feature." >&2
+        exit 1
+    fi
+else
+    echo "crcbl vk e2e: every mesh-path test had an amplification stage to run on"
+fi
+
 # How far this machine's validation layer can see. The suite measures it; this
 # is what turns the measurement into something a reader cannot miss.
 REACH="$(grep -Eo 'sync-validation reach: .*' "${OUTPUT}.plain" | tail -1 || true)"

@@ -315,6 +315,28 @@ try {
     }
     Write-Host 'crcbl vk e2e: every device was destroyed with nothing left alive'
 
+    # **A test that returned early is not a test that passed.** Seven tests in
+    # this suite return early when the device reports no `TASK_SHADER`, and
+    # nextest counts each early return as a pass — so an adapter that stopped
+    # reporting the feature would take the whole mesh path out of the run and
+    # leave the summary unchanged. lavapipe, which is what this leg runs
+    # against, reports it. Same check as `run-vk-e2e.sh`'s, and the two have to
+    # move together: a banner locally, a failure under `CI`.
+    $skips = [regex]::Matches($plain, 'no TASK_SHADER on this device')
+    if ($skips.Count -gt 0) {
+        Write-Host 'crcbl vk e2e: ############################################################'
+        Write-Host "crcbl vk e2e: # $($skips.Count) MESH-PATH TEST(S) RETURNED EARLY AND COUNTED AS PASSES."
+        Write-Host 'crcbl vk e2e: ############################################################'
+        if ($env:CI) {
+            Write-Error ('crcbl vk e2e: this device reports no TASK_SHADER, so every test whose ' +
+                'subject is the amplification stage exercised nothing — and this is CI, where ' +
+                'the implementation this job runs against reports the feature.')
+            exit 1
+        }
+    } else {
+        Write-Host 'crcbl vk e2e: every mesh-path test had an amplification stage to run on'
+    }
+
     # How far this machine's validation layer can see. A hazard inside one
     # command buffer is caught while it is recorded; a hazard spanning two
     # *submissions* can only be caught at submit, and layer builds differ in
