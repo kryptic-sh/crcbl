@@ -16307,12 +16307,17 @@ neither should be fixed on one backend alone.
   windowed loop in `crcbl-dx12/src/swapchain.rs` acquires and then calls
   `draw_and_present`, which acquires again before presenting. Decide what the
   seam means before adding it to `hal_seam_e2e.rs`.
-- **`reconfigure_swapchain` does not clear the outstanding acquire** on dx12, vk
-  or mtl, so `acquire` → `reconfigure` → `present` is accepted even though the
-  reconfigure already destroyed that image and its view. Exotic — the engine
-  only reconfigures from the `OutOfDate` arms, never between an acquire and its
-  present — but it is a real hole, identical on three backends, and cheap to
-  close once someone decides the first question.
+- **`acquire` → `reconfigure` → `present` used to be accepted**, even though the
+  reconfigure had already destroyed that image and its view. **Re-verified
+  2026-08-24, and the entry was wrong about `crcbl-vk`**: its
+  `reconfigure_swapchain` replaces the whole `SwapchainEntry` with one from
+  `SwapchainEntry::fresh`, whose `acquired` starts `None`, and its `present`
+  already refused a `None` — so Vulkan has never had this hole. `crcbl-webgpu`
+  cleared the pair on reconfigure but its `present` checked nothing; that half
+  is now closed. What is left is `crcbl-mtl` and `crcbl-dx12`, both of which
+  refuse a present with no outstanding acquire, so the question there is only
+  whether their reconfigure clears the slot — **not verified**, since neither
+  runs on this machine, and both are deferred.
 
 The suite that would hold every native backend to an answer already exists
 (`crates/crcbl/tests/hal_seam_e2e.rs`, run by CI on WARP, lavapipe and Metal),
@@ -16334,13 +16339,26 @@ single `entry.acquired` slot — which overwrites, in `acquire_next_frame` in
 the caller being at fault. Verified in the tree; the per-API statements are from
 the specifications and were not re-read for this note.
 
-**The second question needs no decision at all** — it is a use-after-free, not a
-policy choice. `reconfigure_swapchain` destroys the ring's images and views, so
-presenting a frame acquired before it presents a destroyed image, and every API
-underneath says so in its own words. It is parked rather than open: closing it
-means each backend clearing its outstanding acquire on reconfigure, and two of
-the backends that hold the hole are `crcbl-mtl` and `crcbl-dx12`, which are
-deferred. Doing it on `crcbl-vk` and `crcbl-webgpu` alone would put the agnostic
-suite red on the other two, which is exactly what the deferral says not to
-cause. Pick it up with the deferral, and do the null device at the same time so
-the refusal has a test that needs no ICD.
+**The second question needed no decision at all** — it is a use-after-free, not
+a policy choice. `reconfigure_swapchain` destroys the ring's images and views,
+so presenting a frame acquired before it presents a destroyed image, and every
+API underneath says so in its own words. It is now closed on both live backends,
+and the reasoning that parked it was wrong in a way worth keeping: it assumed
+closing the hole _required_ an agnostic test, which would indeed have reddened
+the two deferred backends. It did not — `crcbl-vk` never had the hole, and
+`crcbl-webgpu`'s half was closed with a backend-local test
+(`a_present_with_no_acquired_frame_is_refused` in its `hal::tests`), touching
+neither deferred backend. **"Fixing it needs an agnostic test" is the assumption
+to check before parking anything else on the deferral.**
+
+What remains here is genuinely blocked:
+
+- **The null backend tracks no outstanding acquire at all**, so it cannot refuse
+  a present without one — the one backend whose whole purpose is to model the
+  seam's rules with no driver in the room. Adding that state is its own slice
+  and would let the refusal be tested with no ICD.
+- **An agnostic test still cannot be written**, but for a narrower reason than
+  before: `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all refuse, so one would pass
+  on the three backends the suite runs — it is the null backend that would fail
+  it, and `crcbl-webgpu` that the suite cannot reach. Do the null slice first
+  and the agnostic test comes free.

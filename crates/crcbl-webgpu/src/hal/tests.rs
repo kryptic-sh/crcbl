@@ -1094,6 +1094,83 @@ fn a_buffer_binding_is_held_to_its_slots_ceiling_and_memory() {
     assert_eq!(names(&channel).len(), encoded + 3);
 }
 
+/// A present with no frame to present, which three backends refuse and this one
+/// answered `Ok` to.
+///
+/// The second arm is the one that matters: `reconfigure_swapchain` clears the
+/// acquired pair *and destroys the image behind it*, so a present after one is
+/// a use-after-free that reached the replayer as an ordinary command. The seam
+/// entry that recorded this hole believed `crcbl-vk` had it too; it does not —
+/// its reconfigure replaces the whole swapchain entry, whose `acquired` starts
+/// `None`, and its present already refused.
+#[test]
+fn a_present_with_no_acquired_frame_is_refused() {
+    let (channel, device) = device_on_fresh_channel();
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    let handles = HandlePool::new();
+    let queue: crcbl_hal::QueueHandle = handles.alloc();
+    let desc = |extent| SwapchainDesc {
+        label: Some("swapchain"),
+        surface: handles.alloc(),
+        format: Format::Rgba8UnormSrgb,
+        extent,
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device
+        .create_swapchain(&desc((64, 48)))
+        .expect("a swapchain");
+    let present_now = || {
+        device.present(
+            queue,
+            &crcbl_hal::PresentInfo {
+                swapchain,
+                waits: &[],
+                present_id: None,
+            },
+        )
+    };
+
+    // Nothing acquired yet.
+    let error = present_now().expect_err("there is no frame to present");
+    assert!(
+        format!("{error}").contains("without a matching acquire_next_frame"),
+        "the wording every other backend answers: {error}"
+    );
+    let before = names(&channel);
+    assert!(
+        !before.contains(&"Present"),
+        "a refused present must not reach the wire: {before:?}"
+    );
+
+    // Acquired: the present goes through.
+    device
+        .acquire_next_frame(swapchain)
+        .expect("an acquire on a live swapchain");
+    present_now().expect("an acquired frame is one to present");
+    assert!(names(&channel).contains(&"Present"));
+
+    // …and a reconfigure clears it again, which is the use-after-free arm: the
+    // image that pair named has been destroyed by the reconfigure.
+    device
+        .reconfigure_swapchain(swapchain, &desc((32, 24)))
+        .expect("a reconfigure");
+    let error = present_now().expect_err("the reconfigure destroyed the frame that was acquired");
+    assert!(
+        format!("{error}").contains("without a matching acquire_next_frame"),
+        "{error}"
+    );
+}
+
 // ── (d) a recorded frame's command stream ──────────────────────────────────
 
 #[test]

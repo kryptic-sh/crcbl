@@ -1673,6 +1673,34 @@ impl Device for WebGpuDevice {
     }
 
     fn present(&self, _queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
+        // **A present needs a frame to present.** `crcbl-vk`, `crcbl-mtl` and
+        // `crcbl-dx12` all answer "present without a matching acquire_next_frame"
+        // and this backend answered `Ok`, so the same caller bug was a refusal
+        // on three backends and an encoded command here — where the replayer
+        // then presents a canvas whose texture this swapchain never handed out.
+        //
+        // **What this catches, and what it cannot.** The pair is retired at the
+        // *next* acquire rather than at the present — see `acquire_next_frame`,
+        // which is what keeps the replayer holding one pair per swapchain
+        // instead of one per frame ever drawn — so `Some` here means "an
+        // acquire has happened since this swapchain was configured", not "a
+        // frame is outstanding". That catches a present before any acquire, and
+        // a present after a `reconfigure_swapchain` cleared the pair and
+        // destroyed the image behind it, which is the use-after-free of the
+        // two. It does **not** catch presenting the same frame twice; on the
+        // other three backends it does, because they take the slot at present.
+        // `docs/backlog.md` carries the difference.
+        let acquired = self
+            .swapchains
+            .lock()
+            .expect("the swapchain map was poisoned")
+            .get(&present.swapchain.to_bits())
+            .is_some_and(|state| state.acquired.is_some());
+        if !acquired {
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                "present without a matching acquire_next_frame".to_string(),
+            )));
+        }
         self.channel
             .with(|channel| channel.encode(|stream| stream.present(present)));
         Ok(())

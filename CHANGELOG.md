@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-webgpu` refuses a present with no frame to present.** `crcbl-vk`,
+  `crcbl-mtl` and `crcbl-dx12` all answer "present without a matching
+  acquire_next_frame"; this backend answered `Ok` and encoded the command, so
+  the replayer went on to present a canvas whose texture the swapchain had never
+  handed out. The arm that matters is a present after `reconfigure_swapchain`,
+  which clears the acquired pair _and destroys the image behind it_ — a
+  use-after-free that used to reach the browser as an ordinary command. Note the
+  refusal is narrower here than on the other three: this backend retires the
+  acquired pair at the next acquire rather than at the present, so it catches a
+  present before any acquire and a present after a reconfigure, but not the same
+  frame presented twice.
+
 - **`crcbl-vk` refuses an image with zero mip levels**, which it silently
   accepted and then clamped to one on the way to `vkCreateImage`. The seam and
   the null backend have always called a zero a caller bug; this backend kept its
