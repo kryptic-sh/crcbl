@@ -239,12 +239,12 @@ the wrong row.
 
 ## Delivery
 
-| Slice                                                                            | Phase                                                                                                                       |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                     |
-| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | **Started** — the subcommand and the `jobs` scenario (`crcbl-cli/src/bench.rs`); the sample-owned scenarios are not written |
-| Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                                                                                          |
-| Baseline storage + `--compare` + thresholds                                      | P8                                                                                                                          |
-| Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)                                                                          |
-| The rest of the debug panel's perf rows; freeze toggle                           | P10 (with the UI slice that owns the panel)                                                                                 |
-| Tracy or another external profiler, if wanted                                    | later, on demonstrated need and a dependency decision                                                                       |
+| Slice                                                                            | Phase                                                                                                                                                         |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                                                       |
+| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | **Started** — the subcommand and the `jobs` and `phys` scenarios (`crcbl-cli/src/bench.rs`); the sample-owned scenarios, which need a device, are not written |
+| Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                                                                                                                            |
+| Baseline storage + `--compare` + thresholds                                      | P8                                                                                                                                                            |
+| Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)                                                                                                            |
+| The rest of the debug panel's perf rows; freeze toggle                           | P10 (with the UI slice that owns the panel)                                                                                                                   |
+| Tracy or another external profiler, if wanted                                    | later, on demonstrated need and a dependency decision                                                                                                         |
