@@ -16,6 +16,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Pool::stats` reports what the job pool actually did**, so a phase that
+  adopts `crcbl-jobs` can show the adoption helped rather than assert it.
+  `PoolStats` carries the chunks the driver ran against the chunks the workers
+  ran (which sum, between submissions, to every chunk a completed `par_for`
+  split into), successful steals, searches that found the deque empty, searches
+  that lost the exchange for an item that was really there, worker parks, the
+  largest burst any one submission queued, and the number of submissions.
+  `Pool::reset_stats` zeroes them so a reading covers one phase.
+
+  Every counter is a `Relaxed` atomic nothing inside the pool reads back, so
+  none of them joins the happens-before `par_for` rests on, and they are counted
+  per chunk — a `par_for` over ten thousand items costs the driver two atomic
+  writes for the whole call. A reading taken mid-call is torn across its fields
+  by construction, which `PoolStats` documents rather than preventing with a
+  lock: instrumentation that changes the schedule ends up measuring itself.
+
+  Steal retries are counted apart from steal failures on purpose. Folding them
+  together would report a deque busy enough that thieves collide over it as an
+  idle one — the opposite reading.
+
 - **The Web Worker spawn backend now runs in a real browser, and
   `web/run-jobs-e2e.sh` is the gate that says so.** `crcbl_jobs::workers` has
   had the queue-and-drain ABI and a `node:worker_threads` gate over it since it

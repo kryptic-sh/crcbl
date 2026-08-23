@@ -52,6 +52,21 @@
 //! tells them apart is a chunk that refuses to finish until a *second* thread
 //! arrives, which is what `the_work_reaches_more_than_the_calling_thread` does.
 //!
+//! # The counters are observation and nothing else
+//!
+//! [`Pool::stats`] reports what the pool did — which chunks ran where, how
+//! often a worker found the deque empty, how often one slept. Every counter is
+//! a `Relaxed` atomic that nothing inside the pool ever reads back, so none of
+//! them joins the happens-before the code above rests on: delete every
+//! increment and a `par_for` splits the same way, computes the same answer and
+//! raises the same panic. That is what makes them safe to leave in a shipping
+//! build rather than behind a feature.
+//!
+//! They are counted per *chunk*, and where the driver is doing the counting per
+//! *call* — a `par_for` over ten thousand items adds to the driver's counter
+//! once rather than once an item — because a counter in the frame path that
+//! costs what it measures is worse than no counter at all.
+//!
 //! # Shutdown
 //!
 //! Dropping the pool sets the shutdown flag and broadcasts, so a worker parked
@@ -65,7 +80,7 @@
 
 use core::fmt;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -124,6 +139,137 @@ struct Shared {
     /// the "no mutexes in the frame path" rule read for what it is aimed at.
     sleep: Mutex<Sleep>,
     wake: Condvar,
+    /// Observation, and nothing the pool itself reads — see the
+    /// [module docs](self) and [`Counters`].
+    stats: Counters,
+}
+
+/// The pool's counters, in the form they are kept in.
+///
+/// `Relaxed` throughout, and loaded back only by [`Pool::stats`]: no other read
+/// in this file touches one, so they carry no ordering for anything else to
+/// depend on. [`PoolStats`] is the shape they are handed out in.
+#[derive(Default)]
+struct Counters {
+    chunks_run_by_driver: AtomicU64,
+    chunks_run_by_workers: AtomicU64,
+    steals: AtomicU64,
+    steal_failures: AtomicU64,
+    steal_retries: AtomicU64,
+    parks: AtomicU64,
+    longest_queue: AtomicU64,
+    submissions: AtomicU64,
+}
+
+/// A reading of a [`Pool`]'s counters, from [`Pool::stats`].
+///
+/// Every field counts up from the moment the pool was built, or from the last
+/// [`Pool::reset_stats`] — except [`longest_queue`](Self::longest_queue), which
+/// is a high-water mark rather than a total.
+///
+/// **A reading taken while a `par_for` is in flight is torn across its
+/// fields.** The counters are separate relaxed atomics, loaded one after
+/// another with nothing holding them still, so the fields of one `PoolStats`
+/// need not describe any single instant. That is deliberate and not a gap: a
+/// lock would put the observer inside the thing it is observing, and
+/// instrumentation that changes the schedule ends up measuring itself. **Read
+/// it between submissions**, where the chunk counters are settled — the
+/// idleness ones never are, because workers go on searching and parking after
+/// a call has returned, whether or not anybody asks them to.
+///
+/// Between submissions, [`chunks_run_by_driver`](Self::chunks_run_by_driver)
+/// plus [`chunks_run_by_workers`](Self::chunks_run_by_workers) is exactly the
+/// number of chunks every completed `par_for` split into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PoolStats {
+    /// Chunks the calling thread ran itself: the whole of every inline call,
+    /// plus the ones it took back off its own end of the deque while the
+    /// workers were busy, plus the ones a full deque refused.
+    pub chunks_run_by_driver: u64,
+    /// Chunks a worker thread ran.
+    ///
+    /// Counted before the chunk runs rather than after, which is what puts it
+    /// inside the release the worker does on the outstanding-chunk count: a
+    /// driver that has seen its `par_for` finish has seen these too, so the sum
+    /// rule above holds the moment the call returns.
+    pub chunks_run_by_workers: u64,
+    /// Chunks a worker took off the shared deque.
+    ///
+    /// A stolen chunk is run by the thief that won it and by nothing else, so
+    /// this and [`chunks_run_by_workers`](Self::chunks_run_by_workers) agree
+    /// today. They are still two quantities counted at two sites — a steal is
+    /// an event on the deque, running a chunk is an event on a worker — and a
+    /// pool that ever put a stolen chunk anywhere but straight into the thief's
+    /// hands would part them.
+    pub steals: u64,
+    /// Searches by a worker that found the deque genuinely empty.
+    ///
+    /// The reading that precedes a park, and the one that says a pool is
+    /// oversized for what it is being fed. Losing a race for an item is *not*
+    /// counted here — see [`steal_retries`](Self::steal_retries).
+    pub steal_failures: u64,
+    /// Times a worker read an item and then lost the exchange for it.
+    ///
+    /// Split from [`steal_failures`](Self::steal_failures) because folding the
+    /// two together would report a deque busy enough that thieves collide over
+    /// it as an idle one — the opposite reading. A lost exchange means somebody
+    /// else took an item that was really there, so the search goes round again
+    /// rather than ending; this counts contention on the stealing end, not
+    /// idleness.
+    pub steal_retries: u64,
+    /// Times a worker blocked on the pool's condvar.
+    ///
+    /// One per wait, so a worker that woke, saw no new submission and went
+    /// straight back down counts twice, and one that found work without ever
+    /// sleeping does not count at all.
+    pub parks: u64,
+    /// The most chunks any one submission pushed onto the deque.
+    ///
+    /// **Not an instantaneous queue depth**, which nothing here samples: the
+    /// workers steal while the driver is still pushing, so the deque may never
+    /// have held anything like this many at once — and for the same reason a
+    /// submission can push *more* chunks than the deque has slots, when thieves
+    /// free them faster than the driver fills them. What it measures is the
+    /// largest burst a single `par_for` handed to the workers, which is an
+    /// upper bound on the depth that call reached and the cheapest honest one:
+    /// a true peak occupancy needs somebody watching the deque rather than
+    /// somebody counting pushes.
+    pub longest_queue: u64,
+    /// `par_for` calls that queued chunks for the workers.
+    ///
+    /// A call that ran inline — a pool with no workers, or a split that came
+    /// out as a single chunk — queues nothing and is not counted, so this is
+    /// how often the pool was actually asked to be a pool.
+    pub submissions: u64,
+}
+
+impl Counters {
+    /// Loads every counter, in the order they are declared. Torn by
+    /// construction; see [`PoolStats`].
+    fn snapshot(&self) -> PoolStats {
+        PoolStats {
+            chunks_run_by_driver: self.chunks_run_by_driver.load(Ordering::Relaxed),
+            chunks_run_by_workers: self.chunks_run_by_workers.load(Ordering::Relaxed),
+            steals: self.steals.load(Ordering::Relaxed),
+            steal_failures: self.steal_failures.load(Ordering::Relaxed),
+            steal_retries: self.steal_retries.load(Ordering::Relaxed),
+            parks: self.parks.load(Ordering::Relaxed),
+            longest_queue: self.longest_queue.load(Ordering::Relaxed),
+            submissions: self.submissions.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Zeroes every counter, one at a time and for the same reason.
+    fn reset(&self) {
+        self.chunks_run_by_driver.store(0, Ordering::Relaxed);
+        self.chunks_run_by_workers.store(0, Ordering::Relaxed);
+        self.steals.store(0, Ordering::Relaxed);
+        self.steal_failures.store(0, Ordering::Relaxed);
+        self.steal_retries.store(0, Ordering::Relaxed);
+        self.parks.store(0, Ordering::Relaxed);
+        self.longest_queue.store(0, Ordering::Relaxed);
+        self.submissions.store(0, Ordering::Relaxed);
+    }
 }
 
 /// The state a parked worker wakes on.
@@ -256,6 +402,7 @@ impl Pool {
                     shutdown: false,
                 }),
                 wake: Condvar::new(),
+                stats: Counters::default(),
             }),
             queue,
             chunks: Vec::new(),
@@ -281,6 +428,31 @@ impl Pool {
     #[must_use]
     pub fn workers(&self) -> usize {
         self.workers
+    }
+
+    /// What the pool has done since it was built, or since the last
+    /// [`reset_stats`](Self::reset_stats).
+    ///
+    /// This is how a phase that adopts the pool shows the adoption helped:
+    /// chunks that reached a worker rather than the driver, searches that came
+    /// back empty, workers that went to sleep. Cheap enough to read every
+    /// frame — one relaxed load per field, and nothing a `par_for` waits on —
+    /// and worth reading **between** submissions, for the reason
+    /// [`PoolStats`] gives.
+    #[must_use]
+    pub fn stats(&self) -> PoolStats {
+        self.shared.stats.snapshot()
+    }
+
+    /// Zeroes every counter, so the next reading covers one phase rather than
+    /// the whole run.
+    ///
+    /// Between submissions, again — and here there is a second reason as well
+    /// as [`PoolStats`]'s: a reset that lands mid-call clears the chunks that
+    /// have already run while the ones still running go on to be counted, so
+    /// the driver-plus-workers sum is short for that call and only that call.
+    pub fn reset_stats(&self) {
+        self.shared.stats.reset();
     }
 
     /// Runs `f` over `items` in chunks of `chunk`, in parallel where there are
@@ -342,6 +514,13 @@ impl Pool {
                 // only thing running them — nothing was queued.
                 unsafe { run_one(&job, index) };
             }
+            // Once for the whole loop rather than once per turn round it:
+            // nothing else can be adding to this counter, because nothing else
+            // is running any of these chunks.
+            self.shared
+                .stats
+                .chunks_run_by_driver
+                .fetch_add(chunks as u64, Ordering::Relaxed);
         } else {
             self.run_in_parallel(&job, chunks);
         }
@@ -372,8 +551,14 @@ impl Pool {
             });
         }
 
+        // Kept on the stack and folded into the counters once each: the driver
+        // is the only thread that can touch either number, so what a call costs
+        // the counters is a handful of atomic writes rather than one per chunk.
+        let mut by_driver = 0_u64;
+        let mut queued = 0_u64;
         for entry in &self.chunks {
             if self.queue.push(NonNull::from(entry)).is_err() {
+                by_driver += 1;
                 // The queue is full. Running it here keeps the accounting
                 // exact — every chunk runs exactly once — where dropping it
                 // would hang the wait below forever.
@@ -382,8 +567,18 @@ impl Pool {
                 // chunks, and this entry never reached the queue so nothing
                 // else can run it.
                 unsafe { run_one(job, entry.index) };
+            } else {
+                queued += 1;
             }
         }
+        self.shared
+            .stats
+            .submissions
+            .fetch_add(1, Ordering::Relaxed);
+        self.shared
+            .stats
+            .longest_queue
+            .fetch_max(queued, Ordering::Relaxed);
 
         let parked = {
             let mut sleep = lock(&self.shared.sleep);
@@ -406,7 +601,10 @@ impl Pool {
                 // SAFETY: a chunk is in the queue exactly once, so taking it
                 // out is what makes running it exclusive; `job` outlives the
                 // wait by the argument above.
-                Some(chunk) => unsafe { run_chunk(chunk) },
+                Some(chunk) => {
+                    by_driver += 1;
+                    unsafe { run_chunk(chunk) };
+                }
                 // Nothing left to take, and workers still finishing what they
                 // took. Yielding rather than spinning, because on a machine
                 // with fewer cores than workers the thread we are waiting for
@@ -414,6 +612,10 @@ impl Pool {
                 None => std::thread::yield_now(),
             }
         }
+        self.shared
+            .stats
+            .chunks_run_by_driver
+            .fetch_add(by_driver, Ordering::Relaxed);
         // The descriptors are dead the moment the job is: nothing may hold a
         // pointer into this buffer past here, and clearing says so.
         self.chunks.clear();
@@ -443,7 +645,7 @@ fn work(shared: &Shared) {
             // SAFETY: a chunk is handed out by exactly one successful steal,
             // and its job is alive because the driver waits for every chunk to
             // finish before returning.
-            unsafe { run_chunk(chunk) };
+            unsafe { run_stolen(shared, chunk) };
         }
 
         let submissions = {
@@ -460,13 +662,18 @@ fn work(shared: &Shared) {
         // the sleep waits on, so there is no gap between them.
         if let Some(chunk) = shared.steal() {
             // SAFETY: as above.
-            unsafe { run_chunk(chunk) };
+            unsafe { run_stolen(shared, chunk) };
             continue;
         }
 
         let mut sleep = lock(&shared.sleep);
         sleep.parked += 1;
         while !sleep.shutdown && sleep.submissions == submissions {
+            // Under the lock the sleep waits on, and before the wait: a thread
+            // that sees `parked` reach the worker count has to have taken this
+            // lock, so by then every worker it counted has counted itself here
+            // too. That is what a test can wait for.
+            shared.stats.parks.fetch_add(1, Ordering::Relaxed);
             sleep = shared
                 .wake
                 .wait(sleep)
@@ -489,12 +696,47 @@ impl Shared {
     fn steal(&self) -> Option<NonNull<Chunk>> {
         loop {
             match self.thieves.steal() {
-                Steal::Task(chunk) => return Some(chunk),
-                Steal::Empty => return None,
-                Steal::Retry => core::hint::spin_loop(),
+                Steal::Task(chunk) => {
+                    self.stats.steals.fetch_add(1, Ordering::Relaxed);
+                    return Some(chunk);
+                }
+                Steal::Empty => {
+                    // The search, not the attempt: one call that spun through
+                    // a dozen lost exchanges and then found the deque empty is
+                    // one failure here and a dozen retries below.
+                    self.stats.steal_failures.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                Steal::Retry => {
+                    self.stats.steal_retries.fetch_add(1, Ordering::Relaxed);
+                    core::hint::spin_loop();
+                }
             }
         }
     }
+}
+
+/// Runs a chunk a worker won, and counts it as that worker's.
+///
+/// **The one place a worker's chunk is counted**, which is why it is a function
+/// and not a line repeated at the two places a worker takes one: a count that
+/// lived at both would go on reading right with either copy deleted.
+///
+/// Counted *before* the chunk runs, so that the increment is published by the
+/// release [`run_one`] does on the outstanding-chunk count — a driver whose
+/// call has returned has therefore seen every one of them, which is what makes
+/// the driver-plus-workers sum hold the moment `par_for` returns.
+///
+/// # Safety
+///
+/// As [`run_chunk`], whose contract this passes straight through.
+unsafe fn run_stolen(shared: &Shared, chunk: NonNull<Chunk>) {
+    shared
+        .stats
+        .chunks_run_by_workers
+        .fetch_add(1, Ordering::Relaxed);
+    // SAFETY: the caller's contract.
+    unsafe { run_chunk(chunk) };
 }
 
 /// Runs the chunk `chunk` describes.
@@ -1042,5 +1284,245 @@ mod tests {
             chunk[0] = start as u32 + 1;
         });
         assert_eq!(items, vec![1, 2, 3]);
+    }
+
+    /// **Every chunk of a completed call is counted exactly once, and to the
+    /// thread that ran it.** The sum is the whole point of splitting the two:
+    /// a driver counter that also caught the workers' chunks, or a worker
+    /// counter that missed the ones a full deque handed back, would still look
+    /// plausible on its own and would not add up here.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_driver_and_the_workers_between_them_ran_every_chunk() {
+        const ITEMS: usize = if cfg!(miri) { 200 } else { 10_000 };
+        const CHUNK: usize = 16;
+
+        let mut pool = threaded(3);
+        let mut items = vec![0_u32; ITEMS];
+        pool.par_for(&mut items, CHUNK, |_, chunk| {
+            for item in chunk {
+                *item += 1;
+            }
+        });
+
+        let stats = pool.stats();
+        assert_eq!(
+            stats.chunks_run_by_driver + stats.chunks_run_by_workers,
+            ITEMS.div_ceil(CHUNK) as u64,
+            "{stats:?} does not account for every chunk",
+        );
+        assert_eq!(stats.submissions, 1, "one call, one submission");
+    }
+
+    /// A pool with no workers puts **every** chunk on the driver, and touches
+    /// nothing else: no deque, no thieves, no sleeping. Comparing the whole
+    /// snapshot rather than one field is what makes the second half of that a
+    /// real assertion.
+    #[test]
+    fn a_pool_with_no_workers_puts_every_chunk_on_the_driver() {
+        const ITEMS: usize = 50;
+        const CHUNK: usize = 8;
+
+        let mut pool = Pool::new(&Inline).expect("Inline");
+        let mut items = vec![0_u32; ITEMS];
+        pool.par_for(&mut items, CHUNK, |_, chunk| {
+            for item in chunk {
+                *item += 1;
+            }
+        });
+
+        assert_eq!(
+            pool.stats(),
+            PoolStats {
+                chunks_run_by_driver: ITEMS.div_ceil(CHUNK) as u64,
+                ..PoolStats::default()
+            },
+        );
+    }
+
+    /// **A stolen chunk is counted twice over, once as a steal and once as a
+    /// worker running it** — and the two agree, because a thief runs what it
+    /// wins and hands it to nobody.
+    ///
+    /// Each chunk waits for a second thread before finishing, exactly as
+    /// `the_work_reaches_more_than_the_calling_thread` does: without that a
+    /// driver quick enough to run all eight chunks itself would leave both
+    /// counters at zero, and the test would be asserting on the scheduler.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_stolen_chunk_is_counted_as_a_steal_and_as_a_worker_running_it() {
+        let mut pool = threaded(2);
+        wait_until_parked(&pool);
+        pool.reset_stats();
+
+        let arrived = AtomicUsize::new(0);
+        let mut items = vec![0_u8; 64];
+        pool.par_for(&mut items, 8, |_, _| {
+            arrived.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + DEADLINE;
+            while arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        });
+
+        let stats = pool.stats();
+        assert!(
+            stats.chunks_run_by_workers > 0,
+            "no chunk reached a worker: {stats:?}",
+        );
+        assert_eq!(
+            stats.steals, stats.chunks_run_by_workers,
+            "a stolen chunk is run by the thief that won it: {stats:?}",
+        );
+        assert_eq!(
+            stats.chunks_run_by_driver + stats.chunks_run_by_workers,
+            items.len().div_ceil(8) as u64,
+            "{stats:?} does not account for every chunk",
+        );
+    }
+
+    /// A worker that finds the deque empty counts the search. Every parked
+    /// worker went through at least one — two, in fact — on its way down, so
+    /// waiting for them to park is what makes this a count rather than a hope.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_worker_that_finds_nothing_counts_the_search_that_found_it() {
+        let pool = threaded(3);
+        wait_until_parked(&pool);
+
+        let stats = pool.stats();
+        assert!(
+            stats.steal_failures >= pool.workers() as u64,
+            "{} workers parked without one empty search each: {stats:?}",
+            pool.workers(),
+        );
+    }
+
+    /// **A worker that goes to sleep says so.** Parking is counted under the
+    /// same lock the sleep waits on and before the wait itself, which is what
+    /// lets `wait_until_parked` stand in for "and now check the counter": a
+    /// thread that has seen the parked count reach the worker count cannot be
+    /// racing an increment that has not happened.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_worker_with_nothing_left_to_do_parks_and_the_park_is_counted() {
+        let pool = threaded(2);
+        wait_until_parked(&pool);
+
+        let stats = pool.stats();
+        assert!(
+            stats.parks >= pool.workers() as u64,
+            "{} workers are asleep and {} parks were counted: {stats:?}",
+            pool.workers(),
+            stats.parks,
+        );
+    }
+
+    /// The longest queue is the **biggest** burst, not the last one — the
+    /// high-water mark a smaller call afterwards must not lower. Both calls
+    /// split into fewer chunks than the deque has slots, so every push lands
+    /// and the number is exact rather than a lower bound.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_longest_queue_keeps_the_biggest_burst_rather_than_the_last() {
+        const BIG: usize = 300;
+        const SMALL: usize = 20;
+        const { assert!(BIG < QUEUE_CAPACITY, "the big burst has to fit") };
+
+        let mut pool = threaded(2);
+        // One item per chunk, so the chunk count is the item count.
+        let mut items = vec![0_u32; BIG];
+        pool.par_for(&mut items, 1, |_, chunk| chunk[0] += 1);
+        assert_eq!(pool.stats().longest_queue, BIG as u64);
+
+        let mut items = vec![0_u32; SMALL];
+        pool.par_for(&mut items, 1, |_, chunk| chunk[0] += 1);
+        let stats = pool.stats();
+        assert_eq!(
+            stats.longest_queue, BIG as u64,
+            "a smaller burst moved the high-water mark: {stats:?}",
+        );
+        assert_eq!(stats.submissions, 2, "two calls, two submissions");
+    }
+
+    /// **A thief that loses the exchange counts the retry**, which is a
+    /// different thing from finding the deque empty: somebody else took an item
+    /// that was really there, and the search goes round rather than ending.
+    ///
+    /// Contention cannot be staged — it needs two thieves inside the same
+    /// exchange — so this is a stress test in the shape of the deque's own
+    /// `the_last_item_goes_to_exactly_one_taker`: one-item chunks and more
+    /// thieves than there is work, submitted until a retry shows up. The
+    /// deadline is what makes a pool that never contends a red test rather than
+    /// a hang. Not run under miri, where an interpreted spin of this length
+    /// would outlast the run it belongs to.
+    #[test]
+    #[cfg(all(not(target_arch = "wasm32"), not(miri)))]
+    fn a_thief_that_loses_the_exchange_counts_the_retry() {
+        const ITEMS: usize = 64;
+
+        let mut pool = threaded(4);
+        let mut items = vec![0_u32; ITEMS];
+        let deadline = Instant::now() + DEADLINE;
+        let mut rounds = 0_u64;
+        while pool.stats().steal_retries == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "{rounds} rounds of four thieves over one-item chunks and not \
+                 one lost exchange: {:?}",
+                pool.stats(),
+            );
+            pool.par_for(&mut items, 1, |_, chunk| chunk[0] += 1);
+            rounds += 1;
+        }
+    }
+
+    /// **Resetting zeroes every counter, not the ones that happened to be
+    /// looked at.** Each is driven off zero first — a reset that missed one
+    /// would otherwise pass on a field nothing had moved — and the pool is put
+    /// back to sleep before the reset, because workers go on searching and
+    /// parking after a call returns and would otherwise be counting again
+    /// before the snapshot below is taken.
+    ///
+    /// `steal_retries` is the one field this cannot drive off zero, for the
+    /// reason `a_thief_that_loses_the_exchange_counts_the_retry` gives.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resetting_the_counters_zeroes_every_one_of_them() {
+        let mut pool = threaded(2);
+        wait_until_parked(&pool);
+
+        // The waiting chunks again, so that a worker is guaranteed to have
+        // stolen and run one of them.
+        let arrived = AtomicUsize::new(0);
+        let mut items = vec![0_u8; 64];
+        pool.par_for(&mut items, 8, |_, _| {
+            arrived.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + DEADLINE;
+            while arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        });
+        wait_until_parked(&pool);
+
+        let stats = pool.stats();
+        for (name, count) in [
+            ("chunks_run_by_driver", stats.chunks_run_by_driver),
+            ("chunks_run_by_workers", stats.chunks_run_by_workers),
+            ("steals", stats.steals),
+            ("steal_failures", stats.steal_failures),
+            ("parks", stats.parks),
+            ("longest_queue", stats.longest_queue),
+            ("submissions", stats.submissions),
+        ] {
+            assert!(count > 0, "{name} was already zero: {stats:?}");
+        }
+
+        pool.reset_stats();
+        assert_eq!(
+            pool.stats(),
+            PoolStats::default(),
+            "a parked pool's counters moved, or a field was not reset",
+        );
     }
 }

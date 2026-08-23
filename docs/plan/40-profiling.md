@@ -61,9 +61,19 @@ stand.
 4. **No trace export.** Nothing a real profiler UI can open.
 5. **No memory or occupancy accounting.** Pool residency, buffer bytes,
    descriptor counts, staging-ring pressure — all invisible.
-6. **No job-system instrumentation.** `crcbl-jobs` has a work-stealing deque and
-   exposes no worker utilisation, steal counts or queue depth, so the phase that
-   adopts it cannot show it helped.
+6. ~~**No job-system instrumentation.** `crcbl-jobs` has a work-stealing deque
+   and exposes no worker utilisation, steal counts or queue depth, so the phase
+   that adopts it cannot show it helped.~~ **Built** as `Pool::stats` →
+   `PoolStats`, with `Pool::reset_stats` to bound a reading to one phase: chunks
+   run by the driver against chunks run by workers (they sum, between
+   submissions, to every chunk a completed `par_for` split into), steals,
+   searches that found the deque empty, searches that lost the exchange, parks,
+   the largest burst one submission queued, and the submission count. Relaxed
+   atomics nothing in the pool reads back, counted per chunk rather than per
+   item, and torn across fields if read mid-call — which the type documents
+   rather than preventing with a lock, for the reason under Risks. What is still
+   absent is a _reader_: nothing puts these on the trace or in a panel row, and
+   `crcbl-jobs` still has no spans.
 7. ~~**Counters are piecemeal.** `SceneStats`, `visible_count` and each sample's
    own rows exist; there is no one place a frame's draw count, instance count,
    cluster count or triangle count is reported.~~ **Built** as

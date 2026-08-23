@@ -102,7 +102,7 @@ mod spawn;
 #[cfg(target_arch = "wasm32")]
 pub mod workers;
 
-pub use pool::Pool;
+pub use pool::{Pool, PoolStats};
 #[cfg(not(target_arch = "wasm32"))]
 pub use spawn::Threads;
 pub use spawn::{Inline, Spawn, SpawnError, Work, default_spawner};
