@@ -3,88 +3,62 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### The shadow atlas holds one point cube and nothing beside it — taking option (a)
+### lantern's downlight now holds a tile, and its shadow still changes no pixel
 
-P7B's exit criterion is "lantern renders the scene complete on
-`LightingPath::Rasterised`", and the roadmap row says it stays unticked because
-`apps/lantern`'s room had no spot light. It has one now — `room::spot`, a cool
-downlight in the back-left corner, in the light list `room::lights` hands both
-views. **Its cone is drawn and its shadow is not**, and the row still cannot be
-ticked, because the shadow is not lantern's to give.
+The atlas grew to seven light tiles and `room::spot` is shadowed: `Selection`
+gives it the tile past the lamp's cube at every phase of the orbit, and the
+shadow pass rasterises into it. **Measured on the device**, not inferred — a
+scene with a point light and a spot together fills light tiles 0–5 with the
+cube's faces (tile 2 empty, being the face that looks at nothing) and light tile
+6 — atlas tile 8 — with 1048576 written texels, in one frame.
 
-`crcbl_shaders::mesh::SHADOW_LIGHT_TILES` is 6 and `SHADOW_POINT_FACES` is 6:
-the atlas's whole light region is exactly one point light's cube. `run_is_free`
-therefore has one base a point light can start at, so a room holding one point
-light and one spot has room for one of their two maps and `shadow::Selection`
-decides which — the other lights without occluding. That is the module's own
-documented degradation, not a bug; what it means here is that **no arrangement
-of lantern's room can show a spot shadow and a point shadow in the same frame.**
+**But lantern's picture is unchanged.** Rendering the room with `LIGHT_SLOTS` at
+2 and at 1 — the same cone geometry, the only difference being whether the
+downlight is given a tile — produced two byte-identical 1280×960 frames on radv.
+The reason is the room, not the engine: sampling every room AABB against the
+cone shows the mirror, the block and the monitor lie wholly outside it, and the
+only object inside is the plinth's `-x` corner, whose top edge projects to the
+floor at `x = -1.846` — inside the plinth's own footprint of `-2.0..-0.4`. So
+the downlight occludes nothing visible from `fixed_camera`.
 
-Making the spot the winner instead is not a fix either. `Selection` ranks by
-radius over distance to the eye and `room::lamp` **orbits**, so its influence
-swings from 0.611 to 1.738 over one period (measured by sweeping the orbit
-against `fixed_camera`'s eye). A spot that beat the lamp's weakest phase would
-lose at its strongest, and the room's one shadow would appear and disappear as
-the lamp went round — worse than either light having it. From where `room::spot`
-hangs, beating the lamp at _every_ phase needs a radius of 11.6, in a room 8 m
-deep and 6 m across — a light bounded by nothing but its cone. So `SPOT_REACH`
-is chosen to lose deliberately and
-`the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` pins it,
-sweeping the orbit with both a carried selection and a fresh one so the answer
-does not depend on when the run started.
+The consequence for P7B: the engine limitation the roadmap row named is gone and
+the sample does shadow all three of its lights, but nobody looking at
+`tests/golden/room.png` can _see_ the third shadow. If the row wants a visible
+one it needs an occluder standing in the cone — something on the floor between
+the downlight and its pool, clear of the plinth. That is a change to the
+sample's composition and a re-bless, so it was left for the owner rather than
+taken here.
 
-**Decided 2026-08-23: option (a), and taken as ordinary work rather than
-referred up.** Four MiB of atlas against "the engine cannot shadow a point light
-and a spot at the same time" is not a close trade, and the limitation is not
-lantern's — it applies to every scene with one of each, which is an ordinary
-lighting rig rather than a corner case. Recorded here rather than only in a
-commit so it is cheap to reverse if the owner disagrees with the budget.
+**Considered and declined: re-blessing the goldens anyway.** The atlas going
+4096 × 2048 → 3072 × 3072 changes `Cascades::params`' inverse extent, which is
+the denominator of the shadow bias, so the picture does move a little — blessing
+from radv rewrote `room.png` by 5 pixels of 49152 (max delta 3/255) and
+`live.png` by 400 of 691200 (max 9/255). Both are under the rasteriser tolerance
+the goldens are compared with, and the committed references pass unchanged on
+radv _and_ on lavapipe. Blessing would have pulled the reference toward one
+rasteriser for a sub-tolerance difference, so the references were put back.
 
-What it costs in tooling, measured before committing to it rather than after:
-`mesh.slang`'s own `crcbl-targets` line names **spirv, wgsl, msl and dxil**, and
-**nine** shaders import it, so a constant change regenerates every one of those
-across all four targets and `compile-shaders.sh --check` demands the result be
-byte-identical. That needs both pinned compilers. `slangc` is the version in
-`ci.yml`'s `SLANG_VERSION` (2026.14) and its release asset answers a request
-here, so it is a download. `dxc` is the harder half: `CRCBL_DXC` deliberately
-**never** falls back to `PATH`, because distributions ship Shader Model 6.10
-preview builds that abort on a four-line shader, and `ci.yml` notes the archive
-carrying it is around 492 MiB. **Regenerating three of the four target sets is
-worse than regenerating none** — it would leave `crcbl-dx12`'s artifacts drifted
-against a shader they no longer match, which is exactly the breakage the seam
-rule forbids for a deferred backend.
+Cross-rasteriser drift after the change, `fixed_camera` at 1280×960, radv
+against lavapipe: 341602 of 1228800 pixels differ (27.8%), 340689 of them by
+exactly 1/255; mean 1.01, max 110/255 on 11 pixels. No before-figure was taken —
+the pre-change frame would have needed HEAD built in a second worktree, which
+was not done.
 
-The options as they were costed:
+Not verified: nothing measures the new atlas's 36 MiB on a device; that figure
+is `TILE` × `TILE` × 4 bytes × 9 tiles, computed from the constants. `crcbl-mtl`
+and `crcbl-dx12` type-check and document on `aarch64-apple-darwin` and
+`x86_64-pc-windows-msvc`, and their MSL and DXIL artifacts are regenerated with
+the pinned compilers, but no Metal or D3D12 device ran this atlas.
 
-- **(a) Grow the light region to seven tiles.** `SHADOW_LIGHT_TILES` 6 → 7 with
-  the grid at `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` = 3 × 3, which the
-  `TILES == CASCADES + LIGHT_TILES` assertion makes exact. The atlas goes from
-  4096 × 2048 to 3072 × 3072 of `D32Float` — 32 MiB to 36 MiB — and
-  `FrameUniforms` gains one `float4x4`. `LIGHT_SLOTS` stays 2, so no new
-  `DrawGen` and none of the ~5 MiB each costs. Both `.slang` copies of the
-  constants move with it and the drift test is what holds them together.
-  Cheapest of the three, and the only one that closes P7B's row as written.
-- **(b) Convert `room::lamp` to a spot.** One tile, always shadowed, no engine
-  change — and the room then renders sun and spot shadows only, which is the
-  same gap the other way round and costs the sample its point light as well.
-- **(c) Leave it.** lantern shows the cone, the penumbra and the lamp's cube
-  shadow; P7B's row stays unticked and the reason changes from "no spot light"
-  to "the atlas holds one of the two maps". This is what is in the tree today,
-  and (a) is what replaces it.
-
-One consequence to carry into that work:
-`room::the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` exists to
-pin the _current_ behaviour and its premise stops being true the moment the
-light region grows. It must be rewritten to assert that both lights hold tiles,
-not deleted — a test that disappears alongside the limitation it described
-leaves nothing asserting the new one.
-
-Evidence: `room::the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit`
-runs `Selection` over the real light list and is red-checked both ways — a
-`SPOT_REACH` of 4.5 makes the spot win on part of the orbit, and an
-`outer_angle` past `MAX_SPOT_HALF_ANGLE` makes it ineligible rather than outbid.
-Not verified: nothing here measures option (a)'s atlas on a device; the memory
-figures are `TILE` × `TILE` × 4 bytes per tile arithmetic, not a capture.
+**The point-and-spot atlas probe is not in the tree.** It was temporary
+instrumentation in `crates/crcbl/tests/forward_e2e/shadow.rs`, run and then
+reverted, because that file is outside the write set this work was given. The
+tile assertions there still cover a spot alone
+(`a_shadowed_spot_fills_the_tile_it_was_given_and_no_other`) and a point alone
+(`a_shadowed_point_lights_faces_are_the_six_the_host_built`); **no committed
+test rasterises both into one atlas**, which is the coverage gap the seventh
+tile actually created. It is a short addition to that module, on the pattern of
+the two beside it.
 
 ### DECISION NEEDED — should lantern's irradiance volume carry the downlight?
 
@@ -12207,28 +12181,30 @@ slice deferred or turned up:
 
 ## What punctual-light shadows left owed
 
-The atlas is a fixed 4×2 tile grid, `shadow::Selection` decides who gets tiles,
+The atlas is a fixed 3×3 tile grid, `shadow::Selection` decides who gets tiles,
 `shadow::spot_matrix` and `shadow::point_matrix` build reversed-Z perspective
 projections, and `mesh.slang`'s `spot_visibility` and `point_visibility` sample
 them through the same 3×3 PCF kernel the cascades use. Decisions taken, so they
 are not re-argued:
 
 - **Two budgets, because they buy different things.** `LIGHT_TILES` is atlas
-  space — six of them, the minimum a point light can exist in — and
-  `LIGHT_SLOTS` is cull space, two of them, because a slot costs a `DrawGen`. A
-  `DrawGen` is ~5.0 MiB measured on the spot scene, 3.7 MiB of it per-instance
-  LOD hysteresis state that is device-local and permanent; a tile is 4 MiB of
-  `D32Float`. So the atlas is 32 MiB and the four generators are ~20 MiB,
-  allocated whether a scene has a shadowed light or not. That is deliberate:
-  building a `DrawGen` inside `begin_frame` means a frame that cannot allocate
-  is a frame that cannot draw. **Raising either budget is the memory
-  conversation, not the atlas one.**
-- **The reachable states are one point light or two spots**, and nothing in
-  between. Six light tiles is the minimum a point light needs; two of them are
-  what a spot each takes. A frame with more shadow-worthy lights than fit ranks
-  them by projected influence and hands out runs first-fit, and a point light
-  that cannot fit six consecutive tiles is **skipped without taking the budget
-  down with it** —
+  space — seven of them, one past the six a point light's cube needs, so a spot
+  fits beside it — and `LIGHT_SLOTS` is cull space, two of them, because a slot
+  costs a `DrawGen`. A `DrawGen` is ~5.0 MiB measured on the spot scene, 3.7 MiB
+  of it per-instance LOD hysteresis state that is device-local and permanent; a
+  tile is 4 MiB of `D32Float`. So the atlas is 36 MiB (raised from 32 on
+  2026-08-23, when the region went from six tiles to seven) and the four
+  generators are ~20 MiB, allocated whether a scene has a shadowed light or not.
+  That is deliberate: building a `DrawGen` inside `begin_frame` means a frame
+  that cannot allocate is a frame that cannot draw. **Raising either budget is
+  the memory conversation, not the atlas one.**
+- **The reachable states are one point light and one spot, or two spots**, and
+  nothing in between. Six of the seven light tiles are the minimum a point light
+  needs and the seventh is a spot's whole map, so the two kinds fit together; a
+  _second_ point light is what does not, since two cubes are twelve tiles. A
+  frame with more shadow-worthy lights than fit ranks them by projected
+  influence and hands out runs first-fit, and a point light that cannot fit six
+  consecutive tiles is **skipped without taking the budget down with it** —
   `a_point_light_that_cannot_fit_leaves_the_lights_around_it_alone` is the
   assertion.
 - **A cone at or past `MAX_SPOT_HALF_ANGLE` (80°) is refused a tile** rather

@@ -180,7 +180,7 @@ static const uint SHADOW_CASCADES = 2;
 /// region and a point light occupies six of it, so how many lights a frame can
 /// shadow is a host-side budget (`crcbl_render::shadow::LIGHT_SLOTS`) that no
 /// shader has any use for.
-static const uint SHADOW_LIGHT_TILES = 6;
+static const uint SHADOW_LIGHT_TILES = 7;
 
 /// Tiles one point light's shadow map is, matching
 /// `crcbl_shaders::mesh::SHADOW_POINT_FACES`.
@@ -191,10 +191,10 @@ static const uint SHADOW_POINT_FACES = 6;
 
 /// Tiles across the shadow atlas, matching
 /// `crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS`.
-static const uint SHADOW_ATLAS_COLUMNS = 4;
+static const uint SHADOW_ATLAS_COLUMNS = 3;
 
 /// Tiles down it, matching `crcbl_shaders::mesh::SHADOW_ATLAS_ROWS`.
-static const uint SHADOW_ATLAS_ROWS = 2;
+static const uint SHADOW_ATLAS_ROWS = 3;
 
 /// The side of one tile in texels, matching `crcbl_shaders::mesh::SHADOW_TILE`.
 ///

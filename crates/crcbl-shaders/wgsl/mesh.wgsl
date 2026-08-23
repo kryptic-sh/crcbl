@@ -60,9 +60,9 @@ struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E2_0
     @align(16) data_2 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(2)>,
 };
 
-struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E6_0
+struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E7_0
 {
-    @align(16) data_3 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(6)>,
+    @align(16) data_3 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(7)>,
 };
 
 struct FrameUniforms_std140_0
@@ -74,7 +74,7 @@ struct FrameUniforms_std140_0
     @align(16) cascade_far_0 : vec4<f32>,
     @align(16) shadow_params_0 : vec4<f32>,
     @align(16) cluster_grid_0 : vec4<u32>,
-    @align(16) light_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E6_0,
+    @align(16) light_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E7_0,
     @align(16) probe_origin_0 : vec4<f32>,
     @align(16) probe_inv_spacing_0 : vec4<f32>,
     @align(16) probe_counts_0 : vec4<u32>,
@@ -263,13 +263,13 @@ fn shadow_slope_0( geometric_normal_0 : vec3<f32>,  to_light_1 : vec3<f32>) -> f
 
 fn atlas_uv_0( tile_0 : u32,  tile_uv_0 : vec2<f32>) -> vec2<f32>
 {
-    return (vec2<f32>(f32(tile_0 % u32(4)), f32(tile_0 / u32(4))) + tile_uv_0) / vec2<f32>(4.0f, 2.0f);
+    return (vec2<f32>(f32(tile_0 % u32(3)), f32(tile_0 / u32(3))) + tile_uv_0) / vec2<f32>(3.0f, 3.0f);
 }
 
 fn tile_pcf_0( tile_1 : u32,  tile_uv_1 : vec2<f32>,  reference_0 : f32) -> f32
 {
     var texel_0 : vec2<f32> = frame_0.shadow_params_0.xy;
-    const grid_0 : vec2<f32> = vec2<f32>(4.0f, 2.0f);
+    const grid_0 : vec2<f32> = vec2<f32>(3.0f, 3.0f);
     var _S15 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_0 * grid_0;
     var y_0 : i32 = i32(-1);
     var visibility_0 : f32 = 0.0f;
@@ -613,7 +613,7 @@ fn fragmentMain( _S39 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
             if(_S51 == u32(1))
             {
                 var _S54 : u32 = _S50.shadow_tile_0;
-                if((_S50.shadow_tile_0) <= u32(0))
+                if((_S50.shadow_tile_0) <= u32(1))
                 {
                     var _S55 : f32 = point_visibility_0(&(_S50), _S54, _S39.world_position_8, to_light_6, n_dot_l_5, _S41);
                     reach_2 = reach_0 * _S55;
@@ -626,7 +626,7 @@ fn fragmentMain( _S39 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
             else
             {
                 var _S56 : u32 = _S50.shadow_tile_0;
-                if((_S50.shadow_tile_0) < u32(6))
+                if((_S50.shadow_tile_0) < u32(7))
                 {
                     var _S57 : f32 = spot_visibility_0(&(_S50), _S56, _S39.world_position_8, to_light_6, n_dot_l_5, _S41);
                     reach_2 = reach_0 * _S57;

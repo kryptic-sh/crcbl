@@ -180,9 +180,9 @@ struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 
 
 #line 3332 "core.meta.slang"
-struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E6_0
+struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E7_0
 {
-    array<_MatrixStorage_float4x4_ColMajornatural_1, int(6)> data_3;
+    array<_MatrixStorage_float4x4_ColMajornatural_1, int(7)> data_3;
 };
 
 
@@ -196,7 +196,7 @@ struct FrameUniforms_natural_0
     float4 cascade_far_0;
     float4 shadow_params_0;
     uint4 cluster_grid_0;
-    _Array_natural_matrixx3Cfloatx2C4x2C4x3E6_0 light_view_proj_0;
+    _Array_natural_matrixx3Cfloatx2C4x2C4x3E7_0 light_view_proj_0;
     float4 probe_origin_0;
     float4 probe_inv_spacing_0;
     uint4 probe_counts_0;
@@ -334,7 +334,7 @@ float shadow_slope_0(float3 geometric_normal_0, float3 to_light_1)
 float2 atlas_uv_0(uint tile_0, float2 tile_uv_0)
 {
 
-    return (float2(float(tile_0 % 4U), float(tile_0 / 4U)) + tile_uv_0) / float2(4.0f, 2.0f);
+    return (float2(float(tile_0 % 3U), float(tile_0 / 3U)) + tile_uv_0) / float2(3.0f, 3.0f);
 }
 
 
@@ -344,7 +344,7 @@ float tile_pcf_0(uint tile_1, float2 tile_uv_1, float reference_0, KernelContext
     float2 texel_0 = kernelContext_1->frame_0->shadow_params_0.xy;
 
 #line 1146
-    float2 grid_0 = float2(4.0f, 2.0f);
+    float2 grid_0 = float2(3.0f, 3.0f);
     float2 _S13 = float2(0.5f, 0.5f) * texel_0 * grid_0;
 
 #line 1147
@@ -1186,7 +1186,7 @@ struct pixelInput_0
                 uint _S91 = (&_S84)->shadow_tile_0;
 
 #line 1892
-                if(((&_S84)->shadow_tile_0) <= 0U)
+                if(((&_S84)->shadow_tile_0) <= 1U)
                 {
 
 #line 1892
@@ -1215,7 +1215,7 @@ struct pixelInput_0
                 uint _S93 = (&_S84)->shadow_tile_0;
 
 #line 1898
-                if(((&_S84)->shadow_tile_0) < 6U)
+                if(((&_S84)->shadow_tile_0) < 7U)
                 {
 
 #line 1898

@@ -26,15 +26,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   what was there rather than added to it. `apps/lantern/tests/golden/room.png`
   and `live.png` are re-blessed for it.
 
-  **Its cone is drawn and its shadow is not**, which is the shadow atlas rather
-  than the sample: `crcbl_shaders::mesh::SHADOW_LIGHT_TILES` and
-  `SHADOW_POINT_FACES` are the same number, so the light region holds one point
-  light's cube and nothing beside it, and a room with a point light and a spot
-  in it gets one of their two maps. The lamp is the one that gets it, on every
-  frame of its orbit rather than on the frames it happens to win — see
-  `docs/backlog.md`, which carries what it would take for both to be shadowed.
-  No read point in the room moved: every measured value in the golden suite is
-  identical to the run before the light was added.
+  **Both of the room's punctual lights are shadowed**, on every frame of the
+  lamp's orbit and from a run started at any phase of it — the light region grew
+  a seventh tile for exactly this (see `Changed` below), so the lamp's cube and
+  the downlight's map are held side by side.
+  `room::the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit`
+  is what asserts it, and it fails to compile if the region is ever shortened
+  back. No read point in the room moved: every measured value in the golden
+  suite is identical to the run before the light was added.
 
 - **`crcbl_hal::null::NullInstance::with_adapters` and
   `Recorder::refuse_surface_on`** let a null instance list more than one adapter
@@ -120,6 +119,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   probe's answer, so a device without the feature cannot report as covered.
 
 ### Changed
+
+- **The shadow atlas's light region holds seven tiles rather than six, so a
+  scene can shadow a point light and a spot at the same time.**
+  `crcbl_shaders::mesh::SHADOW_LIGHT_TILES` goes 6 → 7 against an unchanged
+  `SHADOW_POINT_FACES` of 6, which is what leaves a tile over: until now the two
+  were the same number, the region was exactly one point light's cube, and
+  `crcbl_render::shadow::Selection` had no base left for a spot. That was not a
+  lantern problem — every scene with one light of each kind hit it, which is an
+  ordinary lighting rig.
+
+  The grid goes from `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` = 4 × 2 to 3 ×
+  3 and the atlas from 4096 × 2048 to 3072 × 3072 of `D32Float` — **32 MiB to 36
+  MiB**, the cost of the change. The cascades stay tiles `0..CASCADES` in the
+  top row at the origins they were blessed at, so no cascade's rasterised tile
+  moves. `crcbl_render::shadow::LIGHT_SLOTS` is unchanged at 2: this is not a
+  change to how many lights a frame can shadow, only to how many tiles the
+  region holds, so no new `DrawGen` is allocated. A _second_ point light still
+  does not fit, and still lights without occluding.
+
+  **`FrameUniforms::light_view_proj` gains one `float4x4`, which moves every
+  member after it** — the block goes 720 to 784 bytes, and the offsets `slangc`
+  emits for the members past it move with it. Both `.slang` copies of the
+  constants moved in the same change; `crcbl_shaders::mesh`'s
+  `the_cascade_count_matches_the_one_the_shaders_declare` and
+  `the_uniform_block_matches_the_offsets_slangc_emits` are what hold the Rust
+  and shader sides together, and both were confirmed to fail on a one-sided
+  edit. Every committed SPIR-V, WGSL, MSL and DXIL artifact for `mesh.slang` and
+  `mesh_cluster.slang` is regenerated with the pinned `slangc` 2026.14 and `dxc`
+  1.9.0.1.
 
 - **`crcbl_webgpu::probe::probe_device_desc` now asks for `DEPTH_CLAMP` as well
   as `TIMESTAMP_QUERY`**, both optional, so a browser without

@@ -31,10 +31,11 @@
 //! [`LIGHT_TILES`] is atlas space and [`LIGHT_SLOTS`] is *cull* space, and the
 //! two stopped being one number the moment a light could own six tiles:
 //!
-//! * A tile is [`TILE`]² of `D32Float` — four mebibytes each, and the atlas is
-//!   allocated once for the renderer's life. [`LIGHT_TILES`] of them is what a
-//!   point light needs to be shadowable at all, since its six faces have to fit
-//!   in the region together.
+//! * A tile is [`TILE`]² of `D32Float`, and the atlas is allocated once for the
+//!   renderer's life. [`POINT_FACES`] of them is what a point light needs to be
+//!   shadowable at all, since its faces have to fit in the region together, and
+//!   [`LIGHT_TILES`] is one more than that — so a cube and a cone fit side by
+//!   side.
 //! * A slot is one shadowed *light*, and what it costs is a
 //!   [`DrawGen`](crate::draw_gen::DrawGen) — roughly five megabytes, most of it
 //!   per-instance LOD hysteresis state that is device-local and permanent. Topic
@@ -44,9 +45,11 @@
 //!   six matrices into six tiles. A face draws what is behind it and the
 //!   rasteriser discards it.
 //!
-//! So the light region holds one point light *or* [`LIGHT_SLOTS`] spots, and a
-//! frame with more shadow-worthy lights than either budget covers shadows the
-//! most influential ones it can fit and lights the rest without occluding.
+//! So the light region holds one point light *and* one spot, or [`LIGHT_SLOTS`]
+//! spots, and a frame with more shadow-worthy lights than either budget covers
+//! shadows the most influential ones it can fit and lights the rest without
+//! occluding. A *second* point light is what no longer fits: two cubes are twice
+//! [`POINT_FACES`] tiles and the region is not that long.
 //!
 //! # Stability: a sphere around the eye, snapped to texels
 //!
@@ -104,10 +107,11 @@ pub const POINT_FACES: usize = crcbl_shaders::mesh::SHADOW_POINT_FACES;
 /// [`DrawGen`](crate::draw_gen::DrawGen)s the renderer holds — one cull per
 /// shadowed light, whether that light is one tile or six.
 ///
-/// Two, which is what the light region can hold as spots: a point light takes
-/// the whole region and leaves the second slot with nothing to render into,
-/// which [`Selection`] discovers by running out of tiles rather than by a rule
-/// of its own.
+/// Two, which is the pair the light region is sized for: a point light's cube
+/// and one spot's map beside it. A third shadowed light is refused here, and a
+/// second *point* light is refused by [`Selection`] running out of tiles rather
+/// than by a rule of its own — the two budgets bind in different places, which
+/// is why they are two numbers.
 pub const LIGHT_SLOTS: usize = 2;
 
 /// The side of one tile in the shadow atlas, in texels.
@@ -125,9 +129,10 @@ pub const ATLAS_COLUMNS: u32 = crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS;
 /// Tiles down it.
 ///
 /// A grid rather than one row: a point light is [`POINT_FACES`] tiles of exactly
-/// this kind, and a single row holding them beside the cascades would be an image
-/// eight thousand texels wide. The addressing below is written in terms of both
-/// extents, and so is `mesh.slang`'s.
+/// this kind, and a single row holding [`TILES`] of them beside the cascades
+/// would be an image several times wider than it is tall, for no gain. The
+/// addressing below is written in terms of both extents, and so is
+/// `mesh.slang`'s.
 pub const ATLAS_ROWS: u32 = crcbl_shaders::mesh::SHADOW_ATLAS_ROWS;
 
 /// Tiles in the whole atlas: [`CASCADES`] for the sun and [`LIGHT_TILES`] for
@@ -749,9 +754,10 @@ pub struct Assignment {
 ///
 /// **A light that gets no tiles still lights.** Nothing here removes a light from
 /// the frame; it decides which of them also occlude. A light can miss out two
-/// ways now — no free slot, or no free *run* long enough — and the second is what
-/// a scene with one point light and one spot in it hits: the point takes the
-/// whole region and the spot lights without occluding.
+/// ways — no free slot, or no free *run* long enough — and the second is what a
+/// scene with two point lights hits: the first cube leaves less than a cube
+/// behind it, so the second point light lights without occluding while a spot
+/// ranked below it still fits in the tile left over.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
     /// What holds slot `i`, or `None` if the slot is free.
@@ -1597,16 +1603,21 @@ mod tests {
         );
     }
 
-    /// **A point light takes the whole light region**, and the spot behind it
-    /// lights without occluding.
+    /// **A point light and a spot are shadowed in the same frame**, which is the
+    /// whole of what the light region's seventh tile buys.
     ///
-    /// The budget's shape, stated as the frame a caller actually gets: six tiles
-    /// is one point light's six faces exactly, so a second light has a free
-    /// *slot* and no run to put a map in. That is the honest degradation the plan
-    /// asks for, and it is a different refusal from "no slot left" — which is
-    /// why the walk below does not stop at the first light it cannot place.
+    /// The budget's shape, stated as the frame a caller actually gets: the cube
+    /// is [`POINT_FACES`] tiles and the region is one longer than that, so the
+    /// spot's map is the tile left over and both lights occlude. Until
+    /// [`LIGHT_TILES`] grew past [`POINT_FACES`] this pair was the plan's
+    /// documented degradation — the point took everything and the spot lit
+    /// without occluding — and an ordinary lighting rig hit it.
+    ///
+    /// The spot's base is asserted, not just that it has one: it must land
+    /// *after* the cube rather than inside it, and "it got a tile" is true
+    /// either way.
     #[test]
-    fn a_point_light_takes_the_whole_region_and_a_spot_behind_it_gets_nothing() {
+    fn a_point_light_and_a_spot_behind_it_are_both_shadowed() {
         let lights = [
             Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 4.0)),
             spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
@@ -1615,25 +1626,28 @@ mod tests {
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[held(0, 0), None],
-            "the point light's faces are the whole region, so nothing is left for the spot"
+            &[held(0, 0), held(1, POINT_FACES)],
+            "the point light's cube is the first {POINT_FACES} tiles and the spot's map is \
+             the one after it"
         );
         assert_eq!(selection.base_of(0), Some(0));
-        assert_eq!(selection.base_of(1), None);
+        assert_eq!(selection.base_of(1), Some(POINT_FACES));
     }
 
-    /// A point light ranked behind a spot cannot fit, and **the spot keeps its
-    /// tile rather than the frame losing both maps**.
+    /// A point light that cannot fit does not take the budget down with it, and
+    /// **the lights around it keep their tiles**.
     ///
     /// The fragmentation case, and the reason the allocation walks the whole
-    /// ranking: the spot holds tile 0, so the six consecutive tiles a point needs
-    /// are not there. A walk that stopped at the first light it could not place
-    /// would be a frame where a distant point light silently switched off a
-    /// nearer spot's shadow.
+    /// ranking rather than stopping at the first light it cannot place. A
+    /// [`POINT_FACES`]-tile run needs the region nearly empty, so a second point
+    /// light is what no longer fits once the first one is placed: one tile is
+    /// left and a cube needs [`POINT_FACES`]. A walk that stopped there would be
+    /// a frame where a distant point light silently switched off a nearer spot's
+    /// shadow.
     #[test]
     fn a_point_light_that_cannot_fit_leaves_the_lights_around_it_alone() {
         let lights = [
-            spot_light_at(Vec3::new(0.0, 0.0, -1.0), 4.0),
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 4.0)),
             Light::Point(point_at(Vec3::new(0.0, 0.0, -4.0), 2.0)),
             spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
         ];
@@ -1641,9 +1655,15 @@ mod tests {
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[held(0, 0), held(2, 1)],
-            "the spot ahead of the point keeps tile 0, the point does not fit in what is left, \
-             and the spot behind it is still shadowed"
+            &[held(0, 0), held(2, POINT_FACES)],
+            "the first point light's cube fills the region but for one tile, the second \
+             point light does not fit in what is left, and the spot ranked behind it still \
+             takes that tile"
+        );
+        assert_eq!(
+            selection.base_of(1),
+            None,
+            "the second cube has nowhere to go"
         );
     }
 

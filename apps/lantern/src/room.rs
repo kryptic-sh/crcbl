@@ -59,25 +59,24 @@
 //! Neither is faked. A fixture whose job is showing what the renderer does must
 //! not flatter it.
 //!
-//! # Three lights, and one of them lights without occluding
+//! # Three lights, and every one of them occludes
 //!
 //! [`sun`] is directional and shadowed through the cascades, [`lamp`] is a point
 //! light shadowed through a cube, and [`spot`] is a cone in the back-left
 //! corner — the one part of the room the other two do not reach. Between them
 //! they are every light kind `crcbl::render::light` has.
 //!
-//! **The downlight's cone is drawn and its shadow is not**, and the reason is
-//! `crcbl::render::shadow`'s atlas rather than anything in this file: its light
-//! region holds [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles, a
-//! point light's cube needs
-//! [`POINT_FACES`](crcbl::render::shadow::POINT_FACES) of them, and the two
-//! constants are the same number — so a room with one point light and one spot
-//! in it can have one of their two maps. The lamp is the one that gets it, on
-//! every frame of its orbit rather than on the frames it happens to win, which
-//! is what this module's `SPOT_REACH` is chosen for and what
-//! `the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` holds. What
-//! it would take for both to be shadowed at once is a decision about that atlas
-//! and it is written up in `docs/backlog.md`.
+//! **All three cast**, which is what makes this room a complete rasterised
+//! scene rather than a nearly complete one. It rests on
+//! `crcbl::render::shadow`'s light region holding
+//! [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles against a point
+//! light's cube of [`POINT_FACES`](crcbl::render::shadow::POINT_FACES): one
+//! tile spare, and the downlight's map is that tile. Until the region grew, the
+//! two constants were the same number and this room had one shadow to divide
+//! between its two punctual lights — the cone was drawn and its shadow was not.
+//! `the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit` is
+//! what says the arrangement still holds at every phase of the lamp's orbit,
+//! and it fails to compile if the region is ever shortened back.
 
 use std::borrow::Cow;
 
@@ -1299,17 +1298,17 @@ const SPOT_POOL: Vec3 = Vec3::new(-2.75, 0.0, -3.15);
 /// How far the downlight reaches, on [`LAMP_REACH`]'s terms exactly — the
 /// distance at which `SpotLight::radius`'s window closes.
 ///
-/// **Short enough that the lamp always outranks it**, which is the whole of what
-/// keeps this room's shadow atlas deterministic.
-/// `crcbl::render::shadow::Selection` ranks lights by radius over distance to
-/// the eye, and the atlas's light region is exactly one point light's worth of
-/// tiles — so whichever of the two ranks first takes all of them and the other
-/// lights without occluding. A reach that let this spot win on some frames and
-/// lose on others would move the room's one point shadow in and out of the
-/// picture as the lamp orbits.
-/// `the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit` is what holds
-/// it, and `docs/backlog.md` carries what it would take for both to be shadowed
-/// at once.
+/// **Short enough that its pool and the lamp's stay separate**, which is what
+/// `the_corner_the_downlight_stands_in_is_dark_without_it` measures: the lamp's
+/// closest approach over the whole orbit is further off than [`LAMP_REACH`], so
+/// the corner this cone lights is a corner nothing else reaches and the
+/// penumbra is read against darkness rather than against the lamp's falloff.
+///
+/// It no longer has to lose a contest for the atlas. The light region holds a
+/// cube and a cone side by side, so both punctual lights are shadowed whatever
+/// this number is — `the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit`
+/// is what holds that, at every phase of the orbit and from a run started at
+/// any of them.
 const SPOT_REACH: f32 = 3.2;
 
 /// Half-angle of the cone's bright core, in radians.
@@ -1894,51 +1893,53 @@ mod tests {
         );
     }
 
-    /// **The shadow atlas goes to the lamp, on every frame of the orbit** — and
-    /// the downlight lights without occluding.
+    /// **The shadow atlas holds the lamp and the downlight together, on every
+    /// frame of the orbit.**
     ///
     /// `crcbl::render::shadow`'s light region holds
-    /// [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles, a point light
-    /// needs [`POINT_FACES`](crcbl::render::shadow::POINT_FACES) of them for its
-    /// cube, and the two constants are the same number — so this room's two
-    /// punctual lights cannot both be shadowed and the selection decides which
-    /// one is. It decides by radius over distance to the eye, and the lamp
-    /// *moves*, so "the lamp wins" is a claim about the whole orbit rather than
-    /// about the frame the goldens are taken at: a spot that won on some phases
-    /// would move the room's one point shadow in and out of the picture.
+    /// [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles and a point
+    /// light's cube needs [`POINT_FACES`](crcbl::render::shadow::POINT_FACES)
+    /// of them, so the region has exactly one tile spare — which is a spot's
+    /// whole map. That spare tile is the downlight's shadow, and it is why the
+    /// assertion below reads `[0, 1]` and not `[0]`.
     ///
-    /// **The last claim is what makes the first one about the budget.** Given
-    /// the downlight alone the selection hands it a tile at once — so the
-    /// refusal above is contention for the region and not the spot being
-    /// ineligible, which is a different bug with the same symptom.
+    /// **On every frame of the orbit, and from a run started at any phase.**
+    /// The lamp *moves* and the selection ranks by radius over distance to the
+    /// eye, so "both are shadowed" is a claim about the whole period rather
+    /// than about the frame the goldens are taken at. Two sweeps for the reason
+    /// there were two when the region held one map: `HOLD_RATIO` boosts
+    /// whatever held a tile last frame, so a carried run and a fresh one can
+    /// answer differently, and a room whose second shadow depended on when it
+    /// was started is not a fixture.
+    ///
+    /// **The runs must not overlap either**, which is the failure a region
+    /// holding two maps makes reachable for the first time: two lights given
+    /// the same tile both render into it and both sample it, which is a picture
+    /// and a plausible one.
     #[test]
-    fn the_shadow_atlas_goes_to_the_lamp_on_every_frame_of_the_orbit() {
-        use crcbl::render::shadow::{LIGHT_TILES, POINT_FACES, Selection};
+    fn the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit() {
+        use crcbl::render::shadow::{LIGHT_TILES, POINT_FACES, Selection, tile_span};
 
         const {
             assert!(
-                LIGHT_TILES < 1 + POINT_FACES,
-                "the atlas now has room for a point light's cube and a spot's tile side by \
-                 side, so the reason for everything below has gone: this room should shadow \
-                 both of its punctual lights, and the golden that says otherwise is stale"
+                LIGHT_TILES > POINT_FACES,
+                "the light region no longer holds a point light's cube and a spot's tile side \
+                 by side, so this room is back to one shadow between its two punctual lights \
+                 and everything below asserts something that cannot happen"
             );
         }
 
         let eye = fixed_camera().eye;
         let held_by = |selection: &Selection| -> Vec<usize> {
-            selection
+            let mut held: Vec<usize> = selection
                 .slots()
                 .iter()
                 .flatten()
                 .map(|assignment| assignment.light)
-                .collect()
+                .collect();
+            held.sort_unstable();
+            held
         };
-        // Two sweeps of the same orbit. The first is the run the sample makes:
-        // one selection carried frame to frame, hysteresis and all. The second
-        // starts each phase from nothing — `HOLD_RATIO` boosts whatever held a
-        // tile last frame, so a run that began at some other time is the case
-        // the first sweep cannot see, and a room whose shadow depended on when
-        // it was started is not a fixture.
         let mut carried = Selection::default();
         for step in 0..360 {
             let seconds = LAMP_PERIOD * step as f32 / 360.0;
@@ -1946,24 +1947,50 @@ mod tests {
             carried.update(&lights, eye);
             let mut fresh = Selection::default();
             fresh.update(&lights, eye);
-            for (held, how) in [(held_by(&carried), "carried"), (held_by(&fresh), "fresh")] {
+            for (selection, how) in [(&carried, "carried"), (&fresh, "fresh")] {
+                let held = held_by(selection);
                 assert_eq!(
                     held,
-                    vec![0],
+                    vec![0, 1],
                     "at {seconds:.3}s a {how} selection gave the atlas to {held:?} of \
-                     {lights:?} — the room's shadow is supposed to be the lamp's on every \
-                     frame, whenever the run started"
+                     {lights:?} — both of this room's punctual lights are supposed to be \
+                     shadowed on every frame, whenever the run started"
+                );
+                // Disjoint runs, inside the region, and the right size: the
+                // lamp's cube plus the downlight's one tile is the whole of it.
+                let mut used = [false; LIGHT_TILES];
+                for assignment in selection.slots().iter().flatten() {
+                    let span = tile_span(&lights[assignment.light]);
+                    let end = assignment.base + span;
+                    assert!(
+                        end <= LIGHT_TILES,
+                        "at {seconds:.3}s a {how} selection put light {} at {}..{end} of a \
+                         {LIGHT_TILES}-tile region",
+                        assignment.light,
+                        assignment.base
+                    );
+                    for tile in &mut used[assignment.base..end] {
+                        assert!(
+                            !*tile,
+                            "at {seconds:.3}s a {how} selection gave light {} a tile another \
+                             light already holds",
+                            assignment.light
+                        );
+                        *tile = true;
+                    }
+                }
+                assert_eq!(
+                    used.iter().filter(|tile| **tile).count(),
+                    POINT_FACES + 1,
+                    "at {seconds:.3}s a {how} selection covers the wrong tile count: the \
+                     lamp's cube is {POINT_FACES} tiles and the downlight's map is one"
                 );
             }
         }
-
-        let mut alone = Selection::default();
-        alone.update(&[spot()], eye);
-        assert!(
-            alone.slots().iter().flatten().count() == 1,
-            "the downlight on its own is refused a tile as well, so it is ineligible \
-             rather than outbid: {:?}",
-            spot()
+        eprintln!(
+            "lantern room: both punctual lights hold tiles at every phase of the orbit — \
+             {POINT_FACES} for the lamp's cube and 1 for the downlight, in a \
+             {LIGHT_TILES}-tile region"
         );
     }
 

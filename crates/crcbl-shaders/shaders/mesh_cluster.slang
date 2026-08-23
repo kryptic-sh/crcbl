@@ -129,7 +129,7 @@ static const uint SHADOW_CASCADES = 2;
 /// Matching `static const uint SHADOW_LIGHT_TILES` in `mesh.slang`, for
 /// `SHADOW_CASCADES`' reason exactly: `FrameUniforms` below sizes a second array
 /// with it.
-static const uint SHADOW_LIGHT_TILES = 6;
+static const uint SHADOW_LIGHT_TILES = 7;
 
 /// Matching `struct FrameUniforms` in `mesh.slang`.
 ///

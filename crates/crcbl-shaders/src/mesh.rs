@@ -64,7 +64,7 @@ pub const SHADOW_CASCADES: usize = 2;
 /// exactly: [`FrameUniforms::light_view_proj`] is an array of this length, so a
 /// block sized differently on the two sides puts every member after it at the
 /// wrong offset. The same drift test covers it.
-pub const SHADOW_LIGHT_TILES: usize = 6;
+pub const SHADOW_LIGHT_TILES: usize = 7;
 
 /// Tiles one point light's shadow map is: the six faces of a cube.
 ///
@@ -91,7 +91,7 @@ pub const SHADOW_TILE: u32 = 1024;
 /// at the origins they have always had — see `crcbl_render::shadow::tile_origin`,
 /// and the cascade goldens, which are what say the arrangement survived a change
 /// to the grid's shape.
-pub const SHADOW_ATLAS_COLUMNS: u32 = 4;
+pub const SHADOW_ATLAS_COLUMNS: u32 = 3;
 
 /// Tiles down it.
 ///
@@ -100,7 +100,7 @@ pub const SHADOW_ATLAS_COLUMNS: u32 = 4;
 /// would be an image wider than some devices' limit. `mesh.slang` addresses a
 /// tile through both extents, so the shape is free to change without the
 /// sampling side changing with it.
-pub const SHADOW_ATLAS_ROWS: u32 = 2;
+pub const SHADOW_ATLAS_ROWS: u32 = 3;
 
 const _: () = assert!(
     (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_CASCADES + SHADOW_LIGHT_TILES,
@@ -1732,13 +1732,16 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 720,
-            "at two cascades and six light tiles"
+            FRAME_UNIFORMS_SIZE, 784,
+            "at two cascades and seven light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272, 656, 672, 688, 704 — and
-        // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`. Three of the last
-        // four are the grid header's rows, which this side writes as one group.
+        // 224, 240, 256, 272, 720, 736, 752, 768 — and
+        // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
+        // `%_arr_mat4v4float_int_7`, which is the light array's own length.
+        // Three of the last four are the grid header's rows, which this side
+        // writes as one group. Read out of `spirv/mesh.spv` with `spirv-dis`,
+        // not derived from the arithmetic below — that is the point of them.
         let cascades = 64 * SHADOW_CASCADES;
         let lights = 64 * SHADOW_LIGHT_TILES;
         let offsets = [
