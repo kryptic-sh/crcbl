@@ -473,6 +473,12 @@ pub(crate) fn import_glb(json: &str) -> Result<GltfScene, StorageError> {
     import_glb_bytes(&glb(json, Some(&triangle_bin())))
 }
 
+/// [`import_glb`] for the rigged document, whose buffer is a different length.
+#[cfg(test)]
+pub(crate) fn import_rigged_glb(json: &str) -> Result<GltfScene, StorageError> {
+    import_glb_bytes(&glb(json, Some(&rigged_bin())))
+}
+
 /// Import raw bytes as `meshes/model.glb`.
 #[cfg(test)]
 pub(crate) fn import_glb_bytes(bytes: &[u8]) -> Result<GltfScene, StorageError> {
@@ -489,4 +495,191 @@ pub(crate) fn import_gltf_text(json: &str, bin: &[u8]) -> Result<GltfScene, Stor
     assets.write("meshes/model.gltf", json.as_bytes());
     assets.write("meshes/triangle.bin", bin);
     assets.import("meshes/model.gltf")
+}
+
+// ---------------------------------------------------------------------------
+// The rigged fixture
+// ---------------------------------------------------------------------------
+
+/// Which joint each of the triangle's three vertices is bound to.
+///
+/// `JOINTS_0` is `VEC4` of `UNSIGNED_BYTE` or `UNSIGNED_SHORT` per the
+/// specification — never float — and the three slots past the first carry zero
+/// weight, so only the leading index matters.
+pub(crate) const JOINTS: [[u16; 4]; 3] = [[0, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0]];
+
+/// How much of each vertex each joint owns. Rigid: one joint takes all of it.
+pub(crate) const WEIGHTS: [[f32; 4]; 3] = [[1.0, 0.0, 0.0, 0.0]; 3];
+
+/// The two joints' inverse bind matrices, column-major as the format stores
+/// them.
+///
+/// The root binds at the origin, so its inverse is the identity. The tip binds
+/// one unit up — `"translation": [0, 1, 0]` on its node — so its inverse
+/// translates one unit down, and the last column is where a column-major matrix
+/// keeps that.
+pub(crate) const INVERSE_BIND: [[f32; 16]; 2] = [
+    [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ],
+    [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, -1.0, 0.0, 1.0,
+    ],
+];
+
+/// The clip's two keyframe times, in seconds.
+pub(crate) const CLIP_TIMES: [f32; 2] = [0.0, 1.0];
+
+/// What the tip joint's rotation is at each of those times, as `xyzw`
+/// quaternions — the order the format stores them in.
+///
+/// Identity, then a quarter turn about Z. `sin` and `cos` of forty-five degrees
+/// rather than a decimal typed from memory: a quaternion for an angle `θ` carries
+/// `θ/2` in it, which is the step this fixture would otherwise get wrong
+/// silently.
+pub(crate) const CLIP_ROTATIONS: [[f32; 4]; 2] = [
+    [0.0, 0.0, 0.0, 1.0],
+    [
+        0.0,
+        0.0,
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ],
+];
+
+/// The bytes [`rigged_json`]'s accessors read.
+///
+/// | bytes       | what                                    |
+/// | ----------- | --------------------------------------- |
+/// | `0..102`    | the same geometry [`triangle_bin`] holds |
+/// | `102..104`  | two bytes of padding, so what follows is four-byte aligned |
+/// | `104..128`  | 3 × `[u16; 4]` joint indices             |
+/// | `128..176`  | 3 × `[f32; 4]` joint weights            |
+/// | `176..304`  | 2 × `[f32; 16]` inverse bind matrices    |
+/// | `304..312`  | 2 × `f32` keyframe times                |
+/// | `312..344`  | 2 × `[f32; 4]` keyframe rotations        |
+#[must_use]
+pub fn rigged_bin() -> Vec<u8> {
+    let mut bytes = triangle_bin();
+    // The accessors below are all four-byte types, and the specification puts
+    // each one's offset at a multiple of its component size. The indices left
+    // the cursor on an even address rather than a multiple of four.
+    bytes.resize(104, 0);
+    for joints in JOINTS {
+        for index in joints {
+            bytes.extend_from_slice(&index.to_le_bytes());
+        }
+    }
+    for weights in WEIGHTS {
+        for weight in weights {
+            bytes.extend_from_slice(&weight.to_le_bytes());
+        }
+    }
+    for matrix in INVERSE_BIND {
+        for cell in matrix {
+            bytes.extend_from_slice(&cell.to_le_bytes());
+        }
+    }
+    for time in CLIP_TIMES {
+        bytes.extend_from_slice(&time.to_le_bytes());
+    }
+    for rotation in CLIP_ROTATIONS {
+        for component in rotation {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+/// A document with a skin and one animation, with `buffer` as its single
+/// buffer's JSON object.
+///
+/// Deliberately the smallest thing that is still a rig: one skinned primitive,
+/// two joints in a parent/child pair, and a clip that turns the child. Every
+/// piece the importer has to read is present exactly once, so a test that loses
+/// one of them fails on that one rather than on a document that stopped being
+/// valid glTF.
+///
+/// Two accessors here carry `min` and `max` because the specification requires
+/// them rather than because anything reads them: an animation sampler's `input`,
+/// so a player knows a clip's duration without walking its samples, and
+/// `POSITION`, so a loader can bound a mesh without reading its vertices. This
+/// document validates under `gltf::Gltf::from_slice`, which is stricter than the
+/// `from_slice_without_validation` the importer itself uses — the fixture is
+/// held to the format, not merely to what this crate happens to accept.
+#[must_use]
+pub fn rigged_json(buffer: &str) -> String {
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0, 1] }}],
+  "nodes": [
+    {{ "name": "skinned", "mesh": 0, "skin": 0 }},
+    {{ "name": "joint-root", "children": [2] }},
+    {{ "name": "joint-tip", "translation": [0.0, 1.0, 0.0] }}
+  ],
+  "meshes": [{{
+    "name": "rigged-triangle",
+    "primitives": [{{
+      "attributes": {{
+        "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2,
+        "JOINTS_0": 4, "WEIGHTS_0": 5
+      }},
+      "indices": 3,
+      "material": 0
+    }}]
+  }}],
+  "skins": [{{
+    "name": "rig",
+    "skeleton": 1,
+    "joints": [1, 2],
+    "inverseBindMatrices": 6
+  }}],
+  "animations": [{{
+    "name": "wave",
+    "channels": [{{ "sampler": 0, "target": {{ "node": 2, "path": "rotation" }} }}],
+    "samplers": [{{ "input": 7, "output": 8, "interpolation": "LINEAR" }}]
+  }}],
+  "materials": [{{
+    "name": "paint",
+    "pbrMetallicRoughness": {{ "baseColorFactor": [0.25, 0.5, 0.75, 1.0] }}
+  }}],
+  "accessors": [
+    {{
+      "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+    }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" }},
+    {{ "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" }},
+    {{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }},
+    {{ "bufferView": 4, "componentType": 5123, "count": 3, "type": "VEC4" }},
+    {{ "bufferView": 5, "componentType": 5126, "count": 3, "type": "VEC4" }},
+    {{ "bufferView": 6, "componentType": 5126, "count": 2, "type": "MAT4" }},
+    {{
+      "bufferView": 7, "componentType": 5126, "count": 2, "type": "SCALAR",
+      "min": [0.0], "max": [1.0]
+    }},
+    {{ "bufferView": 8, "componentType": 5126, "count": 2, "type": "VEC4" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": 36 }},
+    {{ "buffer": 0, "byteOffset": 36, "byteLength": 36 }},
+    {{ "buffer": 0, "byteOffset": 72, "byteLength": 24 }},
+    {{ "buffer": 0, "byteOffset": 96, "byteLength": 6 }},
+    {{ "buffer": 0, "byteOffset": 104, "byteLength": 24 }},
+    {{ "buffer": 0, "byteOffset": 128, "byteLength": 48 }},
+    {{ "buffer": 0, "byteOffset": 176, "byteLength": 128 }},
+    {{ "buffer": 0, "byteOffset": 304, "byteLength": 8 }},
+    {{ "buffer": 0, "byteOffset": 312, "byteLength": 32 }}
+  ],
+  "buffers": [{buffer}]
+}}"#
+    )
 }

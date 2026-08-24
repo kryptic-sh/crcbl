@@ -655,9 +655,135 @@ mod tests {
     use super::GLB_HEADER_LEN;
     use crate::gltf_fixture::{
         Assets, BIN_CHUNK_BUFFER, EXTERNAL_BUFFER, glb, import_glb, import_glb_bytes,
-        import_gltf_text, replacing, textured_parts, triangle_bin, triangle_json,
+        import_gltf_text, import_rigged_glb, replacing, rigged_json, textured_parts, triangle_bin,
+        triangle_json,
     };
     use crcbl_assets::StorageError;
+
+    /// The rigged fixture is real glTF, and its geometry survives the rig.
+    ///
+    /// This asserts nothing about skins or animations being *read* — they are
+    /// not, yet. What it pins is that the document parses, which is the part a
+    /// hand-written buffer layout gets wrong: an accessor whose offset is not a
+    /// multiple of its component size, a `bufferView` that runs past the
+    /// buffer, or a `JOINTS_0` declared as float would all fail here rather
+    /// than much later, in whatever first tries to read them.
+    #[test]
+    fn the_rigged_fixture_is_a_document_this_importer_accepts() {
+        let scene = import_rigged_glb(&rigged_json(BIN_CHUNK_BUFFER))
+            .expect("the rigged fixture should be valid glTF");
+        assert_eq!(scene.meshes().len(), 1, "{:?}", scene.meshes().len());
+        assert_eq!(scene.materials().len(), 1);
+    }
+
+    /// The rig in the fixture says what this file thinks it says.
+    ///
+    /// The test above only asks that the document parses, and a hand-written
+    /// buffer layout can be well-formed and still wrong: shifting the payload
+    /// while leaving every `byteOffset` alone leaves each accessor in range and
+    /// reading the wrong bytes. Nothing in the importer reads a skin yet, so the
+    /// values are checked here against the constants the fixture was built
+    /// from — otherwise the extraction that comes next would be written against
+    /// a rig nobody had confirmed.
+    #[test]
+    fn the_rigged_fixture_holds_the_rig_it_declares() {
+        use crate::gltf_fixture::{CLIP_ROTATIONS, CLIP_TIMES, INVERSE_BIND, rigged_bin};
+
+        let bytes = glb(&rigged_json(BIN_CHUNK_BUFFER), Some(&rigged_bin()));
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("the fixture should parse");
+        let blob = gltf.blob.as_deref().expect("a GLB carries its buffer");
+        let buffer = |_: gltf::Buffer<'_>| Some(blob);
+
+        let skin = gltf.skins().next().expect("one skin");
+        assert_eq!(skin.name(), Some("rig"));
+        let joints: Vec<usize> = skin.joints().map(|node| node.index()).collect();
+        assert_eq!(joints, vec![1, 2], "the joints are the two joint nodes");
+        assert_eq!(skin.skeleton().map(|node| node.index()), Some(1));
+
+        let matrices: Vec<[[f32; 4]; 4]> = skin
+            .reader(buffer)
+            .read_inverse_bind_matrices()
+            .expect("the skin declares inverse bind matrices")
+            .collect();
+        assert_eq!(matrices.len(), INVERSE_BIND.len());
+        for (read, declared) in matrices.iter().zip(INVERSE_BIND) {
+            // `read` arrives as four columns; the constant is the same numbers
+            // flat, in the column-major order the format stores them.
+            let flat: Vec<f32> = read.iter().flatten().copied().collect();
+            assert_eq!(flat, declared.to_vec(), "an inverse bind matrix differs");
+        }
+
+        let animation = gltf.animations().next().expect("one animation");
+        assert_eq!(animation.name(), Some("wave"));
+        let channel = animation.channels().next().expect("one channel");
+        assert_eq!(channel.target().node().index(), 2);
+        assert!(
+            matches!(
+                channel.target().property(),
+                gltf::animation::Property::Rotation
+            ),
+            "the channel should drive rotation"
+        );
+
+        let reader = channel.reader(buffer);
+        let times: Vec<f32> = reader.read_inputs().expect("keyframe times").collect();
+        assert_eq!(times, CLIP_TIMES.to_vec());
+        let gltf::animation::util::ReadOutputs::Rotations(rotations) =
+            reader.read_outputs().expect("keyframe outputs")
+        else {
+            panic!("the channel's outputs should be rotations");
+        };
+        let read: Vec<[f32; 4]> = rotations.into_f32().collect();
+        assert_eq!(read, CLIP_ROTATIONS.to_vec());
+    }
+
+    /// The rig's constants mean what their names say.
+    ///
+    /// The test above compares the buffer against the constants it was written
+    /// from, which catches a layout that shifted and cannot catch a constant
+    /// that is simply wrong — change one and both sides move together. These
+    /// two facts are derivable instead, so they are derived: an inverse bind
+    /// matrix composed with the bind transform it inverts is the identity, and
+    /// a quaternion for a quarter turn about Z carries *half* that angle and so
+    /// takes x to y.
+    #[test]
+    fn the_rigs_constants_are_the_transforms_they_claim_to_be() {
+        use crate::gltf_fixture::{CLIP_ROTATIONS, INVERSE_BIND};
+        use glam::{Mat4, Quat, Vec3};
+
+        // The tip joint binds at `"translation": [0, 1, 0]` in the document, and
+        // the root at the origin.
+        for (bind, inverse) in [
+            (Vec3::ZERO, INVERSE_BIND[0]),
+            (Vec3::new(0.0, 1.0, 0.0), INVERSE_BIND[1]),
+        ] {
+            let composed = Mat4::from_cols_array(&inverse) * Mat4::from_translation(bind);
+            let drift = (composed - Mat4::IDENTITY)
+                .to_cols_array()
+                .iter()
+                .fold(0.0f32, |worst, cell| worst.max(cell.abs()));
+            assert!(
+                drift < 1.0e-6,
+                "the inverse bind matrix for a joint bound at {bind} is not its inverse: {composed}"
+            );
+        }
+
+        let identity = Quat::from_array(CLIP_ROTATIONS[0]);
+        assert!(
+            (identity * Vec3::X).distance(Vec3::X) < 1.0e-6,
+            "the first keyframe should be the identity rotation"
+        );
+        let quarter = Quat::from_array(CLIP_ROTATIONS[1]);
+        assert!(
+            quarter.is_normalized(),
+            "a rotation quaternion has to be a unit one"
+        );
+        assert!(
+            (quarter * Vec3::X).distance(Vec3::Y) < 1.0e-6,
+            "a quarter turn about Z should take x to y, and takes it to {}",
+            quarter * Vec3::X
+        );
+    }
 
     /// The fixture with one thing wrong, imported. Panics rather than returns
     /// if the import *succeeded*, so a mutation that stopped being malformed
