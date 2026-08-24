@@ -19,14 +19,21 @@
 // source, so a field this pass does not write is a field holding whatever the
 // allocator last put there.
 //
-// # Nothing dispatches this yet
+// # What dispatches this
 //
-// There is no render-graph pass and no host-side consumer anywhere in the tree.
-// This slice is the shader and the layout `crcbl_shaders::skinning` pins against
-// it, deliberately and only that; the pass, the pool's transient region and the
-// prev/current ping-pong that topic 17's 2026-07-27 correction asks for are the
-// slices after it. The shader is finished — it is not a stub — but a reader
-// looking for the thing that runs it will not find one.
+// `crcbl_render::skinning::Skinning`: it reserves the pool's transient region
+// with the prev/current ping-pong topic 17's 2026-07-27 correction asks for,
+// uploads the palette and the bindings, and records one dispatch per skinned
+// range. `crcbl_render::skinning::skin_vertex` is this entry point rewritten in
+// Rust, term for term, as the oracle a readback compares against.
+//
+// **No test has ever executed this kernel**, which is a different claim from
+// the layout being checked: every test of this file reads its source or its
+// artifacts. In particular the `vertex_count` bound below is what stops the
+// last workgroup's tail invocations from overwriting the vertices of whatever
+// the pool put next, and deleting it passes the whole suite. `docs/backlog.md`
+// records that, and the readback that closes it belongs where this crate's
+// other kernels are executed: `crates/crcbl-vk/tests/vk_e2e/`.
 //
 // # Compute, and every backend can run it
 //

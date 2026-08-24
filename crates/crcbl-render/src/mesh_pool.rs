@@ -250,6 +250,14 @@ pub enum MeshPoolError {
         /// permanently withdrawn by generation exhaustion.
         in_use: u32,
     },
+    /// A reservation of no vertices, which has no address to hand back.
+    ///
+    /// Its own variant rather than [`EmptyMesh`](Self::EmptyMesh): a
+    /// [`reserve_vertices`](MeshPool::reserve_vertices) caller has no indices
+    /// to have got wrong, and a message naming them would send the reader
+    /// looking for a mistake that is not there.
+    #[error("a reserved vertex run needs at least one vertex")]
+    EmptyReservation,
     /// A mesh with no vertices or no indices.
     #[error("a mesh needs both vertices and indices; got {vertices} and {indices}")]
     EmptyMesh {
@@ -898,6 +906,56 @@ impl MeshPool {
         self.index_alloc
             .free(resident.range.base_index, resident.range.index_count);
         Ok(true)
+    }
+
+    /// Takes `count` vertices of the pool for a run **no upload fills**, and
+    /// returns where it starts.
+    ///
+    /// The same suballocator [`MeshPool::upload`] draws from, without the
+    /// staging copy, the mesh-table entry or the residency gate — because the
+    /// caller is not uploading a mesh. [`crate::skinning`]'s transient skinned
+    /// region is what this exists for: a run of the pool a compute pass writes
+    /// and the vertex stage then pulls, whose bytes never come from the host at
+    /// all.
+    ///
+    /// Two consequences, both of them the point rather than gaps:
+    ///
+    /// * **The space is undefined until something writes it.** There is no
+    ///   staging buffer and no copy, so a draw over a reserved run that no
+    ///   dispatch has filled reads whatever the allocation came with.
+    /// * **It is disjoint from every other live allocation**, which is what
+    ///   makes the skinning kernel's precondition true rather than merely
+    ///   asserted: the free list never hands out an address twice, so a range
+    ///   reserved here cannot overlap the bind-pose range a mesh occupies.
+    ///
+    /// It comes back through
+    /// [`release_vertices`](Self::release_vertices) rather than
+    /// [`free`](Self::free): there is no handle, no table entry and no
+    /// generation here, so nothing can tell a second release from a first.
+    ///
+    /// # Errors
+    ///
+    /// [`MeshPoolError::EmptyReservation`] for a zero-length request, which has
+    /// no address to hand back, and [`MeshPoolError::PoolExhausted`] when no
+    /// single free block is large enough — see the [module docs](self) on why
+    /// that can happen with the space free in total.
+    pub fn reserve_vertices(&mut self, count: u32) -> Result<u32, MeshPoolError> {
+        if count == 0 {
+            return Err(MeshPoolError::EmptyReservation);
+        }
+        self.vertex_alloc
+            .alloc(count)
+            .ok_or_else(|| self.vertex_alloc.exhausted("vertex", count))
+    }
+
+    /// Gives a run taken by [`reserve_vertices`](Self::reserve_vertices) back.
+    ///
+    /// `base` and `count` must be exactly what that call handed out and asked
+    /// for. Releasing a run twice, or one that was never reserved, corrupts the
+    /// free list — a debug build catches the overlap it produces, and a release
+    /// build hands the same address out twice.
+    pub fn release_vertices(&mut self, base: u32, count: u32) {
+        self.vertex_alloc.free(base, count);
     }
 
     /// Vertices free, and the largest single run of them: the pair that tells

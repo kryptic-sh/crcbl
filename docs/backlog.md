@@ -34,38 +34,45 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
-### The skinning shader exists and nothing dispatches it
+### The skinning kernel has never been executed
 
-`crates/crcbl-shaders/shaders/skinning.slang` and `crcbl_shaders::skinning`
-landed on 2026-08-25: the compute kernel of `docs/plan/17-animation.md`'s
-skinning prepass, with artifacts for all four backends and its layout pinned
-against what `slangc` emitted. There is **no render-graph pass, no bind group
-and no host consumer**, so nothing has ever executed it — the artifacts are
-validated (naga reads the WGSL) and the kernel is not.
+`crcbl_render::skinning::Skinning` dispatches
+`crates/crcbl-shaders/shaders/skinning.slang` as of 2026-08-25: it reserves the
+pool's transient region with the prev/current ping-pong, uploads the palette and
+the bindings, refuses a binding naming a joint outside its own palette, and
+records one dispatch per range. The layout is pinned against what `slangc`
+emitted and `crcbl_render::skinning::skin_vertex` is the kernel rewritten in
+Rust, term for term, asserted against hand-computed values.
 
-Three things the next slice owns, each named where it has to be solved rather
-than where it was noticed:
+**None of that runs a shader.** `crcbl-render` has no way to execute one — its
+only backend is `crcbl_hal::null`, whose `dispatch` records a command and
+returns, and it cannot gain a real one because `crcbl-vk` dev-depends on
+`crcbl-render` and the cycle is argued down by name in that crate's own docs.
+The null recorder proves the group counts, the dispatch order, the bind groups
+and the exact bytes that reached each buffer; it proves nothing about the
+arithmetic.
 
-- **The transient pool region.** `Params::to_bytes` panics on an input range
-  that overlaps its output range, which enforces the precondition at the only
-  place this slice could. What has to actually _make_ it true is the allocator
-  that hands out the skinned region of `crcbl_render::mesh_pool` — and per the
-  plan's own 2026-07-27 correction, that region is double-buffered prev/current
-  from day one, because TAA on deforming geometry needs the previous frame's
-  skinned positions and retrofitting it is a pipeline rewrite.
-- **Joint indices are not validated at import.** `crcbl-scene` checks that
-  `JOINTS_0` and `WEIGHTS_0` are as long as `POSITION`, and nothing checks an
-  index against the skin's joint count, because a primitive does not know its
-  skin at that point. The shader clamps, so a malformed asset draws wrongly
-  rather than reading past a storage buffer — but the consumer that builds the
-  skin-binding buffer _does_ know the palette length and is where it should be
-  refused loudly.
-- **The dispatch bound is unguarded by any test.**
-  `if (index >= skin.vertex_count) return;` is what stops the tail invocations
-  of the last workgroup from overwriting the next mesh's vertices. Deleting that
-  line passes every test in the workspace today, because every test of this
-  shader reads its source and none runs it. A readback test over a known palette
-  is what closes it, and that needs the pass.
+So the concrete hole: **deleting `if (index >= skin.vertex_count) return;` from
+the kernel passes every test in the workspace.** That line is what stops the
+last workgroup's tail invocations from writing over whatever the pool put after
+the skinned range — not a hypothetical, since the region is allocated out of the
+same free list as every other mesh.
+
+What closes it is a readback where this crate's other kernels are executed:
+`crates/crcbl-vk/tests/vk_e2e/`, whose `mesh.rs` already cites
+`crcbl_render::cull::visible_instances` as the oracle for exactly this shape. It
+has to cover a vertex with all its weight on one joint (transformed exactly), a
+vertex blended across two, a normal under a joint carrying non-uniform scale,
+and a dispatch whose vertex count is not a multiple of the workgroup size — that
+last one is the case the bound exists for, and it is the one that must go red
+when the line is deleted.
+
+Also open, and smaller: **joint indices are not validated at import.**
+`crcbl-scene` checks that `JOINTS_0` and `WEIGHTS_0` are as long as `POSITION`,
+and nothing checks an index against the skin's joint count, because a primitive
+does not know its skin there. `Skinning::begin_frame` now refuses it, which is
+the first place both are Rust values at once; the shader's clamp remains the
+backstop.
 
 ### `OffscreenSetup::finish` cannot see a WebGPU device error
 

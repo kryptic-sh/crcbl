@@ -46,8 +46,46 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   are **widened** to `u32` rather than packed, because `std430` padding makes
   the packed form exactly as wide and WGSL has no 16-bit integer to unpack into.
 
-  **Nothing dispatches it yet**: there is no render-graph pass and no host-side
-  consumer, and those are the slices after this one.
+  The host side — the render-graph pass, the transient pool region and the
+  buffers it reads — is `crcbl_render::skinning`, below.
+
+- **The skinning compute pass, `crcbl_render::skinning`.** What dispatches
+  `skinning.slang`. `Skinning` owns one frame's joint-palette and skin-binding
+  buffers and a uniform block and bind group per skinned range, and
+  `Skinning::add_pass` records one dispatch per range into the render graph,
+  each sized from its own vertex count and the kernel's workgroup size. The
+  vertex pool is imported into the graph as one resource read and written
+  through one binding, so the barrier that orders the pass against the mesh
+  passes that draw its output is the graph's.
+
+  `SkinnedRegion` is the transient region of `crcbl_render::mesh_pool`'s vertex
+  pool the pass writes into, and it is **double-buffered from the first
+  version**, per `docs/plan/17-animation.md`'s 2026-07-27 correction: two runs
+  of equal length that alternate with `Skinning::parity`, because TAA on
+  deforming geometry needs the previous frame's skinned positions and
+  retrofitting that is a skinning-pipeline rewrite. **Nothing reads the previous
+  half yet** — there is no TAA pass — so the memory it costs is bought now to
+  keep the pool layout from having to change later. `MeshPool::reserve_vertices`
+  and `MeshPool::release_vertices` are the pool API it draws from: a run no
+  upload fills, disjoint from every other live allocation, which is what makes
+  the kernel's non-overlapping-ranges precondition true rather than merely
+  asserted.
+
+  **`Skinning::begin_frame` refuses a skin binding naming a joint its range's
+  palette has not got**, and names the range, the vertex, the joint slot and the
+  index. The shader can only clamp such an index, and `crcbl-scene` cannot check
+  it at import because a glTF primitive does not know which skin will be applied
+  to it — so this call, the one place the palette and the bindings are in hand
+  together, is where a malformed rig is caught. Empty palettes, binding runs
+  that are not one per vertex, and frames past any capacity are refused by name
+  for the same reason: a character silently missing from a frame is what these
+  bounds exist to prevent.
+
+  **Nothing in the workspace executes the kernel yet.** `crcbl-render` depends
+  on no backend, so its own tests check the recorded command stream and the
+  bytes that reached each buffer; `crcbl_render::skinning::skin_vertex` is the
+  CPU oracle a readback will be compared against, on the terms
+  `crcbl_render::cull::visible_instances` already sets.
 
 - **`apps/viewer` plays the clip in the document it opened, and `B` draws the
   posed skeleton.** The rig is converted into `crcbl::anim`'s `Skeleton` and

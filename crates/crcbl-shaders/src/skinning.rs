@@ -15,14 +15,18 @@
 //! [`crate::mesh::MeshVertex`] byte for byte. Vertex pulling never learns
 //! skinning exists.
 //!
-//! # Nothing dispatches it yet
+//! # What dispatches it
 //!
-//! There is no render-graph pass, no bind group and no host-side consumer
-//! anywhere in the workspace. This is the shader and the layout, and only that;
-//! the pass, the pool's transient region and the prev/current ping-pong topic
-//! 17's 2026-07-27 correction asks for are later slices. Nothing here is a stub
-//! — the shader is complete and its artifacts are committed — but a reader
-//! looking for the thing that runs it will not find one.
+//! `crcbl_render::skinning::Skinning` builds the bind group this module
+//! describes, reserves the pool's transient region with the prev/current
+//! ping-pong topic 17's 2026-07-27 correction asks for, and records one
+//! dispatch per skinned range.
+//!
+//! **No test has ever executed the kernel**, which is not the same as the
+//! layout being unchecked — this module pins every offset against what `slangc`
+//! emitted, and none of that runs a shader. The readback that would belongs
+//! with this crate's other executed kernels, in `crates/crcbl-vk/tests/vk_e2e/`,
+//! and `docs/backlog.md` says what it has to cover.
 //!
 //! # The bind group the pass will need
 //!

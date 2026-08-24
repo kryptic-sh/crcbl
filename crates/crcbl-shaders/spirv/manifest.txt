@@ -216,14 +216,14 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [skinning]
 source = shaders/skinning.slang
-source-sha256 = b2eb1ea2ecd3360e9b33e234850b80e1b5b768a352a2296d3f41a2c9e088c82a
+source-sha256 = 76c47aef4cfb43503e9070ebd69605c0bcf74196037bbda857a1536f5dc491bd
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/skinning.spv
 spirv-sha256 = a37f7b99ffd5317469ca903250fa49589722d495b47ddf24f8e467ce4f193ddd
 wgsl = wgsl/skinning.wgsl
 wgsl-sha256 = 82f6b7cafa873babc23979874c1dc089857773ed0ab90903b754ef9160a46f67
 msl = msl/skinning.metal
-msl-sha256 = 44309bf6ec1779076d3966b1757ab73f9f19e7c4a2bb888ace9a63ea22e415f2
+msl-sha256 = 2fade84fcc0b2d06de7959eac54a54aab15d950b522114f789224a2336bf8d0c
 dxil = computeMain:dxil/skinning.computeMain.dxil:5b0d9b30bf4296213b15efdcf6702c791093cb1a25577d2de77cb135fd8db9e4
 entry-points = computeMain:glcompute
 
