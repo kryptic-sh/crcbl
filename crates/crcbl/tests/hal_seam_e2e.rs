@@ -2008,7 +2008,8 @@ fn a_binds_dynamic_offsets_are_held_to_the_layout_that_declared_them() {
     match bind_with(&[u32::try_from(window).expect("an alignment fits a u32")]) {
         Ok(command_buffer) => device.destroy_command_buffer(command_buffer),
         Err(error) => panic!(
-            "one aligned offset for one dynamic binding is the call this rule exists to              permit, and it was refused: {error:?}"
+            "one aligned offset for one dynamic binding is the call this rule exists \
+             to permit, and it was refused: {error:?}"
         ),
     }
 
@@ -2020,7 +2021,8 @@ fn a_binds_dynamic_offsets_are_held_to_the_layout_that_declared_them() {
         Ok(command_buffer) => {
             device.destroy_command_buffer(command_buffer);
             panic!(
-                "{what} was recorded — this backend is not checking a bind's dynamic offsets                  against the layout, so a caller's mistake reaches the driver"
+                "{what} was recorded — this backend is not checking a bind's dynamic \
+                 offsets against the layout, so a caller's mistake reaches the driver"
             );
         }
     };
