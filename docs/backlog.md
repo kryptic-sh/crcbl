@@ -16772,6 +16772,57 @@ with the flight instruments over it. What that leaves:
   thousand revolutions, but nothing has run _this sample_ at ×1000 for long
   enough to say the frame hierarchy, the fuel and the phase logic survive it.
 
+## sandbox is not in the windowed gate (2026-08-24)
+
+`tools/run-samples-windowed.sh` is the only check that a sample brings up a real
+surface rather than the headless offscreen ring. Its list was hand-written and
+had fallen behind: `orbit` and `sandbox` both open windows and neither had ever
+been added, so their windowed paths had never been gated. `orbit` is in now, and
+`tools/check-windowed-samples.sh` holds the list to `apps/*/src/main.rs` so it
+cannot drift again.
+
+`sandbox` is exempted there rather than fixed, and this is why: the harness
+hands every sample an extent, and `sandbox` has no `--size` flag — it opens at
+its own default, so the extent assertion fails on a run that otherwise presented
+120 frames cleanly. Verified locally under Xvfb with openbox: the summary line
+reads `sandbox: 120 frames, 87 ticks, 4 events on the x11 shell at 1280x720`.
+
+Closing it means giving `sandbox` a `--size` flag of the shape every other
+sample already takes. That was out of scope for the change that found it — a new
+demo — and it touches a crate no demo depends on. Small, and worth doing the
+next time anything else goes near `apps/sandbox`.
+
+## bracket does not yet drive the transport (2026-08-24)
+
+The demo runs `bracket::sim::Sim` directly. That matches the decision already
+recorded above — "client and matchmaking server in-process, only the transport
+is absent" — and it satisfies sample rule 7, which asks for a wasm build on the
+demo site and nothing about netcode. So this is a slice boundary, not a gap in
+what shipped.
+
+What it leaves undone is the thing `docs/plan/sample/16-bracket.md` says bracket
+is _for_: "the first consumer of the transport that is pure request/response —
+no snapshots, no interpolation, no tick", against a protocol that "has only ever
+been driven by tick-shaped traffic".
+
+**What that needs, and it is engine work rather than sample work.**
+`ClientToServer::Command` is decoded and dropped — `crcbl-server/src/lib.rs`'s
+receive loop has an arm for it whose body is empty, and whose comment says so
+plainly ("nothing on this server consumes one yet ... a caller must not read
+this arm as a command being acted on"). Queueing, leaving the queue and
+reporting a result are commands: each is a request that must be answered once
+and stay answered, which is exactly what the `Input` path is not. So the slice
+is a way for a `GameModule` to receive a command and reply to it.
+
+Routing the demo through `Loopback` **without** that would be worse than what is
+there now — it would put the matchmaker behind a tick-shaped input channel and
+look like the claim while not being it.
+
+Also still absent, and deliberately: the multi-client half. `Server` holds one
+`transport: T` and one `SessionManager`, so "many connections, low bandwidth"
+has no implementation. A browser demo cannot show it either way — both ends live
+in one wasm module — so it belongs with the native milestone, not this one.
+
 ## Narrow matchmaking stretches an Elo ladder (2026-08-24)
 
 Found while building `apps/bracket`, and it needs a decision before the sample

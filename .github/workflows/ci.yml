@@ -126,6 +126,12 @@ jobs:
       - name: Every demo the site builds is run through the browser gate
         run: ./tools/check-browser-gate-demos.sh
 
+      # The same seam, asked of the windowed gate's own hand-written list.
+      # `orbit` and `sandbox` both open windows and neither had ever been added
+      # to it, so their windowed path went ungated for as long as they existed.
+      - name: Every sample that opens a window is run by the windowed gate
+        run: ./tools/check-windowed-samples.sh
+
       # `docs/backlog.md` is the working record and its worth is that an entry
       # can be acted on months later. A moved file breaks that silently: the
       # reader greps the cited path, finds nothing, and concludes the work was

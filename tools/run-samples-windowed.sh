@@ -95,11 +95,13 @@ VIEWER_MODEL="${RUNTIME_DIR}/triangle.glb"
 SAMPLES=(
     "asteroids 960x720"
     "bare 960x720"
+    "bracket 960x720"
     "breakout 960x720"
     "flappy 960x720"
     "horde 960x720"
     "hud 960x720"
     "lantern 960x720"
+    "orbit 960x720"
     "quarry 960x720"
     "viewer 960x720 ${VIEWER_MODEL}"
 )
