@@ -14,6 +14,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `GpuInstance` naming a mesh-table slot the description never filled no
+  longer reads past the level-selection tables.** `draw_gen.slang`'s
+  `mesh_levels_of` indexes them with `GpuInstance::mesh` and no bound, and its
+  own doc comment states the invariant it rests on — "every entry an instance
+  can name is filled" — but `ForwardRenderer::with_scene` sized them to the
+  description's meshes, while `MeshPool::alias` hands out slots past every one
+  of them. What that read found decided the frame: zeros resolved to mesh 0 and
+  drew another mesh's geometry, and a live `group_count` sent `select_level`'s
+  loop over a count no allocation backs, which on radv is a hard GPU recovery
+  rather than a wrong picture. The tables are now sized by the mesh table's
+  capacity, so the invariant the shader states is one the renderer keeps.
+
 ### Added
 
 - **`crcbl_scene::GltfNode::skin`, which node a document's skin is worn by.**

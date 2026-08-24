@@ -2369,15 +2369,33 @@ impl ForwardRenderer {
         // **A DAG keeps that default on the mesh path**, which is how a device
         // already descending it per cluster avoids a second, coarser cut on top
         // of it — the suppression is data rather than a branch in the shader.
-        let table_len = usize::try_from(
-            residents
-                .iter()
-                .flat_map(|resident| resident.levels.iter().copied())
-                .max()
-                .unwrap_or_else(|| unreachable!("check_scene refused an empty description"))
-                + 1,
-        )
-        .unwrap_or_else(|_| unreachable!("a table of a few meshes"));
+        //
+        // **Sized by the mesh table's capacity, not by the meshes resident in
+        // it**, because that is the invariant `draw_gen.slang`'s
+        // `mesh_levels_of` states and indexes on: "every entry an instance can
+        // name is filled". An instance may name any table slot — a
+        // `MeshPool::alias` hands out one past every description mesh — and the
+        // read is unbounded, so a table sized to the description alone is an
+        // out-of-range read of whatever the packer laid down next. What it finds
+        // there decides the frame: zeros resolve to mesh 0 and draw another
+        // mesh's geometry, and a live `group_count` sends `select_level`'s loop
+        // over a count no allocation backs, which on radv is a hard GPU recovery
+        // rather than a wrong picture.
+        let table_len = usize::try_from(scene.capacities.meshes)
+            .unwrap_or(usize::MAX)
+            .max(
+                usize::try_from(
+                    residents
+                        .iter()
+                        .flat_map(|resident| resident.levels.iter().copied())
+                        .max()
+                        .unwrap_or_else(|| {
+                            unreachable!("check_scene refused an empty description")
+                        })
+                        + 1,
+                )
+                .unwrap_or_else(|_| unreachable!("a table of a few meshes")),
+            );
         let mut level_meshes: Vec<u32> = (0..table_len)
             .map(|id| u32::try_from(id).unwrap_or_else(|_| unreachable!("bounded by table_len")))
             .collect();
@@ -8604,6 +8622,49 @@ mod tests {
                 .expect("a description that fits exactly is not too large for itself");
         renderer.destroy(device.as_ref());
         recorder.assert_valid();
+    }
+
+    /// **The level tables cover every mesh-table slot an instance can name**,
+    /// not only the slots the description filled.
+    ///
+    /// `draw_gen.slang`'s `mesh_levels_of` reads `gen.mesh_levels_at + mesh *
+    /// MESH_LEVELS_WORDS` with no bound, and says in its own doc comment that
+    /// "every entry an instance can name is filled". An instance can name any
+    /// table slot — [`MeshPool::alias`] hands out one past every description
+    /// mesh — so a table sized to the description alone makes that read land in
+    /// whatever the packer put next.
+    ///
+    /// Growing the capacity by a known number of slots grows the tables buffer
+    /// by exactly what those slots occupy: one `MeshLevels` record and one
+    /// `level_meshes` word each. The arithmetic is the assertion, so nothing
+    /// here is a number to keep in step by hand.
+    #[test]
+    fn the_level_tables_cover_every_slot_the_mesh_table_has() {
+        const EXTRA: u32 = 4;
+
+        let sized = |extra: u32| {
+            let (recorder, device, queue) = open();
+            let mut scene = scene::demo();
+            scene.capacities.meshes += extra;
+            let renderer =
+                ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                    .expect("a description with room to spare");
+            let size = recorder
+                .buffer_bytes(renderer.draws.tables())
+                .expect("the table buffer is live")
+                .len();
+            renderer.destroy(device.as_ref());
+            recorder.assert_valid();
+            size
+        };
+
+        let grown = sized(EXTRA) - sized(0);
+        let want = EXTRA as usize * (crcbl_shaders::level_select::MESH_LEVELS_STRIDE + 4);
+        assert_eq!(
+            grown, want,
+            "{EXTRA} more table slots must add {EXTRA} more selection records and {EXTRA} more \
+             level words, and added {grown} bytes"
+        );
     }
 
     /// The property the whole arrangement exists for: the pool's second

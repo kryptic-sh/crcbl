@@ -34,18 +34,65 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
-### Nothing draws a skinned mesh yet, and the seam has three limits
+### BLOCKING — a skinned region is unreachable from the vertex stage
 
-`crcbl_render::forward` gained the seam an application reaches the skinning pass
-through — `reserve_skinned`, `add_skinned_instance`, `begin_skinned_frame`,
-`add_skinned_passes` — and `crcbl_scene::gltf_render` carries a primitive's
-per-vertex bindings out as `MeshOrigin::bindings`. **No application calls any of
-it.** `apps/viewer` still draws a skeleton rather than skinned geometry, and the
-demo that would close it is `docs/plan/sample/09-puppet.md`. Until one does, the
-seam is exercised only by `crcbl-render`'s own tests, and the kernel runs on no
-backend but Vulkan (see the entry below).
+**The two mesh-table entries `SkinnedMesh` creates cannot be drawn through, and
+the design that produced them is contradicted by the shader.** Reproduced
+natively on 2026-08-25 by a Vulkan test that draws a skinned cube and reads the
+colour target back: changing the palette to one that slides half the cube a
+cube-and-a-half sideways changes **zero pixels** — the two frames are
+bit-identical — on radv and on lavapipe alike. The subsystem is green everywhere
+because nothing anywhere rendered a skinned mesh and looked at the result.
 
-Three things a caller meets that are documented rather than fixed:
+**Why.** A draw's base vertex comes from the _bucket's_ mesh entry, never from
+the instance's. `crates/crcbl-shaders/shaders/mesh.slang` reads
+`GpuMesh mesh = meshes[draw.mesh]` and then
+`vertices[index + mesh.base_vertex]`, and `DrawConstants::mesh` is documented in
+that file as "the bucket's mesh, not the instance's". Buckets are built once, in
+`ForwardRenderer::with_scene`, by walking the description's residents;
+`reserve_skinned` adds none, and `MeshPool::alias` hands out a table slot past
+every one of them. So `skinned_gpu_instance` writes an alias id into
+`GpuInstance::mesh` that the vertex stage never consults, and the dispatch's
+output — which `crates/crcbl-vk/tests/vk_e2e/skinning.rs` proves is written
+correctly, every frame, into the half the parity names — is simply never read.
+
+What is drawn instead is whatever the alias id resolves to in `draw_gen.slang`'s
+level tables. Sizing those by the mesh table's capacity (shipped separately)
+makes that read in range rather than undefined, so the symptom is now a stable
+"instance no bucket matches", not a hard GPU recovery — but it is still not the
+skinned geometry.
+
+**The fix is a design call, not a patch.** Two shapes, both real work:
+
+- **A per-instance base-vertex override.** The vertex stage takes the base from
+  the instance's own entry when a flag says to, and from the bucket otherwise —
+  the bucket must stay authoritative for a `Geometry::Dag`, whose level is
+  chosen per instance on the GPU and whose base belongs to the _selected_ level.
+  Needs a bit in `GpuInstance::flags`, a `mesh.slang` change, and the alias's
+  level-table entry pointing at the source's level run so the instance still
+  finds the source's bucket. `MeshPool::alias`'s second entry may then be
+  unnecessary — the parity would live on the instance instead — which would
+  delete a mechanism rather than add one.
+- **A bucket and a level-table entry per skinned region.** Keeps the mesh table
+  authoritative and changes no shader, at the cost of growing tables that are
+  currently built once at `with_scene`, before any region is reserved.
+
+The first is smaller, removes a mechanism, and matches what the industry does —
+a skinned instance carries the offset of the region it was deformed into. The
+second avoids touching a `slangc` artifact. Neither has been started.
+
+**Do not reproduce this with `scene::demo()`.** The full demo scene plus
+`reserve_skinned` plus `add_skinned_instance` used to hard-reset the GPU on radv
+(`the CS has been cancelled because the context is lost. This context is guilty of a hard recovery.`)
+and run a single frame for about a minute on lavapipe, because the dunes DAG put
+live data where the out-of-range level read landed. The table sizing fix removes
+that particular cliff; a cut-down scene is still the sane way to work on this.
+
+### The skinning seam has two limits a caller meets
+
+Both are documented at the seam rather than fixed, and `apps/viewer` runs into
+neither — the first because it builds no DAGs, the second because its demo
+document's crate never leaves its bind-pose box far enough to be culled.
 
 - **A `Geometry::Dag` cannot be skinned.** Its coarser levels are separate
   vertex runs no dispatch writes, so `ForwardRenderer::reserve_skinned` refuses
@@ -53,42 +100,50 @@ Three things a caller meets that are documented rather than fixed:
 - **An alias entry carries the bind pose's bounding box**, so a mesh deformed
   outside it is culled while still on screen. The box the dispatch will fill is
   a property of a palette the reservation has never seen; fixing it means either
-  a caller-supplied bound or a pass that computes one.
-- **A binding does not arrive with its palette.** Joint indices are relative to
-  the skin the _drawing node_ wears, and neither `InstanceDesc` nor `MeshOrigin`
-  names a node — so pairing the two takes the `GltfScene` the conversion read,
-  walking its instances in step with `RenderScene::origins` and reading
-  `GltfNode::skin`. See the entry below.
+  a caller-supplied bound or a pass that computes one. **Nothing reports it when
+  it happens** — the instance is simply not drawn — so the first sighting will
+  be a limb disappearing at a camera angle.
 
-### `apps/viewer` still draws its document's bind pose
+### What `apps/viewer`'s skinning slice left open
 
-The importer now reports which node wears a skin (`GltfNode::skin`), which was
-the one fact that was missing, but no application consumes it yet. What a
-follow-up needs, all verified rather than assumed:
+Separate from the blocker above, which is not this application's. What the
+viewer half does: `crate::model::skinned_of` decides which instances a skin
+deforms and `Gpu::build_skinning` reserves a region each, with the frame taking
+`ForwardRenderer::begin_skinned_frame` and `add_skinned_passes`. What it left:
 
-- **The viewer never builds a `Geometry::Dag`**, so `reserve_skinned`'s
-  documented panic is unreachable from it: `gltf_render::resident_meshes` emits
-  `Geometry::Flat` for every row it makes, and `index_count`'s `Dag` arm carries
-  a comment saying the module builds no DAGs. No guard is needed, only the note.
-- **Instance to node is reconstructible** without a further importer change.
-  `gltf_render::place_instances` walks `GltfScene::instances` in order and
-  pushes one `InstanceDesc` per non-skipped primitive of that placement's mesh,
-  in primitive order; `RenderScene::origins` is in `(mesh, primitive)` document
-  order. Re-walking both in step recovers the node behind each instance, and
-  `GltfNode::skin` then gives its skin.
-- **The capacities must be raised by the viewer, and can be.**
-  `gltf_render::capacities_for` sizes `vertices` and `meshes` to exactly what
-  the description holds, with no headroom, and a skinned primitive costs two
-  extra mesh-table entries and two extra vertex regions. `SceneDesc::capacities`
-  is a public field, so the viewer can add the headroom after
-  `build_render_scene` and before `ForwardRenderer::with_scene`.
-- **`crate::anim::Player` needs one accessor**, `palette().matrices()`, to hand
-  the frame's palette to `SkinRange`; the field exists and is private.
-- **Do not decide skinning from a mesh's `JOINTS_0`.** The same rigged mesh may
-  be drawn again under a node with no skin — `demo_model::nodes_json` does
-  exactly that with `crate.far` — and skinning that copy draws it wherever the
-  joints are. A pixel-hash browser check would still pass over the wrong
-  picture, so the check must be paired with the skin the node actually wears.
+- **One region and one dispatch per skinned _instance_, not per mesh row.** Two
+  nodes wearing the same skin over the same mesh reserve two regions and skin
+  the same vertices twice to the same answer, because this application poses one
+  skeleton and every range shares the one palette. Deduplicating by row would
+  halve that, and it stops being correct the moment a second palette exists. Not
+  measured; the demo document has one skinned instance.
+- **Only the document's first skin is posed**, which is
+  `crate::anim::playable_of`'s existing rule and now decides geometry as well as
+  the overlay. A node wearing any other skin draws its bind pose and gets a
+  `Skip` naming it.
+- **A skin whose root joints hang from _different_ nodes is placed by the
+  first.** `crate::model::skeleton_to_world` reports it and carries on, because
+  a skinned instance carries one transform. Not seen on any document; the rule
+  is written from the specification rather than from a file that needed it.
+- **The instance-to-node walk is checked rather than trusted, and its failure is
+  all-or-nothing.** `skinned_of` repeats
+  `crcbl_scene::gltf_render::place_instances`' expansion order and compares the
+  row it predicts against the row each `InstanceDesc` names; a mismatch skins
+  nothing in the whole document and says so on the skip list. That is the honest
+  outcome and it is also a cliff. Putting the node on `GltfInstance` would
+  delete the walk outright.
+- **A per-frame `Vec<SkinRange>` in `Gpu::frame`.** `SkinRange` borrows the
+  region and the bindings, so it cannot be kept in a field between frames. One
+  small allocation per frame, in an application whose frame is otherwise
+  allocation-free by design.
+- **The browser check's passing side is unmeasured**, because nothing has drawn
+  this document deformed. `DEFORM_CHANGING_SHARE` in `web/tools/browser-e2e.mjs`
+  is set from the failing side alone — a two-state picture gives 2 samples in 25
+  — and should be revisited against a real passing run.
+- **Not verified against a real rigged asset.** The whole slice was run against
+  `crate::demo_model`'s two-joint crate and nothing else. `CesiumMan`,
+  `RiggedFigure` and `Fox` would exercise a deep hierarchy, an armature node
+  with its own transform, and weights that are not rigid.
 
 ### The skinning rig is validated late, and only the vk leg runs the kernel
 
@@ -107,13 +162,12 @@ test and no other. What is left:
   is the first place the palette and the bindings are both Rust values; the
   shader's clamp is the backstop under that. A caller that never goes through
   `begin_frame` — a cooked-asset path, when one exists — would have neither.
-- **Only Vulkan executes it.** The kernel's WGSL is validated by naga and its
-  MSL and DXIL are generated, and no test dispatches any of them. WebGPU is the
-  backend this project is measured on, so the browser is where an arithmetic
-  difference would matter most and is exactly where nothing runs the shader. The
-  demo that will close this is the puppet sample of
-  `docs/plan/sample/09-puppet.md`, or the viewer once it draws a skinned mesh
-  rather than a skeleton.
+- **Only Vulkan executes it, and only for one dispatch.** The kernel's WGSL is
+  validated by naga and its MSL and DXIL are generated, and no test dispatches
+  any of them. `apps/viewer` now submits the WGSL every frame in a browser and
+  what comes out never deforms — see the blocking entry above — so a **second
+  frame** with a different palette is the case the vk readback should grow, and
+  it is exactly the case nothing anywhere covers today.
 - **`crcbl-render` cannot execute a kernel at all**, which is why the readback
   lives two crates away: its only backend is `crcbl_hal::null`, and it cannot
   gain a real one because `crcbl-vk` dev-depends on it. Worth knowing before
