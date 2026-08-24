@@ -39,7 +39,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crcbl::assets::DirSource;
+use crcbl::assets::{DirSource, MemorySource};
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::cull::Aabb;
 use crcbl::scene::GltfScene;
@@ -228,9 +228,10 @@ pub fn load(path: &Path) -> Result<Model, LoadError> {
 /// [`load`] is this over a [`DirSource`] rooted at the file's own directory.
 /// The split exists because the browser has no directory to point one at: the
 /// web demo compiles its `.glb` into the module and opens it through a
-/// [`MemorySource`](crcbl::assets::MemorySource), and a dropped file would
-/// arrive the same way. Every rule below — the non-finite scan, the empty
-/// document, the framing box — is the file handling itself and belongs to both.
+/// [`MemorySource`], and a file dropped on the canvas arrives the same way.
+/// [`load_bytes`] is that second shape, written once for both. Every rule below
+/// — the non-finite scan, the empty document, the framing box — is the file
+/// handling itself and belongs to all of them.
 ///
 /// `reported_as` is what the errors name, and is not always `key`. Natively it
 /// is the whole path the user typed, because this is the one application a
@@ -275,6 +276,37 @@ pub fn load_from(
         bounds,
         rig,
     })
+}
+
+/// Reads the document held in `bytes`, filed under `name`.
+///
+/// [`load_from`] over a one-entry [`MemorySource`], which is the shape a
+/// document that never had a directory takes: the `.glb`
+/// [`crate::demo_model`] generates into the browser build, and a file a
+/// visitor drops on the canvas.
+///
+/// `name` is both the key the bytes are filed under and what an error names,
+/// because bytes that never had a path have no better answer. It has to be a
+/// legal asset key — the rule this module's header sets out — and a name that
+/// is not one is refused here, with that rule in the message, rather than
+/// rewritten into something that would load.
+///
+/// # Errors
+///
+/// [`LoadError::Storage`] for a name the asset seam refuses, and everything
+/// [`load_from`] reports about the document itself. It does not panic on any
+/// input, which is what lets a page hand it whatever was dropped on it.
+pub fn load_bytes(name: &Path, bytes: Vec<u8>) -> Result<Model, LoadError> {
+    let mut source = MemorySource::new();
+    source
+        .insert(name, bytes)
+        .map_err(|why| LoadError::Storage {
+            path: name.to_path_buf(),
+            why,
+        })?;
+    // The name twice, for `load_from`'s reason: it is what the source is asked
+    // for and what an error names.
+    load_from(&source, name, name)
 }
 
 /// What [`Model::rig`] reports about `scene`.
@@ -543,6 +575,74 @@ mod tests {
         assert!(
             !model.rig.is_empty(),
             "a document with a clip and no skin still has something to report",
+        );
+    }
+
+    /// **Bytes with no directory behind them load exactly as a file does.**
+    /// This is the call the browser's generated document takes and the one a
+    /// file dropped on the canvas takes, and neither of those can be run on the
+    /// machine that builds them — so what holds it is this, against a fixture
+    /// whose numbers `a_glb_on_disk_loads_and_its_bounds_are_where_its_hierarchy_puts_it`
+    /// asserts through the other door.
+    #[test]
+    fn a_document_that_never_had_a_directory_loads_from_its_bytes() {
+        let model = load_bytes(
+            Path::new("panel.glb"),
+            fixture::quad_glb(fixture::QUAD_CENTRE),
+        )
+        .expect("the fixture loads out of memory as it does off a disk");
+
+        assert_eq!(model.key, Path::new("panel.glb"));
+        assert_eq!(model.render.instances.len(), 1, "one node, one primitive");
+        let centre = model.bounds.center();
+        assert!(
+            (centre - fixture::QUAD_CENTRE).length() < 1e-5,
+            "the quad's centre is at {centre:?}, not at {:?}",
+            fixture::QUAD_CENTRE,
+        );
+    }
+
+    /// **A name a person's filesystem allows and this seam does not is refused
+    /// with the rule in it**, rather than rewritten into something that would
+    /// load. It is the message a visitor who drops `My Model.glb` reads, and
+    /// the one thing about that drop the browser cannot be asked about here.
+    #[test]
+    fn a_name_that_is_not_a_legal_asset_key_is_refused_by_its_name() {
+        let error = load_bytes(
+            Path::new("My Model.glb"),
+            fixture::quad_glb(fixture::QUAD_CENTRE),
+        )
+        .expect_err("a space is not a legal asset key");
+
+        assert!(
+            matches!(
+                &error,
+                LoadError::Storage {
+                    why: StorageError::InvalidPath(_),
+                    ..
+                }
+            ),
+            "{error:?}",
+        );
+        let said = error.to_string();
+        assert!(
+            said.contains("My Model.glb") && said.contains("legal asset key"),
+            "the message names the file and the rule: {said}",
+        );
+    }
+
+    /// **Bytes that are not a document come back as a sentence, not a panic.**
+    /// The whole claim the drop target makes to a visitor: whatever lands on
+    /// the canvas, the page keeps drawing and says what was wrong with it.
+    #[test]
+    fn bytes_that_are_not_a_document_are_reported_and_not_a_panic() {
+        let error = load_bytes(Path::new("dropped.glb"), b"not a glTF file".to_vec())
+            .expect_err("fifteen bytes of prose are not a document");
+
+        let said = error.to_string();
+        assert!(
+            said.contains("dropped.glb"),
+            "the message names what was dropped: {said}",
         );
     }
 }

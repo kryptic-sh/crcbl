@@ -440,6 +440,27 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument for the viewer's drop target, which is the one thing on
+# this page a visitor brings themselves. Every other check passes against a page
+# that ignores a dropped file entirely — the demo document is compiled into the
+# module and opens without anyone touching anything — so these four rows going
+# missing leaves a green run and no gate at all on V-F5. `viewer` alone, because
+# it is the only demo that takes a document.
+#
+# One name is matched rather than four, because they are one block in the driver
+# and cannot go missing separately. Renaming it there is meant to fail here and
+# be renamed here too.
+case "$DEMO" in
+    viewer)
+        DROPPED="$(grep -F 'a dropped document replaces the one the page opened with' "${OUTPUT}.plain" || true)"
+        if [ -z "$DROPPED" ]; then
+            echo "crcbl web e2e: the driver never dropped a document onto the canvas;" >&2
+            echo "               the drop target in web/demos/viewer/main.js is ungated" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the strongest form of the same argument, for group H. Three of the driver's
 # checks assert that *nothing* was reported — no uncaught exception, no missing
 # asset, no WebGPU device error — and every one of them passes just as happily

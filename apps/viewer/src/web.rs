@@ -15,15 +15,18 @@
 //! nothing resident and swapping the real scene in afterwards — a renderer
 //! built twice at every start-up to work around a signature.
 //!
-//! # What a visitor sees, and what they do not
+//! # What a visitor sees
 //!
-//! The **native** viewer is pointed at a file. This one shows the document it
-//! ships with; there is no drop target yet, which is
-//! `docs/plan/sample/05-viewer.md`'s V-F5 and is written up in
-//! `docs/backlog.md`. Everything past the loading is the same code the native
-//! viewer runs: the orbit camera, the frame-on-load, the grid scaled to the
-//! document, the listing behind `I`, the wireframe and normals views, and the
-//! exposure slider.
+//! The **native** viewer is pointed at a file. This one opens on the document
+//! it ships with and then takes one the visitor drags onto the canvas — the
+//! drop target below, which is `docs/plan/sample/05-viewer.md`'s V-F5. A
+//! dropped `.glb` or `.gltf` reaches exactly the loader a path does, so it
+//! either appears or says why not; see this module's `DropTarget` for the ABI
+//! and `crate::app::Viewer::poll_for_dropped_document` for the frame that opens
+//! it. Everything past the loading is the same code the native viewer runs: the
+//! orbit camera, the frame-on-load, the grid scaled to the document, the
+//! listing behind `I`, the wireframe and normals views, and the exposure
+//! slider.
 //!
 //! The re-export watch is native-only in effect. [`crate::watch`] polls a path,
 //! and a page has none, so it never fires — the loop carries it and nothing
@@ -172,4 +175,182 @@ fn browser_options() -> Options {
         common: crcbl::args::Common::new(crate::args::DEFAULT_TICK_HZ),
         model: std::path::PathBuf::from(crate::demo_model::DEMO_KEY),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The drop target
+// ---------------------------------------------------------------------------
+
+/// The largest document the page may push across in one drop, in bytes.
+///
+/// [`crcbl::store::web::fetch::MAX_ASSET_BYTES`] rather than a number of this
+/// module's own: a dropped document is an asset body arriving through the page
+/// exactly as a fetched one is, and the bound exists for the same reason there
+/// — a nonsense length must not be able to ask wasm to allocate arbitrarily
+/// much before anything has looked at what it holds.
+const MAX_DROP_BYTES: usize = crcbl::store::web::fetch::MAX_ASSET_BYTES;
+
+/// Everything the drop target owns, for the life of the page.
+///
+/// # The wire format
+///
+/// One staging buffer carries the file's name and its bytes together, as a
+/// pair the commit gives the lengths of. The alternative was a second scratch
+/// for the name, and it would have had to be a fixed-capacity one whose address
+/// never moves — the name has to survive the allocation
+/// [`__crcbl_viewer_drop_buffer`] makes, and a `Vec` that reallocates moves its
+/// contents. Writing both into the one buffer the page is already filling
+/// removes the question: there is nothing live across that call.
+///
+/// | Symbol | Signature | Meaning |
+/// | --- | --- | --- |
+/// | [`__crcbl_viewer_drop_buffer`] | `(i32) -> i32` | Size the staging buffer to `len` bytes and return its address, or `0`. **May grow wasm memory.** |
+/// | [`__crcbl_viewer_drop_commit`] | `(i32, i32) -> i32` | The buffer holds a `name_len`-byte UTF-8 file name followed by `byte_len` bytes of document. `1`/`0`. |
+/// | [`__crcbl_viewer_drop_take`] | `() -> i32` | Move the verdict for the last opened drop into the scratch and return its length, or `0` when there is none. |
+/// | [`__crcbl_viewer_drop_ptr`] | `() -> i32` | Address of that scratch, or `0`. |
+///
+/// The detached-view trap is the fetch ABI's, unchanged and for the same
+/// reason: build the `Uint8Array` *after* the call that handed back the
+/// pointer, because that call allocates.
+#[derive(Default)]
+struct DropTarget {
+    /// What the page writes into, between a `buffer` and the `commit` that
+    /// closes it. Released at the commit rather than kept: a page that dropped
+    /// a large document once must not go on holding it for the session.
+    staging: Vec<u8>,
+    /// A committed document, waiting for the next frame to open it.
+    ///
+    /// One deep, and a second commit replaces it. A visitor who drops two files
+    /// before a frame has run meant the second one, and queueing the first
+    /// would put a document on screen that nobody is still asking for.
+    pending: Option<(std::path::PathBuf, Vec<u8>)>,
+    /// What the frame made of the last drop, waiting for the page to take it.
+    verdict: Option<String>,
+    /// The verdict the page is reading now.
+    ///
+    /// Held rather than handed out of `verdict` directly, for
+    /// [`crcbl::web::log_take`]'s reason: the length and the pointer are two
+    /// calls, and the bytes between them have to stay where they were.
+    current: String,
+}
+
+thread_local! {
+    /// The page's drop target. Beside [`crcbl::web_exports!`]'s `APP` rather
+    /// than inside it: that macro's shape is every sample's, and this is one
+    /// sample's.
+    static DROP: std::cell::RefCell<DropTarget> =
+        std::cell::RefCell::new(DropTarget::default());
+}
+
+/// Takes the document the page last committed, if the frame has not had it yet.
+///
+/// [`crate::app::Viewer`] calls this once a frame from `draw`. The name is the
+/// one the visitor's file had — not necessarily a legal asset key, which is
+/// `crate::model::load_bytes`'s to refuse and to explain.
+pub(crate) fn take_dropped_document() -> Option<(std::path::PathBuf, Vec<u8>)> {
+    DROP.with(|slot| slot.try_borrow_mut().ok()?.pending.take())
+}
+
+/// Files what the frame made of that document, for the page to read back.
+///
+/// Replaces an unread verdict rather than queueing behind it: the page shows
+/// one line, and it is the newest drop's.
+pub(crate) fn report_dropped_document(verdict: String) {
+    DROP.with(|slot| {
+        if let Ok(mut target) = slot.try_borrow_mut() {
+            target.verdict = Some(verdict);
+        }
+    });
+}
+
+/// Size the staging buffer to `len` bytes and return its address.
+///
+/// `0` when `len` is zero or above this module's `MAX_DROP_BYTES`, and the page
+/// must then tell the visitor rather than commit — a commit whose lengths do
+/// not add up to the buffer is refused anyway.
+///
+/// **May grow wasm memory**, detaching any `Uint8Array` built before the call.
+/// Build the view afterwards.
+///
+/// # Safety
+///
+/// The returned address is valid until the next call to this function or to
+/// [`__crcbl_viewer_drop_commit`], and the page owns every byte of it in
+/// between.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_viewer_drop_buffer(len: u32) -> *mut u8 {
+    let len = len as usize;
+    if len == 0 || len > MAX_DROP_BYTES {
+        return std::ptr::null_mut();
+    }
+    DROP.with(|slot| match slot.try_borrow_mut() {
+        Ok(mut target) => {
+            target.staging = vec![0; len];
+            target.staging.as_mut_ptr()
+        }
+        Err(_) => std::ptr::null_mut(),
+    })
+}
+
+/// The staging buffer holds a `name_len`-byte UTF-8 file name followed by
+/// `byte_len` bytes of document; open it on the next frame.
+///
+/// `1` on success. `0` — and the staged bytes are dropped, so the page has to
+/// stage them again — when the two lengths do not add up to exactly the buffer
+/// that was handed out, when the document half is empty, or when the name is
+/// not UTF-8. Every one of those is a shim that wrote something other than what
+/// it asked for, which is worth refusing here rather than reporting to a
+/// visitor as a bad file.
+///
+/// A name that is not a legal *asset key* is not refused here: it is a real
+/// file with a real name, and `crate::model::load_bytes` is where that rule
+/// lives and where the message explaining it is written.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_viewer_drop_commit(name_len: u32, byte_len: u32) -> u32 {
+    let (name_len, byte_len) = (name_len as usize, byte_len as usize);
+    DROP.with(|slot| {
+        let Ok(mut target) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if byte_len == 0 || name_len.checked_add(byte_len) != Some(target.staging.len()) {
+            return 0;
+        }
+        let mut staged = std::mem::take(&mut target.staging);
+        let Ok(name) = std::str::from_utf8(&staged[..name_len]) else {
+            return 0;
+        };
+        let name = std::path::PathBuf::from(name);
+        staged.drain(..name_len);
+        target.pending = Some((name, staged));
+        1
+    })
+}
+
+/// Move the verdict for the last opened drop into the scratch buffer and return
+/// its length in bytes.
+///
+/// `0` means there is none: nothing has been dropped, or the frame that will
+/// open what was has not run yet. Read [`__crcbl_viewer_drop_ptr`] **after**
+/// this, not before — the two together are one read.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_viewer_drop_take() -> u32 {
+    DROP.with(|slot| {
+        let Ok(mut target) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        let Some(verdict) = target.verdict.take() else {
+            return 0;
+        };
+        target.current = verdict;
+        u32::try_from(target.current.len()).unwrap_or(u32::MAX)
+    })
+}
+
+/// Address of the verdict scratch buffer, or `0` when nothing has been taken.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_viewer_drop_ptr() -> *const u8 {
+    DROP.with(|slot| match slot.try_borrow() {
+        Ok(target) if !target.current.is_empty() => target.current.as_ptr(),
+        _ => std::ptr::null(),
+    })
 }

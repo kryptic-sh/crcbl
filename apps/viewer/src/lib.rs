@@ -31,13 +31,14 @@
 //! the document [`demo_model`] generates and compiles into the module —
 //! everything past the loading is the code below, unchanged.
 //!
-//! What it still deliberately does not do: **no drop target**. V-F5 is "path
-//! argument natively, drop target in the browser", and the second half is a
-//! document the *visitor* chooses. That needs an asset source over bytes the
-//! browser handed across, which is now a small piece of work rather than the
-//! stage-10 item it once was — [`crcbl::assets::MemorySource`] is the part that
-//! was missing, and the browser demo already loads through one. It is in
-//! `docs/backlog.md` with what is left.
+//! **And it takes a document the visitor chooses.** V-F5 is "path argument
+//! natively, drop target in the browser": drag a `.glb` or a `.gltf` onto the
+//! canvas and the page hands the bytes across, [`model::load_bytes`] opens them
+//! over a [`MemorySource`](crcbl::assets::MemorySource) — the same call the
+//! generated document takes — and the frame becomes that document, framed on
+//! its own bounds with the listing rebuilt. A file that will not parse keeps
+//! the frame that is on screen and puts the loader's own sentence on the status
+//! bar, because a page has no exit code to fail with.
 //!
 //! # Two rules this sample is exempt from, and neither is an oversight
 //!
@@ -87,4 +88,4 @@ pub use args::{DEFAULT_TICK_HZ, Invocation, Options, USAGE, parse};
 pub use controls::Controls;
 pub use listing::Listing;
 pub use menu::{MenuKind, Menus};
-pub use model::{LoadError, Model, Rig, load, load_from, world_bounds};
+pub use model::{LoadError, Model, Rig, load, load_bytes, load_from, world_bounds};

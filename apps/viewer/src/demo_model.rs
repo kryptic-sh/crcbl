@@ -700,11 +700,13 @@ pub const DEMO_KEY: &str = "demo.glb";
 
 /// The demo document, read and converted the way any other one is.
 ///
-/// [`demo_glb`] is the bytes; this is what [`crate::model::load_from`] makes of
-/// them. **Not a shortcut around the loader** — the browser demo goes through
-/// the same import, the same non-finite scan and the same framing box as a file
-/// a person hands the native viewer, because a demo that bypassed them would
-/// prove nothing about the path a real document takes.
+/// [`demo_glb`] is the bytes; this is what [`crate::model::load_bytes`] makes
+/// of them — the same call, over the same one-entry source, that a document
+/// dropped on the canvas takes. **Not a shortcut around the loader** — the
+/// browser demo goes through the same import, the same non-finite scan and the
+/// same framing box as a file a person hands the native viewer, because a demo
+/// that bypassed them would prove nothing about the path a real document
+/// takes.
 ///
 /// Native code compiles this too, though only the browser build calls it. That
 /// is deliberate: `crate::web` is `wasm32`-only and nothing in it can be tested
@@ -718,17 +720,7 @@ pub const DEMO_KEY: &str = "demo.glb";
 /// visitor did, and `the_demo_document_loads_through_the_real_loader` below is
 /// what holds it.
 pub fn demo_document() -> Result<crate::model::Model, crate::model::LoadError> {
-    let key = std::path::Path::new(DEMO_KEY);
-    let mut source = crcbl::assets::MemorySource::new();
-    source
-        .insert(key, demo_glb())
-        .map_err(|why| crate::model::LoadError::Storage {
-            path: key.to_path_buf(),
-            why,
-        })?;
-    // The key twice: it is both what the source is asked for and what an error
-    // names, because a document that never had a path has no better answer.
-    crate::model::load_from(&source, key, key)
+    crate::model::load_bytes(std::path::Path::new(DEMO_KEY), demo_glb())
 }
 
 #[cfg(test)]

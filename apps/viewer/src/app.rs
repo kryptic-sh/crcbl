@@ -686,20 +686,50 @@ impl Viewer {
         for line in skip_report(&key, model.skipped(), model.render.instances.is_empty()) {
             eprintln!("{line}");
         }
-        if let Err(error) = gpu.reload(
-            &model.render.scene,
-            &model.render.instances,
-            // The same extent `crate::app::with_shell` opened with, and for the
-            // same reason — see `crate::gpu`.
-            model.bounds.half_extent().max_element() * 2.0,
-        ) {
+        if let Err(error) = self.adopt(gpu, &model) {
             crcbl::log::warn!(
                 "viewer: {key} was re-read but the renderer refused it, so the document already \
                  on screen was kept: {error}",
             );
             return;
         }
+        crcbl::log::info!(
+            "viewer: {key} reloaded — {} instance(s), {} skipped",
+            self.instances,
+            self.skipped,
+        );
+    }
 
+    /// Puts `model` on screen in place of the document already there: the
+    /// renderer is rebuilt around it, and the bounds, the counts and the
+    /// listing follow.
+    ///
+    /// The tail of [`Viewer::poll_for_re_export`], and the whole of what a
+    /// dropped document does with the frame — see
+    /// `Viewer::poll_for_dropped_document`. One function because it is one
+    /// event: a different document arriving at a viewer that is already
+    /// running. Two copies is where the browser would quietly stop rebuilding
+    /// the listing.
+    ///
+    /// **The camera is not touched here**, and the two callers differ on
+    /// exactly that. A re-export is the same document again, so the pose an
+    /// artist has aimed has to survive it; a document a visitor just chose is
+    /// one nobody has aimed at, so the drop path asks for a re-frame itself.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Gpu::reload`](crate::gpu::Gpu::reload) refused the document
+    /// with. Nothing here has run at that point and the frame already on screen
+    /// is untouched — `reload` unwinds its own half-built renderer — so a
+    /// caller's whole obligation is to say so.
+    fn adopt(&mut self, gpu: &mut Gpu, model: &Model) -> Result<(), crcbl::hal::HalError> {
+        gpu.reload(
+            &model.render.scene,
+            &model.render.instances,
+            // The same extent `crate::app::with_shell` opened with, and for the
+            // same reason — see `crate::gpu`.
+            model.bounds.half_extent().max_element() * 2.0,
+        )?;
         self.bounds = model.bounds;
         self.instances = model.render.instances.len();
         self.skipped = model.skipped().len();
@@ -708,14 +738,89 @@ impl Viewer {
         // document's; the panel's own visibility is the one thing that is not,
         // so it is the one thing carried across.
         let showing = self.listing.is_visible();
-        self.listing = Listing::of(&model);
+        self.listing = Listing::of(model);
         self.listing.set_visible(showing);
         self.reloads += 1;
-        crcbl::log::info!(
-            "viewer: {key} reloaded — {} instance(s), {} skipped",
-            self.instances,
-            self.skipped,
+        Ok(())
+    }
+
+    /// **The drop target**: opens the document a visitor dropped on the canvas,
+    /// if one has landed since the last frame.
+    ///
+    /// `docs/plan/sample/05-viewer.md` V-F5's browser half, and the counterpart
+    /// of [`Viewer::poll_for_re_export`] — the native viewer is pointed at a
+    /// path and this one is handed bytes, and past that they are the same
+    /// event. [`crate::web`] owns the buffer the page writes into and the
+    /// sentence the page reads back; this is the frame that turns one into the
+    /// other, called from [`Viewer::draw`] beside the re-export poll for the
+    /// same reason: a paused page still draws, and a visitor who dropped a file
+    /// with the panel up must not have to close it first.
+    ///
+    /// **A document that will not parse keeps the frame that is already on
+    /// screen**, exactly as a bad re-export does, and says why. It is the whole
+    /// point of this application that a file either loads or explains itself,
+    /// and a page has no exit code to say it with — so the sentence goes back
+    /// to the shim, which puts it on the status bar under the canvas.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_for_dropped_document(&mut self, gpu: &mut Gpu) {
+        let Some((name, bytes)) = crate::web::take_dropped_document() else {
+            return;
+        };
+        let verdict = self.open_dropped(gpu, &name, bytes);
+        crate::web::report_dropped_document(verdict);
+    }
+
+    /// [`Viewer::poll_for_dropped_document`]'s half that can fail, as the
+    /// sentence a visitor reads.
+    ///
+    /// A `String` rather than a `Result` because both arms end in the same
+    /// place — one line of text on the status bar — and the caller has no
+    /// decision left to make with a typed error. Every arm is also logged where
+    /// it is produced, at the level the outcome deserves, so the browser
+    /// console carries the same account the native terminal would.
+    #[cfg(target_arch = "wasm32")]
+    fn open_dropped(&mut self, gpu: &mut Gpu, name: &std::path::Path, bytes: Vec<u8>) -> String {
+        let model = match model::load_bytes(name, bytes) {
+            Ok(model) => model,
+            Err(error) => {
+                // `LoadError` already names the file and what to do about it,
+                // which is the sentence the native viewer prints and exits on.
+                let verdict = error.to_string();
+                crcbl::log::warn!(
+                    "viewer: a dropped document could not be read, so the document already on \
+                     screen was kept: {verdict}",
+                );
+                return verdict;
+            }
+        };
+        let key = model.key.display().to_string();
+        // Logged rather than printed: `skip_report` writes to stderr at
+        // start-up and in the re-export loop, and this target has none. The
+        // same lines reach the browser console through the shim's log drain,
+        // and the panel behind `I` holds them for whoever wants to look.
+        for line in skip_report(&key, model.skipped(), model.render.instances.is_empty()) {
+            crcbl::log::info!("{line}");
+        }
+        if let Err(error) = self.adopt(gpu, &model) {
+            let verdict = format!(
+                "{key}: the renderer refused it, so the document already on screen was kept: \
+                 {error}"
+            );
+            crcbl::log::warn!("viewer: {verdict}");
+            return verdict;
+        }
+        // Only now, and only here: `adopt` deliberately leaves the camera
+        // alone. Nobody has aimed at this document yet, so it is framed the way
+        // start-up frames the one the page opened with. Taken by
+        // [`Viewer::draw`] a few lines below the call that set it, against this
+        // frame's extent.
+        self.reframe = true;
+        let verdict = format!(
+            "{key} opened — {} instance(s), {} skipped",
+            self.instances, self.skipped,
         );
+        crcbl::log::info!("viewer: {verdict}");
+        verdict
     }
 }
 
@@ -920,13 +1025,22 @@ impl HostedGame for Viewer {
     /// pinned to opposite corners, so today they do not.
     ///
     /// **This is also where the re-export loop runs** — see
-    /// `Viewer::poll_for_re_export` for why it is not in the tick.
+    /// `Viewer::poll_for_re_export` for why it is not in the tick — and, on
+    /// `wasm32`, where a document dropped on the canvas is opened. Both put a
+    /// new document on screen through `Viewer::adopt`, and both are here rather
+    /// than in the tick because a paused frame still draws.
     fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, frame: FrameInfo) {
         // Before anything else in the frame, which is the position the tick
         // used to give it: the tick ran immediately before this, so a document
         // that lands is framed and listed by the rest of this call rather than
         // by the next one.
         self.poll_for_re_export(gpu, frame.render_dt.as_secs_f64());
+        // The browser's half of the same idea, and in the same place for the
+        // same reason — see `Viewer::poll_for_dropped_document`. Native builds
+        // have no page to be dropped on, so there is nothing here for them
+        // rather than a poll that can never fire.
+        #[cfg(target_arch = "wasm32")]
+        self.poll_for_dropped_document(gpu);
         // Read here rather than on resize, so it is the extent this frame is
         // actually drawn at — the loop has already applied any resize by now.
         self.extent = gpu.extent();

@@ -26,7 +26,9 @@
 //   C  input drives the simulation — a real click focuses the canvas, a real
 //      Space key launches the ball, and the game's own HUD log line changes.
 //      A demo with no input at all (`key: null` in EXPECTATIONS) skips the key
-//      and keeps the log line, which is the half it can still make good on
+//      and keeps the log line, which is the half it can still make good on.
+//      A demo with a drop target (`drop`, and only viewer has one) also has a
+//      document dragged onto its canvas, and one that is not a document at all
 //   D  it renders — no WebGPU device errors, the canvas is not one flat colour,
 //      and the canvas changes from frame to frame while the ball is in flight
 //   E  focus and pause — a blurred canvas pauses and runs no ticks, focus
@@ -149,6 +151,11 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * input at all, while lantern and quarry take plenty but have no run to begin —
  * which is why this says "no start key" rather than "no input".
  *
+ * `drop` is the third optional key, and only viewer has one: it is the
+ * document this harness drags onto the canvas, and the numbers the `[HUD]` line
+ * has to reach once the page has opened it. See {@link quadPairGlb} for why the
+ * document is built here rather than checked in.
+ *
  * `backdrop` is the other optional key, and it is what group G reads. It names
  * the demo's clear colour twice over: `encoded` is the byte an sRGB target holds
  * and `unencoded` is the byte the same clear leaves in a linear one, with
@@ -166,6 +173,165 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * this sample chose. None of the four can make this claim, and a row that
  * quietly skipped it would be the check passing for the wrong reason.
  */
+/**
+ * A `.glb` of two quads, one at the origin and one three metres along `x`.
+ *
+ * **Built here rather than vendored**, which is the argument
+ * `apps/viewer/src/fixture.rs` and `crcbl-scene`'s `gltf_fixture` both make and
+ * make for the same reason: a `.glb` is a binary container, so a checked-in one
+ * is a fixture nobody reviewing a change can read, and every number this file
+ * asserts on ought to be written out in this file. It is the same document
+ * those two build, in the same layout, with a second node added — because the
+ * point of the drop check is that the page is showing a document it did not
+ * ship with, and the instance count is what says so.
+ *
+ * Two nodes and no skin, so the `[HUD]` line reads `instances: 2  …  joints: 0`
+ * where the demo document reads `instances: 3  …  joints: 2`. Neither number
+ * can be reached by a page that took the bytes and did nothing with them.
+ *
+ * **THE TWO NODES ARE PLACED THE WAY THEY ARE BECAUSE GROUP D READS THIS
+ * CANVAS AFTERWARDS**, and a document the viewer frames badly makes that group
+ * fail on a page that is working. Both of them:
+ *
+ * - **They stand above the grid**, which is where a model out of any DCC tool
+ *   stands. `OrbitCamera::frame` aims at the bounding box's centre and keeps
+ *   its pitch, so a document centred *on* the ground plane puts the eye exactly
+ *   in that plane: the grid goes edge-on and disappears, and the quads are
+ *   back-face culled for half of the turntable's sweep — the whole canvas comes
+ *   back as one flat clear colour. Measured, not guessed: that is precisely how
+ *   group D failed when these nodes sat at `y = 0`.
+ * - **The box has depth on every axis**, the second one turned a quarter turn
+ *   about `y` so the pair is not one flat sheet. `apps/viewer/src/demo_model.rs`
+ *   holds the same property of the demo document in
+ *   `the_demo_documents_world_box_is_finite_and_has_depth_on_every_axis`, and
+ *   this is the same trap seen from the other side.
+ *
+ * @returns {Buffer} the container, ready to be handed to a `File`
+ */
+function quadPairGlb() {
+  // One metre across in the XY plane, facing +Z; two triangles wound
+  // counter-clockwise seen from there, which is the front face.
+  const positions = [
+    [-0.5, -0.5, 0],
+    [0.5, -0.5, 0],
+    [0.5, 0.5, 0],
+    [-0.5, 0.5, 0],
+  ];
+  const normals = [
+    [0, 0, 1],
+    [0, 0, 1],
+    [0, 0, 1],
+    [0, 0, 1],
+  ];
+  const indices = [0, 1, 2, 0, 2, 3];
+
+  const POSITIONS_AT = 0;
+  const NORMALS_AT = positions.length * 3 * 4;
+  const INDICES_AT = NORMALS_AT + normals.length * 3 * 4;
+  const bin = Buffer.alloc(INDICES_AT + indices.length * 2);
+  let at = POSITIONS_AT;
+  for (const value of [...positions, ...normals].flat()) {
+    bin.writeFloatLE(value, at);
+    at += 4;
+  }
+  for (const index of indices) {
+    bin.writeUInt16LE(index, at);
+    at += 2;
+  }
+
+  // `metallicFactor` is written out as zero for the reason
+  // `crates/crcbl/tests/gltf_e2e.rs` gives: glTF defaults a material to a fully
+  // rough conductor, which has no diffuse lobe at all, so a document that left
+  // it out would be nearly black in any frame drawn from it — and group D reads
+  // this canvas afterwards.
+  const json = JSON.stringify({
+    asset: { version: '2.0' },
+    scene: 0,
+    scenes: [{ nodes: [0, 1] }],
+    nodes: [
+      { name: 'panel', mesh: 0, translation: [0, 1, 0] },
+      {
+        name: 'panel',
+        mesh: 0,
+        translation: [1.5, 1, 1.5],
+        // A quarter turn about +y as an `xyzw` quaternion, so this quad faces
+        // +x where the other faces +z.
+        rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2],
+      },
+    ],
+    meshes: [
+      {
+        name: 'panel',
+        primitives: [
+          {
+            attributes: { POSITION: 0, NORMAL: 1 },
+            indices: 2,
+            material: 0,
+          },
+        ],
+      },
+    ],
+    materials: [
+      {
+        name: 'paint',
+        pbrMetallicRoughness: {
+          baseColorFactor: [0.8, 0.8, 0.8, 1.0],
+          metallicFactor: 0.0,
+          roughnessFactor: 1.0,
+        },
+      },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3' },
+      { bufferView: 1, componentType: 5126, count: 4, type: 'VEC3' },
+      { bufferView: 2, componentType: 5123, count: 6, type: 'SCALAR' },
+    ],
+    bufferViews: [
+      { buffer: 0, byteOffset: POSITIONS_AT, byteLength: NORMALS_AT },
+      {
+        buffer: 0,
+        byteOffset: NORMALS_AT,
+        byteLength: INDICES_AT - NORMALS_AT,
+      },
+      {
+        buffer: 0,
+        byteOffset: INDICES_AT,
+        byteLength: bin.length - INDICES_AT,
+      },
+    ],
+    buffers: [{ byteLength: bin.length }],
+  });
+
+  // Both chunks are padded to a multiple of four, the JSON one with spaces and
+  // the binary one with zeroes, which the container format requires.
+  const jsonChunk = Buffer.from(json, 'utf8');
+  const jsonPad = Buffer.alloc((4 - (jsonChunk.length % 4)) % 4, 0x20);
+  const binPad = Buffer.alloc((4 - (bin.length % 4)) % 4, 0);
+  const jsonLen = jsonChunk.length + jsonPad.length;
+  const binLen = bin.length + binPad.length;
+
+  const header = Buffer.alloc(12);
+  header.write('glTF', 0, 'ascii');
+  header.writeUInt32LE(2, 4);
+  header.writeUInt32LE(12 + 8 + jsonLen + 8 + binLen, 8);
+  const jsonHeader = Buffer.alloc(8);
+  jsonHeader.writeUInt32LE(jsonLen, 0);
+  jsonHeader.write('JSON', 4, 'ascii');
+  const binHeader = Buffer.alloc(8);
+  binHeader.writeUInt32LE(binLen, 0);
+  binHeader.write('BIN\0', 4, 'ascii');
+
+  return Buffer.concat([
+    header,
+    jsonHeader,
+    jsonChunk,
+    jsonPad,
+    binHeader,
+    bin,
+    binPad,
+  ]);
+}
+
 const EXPECTATIONS = {
   breakout: {
     key: 'Space',
@@ -405,6 +571,21 @@ const EXPECTATIONS = {
       line.includes('joints: 2'),
     moving: /turn: ([\d.]+)/,
     movingLabel: 'the turntable carries the camera under its own steam',
+    // **The one demo that takes a file from the visitor**, so the one row with
+    // a `drop`. `document` is dragged onto the canvas and `opened` is what the
+    // `[HUD]` line has to say afterwards — numbers only a *loaded* document can
+    // produce, and neither of them the demo document's own. `broken` is the
+    // other half of the claim: bytes that are not a document at all, which must
+    // leave the page drawing what it already had.
+    drop: {
+      name: 'dropped.glb',
+      document: quadPairGlb(),
+      opened: (line) =>
+        line.includes('instances: 2') && line.includes('joints: 0'),
+      openedLabel: 'instances: 2 and joints: 0',
+      brokenName: 'broken.glb',
+      broken: Buffer.from('not a glTF document', 'utf8'),
+    },
   },
   // **The sample that flies itself.** orbit takes input, but a page that has
   // just loaded has had none — and a rocket standing on its pad is the same
@@ -1691,6 +1872,176 @@ try {
       : `it never changed — ${beats} HUD line(s) since the start, ` +
           `${values().size} value(s): ${[...values()].join(', ') || 'none'}`
   );
+
+  // **A FILE THE VISITOR CHOSE, WHICH IS THE OTHER WAY INPUT REACHES THIS
+  // ENGINE.** Only viewer has one — `apps/viewer/src/web.rs`'s drop target,
+  // `docs/plan/sample/05-viewer.md`'s V-F5 — and it belongs in this group for
+  // the group's own reason: everything above is a pointer or a key arriving
+  // through the browser's input pipeline and changing what the engine says
+  // about itself, and a dropped document is the same claim about a different
+  // pipeline.
+  //
+  // **IT RUNS LAST IN THE GROUP, AND THAT IS LOAD-BEARING.** `EXPECTED.waiting`
+  // asks for the demo document's own `instances: 3`, and the whole point of
+  // this block is that the page stops showing that document — so every check
+  // that reads `waiting` has to have read it already. Nothing after group C
+  // does: `EXPECTED.backdrop` is absent for this demo, and the `touch` rows
+  // that read it belong to demos that have no `drop`.
+  //
+  // The events are dispatched from page script rather than through
+  // `Input.dispatchDragEvent`, because CDP's drag interception needs a real
+  // file on the browser's own filesystem and the document under test is built
+  // in this process. What is dispatched is the event the handler listens for,
+  // carrying a `DataTransfer` with a real `File` in it, which is what a browser
+  // delivers.
+  if (EXPECTED.drop) {
+    // **A drag the page does not claim is a tab that navigates to the file**,
+    // taking the canvas, the device and the log with it. `dragover` is the
+    // event that decides it, so it is the one asked about; the frame lighting
+    // up is the visitor's half of the same answer.
+    const dragged = await evaluate(
+      page,
+      `(() => {
+         const canvas = document.getElementById('canvas');
+         const stage = canvas.closest('.stage');
+         const event = new DragEvent('dragover', {
+           dataTransfer: new DataTransfer(), bubbles: true, cancelable: true });
+         canvas.dispatchEvent(event);
+         const during = stage ? getComputedStyle(stage).borderColor : '';
+         canvas.dispatchEvent(new DragEvent('dragleave', {
+           dataTransfer: new DataTransfer(), bubbles: true, cancelable: true }));
+         const after = stage ? getComputedStyle(stage).borderColor : '';
+         return { prevented: event.defaultPrevented, during, after };
+       })()`
+    );
+    check(
+      'C',
+      'a file dragged over the canvas is claimed rather than navigated to',
+      dragged?.prevented === true,
+      dragged?.prevented === true
+        ? 'dragover was cancelled'
+        : 'dragover was not cancelled, so dropping a file here would replace the page with it'
+    );
+    check(
+      'C',
+      'the frame says it will take the file, and stops saying it',
+      Boolean(dragged) && dragged.during !== dragged.after,
+      Boolean(dragged) && dragged.during !== dragged.after
+        ? `${dragged.during} while over the canvas, ${dragged.after} after`
+        : `the border was ${dragged?.after ?? 'unreadable'} throughout — a ` +
+            'visitor holding a file over the canvas is told nothing'
+    );
+
+    // The document goes across as base64 because that is what survives being
+    // spliced into an expression string; the page turns it back into the bytes
+    // this process built.
+    /**
+     * @param {string} name
+     * @param {Buffer} bytes
+     * @returns {Promise<boolean>} whether the handler claimed the drop
+     */
+    const dropFile = async (name, bytes) =>
+      evaluate(
+        page,
+        `(() => {
+           const bytes = Uint8Array.from(atob(${JSON.stringify(bytes.toString('base64'))}),
+                                         (ch) => ch.charCodeAt(0));
+           const carried = new DataTransfer();
+           carried.items.add(new File([bytes], ${JSON.stringify(name)}));
+           const event = new DragEvent('drop', {
+             dataTransfer: carried, bubbles: true, cancelable: true });
+           document.getElementById('canvas').dispatchEvent(event);
+           return event.defaultPrevented;
+         })()`
+      );
+    const detailLine = () =>
+      evaluate(page, `document.getElementById('detail')?.textContent ?? ''`);
+
+    const beforeDrop = hud().length;
+    await dropFile(EXPECTED.drop.name, EXPECTED.drop.document);
+    const dropped = await until(async () =>
+      hud()
+        .slice(beforeDrop)
+        .find((line) => EXPECTED.drop.opened(line))
+    );
+    check(
+      'C',
+      'a dropped document replaces the one the page opened with',
+      Boolean(dropped),
+      dropped
+        ? dropped.trim()
+        : `no heartbeat in ${TIMEOUT_MS} ms said ${EXPECTED.drop.openedLabel} — ` +
+            `the last of ${hud().length - beforeDrop} since the drop was ` +
+            `"${(hud().at(-1) ?? 'none').trim()}", and the status bar says ` +
+            `"${await detailLine()}"`
+    );
+    const said = await until(async () => {
+      const text = await detailLine();
+      return text.includes(EXPECTED.drop.name) && text.includes('instance(s)')
+        ? text
+        : null;
+    });
+    check(
+      'C',
+      'the page tells the visitor what became of the file they dropped',
+      Boolean(said),
+      said ??
+        `the status bar says "${await detailLine()}", which does not name ` +
+          `${EXPECTED.drop.name} and what it came to`
+    );
+
+    // **AND BYTES THAT ARE NOT A DOCUMENT MUST NOT TAKE THE PAGE DOWN.** The
+    // native viewer's whole claim is that a file either loads or says why not,
+    // and a browser owes a visitor the same — except that a page has no exit
+    // code, so "says why not" means the frame already on screen keeps drawing
+    // and the status bar carries the loader's own sentence. Asked here rather
+    // than left to group D's "no uncaught exception": that check passes just as
+    // happily against a page that stopped drawing.
+    const beforeBroken = hud().length;
+    await dropFile(EXPECTED.drop.brokenName, EXPECTED.drop.broken);
+    // **THE ENGINE'S ANSWER, NOT THE PAGE'S ACKNOWLEDGEMENT.** Every line
+    // `web/demos/viewer/main.js` writes about a drop names the file too — it is
+    // saying it has handed the bytes over, or that nothing came back — so a
+    // check that only looked for the name passes against a page whose engine
+    // never answered at all. It did: under a `take_dropped_document` sabotaged
+    // to return nothing, this check stayed green on "broken.glb was handed over
+    // and no frame has opened it."
+    //
+    // What is asked for instead is `LoadError`'s own shape, which is the file
+    // and then what was wrong with it — `apps/viewer/src/model.rs` writes every
+    // one of its variants that way, and no line the page composes for itself
+    // begins with the name.
+    const refused = await until(async () => {
+      const text = await detailLine();
+      return text.startsWith(`${EXPECTED.drop.brokenName}:`) ? text : null;
+    });
+    check(
+      'C',
+      'a file that is not a document is refused in a sentence, not a crash',
+      Boolean(refused),
+      refused ??
+        `the status bar says "${await detailLine()}", which is not the ` +
+          `loader's own account of ${EXPECTED.drop.brokenName}`
+    );
+    const survived = await until(async () =>
+      hud()
+        .slice(beforeBroken)
+        .filter((line) => EXPECTED.drop.opened(line)).length > 1
+        ? hud().at(-1)
+        : null
+    );
+    check(
+      'C',
+      'the document already on screen is still there and still drawing',
+      Boolean(survived),
+      survived
+        ? survived.trim()
+        : `fewer than two heartbeats since the refusal still said ` +
+            `${EXPECTED.drop.openedLabel} — the page either stopped drawing or ` +
+            `lost the document it had, and the last line was ` +
+            `"${(hud().at(-1) ?? 'none').trim()}"`
+    );
+  }
 
   group('D — it renders');
 

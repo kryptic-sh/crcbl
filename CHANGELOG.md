@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The browser viewer takes a document the visitor drops on it.** Drag a `.glb`
+  or `.gltf` onto the canvas and it opens through the same loader a path does:
+  the camera re-frames on the new bounds, the listing panel rebuilds, and a file
+  that will not parse leaves the frame that is on screen and says why under the
+  canvas. That completes `docs/plan/sample/05-viewer.md`'s V-F5, whose native
+  half — `viewer <MODEL>` — has always been there. `viewer::load_bytes` is the
+  new entry point: a document opened out of memory, which is what a dropped file
+  is and what the demo's own compiled-in document now goes through too.
+
 - **`apps/viewer` reports the rig of the document it opened.** The listing panel
   behind `I` names the file's animation clips and counts the joints its skins
   declare, or says `rig: none` for a document that brought neither — most of
@@ -154,9 +163,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the wasm module — two meshes at three nodes with two materials, enough that
   the listing panel behind `I` reports something. Everything past the loading is
   the native code: the orbit camera, the frame-on-load, the grid scaled to the
-  document, the wireframe and normals views, the exposure. **There is still no
-  drop target**, which is `docs/plan/sample/05-viewer.md`'s V-F5 and the half
-  that lets a visitor open their own file.
+  document, the wireframe and normals views, the exposure. A visitor could not
+  open a file of their own; the drop target above is what changed that, in this
+  same unreleased version.
 
 - **`crcbl_assets::MemorySource`** — an `AssetSource` over bytes already in
   memory, for content that never lived in a directory. It is what the viewer's
