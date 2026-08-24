@@ -555,6 +555,26 @@ pub enum ValidationError {
         /// How many queries the set holds.
         count: u32,
     },
+    /// An indirect draw's arguments break one of the rules
+    /// [`crate::indirect`] states for stepping an array of argument structures:
+    /// a four-byte-aligned offset, a stride no smaller than one structure, and
+    /// structures that fit inside the buffer.
+    ///
+    /// `message` is the seam's own refusal, verbatim, and the same string
+    /// [`CommandEncoder::finish`](crate::CommandEncoder::finish) returns inside
+    /// a [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor) —
+    /// a recording method returns `()` and cannot report one inline, so this
+    /// draw is both recorded here and remembered for the boundary. None of
+    /// these mistakes is one an API reports usefully: a misaligned indirect
+    /// offset is `VUID-vkCmdDrawIndirect-offset-02710`, which has no error code
+    /// at all — the driver reads the arguments from the wrong bytes.
+    #[error("`{command}` was given indirect arguments the seam refuses: {message}")]
+    InvalidIndirectArguments {
+        /// Command name, from [`Command::name`].
+        command: &'static str,
+        /// The seam's refusal, unchanged.
+        message: String,
+    },
     /// A command referenced a handle that was never created or has been
     /// destroyed.
     #[error("`{command}` referenced a dead {kind} handle {bits:#x}")]

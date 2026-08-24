@@ -1907,6 +1907,93 @@ fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
 
 // --- handles, ranges and refusals ------------------------------------------
 
+/// **A misaligned indirect offset is refused before a driver reads it.**
+///
+/// The rule is [`crcbl_hal::indirect`]'s, and it is the one whose absence was
+/// worst: on Vulkan a misaligned `offset` is
+/// `VUID-vkCmdDrawIndirect-offset-02710`, which returns no error code and
+/// leaves the driver reading argument structures from the wrong bytes — a
+/// wrong picture, or a fault, with a clean log. `crcbl-vk`, the null backend
+/// and `crcbl-webgpu` all passed the offset straight through until the rules
+/// moved to the seam.
+///
+/// **The offset is the only thing wrong here.** Two is well inside the buffer,
+/// so the bound cannot be what refuses it, and `draw_count: 1` means the stride
+/// rules are not consulted either — a backend that refused this for any other
+/// reason would be refusing the wrong thing.
+///
+/// **The accepting arm is what stops the refusing one going vacuous**: a
+/// backend that refused every indirect draw would satisfy the assertion below
+/// and never draw again.
+///
+/// **The wording is deliberately not asserted.** `crcbl-dx12` keeps its own
+/// copy of this rule and words it its own way ("expects ArgumentBufferOffset to
+/// be a multiple of"), so an exact-message assertion would pass on Linux and
+/// fail on Windows. What every backend must agree on is the error kind, and
+/// that the message says what it wanted a multiple of.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn an_indirect_draw_at_a_misaligned_offset_is_refused() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let raster = Raster::open(&headless);
+
+    // One argument structure, four bytes in: the aligned arm reads it where it
+    // is, and the misaligned arm reads two bytes short of it and still inside
+    // the buffer.
+    let mut bytes = vec![0u8; 4 + DRAW_ARGS_TIGHT_STRIDE as usize];
+    bytes[4..].copy_from_slice(&raster_draw_args(RASTER_TRIANGLE_VERTICES));
+    let args = raster_indirect_buffer(&headless, "misaligned indirect args", &bytes);
+
+    let pipeline = raster
+        .pipeline(
+            device,
+            "misaligned indirect",
+            PrimitiveState::default(),
+            None,
+        )
+        .expect("a raster pipeline for an indirect draw");
+
+    let draw_at = |offset: u64| {
+        raster.render(&headless, "misaligned indirect", None, |encoder| {
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.bind_group(0, raster.pair_group, &[], raster.pipeline_layout);
+            encoder.draw_indirect(&DrawIndirect {
+                args,
+                offset,
+                draw_count: 1,
+                stride: 0,
+            });
+        })
+    };
+
+    let aligned = draw_at(4);
+    let misaligned = draw_at(2);
+
+    device.destroy_graphics_pipeline(pipeline);
+    device.destroy_buffer(args);
+    raster.destroy(device);
+
+    aligned.expect("an offset of four is the one this buffer was built around");
+
+    let error = misaligned.expect_err(
+        "two is not a multiple of four, and a backend that reads argument structures from \
+         there reads them from the wrong bytes",
+    );
+    assert!(
+        matches!(error, HalError::InvalidDescriptor(_)),
+        "a misaligned indirect offset is a bad descriptor rather than a backend failure, so \
+         every backend must answer InvalidDescriptor: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("multiple of"),
+        "the refusal must say what it wanted a multiple of, so a caller can fix it without \
+         reading this backend's source: {error}"
+    );
+
+    headless.finish();
+}
+
 /// A destroyed handle does not alias the buffer that takes its slot.
 ///
 /// Migrated from three near-verbatim copies — `crcbl-wgpu`'s `wgpu_e2e.rs`,

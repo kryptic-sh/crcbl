@@ -1045,11 +1045,14 @@ impl DeviceInner {
         lookup(&state.buffers, "buffer", handle, self).map(|entry| entry.raw)
     }
 
-    /// Resolves a buffer handle, returning its size and memory location too —
+    /// Resolves a buffer handle, returning its size and memory location too.
+    ///
     /// `write_descriptors` needs the size to resolve a whole-buffer binding
     /// into the length it actually covers before checking it against the slot's
     /// range limit, and the location to refuse a host-visible buffer bound
-    /// where a shader will write to it.
+    /// where a shader will write to it. The indirect draws need the size as
+    /// well, to hold an argument array inside the buffer it is read from —
+    /// `crcbl_hal::indirect::plan_structures` — and read no location.
     pub(crate) fn buffer_raw_size_and_location(
         &self,
         state: &DeviceState,

@@ -16539,3 +16539,41 @@ rules. `swapchain.rs` beyond what the e2e already covers. And the WebGPU replay
 side — `crcbl-webgpu`'s `writer` module says in its own comments that the split
 of enforcement between the encoder and the replayer is where "an unenforced rule
 both sides assume the other checks" could hide, and that was not audited.
+
+## What the indirect-rule wiring left owed (2026-08-24)
+
+The offset, stride and bound rules now live in `crcbl_hal::indirect` and
+`crcbl-vk`, the null backend and `crcbl-webgpu` call them. Three things that
+slice deliberately did not do.
+
+- **The mesh indirect path is not wired, and wiring it turns an existing test
+  red for a real reason.** `draw_mesh_tasks_indirect` still records without
+  checking anything, and `plan_mesh_indirect` — the seam entry point for the
+  three-word mesh argument structure — has no caller. Verified: the null
+  backend's `a_mesh_dispatch_is_recorded_like_any_other_draw` records
+  `DrawIndirect { offset: 12, draw_count: 1, stride: 12 }` against a buffer
+  created with `size: 12`, so the single structure starts exactly at the end and
+  reads bytes 12..24. Wiring the mesh path makes that test fail because the draw
+  it records really does run past its buffer. **Fix the test, not the guard** —
+  and note that mesh shading is a `parity_blockers()` row on both deferred
+  backends, so this is Vulkan-and-WebGPU work whichever way it goes.
+- **The count-buffer draws are unchecked on every backend.**
+  `draw_indirect_count` and `draw_indexed_indirect_count` take
+  `DrawIndirectCount`, a different struct with `args_offset` and
+  `max_draw_count`, and the seam has no entry point for it at all —
+  `crcbl_hal::indirect` covers `DrawIndirect` only. `crcbl-mtl` has its own
+  `plan_indirect_count` and `crcbl-dx12` its own copy; the three backends just
+  wired have nothing. Same class of undetectable mistake as the one just closed:
+  a misaligned count offset is read by the driver with no error returned. WebGPU
+  has no count-buffer draw at all, so its answer there stays `Unsupported` and
+  the work is the seam plus `crcbl-vk` plus the null backend.
+- **`crcbl-webgpu` does not enforce the bound, by design.** Its encoder holds a
+  channel and a handle pool and cannot reach a buffer's length, so it calls
+  `check_layout` (offset and stride) and leaves the bound to the browser, which
+  validates the indirect range itself and reports it. This is an
+  enforcement-location difference rather than a capability divergence, so it is
+  deliberately **not** a `parity_blockers()` row — recorded here so it is not
+  rediscovered as a gap. Closing it would mean giving the encoder a handle on
+  the device's buffer table (the `buffers` map already exists for
+  `check_buffer_range`), which is a larger change than the rule was worth; the
+  option is real if a reason appears.

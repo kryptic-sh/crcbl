@@ -1659,6 +1659,170 @@ fn dispatch_indirect_encodes_rather_than_refusing_at_finish() {
     assert_eq!(*offset, 256, "the byte offset crosses");
 }
 
+/// **An indirect draw's offset and stride are checked before anything is
+/// encoded; its bound is left to the browser, deliberately.**
+///
+/// `crcbl_hal::indirect` states three rules for stepping an array of argument
+/// structures. This encoder holds a channel and a handle pool and cannot reach
+/// a buffer's length, so it calls `check_layout` — the offset and the stride —
+/// and the browser answers the third against the buffer itself. Those first two
+/// are the ones no API reports: a misaligned indirect offset is
+/// `VUID-vkCmdDrawIndirect-offset-02710`, which has no error code at all.
+///
+/// **Both halves are the check.** The refusals alone would be satisfied by an
+/// encoder that refused every indirect draw, so a legal one — including one
+/// whose offset is far past any buffer this test could name — must still reach
+/// the stream with its four fields intact. That last row is the honest half of
+/// the bound: it is not checked here, and a test claiming otherwise would be
+/// claiming a check that does not exist.
+///
+/// **What turns it red.** Encoding before the check, so a refused draw still
+/// reaches the stream; checking the indexed form against the four-word
+/// structure, which accepts a 16-byte stride that reads a word short every
+/// structure after the first; or reaching for the bound, which would refuse the
+/// far-offset row this backend has no length to judge.
+#[test]
+fn an_indirect_draws_offset_and_stride_are_checked_before_it_is_encoded() {
+    use crcbl_hal::DrawIndirect;
+
+    let (channel, device) = device_on_fresh_channel();
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("the graphics queue");
+    let args: BufferHandle = Handle::from_bits((9 << 32) | 3).expect("a real handle");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    // One draw never strides, so `stride: 0` is legal here.
+    encoder.draw_indirect(&DrawIndirect {
+        args,
+        offset: 16,
+        draw_count: 1,
+        stride: 0,
+    });
+    // Two five-word structures 32 bytes apart: a padded stride, honoured.
+    encoder.draw_indexed_indirect(&DrawIndirect {
+        args,
+        offset: 64,
+        draw_count: 2,
+        stride: 32,
+    });
+    // Past the end of any buffer a browser would hand back — and encoded, because
+    // the bound is the browser's rule to enforce and this encoder has no length
+    // to enforce it with.
+    encoder.draw_indirect(&DrawIndirect {
+        args,
+        offset: 1 << 40,
+        draw_count: 1,
+        stride: 0,
+    });
+    encoder
+        .finish()
+        .expect("three legal argument layouts, so finish succeeds");
+
+    let commands = channel
+        .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+        .expect("the channel is not borrowed")
+        .expect("the writer's own bytes decode");
+    let names: Vec<_> = commands.iter().map(crate::Command::name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "CreateCommandEncoder",
+            "DrawIndirect",
+            "DrawIndexedIndirect",
+            "DrawIndirect",
+            "Finish",
+        ],
+        "a legal indirect draw encodes a command of its own"
+    );
+    let Some(crate::Command::DrawIndexedIndirect {
+        buffer,
+        offset,
+        draw_count,
+        stride,
+    }) = commands.get(2)
+    else {
+        panic!("the third command is the indexed indirect draw: {commands:?}");
+    };
+    assert_eq!(
+        (*buffer, *offset, *draw_count, *stride),
+        (args, 64, 2, 32),
+        "all four fields cross unchanged"
+    );
+
+    for (what, indexed, draw) in [
+        (
+            "an offset that is not a multiple of four",
+            false,
+            DrawIndirect {
+                args,
+                offset: 2,
+                draw_count: 1,
+                stride: 0,
+            },
+        ),
+        (
+            "a stride below one 16-byte structure",
+            false,
+            DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride: 12,
+            },
+        ),
+        (
+            "a stride below one 20-byte indexed structure",
+            true,
+            DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride: 16,
+            },
+        ),
+        (
+            "a stride that is not a multiple of four",
+            false,
+            DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride: 18,
+            },
+        ),
+    ] {
+        // A fresh channel each time: the refusal is asserted by what the stream
+        // does *not* hold, which a shared one would carry over.
+        let (channel, device) = device_on_fresh_channel();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        if indexed {
+            encoder.draw_indexed_indirect(&draw);
+        } else {
+            encoder.draw_indirect(&draw);
+        }
+        let finished = encoder.finish();
+        assert!(
+            matches!(finished, Err(HalError::InvalidDescriptor(_))),
+            "{what} must be refused at finish, and finish answered {finished:?}"
+        );
+
+        let commands = channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode");
+        let names: Vec<_> = commands.iter().map(crate::Command::name).collect();
+        assert_eq!(
+            names,
+            vec!["CreateCommandEncoder"],
+            "{what}: nothing is encoded for a draw that was refused"
+        );
+    }
+}
+
 // ── refusals of needed-but-unwired Device methods ──────────────────────────
 
 #[test]

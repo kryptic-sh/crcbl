@@ -237,7 +237,29 @@ impl CommandEncoder for WebGpuCommandEncoder {
             .with(|c| c.encode(|stream| stream.draw_indexed(indices, base_vertex, instances)));
     }
 
+    /// **The offset and stride rules, and not the bound.**
+    ///
+    /// [`crcbl_hal::indirect`] states three rules for reading an array of
+    /// argument structures: a four-byte-aligned offset, a stride no smaller
+    /// than one structure, and structures that fit inside the buffer. This
+    /// encoder holds a channel and a handle pool and nothing else — it has no
+    /// way to reach a buffer's length — so it calls
+    /// [`check_layout`](crcbl_hal::indirect::check_layout), which is the first
+    /// two, and the third is genuinely not checked here. That is not a gap
+    /// worth papering over: the browser validates the indirect range against
+    /// the buffer itself and reports it as a GPUValidationError, which is the
+    /// one rule of the three an API does report. The other two it does not, so
+    /// they are refused here.
+    ///
+    /// The refusal takes the same route a field past a stream cap does —
+    /// `record_refused` — because this method returns `()`: the first one wins
+    /// and [`finish`](CommandEncoder::finish) reports it. Nothing is encoded
+    /// for a draw that was refused.
     fn draw_indirect(&mut self, draw: &DrawIndirect) {
+        if let Err(error) = crcbl_hal::indirect::check_layout(draw, crcbl_hal::DRAW_ARGS_BYTES) {
+            self.record_refused(&error);
+            return;
+        }
         self.channel.with(|c| {
             c.encode(|stream| {
                 stream.draw_indirect(draw.args, draw.offset, draw.draw_count, draw.stride)
@@ -245,7 +267,15 @@ impl CommandEncoder for WebGpuCommandEncoder {
         });
     }
 
+    /// As [`draw_indirect`](Self::draw_indirect), against the five-word indexed
+    /// argument structure rather than the four-word one.
     fn draw_indexed_indirect(&mut self, draw: &DrawIndirect) {
+        if let Err(error) =
+            crcbl_hal::indirect::check_layout(draw, crcbl_hal::DRAW_INDEXED_ARGS_BYTES)
+        {
+            self.record_refused(&error);
+            return;
+        }
         self.channel.with(|c| {
             c.encode(|stream| {
                 stream.draw_indexed_indirect(draw.args, draw.offset, draw.draw_count, draw.stride)

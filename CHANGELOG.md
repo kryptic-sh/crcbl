@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk`, the null backend and `crcbl-webgpu` refuse a malformed indirect
+  draw instead of handing it to a driver.** All three passed `DrawIndirect`'s
+  `offset`, `stride` and `draw_count` straight through. On Vulkan a misaligned
+  offset is `VUID-vkCmdDrawIndirect-offset-02710`: no error code is returned and
+  the driver reads argument structures from the wrong bytes, so the symptom is a
+  wrong picture or a fault with a clean log. The rules were not new — they were
+  `crcbl-mtl`'s, whose own doc said they are pure arithmetic testable without a
+  Mac — so they moved to the seam as `crcbl_hal::indirect` and the three
+  backends now call them. `crcbl-dx12` and `crcbl-mtl` are unchanged; they
+  already enforced the same rules.
+
+  **`crcbl-webgpu` enforces the offset and stride rules and not the bound**, and
+  says so where it is written: its encoder holds a channel and cannot reach a
+  buffer's length, and the bound is the one rule of the three that the browser
+  itself validates and reports. The other two it does not report, which is why
+  they are refused before anything is encoded.
+
 - **`crcbl-dx12` clears the outstanding acquire when a swapchain is
   reconfigured.** `reconfigure_swapchain` destroys the old back buffers and
   their views but edited the swapchain entry in place, so the acquired ring
@@ -190,6 +207,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   op, and `docs/backlog.md` carries the measurement and the open question.
 
 ### Added
+
+- **`crcbl_hal::indirect`**, the seam's indirect-draw argument rules:
+  `plan_structures` and `check_layout`, the argument widths the three graphics
+  APIs agree on, and `IndirectPlan`. A backend that steps an array of argument
+  structures now has one place to ask whether it may.
 
 - **A binary run can prove the validation layer is _checking_, not merely
   loaded.** `CRCBL_VK_VALIDATION_PROVOKE=1` asks a **debug** build of `crcbl-vk`

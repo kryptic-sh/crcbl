@@ -96,6 +96,7 @@ use core::time::Duration;
 
 use crcbl_core::{Handle, SurfaceTarget};
 
+use crate::indirect::{plan_structures, structure_bytes};
 use crate::{
     AcquiredFrame, AdapterId, AdapterInfo, BackendKind, Barriers, BindGroupDesc, BindGroupEntry,
     BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferCopy, BufferDesc,
@@ -2497,6 +2498,60 @@ impl NullEncoder {
         }
     }
 
+    /// Requires an indirect draw's arguments to obey the seam's rules for
+    /// stepping an array of argument structures — [`crate::indirect`].
+    ///
+    /// This backend resolves no driver object and can still answer all three
+    /// rules, bounds included, because it recorded the buffer's size when it
+    /// created it. That is the point of checking here: `crcbl-vk` needs a
+    /// device to reach the same verdict, and this reaches it in a unit test.
+    ///
+    /// A refusal goes two places. It is recorded, like every other violation,
+    /// so a test sees the whole frame's worth; and it is remembered in
+    /// [`failed`](Self::failed), because a recording method returns `()` and
+    /// [`finish`](CommandEncoder::finish) is the first thing that can report
+    /// it — the arrangement `create_command_encoder` already uses for a queue
+    /// it cannot accept.
+    fn need_indirect_arguments(
+        &mut self,
+        command: &'static str,
+        draw: &DrawIndirect,
+        indexed: bool,
+    ) {
+        let length = {
+            let state = self.recorder.lock();
+            let Some(object) = state.get(ObjectKind::Buffer, draw.args.to_bits()) else {
+                // A dead or foreign handle, already reported by `need_live`.
+                // There is no buffer to measure the arguments against.
+                return;
+            };
+            let Detail::Buffer { size, .. } = &object.detail else {
+                unreachable!("a buffer handle always carries buffer detail");
+            };
+            // `size`, not `bytes.len()`: only a mappable buffer keeps its
+            // contents, and an argument buffer is device-local everywhere it
+            // matters.
+            *size
+        };
+        let Err(error) = plan_structures(draw, structure_bytes(indexed), length) else {
+            return;
+        };
+        let message = match error {
+            HalError::InvalidDescriptor(message) => message,
+            // `plan_structures` documents `InvalidDescriptor` as the only
+            // refusal it has; anything else still crosses rather than being
+            // dropped.
+            other => other.to_string(),
+        };
+        self.fail(ValidationError::InvalidIndirectArguments {
+            command,
+            message: message.clone(),
+        });
+        if self.failed.is_none() {
+            self.failed = Some(HalError::InvalidDescriptor(message));
+        }
+    }
+
     /// Requires a handle to still resolve *and* to belong to this device.
     fn need_live(&self, command: &'static str, kind: ObjectKind, bits: u64) {
         let state = self.recorder.lock();
@@ -2713,6 +2768,7 @@ impl CommandEncoder for NullEncoder {
     fn draw_indirect(&mut self, draw: &DrawIndirect) {
         self.need_render("DrawIndirect");
         self.need_live("DrawIndirect", ObjectKind::Buffer, draw.args.to_bits());
+        self.need_indirect_arguments("DrawIndirect", draw, false);
         self.record(Command::DrawIndirect(*draw));
     }
 
@@ -2723,6 +2779,7 @@ impl CommandEncoder for NullEncoder {
             ObjectKind::Buffer,
             draw.args.to_bits(),
         );
+        self.need_indirect_arguments("DrawIndexedIndirect", draw, true);
         self.record(Command::DrawIndexedIndirect(*draw));
     }
 

@@ -38,6 +38,7 @@ use std::sync::Arc;
 use ash::vk;
 use ash::vk::Handle as _;
 
+use crcbl_hal::indirect::{plan_structures, structure_bytes};
 use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
@@ -1484,15 +1485,28 @@ impl VkCommandEncoder {
             return;
         }
         let state = self.device.state();
-        let Ok(args) = self.device.buffer_raw(&state, draw.args) else {
+        let Ok((args, size, _)) = self.device.buffer_raw_size_and_location(&state, draw.args)
+        else {
             drop(state);
             self.fail(HalError::invalid_handle("buffer", draw.args));
             return;
         };
         drop(state);
+        // The seam's rules for stepping an array of argument structures, which
+        // Vulkan reports worst of all: a misaligned offset is
+        // `VUID-vkCmdDrawIndirect-offset-02710` and an over-run is
+        // `VUID-vkCmdDrawIndirect-offset-02711`, neither of which has an error
+        // code — the driver reads the arguments from the wrong bytes and draws
+        // whatever it finds. Refused here for the reason a bad handle is:
+        // recording carries on and `finish` reports it.
+        if let Err(error) = plan_structures(draw, structure_bytes(indexed), size) {
+            self.fail(error);
+            return;
+        }
         self.use_object(args.as_raw());
         // SAFETY: `self.raw` is recording inside a render pass and `args` is a
-        // live buffer with `INDIRECT` usage in `IndirectArgument` state.
+        // live buffer with `INDIRECT` usage in `IndirectArgument` state, whose
+        // size the offset, stride and count have just been checked against.
         unsafe {
             if indexed {
                 self.device.raw.cmd_draw_indexed_indirect(

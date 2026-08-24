@@ -4377,3 +4377,172 @@ fn a_buffer_range_over_the_slots_limit_is_refused() {
         group_of(0, ceiling).expect("a range of exactly the ceiling");
     }
 }
+
+/// **An indirect draw is held to the seam's argument rules, all three of them,
+/// with no device in the room.**
+///
+/// [`crate::indirect`] states them once — a four-byte-aligned offset, a stride
+/// no smaller than one argument structure, and structures that fit inside the
+/// buffer — and this backend is the only one that can answer all three in a
+/// unit test: it recorded the buffer's size when it created it, where
+/// `crcbl-vk` needs a device and `crcbl-webgpu`'s encoder cannot reach a length
+/// at all. None of the three is a mistake an API reports: a misaligned indirect
+/// offset is `VUID-vkCmdDrawIndirect-offset-02710`, which has no error code —
+/// the driver reads the arguments from the wrong bytes and draws something else.
+///
+/// **The legal draws are half the test.** A check that refused every indirect
+/// draw would satisfy the refusals below and break every frame in the
+/// workspace, so the accepting side runs first: a multi-draw at a padded
+/// stride and a one-draw caller's `stride: 0`, which the seam accepts because
+/// a single draw never strides.
+///
+/// **What turns it red.** Dropping the check from `draw_indirect` or
+/// `draw_indexed_indirect` turns its refusals green; using
+/// [`structure_bytes`](crate::structure_bytes)`(false)` for the indexed form
+/// accepts a 16-byte stride that skips a word of every structure after the
+/// first; measuring the buffer by its recorded `bytes` rather than its `size`
+/// refuses the legal draws too, because a device-local buffer keeps no
+/// contents.
+#[test]
+fn an_indirect_draw_is_held_to_the_seams_argument_rules() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
+    let args = device
+        .create_buffer(&BufferDesc {
+            label: Some("draw args"),
+            size: 64,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("buffer");
+    // Attachment-less: this test is about the arguments, and a pass with no
+    // views to resolve keeps the recorded stream to the draws themselves.
+    let pass = RenderPassDesc {
+        label: Some("indirect"),
+        color_attachments: &[],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(16, 16),
+        timestamp_writes: None,
+    };
+
+    recorder.clear();
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    encoder.begin_render_pass(&pass);
+    // Two structures 32 bytes apart from offset 4: a padded stride, which is
+    // what `Capability::IndirectArgumentPaddedStride` promises is honoured
+    // rather than tightened. Last byte read is 4 + 32 + 16 = 52, inside 64.
+    encoder.draw_indirect(&DrawIndirect {
+        args,
+        offset: 4,
+        draw_count: 2,
+        stride: 32,
+    });
+    // One draw never strides, so `stride: 0` is legal and never told to an API.
+    encoder.draw_indexed_indirect(&DrawIndirect {
+        args,
+        offset: 0,
+        draw_count: 1,
+        stride: 0,
+    });
+    encoder.end_render_pass();
+    encoder.finish().expect("both draws obey the seam's rules");
+    recorder.assert_valid();
+    assert_eq!(
+        recorder.command_names(),
+        vec![
+            "BeginRenderPass",
+            "DrawIndirect",
+            "DrawIndexedIndirect",
+            "EndRenderPass",
+        ]
+    );
+
+    // One encoder per refusal: the first hard failure is the one `finish`
+    // reports, so a second on the same encoder would be masked.
+    for (what, command, indexed, draw) in [
+        (
+            "an offset that is not a multiple of four",
+            "DrawIndirect",
+            false,
+            DrawIndirect {
+                args,
+                offset: 2,
+                draw_count: 1,
+                stride: 16,
+            },
+        ),
+        (
+            "a stride below one 16-byte structure",
+            "DrawIndirect",
+            false,
+            DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride: 12,
+            },
+        ),
+        (
+            "a stride below one 20-byte indexed structure",
+            "DrawIndexedIndirect",
+            true,
+            DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride: 16,
+            },
+        ),
+        (
+            "two structures 32 bytes apart from offset 32 of a 64-byte buffer",
+            "DrawIndirect",
+            false,
+            DrawIndirect {
+                args,
+                offset: 32,
+                draw_count: 2,
+                stride: 32,
+            },
+        ),
+    ] {
+        recorder.clear();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_render_pass(&pass);
+        if indexed {
+            encoder.draw_indexed_indirect(&draw);
+        } else {
+            encoder.draw_indirect(&draw);
+        }
+        encoder.end_render_pass();
+
+        let Err(HalError::InvalidDescriptor(reported)) = encoder.finish() else {
+            panic!("{what} must fail the finish with an InvalidDescriptor");
+        };
+        let errors = recorder.validation_errors();
+        let Some(ValidationError::InvalidIndirectArguments {
+            command: recorded_command,
+            message,
+        }) = errors
+            .iter()
+            .find(|error| matches!(error, ValidationError::InvalidIndirectArguments { .. }))
+        else {
+            panic!("{what} must be recorded as well as reported: {errors:?}");
+        };
+        assert_eq!(*recorded_command, command, "{what}");
+        assert_eq!(
+            *message, reported,
+            "{what}: `finish` reports the seam's own message, unchanged"
+        );
+        // A `finish` that fails publishes no stream at all — it returns before
+        // the commands reach the recorder — so the refusal above is the whole
+        // of what a test can read back, which is why it is recorded and not
+        // only returned.
+        assert!(
+            recorder.command_names().is_empty(),
+            "{what}: a failed finish commits nothing"
+        );
+    }
+
+    device.destroy_buffer(args);
+}

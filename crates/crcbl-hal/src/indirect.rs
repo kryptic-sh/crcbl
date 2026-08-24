@@ -101,12 +101,64 @@ pub fn plan_mesh_indirect(
     plan_structures(draw, MESH_DISPATCH_ARGS_BYTES, length)
 }
 
+/// Where the first argument structure starts and how far apart the rest are —
+/// [`plan_structures`] without the part that needs a buffer length.
+///
+/// [`plan_structures`] is this plus the bound, and calls it, so a backend that
+/// can resolve the argument buffer's size wants that one instead. This is for
+/// the backend that cannot: `crcbl-webgpu`'s command encoder holds a channel
+/// and a handle pool, has no way to reach a buffer's length, and can still be
+/// held to the offset and stride rules — which are the rules an API reports
+/// worst. The browser checks the range itself, so the bound is the one part
+/// that backend can afford to leave to it.
+///
+/// **A draw of nothing is accepted**, which is the answer [`plan_structures`]
+/// gives it too (`Ok(None)`): `draw_count: 0` reads no structure, so there is
+/// no offset to step from and no stride to step by. The two entry points have
+/// to agree there, or one backend would refuse the draw another runs.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] when [`DrawIndirect::offset`] is not a
+/// multiple of [`INDIRECT_OFFSET_ALIGNMENT`], or when a multi-draw's
+/// [`stride`](DrawIndirect::stride) is smaller than one argument structure or
+/// is not itself so aligned.
+pub fn check_layout(draw: &DrawIndirect, args: u64) -> Result<(), HalError> {
+    if draw.draw_count == 0 {
+        return Ok(());
+    }
+    if !draw.offset.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "an indirect draw's argument offset {} is not a multiple of {INDIRECT_OFFSET_ALIGNMENT}",
+            draw.offset
+        )));
+    }
+    // A single draw reads one structure at `offset` and never strides, so its
+    // `stride` is not a value the API is ever told — checking it would refuse
+    // the tightly-packed `stride: 0` a one-draw caller may well pass.
+    if draw.draw_count > 1 {
+        let stride = u64::from(draw.stride);
+        if stride < args || !stride.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "an indirect draw of {} structures has a stride of {stride}, and one argument \
+                 structure is {args} bytes on a {INDIRECT_OFFSET_ALIGNMENT}-byte alignment",
+                draw.draw_count
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The shared body of every indirect *draw* plan: `args` bytes per structure,
 /// and nothing that reads them.
 ///
 /// `length` is the size of the buffer [`DrawIndirect::args`] names, which the
 /// backend has already resolved; `None` is a draw of nothing, which is not an
 /// error because there is no structure to read and no draw to issue.
+///
+/// The offset and stride rules are [`check_layout`]'s and are checked by
+/// calling it; what this adds is the bound, which is the one rule that needs
+/// `length`.
 ///
 /// # Errors
 ///
@@ -123,27 +175,14 @@ pub fn plan_structures(
     if draw.draw_count == 0 {
         return Ok(None);
     }
-    if !draw.offset.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
-        return Err(HalError::InvalidDescriptor(format!(
-            "an indirect draw's argument offset {} is not a multiple of {INDIRECT_OFFSET_ALIGNMENT}",
-            draw.offset
-        )));
-    }
-    // A single draw reads one structure at `offset` and never strides, so its
-    // `stride` is not a value the API is ever told — checking it would refuse
-    // the tightly-packed `stride: 0` a one-draw caller may well pass.
+    check_layout(draw, args)?;
+    // A single draw reads one structure at `offset` and never strides, so the
+    // step it takes is the structure's own width — which is why `check_layout`
+    // leaves a one-draw `stride` unchecked and why the plan does not report it.
     let stride = if draw.draw_count == 1 {
         args
     } else {
-        let stride = u64::from(draw.stride);
-        if stride < args || !stride.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
-            return Err(HalError::InvalidDescriptor(format!(
-                "an indirect draw of {} structures has a stride of {stride}, and one argument \
-                 structure is {args} bytes on a {INDIRECT_OFFSET_ALIGNMENT}-byte alignment",
-                draw.draw_count
-            )));
-        }
-        stride
+        u64::from(draw.stride)
     };
     let span = u64::from(draw.draw_count - 1)
         .checked_mul(stride)
@@ -272,6 +311,77 @@ mod tests {
             ),
         ] {
             let Err(error) = plan_mesh_indirect(&draw, length) else {
+                panic!("{what} must be refused");
+            };
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
+    }
+    /// **The offset and stride rules hold without a buffer length, and the
+    /// bound is not smuggled in with them.**
+    ///
+    /// [`check_layout`] is what `crcbl-webgpu` calls: its encoder cannot reach
+    /// a buffer's length, so a check that needed one would be no check at all
+    /// there. Both halves matter — the rules it does enforce have to bite, and
+    /// the rule it does not must be visibly absent, or a backend calling this
+    /// would be credited with a bounds check nothing performs.
+    ///
+    /// **What turns it red.** Dropping the alignment check or either half of
+    /// the stride check turns one of the refusals green; checking a one-draw
+    /// `stride` refuses the `stride: 0` row; folding [`plan_structures`]'s
+    /// bound in here refuses the last row, which this function has no `length`
+    /// to judge.
+    #[test]
+    fn check_layout_judges_the_offset_and_the_stride_and_not_the_bound() {
+        // A draw of nothing reads no structure, which is `plan_structures`'
+        // `Ok(None)` and has to be this function's `Ok(())`.
+        check_layout(&indirect(2, 0, 3), DRAW_ARGS_BYTES).expect("a draw of nothing");
+
+        // `stride: 0` from a one-draw caller is legal: the API is never told
+        // it, because there is nothing to step to.
+        check_layout(&indirect(4, 1, 0), DRAW_ARGS_BYTES)
+            .expect("one structure at offset 4 strides nowhere");
+
+        // The rule this function exists for on the bounds-free backend: an
+        // offset+stride that runs past any plausible buffer is still a legal
+        // *layout*. `plan_structures` is what refuses it, and only because it
+        // was given a length.
+        let past_the_end = indirect(1 << 40, 4, 32);
+        check_layout(&past_the_end, DRAW_ARGS_BYTES)
+            .expect("a bound is not this function's to judge");
+        assert!(
+            matches!(
+                plan_structures(&past_the_end, DRAW_ARGS_BYTES, 4096),
+                Err(HalError::InvalidDescriptor(_))
+            ),
+            "the same draw must be refused where a length is available"
+        );
+
+        for (draw, args, what) in [
+            (
+                indirect(2, 1, 0),
+                DRAW_ARGS_BYTES,
+                "an offset that is not a multiple of four",
+            ),
+            (
+                indirect(0, 2, 8),
+                DRAW_ARGS_BYTES,
+                "a stride below one 16-byte structure",
+            ),
+            (
+                indirect(0, 2, 16),
+                DRAW_INDEXED_ARGS_BYTES,
+                "a stride below one 20-byte structure",
+            ),
+            (
+                indirect(0, 2, 18),
+                DRAW_ARGS_BYTES,
+                "a stride that is not a multiple of four",
+            ),
+        ] {
+            let Err(error) = check_layout(&draw, args) else {
                 panic!("{what} must be refused");
             };
             assert!(
