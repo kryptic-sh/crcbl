@@ -1,0 +1,30 @@
+[package]
+name = "bracket"
+description = "Bracket — matchmaking, rating and ranked session flow, with no game attached"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends**, for the reason every other sample's
+# manifest sets out: the same loop has to be reachable from `main.rs` (argv,
+# exit codes) and from a browser's JS shim, and a bin crate has no linkable
+# artifact for the second.
+#
+# The lib is not called `bracket`: a lib and a bin of the same name in one
+# package write the same `bracket.wasm`, and the file a Pages deploy picks up
+# would be whichever target finished last.
+[lib]
+name = "crcbl_bracket"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "bracket"
+path = "src/main.rs"
+
+[dependencies]
+crcbl = { workspace = true }
+
+[lints]
+workspace = true

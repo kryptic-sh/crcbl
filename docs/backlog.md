@@ -16772,6 +16772,58 @@ with the flight instruments over it. What that leaves:
   thousand revolutions, but nothing has run _this sample_ at ×1000 for long
   enough to say the frame hierarchy, the fuel and the phase logic survive it.
 
+## Narrow matchmaking stretches an Elo ladder (2026-08-24)
+
+Found while building `apps/bracket`, and it needs a decision before the sample
+can claim a rating system that converges.
+
+**What happens.** `bracket`'s population converges and then comes apart. Mean
+distance between a player's rating and their true skill, 64 players, five seeds,
+tight agreement across all of them:
+
+| ticks  | mean error | ladder spread (true range is 1000) |
+| ------ | ---------- | ---------------------------------- |
+| 2 000  | 54–58      | 978                                |
+| 10 000 | 132–139    | 1 860                              |
+| 30 000 | 325–335    | 2 689                              |
+
+The mean rating stays put (1499.9) and the ladder _order_ stays right. What
+breaks is the scale: the top player inflated to 2832 against a true skill of
+2000, the bottom deflated to 144 against a true 1000.
+
+**Why.** Not a random walk — it is far too consistent across seeds for that. It
+is a selection effect. Pairing on a small _observed_ rating gap preferentially
+picks pairs whose _true_ skill gap is larger, because a rating is a noisy
+estimate of skill. The favourite therefore wins more often than the rating gap
+predicted, gains points on average, and the spread inflates with every match.
+
+**Evidence it is the pairing and not the update.** Same `settle` on both sides:
+`rating.rs`'s test pairs at random and holds ~36 points of error over 40 000
+matches; `sim.rs` pairs by rating and drifts as above. Two mitigations were
+measured and neither fixes it — drawing the partner uniformly from the tolerance
+band rather than taking the nearest changed nothing (2673 at 30k), and sending
+2%/5%/15% of matches out wide as calibration got 30k error only to 277/232/164.
+
+**The decision.** Two ways forward, and they are not the same amount of work:
+
+- **Keep Elo and state the window.** What is committed: convergence is claimed
+  and tested at 2 000 ticks, and `queue.rs` says in its own header that it does
+  not hold indefinitely. Cheap and honest, but the sample's exit criterion wants
+  a rating system that converges, and "for a while" is a weaker claim than that.
+- **Move to an uncertainty-aware rating (Glicko-2, or TrueSkill).** This is what
+  the industry actually does and the reason it does it: Glicko's `g(RD)` factor
+  attenuates the expected score by how uncertain the opponent's rating is, which
+  is exactly the correction this selection effect needs. Bigger, and it is a
+  published algorithm with constants that must be checked against Glickman's
+  paper rather than recalled — the whole point of a rating system nobody can
+  falsify is that a transcription slip in it would never show up.
+
+Worth noting the drift is arguably _content_ for this sample rather than only a
+defect: making a matchmaking property visible instead of asserted is what the
+plan says the demo is for, and "your rating is only as good as the variety of
+people you play" is a real thing to show. That does not settle which rating
+system ships.
+
 ## There is still no world-space debug draw (2026-08-24)
 
 The **UI-space** half of this has shipped: `DrawList::line` and

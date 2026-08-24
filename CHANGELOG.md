@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/bracket` — matchmaking, rating and a ladder, with no game attached.**
+  Players queue, get paired by rating with a tolerance that widens as they wait,
+  a stub resolves the match from true skill, and Elo moves.
+  `bracket sim --seed N --players M --ticks K` runs a synthetic population
+  headless and deterministically, reporting what the matchmaker traded: how far
+  the ratings ended from the true skills, how evenly it paired, and how long
+  people waited. The browser demo is not built yet — this is the model it will
+  draw.
+
 - **`DrawList::line` and `DrawList::polyline`** — stroked segments and connected
   runs, the UI layer's first primitive that is not axis-aligned. Both take a
   thickness in pixels and stroke centred on the path; a polyline can close, and
