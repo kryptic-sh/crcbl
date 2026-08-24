@@ -34,6 +34,39 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
+### The skinning shader exists and nothing dispatches it
+
+`crates/crcbl-shaders/shaders/skinning.slang` and `crcbl_shaders::skinning`
+landed on 2026-08-25: the compute kernel of `docs/plan/17-animation.md`'s
+skinning prepass, with artifacts for all four backends and its layout pinned
+against what `slangc` emitted. There is **no render-graph pass, no bind group
+and no host consumer**, so nothing has ever executed it — the artifacts are
+validated (naga reads the WGSL) and the kernel is not.
+
+Three things the next slice owns, each named where it has to be solved rather
+than where it was noticed:
+
+- **The transient pool region.** `Params::to_bytes` panics on an input range
+  that overlaps its output range, which enforces the precondition at the only
+  place this slice could. What has to actually _make_ it true is the allocator
+  that hands out the skinned region of `crcbl_render::mesh_pool` — and per the
+  plan's own 2026-07-27 correction, that region is double-buffered prev/current
+  from day one, because TAA on deforming geometry needs the previous frame's
+  skinned positions and retrofitting it is a pipeline rewrite.
+- **Joint indices are not validated at import.** `crcbl-scene` checks that
+  `JOINTS_0` and `WEIGHTS_0` are as long as `POSITION`, and nothing checks an
+  index against the skin's joint count, because a primitive does not know its
+  skin at that point. The shader clamps, so a malformed asset draws wrongly
+  rather than reading past a storage buffer — but the consumer that builds the
+  skin-binding buffer _does_ know the palette length and is where it should be
+  refused loudly.
+- **The dispatch bound is unguarded by any test.**
+  `if (index >= skin.vertex_count) return;` is what stops the tail invocations
+  of the last workgroup from overwriting the next mesh's vertices. Deleting that
+  line passes every test in the workspace today, because every test of this
+  shader reads its source and none runs it. A readback test over a known palette
+  is what closes it, and that needs the pass.
+
 ### `OffscreenSetup::finish` cannot see a WebGPU device error
 
 `crcbl::screenshot::OffscreenSetup::finish` asks `Device::take_error` after the

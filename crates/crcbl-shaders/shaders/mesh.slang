@@ -925,10 +925,10 @@ StructuredBuffer<GpuProbe> probes;
 /// pool re-uploads on every move, for a value that is a function of a matrix
 /// already in the record. Computing it here spends three cross products instead
 /// of that bandwidth, and it cannot fall out of step with the transform it is
-/// built from. `mesh_cluster.slang` carries this function too, and
-/// `crcbl_shaders::mesh`'s
-/// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` is what
-/// holds the two spellings equal.
+/// built from. `mesh_cluster.slang` and `skinning.slang` carry this function
+/// too, and `crcbl_shaders::mesh`'s
+/// `every_shader_that_transforms_a_normal_builds_it_with_one_function` is what
+/// holds every spelling of it equal.
 float3x3 normal_basis(float3x3 basis)
 {
     return float3x3(cross(basis[1], basis[2]),

@@ -471,7 +471,7 @@ pub struct GpuInstance {
     /// mesh shaders take a normal through this matrix's *cofactor* matrix
     /// rather than through its 3×3 part — `normal_basis`, declared in both
     /// `mesh.slang` and `mesh_cluster.slang` and held to one spelling by
-    /// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` below.
+    /// `every_shader_that_transforms_a_normal_builds_it_with_one_function` below.
     /// So a scaled instance shades with a normal that is still perpendicular to
     /// its surface.
     ///
@@ -2517,8 +2517,8 @@ mod tests {
             }
         }
     }
-    /// `normal_basis`, character for character, as both mesh shaders must
-    /// declare it.
+    /// `normal_basis`, character for character, as every shader that transforms
+    /// a normal must declare it.
     ///
     /// The signature and body only — the doc comment above each copy is
     /// deliberately not compared, on
@@ -2551,36 +2551,54 @@ mod tests {
         .transpose()
     }
 
-    /// **Both mesh shaders build the normal transform with one function.**
+    /// **Every shader that transforms a normal builds the transform with one
+    /// function.**
     ///
     /// `mesh.slang`'s vertex stage and `mesh_cluster.slang`'s mesh stage draw
     /// the same instances of the same meshes; a normal that differed between
     /// them would be one scene lit two ways, and which way depended on whether
-    /// the device reported a mesh stage. Equal text cannot differ under any
-    /// input, which is the stronger of the two assertions available here.
+    /// the device reported a mesh stage. `skinning.slang` is the third copy:
+    /// it takes a normal through the *blended palette's* linear part rather
+    /// than through an instance transform, but a normal is a perpendicular
+    /// whatever produced the matrix, so a skinned mesh shaded off a bare 3×3
+    /// would be lit unlike the static mesh standing beside it. Equal text
+    /// cannot differ under any input, which is the stronger of the two
+    /// assertions available here.
     ///
     /// The second half is what stops a shader declaring the function and never
     /// calling it: a copy of `normal_basis` sitting beside a
     /// `mul((float3x3)instance.transform, vertex.normal…)` would pass a
-    /// declaration check and light exactly as wrongly as before.
+    /// declaration check and light exactly as wrongly as before. Each source
+    /// names the matrix it must build one from, because the three do not agree
+    /// about where their linear part comes from.
     #[test]
-    fn the_two_mesh_shaders_build_the_normal_basis_with_one_function() {
-        for (name, source) in [
-            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+    fn every_shader_that_transforms_a_normal_builds_it_with_one_function() {
+        for (name, source, call) in [
+            (
+                "mesh.slang",
+                include_str!("../shaders/mesh.slang"),
+                "normal_basis((float3x3)instance.transform)",
+            ),
             (
                 "mesh_cluster.slang",
                 include_str!("../shaders/mesh_cluster.slang"),
+                "normal_basis((float3x3)instance.transform)",
+            ),
+            (
+                "skinning.slang",
+                include_str!("../shaders/skinning.slang"),
+                "normal_basis((float3x3)blended)",
             ),
         ] {
             assert!(
                 source.contains(NORMAL_BASIS),
-                "{name} does not carry this exact function, so the two geometry paths can \
-                 light one scaled instance two ways:\n{NORMAL_BASIS}"
+                "{name} does not carry this exact function, so the geometry paths can light \
+                 one scaled instance two ways:\n{NORMAL_BASIS}"
             );
             assert!(
-                source.contains("normal_basis((float3x3)instance.transform)"),
-                "{name} declares `normal_basis` and never builds one from an instance \
-                 transform, so the declaration is decoration"
+                source.contains(call),
+                "{name} declares `normal_basis` and never builds one from `{call}`, so the \
+                 declaration is decoration"
             );
             assert!(
                 !source.contains("mul((float3x3)instance.transform, vertex.normal"),

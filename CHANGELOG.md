@@ -16,6 +16,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The GPU skinning compute shader, `crcbl-shaders`' `skinning.slang`, and
+  `crcbl_shaders::skinning`, which pins its layout.**
+  `docs/plan/17-animation.md`'s skinning prepass: a joint palette and a run of
+  bind-pose vertices in, the same vertices blended onto that palette written
+  into a **transient region of the same vertex pool**. What it writes is
+  `crcbl_shaders::mesh::MeshVertex` byte for byte, so a skinned mesh is drawn,
+  culled and shadowed by passes that were never told skinning exists. SPIR-V,
+  WGSL, MSL and DXIL artifacts are committed like every other shader's, so the
+  browser gets the same path as every native backend.
+
+  `crcbl_shaders::skinning` carries the numbers a consumer has to agree with
+  exactly: `WORKGROUP_SIZE`, the `Params` uniform block and its `PARAMS_SIZE`,
+  the `SkinBinding` per-vertex record and its `SKIN_BINDING_STRIDE`,
+  `JOINT_STRIDE` for the palette buffer, and the bind-group table the pass
+  needs. `Params::to_bytes` **refuses** a block whose bind-pose and skinned
+  ranges overlap, or whose palette is empty — both are dispatches with no
+  correct outcome and nothing on the GPU could report either.
+
+  Three decisions are written down where they are made rather than left to be
+  rediscovered. A normal goes through the blended matrix's **cofactor**, the
+  same `normal_basis` the two mesh shaders use, so a joint carrying a
+  non-uniform scale still shades correctly; what that does not model is the
+  gradient of the weights across the surface, which is zero inside a rigidly
+  bound region and largest in the band around a bending joint. The four weights
+  are used **exactly as stored** and are not renormalised, matching
+  `crcbl-scene`'s import — a set that does not sum deflates its vertex visibly
+  rather than being silently repaired. And the `u16` joint indices glTF stores
+  are **widened** to `u32` rather than packed, because `std430` padding makes
+  the packed form exactly as wide and WGSL has no 16-bit integer to unpack into.
+
+  **Nothing dispatches it yet**: there is no render-graph pass and no host-side
+  consumer, and those are the slices after this one.
+
 - **`apps/viewer` plays the clip in the document it opened, and `B` draws the
   posed skeleton.** The rig is converted into `crcbl::anim`'s `Skeleton` and
   `Clip`, sampled every frame off the render clock, and composed into a joint

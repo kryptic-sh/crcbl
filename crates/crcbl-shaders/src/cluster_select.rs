@@ -705,9 +705,9 @@ mod tests {
     ///
     /// Equal text cannot differ under any input, which is the stronger of the
     /// two assertions available here, and it is the one
-    /// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` and
+    /// `every_shader_that_transforms_a_normal_builds_it_with_one_function` and
     /// `the_two_shaders_project_the_error_with_one_function` already make for
-    /// the other two functions two shaders share.
+    /// the other two functions the shaders share.
     ///
     /// **The second half is what stops a shader declaring the function and never
     /// calling it.** A copy of `max_stretch` sitting beside a projection of the

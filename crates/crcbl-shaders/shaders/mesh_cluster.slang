@@ -1200,9 +1200,9 @@ uint cluster_is_selected(ClusterSelect select, uint instance_index)
 /// account: this is the cofactor matrix, `det(basis)` times the inverse
 /// transpose, which is the transform a *perpendicular* needs where the bare 3x3
 /// is the one a tangent needs. `crcbl_shaders::mesh`'s
-/// `the_two_mesh_shaders_build_the_normal_basis_with_one_function` holds the
-/// two equal, because a normal that differed between the raster path and the
-/// mesh path would be one scene lit two ways.
+/// `every_shader_that_transforms_a_normal_builds_it_with_one_function` holds
+/// every copy equal, because a normal that differed between the raster path and
+/// the mesh path would be one scene lit two ways.
 ///
 /// Hoisted out of the vertex loop below rather than called per vertex: the
 /// instance is fixed for the whole cluster, so this is three cross products per

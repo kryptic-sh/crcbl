@@ -253,6 +253,31 @@ mod tests {
             }
         }
 
+        // `MeshVertex` has a wider spread than either: `skinning.slang` writes
+        // the pool that `mesh.slang` and `mesh_cluster.slang` pull from, so a
+        // drift there is one pass writing a layout the other two read with. It
+        // is not a compile error in any of the three — every file builds and
+        // the skinned mesh simply comes out as noise.
+        {
+            let declared = struct_fields(mesh, "MeshVertex");
+            assert!(
+                !declared.is_empty(),
+                "`struct MeshVertex` was not found in mesh.slang, so this comparison checked \
+                 nothing"
+            );
+            for (source, text) in [
+                ("mesh_cluster.slang", cluster),
+                ("skinning.slang", include_str!("../shaders/skinning.slang")),
+            ] {
+                assert_eq!(
+                    declared,
+                    struct_fields(text, "MeshVertex"),
+                    "`struct MeshVertex` differs between mesh.slang and {source}; one pass \
+                     would write the vertex pool with a layout another reads it with"
+                );
+            }
+        }
+
         // `FrameUniforms` and `GpuLight` have a narrower spread: the frame block
         // is the raster and mesh pipelines' shared uniform buffer, and the light
         // row is read by the fragment stage and written by the clustering pass.

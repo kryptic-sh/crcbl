@@ -263,6 +263,13 @@ pub mod cluster_select;
 /// [`cluster_dag`]'s DAG with, in the layout that shader declares.
 pub mod level_select;
 
+/// The workgroup size, uniform block and per-vertex skin binding
+/// `skinning.slang` declares, in the layouts that shader declares. What that
+/// pass writes is [`mesh::MeshVertex`], into the same pool the vertex stage
+/// pulls from, which is how `docs/plan/17-animation.md` keeps skinning out of
+/// the rendering path entirely.
+pub mod skinning;
+
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 
