@@ -38,7 +38,9 @@
 //! the camera each frame, over the viewer's shoulder and to one side, which is
 //! the three-quarter key every DCC viewport opens with. See [`key_light`].
 
-use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions};
+use crcbl::engine::{
+    FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
+};
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
@@ -645,6 +647,107 @@ impl Gpu {
 
 // The forwards `crcbl::engine` calls this bundle through. Every one of
 // them is a method above; the macro is what stops a sample forgetting one.
+/// The device request this sample's bundle is waiting on, and the document it
+/// will build the renderer out of when it arrives.
+///
+/// **The document is carried through the wait**, which is the whole reason
+/// [`crcbl::engine::PolledGpu::Context`] exists. Every other sample's bundle can
+/// be built from the window and the options, so its pending state holds only the
+/// context request; this one opens with the glTF it was asked to show, and there
+/// is no default document to stand in for it while the device arrives.
+///
+/// An [`Rc`](std::rc::Rc) rather than the model itself, because
+/// [`crate::app::PendingLoop`] needs the same document when it assembles the
+/// loop — the camera is framed on its bounds and the panel lists its contents —
+/// and the alternative is converting the file twice.
+#[derive(Debug)]
+pub struct PendingGpu {
+    pending: PendingGpuContext,
+    model: std::rc::Rc<crate::model::Model>,
+}
+
+impl PendingGpu {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the device request failed, or if the renderer refused
+    /// the document — which for a converted glTF means one larger than the
+    /// pools it asked to be sized for.
+    pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
+        match self.pending.poll()? {
+            Some(ctx) => Gpu::from_context(
+                ctx,
+                &self.model.render.scene,
+                &self.model.render.instances,
+                grid_extent_for(&self.model),
+            )
+            .map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// How wide the ground grid is drawn for `model`.
+///
+/// The largest axis rather than the diagonal, so a long thin model does not get
+/// a cell sized for a span it only has in one direction. Written once because
+/// both bring-up paths need the same number and a second spelling is where they
+/// would drift.
+#[must_use]
+pub fn grid_extent_for(model: &crate::model::Model) -> f32 {
+    model.bounds.half_extent().max_element() * 2.0
+}
+
+impl Gpu {
+    /// Asks for a device and returns at once, keeping `model` for the build.
+    ///
+    /// The non-blocking half of [`Gpu::open`], routed through the same
+    /// `desc` so the two paths cannot ask for different devices.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if no backend could be opened at `extent`.
+    pub fn request_open<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+        model: std::rc::Rc<crate::model::Model>,
+    ) -> Result<PendingGpu, GpuError> {
+        Ok(PendingGpu {
+            pending: GpuContext::request_open(shell, window, extent, &desc(gpu))?,
+            model,
+        })
+    }
+}
+
+/// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
+///
+/// Written out rather than taken from `crcbl::impl_polled_gpu!` because that
+/// macro is for a bundle with no context: it declares `type Context = ()` and
+/// calls a four-argument `request_open`. This one opens with a document.
+impl crcbl::engine::PolledGpu for Gpu {
+    type Pending = PendingGpu;
+
+    /// The document to build the renderer from. See [`PendingGpu`].
+    type Context = std::rc::Rc<crate::model::Model>;
+
+    fn request<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+        model: Self::Context,
+    ) -> Result<Self::Pending, GpuError> {
+        Self::request_open(shell, window, extent, gpu, model)
+    }
+
+    fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
+        pending.poll()
+    }
+}
+
 crcbl::impl_game_gpu!(Gpu);
 
 /// The key light for a frame drawn from `camera`.

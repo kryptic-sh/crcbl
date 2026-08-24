@@ -571,6 +571,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                 window,
                 clock_source,
                 options.common.gpu(),
+                (),
             ),
             options: options.clone(),
         })

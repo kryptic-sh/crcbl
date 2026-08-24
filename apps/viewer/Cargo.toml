@@ -7,17 +7,25 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# **A library with one front end**, where every other sample has two. The web
-# half of `docs/plan/sample/05-viewer.md`'s V-F5 is the drop target, and a drop
-# target needs a browser file the asset seam can read — `crcbl_store::web` owns
-# that and stage 10 owns it landing. So this milestone is the native half, and
-# the lib exists for the reason `apps/hud`'s does anyway: an integration test
-# and a unit test can only reach a loop through a linkable artifact.
+# **A library with two front ends**, like every other sample that reaches a
+# browser: `src/main.rs` natively and `src/web.rs` on `wasm32`.
+#
+# The browser half shows the document `src/demo_model.rs` generates, not one a
+# visitor chose. `docs/plan/sample/05-viewer.md`'s V-F5 is "path argument
+# natively, drop target in the browser", and the drop target is still owed —
+# it needs an asset source over a file the browser handed across, which is now
+# a small thing (`crcbl_assets::MemorySource` is the half that was missing)
+# rather than the stage-10 item this comment used to call it. See
+# `docs/backlog.md`.
 #
 # The lib is not called `viewer`: a lib and a bin of the same name in one
 # package write the same file, which cargo calls an output filename collision.
 [lib]
 name = "crcbl_viewer"
+# `cdylib` for the browser demo — `web/build.sh` publishes this crate's
+# `crcbl_viewer.wasm` — and `rlib` because the bin and the tests link the same
+# library natively. Both, exactly as every other sample that reaches a browser.
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "viewer"

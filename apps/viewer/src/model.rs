@@ -176,8 +176,37 @@ pub fn load(path: &Path) -> Result<Model, LoadError> {
         _ => PathBuf::from("."),
     };
 
-    let source = DirSource::at(root);
-    let imported = crcbl::scene::import_gltf(&source, &key).map_err(|why| LoadError::Storage {
+    load_from(&DirSource::at(root), &key, path)
+}
+
+/// Reads the document `key` names **out of `source`**, converts it, and works
+/// out where it is.
+///
+/// [`load`] is this over a [`DirSource`] rooted at the file's own directory.
+/// The split exists because the browser has no directory to point one at: the
+/// web demo compiles its `.glb` into the module and opens it through a
+/// [`MemorySource`](crcbl::assets::MemorySource), and a dropped file would
+/// arrive the same way. Every rule below — the non-finite scan, the empty
+/// document, the framing box — is the file handling itself and belongs to both.
+///
+/// `reported_as` is what the errors name, and is not always `key`. Natively it
+/// is the whole path the user typed, because this is the one application a
+/// non-developer points at an arbitrary file and "`model.glb` could not be
+/// read" does not say *which* `model.glb`. Where the bytes never had a path,
+/// the key is the honest answer and the caller passes it for both.
+///
+/// # Errors
+///
+/// [`LoadError`], for a document the importer could not read and the two shapes
+/// of geometry the camera cannot be framed on. It does not panic on any file.
+pub fn load_from(
+    source: &dyn crcbl::assets::AssetSource,
+    key: &Path,
+    reported_as: &Path,
+) -> Result<Model, LoadError> {
+    let key = PathBuf::from(key);
+    let path = reported_as;
+    let imported = crcbl::scene::import_gltf(source, &key).map_err(|why| LoadError::Storage {
         path: path.to_path_buf(),
         why,
     })?;

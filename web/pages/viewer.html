@@ -1,0 +1,93 @@
+<!--meta
+{
+  "out": "demos/viewer/index.html",
+  "slug": "viewer",
+  "name": "Viewer",
+  "title": "Viewer — Crucible",
+  "description": "The Crucible glTF viewer, compiled to wasm32 and drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/viewer", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/viewer\">apps/viewer</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/viewer/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Viewer</span></h1>
+  <p class="tagline">
+    Not a game — a tool. The same <code>apps/viewer</code> that opens a
+    <code>.glb</code> from your disk, running here on the document it ships
+    with.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>A mouse and four keys.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Orbit the document</span>
+      <span>drag, or one finger</span>
+    </li>
+    <li class="key-row">
+      <span>Zoom</span>
+      <span>scroll, or pinch</span>
+    </li>
+    <li class="key-row">
+      <span>What the document holds, and what the conversion skipped</span>
+      <span><kbd>I</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Wireframe</span>
+      <span><kbd>W</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>World-space normals</span>
+      <span><kbd>N</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Exposure</span>
+      <span><kbd>-</kbd> <kbd>=</kbd>, or the panel's slider</span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native tool, with one difference that is not a porting detail.</h3>
+  <p>
+    The native viewer is pointed at a file: you give it a path, it reads the
+    document through the asset seam, converts it, frames the camera on its
+    bounds and draws it. Point it at something re-exported from Blender and the
+    frame becomes the new document while you watch.
+  </p>
+  <p>
+    A browser tab has no path and no filesystem to resolve one against, so this
+    build opens a document generated in Rust and compiled into the module. That
+    is the honest limit of it today:
+    <strong>there is no drop target yet</strong>. Everything past the loading is
+    the same code — the orbit camera, the frame-on-load, the grid scaled to the
+    document's own size, the listing, the debug views, the exposure.
+  </p>
+  <p>
+    The other differences are the ones every demo here has. Start-up is polled
+    across several frames, because <code>requestDevice</code> is a promise and
+    the main thread cannot block on it — and for this sample that had to reach
+    further than the others, because its renderer is built out of the document
+    it is showing, so the document has to be carried through the device request
+    rather than loaded after it.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

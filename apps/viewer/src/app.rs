@@ -43,6 +43,8 @@
 //! and there is no `GameModule` below, and their absence is the exception rather
 //! than an oversight.
 
+use std::rc::Rc;
+
 use crcbl::core::input::{KeyCode, PointerButton, ScrollDelta};
 use crcbl::engine::{
     Booted, Clock, ExitReason, FrameInfo, HostedGame, LoopError, PointerUpdate, RunSummary,
@@ -366,6 +368,22 @@ pub struct Viewer {
     /// renderer: a value copied before the first document was swapped would go
     /// on reporting the request the *previous* one held.
     effects: RenderEffects,
+    /// Ticks this run has taken, for the heartbeat's cadence and its first
+    /// column.
+    ticks: u64,
+    /// How far the turntable has carried the camera, in radians.
+    ///
+    /// Kept only to be reported: the camera holds the actual pose. It is on the
+    /// debug panel because it is the one number here that moves on its own, and
+    /// the browser gate reads it to prove the frame is advancing — see
+    /// `web/tools/browser-e2e.mjs`.
+    turned: f32,
+    /// Whether the visitor has taken hold of the camera.
+    ///
+    /// Latched, and never cleared: once someone has aimed this at something,
+    /// having it drift away again is the tool moving under their hands. See
+    /// [`TURNTABLE_RATE`].
+    handed_over: bool,
 }
 
 /// The loop the viewer runs in.
@@ -446,6 +464,33 @@ pub fn with_shell<S: Shell + ?Sized>(
         model.bounds.half_extent().max_element() * 2.0,
     )?;
 
+    Ok(assemble(
+        Booted {
+            shell,
+            window,
+            gpu,
+            clock_source,
+            events,
+        },
+        options,
+        &model,
+    ))
+}
+
+/// Builds the loop out of a bundle that has arrived, whichever path brought it.
+///
+/// Shared by the blocking [`with_shell`] and the polled [`PendingLoop`], so the
+/// camera a browser opens on is framed by the same code as the one a terminal
+/// does. The extent is read off the bundle rather than passed in: the polled
+/// path may have resized the swapchain after the request went out, and the
+/// aspect the camera is framed at has to be the one the frame is drawn at.
+fn assemble<S: Shell + ?Sized>(
+    booted: Booted<S, Gpu>,
+    options: &Options,
+    model: &Model,
+) -> Loop<S> {
+    let extent = booted.gpu.extent();
+
     // Frame on load, against the extent the window actually configured at: an
     // aspect guessed from the requested size would frame a model that hangs off
     // the sides of the window it is really in.
@@ -454,23 +499,17 @@ pub fn with_shell<S: Shell + ?Sized>(
 
     // Read off the document once, here, because nothing in this milestone can
     // change it afterwards — see `Listing::of`.
-    let listing = Listing::of(&model);
+    let listing = Listing::of(model);
 
     // Read before the GPU is handed to the loop, and off the renderer rather
     // than from a constant: the default exposure is the renderer's to choose.
-    let exposure = gpu.exposure();
+    let exposure = booted.gpu.exposure();
     // The same, for the effect set: the device clamps last, so what a run that
     // never reached a frame would have drawn comes back off the renderer.
-    let effects = gpu.effects();
+    let effects = booted.gpu.effects();
 
-    Ok(Loop::new(
-        Booted {
-            shell,
-            window,
-            gpu,
-            clock_source,
-            events,
-        },
+    Loop::new(
+        booted,
         Viewer {
             orbit,
             controls: Controls::new(),
@@ -490,13 +529,89 @@ pub fn with_shell<S: Shell + ?Sized>(
             exposure_handle: crate::menu::handle_at(exposure),
             watch: Watch::new(&options.model),
             reloads: 0,
+            turned: 0.0,
+            handed_over: false,
+            ticks: 0,
             listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
             effects,
         },
         options.common.loop_config(),
-    ))
+    )
+}
+
+/// Start-up with the waits turned inside out, one poll per frame.
+///
+/// The state machine, the event pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s. What is left here is this sample's
+/// `Options` and its document — and the document is why this exists at all: a
+/// browser cannot block on a device request, and this sample's renderer is
+/// built out of the glTF it was asked to show, so the document has to be
+/// carried through the wait rather than loaded after it. See
+/// [`crcbl::engine::PolledGpu::Context`].
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
+    options: Options,
+    model: Rc<Model>,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, blocking on neither.
+    ///
+    /// `model` is the caller's rather than loaded here, because the two callers
+    /// get it from different places: natively it is read off a path, and in a
+    /// browser it is a document compiled into the module — there is no file to
+    /// name. `clock_source` is the caller's for the reason every sample's is:
+    /// `std::time::Instant::now` panics on `wasm32-unknown-unknown`, so a page
+    /// drives the loop from `performance.now()` instead.
+    ///
+    /// # Errors
+    ///
+    /// [`ViewerError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+        model: Rc<Model>,
+    ) -> Result<Self, ViewerError> {
+        let window = open_window(
+            shell.as_mut(),
+            &clock_source,
+            &WindowDesc {
+                title: "crcbl — viewer",
+                app_id: "sh.kryptic.crcbl.viewer",
+                size: requested_window_size(options.common.size),
+                mode: options.common.display_mode(),
+                ..WindowDesc::default()
+            },
+        )?;
+        Ok(Self {
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.gpu(),
+                Rc::clone(&model),
+            ),
+            options: options.clone(),
+            model,
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`ViewerError`] if the window went away before it had a size, or if the
+    /// device request failed.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, ViewerError> {
+        let Some(booted) = self.boot.poll::<ViewerError>()? else {
+            return Ok(None);
+        };
+        Ok(Some(assemble(booted, &self.options, &self.model)))
+    }
 }
 
 impl Viewer {
@@ -593,6 +708,27 @@ impl Viewer {
 }
 
 /// The viewer's half of the frame, and nothing else.
+/// How fast the idle turntable carries the camera, in radians a second.
+///
+/// **Why a viewer turns by itself at all.** A document that sits still is a
+/// picture: nothing about it says the thing on screen is being rendered right
+/// now, from geometry, by a device that had to be asked for — which is the
+/// whole claim a demo makes. `apps/quarry` answers this with a dolly that walks
+/// its face, and this is the same answer for a sample whose subject does not
+/// move.
+///
+/// A full turn takes about eighteen seconds at this rate. Slow enough to read a
+/// silhouette against, fast enough that a visitor sees it move before deciding
+/// the page is broken.
+///
+/// It stops for good the moment anyone drags, pans or zooms — see
+/// [`Viewer::handed_over`].
+const TURNTABLE_RATE: f32 = 0.35;
+
+/// How often the `[HUD]` heartbeat is logged, in ticks — a second at the
+/// default rate, which is the cadence every other sample's uses.
+const HEARTBEAT_TICKS: u64 = 60;
+
 impl HostedGame for Viewer {
     /// The document is read before the loop exists — see [`ViewerError`] — so
     /// there is nothing left here that can fail. Uninhabited rather than a
@@ -622,7 +758,17 @@ impl HostedGame for Viewer {
     /// away, so a document re-exported while the pause panel was up went
     /// unnoticed until the panel was closed. It runs from [`Viewer::draw`] now,
     /// on [`FrameInfo::render_dt`], which a paused frame still advances.
-    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
+    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {
+        // Still nothing simulated. What the tick is used for is the heartbeat,
+        // and it has to be *here* rather than in `draw`: a paused frame still
+        // draws, and a line that went on being logged through a pause would say
+        // a stopped demo was running. `crcbl::engine::run_ticks` throws a
+        // paused frame's ticks away, so this stops with the simulation and
+        // starts again with it — which is exactly what the browser gate reads
+        // it for.
+        self.ticks += 1;
+        self.log_heartbeat();
+    }
 
     /// `F` frames the model again, `I` shows the listing, `W` draws it as lines
     /// and `N` draws its normals — each once per press — and `-`/`=` step the
@@ -674,6 +820,17 @@ impl HostedGame for Viewer {
     /// pointer while any drag is running.
     fn pointer_event(&mut self, pointer: PointerUpdate) {
         self.controls.pointer(pointer, self.extent, &mut self.orbit);
+        // A drag, not a hover: a pointer crossing the canvas has not taken hold
+        // of anything, and stopping the turntable on it would stop it the moment
+        // the mouse arrived.
+        //
+        // **This covers a press as well as a movement**, which is why
+        // `button_event` above latches nothing. A held button reaches here on
+        // the frames it is held for, and `is_dragging` is what those frames
+        // mean. A second latch on the press itself was written first and then
+        // deleted: removing it left this module's turntable test green, so it
+        // was a line no test could tell the presence of.
+        self.handed_over |= self.controls.is_dragging();
     }
 
     /// The pan drag. Both non-primary buttons start one — see
@@ -684,6 +841,7 @@ impl HostedGame for Viewer {
 
     fn wheel_event(&mut self, delta: ScrollDelta) {
         Controls::wheel(delta, &mut self.orbit);
+        self.handed_over = true;
     }
 
     /// The viewer's panel carries no id of its own, so the loop never asks.
@@ -786,6 +944,15 @@ impl HostedGame for Viewer {
         // to keep: the normals view builds nothing and cannot be refused, so the
         // field is the state and pushing it is idempotent.
         gpu.set_normals_view(self.normals);
+        // The turntable, after every key and before the camera is handed over,
+        // so a frame that re-framed still leaves on the new pose rather than one
+        // step behind it. `render_dt` rather than the tick's: this is a property
+        // of the picture, and a paused frame still draws one.
+        if !self.handed_over {
+            let step = TURNTABLE_RATE * frame.render_dt.as_secs_f32();
+            self.orbit.orbit(step, 0.0);
+            self.turned += step;
+        }
         gpu.set_camera(self.orbit.camera());
         // Re-read rather than kept: the device clamps last, and a reload builds
         // a second renderer — so what the summary reports comes back off
@@ -859,12 +1026,52 @@ impl HostedGame for Viewer {
 /// not say which: a face keeping its colour as the camera orbits is what makes
 /// `world` the answer to "is this face inverted", and a reader who does not know
 /// which they are looking at cannot use either.
+impl Viewer {
+    /// The `[HUD]` line, on the cadence every other sample's heartbeat uses.
+    ///
+    /// **This sample has no simulation to report**, so what it names is the
+    /// document: how many instances of it reached the renderer, how much of it
+    /// the conversion could not bring in, and where the camera is. A CI log has
+    /// no debug panel to read and neither has a browser gate.
+    ///
+    /// **`turn` is here for that gate specifically.**
+    /// `web/tools/browser-e2e.mjs` proves a page is running rather than merely
+    /// presenting by watching one number advance, and it has to be a number
+    /// nothing on the JS side can move. Every other row here is a property of
+    /// the document and never changes; the turntable's angle is the only thing
+    /// this sample has that moves on its own. See [`TURNTABLE_RATE`], and note
+    /// that it stops for good once a visitor takes hold — which is correct for
+    /// the tool and is why the gate reads it before it touches the canvas.
+    fn log_heartbeat(&self) {
+        if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
+            return;
+        }
+        crcbl::log::info!(
+            "[HUD] tick: {}  instances: {}  skipped: {}  dist: {:.2}  turn: {:.1}  \
+             wireframe: {}  normals: {}",
+            self.ticks,
+            self.instances,
+            self.skipped,
+            self.orbit.distance(),
+            self.turned.to_degrees() % 360.0,
+            if self.wireframe { "on" } else { "off" },
+            if self.normals { "world" } else { "off" },
+        );
+    }
+}
+
 impl DebugModule for Viewer {
     fn debug_section(&self, out: &mut DebugSection) {
         out.set_title("viewer");
         out.row("instances", format_args!("{}", self.instances));
         out.row("skipped", format_args!("{}", self.skipped));
         out.row("dist", format_args!("{:.2}", self.orbit.distance()));
+        // Wrapped to one turn so the row stays readable; it is the value the
+        // browser gate watches for a frame advancing under its own steam.
+        out.row(
+            "turn",
+            format_args!("{:.1}", self.turned.to_degrees() % 360.0),
+        );
         out.row("reloads", format_args!("{}", self.reloads));
         out.row(
             "wireframe",
@@ -1091,6 +1298,89 @@ mod tests {
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
         let model = model::load(&options.model).expect("the fixture loads");
         with_shell(Box::new(HeadlessShell::new()), options, model).expect("headless always starts")
+    }
+
+    /// **The idle turntable turns, and stops for good when someone takes hold.**
+    ///
+    /// Both halves matter and the second one matters most. The camera moving on
+    /// its own is what the browser gate watches to know a frame is advancing —
+    /// see [`TURNTABLE_RATE`] — but it is also a camera that moves without
+    /// being asked, and
+    /// `every_gesture_reaches_the_camera_through_the_hosted_loop` asserts a drag
+    /// moved the eye. If the turntable kept running through a drag, that
+    /// assertion would pass on a build where the drag reached nothing at all:
+    /// the turntable would have moved the eye for it.
+    ///
+    /// **Each way of taking hold is asserted on its own engine**, because they
+    /// latch at different call sites and one of them covering for another is
+    /// exactly how a line here stops being checked. The first version of this
+    /// test pressed a button *carrying a pointer position*, which reaches
+    /// `pointer_event` as well — so it went on passing with the press's own
+    /// latch deleted, and proved only that something somewhere stopped the
+    /// turntable.
+    #[test]
+    fn the_turntable_turns_until_someone_takes_hold_and_then_never_again() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 64);
+
+        // It turns on its own, with nothing driving it.
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let idle = engine.game().camera();
+        engine.frame().expect("a frame");
+        let later = engine.game().camera();
+        assert_ne!(
+            later.eye, idle.eye,
+            "the turntable never moved the camera, so nothing in this demo advances \
+             under its own steam"
+        );
+        assert_eq!(
+            later.target, idle.target,
+            "a turntable orbits the document; it does not wander off it"
+        );
+
+        // A press that carries no pointer position, so `pointer_event` never
+        // runs and the only thing that can latch is the press itself.
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                crcbl::core::input::ButtonState::Pressed,
+                None,
+            )
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_still(&mut engine, "a button press");
+
+        // The wheel, which latches at its own call site and nowhere else.
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .scroll(window, ScrollDelta::Lines { x: 0.0, y: -1.0 }, None)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_still(&mut engine, "a wheel");
+    }
+
+    /// Fails unless the camera is now still across two further frames.
+    ///
+    /// Two frames rather than one: the eye is compared against a pose taken
+    /// *after* a frame the input was handled in, so a turntable that ran one
+    /// last time before latching is not mistaken for one that stopped.
+    fn assert_still(engine: &mut Loop<HeadlessShell>, took_hold: &str) {
+        let held = engine.game().camera();
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.game().camera().eye,
+            held.eye,
+            "the turntable kept running after {took_hold} — a tool that drifts out from \
+             under the pose someone aimed it at"
+        );
     }
 
     /// Every `Text` command the frame handed to the UI pass.

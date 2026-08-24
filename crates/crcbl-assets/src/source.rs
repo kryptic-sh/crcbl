@@ -140,9 +140,118 @@ impl AssetSource for DirSource {
     }
 }
 
+/// A source over bytes that are already in memory.
+///
+/// **What it is for**: content that never lived in a directory. A `.glb` a
+/// `build.rs` generated and `include_bytes!` compiled into the module, and — the
+/// case that drove it — a document a browser handed over, where there is no
+/// filesystem to point a [`DirSource`] at and no URL to fetch. `apps/viewer`
+/// opens its web demo's model through one.
+///
+/// **Never [`StorageError::Pending`]**, for the same reason [`DirSource`] is
+/// not: the bytes are here, so the read either finds the key or does not.
+///
+/// The key is canonicalised on the way in *and* on the way out, so a document
+/// filed as `model.glb` is found by `./model.glb` — the spelling-independence
+/// [`DirSource`] gives, given by the same function rather than by a second rule
+/// that could disagree with it.
+#[derive(Debug, Default)]
+pub struct MemorySource {
+    /// Canonical key to bytes. A map rather than a single entry because a glTF
+    /// document may name buffers and images beside it, and
+    /// `crcbl_scene::import_gltf` reads each of those through this same source.
+    entries: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+impl MemorySource {
+    /// An empty source. Every read is [`StorageError::NotFound`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Files `bytes` under `key`, replacing anything already there.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::InvalidPath`] if `key` is not a legal asset key —
+    /// refused here rather than at the read, because a key that can never be
+    /// found is a caller's bug at the moment it is written, and a source that
+    /// accepted it would answer `NotFound` for ever and look like a missing
+    /// file.
+    pub fn insert(&mut self, key: &Path, bytes: Vec<u8>) -> Result<(), StorageError> {
+        self.entries.insert(canonical_key(key)?, bytes);
+        Ok(())
+    }
+}
+
+impl AssetSource for MemorySource {
+    fn read(&self, key: &Path) -> Result<Vec<u8>, StorageError> {
+        let key = canonical_key(key)?;
+        self.entries
+            .get(&key)
+            .cloned()
+            .ok_or(StorageError::NotFound(PathBuf::from(key)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A memory source holding one document under a nested key.
+    fn resident() -> MemorySource {
+        let mut source = MemorySource::new();
+        source
+            .insert(Path::new("meshes/crate.glb"), b"glTF fake".to_vec())
+            .expect("a nested key is a legal asset key");
+        source
+    }
+
+    #[test]
+    fn a_memory_source_reads_back_what_was_put_in_it() {
+        let source = resident();
+        assert_eq!(
+            source.read(Path::new("meshes/crate.glb")).unwrap(),
+            b"glTF fake"
+        );
+        // The other spelling of the same key, because both ends canonicalise.
+        assert_eq!(
+            source.read(Path::new("./meshes/crate.glb")).unwrap(),
+            b"glTF fake"
+        );
+    }
+
+    #[test]
+    fn a_memory_source_reports_a_key_it_has_not_got_as_not_found() {
+        let source = resident();
+        assert!(
+            matches!(
+                source.read(Path::new("meshes/barrel.glb")),
+                Err(StorageError::NotFound(_))
+            ),
+            "a key nothing was filed under is missing, not an error about the key"
+        );
+    }
+
+    /// **Refused when it is written, not when it is read.** A key that cannot
+    /// canonicalise can never be found again, so storing it would turn a
+    /// caller's bug into a permanent `NotFound` that reads like a missing file.
+    #[test]
+    fn a_memory_source_refuses_an_illegal_key_at_the_insert() {
+        let mut source = MemorySource::new();
+        let error = source
+            .insert(Path::new("../secrets.txt"), b"do not read me".to_vec())
+            .expect_err("an escaping key is not a legal asset key");
+        assert!(matches!(error, StorageError::InvalidPath(_)), "{error:?}");
+        assert!(
+            matches!(
+                source.read(Path::new("../secrets.txt")),
+                Err(StorageError::InvalidPath(_))
+            ),
+            "and it was not stored under some other spelling either"
+        );
+    }
 
     /// A root with one file in it, plus a sibling directory outside the root
     /// holding a file an escape would reach.

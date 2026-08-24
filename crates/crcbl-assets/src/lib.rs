@@ -48,7 +48,7 @@ pub mod source;
 use core::fmt;
 
 pub use registry::{Asset, AssetHandle, AssetRegistry, AssetState};
-pub use source::{AssetSource, DirSource};
+pub use source::{AssetSource, DirSource, MemorySource};
 
 /// The error every fallible call in this crate returns, re-exported from
 /// [`crcbl_store`].

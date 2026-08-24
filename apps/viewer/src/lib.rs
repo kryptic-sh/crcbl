@@ -22,11 +22,22 @@
 //! on the `ESC` panel — see [`menu`]. Re-export the file and the frame becomes
 //! the new document, which is milestone 3's artist loop — see [`watch`].
 //!
-//! What it deliberately does not do, because it needs something this slice does
-//! not build: **no drop target**. V-F5 is "path argument natively, drop target
-//! in the browser", and this is the native half. The browser half needs an
-//! asset source over a dropped file, which stage 10 owns — it is in
-//! `docs/backlog.md` with what it is waiting on.
+//! # It runs in a browser too, on a document it brings with it
+//!
+//! `crate::web` is the `wasm32` front end — not linked, because it does not
+//! exist in a native documentation build — and `web/demos/viewer/` is its
+//! page. A tab
+//! has no path to type and no directory to root an asset source at, so it opens
+//! the document [`demo_model`] generates and compiles into the module —
+//! everything past the loading is the code below, unchanged.
+//!
+//! What it still deliberately does not do: **no drop target**. V-F5 is "path
+//! argument natively, drop target in the browser", and the second half is a
+//! document the *visitor* chooses. That needs an asset source over bytes the
+//! browser handed across, which is now a small piece of work rather than the
+//! stage-10 item it once was — [`crcbl::assets::MemorySource`] is the part that
+//! was missing, and the browser demo already loads through one. It is in
+//! `docs/backlog.md` with what is left.
 //!
 //! # Two rules this sample is exempt from, and neither is an oversight
 //!
@@ -51,11 +62,15 @@
 pub mod app;
 pub mod args;
 pub mod controls;
+pub mod demo_model;
 pub mod gpu;
 pub mod listing;
 pub mod menu;
 pub mod model;
 pub mod watch;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 /// The `.glb` documents this crate's own tests open.
 ///
@@ -65,10 +80,11 @@ pub mod watch;
 mod fixture;
 
 pub use app::{
-    LISTING_KEY, Loop, REFRAME_KEY, Summary, Viewer, ViewerError, run, start, with_shell,
+    LISTING_KEY, Loop, PendingLoop, REFRAME_KEY, Summary, Viewer, ViewerError, run, start,
+    with_shell,
 };
 pub use args::{DEFAULT_TICK_HZ, Invocation, Options, USAGE, parse};
 pub use controls::Controls;
 pub use listing::Listing;
 pub use menu::{MenuKind, Menus};
-pub use model::{LoadError, Model, load, world_bounds};
+pub use model::{LoadError, Model, load, load_from, world_bounds};

@@ -376,6 +376,23 @@ const EXPECTATIONS = {
     moving: /eye z: (-?[\d.]+)/,
     movingLabel: 'the dolly keeps running down the face under its own steam',
   },
+  // **The sample whose subject does not move.** viewer is a tool rather than a
+  // game: it opens a document and shows it, and left alone it would draw the
+  // same frame for ever — which group C, the one check every demo here makes,
+  // cannot tell from a loop that has stopped. `apps/viewer`'s idle turntable is
+  // what gives it something that advances under its own steam, and `turn` is
+  // that angle on the debug panel. It stops the moment anyone drags or scrolls,
+  // so this gate reads it before group F touches the canvas.
+  viewer: {
+    key: null,
+    // `instances` is the document's own three, so this also says the generated
+    // `.glb` reached the renderer rather than an empty scene arriving as a
+    // successful boot.
+    waiting: (line) =>
+      line.includes('[HUD] tick:') && line.includes('instances: 3'),
+    moving: /turn: ([\d.]+)/,
+    movingLabel: 'the turntable carries the camera under its own steam',
+  },
 };
 
 const EXPECTED = EXPECTATIONS[SLUG];

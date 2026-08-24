@@ -144,6 +144,7 @@ DEMOS=(
   "hud:crcbl_hud:demos/hud"
   "lantern:crcbl_lantern:demos/lantern"
   "quarry:crcbl_quarry:demos/quarry"
+  "viewer:crcbl_viewer:demos/viewer"
 )
 
 profile_flag=()

@@ -3736,6 +3736,22 @@ pub trait PolledGpu: GpuSurface + Sized {
     /// The in-flight device request.
     type Pending;
 
+    /// What this bundle needs at open that the engine has no way to know.
+    ///
+    /// **`()` for most games, and that is the point of it being an associated
+    /// type rather than a parameter on the trait.** A bundle whose renderers
+    /// are built out of content the game already holds — `apps/viewer` opens
+    /// with the glTF document it is there to show — cannot be constructed from
+    /// the window and the options alone, and before this existed the only way
+    /// through was a default the engine could invent for it. A document has no
+    /// default, so that route ended at "open with nothing resident and swap the
+    /// real scene in afterwards", which builds a renderer twice at every
+    /// start-up to work around a signature.
+    ///
+    /// Moved rather than borrowed, because the value has to outlive `request`
+    /// and live in [`Self::Pending`] until the device arrives.
+    type Context;
+
     /// Asks for a device and returns immediately.
     ///
     /// # Errors
@@ -3746,6 +3762,7 @@ pub trait PolledGpu: GpuSurface + Sized {
         window: WindowId,
         extent: (u32, u32),
         gpu: GpuOptions,
+        context: Self::Context,
     ) -> Result<Self::Pending, GpuError>;
 
     /// `Ok(None)` means "not yet, poll again next frame".
@@ -3809,6 +3826,12 @@ pub struct PolledBoot<S: Shell + ?Sized, G: PolledGpu> {
     /// device request is still in flight.
     extent: Option<(u32, u32)>,
     events: u64,
+    /// What the bundle is handed at open — see [`PolledGpu::Context`].
+    ///
+    /// `Option` because it is moved into `G::request`, which happens exactly
+    /// once: the `Configure` stage is left only for `Device`, and coming back
+    /// to it is the `Done` arm's error rather than a second request.
+    context: Option<G::Context>,
 }
 
 impl<S: Shell + ?Sized, G: PolledGpu> std::fmt::Debug for PolledBoot<S, G> {
@@ -3837,7 +3860,13 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
     /// The window is the caller's because its title and size are the game's;
     /// [`open_window`] is what makes one.
     #[must_use]
-    pub fn request(shell: Box<S>, window: WindowId, clock_source: Clock, gpu: GpuOptions) -> Self {
+    pub fn request(
+        shell: Box<S>,
+        window: WindowId,
+        clock_source: Clock,
+        gpu: GpuOptions,
+        context: G::Context,
+    ) -> Self {
         Self {
             shell: Some(shell),
             window,
@@ -3846,6 +3875,7 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
             stage: BootStage::Configure,
             extent: None,
             events: 0,
+            context: Some(context),
         }
     }
 
@@ -3893,8 +3923,16 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
                 log_first_configure(extent);
                 // Left `Done` if this fails, so a failed start-up stays failed
                 // rather than requesting a second device next frame.
+                // Taken after the extent check, not before: the arm above
+                // returns to `Configure` on a window that has no size yet, and
+                // a context taken on that path would be gone by the poll that
+                // finally had one.
+                let context = self
+                    .context
+                    .take()
+                    .expect("Configure is left exactly once, and only for Device");
                 self.stage = BootStage::Device {
-                    pending: G::request(shell.as_ref(), self.window, extent, self.gpu)?,
+                    pending: G::request(shell.as_ref(), self.window, extent, self.gpu, context)?,
                 };
                 Ok(None)
             }
@@ -4142,11 +4180,16 @@ macro_rules! impl_polled_gpu {
         impl $crate::engine::PolledGpu for $gpu {
             type Pending = $pending;
 
+            // A bundle built from the window and the options alone, which is
+            // every one that does not open with content of its own.
+            type Context = ();
+
             fn request<S: $crate::shell::Shell + ?::core::marker::Sized>(
                 shell: &S,
                 window: $crate::shell::WindowId,
                 extent: (u32, u32),
                 gpu: $crate::engine::GpuOptions,
+                (): Self::Context,
             ) -> ::core::result::Result<Self::Pending, $crate::engine::GpuError> {
                 Self::request_open(shell, window, extent, gpu)
             }
@@ -5962,11 +6005,14 @@ mod tests {
     impl PolledGpu for FakeGpu {
         type Pending = FakePending;
 
+        type Context = ();
+
         fn request<S: Shell + ?Sized>(
             _shell: &S,
             _window: WindowId,
             extent: (u32, u32),
             gpu: GpuOptions,
+            (): Self::Context,
         ) -> Result<Self::Pending, GpuError> {
             REQUESTS.with(|n| n.set(n.get() + 1));
             REQUESTED.with(|options| options.set(gpu));
@@ -6071,7 +6117,7 @@ mod tests {
             pacing: Pacing::Off,
         };
         let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
-            PolledBoot::request(Box::new(shell), window, Clock::new(true), asked_for);
+            PolledBoot::request(Box::new(shell), window, Clock::new(true), asked_for, ());
 
         // `HeadlessShell` delays the first configure by a pump or two, exactly
         // as a compositor does.
@@ -6127,6 +6173,7 @@ mod tests {
             window,
             Clock::new(true),
             GpuOptions::default(),
+            (),
         );
 
         let mut polls = 0;
@@ -6170,6 +6217,7 @@ mod tests {
             window,
             Clock::new(true),
             GpuOptions::default(),
+            (),
         );
 
         let mut polls = 0;

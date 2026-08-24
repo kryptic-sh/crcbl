@@ -754,11 +754,16 @@ crcbl::impl_game_gpu!(Gpu);
 impl crcbl::engine::PolledGpu for Gpu {
     type Pending = PendingGpu;
 
+    // Built from the window and the options alone: this sample's extra
+    // arguments come from its own defaults, not from a caller.
+    type Context = ();
+
     fn request<S: Shell + ?Sized>(
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
         gpu: GpuOptions,
+        (): Self::Context,
     ) -> Result<Self::Pending, GpuError> {
         let defaults = crate::args::Options::default();
         Self::request_open(
