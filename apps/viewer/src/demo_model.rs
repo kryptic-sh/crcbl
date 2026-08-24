@@ -984,6 +984,103 @@ mod tests {
         }
     }
 
+    /// **Exactly one of the two crates is deformed, and it is the one whose
+    /// node wears the skin.**
+    ///
+    /// The document draws mesh 0 at two nodes: `crate`, which carries
+    /// `"skin": 0`, and `crate.far`, which carries none — legal glTF, and what
+    /// a file that reuses a rigged mesh as scenery looks like. A viewer that
+    /// decided "skinned" from the mesh's `JOINTS_0` would deform both, and the
+    /// second one would leave its own placement and be drawn wherever the
+    /// joints are, which is on top of the first.
+    ///
+    /// **Nothing about the picture would report that.** The browser gate proves
+    /// skinning by watching the canvas change over a clip cycle with the camera
+    /// held still, and it changes exactly as happily with the far crate
+    /// swallowed. So the distinction is pinned here, where it can be, rather
+    /// than left to a check that cannot see it.
+    ///
+    /// Both halves are asserted: the near crate is deformed **and** the far one
+    /// is not and keeps its own scaled-down placement. The first alone passes
+    /// for a viewer that deforms every instance it can find.
+    #[test]
+    fn only_the_crate_wearing_the_skin_is_deformed() {
+        let model = demo_document().expect("the generated document loads");
+
+        assert_eq!(
+            model.skinned.instances.len(),
+            1,
+            "the document places its rigged mesh at two nodes and one of them wears the skin",
+        );
+        assert_eq!(
+            model.skinned.joints,
+            JOINT_BIND_Y.len() as u32,
+            "the palette is this document's own skeleton",
+        );
+
+        let deformed = &model.skinned.instances[0];
+        let row = model.render.instances[deformed.instance].mesh;
+        let twins: Vec<usize> = model
+            .render
+            .instances
+            .iter()
+            .enumerate()
+            .filter(|(_, instance)| instance.mesh == row)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            twins.len(),
+            2,
+            "the crate mesh is drawn at two nodes, or this test is no longer about the case \
+             it was written for: {twins:?}",
+        );
+        let scenery = twins
+            .iter()
+            .copied()
+            .find(|&index| index != deformed.instance)
+            .expect("two twins, one of them deformed");
+        assert!(
+            !model
+                .skinned
+                .instances
+                .iter()
+                .any(|entry| entry.instance == scenery),
+            "the copy that wears no skin is deformed too, so it is drawn at the joints \
+             instead of where its node puts it",
+        );
+
+        // Which of the two is which, without reaching for either node's
+        // coordinates: the document places `crate` unscaled and `crate.far`
+        // smaller. Picking the wrong twin swaps these two assertions.
+        let scale_of = |index: usize| {
+            model.render.instances[index]
+                .transform
+                .to_scale_rotation_translation()
+                .0
+        };
+        let near = scale_of(deformed.instance);
+        assert!(
+            (near - Vec3::ONE).length() < 1e-4,
+            "the deformed instance is placed at {near:?} rather than unscaled, so it is \
+             `crate.far` and not the node that wears the skin",
+        );
+        let far = scale_of(scenery);
+        assert!(
+            far.max_element() < 0.9,
+            "the copy left undeformed is placed at {far:?}, which is not the scaled-down \
+             `crate.far` this document draws as scenery",
+        );
+
+        // The joints are roots of the scene, so the space the palette composes
+        // in *is* world space and the instance carries nothing.
+        assert_eq!(
+            deformed.transform,
+            Mat4::IDENTITY,
+            "this document hangs its skeleton from the scene root, so a skinned draw of it \
+             is placed by its joints alone",
+        );
+    }
+
     /// **The crate's node and the joint it hangs from are placed together in
     /// the document**, which is what makes the test above true of the emitted
     /// file rather than only of the arithmetic.

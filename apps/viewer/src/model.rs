@@ -44,6 +44,7 @@ use crcbl::math::{Mat4, Vec3};
 use crcbl::render::cull::Aabb;
 use crcbl::scene::GltfScene;
 use crcbl::scene::gltf_render::{RenderScene, Skip};
+use crcbl::shaders::skinning::SkinBinding;
 use crcbl::store::StorageError;
 
 /// A document that loaded: what to draw, where it is, and what was lost.
@@ -72,6 +73,70 @@ pub struct Model {
     /// Everything the conversion could not bring in is already on
     /// [`Model::skipped`] beside the renderer's own losses.
     pub playable: Option<crate::anim::Playable>,
+    /// Which of [`RenderScene::instances`] the document's skin deforms, and
+    /// what the frame needs to deform them — see [`Skinned`].
+    ///
+    /// Empty for the great majority of documents, which wear no skin. Built
+    /// here, at load, for [`playable`](Self::playable)'s reason: it is the last
+    /// point the imported document exists, and the node-to-skin mapping this
+    /// needs lives on the [`GltfScene`] and nowhere downstream of it.
+    pub skinned: Skinned,
+}
+
+/// What [`crate::gpu`] needs to draw this document's skinned geometry: the
+/// instances a skin deforms, and how large a palette poses them.
+///
+/// **`instances` being empty is the ordinary case** and is what a document with
+/// no skin, and a document whose skinned nodes were all refused, both produce —
+/// the frame then draws exactly what it drew before skinning existed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Skinned {
+    /// Matrices one instance's palette holds: the joint count of the skin
+    /// [`Model::playable`] poses, and zero when there is none.
+    ///
+    /// The skinning pass is sized from this times [`instances`](Self::instances)'
+    /// length, because every one of them is posed from the same skeleton.
+    pub joints: u32,
+    /// One entry per instance a skin deforms, in [`RenderScene::instances`]
+    /// order.
+    pub instances: Vec<SkinnedInstance>,
+}
+
+/// One instance of the document that a skin deforms.
+///
+/// It **replaces** a row of [`RenderScene::instances`] rather than joining it:
+/// the row is drawn through the skinning seam instead of through
+/// [`ForwardRenderer::add_instance`](crcbl::render::ForwardRenderer::add_instance),
+/// and a caller that placed both would draw the mesh twice — once deformed and
+/// once in its bind pose, in the same frame, at two different places.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkinnedInstance {
+    /// Which of [`RenderScene::instances`] this replaces.
+    ///
+    /// Its mesh and its material are read from that row rather than copied
+    /// here, so there is no second answer to drift from it. Its **transform**
+    /// is not — see [`transform`](Self::transform), which is the one field a
+    /// skinned draw cannot take from the row it replaces.
+    pub instance: usize,
+    /// **Skeleton space to world**, which is where the drawing node's own
+    /// transform is deliberately absent.
+    ///
+    /// glTF is explicit that "the transform of the skinned mesh node MUST be
+    /// ignored": a skinned vertex is placed by its joints, which carry their own
+    /// placement. What a palette does *not* carry is where the skeleton itself
+    /// hangs — `crcbl::anim::Palette` composes a root joint's global from its
+    /// own local transform and stops there — so this is the world transform of
+    /// the node those roots hang from, and it is the identity for a rig whose
+    /// root joint is a root of the scene.
+    pub transform: crcbl::math::Mat4,
+    /// One [`SkinBinding`] per emitted vertex of the row's mesh, in the same
+    /// order:
+    /// [`MeshOrigin::bindings`](crcbl::scene::gltf_render::MeshOrigin::bindings).
+    ///
+    /// Owned rather than borrowed from the [`RenderScene`], because the frame
+    /// uploads them every frame and the document they came from is dropped once
+    /// the renderer is built.
+    pub bindings: Vec<SkinBinding>,
 }
 
 /// What a document's rig amounts to, as much of it as this application reports.
@@ -285,13 +350,260 @@ pub fn load_from(
     let rig = rig_of(&imported);
     let (playable, skipped) = crate::anim::playable_of(&imported);
     render.skipped.extend(skipped);
+    // After `playable_of`, and reading the same skin it does: the two are one
+    // decision — what this application animates — and a document where they
+    // disagreed would upload a palette for a skeleton nothing else poses.
+    let mut skinned_skips = Vec::new();
+    let skinned = skinned_of(&imported, &render, &mut skinned_skips);
+    render.skipped.extend(skinned_skips);
+    // Before the renderer is built from it, because a pool is sized once. The
+    // conversion measures the description exactly and leaves no headroom, and
+    // every skinned instance needs room the description does not describe.
+    reserve_for_skinning(&mut render.scene.capacities, &skinned);
     Ok(Model {
         key,
         render,
         bounds,
         rig,
         playable,
+        skinned,
     })
+}
+
+/// Adds what the skinning seam reserves on top of the description's own pools.
+///
+/// **Two mesh-table entries and two vertex regions per skinned instance**, which
+/// is what `ForwardRenderer::reserve_skinned` documents it takes and what
+/// `crcbl::render::SkinnedRegion` needs to hold a frame's pose beside the one
+/// before it. `crcbl_scene::gltf_render` sizes both pools to exactly what the
+/// description holds, so without this every document with a rig fails to
+/// reserve at load — on the *second* instance of the pair, with the pool
+/// reporting a number the caller has no way to connect to a skin.
+///
+/// Saturating rather than wrapping: a document that overflows a `u32` of
+/// vertices has already been refused by the conversion, and a capacity that
+/// wrapped to a small number would be a pool failure blamed on the wrong thing.
+fn reserve_for_skinning(capacities: &mut crcbl::render::Capacities, skinned: &Skinned) {
+    for instance in &skinned.instances {
+        capacities.meshes = capacities.meshes.saturating_add(2);
+        let vertices = u32::try_from(instance.bindings.len()).unwrap_or(u32::MAX);
+        capacities.vertices = capacities
+            .vertices
+            .saturating_add(vertices.saturating_mul(2));
+    }
+}
+
+/// Which of `render`'s instances the document's **first** skin deforms.
+///
+/// The first, because that is the skin [`crate::anim::playable_of`] poses and
+/// the palette is the one thing a skinned draw cannot be given twice; a node
+/// wearing any other skin is reported and drawn in its bind pose. Everything
+/// else this refuses is reported the same way, because a document whose rigged
+/// mesh silently draws undeformed is the failure a viewer exists to explain.
+///
+/// # How an instance is paired with the node that placed it
+///
+/// Neither [`InstanceDesc`](crcbl::render::scene::InstanceDesc) nor
+/// [`MeshOrigin`](crcbl::scene::gltf_render::MeshOrigin) names a node, so the
+/// walk `crcbl_scene::gltf_render::place_instances` did is repeated here:
+/// placements in document order, and within each, that mesh's converted
+/// primitives in primitive order. [`RenderScene::origins`] is in
+/// `(mesh, primitive)` order, so the rows one placement emits are the run of
+/// origins naming its mesh.
+///
+/// **The reconstruction checks itself rather than being trusted.** Every
+/// instance carries the row it draws, so the row this walk predicts is compared
+/// against the row the instance actually names; a mismatch means the
+/// conversion's expansion is no longer the one described above, and this skins
+/// nothing at all and says so. That is what keeps it from being a silent
+/// assumption about another crate's loop.
+fn skinned_of(scene: &GltfScene, render: &RenderScene, skips: &mut Vec<Skip>) -> Skinned {
+    let Some(skin) = scene.skins().first() else {
+        return Skinned::default();
+    };
+    let parents = crate::anim::parents_of(scene.nodes());
+    let Some(to_world) = skeleton_to_world(scene, &parents, skin.joints(), skips) else {
+        return Skinned::default();
+    };
+
+    // The converted rows each glTF mesh produced, in primitive order — the
+    // half of `place_instances`' walk that lives in `origins`.
+    let mut rows_of: Vec<Vec<usize>> = vec![Vec::new(); scene.meshes().len()];
+    for (row, origin) in render.origins.iter().enumerate() {
+        rows_of[origin.mesh].push(row);
+    }
+
+    let mut instances = Vec::new();
+    let mut cursor = 0usize;
+    for placement in scene.instances() {
+        let node = placement.node();
+        let at = || match scene.nodes()[node].name() {
+            Some(name) => format!("node {node} {name:?}"),
+            None => format!("node {node}"),
+        };
+        for &row in &rows_of[placement.mesh()] {
+            let Some(desc) = render.instances.get(cursor) else {
+                skips.push(Skip {
+                    feature: "skin",
+                    at: at(),
+                    why: "this viewer ran out of instances while pairing them with the nodes \
+                          that placed them, so it cannot tell which of them a skin deforms \
+                          and skins none of them"
+                        .to_owned(),
+                });
+                return Skinned::default();
+            };
+            if desc.mesh != row {
+                skips.push(Skip {
+                    feature: "skin",
+                    at: at(),
+                    why: format!(
+                        "this viewer expected instance {cursor} to draw mesh row {row} and it \
+                         draws row {}, so the walk that pairs an instance with the node that \
+                         placed it no longer matches the conversion; nothing in this document \
+                         is skinned",
+                        desc.mesh,
+                    ),
+                });
+                return Skinned::default();
+            }
+            cursor += 1;
+
+            let Some(worn) = scene.nodes()[node].skin() else {
+                continue;
+            };
+            if worn != 0 {
+                skips.push(Skip {
+                    feature: "skin",
+                    at: at(),
+                    why: format!(
+                        "it wears skin {worn} and this viewer poses the first skin only, so it \
+                         is drawn in its bind pose"
+                    ),
+                });
+                continue;
+            }
+            let bindings = &render.origins[row].bindings;
+            if bindings.is_empty() {
+                skips.push(Skip {
+                    feature: "JOINTS_0",
+                    at: at(),
+                    why: format!(
+                        "it wears a skin and the primitive it draws (mesh {} primitive {}) \
+                         carries no joint bindings, so there is nothing to deform and it is \
+                         drawn in its bind pose",
+                        render.origins[row].mesh, render.origins[row].primitive,
+                    ),
+                });
+                continue;
+            }
+            instances.push(SkinnedInstance {
+                // `cursor` was advanced past this instance above, so the row
+                // this describes is the one before it.
+                instance: cursor - 1,
+                transform: to_world,
+                bindings: bindings.clone(),
+            });
+        }
+    }
+
+    Skinned {
+        joints: u32::try_from(skin.joints().len()).unwrap_or(u32::MAX),
+        instances,
+    }
+}
+
+/// Where the skeleton hangs, in world space:
+/// [`SkinnedInstance::transform`].
+///
+/// `crcbl::anim::Palette` composes a root joint's global transform from that
+/// joint's own local transform and no further, so its matrices are in the space
+/// of the node the root joints are children of. This is that node's world
+/// transform, which is the same matrix for every joint of the skeleton and so
+/// belongs on the instance rather than folded into the palette every frame.
+///
+/// `None` refuses the whole document's skinning, and is a hierarchy this cannot
+/// answer for: a `children` cycle, which nothing between a file and here rules
+/// out — `crcbl_scene::gltf_check`'s `check_nodes` checks that a child index
+/// exists, not that the graph is a forest.
+///
+/// A skin whose root joints hang from **different** nodes gets the first one's
+/// answer and a report, because one instance carries one transform. Rigs like
+/// that are rare and the alternative is refusing to draw a document over a
+/// second root nobody notices.
+fn skeleton_to_world(
+    scene: &GltfScene,
+    parents: &[Option<usize>],
+    joints: &[usize],
+    skips: &mut Vec<Skip>,
+) -> Option<Mat4> {
+    // A root of the skeleton is a joint whose parent node is not itself a joint
+    // of this skin, which is exactly what `crate::anim::skeleton_of` calls a
+    // root when it builds the hierarchy the palette is composed down.
+    let roots = joints
+        .iter()
+        .filter(|&&joint| !parents[joint].is_some_and(|parent| joints.contains(&parent)));
+    let mut hangs_from = None;
+    for &root in roots {
+        let parent = parents[root];
+        match hangs_from {
+            None => hangs_from = Some(parent),
+            Some(first) if first != parent => {
+                skips.push(Skip {
+                    feature: "skin",
+                    at: format!("skin 0 root joint node {root}"),
+                    why: "this skin's root joints hang from different nodes and a skinned \
+                          instance carries one transform, so every one of them is placed by \
+                          the first root's"
+                        .to_owned(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    let Some(Some(parent)) = hangs_from else {
+        // Either the skin has no joints at all, or its roots are children of
+        // nothing — the scene's own space, which is the identity.
+        return Some(Mat4::IDENTITY);
+    };
+    match world_transform(scene.nodes(), parents, parent) {
+        Some(transform) => Some(transform),
+        None => {
+            skips.push(Skip {
+                feature: "skin",
+                at: format!("node {parent}"),
+                why: "the skeleton hangs from it and its ancestors form a cycle, so there is \
+                      no world transform to place the skeleton with and this document is drawn \
+                      in its bind pose"
+                    .to_owned(),
+            });
+            None
+        }
+    }
+}
+
+/// `node`'s world transform: its own local transform with every ancestor's
+/// applied outside it.
+///
+/// `None` for a `children` graph that is not a forest — see
+/// [`skeleton_to_world`]. The climb is bounded by the node count rather than
+/// trusted to terminate, because an acyclic chain visits each node at most once
+/// and this is the one application a person points at a file nobody curated.
+fn world_transform(
+    nodes: &[crcbl::scene::GltfNode],
+    parents: &[Option<usize>],
+    node: usize,
+) -> Option<Mat4> {
+    let mut transform = Mat4::IDENTITY;
+    let mut at = Some(node);
+    for _ in 0..=nodes.len() {
+        let Some(index) = at else {
+            return Some(transform);
+        };
+        transform = nodes[index].local_transform() * transform;
+        at = parents[index];
+    }
+    None
 }
 
 /// Reads the document held in `bytes`, filed under `name`.

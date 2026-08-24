@@ -36,22 +36,17 @@ Both `puppet` (third person, orbit-follow) and `breach` (first person) are named
 by their plan docs as consumers, which is the reason this cannot be settled
 later by whichever one is built first.
 
-### The glTF rig is read and nothing consumes it
+### What the glTF rig path still drops
 
-`gltf_import` now fills `GltfScene::skins`, `GltfScene::clips`,
-`GltfPrimitive::joints` and `GltfPrimitive::weights` — the source stage of
-`docs/plan/17-animation.md`. That is the whole of what landed. What did not:
+`gltf_import` fills `GltfScene::skins`, `GltfScene::clips`,
+`GltfPrimitive::joints`, `GltfPrimitive::weights` and `GltfNode::skin`, and
+`apps/viewer` draws a document deformed by its own clip in a browser. What is
+still missing or silently lost:
 
-- **Nothing downstream reads them.** `gltf_render::build_render_scene` does not
-  look at a skin, `apps/viewer` neither reports nor draws one, and the puppet
-  sample of `docs/plan/sample/09-puppet.md` has no crate yet. A rigged glTF
-  still draws in its bind pose, exactly as before; the difference is that the
-  rig is now in the result rather than only in a warning. Viewer was named as
-  this slice's consumer and is not wired.
-- **No pose, blend or palette math anywhere.** `crcbl-anim` is unwritten, and
-  `GltfInterpolation::CubicSpline` is carried through with its tangents
-  interleaved in `GltfChannel::samples` and nothing that knows how to evaluate
-  them.
+- **No blend layer.** `crcbl-anim` samples a clip and builds a palette; there is
+  no blend tree, no crossfade and no state machine, which is what
+  `docs/plan/sample/09-puppet.md`'s locomotion set needs. The puppet sample
+  itself has no crate yet.
 - **`JOINTS_1`/`WEIGHTS_1` are not read** and are not warned about either, so a
   document binding a vertex to more than four joints loses the rest silently.
   Deliberate for now — every plausible palette here is four-wide — but it is a
@@ -67,7 +62,7 @@ later by whichever one is built first.
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
-### The skinned draw is unverified on the WebGPU and Metal seams
+### The skinned draw is unverified on the Metal and DX12 seams
 
 A skinned instance carries the base vertex of the region it was deformed into —
 `GpuInstance::base_vertex`, read by `mesh.slang`'s `vertexMain` and
@@ -78,12 +73,12 @@ A skinned instance carries the base vertex of the region it was deformed into �
 radv and on lavapipe: sabotaging either shader's base reddens exactly the case
 that draws through it. What is **not** checked:
 
-- **No browser or Metal run has drawn a deformed mesh.** The WGSL, MSL and DXIL
-  artifacts are generated and their `GpuInstance` stride was confirmed to be 96
-  on every target, but nothing dispatches skinning and reads a pixel back off
-  those seams. The browser gate's `DEFORM_CHANGING_SHARE` in
-  `web/tools/browser-e2e.mjs` is the nearest thing and its passing side is
-  unmeasured — see the viewer entry below.
+- **No Metal or DX12 run has drawn a deformed mesh.** Their artifacts are
+  generated and the `GpuInstance` stride was confirmed to be 96 on every target,
+  but nothing dispatches skinning and reads a pixel back off those two seams.
+  Both backends are deferred, so this is a known gap rather than a task. WebGPU
+  is no longer in this list: `apps/viewer`'s browser gate draws a deformed mesh
+  on `crcbl-webgpu` and the check goes red when the override is dropped.
 - **The full demo description has not been run skinned.** The pixel case builds
   `cube_only_scene`, one mesh. The reason it had to — an alias id past every
   bucket and past `draw_gen.slang`'s level tables — is gone with the alias, so

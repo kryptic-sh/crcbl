@@ -41,13 +41,15 @@
 use crcbl::engine::{
     FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
 };
-use crcbl::hal::{CommandEncoderDesc, Features};
-use crcbl::math::Vec3;
+use crcbl::hal::{CommandEncoderDesc, Device, Features};
+use crcbl::math::{Mat4, Vec3};
 use crcbl::prelude::*;
 use crcbl::render::{
-    MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderEffects, TransientPool, UiRenderer,
-    grid::GridStyle, scene::InstanceDesc,
+    MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderEffects, SkinRange, SkinnedInstanceDesc,
+    SkinnedMesh, Skinning, SkinningDesc, SkinningError, TransientPool, UiRenderer, grid::GridStyle,
+    scene::InstanceDesc,
 };
+use crcbl::shaders::skinning::SkinBinding;
 use crcbl::shell::{Shell, WindowId};
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::{Menu, MenuLayout};
@@ -104,6 +106,29 @@ pub struct Gpu {
     menu: MenuRenderer,
     atlas: FontAtlas,
     draw_list: DrawList,
+    /// The pass that deforms this document's skinned geometry, and the regions
+    /// it writes — `None` and empty for a document nothing skins, which is most
+    /// of them.
+    ///
+    /// The two are one thing and are built and released together: a [`Skinning`]
+    /// with no region to write is a pipeline nothing dispatches, and a region
+    /// with no pass to fill it is a draw of whatever the vertex pool was
+    /// holding. See [`Gpu::build_skinning`].
+    skinning: Option<Skinning>,
+    /// One reservation per [`crate::model::Skinned::instances`] entry, in that
+    /// order — see [`SkinnedDraw`].
+    skinned: Vec<SkinnedDraw>,
+    /// This frame's joint palette, written by [`Gpu::set_palette`] before the
+    /// frame is recorded.
+    ///
+    /// One palette for every skinned region, because this application poses one
+    /// skeleton: `crate::model::skinned_of` places an instance here only when
+    /// its node wears the skin `crate::anim::playable_of` converted, so every
+    /// region in the list above is deformed by the same joints.
+    ///
+    /// Refilled in place rather than replaced, so a frame costs no allocation —
+    /// the same bargain `crate::anim::Player` keeps with `crcbl-anim`.
+    palette: Vec<Mat4>,
     /// `None` on a device without timestamp queries — the debug panel's GPU
     /// section degrades, the frame does not.
     timers: Option<PassTimers>,
@@ -143,6 +168,72 @@ pub struct Gpu {
 /// is what keeps that true. It is **optional**: an adapter without it opens
 /// exactly as before and the viewer reports that the view is unavailable rather
 /// than refusing to start.
+/// One skinned instance as the frame holds it: the region the dispatch fills
+/// and the bindings that say how.
+///
+/// The instance itself is not here. [`ForwardRenderer::add_skinned_instance`]
+/// keeps a list of its own and re-points every entry of it at the half of its
+/// region each frame's dispatch writes, so a handle kept here would be one
+/// nothing ever used — this application never moves a skinned object after
+/// placing it.
+#[derive(Debug)]
+struct SkinnedDraw {
+    /// The region and its two mesh-table entries, from
+    /// [`ForwardRenderer::reserve_skinned`].
+    mesh: SkinnedMesh,
+    /// One per vertex of the bind-pose run, in the same order —
+    /// [`crate::model::SkinnedInstance::bindings`], owned because the pass
+    /// uploads them every frame and the document is long gone.
+    bindings: Vec<SkinBinding>,
+}
+
+/// Flattens a skinning error into the seam's, the way `crcbl-render` flattens
+/// its own pool errors.
+///
+/// This application's constructors and its frame both return
+/// [`HalError`]-shaped results and neither has anything to do differently for a
+/// palette that was refused than for a buffer that was; the message renders
+/// verbatim through [`HalError::Backend`], so the joint or the capacity the
+/// pass named survives into the log.
+fn hal_error(error: SkinningError) -> HalError {
+    match error {
+        SkinningError::Hal(hal) => hal,
+        other => HalError::Backend(other.to_string()),
+    }
+}
+
+/// Which of a document's `count` instances a skin deforms, by index.
+///
+/// A row that is deformed is placed through the skinning seam and must **not**
+/// also be placed as an ordinary instance — see the loop in
+/// [`Gpu::from_context`], which is the only reason this exists. A mask rather
+/// than a scan per row, so a rig on a document with many instances costs one
+/// pass rather than one per pair.
+///
+/// # Panics
+///
+/// If an entry names a row past `count`, which is one half of a
+/// [`crate::model::Model`] disagreeing with the other — see
+/// [`Gpu::build_skinning`].
+fn skinned_rows(count: usize, skinned: &crate::model::Skinned) -> Vec<bool> {
+    let mut mask = vec![false; count];
+    for entry in &skinned.instances {
+        mask[entry.instance] = true;
+    }
+    mask
+}
+
+/// Gives every reservation in `draws` back to `renderer`.
+///
+/// The unwind for a half-built [`Gpu::build_skinning`], and only that: a
+/// teardown drops them instead, because the pool they are runs of is about to be
+/// destroyed whole.
+fn release_skinned(renderer: &mut ForwardRenderer, draws: Vec<SkinnedDraw>) {
+    for draw in draws {
+        renderer.release_skinned(draw.mesh);
+    }
+}
+
 fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     let base = GpuContextDesc::from(gpu);
     GpuContextDesc {
@@ -153,8 +244,14 @@ fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
 }
 
 impl Gpu {
-    /// Opens a device on `window` and makes `scene` resident, with one instance
-    /// per entry of `instances`.
+    /// Opens a device on `window` and makes `model` resident.
+    ///
+    /// Takes the whole document rather than its description and its instances,
+    /// because a skinned one is three things that have to agree — the scene, the
+    /// instances, and which of those instances a skin deforms — and
+    /// [`grid_extent_for`] is a fourth derived from a fifth. This is the shape
+    /// [`PendingGpu`] already carried, so both bring-up paths now name one
+    /// argument and cannot be handed a rig from a different file.
     ///
     /// # Errors
     ///
@@ -166,15 +263,14 @@ impl Gpu {
         window: WindowId,
         extent: (u32, u32),
         gpu: GpuOptions,
-        scene: &crcbl::render::scene::SceneDesc<'_>,
-        instances: &[InstanceDesc],
-        grid_extent: f32,
+        model: &crate::model::Model,
     ) -> Result<Self, GpuError> {
         Self::from_context(
             GpuContext::open(shell, window, extent, &desc(gpu))?,
-            scene,
-            instances,
-            grid_extent,
+            &model.render.scene,
+            &model.render.instances,
+            &model.skinned,
+            grid_extent_for(model),
         )
     }
 
@@ -192,6 +288,7 @@ impl Gpu {
         ctx: GpuContext,
         scene: &crcbl::render::scene::SceneDesc<'_>,
         instances: &[InstanceDesc],
+        skinned: &crate::model::Skinned,
         grid_extent: f32,
     ) -> Result<Self, GpuError> {
         let format = ctx.format();
@@ -228,7 +325,18 @@ impl Gpu {
 
         // Unwound by hand, because `Gpu` has no `Drop`: a `?` here would leak
         // every pipeline and buffer the renderer just made.
-        for instance in instances {
+        //
+        // **The rows a skin deforms are deliberately not placed here.**
+        // `crate::model::SkinnedInstance` replaces its row rather than joining
+        // it, and placing both would draw the mesh twice in one frame — once
+        // deformed by the joints and once undeformed at the node's own
+        // transform, which is the picture `crate::demo_model`'s `crate.far`
+        // would turn into if this loop ignored the distinction.
+        let deformed = skinned_rows(instances.len(), skinned);
+        for (index, instance) in instances.iter().enumerate() {
+            if deformed[index] {
+                continue;
+            }
             if let Err(error) = renderer.add_instance(instance) {
                 renderer.destroy(ctx.device());
                 ctx.destroy()?;
@@ -239,12 +347,29 @@ impl Gpu {
             }
         }
 
+        let (skinning, skinned_draws) =
+            match Self::build_skinning(ctx.device(), &mut renderer, instances, skinned) {
+                Ok(built) => built,
+                Err(error) => {
+                    renderer.destroy(ctx.device());
+                    ctx.destroy()?;
+                    return Err(GpuError::Hal(error));
+                }
+            };
+
         // Unwound by hand for the reason the instance loop above is: `Gpu` has
         // no `Drop`, so a `?` here would leak every pipeline and buffer the
         // renderers before it have made.
+        //
+        // The skinning pass joins the unwind from here on: it owns buffers and a
+        // pipeline of its own, which `ForwardRenderer::destroy` knows nothing
+        // about.
         let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
             Ok(ui) => ui,
             Err(error) => {
+                if let Some(skinning) = skinning {
+                    skinning.destroy(ctx.device());
+                }
                 renderer.destroy(ctx.device());
                 ctx.destroy()?;
                 return Err(GpuError::Hal(error));
@@ -254,6 +379,9 @@ impl Gpu {
             Ok(menu) => menu,
             Err(error) => {
                 ui.destroy(ctx.device());
+                if let Some(skinning) = skinning {
+                    skinning.destroy(ctx.device());
+                }
                 renderer.destroy(ctx.device());
                 ctx.destroy()?;
                 return Err(GpuError::Hal(error));
@@ -283,12 +411,108 @@ impl Gpu {
             menu,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
+            skinning,
+            skinned: skinned_draws,
+            // Sized for the palette the first frame will bring, so the refill in
+            // `set_palette` never grows it.
+            palette: Vec::with_capacity(skinned.joints as usize),
             timers,
             wireframe_supported,
             dumped: false,
             #[cfg(test)]
             last_dump: String::new(),
         })
+    }
+
+    /// Reserves a region for every instance a skin deforms, places each one, and
+    /// builds the pass that fills them.
+    ///
+    /// `(None, empty)` for a document with nothing to skin, which is the frame
+    /// this application drew before skinning existed —
+    /// [`Skinning::new`] refuses a pass with no range anyway, and a pass with
+    /// nothing to dispatch would cost the vertex pool two barriers a frame for
+    /// no reason.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] for a pool with no room for both halves of a region, a mesh
+    /// table with no room for both entries, an instance pool that is full, or a
+    /// pass that could not be built. **Every reservation this took is given back
+    /// before it returns**, so a refused document leaves the renderer exactly as
+    /// it found it and the caller's own unwind has only the renderer to release.
+    ///
+    /// # Panics
+    ///
+    /// If a [`crate::model::SkinnedInstance`] names a row past the end of
+    /// `instances`. The two come from one [`crate::model::Model`], built by one
+    /// walk over one document, so a mismatch is this application disagreeing
+    /// with itself rather than anything a file can cause.
+    fn build_skinning(
+        device: &dyn Device,
+        renderer: &mut ForwardRenderer,
+        instances: &[InstanceDesc],
+        skinned: &crate::model::Skinned,
+    ) -> Result<(Option<Skinning>, Vec<SkinnedDraw>), HalError> {
+        if skinned.instances.is_empty() || skinned.joints == 0 {
+            return Ok((None, Vec::new()));
+        }
+
+        let mut draws: Vec<SkinnedDraw> = Vec::with_capacity(skinned.instances.len());
+        for entry in &skinned.instances {
+            let row = &instances[entry.instance];
+            // Reserved and pushed before anything else can fail, so every path
+            // out of this loop gives it back — see `release_skinned` below.
+            //
+            // The row's mesh is a `Geometry::Flat`, which is what
+            // `reserve_skinned` panics without: `crcbl_scene::gltf_render`
+            // builds no DAGs, so no document this application can open has a
+            // level for a dispatch to miss.
+            match renderer.reserve_skinned(row.mesh) {
+                Ok(mesh) => draws.push(SkinnedDraw {
+                    mesh,
+                    bindings: entry.bindings.clone(),
+                }),
+                Err(error) => {
+                    release_skinned(renderer, draws);
+                    return Err(error.into());
+                }
+            }
+            let placed = renderer.add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: &draws.last().expect("the reservation was just pushed").mesh,
+                material: row.material,
+                transform: entry.transform,
+            });
+            if let Err(error) = placed {
+                release_skinned(renderer, draws);
+                return Err(error.into());
+            }
+        }
+
+        let ranges = u32::try_from(draws.len()).unwrap_or(u32::MAX);
+        let bindings = draws.iter().map(|draw| draw.bindings.len()).sum::<usize>();
+        let built = Skinning::new(
+            device,
+            &SkinningDesc {
+                label: Some("viewer skinning"),
+                frames: FRAMES_IN_FLIGHT,
+                ranges,
+                // Every range is posed from the same skeleton — see
+                // [`Gpu::palette`] — so the frame's whole palette is one
+                // skeleton's joints once per range.
+                joints: skinned.joints.saturating_mul(ranges),
+                bindings: u32::try_from(bindings).unwrap_or(u32::MAX),
+                // **This pool and no other.** A pass built against a different
+                // buffer writes vertices no draw of this renderer can reach.
+                vertices: renderer.vertex_buffer(),
+            },
+        );
+        match built {
+            Ok(skinning) => Ok((Some(skinning), draws)),
+            Err(error) => {
+                release_skinned(renderer, draws);
+                Err(hal_error(error))
+            }
+        }
     }
 
     /// Replaces the resident scene with a freshly converted document.
@@ -331,6 +555,7 @@ impl Gpu {
         &mut self,
         scene: &crcbl::render::scene::SceneDesc<'_>,
         instances: &[InstanceDesc],
+        skinned: &crate::model::Skinned,
         grid_extent: f32,
     ) -> Result<(), HalError> {
         let device = self.ctx.device();
@@ -343,12 +568,26 @@ impl Gpu {
             next.destroy(device);
             return Err(error);
         }
-        for instance in instances {
+        // The deformed rows are left out here for `Gpu::from_context`'s reason,
+        // and through the same mask so the two cannot come to disagree about
+        // what "deformed" means.
+        let deformed = skinned_rows(instances.len(), skinned);
+        for (index, instance) in instances.iter().enumerate() {
+            if deformed[index] {
+                continue;
+            }
             if let Err(error) = next.add_instance(instance) {
                 next.destroy(device);
                 return Err(error.into());
             }
         }
+        let (skinning, draws) = match Self::build_skinning(device, &mut next, instances, skinned) {
+            Ok(built) => built,
+            Err(error) => {
+                next.destroy(device);
+                return Err(error);
+            }
+        };
 
         next.set_exposure(self.renderer.exposure());
         // The three requested layers, not the resolved set: a reload must not
@@ -367,6 +606,16 @@ impl Gpu {
 
         let previous = core::mem::replace(&mut self.renderer, next);
         previous.destroy(device);
+        // **The pass goes with the renderer it was built against**, because it
+        // holds that renderer's vertex-pool handle: a `Skinning` kept across a
+        // reload would write into a buffer the destroy above has released. The
+        // regions go the same way — they are runs of the old pool — so they
+        // are dropped rather than released, on `release_skinned`'s terms.
+        if let Some(previous) = core::mem::replace(&mut self.skinning, skinning) {
+            previous.destroy(device);
+        }
+        self.skinned = draws;
+        self.palette.clear();
         // The graph's shape is a function of the scene, so the dump the log
         // already carries is about a document that is no longer on screen.
         self.dumped = false;
@@ -473,6 +722,25 @@ impl Gpu {
         self.camera = camera;
     }
 
+    /// Takes this frame's joint palette — [`crate::anim::Player::palette`].
+    ///
+    /// **Every skinned region in the frame is deformed by it**, because this
+    /// application poses one skeleton: `crate::model::skinned_of` places an
+    /// instance in the frame only when its node wears the skin
+    /// `crate::anim::playable_of` converted. A frame drawn
+    /// without it deforms nothing new: the skinning pass would be handed the
+    /// palette of the frame before, or an empty one, and
+    /// [`Skinning::begin_frame`] refuses an empty palette by name rather than
+    /// letting the shader's index clamp make something up.
+    ///
+    /// Copied rather than kept by reference because the palette is composed
+    /// during the game's draw and consumed when the frame is recorded, which are
+    /// two calls with the renderer's own borrows in between.
+    pub fn set_palette(&mut self, palette: &[Mat4]) {
+        self.palette.clear();
+        self.palette.extend_from_slice(palette);
+    }
+
     /// The glyph atlas the UI pass renders text from.
     ///
     /// The menu lays itself out with it and the debug overlay measures its own
@@ -547,8 +815,39 @@ impl Gpu {
         let extent = acquired.extent;
 
         let light = key_light(&self.camera);
-        self.renderer
-            .begin_frame(self.ctx.device(), &self.camera, &light, extent)?;
+        // **The skinned entry point is a different call rather than a flag**,
+        // and the seam is written that way on purpose: it rotates the instance
+        // ring, moves the ping-pong and re-points every skinned object at the
+        // half this frame's dispatch fills, in the one order that is correct. A
+        // frame that took the plain path would leave every skinned object
+        // pointing at the pose of the frame before, for ever, with nothing to
+        // report it.
+        match self.skinning.as_mut() {
+            Some(skinning) => {
+                // One range per reserved region, all four fields of each tied
+                // together by `SkinnedMesh::skin_range` so a region and a
+                // bind-pose base cannot come from different meshes.
+                let ranges: Vec<SkinRange<'_>> = self
+                    .skinned
+                    .iter()
+                    .map(|draw| draw.mesh.skin_range(&self.palette, &draw.bindings))
+                    .collect();
+                self.renderer
+                    .begin_skinned_frame(
+                        self.ctx.device(),
+                        skinning,
+                        &ranges,
+                        &self.camera,
+                        &light,
+                        extent,
+                    )
+                    .map_err(|error| GpuError::Hal(hal_error(error)))?;
+            }
+            None => {
+                self.renderer
+                    .begin_frame(self.ctx.device(), &self.camera, &light, extent)?;
+            }
+        }
         self.menu
             .begin_frame(self.ctx.device(), extent)
             .map_err(GpuError::Hal)?;
@@ -565,9 +864,21 @@ impl Gpu {
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
-            let _hdr = self
-                .renderer
-                .add_passes(&mut graph, &self.pool, target, extent);
+            // **The dispatch is added by the renderer, not beside it.** The
+            // skinned entry point takes the pass itself so it can add it first
+            // and declare the read on every pass that pulls vertices out of the
+            // pool; a caller that imported the pool itself would order nothing,
+            // and the draws would read the region before the compute write was
+            // visible — a mesh that flickers between two poses on hardware and
+            // looks perfect under a validation layer.
+            let _hdr = match self.skinning.as_ref() {
+                Some(skinning) => self
+                    .renderer
+                    .add_skinned_passes(&mut graph, &self.pool, target, extent, skinning),
+                None => self
+                    .renderer
+                    .add_passes(&mut graph, &self.pool, target, extent),
+            };
             // **Between the scene and the text, and that order is the whole
             // join.** The menu's scrim dims what is already in the target, so it
             // has to come after the tonemap; the panel is opaque and the labels
@@ -640,6 +951,15 @@ impl Gpu {
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());
         }
+        // Before the renderer, because it borrowed that renderer's vertex-pool
+        // handle. The regions themselves are dropped rather than released: they
+        // are runs of the pool the line below destroys, so giving them back
+        // would be bookkeeping in a free list nothing reads again — see
+        // [`release_skinned`].
+        if let Some(skinning) = self.skinning.take() {
+            skinning.destroy(self.ctx.device());
+        }
+        self.skinned.clear();
         self.renderer.destroy(self.ctx.device());
         self.ctx.destroy()
     }
@@ -680,6 +1000,7 @@ impl PendingGpu {
                 ctx,
                 &self.model.render.scene,
                 &self.model.render.instances,
+                &self.model.skinned,
                 grid_extent_for(&self.model),
             )
             .map(Some),
@@ -1521,10 +1842,20 @@ mod tests {
         )
         .expect("the null backend opens everywhere");
 
-        let mut gpu = Gpu::from_context(ctx, &crcbl::render::scene::demo(), &[], 1.0)
-            .expect("the null device builds the viewer's renderer");
+        // `Skinned::default` is a document with no rig, which is what
+        // `scene::demo()` is: this test is about the effect request reaching a
+        // renderer, and the skinning seam is not on that path at all.
+        let nothing_skinned = crate::model::Skinned::default();
+        let mut gpu = Gpu::from_context(
+            ctx,
+            &crcbl::render::scene::demo(),
+            &[],
+            &nothing_skinned,
+            1.0,
+        )
+        .expect("the null device builds the viewer's renderer");
         let opened = gpu.effects();
-        gpu.reload(&crcbl::render::scene::demo(), &[], 1.0)
+        gpu.reload(&crcbl::render::scene::demo(), &[], &nothing_skinned, 1.0)
             .expect("the null device builds the replacement renderer");
         let reloaded = gpu.effects();
         gpu.destroy().expect("teardown");

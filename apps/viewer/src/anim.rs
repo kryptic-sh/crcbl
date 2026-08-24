@@ -276,7 +276,11 @@ fn skeleton_of(skin: &GltfSkin, nodes: &[GltfNode]) -> Result<Skeleton, Skeleton
 /// stores the tree in. Every index is valid: `crcbl-scene`'s `gltf_check`
 /// refuses a document whose node names a child that does not exist, before
 /// [`import_gltf`](crcbl::scene::import_gltf) builds anything.
-fn parents_of(nodes: &[GltfNode]) -> Vec<Option<usize>> {
+///
+/// `pub(crate)` because [`crate::model`] wants the same walk: it composes a
+/// node's world transform by climbing this, and a second copy of the loop is
+/// where the two would come to disagree about what a root is.
+pub(crate) fn parents_of(nodes: &[GltfNode]) -> Vec<Option<usize>> {
     let mut parents = vec![None; nodes.len()];
     for (index, node) in nodes.iter().enumerate() {
         for &child in node.children() {
@@ -505,6 +509,24 @@ impl Player {
     #[must_use]
     pub const fn deviation(&self) -> f32 {
         self.deviation
+    }
+
+    /// **The joint palette this frame composed** — each joint's global
+    /// transform times its inverse bind matrix, in the skin's own joint order.
+    ///
+    /// What [`SkinRange::palette`](crcbl::render::SkinRange::palette) takes, and
+    /// the same array [`deviation`](Self::deviation) and [`draw`](Self::draw)
+    /// are derived from: [`advance`](Self::advance) composes it once a frame and
+    /// every consumer reads that one composition, so the geometry the GPU
+    /// deforms and the skeleton drawn over it cannot be a frame apart.
+    ///
+    /// **It does not place the character in the world.** These matrices are in
+    /// the space the skeleton's root joints hang in — see
+    /// [`crate::model::SkinnedInstance::transform`], which is what carries that
+    /// space into the world.
+    #[must_use]
+    pub fn palette(&self) -> &[Mat4] {
+        self.palette.matrices()
     }
 
     /// The skeleton being posed.

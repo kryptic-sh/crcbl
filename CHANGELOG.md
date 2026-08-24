@@ -223,6 +223,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `MeshOrigin` names a node, so building a `SkinRange` still takes the
   `GltfScene` the conversion read.
 
+- **`apps/viewer` draws its document's skinned mesh, deformed by the clip it
+  plays, in a browser.** `crate::model::skinned_of` decides which instances a
+  skin deforms — from `GltfNode::skin`, because the same rigged mesh may legally
+  be drawn again under a node with no skin and skinning that copy would put it
+  wherever the joints are — and `Gpu::build_skinning` reserves a region for
+  each, with the frame going through `ForwardRenderer::begin_skinned_frame` and
+  `add_skinned_passes`. This is the first time the skinning kernel has executed
+  on `crcbl-webgpu`: its WGSL was validated by naga and dispatched by nothing.
+  The browser gate holds it — the turntable is dragged to a stop and the canvas
+  must keep changing across a clip cycle, with the frozen camera and the moving
+  pose both asserted so a pass cannot be vacuous.
+
+- **A document a visitor drops on the browser canvas starts the turntable
+  again.** It already re-framed the camera, on the argument that nobody has
+  aimed at a file they have only just chosen; the turntable was the same
+  decision and was left latched off, so a dropped document sat still at an angle
+  chosen for the previous one. A re-export of the same document still changes
+  neither, because that is the same document an artist has aimed at.
+
 - **`apps/viewer` plays the clip in the document it opened, and `B` draws the
   posed skeleton.** The rig is converted into `crcbl::anim`'s `Skeleton` and
   `Clip`, sampled every frame off the render clock, and composed into a joint

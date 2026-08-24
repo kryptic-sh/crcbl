@@ -493,18 +493,10 @@ pub fn with_shell<S: Shell + ?Sized>(
 
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-    let gpu = Gpu::open(
-        shell.as_ref(),
-        window,
-        extent,
-        options.common.gpu(),
-        &model.render.scene,
-        &model.render.instances,
-        // The grid is scaled to the document's own size — see `crate::gpu`.
-        // The largest axis rather than the diagonal, so a long thin model does
-        // not get a cell sized for a span it only has in one direction.
-        model.bounds.half_extent().max_element() * 2.0,
-    )?;
+    // The whole document, because a rigged one is a scene, its instances and
+    // the rig that pairs them, and the grid extent is derived from it too — see
+    // `Gpu::open`.
+    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu(), &model)?;
 
     Ok(assemble(
         Booted {
@@ -776,9 +768,12 @@ impl Viewer {
         gpu.reload(
             &model.render.scene,
             &model.render.instances,
+            // The new document's rig, not the old one's: the regions the frame
+            // deforms are reserved out of the renderer this call builds.
+            &model.skinned,
             // The same extent `crate::app::with_shell` opened with, and for the
             // same reason — see `crate::gpu`.
-            model.bounds.half_extent().max_element() * 2.0,
+            crate::gpu::grid_extent_for(model),
         )?;
         self.bounds = model.bounds;
         self.instances = model.render.instances.len();
@@ -869,6 +864,15 @@ impl Viewer {
         // [`Viewer::draw`] a few lines below the call that set it, against this
         // frame's extent.
         self.reframe = true;
+        // **And the turntable starts again, for the same reason and only for
+        // the same caller.** A visitor who has taken hold of one document has
+        // aimed at *that* one; the line above already throws that aim away
+        // because this is a different document, and leaving the turntable
+        // latched off would hand them a new file sitting still at an angle they
+        // chose for the old one. A re-export is the opposite case — the same
+        // document again, which is why `adopt` does neither of these and the
+        // native path sets neither.
+        self.handed_over = false;
         let verdict = format!(
             "{key} opened — {} instance(s), {} skipped",
             self.instances, self.skipped,
@@ -1146,6 +1150,12 @@ impl HostedGame for Viewer {
         // leaves it.
         if let Some(player) = &mut self.player {
             player.advance(frame.render_dt.as_secs_f32());
+            // **The same composition the overlay and the `pose` row read**, so
+            // the geometry the GPU deforms and the skeleton drawn over it cannot
+            // be a frame apart. The frame this feeds is recorded after this
+            // call returns; a document with nothing skinned takes it and ignores
+            // it, which costs one copy of a palette nobody uploads.
+            gpu.set_palette(player.palette());
         }
         gpu.set_camera(self.orbit.camera());
         // Re-read rather than kept: the device clamps last, and a reload builds
@@ -2851,6 +2861,43 @@ mod tests {
             tonemap < grid,
             "the grid must be recorded after the tonemap, not before it:\n{dump}"
         );
+
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The skinning dispatch is in the frame, and in front of everything that
+    /// reads a vertex out of the pool.**
+    ///
+    /// The frame this application records is the observable, for
+    /// `the_frame_carries_a_grid_floor_after_the_tonemap`'s reason: a
+    /// reservation made and a pass built are not "the document is deformed",
+    /// and only the recorded graph says which. Ordering is half the claim —
+    /// the dispatch writes the run the depth prepass and the forward pass read,
+    /// and a graph that recorded it afterwards would draw the pose of the frame
+    /// before on hardware and look perfect under a validation layer.
+    ///
+    /// The demo document rather than the quad fixture, because it is the one
+    /// this crate has that wears a skin — `crate::demo_model`'s `crate-rig`.
+    #[test]
+    fn a_rigged_document_records_its_skinning_dispatch_before_it_draws() {
+        let (_dir, options) = model_at(&crate::demo_model::demo_glb(), 4);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+
+        let dump = engine.gpu().last_dump().to_string();
+        let skinning = dump
+            .find(r#"pass "skinning""#)
+            .unwrap_or_else(|| panic!("the rigged document records no skinning pass:\n{dump}"));
+        for drawn in [r#"pass "depth-prepass""#, r#"pass "forward""#] {
+            let at = dump
+                .find(drawn)
+                .unwrap_or_else(|| panic!("no {drawn} in the viewer's frame:\n{dump}"));
+            assert!(
+                skinning < at,
+                "the skinning dispatch is recorded after {drawn}, so the draw reads the \
+                 region before the compute write:\n{dump}",
+            );
+        }
 
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

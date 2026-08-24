@@ -591,6 +591,25 @@ const EXPECTATIONS = {
     // `moving`: the clip loops, so the number sweeps rather than climbing.
     playing: /pose: ([\d.]+)/,
     playingLabel: 'the clip in the document plays under its own steam',
+    // **The geometry being deformed by that clip, which `playing` above cannot
+    // see.** `pose` is a number this application computes on the CPU and prints:
+    // a page that samples the clip, composes the palette and then hands the GPU
+    // nothing to skin with reports exactly the same sweep, draws the document's
+    // bind pose for ever, and passes every other check in this file.
+    //
+    // So this one reads the canvas. The turntable is stopped first through the
+    // viewer's own drag, because a moving camera changes the picture whatever
+    // the geometry is doing, and then the two controls that stop this being a
+    // check of nothing are asserted beside it: `turn` must have stopped taking
+    // new values, and `pose` must still be taking them. Without the first, the
+    // frames differ because the camera moved; without the second, they differ
+    // because — well, nothing, and the check has no business passing.
+    //
+    // It uses the `moving` and `playing` patterns above, so a row carrying this
+    // has to carry both of those. viewer is the only one that does.
+    deforming: true,
+    deformingLabel:
+      'the document is deformed by its own clip, with the camera held still',
     // **The one demo that takes a file from the visitor**, so the one row with
     // a `drop`. `document` is dragged onto the canvas and `opened` is what the
     // `[HUD]` line has to say afterwards — numbers only a *loaded* document can
@@ -802,6 +821,53 @@ const HEARTBEAT_DEADLINE_MS = 60_000;
  * reached the corner fails a fast Rust test rather than this slow one.
  */
 const FOCUS_CLICK_INSET = 8;
+
+/**
+ * How many pointer movements the turntable-stopping drag sends, and how far
+ * apart in CSS pixels. Named apart from `DRAG_STEPS`, which is group F's touch
+ * drag and answers a different question.
+ *
+ * A press alone is not a drag — `apps/viewer/src/controls.rs` needs movement
+ * while a button is held — so there has to be more than one, and the viewer
+ * latches its turntable off on the first one that arrives. They are small on
+ * purpose: the drag orbits the camera, and a large one can swing the model off
+ * screen entirely, which would stop the canvas changing for a reason that has
+ * nothing to do with the geometry the check is about.
+ */
+const TURNTABLE_DRAG_STEPS = 4;
+/** @see TURNTABLE_DRAG_STEPS */
+const TURNTABLE_DRAG_STEP_PX = 2;
+
+/**
+ * How many heartbeats the deform check watches for, once the camera is still.
+ *
+ * Beats rather than milliseconds, so the window is this machine's rather than a
+ * desktop's: a runner that takes four wall seconds to log a simulated one gets
+ * four times as long to show a change, which is the direction a check watching
+ * for motion has to scale in. Three of them span more than one cycle of the demo
+ * document's clip — `apps/viewer/src/demo_model.rs`'s `CLIP_TIMES` ends before
+ * two simulated seconds — so the pose sweeps rather than being sampled at one
+ * phase.
+ */
+const DEFORM_BEATS = 3;
+
+/**
+ * How much of the deform check's sampling has to be a frame it has not seen
+ * before.
+ *
+ * **A canvas that takes two values is not a canvas that is changing**, and the
+ * difference is the whole check. Geometry following a clip in front of a still
+ * camera gives a new picture almost every sample; a mesh whose vertices are
+ * fixed gives one, and a mesh drawn alternately out of two fixed runs gives
+ * exactly two however long the window is — 2 out of 25 on the run this constant
+ * was written for. A half is nowhere near either.
+ *
+ * **The passing side of this is not measured**, because nothing has yet drawn
+ * this document deformed; `docs/backlog.md` carries that as a gap. If a working
+ * run ever lands near this share rather than near one, the number to look at is
+ * how many frames the page presents per sample, not this.
+ */
+const DEFORM_CHANGING_SHARE = 0.5;
 
 /**
  * How many contacts the emulated touchscreen reports.
@@ -1922,6 +1988,132 @@ try {
         : `it never changed — ${beats} HUD line(s) since the start, ` +
             `${valuesOf(EXPECTED.playing).size} value(s): ` +
             `${[...valuesOf(EXPECTED.playing)].join(', ') || 'none'}`
+    );
+  }
+
+  // **AND THE GEOMETRY BEING DEFORMED, WHICH THE CHECK ABOVE CANNOT SEE
+  // EITHER.** `pose` is composed on the CPU and printed; the palette reaching a
+  // skinning dispatch, the dispatch running, and a draw reading what it wrote
+  // are three further steps, and a page that lost any of them prints the same
+  // sweep while drawing the document's bind pose for ever.
+  //
+  // **IT RUNS BEFORE THE DROP BLOCK, FOR THE REASON THE CHECK ABOVE DOES**: the
+  // document dropped there has no skin, so nothing below this point in the run
+  // has any skinned geometry to look at.
+  if (EXPECTED.deforming) {
+    // **The viewer's own control, not a switch this harness reaches past it.**
+    // `apps/viewer/src/app.rs` latches the turntable off the first time
+    // `Controls::is_dragging` is true, which is a press *and* a movement — a
+    // click alone is not a drag, which is exactly what the focus click above
+    // relies on.
+    //
+    // A few pixels, and from the same corner the focus click used. A large drag
+    // swings the orbit somewhere the crate may not be on screen at all, and the
+    // failure that produces is a canvas that stops changing for a reason that
+    // has nothing to do with skinning.
+    const grip = { x: rect.x, y: rect.y };
+    await page.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: grip.x,
+      y: grip.y,
+      button: 'left',
+      clickCount: 1,
+      buttons: 1,
+    });
+    for (let step = 1; step <= TURNTABLE_DRAG_STEPS; step += 1) {
+      await page.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: grip.x + step * TURNTABLE_DRAG_STEP_PX,
+        y: grip.y,
+        button: 'left',
+        buttons: 1,
+      });
+    }
+    await page.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: grip.x + TURNTABLE_DRAG_STEPS * TURNTABLE_DRAG_STEP_PX,
+      y: grip.y,
+      button: 'left',
+      clickCount: 1,
+      buttons: 0,
+    });
+
+    // **The drag has to have landed before anything below means anything.** The
+    // events are queued and the next heartbeat may still come from a frame the
+    // turntable was running in, so the sampling window starts only once two
+    // consecutive lines report the same angle — which is the observable that
+    // says it stopped, and the same one the check then requires to hold.
+    const held = await until(async () => {
+      const lines = hud();
+      const last = lines.at(-1)?.match(EXPECTED.moving)?.[1];
+      const previous = lines.at(-2)?.match(EXPECTED.moving)?.[1];
+      return last && previous && last === previous ? last : null;
+    });
+    check(
+      'C',
+      'a drag takes the turntable out of the picture',
+      Boolean(held),
+      held
+        ? `turn held at ${held}`
+        : `no two consecutive HUD lines reported the same angle after the drag, so the ` +
+            `turntable never stopped and the check below cannot tell a deformed mesh ` +
+            `from a moving camera`
+    );
+    const still = hud().length;
+
+    // Sampled until all three hold at once, rather than for a fixed spell: the
+    // clip is under two seconds long and the heartbeat is a simulated second, so
+    // waiting for `DEFORM_BEATS` lines is a window that covers a whole cycle on
+    // a fast machine and stretches by itself on a slow one, where the beats are
+    // what get longer.
+    const hashes = new Set();
+    let samples = 0;
+    const readings = () => {
+      const lines = hud().slice(still);
+      const distinct = (pattern) =>
+        new Set(lines.map((line) => line.match(pattern)?.[1]).filter(Boolean));
+      return {
+        lines: lines.length,
+        turns: distinct(EXPECTED.moving),
+        poses: distinct(EXPECTED.playing),
+      };
+    };
+    const changing = () => hashes.size >= samples * DEFORM_CHANGING_SHARE;
+    const deformed = await until(async () => {
+      const sample = await evaluate(page, SAMPLE_CANVAS('#canvas'));
+      if (sample) {
+        hashes.add(sample.hash);
+        samples += 1;
+      }
+      const { lines, turns, poses } = readings();
+      return lines >= DEFORM_BEATS &&
+        turns.size === 1 &&
+        poses.size > 1 &&
+        changing()
+        ? { lines, turns, poses }
+        : null;
+    });
+    const { lines, turns, poses } = deformed ?? readings();
+    const counted = `${hashes.size} distinct frame(s) in ${samples} sample(s) over ${lines} beat(s)`;
+    check(
+      'C',
+      EXPECTED.deformingLabel,
+      Boolean(deformed),
+      deformed
+        ? `${counted}, with turn held at ${[...turns].join(', ')} and pose taking ` +
+            `${poses.size} values: ${[...poses].join(', ')}`
+        : `${counted}; turn took ${turns.size} value(s) ` +
+            `(${[...turns].join(', ') || 'none'}) and pose took ${poses.size} ` +
+            `(${[...poses].join(', ') || 'none'}) — ` +
+            (turns.size !== 1
+              ? 'the camera never stopped, so this could not have been a check about geometry'
+              : poses.size <= 1
+                ? 'the clip stopped playing, so there was nothing for the mesh to be ' +
+                  'deformed by'
+                : 'the clip played and the camera stood still and the picture did not keep ' +
+                  'changing: the geometry on screen is not following the palette. A single ' +
+                  'frame means the draw resolved a base vertex the dispatch never wrote to ' +
+                  '— GpuInstance::BASE_VERTEX_OVERRIDE is what points it at the region')
     );
   }
 

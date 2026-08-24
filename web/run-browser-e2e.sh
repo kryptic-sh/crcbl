@@ -484,6 +484,30 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument again for the *geometry* that clip deforms, which the
+# check above cannot make. `pose` is a number `apps/viewer` computes on the CPU
+# and prints, so a page that samples the clip and composes the palette and then
+# hands the GPU nothing to skin with reports the identical sweep while drawing
+# the document's bind pose for ever — and every other check in the driver passes
+# against it, `played` above included. The deform check reads the canvas with the
+# turntable dragged to a stop, so it is the only thing anywhere that asks whether
+# the skinning dispatch reached a picture.
+#
+# It is also the check most worth deleting when it goes red on a slow machine,
+# which is exactly why its name is matched here. `viewer` alone, because it is
+# the only demo that opens a rigged document.
+case "$DEMO" in
+    viewer)
+        DEFORMED="$(grep -F 'the document is deformed by its own clip, with the camera held still' "${OUTPUT}.plain" || true)"
+        if [ -z "$DEFORMED" ]; then
+            echo "crcbl web e2e: the driver never asked whether the skinned geometry moved;" >&2
+            echo "               the skinning seam in apps/viewer/src/gpu.rs is ungated, and" >&2
+            echo "               the clip check above passes over a bind pose" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the strongest form of the same argument, for group H. Three of the driver's
 # checks assert that *nothing* was reported — no uncaught exception, no missing
 # asset, no WebGPU device error — and every one of them passes just as happily
