@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the demo boots. bracket has none: every panel it draws is draw-list rectangles, strokes and text, and its font atlas and shaders are compiled into the wasm module. The list is the seam, not the content.",
+  "keys": []
+}

@@ -9,8 +9,8 @@
 //! them.
 //!
 //! So a waiting player carries a **tolerance** that starts at
-//! [`BASE_TOLERANCE`] and widens by [`WIDEN_PER_TICK`] every tick they are still
-//! waiting, up to [`MAX_TOLERANCE`]. A pair is allowed when the rating gap is
+//! `BASE_TOLERANCE` and widens by `WIDEN_PER_TICK` every tick they are still
+//! waiting, up to `MAX_TOLERANCE`. A pair is allowed when the rating gap is
 //! inside *both* players' tolerance — the stricter of the two decides, so a
 //! player who just joined is never dragged into a bad match by someone who has
 //! been waiting a long time.

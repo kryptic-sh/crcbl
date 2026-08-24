@@ -1,18 +1,35 @@
-//! Bracket's native front end: the synthetic population driver.
+//! bracket — the native front end, and the headless population driver.
 //!
 //! ```text
+//! bracket     [--headless] [--frames N] [--size WxH] [--seed N] [--players N]
 //! bracket sim [--seed N] [--players N] [--ticks N]
 //! ```
 //!
-//! Runs a population through the queue, the match stub and the rating update,
-//! and reports what the matchmaker traded away. Deterministic from the seed, so
-//! a run is reproducible and a CI soak is a fixed expectation rather than a
-//! sample.
+//! **The first word of argv chooses between two front ends.** With no
+//! subcommand this file is every other sample's `main`: argv in, exit code out,
+//! and the demo itself is the `crcbl_bracket` library this binary links — which
+//! is also what the browser's wasm entry point drives.
+//!
+//! `sim` is the other, and it is why this file has more in it than any other
+//! sample's. It runs a population through the queue, the match stub and the
+//! rating update with no window and no GPU at all, and prints what the
+//! matchmaker traded away: the same measurement the page draws, in a form a CI
+//! soak can hold to a fixed expectation. Deterministic from the seed, so a run
+//! is reproducible rather than a sample of one.
+//!
+//! Exit codes for the demo: 0 ran, 1 it failed, 2 bad arguments. `sim` reports a
+//! bad argument as 1, which is the code it has always used.
+
+use std::process::ExitCode;
 
 use crcbl_bracket::sim::Sim;
 
-/// The usage text, printed for `--help` and for anything unrecognised.
-const USAGE: &str = "\
+/// The usage text for `sim`, printed for `bracket sim --help` and for anything
+/// unrecognised after the subcommand.
+///
+/// The demo's own is [`crcbl_bracket::USAGE`], which names this subcommand so a
+/// reader who typed `bracket --help` can find it.
+const SIM_USAGE: &str = "\
 bracket — matchmaking, rating and ranked session flow
 
 USAGE:
@@ -28,27 +45,58 @@ OPTIONS:
 /// How many ladder places to print at each end.
 const SHOWN: usize = 5;
 
-fn main() -> std::process::ExitCode {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(&args) {
-        Ok(report) => {
-            print!("{report}");
-            std::process::ExitCode::SUCCESS
-        }
-        Err(message) => {
-            eprintln!("bracket: {message}\n\n{USAGE}");
-            std::process::ExitCode::FAILURE
-        }
+    // The subcommand is claimed here, before the demo's parser is ever built,
+    // so a word that parser does not recognise is genuinely unknown rather than
+    // a command it forgot about.
+    if args.first().is_some_and(|arg| arg == "sim") {
+        return match run(&args) {
+            Ok(report) => {
+                print!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("bracket: {message}\n\n{SIM_USAGE}");
+                ExitCode::FAILURE
+            }
+        };
     }
+
+    crcbl::args::run_front_end(
+        "bracket",
+        crcbl_bracket::USAGE,
+        crcbl_bracket::parse(args.into_iter()),
+        crcbl_bracket::run,
+        |summary| {
+            format!(
+                "bracket: {} frames, {} ticks on the {} shell at {}x{}, {} \
+                 ({} matches, {:.1} rating error, {} page commands, {:?})",
+                summary.frames,
+                summary.ticks,
+                summary.backend,
+                summary.extent.0,
+                summary.extent.1,
+                // What the window system actually did, not what `--fullscreen`
+                // asked for. It is free to refuse.
+                summary.mode,
+                summary.matches,
+                summary.error,
+                summary.commands,
+                summary.exit,
+            )
+        },
+    )
 }
 
-/// Parse `args`, run the simulation and render its report.
+/// Parse a `sim` argv, run the population and render its report.
 ///
 /// Split out from `main` so the tests below drive the same path the binary
-/// does, argument parsing included.
+/// does, argument parsing included — `args` is the whole argv, subcommand and
+/// all, and this is where the subcommand is checked rather than assumed.
 fn run(args: &[String]) -> Result<String, String> {
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return Ok(USAGE.to_string());
+        return Ok(SIM_USAGE.to_string());
     }
     let Some((command, rest)) = args.split_first() else {
         return Err("no command given".to_string());

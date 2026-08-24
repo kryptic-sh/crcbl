@@ -1,0 +1,86 @@
+<!--meta
+{
+  "out": "demos/bracket/index.html",
+  "slug": "bracket",
+  "name": "Bracket",
+  "title": "Bracket — Crucible",
+  "description": "A synthetic population queueing, matching and being rated, drawn through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/bracket", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/bracket\">apps/bracket</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/bracket/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Bracket</span></h1>
+  <p class="tagline">
+    Matchmaking, rating and a ladder, with no game attached. Players queue, get
+    paired, a stub decides who won, and the numbers move.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>There is nothing to play. That is the point.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Watch</span>
+      <span>the <kbd>CONVERGENCE</kbd> curve</span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>Matchmaking quality is a property of a population, not of one match.</h3>
+  <p>
+    A matchmaker that pairs well for four players and badly for four thousand is
+    a matchmaker nobody has tested. Attaching one to a real game would mean
+    needing a real playerbase before you could learn anything about it, so this
+    sample has no game: the match is resolved by a seeded roll weighted by the
+    two players' true skill, and a population of any size runs deterministically
+    from a seed.
+  </p>
+  <p>
+    Every player here has a <strong>true skill</strong> that the matchmaker
+    never sees — it is the mark drawn across each bar on the ladder. The bar
+    itself is what the system currently believes, and the whole exercise is
+    getting the one to land on the other. The <strong>CONVERGENCE</strong> plot
+    is the distance between them, averaged over everybody, drawn as it falls. A
+    rating system nobody can falsify is a number generator, so the number is on
+    screen.
+  </p>
+  <p>
+    The queue is the other half. A waiting player will accept an opponent within
+    a tolerance that <strong>widens the longer they wait</strong>, and the
+    stricter of the two tolerances decides — so somebody who just joined is
+    never dragged into a lopsided match by a player who has been waiting a long
+    time. Both sides of that trade are reported rather than asserted: how far
+    apart the average pairing was, and how long the average player waited for
+    it.
+  </p>
+  <p>
+    One thing worth watching if you leave it running: the curve comes down, and
+    then it slowly climbs again. That is not a bug in the arithmetic. Pairing
+    people against their nearest equal means a small rating gap is
+    preferentially drawn from pairs whose true skills are further apart than the
+    ratings suggest, so the favourite wins a little more often than predicted
+    and the ladder gradually stretches. Tight matchmaking and a trustworthy
+    rating are genuinely in tension, and fixing it needs a rating that tracks
+    how sure it is — not a change to who gets paired.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

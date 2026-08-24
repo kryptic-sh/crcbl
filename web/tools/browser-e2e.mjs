@@ -399,6 +399,23 @@ const EXPECTATIONS = {
   // sixtieth tick, so `alt` climbs without anyone touching a key, and the first
   // key a visitor presses ends the script for good. Group C reads it before
   // group F touches anything.
+  bracket: {
+    key: null,
+    // Read off the *first* line, and what it asks is that `error:` is a number.
+    // That readout is the sample's entire claim — how far the ladder is from
+    // the true skills — and it is a mean over a population, so a single
+    // non-finite rating anywhere in it poisons the whole figure and every later
+    // one. A `NaN` reads as a number to everything downstream, including the
+    // plot, which would draw a curve with a hole in it rather than fail. The
+    // place to catch it is where it is printed.
+    waiting: (line) =>
+      line.includes('[HUD] tick:') && /\berror: -?\d/.test(line),
+    // Nothing here takes input, so the demo has to be advancing by itself for
+    // this to move at all — which is the point: a visitor sees a ladder sorting
+    // itself out and nothing they did.
+    moving: /matches: (\d+)/,
+    movingLabel: 'the population plays matches under its own steam',
+  },
   orbit: {
     key: null,
     // Read off the *first* line, which is the ship still on the pad — so it

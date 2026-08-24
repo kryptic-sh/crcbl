@@ -75,6 +75,7 @@ const DEMOS = [
   ['quarry', 'quarry', '/demos/quarry/'],
   ['viewer', 'viewer', '/demos/viewer/'],
   ['orbit', 'orbit', '/demos/orbit/'],
+  ['bracket', 'bracket', '/demos/bracket/'],
 ];
 
 // Partials every demo page must pull in, so "the demo window is one template"

@@ -7,7 +7,7 @@
 //! # Determinism
 //!
 //! Every decision — who queues this tick, who wins — comes from
-//! [`hash_unit`](crcbl::core::rand::hash_unit) over the seed and a counter, so a
+//! [`crcbl::core::rand::hash_unit`] over the seed and a counter, so a
 //! run is reproducible from its seed on any platform. There is no clock and no
 //! thread-local state; ticking the same seed twice gives the same ladder.
 
@@ -31,6 +31,19 @@ const JOIN_CHANCE: f64 = 0.25;
 
 /// How many finished matches the sim keeps for display.
 const RECENT_MATCHES: usize = 8;
+
+/// How often the convergence history takes a reading, in ticks.
+///
+/// Often enough that the early fall is drawn as a curve rather than a step, and
+/// rarely enough that the window below covers a run long enough to show the
+/// ratings settling.
+const HISTORY_EVERY: u64 = 4;
+
+/// How many readings the convergence history keeps.
+///
+/// One per horizontal pixel of a reasonably sized plot, so the curve is drawn
+/// from its readings rather than resampled.
+const HISTORY_LEN: usize = 240;
 
 /// One player in the population.
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +86,7 @@ pub struct Sim {
     recent: Vec<Report>,
     total_gap: f64,
     total_wait: u64,
+    history: Vec<f32>,
 }
 
 impl Sim {
@@ -102,6 +116,7 @@ impl Sim {
             recent: Vec::new(),
             total_gap: 0.0,
             total_wait: 0,
+            history: Vec::new(),
         }
     }
 
@@ -172,6 +187,16 @@ impl Sim {
         total / self.players.len() as f64
     }
 
+    /// How far the ratings have been from the true skills over time, oldest
+    /// first, in points.
+    ///
+    /// The sample's whole claim drawn as a curve: it should fall and then stay
+    /// down. It does not stay down forever — see this crate's `queue` module.
+    #[must_use]
+    pub fn history(&self) -> &[f32] {
+        &self.history
+    }
+
     /// The ladder: every player's index, strongest rating first.
     #[must_use]
     pub fn ladder(&self) -> Vec<PlayerId> {
@@ -214,6 +239,12 @@ impl Sim {
     /// then every pair plays and is re-rated.
     pub fn step(&mut self) {
         self.tick = self.tick.saturating_add(1);
+        if self.tick.is_multiple_of(HISTORY_EVERY) {
+            if self.history.len() == HISTORY_LEN {
+                self.history.remove(0);
+            }
+            self.history.push(self.mean_rating_error() as f32);
+        }
 
         for index in 0..self.players.len() {
             if self.players[index].busy {

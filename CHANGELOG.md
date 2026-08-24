@@ -22,8 +22,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `bracket sim --seed N --players M --ticks K` runs a synthetic population
   headless and deterministically, reporting what the matchmaker traded: how far
   the ratings ended from the true skills, how evenly it paired, and how long
-  people waited. The browser demo is not built yet — this is the model it will
-  draw.
+  people waited. It runs in a browser as the tenth demo on the site, taking no
+  input at all: what a visitor sees is a ladder sorting itself out and a
+  CONVERGENCE curve falling, drawn with the new `DrawList::polyline`. Each
+  ladder bar carries a mark at that player's true skill — the number the
+  matchmaker never sees — so the claim is on screen rather than asserted. The
+  curve climbs again if left running, which is real and explained on the page:
+  pairing people against their nearest equal is in tension with rating them
+  correctly.
 
 - **`DrawList::line` and `DrawList::polyline`** — stroked segments and connected
   runs, the UI layer's first primitive that is not axis-aligned. Both take a

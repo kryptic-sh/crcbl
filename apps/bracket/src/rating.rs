@@ -2,7 +2,7 @@
 //!
 //! # The formula is Elo's, not an approximation of it
 //!
-//! A player rated [`SCALE`] points above another is expected to score ten times
+//! A player rated `SCALE` points above another is expected to score ten times
 //! as often, and the expected score follows from that alone:
 //!
 //! ```text
@@ -11,7 +11,7 @@
 //!
 //! That relation *is* the definition of the scale, so it is the thing worth
 //! asserting rather than a table of values copied from somewhere: at a
-//! difference of [`SCALE`] the expected score is exactly `10/11`, and the tests
+//! difference of `SCALE` the expected score is exactly `10/11`, and the tests
 //! below pin that.
 //!
 //! # A rating cannot be built out of range
