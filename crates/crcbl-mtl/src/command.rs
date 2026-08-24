@@ -2148,7 +2148,7 @@ impl CommandEncoder for MetalCommandEncoder {
         let Some(args) = self.buffer(draw.args) else {
             return;
         };
-        let plan = match crate::indirect_count::plan_mesh_indirect(draw, args.length() as u64) {
+        let plan = match crcbl_hal::plan_mesh_indirect(draw, args.length() as u64) {
             Ok(Some(plan)) => plan,
             // A draw of nothing, which the seam permits and which reads no
             // argument structure at all.

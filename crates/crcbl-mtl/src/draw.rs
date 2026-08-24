@@ -71,22 +71,21 @@
 //! reported — `baseInstance` is a field Metal reads, not one it requires to be
 //! zero.
 
-use crcbl_hal::{DrawIndirect, HalError, IndexFormat};
+// The argument-structure geometry and the plan built from it are the seam's:
+// `crcbl_hal::indirect` holds the widths the APIs fix and the rules for
+// stepping an array of them, so this module and `crcbl_mtl::indirect_count`
+// step one plan — one buffer offset at a time here, and one *word index* at a
+// time there, because the packing kernel is told the layout rather than
+// declaring it. The mesh path's own entry point is there too — see
+// `crcbl_hal::plan_mesh_indirect`, which this module has no `MTLBuffer` to
+// add to.
+use crcbl_hal::{
+    DRAW_ARGS_BYTES, DRAW_INDEXED_ARGS_BYTES, DrawIndirect, HalError, IndexFormat, IndirectPlan,
+    plan_structures,
+};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLIndexType};
-
-// The argument-structure geometry and the plan built from it, which this module
-// and `crcbl_mtl::indirect_count` both step by — one buffer offset at a time
-// here, and one *word index* at a time there, because the packing kernel is told
-// the layout rather than declaring it. It lives in that module because it is
-// compiled on every host: these are numbers the API fixes, and a test that can
-// only run on a Mac is a test that runs on one machine in CI. The mesh path's
-// own entry point is there too, for that reason and no other — see
-// `plan_mesh_indirect`, which this module has no `MTLBuffer` to add to.
-use crate::indirect_count::{
-    DRAW_ARGS_BYTES, DRAW_INDEXED_ARGS_BYTES, IndirectPlan, plan_structures,
-};
 
 /// The index buffer a later draw will read, held because Metal takes it at the
 /// draw call. See the module docs.
