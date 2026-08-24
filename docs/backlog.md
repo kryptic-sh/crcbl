@@ -16413,3 +16413,129 @@ What is left is only what the suite cannot reach:
   into back buffers that had just been destroyed. Fixed by clearing it beside
   the images. That is a bug fix on a deferred backend, taken because the
   deferral requires their jobs keep passing — not new work on it.
+
+## Seam obligations no test enforces, from a survey (2026-08-24)
+
+A survey read the seam's stated caller obligations in `crcbl-hal` and then
+opened the implementing function in all five backends for eighteen of them. What
+follows is its findings, split by whether I re-read the code myself. The survey
+ran no tests; every claim in it is from reading source.
+
+`DrawIndirect::offset` alignment is **not** in this list: it is being closed
+now, by lifting `plan_structures` out of `crcbl-mtl` into the seam.
+
+### Verified — I opened these myself
+
+- **The indirect-draw argument rules live in the wrong crate.** The full rule
+  set — four-byte offset alignment, a multi-draw stride at least one argument
+  structure wide and itself four-byte aligned, and the structures fitting inside
+  the buffer — is `plan_structures` in `crcbl-mtl`'s `indirect_count` module,
+  whose own doc says it is pure so the rules are testable without a Mac.
+  `crcbl-dx12` keeps a second copy in its `draw` module's `plan_indirect`.
+  Neither `crcbl-vk`'s `indirect`, the null backend's `draw_indirect` /
+  `draw_indexed_indirect`, nor `crcbl-webgpu`'s encoder checks any of them: vk
+  puts `draw.offset` straight into `cmd_draw_indirect`, null records the struct
+  verbatim after checking render scope and buffer liveness, and webgpu encodes
+  it unchanged. On Vulkan a misaligned offset is
+  `VUID-vkCmdDrawIndirect-offset-02710` — no error code, the driver reads
+  argument structures from the wrong bytes.
+- **`crcbl-webgpu`'s encoder cannot reach a buffer length.**
+  `WebGpuCommandEncoder` holds a channel and nothing else, so the bounds half of
+  those rules has nowhere to read a size from on that backend, while the
+  alignment and stride halves need no buffer at all. The null backend can: it
+  holds `Detail::Buffer { bytes, .. }`. `crcbl-vk` can, through
+  `buffer_raw_size_and_location`. Whatever the seam helper's final shape, it has
+  to let a backend ask the length-free question on its own — or the encoder has
+  to gain a handle on the device's buffer table, which is the larger change.
+
+- **`create_image_view` never checks its subresource against the image.** The
+  null backend's `create_image_view` checks that the image handle is live and
+  then files `Detail::None`: it records neither the mip count nor the layer
+  count, so it _cannot state the rule_ — the same shape as the present/acquire
+  bug fixed this session, where the reference backend had nowhere to hold the
+  fact the rule is about. `crcbl-vk` puts `conv::subresource_range(desc.range)`
+  straight into `vkCreateImageView`, which is
+  `VUID-VkImageViewCreateInfo-subresourceRange-01478`: drivers return
+  `VK_SUCCESS` and the view addresses mips that do not exist. The survey reports
+  mtl and dx12 refusing it and webgpu encoding it unchanged; I did not read
+  those three. No e2e case uses a non-zero `base_mip` or `base_layer`. Closing
+  it means giving the null backend an image detail that records the two counts,
+  then a seam-owned check every backend calls.
+
+### Reported by the survey, NOT re-verified by me
+
+Each names a file and a symbol, so it can be checked without re-running the
+survey. Treat every one as a claim until read.
+
+- **`update_bind_group` on a layout without `UPDATE_AFTER_BIND`.** Refused by
+  null, vk and webgpu; `crcbl-mtl`'s `binding` module and `crcbl-dx12`'s
+  `device` are said to resolve and write without ever reading the flag. The
+  failure is a caller rewriting descriptors a pending command list still points
+  at — the same class as the dx12 acquire bug fixed this session. Already noted
+  as prose in `crates/crcbl/tests/hal_seam_e2e.rs`; nothing red.
+- **A bind-group buffer range over `max_uniform_buffer_range` /
+  `max_storage_buffer_range`.** Kept by null, vk and webgpu. `crcbl-dx12` is
+  said to bound the range against the buffer and against `u32` but never against
+  the limit — and it is the one backend where the limit is real, reporting 65536
+  from `D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT`. `crcbl-mtl` keeps it only
+  incidentally, because its adapter sets both limits to `maxBufferLength`.
+  `WHOLE_BUFFER` appears nowhere in the e2e suite.
+- **`create_sampler` above `max_sampler_anisotropy`.** Refused by null, vk, mtl
+  and dx12; `crcbl-webgpu` is said to encode `desc.anisotropy` with no check.
+  The e2e `exercise_sampler_anisotropy` drives only the accepting path, at
+  exactly the limit, so the refusal is untested on every backend. **Do not "fix"
+  the WebGPU half without reading "Anisotropy: the limit says one, the replayer
+  passes more through" above** — I checked, and they are the same item, not
+  adjacent ones. That backend reports `max_sampler_anisotropy: 1` to mean "no
+  ceiling this backend can guarantee", so enforcing the seam's ceiling there
+  refuses everything above 1, which is precisely the option that entry records
+  as declined for making anisotropic filtering permanently unreachable on
+  WebGPU. What is genuinely missing is the refusal test on the four backends
+  where the limit is a real ceiling.
+- **Binding offset alignment** against `min_uniform_buffer_offset_alignment` /
+  `min_storage_buffer_offset_alignment`: kept by vk, mtl and dx12, absent from
+  null and webgpu. Mild in itself, but the null backend is the reference, so
+  again no no-GPU test can guard a backend that drops its check.
+- **The seam and the suite contradict each other on `destroy_surface`.** The
+  seam says every swapchain on a surface must already be destroyed; the agnostic
+  suite's `a_swapchain_keeps_working_after_its_surface_handle_is_destroyed`
+  destroys the surface mid-life and then renders and presents a whole frame
+  through the swapchain, calling that "Obligation 2b". Both cannot be right.
+  **This one needs a decision**: either the sentence goes, or the test does.
+  Nothing depends on the answer today, which is why it is here and not fixed —
+  but a caller reading the doc gets the wrong answer either way.
+
+### Where the backends actively disagree
+
+The survey's most valuable output: rules one backend refuses and another
+silently accepts or substitutes. All unverified by me.
+
+- `mip_levels == 0`: refused by null, vk and webgpu through `ImageDesc::check`;
+  **mtl and dx12 are each said to clamp it with `.max(1)`**, so a caller asking
+  for something the seam calls a bug gets a working one-mip image and is never
+  told.
+- `mip_levels` past the full chain: refused by the same three; mtl passes it to
+  `MTLTextureDescriptor` and dx12 surfaces it as `E_INVALIDARG` →
+  `HalError::Backend` rather than the `InvalidDescriptor` it is.
+- `ImageType::D1` with `height != 1`, and a multisampled image with more than
+  one mip: **refused by mtl and dx12, served by null, vk and webgpu.** The seam
+  is silent on both, so two backends refuse what three accept. The seam should
+  say which it is.
+- `anisotropy < 1.0`: refused by vk, mtl and dx12; accepted by null and webgpu.
+  The seam states only the ceiling.
+- `ImageViewDesc::format` differing from the image's: the seam permits it and
+  mtl honours it except across depth, but **dx12 refuses every cross-format view
+  uniformly, by design**. A documented seam promise one backend does not keep.
+
+### What the survey did not look at, stated as a gap
+
+`caps.rs` and `capability.rs` beyond the lines a grep surfaced — very likely
+more obligations in the `Limits` per-field docs. All resource-state obligations
+in `command.rs` (attachments already in the right state,
+`ResourceState::IndirectArgument`), which are on `&mut self` methods returning
+`()` and so can only be enforced at `finish`; no backend was audited for them.
+`shader.rs` stage rules and `pipeline.rs` push-constant and render-target-format
+rules. `swapchain.rs` beyond what the e2e already covers. And the WebGPU replay
+side — `crcbl-webgpu`'s `writer` module says in its own comments that the split
+of enforcement between the encoder and the replayer is where "an unenforced rule
+both sides assume the other checks" could hide, and that was not audited.
