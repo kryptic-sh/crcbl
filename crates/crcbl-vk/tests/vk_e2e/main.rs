@@ -72,6 +72,7 @@ mod recording;
 mod resources;
 mod retire;
 mod seam_obligations;
+mod skinning;
 mod swapchain;
 mod triangle;
 mod validation_gate;

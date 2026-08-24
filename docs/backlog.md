@@ -34,45 +34,34 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
-### The skinning kernel has never been executed
+### The skinning rig is validated late, and only the vk leg runs the kernel
 
-`crcbl_render::skinning::Skinning` dispatches
-`crates/crcbl-shaders/shaders/skinning.slang` as of 2026-08-25: it reserves the
-pool's transient region with the prev/current ping-pong, uploads the palette and
-the bindings, refuses a binding naming a joint outside its own palette, and
-records one dispatch per range. The layout is pinned against what `slangc`
-emitted and `crcbl_render::skinning::skin_vertex` is the kernel rewritten in
-Rust, term for term, asserted against hand-computed values.
+`crates/crcbl-vk/tests/vk_e2e/skinning.rs` dispatches
+`crates/crcbl-shaders/shaders/skinning.slang` on a real driver and compares
+every component it wrote against `crcbl_render::skinning::skin_vertex`, on radv
+locally and on lavapipe in CI. The case the kernel's `vertex_count` bound exists
+for — a dispatch whose last workgroup is partial — asserts the pool after the
+skinned range is byte-unchanged, and deleting the bound reddens exactly that
+test and no other. What is left:
 
-**None of that runs a shader.** `crcbl-render` has no way to execute one — its
-only backend is `crcbl_hal::null`, whose `dispatch` records a command and
-returns, and it cannot gain a real one because `crcbl-vk` dev-depends on
-`crcbl-render` and the cycle is argued down by name in that crate's own docs.
-The null recorder proves the group counts, the dispatch order, the bind groups
-and the exact bytes that reached each buffer; it proves nothing about the
-arithmetic.
-
-So the concrete hole: **deleting `if (index >= skin.vertex_count) return;` from
-the kernel passes every test in the workspace.** That line is what stops the
-last workgroup's tail invocations from writing over whatever the pool put after
-the skinned range — not a hypothetical, since the region is allocated out of the
-same free list as every other mesh.
-
-What closes it is a readback where this crate's other kernels are executed:
-`crates/crcbl-vk/tests/vk_e2e/`, whose `mesh.rs` already cites
-`crcbl_render::cull::visible_instances` as the oracle for exactly this shape. It
-has to cover a vertex with all its weight on one joint (transformed exactly), a
-vertex blended across two, a normal under a joint carrying non-uniform scale,
-and a dispatch whose vertex count is not a multiple of the workgroup size — that
-last one is the case the bound exists for, and it is the one that must go red
-when the line is deleted.
-
-Also open, and smaller: **joint indices are not validated at import.**
-`crcbl-scene` checks that `JOINTS_0` and `WEIGHTS_0` are as long as `POSITION`,
-and nothing checks an index against the skin's joint count, because a primitive
-does not know its skin there. `Skinning::begin_frame` now refuses it, which is
-the first place both are Rust values at once; the shader's clamp remains the
-backstop.
+- **Joint indices are not validated at import.** `crcbl-scene` checks that
+  `JOINTS_0` and `WEIGHTS_0` are as long as `POSITION`, and nothing checks an
+  index against the skin's joint count, because a primitive does not know its
+  skin there. `crcbl_render::skinning::Skinning::begin_frame` refuses it, which
+  is the first place the palette and the bindings are both Rust values; the
+  shader's clamp is the backstop under that. A caller that never goes through
+  `begin_frame` — a cooked-asset path, when one exists — would have neither.
+- **Only Vulkan executes it.** The kernel's WGSL is validated by naga and its
+  MSL and DXIL are generated, and no test dispatches any of them. WebGPU is the
+  backend this project is measured on, so the browser is where an arithmetic
+  difference would matter most and is exactly where nothing runs the shader. The
+  demo that will close this is the puppet sample of
+  `docs/plan/sample/09-puppet.md`, or the viewer once it draws a skinned mesh
+  rather than a skeleton.
+- **`crcbl-render` cannot execute a kernel at all**, which is why the readback
+  lives two crates away: its only backend is `crcbl_hal::null`, and it cannot
+  gain a real one because `crcbl-vk` dev-depends on it. Worth knowing before
+  wondering why the oracle and the test that uses it are not neighbours.
 
 ### `OffscreenSetup::finish` cannot see a WebGPU device error
 

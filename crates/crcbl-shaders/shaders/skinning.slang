@@ -27,13 +27,11 @@
 // range. `crcbl_render::skinning::skin_vertex` is this entry point rewritten in
 // Rust, term for term, as the oracle a readback compares against.
 //
-// **No test has ever executed this kernel**, which is a different claim from
-// the layout being checked: every test of this file reads its source or its
-// artifacts. In particular the `vertex_count` bound below is what stops the
-// last workgroup's tail invocations from overwriting the vertices of whatever
-// the pool put next, and deleting it passes the whole suite. `docs/backlog.md`
-// records that, and the readback that closes it belongs where this crate's
-// other kernels are executed: `crates/crcbl-vk/tests/vk_e2e/`.
+// `crates/crcbl-vk/tests/vk_e2e/skinning.rs` runs it on a real driver and
+// compares every component against that oracle — including the case the
+// `vertex_count` bound below exists for, a dispatch whose last workgroup is
+// partial, which asserts that the pool immediately after the skinned range is
+// byte-unchanged. Deleting the bound reddens exactly that test and no other.
 //
 // # Compute, and every backend can run it
 //

@@ -22,11 +22,11 @@
 //! ping-pong topic 17's 2026-07-27 correction asks for, and records one
 //! dispatch per skinned range.
 //!
-//! **No test has ever executed the kernel**, which is not the same as the
-//! layout being unchecked — this module pins every offset against what `slangc`
-//! emitted, and none of that runs a shader. The readback that would belongs
-//! with this crate's other executed kernels, in `crates/crcbl-vk/tests/vk_e2e/`,
-//! and `docs/backlog.md` says what it has to cover.
+//! The offsets this module pins are what `slangc` emitted, which is a claim
+//! about layout and not about arithmetic. The arithmetic is checked by
+//! `crates/crcbl-vk/tests/vk_e2e/skinning.rs`, which dispatches the kernel on a
+//! real driver and compares the vertices it wrote against
+//! `crcbl_render::skinning::skin_vertex`.
 //!
 //! # The bind group the pass will need
 //!
