@@ -358,6 +358,18 @@ jobs:
         timeout-minutes: 10
         run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh
 
+      # viewer and orbit are the two samples whose subject does not move on its
+      # own, and both answer group C off something the sample itself advances —
+      # viewer's idle turntable, orbit's scripted ascent. Their `EXPECTATIONS`
+      # rows in `web/tools/browser-e2e.mjs` say which number each reads.
+      - name: Render viewer in a real browser
+        timeout-minutes: 10
+        run: CRCBL_WEB_E2E_DEMO=viewer ./web/run-browser-e2e.sh
+
+      - name: Render orbit in a real browser
+        timeout-minutes: 10
+        run: CRCBL_WEB_E2E_DEMO=orbit ./web/run-browser-e2e.sh
+
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
       # from the step log.
@@ -506,6 +518,14 @@ jobs:
       - name: Render lantern in a real browser
         timeout-minutes: 12
         run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh --headless
+
+      - name: Render viewer in a real browser
+        timeout-minutes: 12
+        run: CRCBL_WEB_E2E_DEMO=viewer ./web/run-browser-e2e.sh --headless
+
+      - name: Render orbit in a real browser
+        timeout-minutes: 12
+        run: CRCBL_WEB_E2E_DEMO=orbit ./web/run-browser-e2e.sh --headless
 
   probe-windows:
     name: probe the seam on Windows

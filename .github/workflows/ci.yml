@@ -116,6 +116,16 @@ jobs:
       - name: The validation-log guard rejects the logs it is there to reject
         run: ./tools/vk-validation-log-test.sh
 
+      # `pages.yml` names each demo's browser gate in a step of its own,
+      # because the driver runs one demo per invocation. A list written by hand
+      # is a list that falls behind, and it did: `apps/viewer` shipped and its
+      # gate was never added, so the only check that a demo actually draws
+      # anything went a week without ever running on it. `build-pages.mjs`
+      # already holds `web/build.sh` and its own list together; neither knows
+      # about the workflow, and this closes that seam.
+      - name: Every demo the site builds is run through the browser gate
+        run: ./tools/check-browser-gate-demos.sh
+
       # `docs/backlog.md` is the working record and its worth is that an entry
       # can be acted on months later. A moved file breaks that silently: the
       # reader greps the cited path, finds nothing, and concludes the work was
