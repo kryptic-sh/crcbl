@@ -173,6 +173,199 @@ const CLIP_TIMES: [f32; 2] = [0.0, 1.0];
 /// still a curve.
 const CLIP_ROTATIONS: [[f32; 4]; 2] = [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.0]];
 
+/// The two joint nodes [`skinned_glb`] declares, as indices into its `nodes`
+/// array: the root at the origin, and its child a metre above it.
+///
+/// Written down because three places have to agree about them — the skin's
+/// `joints`, the root's `children`, and the animation channel's target.
+const SKIN_JOINT_NODES: [usize; 2] = [1, 2];
+
+/// How far the tip joint stands above its parent, in metres.
+const SKIN_TIP_Y: f32 = 1.0;
+
+/// A `.glb` with a skin over two joints and a clip that drives one of them and
+/// the mesh node too.
+///
+/// **The one fixture here that is a rig**, and it exists for the two cases
+/// [`crate::anim`] has to get right and that no other document in this crate
+/// shows:
+///
+/// * Its clip has **two** channels — one on the tip joint and one on the mesh
+///   node, which is not a joint of the skin at all. That is what a clip out of
+///   any tool looks like, since one animation drives the whole scene, and the
+///   second channel is the one a converter has to drop rather than hand to a
+///   joint index that means something else.
+/// * `parents_first` spells the joint array both ways. `true` is the ordinary
+///   document, root then tip. `false` lists the tip first, which is a hierarchy
+///   `Skeleton::new` refuses because its single forward pass would read a
+///   parent it has not reached — and the viewer's answer to that is a message
+///   rather than a renumbering, for the reason [`crate::anim`] gives.
+///
+/// The inverse bind matrices follow the joint order in both spellings, so the
+/// document is a correct rig either way and the ordering is the only thing that
+/// changes between them.
+#[must_use]
+pub fn skinned_glb(parents_first: bool) -> Vec<u8> {
+    let [root, tip] = SKIN_JOINT_NODES;
+    let (joints, binds) = if parents_first {
+        (
+            [root, tip],
+            [inverse_bind_at(0.0), inverse_bind_at(SKIN_TIP_Y)],
+        )
+    } else {
+        (
+            [tip, root],
+            [inverse_bind_at(SKIN_TIP_Y), inverse_bind_at(0.0)],
+        )
+    };
+
+    // Every offset below is where the previous array ended, and each is a
+    // multiple of its own component size — four for a float, two for an index —
+    // which is what glTF requires of a buffer view an accessor reads.
+    let mut bin = Vec::new();
+    for value in POSITIONS.iter().chain(NORMALS.iter()).flatten() {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    let indices_at = bin.len();
+    for index in INDICES {
+        bin.extend_from_slice(&index.to_le_bytes());
+    }
+    // Rigid bindings: the half of the quad above the origin on the tip joint,
+    // the half below it on the root, and the whole of each vertex on its one
+    // joint. `JOINTS_0` indexes the skin's own `joints` array, so joint 1 is
+    // whichever node that array lists second.
+    let joints_at = bin.len();
+    for [_, y, _] in POSITIONS {
+        for slot in [u16::from(y >= 0.0), 0, 0, 0] {
+            bin.extend_from_slice(&slot.to_le_bytes());
+        }
+    }
+    let weights_at = bin.len();
+    for _ in POSITIONS {
+        for weight in [1.0_f32, 0.0, 0.0, 0.0] {
+            bin.extend_from_slice(&weight.to_le_bytes());
+        }
+    }
+    let binds_at = bin.len();
+    for value in binds.iter().flatten() {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    let times_at = bin.len();
+    for time in CLIP_TIMES {
+        bin.extend_from_slice(&time.to_le_bytes());
+    }
+    let rotations_at = bin.len();
+    for component in CLIP_ROTATIONS.iter().flatten() {
+        bin.extend_from_slice(&component.to_le_bytes());
+    }
+    // The mesh node's own curve, so the clip drives something outside the skin.
+    let translations_at = bin.len();
+    for component in [[0.0_f32, 0.0, 0.0], [0.0, 0.0, 1.0]].iter().flatten() {
+        bin.extend_from_slice(&component.to_le_bytes());
+    }
+    let end = bin.len();
+
+    let json = format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0, {root}] }}],
+  "nodes": [
+    {{ "name": "panel", "mesh": 0, "skin": 0 }},
+    {{ "name": "root", "children": [{tip}] }},
+    {{ "name": "tip", "translation": [0.0, {SKIN_TIP_Y}, 0.0] }}
+  ],
+  "meshes": [{{
+    "name": "panel",
+    "primitives": [{{
+      "attributes": {{ "POSITION": 0, "NORMAL": 1, "JOINTS_0": 3, "WEIGHTS_0": 4 }},
+      "indices": 2,
+      "material": 0
+    }}]
+  }}],
+  "skins": [{{
+    "name": "rig",
+    "skeleton": {root},
+    "joints": [{}, {}],
+    "inverseBindMatrices": 5
+  }}],
+  "animations": [{{
+    "name": "wave",
+    "channels": [
+      {{ "sampler": 0, "target": {{ "node": {tip}, "path": "rotation" }} }},
+      {{ "sampler": 1, "target": {{ "node": 0, "path": "translation" }} }}
+    ],
+    "samplers": [
+      {{ "input": 6, "output": 7, "interpolation": "LINEAR" }},
+      {{ "input": 6, "output": 8, "interpolation": "LINEAR" }}
+    ]
+  }}],
+  "materials": [{{
+    "name": "paint",
+    "pbrMetallicRoughness": {{
+      "baseColorFactor": [0.8, 0.8, 0.8, 1.0],
+      "metallicFactor": 0.0,
+      "roughnessFactor": 1.0
+    }}
+  }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3" }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC3" }},
+    {{ "bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR" }},
+    {{ "bufferView": 3, "componentType": 5123, "count": 4, "type": "VEC4" }},
+    {{ "bufferView": 4, "componentType": 5126, "count": 4, "type": "VEC4" }},
+    {{ "bufferView": 5, "componentType": 5126, "count": {}, "type": "MAT4" }},
+    {{ "bufferView": 6, "componentType": 5126, "count": {}, "type": "SCALAR", "min": [{}], "max": [{}] }},
+    {{ "bufferView": 7, "componentType": 5126, "count": {}, "type": "VEC4" }},
+    {{ "bufferView": 8, "componentType": 5126, "count": 2, "type": "VEC3" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": 48 }},
+    {{ "buffer": 0, "byteOffset": 48, "byteLength": 48 }},
+    {{ "buffer": 0, "byteOffset": {indices_at}, "byteLength": {} }},
+    {{ "buffer": 0, "byteOffset": {joints_at}, "byteLength": {} }},
+    {{ "buffer": 0, "byteOffset": {weights_at}, "byteLength": {} }},
+    {{ "buffer": 0, "byteOffset": {binds_at}, "byteLength": {} }},
+    {{ "buffer": 0, "byteOffset": {times_at}, "byteLength": {} }},
+    {{ "buffer": 0, "byteOffset": {rotations_at}, "byteLength": {} }},
+    {{ "buffer": 0, "byteOffset": {translations_at}, "byteLength": {} }}
+  ],
+  "buffers": [{{ "byteLength": {end} }}]
+}}"#,
+        joints[0],
+        joints[1],
+        binds.len(),
+        CLIP_TIMES.len(),
+        CLIP_TIMES[0],
+        CLIP_TIMES[CLIP_TIMES.len() - 1],
+        CLIP_ROTATIONS.len(),
+        joints_at - indices_at,
+        weights_at - joints_at,
+        binds_at - weights_at,
+        times_at - binds_at,
+        rotations_at - times_at,
+        translations_at - rotations_at,
+        end - translations_at,
+    );
+    glb(&json, &bin)
+}
+
+/// The inverse bind matrix of a joint that binds `y` metres up the `Y` axis,
+/// column-major, which is the order glTF stores a `MAT4` in.
+///
+/// The inverse of a translation is the opposite translation, and the last
+/// column is where a column-major matrix keeps one — so this undoes exactly the
+/// placement of the joint it belongs to, and the bind pose reproduces the mesh
+/// as it is written.
+fn inverse_bind_at(y: f32) -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, -y, 0.0, 1.0,
+    ]
+}
+
 /// The document's one node: translated to `at`, scaled by `scale`, drawing the
 /// mesh or not.
 fn node_clause(at: Vec3, draws: bool, scale: Vec3) -> String {

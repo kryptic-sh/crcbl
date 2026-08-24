@@ -8,12 +8,13 @@
 //!     ──────────────────────────────→ Viewer::button_event   (pan press)
 //!     ──────────────────────────────→ Viewer::wheel_event    (zoom)
 //!     ──────────────────────────────→ Viewer::pointer_event  (orbit press, drag)
-//!     ──────────────────────────────→ Viewer::key_event      (F, I, W, -, =)
+//!     ──────────────────────────────→ Viewer::key_event      (F, I, W, N, B, -, =)
 //!   run_ticks  ─────────────────────→ Viewer::tick           (nothing at all)
 //!   draw_list.clear()
 //!     ──────────────────────────────→ Viewer::draw           (re-export poll,
 //!                                                             re-frame, camera,
 //!                                                             wireframe, exposure,
+//!                                                             clip, skeleton,
 //!                                                             listing panel)
 //!     menu, debug overlay             ← the engine's
 //!   gpu.frame()
@@ -103,6 +104,22 @@ pub const WIREFRAME_KEY: KeyCode = KeyCode::KeyW;
 /// three keys the loop reserves, none of the three it arbitrates while a menu is
 /// showing, and none of the four this application already binds.
 pub const NORMALS_KEY: KeyCode = KeyCode::KeyN;
+
+/// Draws the document's posed skeleton over the frame — see [`crate::anim`].
+/// Off to begin with.
+///
+/// **Off, on [`LISTING_KEY`]'s argument and not merely by analogy with it.** A
+/// viewer's job is to show the user's asset unadorned — see [`crate`] — and
+/// bones drawn over a model nobody asked to see bones on are exactly the
+/// decoration this sample is not allowed to add. The clip plays either way, so
+/// what the key controls is the annotation and never the document.
+///
+/// `B` for bones, which is what every DCC tool calls this display, and it is
+/// free on [`LISTING_KEY`]'s terms: it is none of the three keys the loop
+/// reserves, none of the three it arbitrates while a menu is showing, and none
+/// of the keys this application already binds — which
+/// `no_two_bindings_claim_the_same_key` is what keeps true.
+pub const SKELETON_KEY: KeyCode = KeyCode::KeyB;
 
 /// Darkens the picture: one press divides the tonemap's exposure by
 /// [`exposure_step`].
@@ -308,6 +325,11 @@ pub struct Viewer {
     normals: bool,
     /// Whether [`NORMALS_KEY`] is currently held, for `listing_held`'s reason.
     normals_held: bool,
+    /// Whether the posed skeleton is drawn over the frame — see
+    /// [`SKELETON_KEY`], which is what flips it.
+    skeleton: bool,
+    /// Whether [`SKELETON_KEY`] is currently held, for `listing_held`'s reason.
+    skeleton_held: bool,
     /// Net presses of [`EXPOSURE_UP_KEY`] less [`EXPOSURE_DOWN_KEY`] since the
     /// last frame drew, applied in [`Viewer::draw`].
     ///
@@ -381,6 +403,16 @@ pub struct Viewer {
     /// Ticks this run has taken, for the heartbeat's cadence and its first
     /// column.
     ticks: u64,
+    /// The document's rig, with a playhead — see [`crate::anim`].
+    ///
+    /// `None` for a document with no skin, which is nearly every document: then
+    /// nothing is sampled, nothing is drawn by [`SKELETON_KEY`], and the
+    /// heartbeat's `pose` reports the zero a skeleton standing at rest would.
+    ///
+    /// Built from the [`Model`]'s own [`Playable`](crate::anim::Playable),
+    /// which is the document's half and is shared; this is the half that moves,
+    /// so it lives here and is rebuilt whenever a document is adopted.
+    player: Option<crate::anim::Player>,
     /// How far the turntable has carried the camera, in radians.
     ///
     /// Kept only to be reported: the camera holds the actual pose. It is on the
@@ -533,6 +565,9 @@ fn assemble<S: Shell + ?Sized>(
             wireframe_held: false,
             normals: false,
             normals_held: false,
+            skeleton: false,
+            skeleton_held: false,
+            player: model.playable.as_ref().map(crate::anim::Player::new),
             exposure_steps: 0,
             exposure,
             exposure_pending: None,
@@ -638,6 +673,21 @@ impl Viewer {
         self.bounds
     }
 
+    /// **How far the clip has carried the skeleton from its rest pose, in
+    /// metres** — the one number here that moves because a *document* is
+    /// playing rather than because the frame is.
+    ///
+    /// Zero for a document with no rig, which is honest rather than a
+    /// placeholder: a skeleton that is not there is a skeleton standing still.
+    /// See [`crate::anim::Player::deviation`] for what it measures and why it
+    /// is a property of the pose rather than of the playhead.
+    #[must_use]
+    pub fn pose(&self) -> f32 {
+        self.player
+            .as_ref()
+            .map_or(0.0, crate::anim::Player::deviation)
+    }
+
     /// **The re-export loop**: notices that the document has been written
     /// again, converts it, and swaps it into the frame.
     ///
@@ -734,6 +784,10 @@ impl Viewer {
         self.instances = model.render.instances.len();
         self.skipped = model.skipped().len();
         self.joints = model.rig.joints;
+        // A different document is a different rig, so the playhead starts
+        // again; the *overlay's* visibility is the visitor's rather than the
+        // document's and is carried across, exactly as the listing's is below.
+        self.player = model.playable.as_ref().map(crate::anim::Player::new);
         // Rebuilt rather than edited row by row, because every row is the
         // document's; the panel's own visibility is the one thing that is not,
         // so it is the one thing carried across.
@@ -927,6 +981,12 @@ impl HostedGame for Viewer {
                 }
                 self.normals_held = pressed;
             }
+            SKELETON_KEY => {
+                if pressed && !self.skeleton_held {
+                    self.skeleton = !self.skeleton;
+                }
+                self.skeleton_held = pressed;
+            }
             EXPOSURE_UP_KEY => self.exposure_steps += i32::from(pressed),
             EXPOSURE_DOWN_KEY => self.exposure_steps -= i32::from(pressed),
             _ => {}
@@ -1079,6 +1139,14 @@ impl HostedGame for Viewer {
             self.orbit.orbit(step, 0.0);
             self.turned += step;
         }
+        // The clip, stepped on `render_dt` for the turntable's reason above:
+        // nothing in this sample is simulated, so playback is a property of the
+        // picture and a paused frame still draws one. The loop is
+        // `crate::anim::Player::advance`'s modulo, which is where the crate
+        // leaves it.
+        if let Some(player) = &mut self.player {
+            player.advance(frame.render_dt.as_secs_f32());
+        }
         gpu.set_camera(self.orbit.camera());
         // Re-read rather than kept: the device clamps last, and a reload builds
         // a second renderer — so what the summary reports comes back off
@@ -1087,6 +1155,24 @@ impl HostedGame for Viewer {
         // Every frame rather than only on a step, so the row cannot disagree
         // with the frame after anything else moves the exposure.
         self.listing.set_exposure(self.exposure);
+        // **The skeleton first of the three things this frame draws in screen
+        // space**: it belongs over the model it annotates, and the listing and
+        // the engine's overlay belong over both. Nothing is drawn for a
+        // document with no rig, and nothing at all until `B` asks — see
+        // [`SKELETON_KEY`].
+        if self.skeleton
+            && let Some(player) = &self.player
+        {
+            player.draw(
+                draw_list,
+                &self.orbit.camera(),
+                self.extent,
+                // The same figure the grid is sized from, for the same reason:
+                // the overlay has to be legible on a chair and on a cathedral,
+                // so its one length is a fraction of the document's own size.
+                self.bounds.half_extent().max_element(),
+            );
+        }
         // Laid out against the same extent, and with the atlas the UI pass will
         // actually draw with: a panel measured with a second atlas is a
         // background rect the wrong size for the text inside it.
@@ -1140,11 +1226,10 @@ impl HostedGame for Viewer {
 /// is what says "nothing is on screen because you zoomed past it" rather than
 /// "nothing is on screen because the file is empty".
 ///
-/// `joints` is the rig, reduced to the one thing that fits a row. Nothing here
-/// poses a skeleton, so it is the only sign the panel gives that the import
-/// read one at all; the clip *names* are on the listing behind
-/// [`LISTING_KEY`], because a name out of someone else's file is not something
-/// a `name: value` row can carry safely.
+/// `joints` is the rig, reduced to the one thing that fits a row, and `pose` is
+/// what the clip is doing to it — see [`Viewer::pose`]. The clip *names* are on
+/// the listing behind [`LISTING_KEY`], because a name out of someone else's
+/// file is not something a `name: value` row can carry safely.
 ///
 /// The last two rows are the debug views, and both report the frame that was
 /// **drawn**: the wireframe's field holds what the device answered rather than
@@ -1163,8 +1248,8 @@ impl Viewer {
     ///
     /// **This sample has no simulation to report**, so what it names is the
     /// document: how many instances of it reached the renderer, how much of it
-    /// the conversion could not bring in, how many joints its skins declare, and
-    /// where the camera is. A CI log has no debug panel to read and neither has
+    /// the conversion could not bring in, how many joints its skins declare,
+    /// how far its clip has bent them, and where the camera is. A CI log has no debug panel to read and neither has
     /// a browser gate.
     ///
     /// **Counts only, and `joints` is why that is written down.** Every value
@@ -1174,6 +1259,15 @@ impl Viewer {
     /// arbitrary text out of a document nobody here wrote — one with a space or
     /// a colon in it takes that parse apart — so the names stay on the listing
     /// panel and only the joint count comes here.
+    ///
+    /// **`pose` is the document playing rather than the frame drawing.**
+    /// `web/tools/browser-e2e.mjs` reads it to know that the clip in the
+    /// document is being sampled and the skeleton composed from it: it is
+    /// derived from the palette and from nothing else, so a playhead that
+    /// advanced over a pose nobody ever wrote leaves it at zero. It is a
+    /// distance in metres, which is a bare number like every other value on
+    /// this line — the clip's *name* is on the listing panel, where arbitrary
+    /// text out of someone else's file cannot take this parse apart.
     ///
     /// **`turn` is here for that gate specifically.**
     /// `web/tools/browser-e2e.mjs` proves a page is running rather than merely
@@ -1188,12 +1282,13 @@ impl Viewer {
             return;
         }
         crcbl::log::info!(
-            "[HUD] tick: {}  instances: {}  skipped: {}  joints: {}  dist: {:.2}  turn: {:.1}  \
-             wireframe: {}  normals: {}",
+            "[HUD] tick: {}  instances: {}  skipped: {}  joints: {}  pose: {:.2}  dist: {:.2}  \
+             turn: {:.1}  wireframe: {}  normals: {}",
             self.ticks,
             self.instances,
             self.skipped,
             self.joints,
+            self.pose(),
             self.orbit.distance(),
             self.turned.to_degrees() % 360.0,
             if self.wireframe { "on" } else { "off" },
@@ -1208,6 +1303,7 @@ impl DebugModule for Viewer {
         out.row("instances", format_args!("{}", self.instances));
         out.row("skipped", format_args!("{}", self.skipped));
         out.row("joints", format_args!("{}", self.joints));
+        out.row("pose", format_args!("{:.2}", self.pose()));
         out.row("dist", format_args!("{:.2}", self.orbit.distance()));
         // Wrapped to one turn so the row stays readable; it is the value the
         // browser gate watches for a frame advancing under its own steam.
@@ -1536,6 +1632,25 @@ mod tests {
             .iter()
             .filter_map(|command| match command {
                 DrawCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every `Line` command the frame handed to the UI pass, as its two ends.
+    ///
+    /// The skeleton overlay is the only thing this application strokes lines
+    /// with, so with the engine's debug overlay switched off this is the
+    /// overlay and nothing else.
+    fn ui_lines(engine: &Loop<HeadlessShell>) -> Vec<(Vec2, Vec2)> {
+        use crcbl::ui::draw_list::DrawCommand;
+        engine
+            .gpu()
+            .draw_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Line { from, to, .. } => Some((*from, *to)),
                 _ => None,
             })
             .collect()
@@ -2691,6 +2806,7 @@ mod tests {
             ("listing", LISTING_KEY),
             ("wireframe", WIREFRAME_KEY),
             ("normals", NORMALS_KEY),
+            ("skeleton", SKELETON_KEY),
             ("exposure down", EXPOSURE_DOWN_KEY),
             ("exposure up", EXPOSURE_UP_KEY),
             ("pause", PAUSE_KEY),
@@ -2829,5 +2945,164 @@ mod tests {
             matches!(error, ViewerError::Load(LoadError::NoGeometry(_))),
             "{error}",
         );
+    }
+
+    /// **The clip in the document plays, through the loop, with nobody
+    /// touching anything.**
+    ///
+    /// `crate::anim` asserts the conversion, the sampling and the wrap on their
+    /// own; this is the claim that the frame steps them — that
+    /// [`Viewer::draw`] carries the playhead and that `pose` on the heartbeat
+    /// is a number the document moved rather than one this application prints.
+    /// Over the demo document, which is the one this application ships a rig
+    /// in and the one the browser gate reads.
+    #[test]
+    fn the_documents_clip_plays_without_anyone_touching_anything() {
+        let (_dir, options) = model_at(&crate::demo_model::demo_glb(), 64);
+        let mut engine = scripted(&options);
+
+        engine.frame().expect("a frame");
+        let opened = engine.game().pose();
+        assert!(
+            opened < 1e-6,
+            "the demo's clip starts at the rest pose, so the frame it opens on does too: \
+             {opened}",
+        );
+
+        // Frames until the pose has left rest. A budget rather than a fixed
+        // count, because how far a headless frame carries the playhead is
+        // wall-clock and not this test's to decide; what is asserted is that it
+        // moves at all, which a viewer that never sampled could not do.
+        let mut moved = 0.0;
+        for _ in 0..options.common.frames.expect("a frame budget") {
+            engine.frame().expect("a frame");
+            moved = engine.game().pose();
+            if moved > 1e-6 {
+                break;
+            }
+        }
+        assert!(
+            moved > 1e-6,
+            "the pose never left rest over a document whose clip turns a joint",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A document with no rig plays nothing and reports the zero honestly**,
+    /// which is nearly every document anyone opens.
+    ///
+    /// Both halves: `pose` stays at zero, and `B` — which is a key a visitor
+    /// can press over any file — draws nothing rather than reaching into a rig
+    /// that is not there.
+    #[test]
+    fn a_document_with_no_rig_poses_nothing_and_draws_nothing() {
+        let (_dir, mut options) = model_at(&fixture::quad_glb(Vec3::ZERO), 16);
+        options.common.debug_overlay = Some(false);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+
+        engine.frame().expect("a frame");
+        tap(&mut engine, window, SKELETON_KEY);
+        engine.frame().expect("a frame");
+
+        assert_eq!(engine.game().pose(), 0.0);
+        assert_eq!(
+            ui_lines(&engine),
+            Vec::new(),
+            "a document with no skin has no skeleton to draw",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **`B` draws the posed skeleton, and what it draws moves because the
+    /// clip does — not because the turntable does.**
+    ///
+    /// The overlay is off first, because a viewer shows the user's asset
+    /// unadorned — see [`crate`] — and it is the listing panel's argument: a
+    /// panel is asked for rather than dismissed.
+    ///
+    /// **The camera is taken hold of before the motion is asserted**, and that
+    /// is the whole of why this test is worth having. The turntable moves the
+    /// eye every frame, so every projected joint moves every frame whatever the
+    /// pose is doing: an overlay wired to a skeleton that never moved would
+    /// draw a different picture each frame and pass. A wheel event latches the
+    /// turntable off for good — see [`TURNTABLE_RATE`] — so what moves after it
+    /// is the clip and nothing else.
+    #[test]
+    fn b_draws_the_posed_skeleton_and_it_moves_with_the_clip() {
+        let (_dir, mut options) = model_at(&crate::demo_model::demo_glb(), 64);
+        options.common.debug_overlay = Some(false);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+
+        engine.frame().expect("a frame");
+        assert_eq!(
+            ui_lines(&engine),
+            Vec::new(),
+            "the overlay is something to ask for, not something to dismiss",
+        );
+
+        tap(&mut engine, window, SKELETON_KEY);
+        let drawn = ui_lines(&engine);
+        assert!(
+            !drawn.is_empty(),
+            "B drew no skeleton over a document that has one",
+        );
+
+        engine
+            .shell_mut()
+            .scroll(window, ScrollDelta::Lines { x: 0.0, y: -1.0 }, None)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        let held = engine.game().camera();
+        let before = ui_lines(&engine);
+        let posed = engine.game().pose();
+
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.game().camera().eye,
+            held.eye,
+            "the camera moved after the wheel, so nothing below is about the pose",
+        );
+        assert_ne!(
+            engine.game().pose(),
+            posed,
+            "the playhead stood still across two frames",
+        );
+        assert_ne!(
+            ui_lines(&engine),
+            before,
+            "the overlay drew the same picture over a clip that had moved",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The `pose` row and the `[HUD]` line's `pose` are the same number**, so
+    /// the browser gate and the panel cannot come to disagree.
+    ///
+    /// The panel is where a person reads it and the heartbeat is where CI and
+    /// `web/tools/browser-e2e.mjs` do; both call [`Viewer::pose`], and this is
+    /// what says so rather than leaving two format strings to drift.
+    #[test]
+    fn the_debug_panel_reports_the_pose_the_heartbeat_does() {
+        let (_dir, mut options) = model_at(&crate::demo_model::demo_glb(), 16);
+        options.common.debug_overlay = Some(false);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_press(window, DEBUG_OVERLAY_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        let drawn = ui_text(&engine);
+        assert_eq!(
+            row_value(&drawn, "pose"),
+            format!("{:.2}", engine.game().pose()),
+            "the panel's pose row is not the number the heartbeat prints: {drawn:?}",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 }

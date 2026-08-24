@@ -16,6 +16,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer` plays the clip in the document it opened, and `B` draws the
+  posed skeleton.** The rig is converted into `crcbl::anim`'s `Skeleton` and
+  `Clip`, sampled every frame off the render clock, and composed into a joint
+  palette; the `[HUD]` line and the `F3` panel carry `pose`, which is how far
+  the clip has bent the skeleton away from its rest pose in metres. `B` overlays
+  the bones and each joint's axes — off by default, because a viewer's job is to
+  show the asset unadorned and bones nobody asked for are decoration. Both the
+  compiled-in demo document and one a visitor drops go through the same
+  conversion.
+
+  What the conversion cannot bring in becomes a `Skip`, alongside the ones the
+  mesh conversion already reports: a skin whose joints are not in
+  parent-before-child order is **refused rather than sorted**, because the
+  mesh's `JOINTS_0` and the skin's `inverseBindMatrices` already agree on the
+  existing numbering and renumbering would draw a skeleton matching no vertex in
+  the file. A channel naming a node the skin has not got is ordinary and dropped
+  quietly.
+
 - **`crcbl-anim`, a new crate: skeletal animation's runtime half.** A `Skeleton`
   is joints in palette order, each with a parent index, an inverse bind matrix
   and a rest pose; a `Clip` is `Channel`s of keyframes over it;

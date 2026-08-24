@@ -22,6 +22,13 @@
 //! on the `ESC` panel — see [`menu`]. Re-export the file and the frame becomes
 //! the new document, which is milestone 3's artist loop — see [`watch`].
 //!
+//! **And it plays the document's animation.** A file's first skin and first
+//! clip are converted into what [`crcbl::anim`] poses — the conversion is this
+//! application's, because that crate deliberately does not depend on the glTF
+//! importer — and sampled every frame, looping. `B` draws the posed skeleton
+//! over the model, and the `[HUD]` line's `pose` is how far the clip has
+//! carried it from its rest pose. See [`anim`].
+//!
 //! # It runs in a browser too, on a document it brings with it
 //!
 //! `crate::web` is the `wasm32` front end — not linked, because it does not
@@ -60,6 +67,7 @@
 //! could not honour is printed where the person who opened the file is looking,
 //! not only logged. See [`model`] and [`app::run`].
 
+pub mod anim;
 pub mod app;
 pub mod args;
 pub mod controls;
@@ -80,9 +88,10 @@ pub mod web;
 #[cfg(test)]
 mod fixture;
 
+pub use anim::{Playable, Player, playable_of};
 pub use app::{
-    LISTING_KEY, Loop, PendingLoop, REFRAME_KEY, Summary, Viewer, ViewerError, run, start,
-    with_shell,
+    LISTING_KEY, Loop, PendingLoop, REFRAME_KEY, SKELETON_KEY, Summary, Viewer, ViewerError, run,
+    start, with_shell,
 };
 pub use args::{DEFAULT_TICK_HZ, Invocation, Options, USAGE, parse};
 pub use controls::Controls;

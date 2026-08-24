@@ -461,6 +461,29 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument for the clip the viewer plays, which is the only gate
+# anywhere on the browser path that `crcbl-anim` has a consumer at all. Every
+# other check here passes against a page that converts no skin, samples no clip
+# and composes no palette: the document still draws, the turntable still turns,
+# and `crate::anim`'s own row going missing from the driver would leave a green
+# run with nothing asking whether the animation in the file ever moved. `viewer`
+# alone, because it is the only demo that opens a rigged document.
+#
+# The `moving` check next to it is *not* this claim and cannot stand in for it:
+# it reads the turntable, which is the page's own camera and turns over a
+# skeleton that was never posed. Renaming the check in the driver is meant to
+# fail here and be renamed here too.
+case "$DEMO" in
+    viewer)
+        PLAYED="$(grep -F 'the clip in the document plays under its own steam' "${OUTPUT}.plain" || true)"
+        if [ -z "$PLAYED" ]; then
+            echo "crcbl web e2e: the driver never asked whether the document's own clip is playing;" >&2
+            echo "               the rig conversion and the clip player in apps/viewer/src/anim.rs are ungated" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the strongest form of the same argument, for group H. Three of the driver's
 # checks assert that *nothing* was reported — no uncaught exception, no missing
 # asset, no WebGPU device error — and every one of them passes just as happily

@@ -39,21 +39,28 @@
 //! instance counts are all distinct from each other and all greater than one,
 //! and the arrangement has depth for the orbit camera to turn around.
 //!
-//! # It has a rig, and the rig is there to be reported
+//! # It has a rig, and the rig is played
 //!
-//! [`crcbl::scene::GltfScene`] reads skins and animation clips, and nothing in
-//! this engine poses a skeleton yet — so the rig here is read, reported and not
-//! played. That is exactly why it is in the *demo* document rather than only in
-//! a test fixture: `crate::listing` names the clips and `crate::app`'s `[HUD]`
-//! line counts the joints, and over a document with no rig both would report
+//! [`crcbl::scene::GltfScene`] reads skins and animation clips, `crate::anim`
+//! converts them into what `crcbl::anim` poses, and `crate::app` samples the
+//! clip every frame — so what a visitor to the demo meets is a document whose
+//! skeleton is moving. That is exactly why the rig is in the *demo* document
+//! rather than only in a test fixture: `crate::app`'s `[HUD]` line counts the
+//! joints and reports how far the clip has bent them, `crate::listing` names
+//! the clips, and over a document with no rig every one of those would report
 //! nothing whether the import works or was never written. The browser gate in
-//! `web/tools/browser-e2e.mjs` requires the joint count this document declares,
-//! which is a check that can only pass because the rig is here.
+//! `web/tools/browser-e2e.mjs` reads both numbers, which are checks that can
+//! only pass because the rig is here.
 //!
 //! It is a skin over two joint nodes, `JOINTS_0` and `WEIGHTS_0` on the crate's
 //! primitive, and one clip that turns the upper joint. **A joint node draws
 //! nothing**, so it adds no instance and no vertex: the instance count is still
 //! three and the box the camera frames on is still the crates and the ground.
+//!
+//! The joint the clip turns is the *leaf* of the two, so its own origin never
+//! moves — a rotation carries no point at its own centre. That is the document
+//! `crate::anim`'s overlay draws each joint's axes for, and the reason the
+//! heartbeat's `pose` is measured a metre out from a joint rather than at it.
 
 use std::array;
 
@@ -151,7 +158,17 @@ const JOINT_BIND_Y: [f32; 2] = [-0.25, 0.25];
 
 /// The clip's keyframe times, in seconds. Ascending, which glTF requires and
 /// which the `min`/`max` written onto the sampler's input accessor assumes.
-const CLIP_TIMES: [f32; 2] = [0.0, 1.0];
+///
+/// **Not a whole number of seconds, and that is the browser gate's.**
+/// `crate::app` logs its heartbeat every `HEARTBEAT_TICKS` ticks, which is one
+/// second, and `web/tools/browser-e2e.mjs` proves the clip is playing by
+/// watching the pose on that line take more than one value. A clip whose
+/// duration divides that period is sampled at very nearly the same phase every
+/// time: the number printed would be the same one over and over on a page that
+/// was animating perfectly, and the only thing that saved the check would be
+/// frame-time jitter. A duration that shares no small factor with the heartbeat
+/// walks the whole sweep instead.
+const CLIP_TIMES: [f32; 2] = [0.0, 1.7];
 
 /// How far the clip swings the upper joint about `Z`, in degrees.
 const LID_SWING_DEGREES: f32 = 45.0;

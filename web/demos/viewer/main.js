@@ -208,7 +208,7 @@ function installDropTarget(ex) {
 
 bootDemo({
   init,
-  hint: 'Drag to orbit, scroll to zoom · drop a .glb or .gltf on the canvas to open your own · I lists what the document holds and what the conversion skipped · W wireframe · N world-space normals · -/= exposure · ESC opens the panel · F3 shows the stats · F11 fullscreen',
+  hint: 'Drag to orbit, scroll to zoom · drop a .glb or .gltf on the canvas to open your own · I lists what the document holds and what the conversion skipped · B draws the posed skeleton · W wireframe · N world-space normals · -/= exposure · ESC opens the panel · F3 shows the stats · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => {
     installDropTarget(ex);

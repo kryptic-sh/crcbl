@@ -16988,3 +16988,17 @@ Not started. Worth noting that thin hardware lines are one pixel wide and not
 uniformly supported, so the same triangle-expansion `push_stroke` does for the
 UI is likely the right answer there too — which is an argument for lifting that
 helper rather than writing a second one.
+
+**A second consumer arrived on 2026-08-25**: `apps/viewer`'s skeleton overlay,
+which draws a posed skeleton from `crcbl-anim`'s joint palette. It projects each
+joint to screen by hand and strokes the bones with the UI-space polyline —
+exactly the workaround a world-space pass exists to remove, and it inherits the
+two limitations that come with it. The bones do **not** depth-test against the
+geometry they annotate, so a joint behind the mesh draws in front of it; and the
+projection is the viewer's own copy of what the camera already does.
+
+That does not make the overlay wrong — it is the honest shape available today,
+and a skeleton drawn over the mesh is what most tools show anyway. It does mean
+the count of consumers waiting on the world-space pass is no longer only
+`05-physics.md`'s five, and that the next one to want it will be the third to
+hand-roll a projection.

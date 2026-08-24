@@ -63,17 +63,27 @@ pub struct Model {
     pub bounds: Aabb,
     /// What the document's skins and animations amount to — see [`Rig`].
     pub rig: Rig,
+    /// The skeleton and the clip the viewer poses and plays, or `None` for a
+    /// document with no skin — see [`crate::anim`].
+    ///
+    /// Converted here, at load, rather than kept as the imported scene: this is
+    /// the only part of a document's rig anything downstream can consume, and
+    /// carrying the keyframes twice would be keeping the rest for nobody.
+    /// Everything the conversion could not bring in is already on
+    /// [`Model::skipped`] beside the renderer's own losses.
+    pub playable: Option<crate::anim::Playable>,
 }
 
 /// What a document's rig amounts to, as much of it as this application reports.
 ///
 /// **A summary, not the rig.** [`crcbl::scene::GltfScene`] holds the joints, the
-/// bind matrices and every keyframe; nothing in this engine poses a skeleton
-/// yet, so a viewer that carried the whole imported scene around would be
-/// keeping it for a renderer that cannot use it. What a person looking at an
-/// unfamiliar file needs is the two facts that say whether the rig survived the
+/// bind matrices and every keyframe, and the part of that this application can
+/// use is converted into [`Model::playable`] and the rest of the imported scene
+/// dropped — see [`crate::anim`]. What is left for a person looking at an
+/// unfamiliar file is the two facts that say whether the rig survived the
 /// import at all: how big the skeleton is, and what the file's animations are
-/// called.
+/// called. Both cover *every* skin and *every* animation, where the player
+/// takes the first of each.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rig {
     /// How many joints the document's skins declare, summed over every skin.
@@ -267,14 +277,20 @@ pub fn load_from(
         return Err(LoadError::NonFiniteGeometry(path.to_path_buf()));
     }
 
-    let render = crcbl::scene::gltf_render::build_render_scene(&imported, &key);
-    // Summarised here and the imported scene dropped: see `Rig`.
+    let mut render = crcbl::scene::gltf_render::build_render_scene(&imported, &key);
+    // Summarised and converted here, and the imported scene dropped: see `Rig`
+    // and `crate::anim`. The rig's own skips join the conversion's, because
+    // they are the same kind of thing — a feature the file asked for and did
+    // not get — and this application has exactly one place it reports those.
     let rig = rig_of(&imported);
+    let (playable, skipped) = crate::anim::playable_of(&imported);
+    render.skipped.extend(skipped);
     Ok(Model {
         key,
         render,
         bounds,
         rig,
+        playable,
     })
 }
 
@@ -551,6 +567,59 @@ mod tests {
 
         assert_eq!(model.rig, Rig::default());
         assert!(model.rig.is_empty());
+        assert!(
+            model.playable.is_none(),
+            "there is no skeleton here to pose",
+        );
+    }
+
+    /// **A rigged document arrives with its rig converted**, which is the link
+    /// between this module and the player in [`crate::app`]: `crate::anim` says
+    /// the conversion is right, and this says the loader ran it and kept the
+    /// result.
+    #[test]
+    fn a_rigged_document_arrives_with_a_skeleton_and_a_clip_to_play() {
+        let (_dir, path) = written("demo.glb", &crate::demo_model::demo_glb());
+        let model = load(&path).expect("the demo document loads");
+
+        let playable = model
+            .playable
+            .as_ref()
+            .expect("the demo document is rigged");
+        assert_eq!(
+            playable.skeleton().len(),
+            model.rig.joints,
+            "the skeleton and the panel's count are the same skin",
+        );
+        assert!(
+            playable.clip().duration() > 0.0,
+            "the document's clip arrived with no keyframes in it",
+        );
+        assert_eq!(model.skipped(), [], "and nothing was lost converting it");
+    }
+
+    /// **A rig this application cannot pose is reported the way a lost texture
+    /// is** — on the skip list `load_and_report` prints and the listing panel
+    /// draws — and the document still loads and still draws.
+    ///
+    /// The fixture's joints are listed child-first, which `Skeleton::new`
+    /// refuses; see [`crate::anim`] for why that is refused rather than sorted
+    /// out. Without this, the refusal would be a `None` nobody is told about.
+    #[test]
+    fn a_rig_that_cannot_be_posed_is_on_the_skip_list_and_the_document_loads() {
+        let (_dir, path) = written("reversed.glb", &fixture::skinned_glb(false));
+        let model = load(&path).expect("a document whose rig will not pose still draws");
+
+        assert!(model.playable.is_none());
+        assert!(
+            model.skipped().iter().any(|skip| skip.feature == "joints"),
+            "the refusal never reached the user: {:?}",
+            model.skipped(),
+        );
+        assert_eq!(
+            model.rig.joints, 2,
+            "the panel still reports the rig the file declares",
+        );
     }
 
     /// **An animation with no name is still named on the panel**, by the

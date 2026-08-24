@@ -48,11 +48,12 @@
 //!   they are looking, because "one instance" beside a mesh count of forty is
 //!   exactly the shape of a scene graph that did not survive.
 //! * **`joints` and `clips`, or `rig: none`.** Whether the file brought a
-//!   skeleton with it, how big it is, and what its animations are called.
-//!   Nothing in this engine poses a skeleton or plays a clip yet, so the panel
-//!   is the *only* place a rig is visible at all: a document whose skin or
-//!   whose animations the import dropped looks exactly like one that never had
-//!   them, and these two rows are the difference. The clips are named rather
+//!   skeleton with it, how big it is, and what its animations are called. The
+//!   viewer poses the first skin and plays the first clip — see [`crate::anim`]
+//!   — so a rigged document moves on its own; what these rows add is every
+//!   *other* skin and clip, which nothing on screen shows. A document whose
+//!   skin or whose animations the import dropped looks exactly like one that
+//!   never had them, and these two rows are the difference. The clips are named rather
 //!   than counted because a name is what an artist asked for by name and a
 //!   count is not — they share one row, joined, for the reason there is no row
 //!   per mesh either. A document with no rig says `none` on one row instead of

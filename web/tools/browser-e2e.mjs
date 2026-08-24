@@ -156,6 +156,12 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * has to reach once the page has opened it. See {@link quadPairGlb} for why the
  * document is built here rather than checked in.
  *
+ * `playing` is the fourth, and only viewer has one of those either: a second
+ * pattern read the way `moving` is, for the demo whose subject is a *document*
+ * rather than a simulation. `moving` says the page is running; `playing` says
+ * the animation inside the file it opened is being sampled. A row without one
+ * is a demo that ships no rig, which is every other demo here.
+ *
  * `backdrop` is the other optional key, and it is what group G reads. It names
  * the demo's clear colour twice over: `encoded` is the byte an sRGB target holds
  * and `unencoded` is the byte the same clear leaves in a linear one, with
@@ -571,6 +577,20 @@ const EXPECTATIONS = {
       line.includes('joints: 2'),
     moving: /turn: ([\d.]+)/,
     movingLabel: 'the turntable carries the camera under its own steam',
+    // **The document advancing, which is a different claim from the frame
+    // advancing.** `turn` above is this page's own turntable — it would go on
+    // moving over a document the engine never looked at twice. `pose` is how
+    // far the demo document's own clip has carried its skeleton from its rest
+    // pose, in metres, and it is read off the joint palette and off nothing
+    // else: a playhead ticking over a pose nobody ever composed leaves it at
+    // `0.00` for ever, and so does a conversion that handed the sampler joint
+    // indices that name no joint. See `apps/viewer/src/anim.rs`, which is the
+    // one consumer `crcbl-anim` has.
+    //
+    // Two different values is the whole assertion, exactly as it is for
+    // `moving`: the clip loops, so the number sweeps rather than climbing.
+    playing: /pose: ([\d.]+)/,
+    playingLabel: 'the clip in the document plays under its own steam',
     // **The one demo that takes a file from the visitor**, so the one row with
     // a `drop`. `document` is dragged onto the canvas and `opened` is what the
     // `[HUD]` line has to say afterwards — numbers only a *loaded* document can
@@ -1845,13 +1865,15 @@ try {
   // simulation advancing under its own steam — which nothing on the JS side
   // could fake. The one check in this group every demo makes, including the one
   // that took no key to get here.
-  const values = () =>
+  /** Every distinct value `pattern` has captured on a HUD line since the start. */
+  const valuesOf = (/** @type {RegExp} */ pattern) =>
     new Set(
       hud()
         .slice(beforeLaunch)
-        .map((line) => line.match(EXPECTED.moving)?.[1])
+        .map((line) => line.match(pattern)?.[1])
         .filter(Boolean)
     );
+  const values = () => valuesOf(EXPECTED.moving);
   const positions = await until(async () => {
     const seen = values();
     return seen.size > 1 ? seen : null;
@@ -1872,6 +1894,36 @@ try {
       : `it never changed — ${beats} HUD line(s) since the start, ` +
           `${values().size} value(s): ${[...values()].join(', ') || 'none'}`
   );
+
+  // **AND THE DOCUMENT'S OWN CLIP PLAYING, WHICH THE CHECK ABOVE CANNOT SEE.**
+  // Only viewer has one. Every other demo in this file advances because its
+  // *simulation* does; this one opens a file and shows it, and what has to
+  // advance is the animation inside that file — sampled, composed down the
+  // joint hierarchy and reported as a distance the pose is from rest. Nothing
+  // on the JS side can move it, and neither can the turntable the check above
+  // reads: `pose` comes off the palette and would sit at `0.00` through a
+  // whole run of a page whose skeleton was never posed.
+  //
+  // **IT RUNS BEFORE THE DROP BLOCK BELOW, AND THAT IS LOAD-BEARING.** The
+  // document dropped there has no skin and no clip, so from that moment on
+  // `pose` is `0.00` and can never take a second value again.
+  if (EXPECTED.playing) {
+    const posed = await until(async () => {
+      const seen = valuesOf(EXPECTED.playing);
+      return seen.size > 1 ? seen : null;
+    });
+    const beats = hud().length - beforeLaunch;
+    check(
+      'C',
+      EXPECTED.playingLabel,
+      Boolean(posed),
+      posed
+        ? `it took ${posed.size} values: ${[...posed].join(', ')}`
+        : `it never changed — ${beats} HUD line(s) since the start, ` +
+            `${valuesOf(EXPECTED.playing).size} value(s): ` +
+            `${[...valuesOf(EXPECTED.playing)].join(', ') || 'none'}`
+    );
+  }
 
   // **A FILE THE VISITOR CHOSE, WHICH IS THE OTHER WAY INPUT REACHES THIS
   // ENGINE.** Only viewer has one — `apps/viewer/src/web.rs`'s drop target,
