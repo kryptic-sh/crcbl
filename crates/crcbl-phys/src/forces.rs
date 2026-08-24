@@ -119,8 +119,10 @@ impl PointGravity {
     pub fn acceleration_at(&self, position: DVec3) -> DVec3 {
         let offset = position - self.centre;
         let distance_squared = offset.length_squared();
-        if !(distance_squared > 0.0) {
-            // Negated so a NaN position lands here rather than in the divide.
+        // A NaN position and the centre itself both land here rather than in
+        // the divide below, which would hand back a NaN or an infinity and
+        // poison the body's velocity for the rest of the run.
+        if distance_squared.is_nan() || distance_squared <= 0.0 {
             return DVec3::ZERO;
         }
         // `r̂ / r²` is `r / r³`, which is one root rather than a root and a
