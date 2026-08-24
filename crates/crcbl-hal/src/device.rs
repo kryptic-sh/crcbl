@@ -340,7 +340,29 @@ pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// platform, or [`HalError::Backend`] if the window system refused.
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError>;
 
-    /// Destroys a surface. Every swapchain on it must already be destroyed.
+    /// Invalidates `surface`'s handle. **A swapchain already on it goes on
+    /// working.**
+    ///
+    /// The two halves of a surface's lifetime come apart here, deliberately.
+    /// The handle is stale from this call on, so a later
+    /// [`surface_caps`](Instance::surface_caps) with it fails
+    /// [`HalError::InvalidHandle`]. The platform object underneath — a
+    /// `VkSurfaceKHR`, a `CAMetalLayer`, a canvas context — lives until the
+    /// last swapchain configured on it is destroyed. **The caller owes no
+    /// teardown order**: either call may come first.
+    ///
+    /// That is not a courtesy the backends happen to extend, it is what each
+    /// one is built to do. `crcbl-vk` keeps a per-surface swapchain count and a
+    /// zombie list so `vkDestroySurfaceKHR` can be deferred; `crcbl-mtl` lets
+    /// the last swapchain's clone of the layer release it; `crcbl-dx12` has
+    /// nothing to defer, because a swapchain holds its own `HWND` and never
+    /// consults the surface table again; the WebGPU replayer drops its
+    /// reference to the context without unconfiguring the canvas.
+    ///
+    /// What does still bind the caller is obligation 2 on
+    /// [`create_surface`](Instance::create_surface): the *window* must outlive
+    /// both objects. Destroying it early is a use-after-free inside the driver
+    /// whichever order these two calls come in.
     fn destroy_surface(&self, surface: SurfaceHandle);
 
     /// What `surface` supports on `adapter`.

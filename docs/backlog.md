@@ -16499,14 +16499,6 @@ survey. Treat every one as a claim until read.
   neither the device's `Limits` nor its `layouts` table. That is the decision
   recorded under "should `crcbl-webgpu`'s encoder see device state?" above, and
   this is now the second rule waiting on it.
-- **The seam and the suite contradict each other on `destroy_surface`.** The
-  seam says every swapchain on a surface must already be destroyed; the agnostic
-  suite's `a_swapchain_keeps_working_after_its_surface_handle_is_destroyed`
-  destroys the surface mid-life and then renders and presents a whole frame
-  through the swapchain, calling that "Obligation 2b". Both cannot be right.
-  **This one needs a decision**: either the sentence goes, or the test does.
-  Nothing depends on the answer today, which is why it is here and not fixed —
-  but a caller reading the doc gets the wrong answer either way.
 
 ### Where the backends actively disagree
 
@@ -16666,3 +16658,24 @@ same thing on every backend, which is the whole point of the exhaustive
 change to how every recording method on that backend works, it wants a
 measurement first, and it is not what either of the two slices that hit the wall
 was about. **Needs the user's call**, or an explicit decision to measure.
+
+## `crcbl-sprite`'s docs only build with `--all-features` (2026-08-24)
+
+`cargo doc -p crcbl-sprite` with default features fails
+`rustdoc::broken-intra-doc-links` on four `[`crate::bake`]` links in `crpix.rs`
+and `load.rs`. The crate declares no `default` feature and `bake` is
+`#[cfg(feature = "bake")]`, so under default features the module those links
+name does not exist.
+
+CI never sees it: every `cargo doc` invocation in `ci.yml` passes
+`--all-features`. Found by running the doc gate the wrong way, which is also how
+it was confirmed — with `--all-features` the workspace documents clean.
+
+It matters where the feature set is not ours to choose. The crate carries no
+`[package.metadata.docs.rs]`, so a docs.rs build would use default features and
+hit exactly this. Two ways to close it: add that metadata with
+`all-features = true`, or make the links degrade — the usual spelling is a
+`#[cfg_attr(not(feature = "bake"), doc = "...")]` pair, which is noisier than
+the problem. Not fixed because nothing publishes this crate yet, and it is a
+decision about what the crate's default documentation should say rather than a
+bug in the prose.

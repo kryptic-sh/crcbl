@@ -3531,13 +3531,21 @@ fn commands_naming_a_foreign_handle_are_recorded_as_such() {
     );
 }
 
-/// Rule 2: destroying the surface before its swapchain invalidates the handle
-/// immediately, and the swapchain built on it is unusable afterwards — an
-/// error, never undefined behaviour.
+/// Rule 2: destroying the surface invalidates its *handle* immediately and
+/// leaves the swapchain built on it working, which is what
+/// `Instance::destroy_surface` promises. The caller owes no teardown order.
+///
+/// The two halves are asserted separately because they fail for different
+/// reasons: a whole frame still goes through the swapchain, while the dead
+/// handle refuses to have anything new built on it — an error, never undefined
+/// behaviour.
 #[test]
-fn destroying_a_surface_out_of_order_is_detected_not_undefined() {
+fn destroying_a_surface_first_leaves_its_swapchain_working() {
     let instance = NullInstance::gpu_driven();
     let device = open(&instance);
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("every device has a graphics queue");
     // SAFETY: an offscreen target holds no platform pointers.
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
     let desc = SwapchainDesc {
@@ -3551,15 +3559,29 @@ fn destroying_a_surface_out_of_order_is_detected_not_undefined() {
     };
     let swapchain = device.create_swapchain(&desc).expect("swapchain");
 
-    // Out of order: surface first.
+    // The surface handle dies here, mid-life of the swapchain on it.
     instance.destroy_surface(surface);
 
-    // The swapchain object itself is still tracked, so acquiring from it does
-    // not fault — the backend deferred the real teardown. But nothing new can
-    // be built on the dead surface handle.
-    device
+    // A whole frame still goes through: the backend deferred the real teardown
+    // and the swapchain never consults the surface table again.
+    let frame = device
         .acquire_next_frame(swapchain)
         .expect("still acquirable");
+    device
+        .present(
+            queue,
+            &PresentInfo {
+                swapchain,
+                waits: frame.present_semaphore.as_slice(),
+                present_id: Some(1),
+            },
+        )
+        .expect("still presentable");
+    device
+        .wait_until_presented(swapchain, 1, Duration::from_secs(30))
+        .expect("the frame landed");
+
+    // But nothing new can be built on the dead surface handle.
     let error = device.create_swapchain(&desc).expect_err("dead surface");
     assert!(
         matches!(error, SurfaceError::Hal(HalError::InvalidHandle { .. })),

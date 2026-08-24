@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`Instance::destroy_surface` documented a teardown order that does not
+  exist.** Its one-line doc said every swapchain on a surface must already be
+  destroyed. No backend requires that and four go out of their way not to:
+  `crcbl-vk` keeps a per-surface swapchain count and a zombie list so
+  `vkDestroySurfaceKHR` can be deferred, `crcbl-mtl` lets the last swapchain's
+  clone of the layer release it, `crcbl-dx12` has nothing to defer because a
+  swapchain holds its own `HWND`, and the WebGPU replayer drops the context
+  reference without unconfiguring the canvas. The doc now says what they all do:
+  the handle goes stale immediately, the swapchain on it keeps working, and the
+  caller owes no order between the two calls. A caller who believed the old
+  sentence was writing teardown sequencing it never needed.
+
 - **A mesh dispatch's indirect arguments are checked like any other draw's.**
   `draw_mesh_tasks_indirect` recorded whatever offset, stride and count it was
   handed on `crcbl-vk` and the null backend, so a misaligned offset reached the
