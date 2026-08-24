@@ -718,12 +718,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "a body at the centre of attraction is not on an orbit")]
     fn a_body_on_the_centre_of_attraction_is_refused() {
-        propagate(EARTH_MU, State::AT_ORIGIN, 1.0);
+        let _ = propagate(EARTH_MU, State::AT_ORIGIN, 1.0);
     }
 
     #[test]
     #[should_panic(expected = "cannot propagate by NaN seconds")]
     fn a_non_finite_flight_time_is_refused() {
-        propagate(EARTH_MU, circular(7_000_000.0), f64::NAN);
+        let _ = propagate(EARTH_MU, circular(7_000_000.0), f64::NAN);
     }
 }

@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_phys::PointGravity`** — Newtonian gravity toward a body, falling off
+  as the inverse square, alongside the uniform `GravityForce` that stays. A
+  platformer wants the field; anything that goes high enough to notice gravity
+  points at something wants the point, and an orbit is only possible under the
+  second.
+
 - **`crcbl_phys::propagate` and `Orbit`** — analytic Kepler propagation, so a
   coasting body's position at time `t` costs the same whether `t` is a second or
   a century away and drifts by nothing in between. It is the universal-variable

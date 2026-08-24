@@ -63,6 +63,81 @@ impl ForceProvider for GravityForce {
 }
 
 // ---------------------------------------------------------------------------
+// Point gravity
+// ---------------------------------------------------------------------------
+
+/// Newtonian gravity toward a single body, `F = -mu·m·r̂ / |r|²`.
+///
+/// [`GravityForce`] is a uniform field, which is the right model for a room and
+/// the wrong one for anything that goes high enough or far enough to notice
+/// that gravity points at something. This one falls off, so an orbit is
+/// possible under it — and both stay, because a platformer wants the field and
+/// a spacecraft wants the point.
+///
+/// `mu` is the gravitational parameter `GM` in m³/s², the same quantity
+/// [`crate::Frames`] carries and [`crate::propagate`] takes: the product is
+/// what is measured to eight figures for a real body, while `G` and `M`
+/// separately are not.
+///
+/// **The centre is in world space, not in a frame.** A [`ForceProvider`] runs
+/// over every dynamic body, so it cannot know which frame any of them is being
+/// simulated in; the caller is already converting a body's state into the frame
+/// it dominates, and this reads the position it is handed.
+///
+/// # What drove it
+///
+/// `docs/plan/sample/06-orbit.md` — a rocket that leaves the pad has to keep
+/// feeling the planet after the pad is out of sight.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointGravity {
+    /// The attracting body's gravitational parameter `GM`, in m³/s².
+    pub mu: f64,
+    /// Where it is, in the same space the bodies' transforms are in.
+    pub centre: DVec3,
+}
+
+impl PointGravity {
+    /// Create a point-gravity provider.
+    #[inline]
+    #[must_use]
+    pub fn new(mu: f64, centre: DVec3) -> Self {
+        debug_assert!(mu >= 0.0, "a gravitational parameter is not negative");
+        Self { mu, centre }
+    }
+
+    /// The acceleration this exerts at `position`, in m/s².
+    ///
+    /// An acceleration rather than a force because gravity's is the same for
+    /// every mass, which is the one thing about it worth not multiplying out
+    /// and dividing back: a caller checking a surface gravity wants this.
+    ///
+    /// Zero at the centre itself, where the direction is undefined and the
+    /// magnitude infinite. A body there is inside the attractor, which this
+    /// model has nothing to say about, and returning a NaN would poison its
+    /// velocity for the rest of the run.
+    #[must_use]
+    pub fn acceleration_at(&self, position: DVec3) -> DVec3 {
+        let offset = position - self.centre;
+        let distance_squared = offset.length_squared();
+        if !(distance_squared > 0.0) {
+            // Negated so a NaN position lands here rather than in the divide.
+            return DVec3::ZERO;
+        }
+        // `r̂ / r²` is `r / r³`, which is one root rather than a root and a
+        // separate normalize.
+        -offset * (self.mu / (distance_squared * distance_squared.sqrt()))
+    }
+}
+
+impl ForceProvider for PointGravity {
+    fn apply(&self, body: &mut RigidBody, transform: &Transform, _dt: f64) {
+        if body.is_dynamic() {
+            body.apply_force(self.acceleration_at(transform.position) * body.mass);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Drag (linear damping)
 // ---------------------------------------------------------------------------
 
@@ -540,6 +615,77 @@ mod tests {
             (body.force_accum.y + 8.31).abs() < 1e-10,
             "expected ~-8.31, got {}",
             body.force_accum.y
+        );
+    }
+
+    /// **Point gravity against the number everyone knows.** Earth's
+    /// gravitational parameter over its equatorial radius squared is the
+    /// surface gravity in every physics textbook.
+    ///
+    /// `mu` is JPL's `3.986004418e14` m³/s² and the radius the WGS 84
+    /// equatorial `6_378_137` m, which give 9.798 m/s² — the equatorial value,
+    /// a little below the 9.80665 m/s² *standard* gravity, which is defined at
+    /// 45° latitude and includes the rotation this does not model.
+    #[test]
+    fn point_gravity_at_the_earths_surface_is_nine_point_eight() {
+        const EARTH_MU: f64 = 3.986_004_418e14;
+        const EQUATORIAL_RADIUS: f64 = 6_378_137.0;
+
+        let gravity = PointGravity::new(EARTH_MU, DVec3::ZERO);
+        let surface = DVec3::new(0.0, EQUATORIAL_RADIUS, 0.0);
+        let acceleration = gravity.acceleration_at(surface);
+        assert!(
+            acceleration.x == 0.0 && acceleration.z == 0.0 && acceleration.y < 0.0,
+            "gravity at the north of a sphere points straight down, got {acceleration:?}"
+        );
+        let magnitude = acceleration.length();
+        assert!(
+            (magnitude - 9.798).abs() < 0.001,
+            "surface gravity came out {magnitude} m/s², expected 9.798"
+        );
+
+        // **It falls off as the inverse square**, which is the whole difference
+        // from `GravityForce` and the only reason an orbit is possible: twice
+        // as far is a quarter as strong, and no other power law agrees.
+        let twice_out = gravity.acceleration_at(surface * 2.0).length();
+        assert!(
+            (twice_out - magnitude / 4.0).abs() < magnitude * 1.0e-12,
+            "twice the distance must be a quarter the pull: {twice_out} against {}",
+            magnitude / 4.0
+        );
+
+        // Nothing infinite at the centre, and nothing NaN off a NaN position.
+        assert_eq!(gravity.acceleration_at(DVec3::ZERO), DVec3::ZERO);
+        assert_eq!(gravity.acceleration_at(DVec3::splat(f64::NAN)), DVec3::ZERO);
+    }
+
+    /// It reaches a body through the pipeline, scaled by that body's mass, and
+    /// leaves a static one alone.
+    #[test]
+    fn point_gravity_pulls_a_dynamic_body_and_not_a_kinematic_one() {
+        const EARTH_MU: f64 = 3.986_004_418e14;
+        const MASS: f64 = 1_200.0;
+        let gravity = PointGravity::new(EARTH_MU, DVec3::ZERO);
+        let transform = Transform {
+            position: DVec3::new(0.0, 6_378_137.0, 0.0),
+            rotation: glam::DQuat::IDENTITY,
+        };
+
+        let mut body = RigidBody::new_dynamic(MASS);
+        gravity.apply(&mut body, &transform, 1.0 / 60.0);
+        let expected = gravity.acceleration_at(transform.position) * MASS;
+        assert!(
+            (body.force_accum - expected).length() < expected.length() * 1.0e-12,
+            "expected {expected:?}, got {:?}",
+            body.force_accum
+        );
+
+        let mut anchored = RigidBody::new_kinematic();
+        gravity.apply(&mut anchored, &transform, 1.0 / 60.0);
+        assert_eq!(
+            anchored.force_accum,
+            DVec3::ZERO,
+            "a kinematic body is moved by its own script, not by gravity"
         );
     }
 }

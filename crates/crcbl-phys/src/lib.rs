@@ -41,7 +41,7 @@ pub use atmosphere::{Atmosphere, AtmosphericDrag};
 pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
-pub use forces::{DampingForce, DragForce, ForceProvider, GravityForce, ThrustForce};
+pub use forces::{DampingForce, DragForce, ForceProvider, GravityForce, PointGravity, ThrustForce};
 pub use frames::{FrameId, Frames, State, sphere_of_influence};
 pub use integrator::{Integrator, SemiImplicitEuler};
 pub use orbit::{Orbit, propagate};
