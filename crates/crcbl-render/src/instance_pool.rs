@@ -428,7 +428,41 @@ impl InstancePool {
     /// written and the rest stay dirty, so a later frame retries them — a
     /// half-uploaded array that forgot the rest would be the worse failure.
     pub fn begin_frame(&mut self, device: &dyn Device) -> Result<usize, HalError> {
+        let slot = self.rotate();
+        self.flush(device)?;
+        Ok(slot)
+    }
+
+    /// Rotates to the next frame's buffer **without uploading anything**, and
+    /// returns the slot it rotated to.
+    ///
+    /// The half of [`begin_frame`](Self::begin_frame) that decides which buffer
+    /// this frame writes, split out for the one caller that has an instance to
+    /// write which *depends* on the slot:
+    /// [`ForwardRenderer::begin_skinned_frame`](crate::forward::ForwardRenderer::begin_skinned_frame)
+    /// points every skinned instance at the half of its region this frame's
+    /// dispatch will fill, and the parity it reads comes from a
+    /// [`Skinning`](crate::skinning::Skinning) that has to be handed this slot
+    /// first. Rotating and uploading in one call would leave that write for the
+    /// *next* frame's upload, which is a character posed one frame late.
+    ///
+    /// [`flush`](Self::flush) must follow it, or this frame draws whatever the
+    /// frame before last left in this buffer.
+    pub const fn rotate(&mut self) -> usize {
         self.frame = (self.frame + 1) % self.buffers.len();
+        self.frame
+    }
+
+    /// Writes the current slot's outstanding changes into its buffer.
+    ///
+    /// The other half of [`begin_frame`](Self::begin_frame). Idempotent: a
+    /// second call with nothing newly written performs no seam call at all.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] if a write failed, on [`begin_frame`](Self::begin_frame)'s
+    /// terms — the runs already written stay written and the rest stay dirty.
+    pub fn flush(&mut self, device: &dyn Device) -> Result<(), HalError> {
         let slot = self.frame;
         let buffer = self.buffers[slot];
         // Detached so the mirror can be borrowed while the runs are walked.
@@ -441,7 +475,7 @@ impl InstancePool {
                 return Err(error);
             }
         }
-        Ok(slot)
+        Ok(())
     }
 
     /// Releases every buffer. The device must be idle.

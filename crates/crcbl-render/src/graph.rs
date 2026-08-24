@@ -1067,6 +1067,19 @@ impl CompiledPass<'_> {
     pub const fn render_area(&self) -> Rect2d {
         self.render_area
     }
+
+    /// Whether it declared a read of `buffer`.
+    ///
+    /// Compilation walks passes in declaration order and never reorders them,
+    /// so a pass that omits the declaration still runs after the barrier the
+    /// first reader earned — the omission is invisible in the compiled
+    /// barriers. This is what lets a test assert the declaration itself.
+    #[cfg(test)]
+    pub(crate) fn reads_buffer(&self, buffer: BufferId) -> bool {
+        self.buffers
+            .iter()
+            .any(|access| access.buffer == buffer && access.state == ResourceState::ShaderRead)
+    }
 }
 
 /// Which physical resource a virtual one ended up on.

@@ -87,6 +87,87 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   CPU oracle a readback will be compared against, on the terms
   `crcbl_render::cull::visible_instances` already sets.
 
+- **The seam an application draws a skinned mesh through,
+  `crcbl_render::forward`.** The skinning kernel and the pass that dispatches it
+  existed with no way for a caller to point a draw at what they wrote; this is
+  that way. `ForwardRenderer::reserve_skinned` takes a description mesh index
+  and hands back a `SkinnedMesh` — a `SkinnedRegion` plus the mesh-table entries
+  a draw of it resolves through — `ForwardRenderer::vertex_buffer` is what
+  `SkinningDesc::vertices` takes, `SkinnedMesh::skin_range` builds the frame's
+  `SkinRange` from a palette and a set of bindings, and
+  `ForwardRenderer::add_skinned_instance` / `set_skinned_instance` place the
+  object with a `SkinnedInstanceDesc`. `ForwardRenderer::release_skinned` gives
+  all of it back. A caller never spells a base vertex, a parity or a table id.
+
+  **A skinned primitive gets two mesh-table entries, one per parity, and neither
+  is ever rewritten.** `MeshPool::alias` is the new primitive that creates one:
+  a second entry naming a mesh's indices and box at a different base vertex,
+  owning no pool space, written once and cleared once by `MeshPool::free`. That
+  preserves the reason the mesh table is a single host-visible buffer rather
+  than a ring — nothing rewrites an entry between frames — which re-pointing one
+  entry at the half a frame skins would have broken silently, on exactly the
+  frames that overlap. What alternates instead is which entry an _instance_
+  names, and instances already go through a ring. The bind pose keeps its own
+  entry, so one mesh can be drawn skinned and unskinned in the same frame. A
+  skinned mesh therefore costs two `Capacities::meshes` entries and two vertex
+  regions on top of its own.
+
+  **The two new frame calls are what make the missing barrier unrepresentable.**
+  `ForwardRenderer::begin_skinned_frame` rotates the instance ring, hands the
+  slot to `Skinning::begin_frame`, re-points every skinned object at the half
+  that frame's dispatch fills, and only then uploads the instance delta — the
+  one order that does not draw the previous frame's pose.
+  `ForwardRenderer::add_skinned_passes` takes the `&Skinning` rather than a
+  `BufferId`, adds the dispatch itself, and declares the read on the shadow
+  pass, the depth prepass and the forward pass, so there is no ordering left for
+  a caller to get wrong. `add_passes` and `begin_frame` are unchanged and build
+  the frame they always did. `MAX_TIMED_PASSES` now includes
+  `Skinning::MAX_PASSES`.
+
+  Two limits are documented rather than hidden. A `Geometry::Dag` **cannot** be
+  skinned — its coarser levels are separate vertex runs no dispatch writes — and
+  `reserve_skinned` refuses one by name. And an alias entry carries the bind
+  pose's bounding box, so a mesh deformed outside it is culled while on screen;
+  the box the dispatch will actually fill is a property of a palette the
+  reservation has never seen.
+
+- **`InstancePool::rotate` and `InstancePool::flush`**, the two halves
+  `InstancePool::begin_frame` now delegates to. Split so a caller with a write
+  that depends on the frame slot — the skinned-instance re-pointing above — can
+  make it between the rotation and the upload instead of a frame late.
+  `begin_frame` is unchanged for everyone else.
+
+- **`crcbl_scene::gltf_render` carries a skinned primitive's per-vertex bindings
+  through to the vertices it emits.** `RenderScene::origins` is a new
+  `Vec<MeshOrigin>`, one entry per `SceneDesc::meshes` row and in the same
+  order. Each names the glTF mesh and primitive the row was made from and holds
+  `MeshOrigin::bindings`: one `crcbl_shaders::skinning::SkinBinding` per emitted
+  vertex, in emitted-vertex order, empty for a primitive with no `JOINTS_0`.
+  That is the slice `crcbl_render::skinning::SkinRange::bindings` takes, so a
+  caller passes it straight to the skinning pass instead of converting it; the
+  conversion still names no renderer type, the record coming from
+  `crcbl-shaders` the way `GpuMaterial` already does.
+
+  The bindings could not be re-derived downstream, which is why they are
+  produced here. A primitive that declares `NORMAL` emits one vertex per
+  position; one that does not is **de-indexed** so the flat normals the
+  specification requires can be per face, and emitted vertex `n` is then input
+  vertex `indices[n]`. Nothing in the emitted run says which of the two shapes
+  it got, so a consumer holding only the vertices could not pair them with the
+  file's `JOINTS_0`/`WEIGHTS_0` at all.
+
+  `MeshOrigin` is also the first mapping from a converted mesh back to the
+  primitive it came from — `apps/viewer`'s `world_bounds` documents the absence
+  of one. It is needed rather than decorative because a primitive the conversion
+  skips produces no row: its bindings go with the geometry they indexed, no
+  separate skip is logged for the rig, and every row after the hole sits at an
+  index its document position no longer predicts.
+
+  What a binding still does not arrive with is its palette. Joint indices are
+  relative to the skin the _drawing node_ wears, and neither `InstanceDesc` nor
+  `MeshOrigin` names a node, so building a `SkinRange` still takes the
+  `GltfScene` the conversion read.
+
 - **`apps/viewer` plays the clip in the document it opened, and `B` draws the
   posed skeleton.** The rig is converted into `crcbl::anim`'s `Skeleton` and
   `Clip`, sampled every frame off the render clock, and composed into a joint

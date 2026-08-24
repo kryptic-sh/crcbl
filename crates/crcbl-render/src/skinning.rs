@@ -97,7 +97,7 @@ use glam::{Mat3, Mat4, Vec3, Vec4};
 
 use crate::draw_gen::{bound, compute_pipeline, storage, uniform};
 use crate::graph::{BufferId, ImportedBuffer, RenderGraph};
-use crate::mesh_pool::{MeshPool, MeshPoolError};
+use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolError};
 
 /// A skinned mesh's transient region of the vertex pool: two runs of the same
 /// length, one written per frame and one holding the frame before it.
@@ -176,6 +176,184 @@ impl SkinnedRegion {
     #[must_use]
     pub const fn previous_base(&self, parity: u32) -> u32 {
         self.bases[((parity ^ 1) & 1) as usize]
+    }
+}
+
+/// A resident mesh a draw can be pointed at the skinned output of: a
+/// [`SkinnedRegion`], the **two** mesh-table entries a draw selects between, and
+/// the bind pose those entries were derived from.
+///
+/// ```text
+///  bind pose ─┬─ entry A ─▶ region half 0   drawn on even frames
+///             └─ entry B ─▶ region half 1   drawn on odd frames
+/// ```
+///
+/// # Why two entries and not one rewritten
+///
+/// [`SkinnedRegion::base`] alternates every frame and a draw's base vertex is
+/// **data**, not a draw argument — [`crate::mesh_pool`]'s module docs say why,
+/// and they also say the mesh table is a single host-visible buffer rather than
+/// a ring *because* nothing rewrites an entry between frames. Pointing one entry
+/// at the half a frame writes would break that argument silently, on exactly the
+/// frames that overlap. So both halves get an entry of their own, each written
+/// once by [`MeshPool::alias`] here and cleared once by [`release`](Self::release),
+/// and what alternates per frame is which entry an **instance** names — and
+/// instances already go through [`crate::instance_pool`], which *is* a ring.
+///
+/// The bind pose keeps its own entry throughout, so the same mesh can be drawn
+/// skinned and unskinned in one frame.
+///
+/// # It does not own the mesh
+///
+/// `source`'s vertices, indices and table entry are still the pool's, and
+/// freeing that mesh while one of these is live leaves both entries naming index
+/// bytes the pool has handed back. Release this first.
+#[derive(Debug)]
+pub struct SkinnedMesh {
+    region: SkinnedRegion,
+    /// One per parity, in [`SkinnedRegion::base`]'s indexing: entry `i` names
+    /// half `i`.
+    entries: [MeshHandle; 2],
+    /// The bind pose's first vertex — what [`SkinRange::input_base`] wants, kept
+    /// here so the one call that needs it cannot be handed the skinned base by
+    /// mistake.
+    input_base: u32,
+}
+
+impl SkinnedMesh {
+    /// Reserves a region as long as `source`'s vertex run and gives each of its
+    /// halves a mesh-table entry.
+    ///
+    /// Nothing writes the region: it holds whatever its allocation came with
+    /// until a [`Skinning`] dispatch fills it, exactly as
+    /// [`MeshPool::reserve_vertices`] says. A draw of one of these entries
+    /// before that has happened is a draw of undefined vertices, which is what
+    /// [`crate::forward::ForwardRenderer::add_skinned_passes`] exists to make
+    /// impossible to record.
+    ///
+    /// # Errors
+    ///
+    /// [`MeshPoolError::NotResident`] if `source` is not a resident mesh of this
+    /// pool, and whatever [`SkinnedRegion::reserve`] or [`MeshPool::alias`]
+    /// refuses — a pool with no room for both halves, or a mesh table with no
+    /// room for both entries. **A failure at any step gives back everything the
+    /// earlier steps took**, so a refused reservation leaks neither pool space
+    /// nor a table slot.
+    pub fn reserve(
+        device: &dyn Device,
+        pool: &mut MeshPool,
+        source: MeshHandle,
+    ) -> Result<Self, MeshPoolError> {
+        let range = pool
+            .mesh(source)
+            .ok_or(MeshPoolError::NotResident { handle: source })?;
+        let vertex_count = pool
+            .vertex_count(source)
+            .ok_or(MeshPoolError::NotResident { handle: source })?;
+        let region = SkinnedRegion::reserve(pool, vertex_count)?;
+
+        // Two calls rather than a loop, on `SkinnedRegion::reserve`'s pattern:
+        // each failing path gives back exactly what the paths before it took,
+        // and the region is released last because an entry still naming it would
+        // otherwise outlive the run it points at. A `free` that itself fails
+        // leaves that entry live, so the region stays reserved too — see
+        // `SkinnedMesh::release`, which makes the same trade for the same
+        // reason.
+        let first = match pool.alias(device, source, region.base(0)) {
+            Ok(handle) => handle,
+            Err(error) => {
+                region.release(pool);
+                return Err(error);
+            }
+        };
+        let second = match pool.alias(device, source, region.base(1)) {
+            Ok(handle) => handle,
+            Err(error) => {
+                if pool.free(device, first).unwrap_or(false) {
+                    region.release(pool);
+                }
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            region,
+            entries: [first, second],
+            input_base: range.base_vertex,
+        })
+    }
+
+    /// Clears both table entries and gives the region back.
+    ///
+    /// The device must not be reading either half: this records no barrier, on
+    /// [`SkinnedRegion::release`]'s terms and [`MeshPool::free`]'s.
+    ///
+    /// # Errors
+    ///
+    /// [`MeshPoolError::Hal`] if an entry could not be cleared, in which case
+    /// **the region is not released**: its vertices stay reserved and the entry
+    /// that refused stays spoken for, for the pool's lifetime. That leaks, and
+    /// it is the safe half of the trade — the alternative is a table entry
+    /// naming vertices some other mesh now owns, which is geometry drawn out of
+    /// another object's memory with nothing to report it.
+    pub fn release(self, device: &dyn Device, pool: &mut MeshPool) -> Result<(), MeshPoolError> {
+        for entry in self.entries {
+            pool.free(device, entry)?;
+        }
+        self.region.release(pool);
+        Ok(())
+    }
+
+    /// The region the dispatch writes and the draws read.
+    #[must_use]
+    pub const fn region(&self) -> &SkinnedRegion {
+        &self.region
+    }
+
+    /// Vertices in each half, which is the bind pose's vertex count.
+    #[must_use]
+    pub const fn vertex_count(&self) -> u32 {
+        self.region.vertex_count()
+    }
+
+    /// The bind pose's first vertex: [`SkinRange::input_base`].
+    #[must_use]
+    pub const fn input_base(&self) -> u32 {
+        self.input_base
+    }
+
+    /// The mesh-table id an instance carries to be drawn out of the half a frame
+    /// of this parity wrote — what
+    /// [`GpuInstance::mesh`](crcbl_shaders::mesh::GpuInstance::mesh) holds.
+    ///
+    /// `parity` is [`Skinning::parity`], and an instance written for one parity
+    /// and drawn under the other draws the frame before's pose. Nothing here can
+    /// check that, which is why
+    /// [`ForwardRenderer::begin_skinned_frame`](crate::forward::ForwardRenderer::begin_skinned_frame)
+    /// is what a caller uses rather than this: it reads the parity out of the
+    /// same [`Skinning`] that has just moved it, so the two cannot disagree.
+    #[must_use]
+    pub const fn mesh_id(&self, parity: u32) -> u32 {
+        self.entries[(parity & 1) as usize].index()
+    }
+
+    /// This mesh's [`SkinRange`] for one frame, given the palette and the
+    /// bindings.
+    ///
+    /// The only way to build one where `input_base` and `region` can disagree
+    /// about which mesh they belong to, which is the mistake that would skin one
+    /// primitive's vertices into another's region.
+    #[must_use]
+    pub const fn skin_range<'a>(
+        &'a self,
+        palette: &'a [Mat4],
+        bindings: &'a [SkinBinding],
+    ) -> SkinRange<'a> {
+        SkinRange {
+            input_base: self.input_base,
+            region: &self.region,
+            palette,
+            bindings,
+        }
     }
 }
 
@@ -1007,6 +1185,140 @@ mod tests {
             joint_base: word(16),
             joint_count: word(20),
         }
+    }
+
+    // --- the drawable region -------------------------------------------------
+
+    /// **Releasing a skinned mesh gives back the region and both table
+    /// entries**, and the space is reusable straight away.
+    ///
+    /// The second reservation is what says the *table* slots came back and not
+    /// only the vertices: the pool below holds four entries, one of which the
+    /// source mesh occupies, so a release that left its two behind would refuse
+    /// the second reserve with [`MeshPoolError::MeshTableFull`].
+    #[test]
+    fn releasing_a_skinned_mesh_returns_its_region_and_both_table_entries() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut pool = pool(device, 64);
+        const VERTICES: u32 = 8;
+        let source = pool
+            .upload(
+                device,
+                queue,
+                "source",
+                &vec![0u8; VERTICES as usize * VERTEX_STRIDE],
+                &[0, 1, 2],
+            )
+            .expect("the pool has room");
+        pool.flush(device).expect("the null backend completes it");
+        let (free_before, _) = pool.vertex_space();
+
+        let skinned = SkinnedMesh::reserve(device, &mut pool, source).expect("room for two halves");
+        assert_eq!(
+            skinned.vertex_count(),
+            VERTICES,
+            "each half is as long as the bind pose it deforms"
+        );
+        assert_eq!(
+            skinned.input_base(),
+            pool.mesh(source).expect("resident").base_vertex,
+            "the range reads the bind pose where the pool put it"
+        );
+        assert_eq!(
+            pool.vertex_space().0,
+            free_before - 2 * VERTICES,
+            "two halves are taken, not one"
+        );
+
+        let ids = [skinned.mesh_id(0), skinned.mesh_id(1)];
+        skinned
+            .release(device, &mut pool)
+            .expect("the null backend writes every buffer");
+        assert_eq!(
+            pool.vertex_space().0,
+            free_before,
+            "the region goes back whole, and the free list coalesces it"
+        );
+
+        let table = recorder
+            .buffer_bytes(pool.table_buffer())
+            .expect("the table is live");
+        for id in ids {
+            let at = id as usize * crcbl_shaders::mesh::MESH_ENTRY_STRIDE;
+            let entry = crcbl_shaders::mesh::GpuMesh::from_bytes(
+                table[at..at + crcbl_shaders::mesh::MESH_ENTRY_STRIDE]
+                    .try_into()
+                    .expect("one whole entry"),
+            );
+            assert_eq!(
+                entry.index_count, 0,
+                "entry {id} must read as the empty range, or an instance still naming it \
+                 draws whatever lands in that space next"
+            );
+        }
+
+        let again = SkinnedMesh::reserve(device, &mut pool, source)
+            .expect("the vertices and both table slots came back");
+        again
+            .release(device, &mut pool)
+            .expect("the null backend writes every buffer");
+        pool.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// A reservation that cannot get its **second** table entry gives back the
+    /// first one and the whole region.
+    ///
+    /// The pool below has three entries: the source's, and room for one alias.
+    /// So the second `alias` is refused, and what this asks is that the failure
+    /// path is the one written rather than the one assumed — a leaked half
+    /// region and a held table slot would both survive any test that only ever
+    /// takes the happy path.
+    #[test]
+    fn a_refused_second_entry_gives_back_the_first_and_the_region() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut pool = MeshPool::new(
+            device,
+            &MeshPoolDesc {
+                label: Some("one spare entry"),
+                vertex_capacity: 64,
+                index_capacity: 64,
+                mesh_capacity: 2,
+            },
+        )
+        .expect("the null backend accepts every descriptor");
+        let source = pool
+            .upload(
+                device,
+                queue,
+                "source",
+                &vec![0u8; 8 * VERTEX_STRIDE],
+                &[0, 1, 2],
+            )
+            .expect("the pool has room");
+        pool.flush(device).expect("the null backend completes it");
+        let space = pool.vertex_space();
+
+        let refused = SkinnedMesh::reserve(device, &mut pool, source);
+        assert!(
+            matches!(refused, Err(MeshPoolError::MeshTableFull { .. })),
+            "a table with one spare entry cannot hold two: {refused:?}"
+        );
+        assert_eq!(
+            pool.vertex_space(),
+            space,
+            "a refused reservation leaks no pool space"
+        );
+        // And the one entry it did take is back, or this would refuse too.
+        let alias = pool
+            .alias(device, source, 32)
+            .expect("the entry the failed reservation took must have been given back");
+        pool.free(device, alias).expect("cleared");
+
+        pool.destroy(device);
+        recorder.assert_valid();
     }
 
     // --- the oracle ---------------------------------------------------------

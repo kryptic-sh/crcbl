@@ -169,10 +169,11 @@ use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, Insta
 use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
-use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
+use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError};
 use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
+use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
@@ -681,6 +682,31 @@ impl EmitTail {
     }
 }
 
+/// Where a skinned object is, and what it draws: [`InstanceDesc`] with a
+/// [`SkinnedMesh`] where the description's mesh index would be.
+///
+/// The mesh is a reservation rather than an index because a skinned draw does
+/// not name a mesh at all — it names a *run of the vertex pool* the skinning
+/// dispatch fills, and which of the reservation's two runs that is changes every
+/// frame. [`ForwardRenderer::begin_skinned_frame`] is what keeps it current, so
+/// nothing here carries a parity.
+#[derive(Clone, Copy, Debug)]
+pub struct SkinnedInstanceDesc<'a> {
+    /// The region this object is drawn out of, from
+    /// [`ForwardRenderer::reserve_skinned`].
+    pub mesh: &'a SkinnedMesh,
+    /// Which [`SceneDesc::materials`] row it shades through, exactly as
+    /// [`InstanceDesc::material`].
+    pub material: usize,
+    /// Where it is: a model matrix, on [`InstanceDesc::transform`]'s terms.
+    ///
+    /// The joints are **not** in it — a palette carries each joint's global
+    /// transform times its inverse bind matrix, and this is what puts the
+    /// deformed mesh in the world. See
+    /// [`SkinRange::palette`](crate::skinning::SkinRange::palette).
+    pub transform: Mat4,
+}
+
 /// Everything the forward frame owns, created once.
 #[derive(Debug)]
 pub struct ForwardRenderer {
@@ -718,6 +744,24 @@ pub struct ForwardRenderer {
     /// writes the whole record, and an instance that lost its mesh id would
     /// resolve to entry 0 — which is a mesh, and the wrong one.
     mesh_ids: Vec<u32>,
+    /// Level 0's pool handle for each description mesh that can be skinned, in
+    /// [`SceneDesc::meshes`] order, and [`None`] for the ones that cannot — see
+    /// [`ResidentMesh::skinnable`].
+    ///
+    /// What [`ForwardRenderer::reserve_skinned`] resolves an
+    /// [`InstanceDesc::mesh`] index through. Kept rather than looked up, because
+    /// there is no way back from a table id to the handle that owns it: an id is
+    /// a bare index and a [`MeshHandle`] is generational.
+    skinnable_meshes: Vec<Option<MeshHandle>>,
+    /// Every object [`ForwardRenderer::add_skinned_instance`] placed, with the
+    /// two mesh-table ids it alternates between.
+    ///
+    /// The list [`ForwardRenderer::begin_skinned_frame`] walks to point each one
+    /// at the half of its region *this* frame's dispatch fills. Entries whose
+    /// instance has gone stale are dropped as it walks, so
+    /// [`ForwardRenderer::remove_instance`] needs to know nothing about
+    /// skinning.
+    skinned_instances: Vec<SkinnedInstance>,
 
     /// §3.2's material table, and the rows in it.
     ///
@@ -1829,6 +1873,15 @@ struct ResidentMesh {
     /// stage adds this to the instance's own `base_vertex`, so a cut spanning
     /// three levels reads three different vertex ranges out of one pool.
     vertex_bases: Vec<u32>,
+    /// Level 0's pool handle, for a mesh that can be **skinned** — and [`None`]
+    /// for a [`Geometry::Dag`].
+    ///
+    /// A DAG is refused because its coarser levels are separate vertex runs no
+    /// skinning dispatch writes: an instance drawn out of a skinned region
+    /// resolves every level through [`vertex_bases`](Self::vertex_bases) added
+    /// to the region's base, which for anything but level 0 is memory the
+    /// dispatch never touched.
+    skinnable: Option<MeshHandle>,
 }
 
 impl ResidentMesh {
@@ -1839,6 +1892,20 @@ impl ResidentMesh {
     fn id(&self) -> u32 {
         self.levels[0]
     }
+}
+
+/// One skinned object the renderer re-points every frame: the instance, and the
+/// mesh-table id it draws through under each parity.
+///
+/// The ids are copied out of the [`SkinnedMesh`] rather than borrowed from it,
+/// so placing an object does not tie the renderer's lifetime to the caller's
+/// reservation — the renderer never needs the region again, only the two
+/// numbers.
+#[derive(Clone, Copy, Debug)]
+struct SkinnedInstance {
+    handle: InstanceHandle,
+    /// Indexed by parity, in [`SkinnedMesh::mesh_id`]'s indexing.
+    ids: [u32; 2],
 }
 
 /// One shadow cull's per-frame buffers, read out of its [`DrawGen`] before that
@@ -2147,6 +2214,12 @@ impl ForwardRenderer {
         // reads a bounding box out of, and a DAG's coarser levels approximate
         // the same surface inside the same box.
         let mesh_ids: Vec<u32> = residents.iter().map(ResidentMesh::id).collect();
+        // The same list one level down: what a caller reserving a skinned region
+        // names its mesh with. Read here beside the ids rather than from
+        // `residents` later, because the descriptions this came from are the
+        // caller's and are read once.
+        let skinnable_meshes: Vec<Option<MeshHandle>> =
+            residents.iter().map(|mesh| mesh.skinnable).collect();
         // The handles are `Copy`, so they can be read out before the pool
         // becomes the rollback's — which it must be before the first `?` below,
         // or a failed pipeline would leak two device-local buffers. The index
@@ -3583,6 +3656,8 @@ impl ForwardRenderer {
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
             mesh_ids,
+            skinnable_meshes,
+            skinned_instances: Vec::new(),
             materials: rollback
                 .materials
                 .take()
@@ -3971,6 +4046,12 @@ impl ForwardRenderer {
                     .map(|&handle| resolve(handle))
                     .collect::<Result<_, _>>()?,
                 vertex_bases,
+                // Matched on the description rather than counted off `handles`,
+                // so a DAG decimated to a single level is still refused: what
+                // makes a mesh skinnable is that every draw of it reads one
+                // vertex run, and that is a property of the geometry rather than
+                // of how many levels it happened to arrive with.
+                skinnable: matches!(desc.geometry, Geometry::Flat { .. }).then(|| handles[0]),
             });
         }
         Ok(residents)
@@ -4012,8 +4093,82 @@ impl ForwardRenderer {
     ) -> Result<(), HalError> {
         // The instance pool owns the ring, so its slot is the frame index the
         // uniform buffer and the bind group below are picked with.
-        self.frame = self.instances.begin_frame(device)?;
+        self.frame = self.instances.rotate();
+        self.instances.flush(device)?;
+        self.begin_frame_body(device, camera, light, extent)
+    }
 
+    /// [`begin_frame`](Self::begin_frame) for a frame that **skins**: the same
+    /// call with the skinning plan folded into it.
+    ///
+    /// It does four things in the one order that is correct, which is why it is
+    /// a call and not a note in someone's docs:
+    ///
+    /// 1. rotates the instance ring, so the frame slot exists;
+    /// 2. hands that slot and `ranges` to `skinning`, which validates them,
+    ///    uploads the palettes and **moves the ping-pong** — the only place the
+    ///    parity ever moves;
+    /// 3. points every object placed by
+    ///    [`add_skinned_instance`](Self::add_skinned_instance) at the half of its
+    ///    region the parity now names;
+    /// 4. uploads the instance delta, so those ids are the ones this frame draws.
+    ///
+    /// Do those three and four in the other order and the objects carry the
+    /// previous frame's half — a character posed one frame late, every frame,
+    /// with nothing to report it. A caller never sees a parity or a table id, and
+    /// so cannot get that wrong.
+    ///
+    /// Build `ranges` with [`SkinnedMesh::skin_range`], one per reserved region
+    /// this frame animates. A frame with **no** skinned object still calls this
+    /// with an empty slice — see [`Skinning::begin_frame`], whose slot would
+    /// otherwise re-dispatch whichever frame last used it.
+    ///
+    /// [`add_skinned_passes`](Self::add_skinned_passes) is the other half, and
+    /// the one that orders the dispatch before the draws.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Skinning::begin_frame`] refuses — a joint index past its
+    /// palette, a binding count that is not the region's vertex count, more than
+    /// the pass was built for — and [`SkinningError::Hal`] for anything the seam
+    /// refused, this renderer's own uniform and instance writes included.
+    ///
+    /// # Panics
+    ///
+    /// If `skinning` was not built with at least [`FRAMES_IN_FLIGHT`] frames:
+    /// its rings are indexed by this renderer's frame slot, and
+    /// [`Skinning::begin_frame`] refuses a slot it has no buffers for.
+    pub fn begin_skinned_frame(
+        &mut self,
+        device: &dyn Device,
+        skinning: &mut Skinning,
+        ranges: &[SkinRange<'_>],
+        camera: &Camera,
+        light: &DirectionalLight,
+        extent: (u32, u32),
+    ) -> Result<(), SkinningError> {
+        self.frame = self.instances.rotate();
+        skinning.begin_frame(device, self.frame, ranges)?;
+        self.point_skinned_instances(skinning.parity());
+        self.instances.flush(device)?;
+        self.begin_frame_body(device, camera, light, extent)?;
+        Ok(())
+    }
+
+    /// Everything a frame's start does once its slot has been chosen and its
+    /// instances uploaded — the shared body of [`begin_frame`](Self::begin_frame)
+    /// and [`begin_skinned_frame`](Self::begin_skinned_frame).
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] on [`begin_frame`](Self::begin_frame)'s terms.
+    fn begin_frame_body(
+        &mut self,
+        device: &dyn Device,
+        camera: &Camera,
+        light: &DirectionalLight,
+        extent: (u32, u32),
+    ) -> Result<(), HalError> {
         // `docs/plan/39-capabilities.md`'s four layers, applied here and nowhere
         // else. Frozen for the frame because this call and `add_passes` have to
         // agree: the loops below skip a shadow cull's parameter write when
@@ -4505,6 +4660,201 @@ impl ForwardRenderer {
         }
     }
 
+    // --- skinning: reserving the region, placing the object, ordering the
+    // dispatch ---
+
+    /// The vertex pool every mesh here is resident in — what
+    /// [`SkinningDesc::vertices`](crate::skinning::SkinningDesc::vertices)
+    /// takes.
+    ///
+    /// The skinning pass reads a bind pose out of this buffer and writes the
+    /// deformed vertices back into another run of it, which is what makes a
+    /// skinned draw an ordinary draw. It must be *this* pool's buffer: a
+    /// [`Skinning`] built against any other writes vertices no draw here can
+    /// reach.
+    #[must_use]
+    pub const fn vertex_buffer(&self) -> BufferHandle {
+        self.pool.vertex_buffer()
+    }
+
+    /// Reserves a skinned region for description mesh `mesh`, with the two
+    /// mesh-table entries a draw of it selects between.
+    ///
+    /// The whole of what a caller needs to skin something, in one value: hand
+    /// [`SkinnedMesh::skin_range`] a palette and a set of bindings to get the
+    /// frame's [`SkinRange`], hand the result to
+    /// [`begin_skinned_frame`](Self::begin_skinned_frame), and place it with
+    /// [`add_skinned_instance`](Self::add_skinned_instance). The bases, the
+    /// parity and the table ids never have to be spelled by the caller at all —
+    /// see [`crate::skinning::SkinnedMesh`] for why there are two entries.
+    ///
+    /// **The mesh keeps its own entry**, so the same description mesh can be
+    /// drawn skinned through this and in its bind pose through
+    /// [`add_instance`](Self::add_instance) in the same frame.
+    ///
+    /// Give it back with [`release_skinned`](Self::release_skinned).
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`SkinnedMesh::reserve`] refuses: a vertex pool with no room for
+    /// both halves, or a mesh table with no room for both entries. **Two of each
+    /// per skinned primitive** is what a scene's
+    /// [`Capacities`](crate::scene::Capacities) has to have been sized for.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` is past the end of the description this renderer was built
+    /// from, on [`add_instance`](Self::add_instance)'s terms — and if it names a
+    /// [`Geometry::Dag`], which cannot be drawn out of a skinned region at all.
+    /// A DAG is refused rather than skinned wrongly: its coarser levels are
+    /// separate vertex runs no dispatch writes, so a cut that descended past
+    /// level 0 would draw whatever the pool happened to be holding there.
+    pub fn reserve_skinned(
+        &mut self,
+        device: &dyn Device,
+        mesh: usize,
+    ) -> Result<SkinnedMesh, MeshPoolError> {
+        let source = self.skinnable_meshes[mesh].unwrap_or_else(|| {
+            panic!(
+                "description mesh {mesh} is a Geometry::Dag, whose coarser levels are vertex \
+                 runs no skinning dispatch writes; only a flat mesh can be skinned"
+            )
+        });
+        SkinnedMesh::reserve(device, &mut self.pool, source)
+    }
+
+    /// Clears both of `skinned`'s table entries and gives its region back to the
+    /// vertex pool.
+    ///
+    /// The device must not still be drawing it: this records no barrier, on
+    /// [`SkinnedMesh::release`]'s terms. Objects placed through it are **not**
+    /// removed — [`remove_instance`](Self::remove_instance) is what does that,
+    /// and an instance still naming a released entry draws nothing, because a
+    /// cleared entry is the empty range.
+    ///
+    /// # Errors
+    ///
+    /// [`MeshPoolError::Hal`] if an entry could not be cleared, in which case
+    /// nothing is released — see [`SkinnedMesh::release`], which is where that
+    /// trade is argued.
+    pub fn release_skinned(
+        &mut self,
+        device: &dyn Device,
+        skinned: SkinnedMesh,
+    ) -> Result<(), MeshPoolError> {
+        skinned.release(device, &mut self.pool)
+    }
+
+    /// Places a skinned object in the scene.
+    ///
+    /// [`add_instance`](Self::add_instance) with a reserved region in place of a
+    /// description mesh. The renderer keeps the object in a list of its own and
+    /// **re-points it every [`begin_skinned_frame`](Self::begin_skinned_frame)**
+    /// at the half of the region that frame's dispatch fills, so the parity is
+    /// never something a caller writes.
+    ///
+    /// A skinned object driven by plain [`begin_frame`](Self::begin_frame) is
+    /// therefore left pointing wherever it last was, which after the first frame
+    /// is the pose of the frame before — the reason the two entry points are
+    /// separate calls rather than a flag.
+    ///
+    /// # Errors
+    ///
+    /// [`InstancePoolError::PoolFull`], on
+    /// [`add_instance`](Self::add_instance)'s terms.
+    ///
+    /// # Panics
+    ///
+    /// If [`SkinnedInstanceDesc::material`] is past the end of the description
+    /// this renderer was built from, on
+    /// [`add_instance`](Self::add_instance)'s terms.
+    pub fn add_skinned_instance(
+        &mut self,
+        desc: &SkinnedInstanceDesc<'_>,
+    ) -> Result<InstanceHandle, InstancePoolError> {
+        // Parity zero, and it never reaches the GPU as such: the instance pool
+        // uploads by delta at `begin_skinned_frame`, which re-points every entry
+        // of the list below before it flushes. What this writes is the record's
+        // other four-fifths.
+        let instance = self.skinned_gpu_instance(desc, 0);
+        let handle = self.instances.insert(&instance)?;
+        self.skinned_instances.push(SkinnedInstance {
+            handle,
+            ids: [desc.mesh.mesh_id(0), desc.mesh.mesh_id(1)],
+        });
+        Ok(handle)
+    }
+
+    /// Rewrites the skinned object `handle` names — its region, its material and
+    /// its transform.
+    ///
+    /// [`set_instance`](Self::set_instance) for an object placed by
+    /// [`add_skinned_instance`](Self::add_skinned_instance), and the call a
+    /// character's transform changes through. A stale handle writes nothing.
+    ///
+    /// Passing a handle this renderer has never seen skinned adopts it: the
+    /// object joins the re-pointed list from here on. That is what lets a caller
+    /// swap a bind-pose instance over to a region without removing and replacing
+    /// it.
+    ///
+    /// # Panics
+    ///
+    /// On [`add_skinned_instance`](Self::add_skinned_instance)'s terms.
+    pub fn set_skinned_instance(&mut self, handle: InstanceHandle, desc: &SkinnedInstanceDesc<'_>) {
+        let instance = self.skinned_gpu_instance(desc, 0);
+        if !self.instances.set(handle, &instance) {
+            return;
+        }
+        let ids = [desc.mesh.mesh_id(0), desc.mesh.mesh_id(1)];
+        match self
+            .skinned_instances
+            .iter_mut()
+            .find(|entry| entry.handle == handle)
+        {
+            Some(entry) => entry.ids = ids,
+            None => self.skinned_instances.push(SkinnedInstance { handle, ids }),
+        }
+    }
+
+    /// A skinned object's record, at one parity — [`gpu_instance`](Self::gpu_instance)
+    /// with a region's table id where a description mesh's would be.
+    fn skinned_gpu_instance(
+        &self,
+        desc: &SkinnedInstanceDesc<'_>,
+        parity: u32,
+    ) -> mesh::GpuInstance {
+        mesh::GpuInstance {
+            transform: desc.transform.to_cols_array(),
+            mesh: desc.mesh.mesh_id(parity),
+            material: self.material_ids[desc.material],
+            ..mesh::GpuInstance::default()
+        }
+    }
+
+    /// Points every skinned object at the half of its region a frame of this
+    /// parity fills, and forgets the ones whose instance has gone.
+    ///
+    /// Called between the instance ring's rotation and its upload, which is the
+    /// whole reason those two are separate calls — see
+    /// [`InstancePool::rotate`](crate::instance_pool::InstancePool::rotate).
+    fn point_skinned_instances(&mut self, parity: u32) {
+        let Self {
+            instances,
+            skinned_instances,
+            ..
+        } = self;
+        skinned_instances.retain(|entry| {
+            // The record as the pool holds it, so the transform and material the
+            // caller last set survive: only the mesh id is this call's.
+            let Some(mut instance) = instances.get(entry.handle) else {
+                return false;
+            };
+            instance.mesh = entry.ids[(parity & 1) as usize];
+            instances.set(entry.handle, &instance);
+            true
+        });
+    }
+
     /// The lights in the frame **beside the sun**, which
     /// [`begin_frame`](Self::begin_frame) still takes on its own.
     ///
@@ -4815,6 +5165,70 @@ impl ForwardRenderer {
         target: ImageId,
         extent: (u32, u32),
     ) -> ImageId {
+        self.add_frame_passes(graph, pool, target, extent, None)
+    }
+
+    /// [`add_passes`](Self::add_passes) for a frame that **skins**: the same
+    /// frame with `skinning`'s dispatch in front of every pass that draws.
+    ///
+    /// # This takes the pass rather than its [`BufferId`], and that is the point
+    ///
+    /// [`Skinning::add_pass`] hands back the id of the vertex pool so that a
+    /// mesh pass can declare a read of it and be ordered after the dispatch. The
+    /// obvious seam is therefore an id parameter here — and it is the wrong one,
+    /// because every way of getting it wrong is silent. A caller can pass the id
+    /// of a *different* import, add the skinning pass after this one, or not add
+    /// it at all, and in each case the graph orders nothing, the draws read the
+    /// region before the compute write has been made visible, and what comes out
+    /// is a mesh that flickers between two poses on hardware and looks perfect
+    /// under a validation layer.
+    ///
+    /// So this takes the [`Skinning`] and **adds the pass itself**, first, with
+    /// this renderer's own frame slot, and declares the read on the three passes
+    /// that pull vertices out of the pool — the shadow atlas, the depth prepass
+    /// and the forward pass. There is no order for a caller to get right,
+    /// because there is only one call.
+    ///
+    /// A frame whose [`begin_skinned_frame`](Self::begin_skinned_frame) was
+    /// handed no ranges adds no dispatch and no declarations, and is the frame
+    /// [`add_passes`](Self::add_passes) would have built.
+    ///
+    /// # It records one pass more than [`MAX_PASSES`](Self::MAX_PASSES)
+    ///
+    /// That constant is the bound on [`add_passes`](Self::add_passes) and stays
+    /// so; the skinning dispatch is [`Skinning::MAX_PASSES`], and
+    /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES) — what a caller
+    /// sizes [`PassTimers`](crate::PassTimers) with — already sums the two.
+    pub fn add_skinned_passes<'a>(
+        &'a mut self,
+        graph: &mut RenderGraph<'a>,
+        pool: &TransientPool,
+        target: ImageId,
+        extent: (u32, u32),
+        skinning: &Skinning,
+    ) -> ImageId {
+        self.add_frame_passes(graph, pool, target, extent, Some(skinning))
+    }
+
+    /// The body of [`add_passes`](Self::add_passes) and
+    /// [`add_skinned_passes`](Self::add_skinned_passes), which differ in one
+    /// argument and in nothing else.
+    fn add_frame_passes<'a>(
+        &'a mut self,
+        graph: &mut RenderGraph<'a>,
+        pool: &TransientPool,
+        target: ImageId,
+        extent: (u32, u32),
+        skinning: Option<&Skinning>,
+    ) -> ImageId {
+        // **The skinning dispatch, before anything else is added.** It imports
+        // the vertex pool and hands back that node's id; every pass below that
+        // pulls vertices declares a read of it, and the graph is what turns the
+        // two declarations into the barrier between the compute write and the
+        // draws. `None` is a frame with nothing to skin, which adds no pass and
+        // declares nothing — see `Skinning::add_pass`.
+        let skinned = skinning.and_then(|skinning| skinning.add_pass(graph, self.frame));
+
         // The cull dispatch and the draw-argument dispatch, before anything
         // draws. Every barrier between them and the pass below — including the
         // one into `IndirectArgument` — is the graph's, computed from what each
@@ -4920,6 +5334,7 @@ impl ForwardRenderer {
             &tile_selection,
             occlusion_placeholder,
             base_color_page,
+            skinned,
         );
 
         let scene_color =
@@ -5125,6 +5540,15 @@ impl ForwardRenderer {
         // instead, so both are declared and the graph barriers both.
         let prepass = read_draw_sources(prepass, &generated, emit)
             .use_buffer(prepass_stats, ResourceState::ShaderReadWrite);
+        // The skinned vertices, on the shadow pass's terms. This pass writes the
+        // depth the occlusion pair samples and the forward pass tests against,
+        // so a prepass reading the region before the dispatch is visible lays
+        // down the previous pose's silhouette and the frame is rejected against
+        // it.
+        let prepass = match skinned {
+            Some(vertices) => prepass.read_buffer(vertices),
+            None => prepass,
+        };
         // The camera's own cut, written here and again by the forward pass with
         // the same camera and the same budget. Shared rather than a buffer of its
         // own — unlike a cascade's, which a *later* pass would overwrite before
@@ -5236,6 +5660,15 @@ impl ForwardRenderer {
             // without the declaration the fragment stage reads a buffer the
             // compute pass may still be writing.
             .read_buffer(light_grid);
+        // And the skinned vertices, which is the declaration this whole entry
+        // point exists for: without it the vertex stage pulls a region the
+        // compute dispatch may still be writing, and the graph — which is told
+        // about every other hazard in the frame — has not been told about this
+        // one.
+        let pass = match skinned {
+            Some(vertices) => pass.read_buffer(vertices),
+            None => pass,
+        };
         let pass = read_draw_sources(pass, &generated, emit);
         let pass = match selection {
             // The colour pass's own, which no cascade writes — the cascades
@@ -5479,6 +5912,7 @@ impl ForwardRenderer {
         selection: &[BufferId],
         occlusion_placeholder: ImageId,
         base_color_page: ImageId,
+        skinned: Option<BufferId>,
     ) -> (ImageId, u64) {
         let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
         let (atlas_width, atlas_height) = shadow::atlas_extent();
@@ -5612,6 +6046,15 @@ impl ForwardRenderer {
         // arrive in the state the next frame's import claims.
         for &buffer in selection {
             pass = pass.use_buffer(buffer, ResourceState::ShaderReadWrite);
+        }
+        // The skinned vertices this pass may pull, and the reason it is declared
+        // here as well as on the colour passes: a cascade draws the same
+        // geometry out of the same pool, so a shadow that fell before the
+        // dispatch was visible would be cast by the previous pose — a shadow
+        // that does not match its caster, on a frame whose picture is otherwise
+        // right.
+        if let Some(vertices) = skinned {
+            pass = pass.read_buffer(vertices);
         }
         for (_, draws) in &generated {
             pass = read_draw_sources(pass, draws, self.emit);
@@ -10898,6 +11341,445 @@ mod tests {
                 .try_into()
                 .expect("one whole entry"),
         )
+    }
+
+    // --- skinning: the seam a caller draws a skinned mesh through -----------
+
+    /// A renderer with [`scene::demo`]'s cube reserved for skinning, and a
+    /// [`Skinning`] built against that renderer's own vertex pool.
+    struct SkinnedFixture {
+        renderer: ForwardRenderer,
+        skinning: Skinning,
+        skinned: SkinnedMesh,
+        palette: Vec<Mat4>,
+        bindings: Vec<crcbl_shaders::skinning::SkinBinding>,
+    }
+
+    impl SkinnedFixture {
+        fn build(device: &dyn Device, queue: QueueHandle) -> Self {
+            let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb)
+                .expect("the null backend accepts every descriptor");
+            let skinned = renderer
+                .reserve_skinned(device, DEMO_CUBE)
+                .expect("a default pool has room for two halves of a cube");
+            let skinning = Skinning::new(
+                device,
+                &crate::skinning::SkinningDesc {
+                    label: Some("skinned fixture"),
+                    frames: FRAMES_IN_FLIGHT,
+                    ranges: 1,
+                    joints: 1,
+                    bindings: skinned.vertex_count(),
+                    // The renderer's own pool, which is the whole of what makes
+                    // the dispatch's output reachable by its draws.
+                    vertices: renderer.vertex_buffer(),
+                },
+            )
+            .expect("the null backend accepts every descriptor");
+            let bindings = vec![
+                crcbl_shaders::skinning::SkinBinding {
+                    joints: [0; crcbl_shaders::skinning::JOINTS_PER_VERTEX],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                };
+                skinned.vertex_count() as usize
+            ];
+            Self {
+                renderer,
+                skinning,
+                skinned,
+                palette: vec![Mat4::IDENTITY],
+                bindings,
+            }
+        }
+
+        /// One skinned frame's `begin_skinned_frame`, with this fixture's single
+        /// range.
+        fn begin(&mut self, device: &dyn Device) {
+            let range = self.skinned.skin_range(&self.palette, &self.bindings);
+            self.renderer
+                .begin_skinned_frame(
+                    device,
+                    &mut self.skinning,
+                    &[range],
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    TEST_EXTENT,
+                )
+                .expect("a legal skinning plan");
+        }
+
+        fn destroy(mut self, device: &dyn Device) {
+            self.renderer
+                .release_skinned(device, self.skinned)
+                .expect("the null backend writes every buffer");
+            self.skinning.destroy(device);
+            self.renderer.destroy(device);
+        }
+    }
+
+    /// How many times the host wrote the mesh-table entry `id` names.
+    fn table_writes(recorder: &Recorder, renderer: &ForwardRenderer, id: u32) -> usize {
+        let table = renderer.pool.table_buffer();
+        let at = u64::from(id) * crcbl_shaders::mesh::MESH_ENTRY_STRIDE as u64;
+        recorder
+            .events()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crcbl_hal::null::Event::BufferWritten { buffer, offset, .. }
+                        if *buffer == table && *offset == at
+                )
+            })
+            .count()
+    }
+
+    /// **A skinned primitive takes two mesh-table entries, and neither is ever
+    /// rewritten.**
+    ///
+    /// [`crate::mesh_pool`]'s table is one host-visible buffer rather than a ring
+    /// precisely because nothing rewrites an entry between frames, so a design
+    /// that re-pointed one entry at the half a frame writes would be wrong only
+    /// on the frames that overlap — which is to say invisibly. Both halves of
+    /// that are asserted here: the two entries carry the two bases, and after
+    /// several skinned frames each has been written exactly once.
+    ///
+    /// The bind pose keeps its own entry throughout, which is what lets the same
+    /// mesh be drawn skinned and unskinned in one frame.
+    #[test]
+    fn a_skinned_mesh_takes_two_table_entries_and_neither_is_ever_rewritten() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+
+        let bind_pose_id = fixture.renderer.mesh_ids[DEMO_CUBE];
+        let even_id = fixture.skinned.mesh_id(0);
+        let odd_id = fixture.skinned.mesh_id(1);
+        assert!(
+            even_id != odd_id && even_id != bind_pose_id && odd_id != bind_pose_id,
+            "three distinct entries: the bind pose's and one per parity, not {bind_pose_id}, \
+             {even_id}, {odd_id}"
+        );
+
+        let bind_pose = mesh_entry(&recorder, &fixture.renderer, bind_pose_id);
+        let even = mesh_entry(&recorder, &fixture.renderer, even_id);
+        let odd = mesh_entry(&recorder, &fixture.renderer, odd_id);
+        assert_eq!(
+            (even.base_vertex, odd.base_vertex),
+            (
+                fixture.skinned.region().base(0),
+                fixture.skinned.region().base(1)
+            ),
+            "each entry names the half of the region its parity is written into"
+        );
+        assert_ne!(
+            even.base_vertex, odd.base_vertex,
+            "the two halves are separate reservations, or the ping-pong is one buffer"
+        );
+        assert!(
+            even.base_vertex != bind_pose.base_vertex && odd.base_vertex != bind_pose.base_vertex,
+            "neither half is the bind pose, which the kernel reads while it writes them"
+        );
+        assert_eq!(
+            (
+                even.base_index,
+                even.index_count,
+                even.bounds_min,
+                even.bounds_max
+            ),
+            (
+                bind_pose.base_index,
+                bind_pose.index_count,
+                bind_pose.bounds_min,
+                bind_pose.bounds_max
+            ),
+            "a deformation changes neither the indices nor — as far as this table knows — the box"
+        );
+
+        // Four frames, which is two of each parity: enough that a design
+        // rewriting one entry per frame would have written four times.
+        let imported = swapchain_image_at(device, TEST_EXTENT);
+        let mut pool = crate::TransientPool::new();
+        for _ in 0..4 {
+            fixture.begin(device);
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            fixture.renderer.add_skinned_passes(
+                &mut graph,
+                &pool,
+                target,
+                TEST_EXTENT,
+                &fixture.skinning,
+            );
+            graph.compile(&pool).expect("a legal frame");
+        }
+
+        for (parity, id) in [(0, even_id), (1, odd_id)] {
+            assert_eq!(
+                table_writes(&recorder, &fixture.renderer, id),
+                1,
+                "entry {id} — parity {parity} — must have been written once, when the region \
+                 was reserved, and never again"
+            );
+        }
+
+        fixture.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **A skinned object's recorded mesh id follows the parity of the frame it
+    /// is drawn in.**
+    ///
+    /// The other half of the two-entry design: the entries never move, so what
+    /// has to alternate is which of them an *instance* names — and it has to
+    /// alternate in the buffer the frame actually draws from, which is why this
+    /// reads the instance ring's bytes rather than the host's mirror.
+    ///
+    /// The second assertion is what stops this passing with the parity ignored:
+    /// two consecutive frames must have named **different** entries.
+    #[test]
+    fn a_skinned_draw_names_the_half_the_frames_dispatch_filled() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        let handle = fixture
+            .renderer
+            .add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+            })
+            .expect("a pool of thousands has room for one object");
+
+        let mut named = Vec::new();
+        for _ in 0..2 {
+            fixture.begin(device);
+            let parity = fixture.skinning.parity();
+            let frame = fixture.renderer.frame();
+            let buffer = fixture.renderer.instances.buffers()[frame];
+            let bytes = recorder.buffer_bytes(buffer).expect("the ring is live");
+            let index = fixture
+                .renderer
+                .instances
+                .index(handle)
+                .expect("the object is live") as usize;
+            let at = index * mesh::INSTANCE_STRIDE;
+            let instance = mesh::GpuInstance::from_bytes(
+                bytes[at..at + mesh::INSTANCE_STRIDE]
+                    .try_into()
+                    .expect("one whole instance"),
+            );
+            assert_eq!(
+                instance.mesh,
+                fixture.skinned.mesh_id(parity),
+                "the buffer this frame draws from must name the entry parity {parity} writes"
+            );
+            named.push(instance.mesh);
+        }
+        assert_ne!(
+            named[0], named[1],
+            "two consecutive frames must have drawn different halves, or a renderer that \
+             ignored the parity entirely would pass this"
+        );
+
+        fixture.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **The graph barriers the skinning dispatch's write before every pass that
+    /// pulls vertices**, and it does so because `add_skinned_passes` added the
+    /// dispatch itself rather than trusting a caller to.
+    ///
+    /// Pass order alone would not settle it — a dispatch that ran first and was
+    /// never barriered is the exact defect, and it produces a correct-looking
+    /// frame on a desktop driver. So the transition out of
+    /// [`ResourceState::ShaderReadWrite`] is named: there must be exactly one,
+    /// it must sit after the dispatch, and it must sit at or before the first of
+    /// the three passes that draw.
+    #[test]
+    fn the_skinning_dispatch_is_barriered_before_every_pass_that_draws() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        place_cube(&mut fixture.renderer, Mat4::IDENTITY);
+        fixture
+            .renderer
+            .add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+            })
+            .expect("room for one object");
+        fixture.begin(device);
+
+        let imported = swapchain_image_at(device, TEST_EXTENT);
+        let mut pool = crate::TransientPool::new();
+        let mut graph = crate::RenderGraph::new(queue);
+        let target = graph.import_image("target", imported);
+        // The same node `Skinning::add_pass` imports — one handle is one node —
+        // so the barriers below can be named rather than guessed at.
+        let vertices = graph.import_buffer(
+            "vertex-pool",
+            ImportedBuffer {
+                buffer: fixture.renderer.vertex_buffer(),
+                initial: ResourceState::ShaderRead,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+        fixture.renderer.add_skinned_passes(
+            &mut graph,
+            &pool,
+            target,
+            TEST_EXTENT,
+            &fixture.skinning,
+        );
+        let compiled = graph.compile(&pool).expect("a legal frame");
+        let labels: Vec<&str> = compiled
+            .passes()
+            .iter()
+            .map(crate::graph::CompiledPass::label)
+            .collect();
+
+        let dispatch = labels
+            .iter()
+            .position(|label| *label == "skinning")
+            .expect("add_skinned_passes adds the dispatch itself");
+        let drawing: Vec<usize> = ["shadow", "depth-prepass", "forward"]
+            .into_iter()
+            .map(|wanted| {
+                labels
+                    .iter()
+                    .position(|label| *label == wanted)
+                    .unwrap_or_else(|| panic!("the frame draws through {wanted}: {labels:?}"))
+            })
+            .collect();
+        for (label, at) in ["shadow", "depth-prepass", "forward"]
+            .into_iter()
+            .zip(&drawing)
+        {
+            assert!(
+                dispatch < *at,
+                "the dispatch is at {dispatch} and {label} at {at}: {labels:?}"
+            );
+        }
+
+        // Each drawing pass declares the read for itself, and this is asserted
+        // per pass rather than left to the single barrier below. The graph
+        // transitions the region once, before the first reader, and a later
+        // pass that never declared the read finds it already in the state it
+        // wanted — so dropping the declaration from `forward` alone changes no
+        // barrier and moves no label, and every assertion in this test still
+        // passes. What it does drop is that pass's *dependency* on the
+        // dispatch, which is the only thing keeping the two in this order.
+        for (label, at) in ["shadow", "depth-prepass", "forward"]
+            .into_iter()
+            .zip(&drawing)
+        {
+            assert!(
+                compiled.passes()[*at].reads_buffer(vertices),
+                "{label} draws skinned vertices and must declare that it reads them, or \
+                 nothing but declaration order keeps it after the dispatch"
+            );
+        }
+
+        let released: Vec<usize> = compiled
+            .passes()
+            .iter()
+            .enumerate()
+            .filter(|(_, pass)| {
+                pass.barriers().buffers.iter().any(|barrier| {
+                    barrier.buffer == vertices
+                        && barrier.from == ResourceState::ShaderReadWrite
+                        && barrier.to == ResourceState::ShaderRead
+                })
+            })
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            released.len(),
+            1,
+            "exactly one transition out of the dispatch's write: {released:?} in {labels:?}"
+        );
+        let barrier = released[0];
+        let first_draw = *drawing.iter().min().expect("three passes");
+        assert!(
+            dispatch < barrier && barrier <= first_draw,
+            "the barrier is at {barrier}, the dispatch at {dispatch} and the first pass that \
+             draws at {first_draw} — a draw that reads the region before the write is made \
+             visible is the whole defect this seam exists to prevent"
+        );
+
+        drop(compiled);
+        fixture.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// A frame with nothing to skin adds no dispatch and declares no read, and
+    /// is the frame [`ForwardRenderer::add_passes`] would have built.
+    #[test]
+    fn a_frame_with_no_skinned_range_is_the_frame_add_passes_builds() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        place_cube(&mut fixture.renderer, Mat4::IDENTITY);
+
+        let imported = swapchain_image_at(device, TEST_EXTENT);
+        let pool = crate::TransientPool::new();
+        let mut skinned_labels = Vec::new();
+        for _ in 0..1 {
+            fixture
+                .renderer
+                .begin_skinned_frame(
+                    device,
+                    &mut fixture.skinning,
+                    &[],
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    TEST_EXTENT,
+                )
+                .expect("an empty plan is a legal one");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            fixture.renderer.add_skinned_passes(
+                &mut graph,
+                &pool,
+                target,
+                TEST_EXTENT,
+                &fixture.skinning,
+            );
+            skinned_labels = graph
+                .compile(&pool)
+                .expect("a legal frame")
+                .passes()
+                .iter()
+                .map(|pass| pass.label().to_string())
+                .collect();
+        }
+        let plain = passes_in_a_frame(
+            device,
+            queue,
+            &mut fixture.renderer,
+            imported,
+            &pool,
+            TEST_EXTENT,
+        );
+        assert_eq!(
+            skinned_labels, plain,
+            "a frame with nothing to skin must cost the vertex pool no barrier at all"
+        );
+
+        fixture.destroy(device);
+        let mut pool = pool;
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
     }
 
     /// One frame recorded end to end: `begin_frame`, the graph, and an encoder

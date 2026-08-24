@@ -70,7 +70,7 @@ pub use gltf_import::{
     GltfPrimitive, GltfSamples, GltfScene, GltfSkin, GltfTexture, import_gltf,
 };
 #[cfg(feature = "render")]
-pub use gltf_render::{RenderScene, Skip, build_render_scene};
+pub use gltf_render::{MeshOrigin, RenderScene, Skip, build_render_scene};
 pub use lod::{DEFAULT_LOD_RATIOS, LodError, LodLevel, build_lod_chain};
 pub use lod_resolve::{HandLodLink, LodOrigin, LodResolveError, MeshLod, resolve_lod};
 pub use meshlet::{ClusterBounds, Meshlet, MeshletBuild, MeshletError, build_meshlets};

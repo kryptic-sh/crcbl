@@ -184,7 +184,9 @@ pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use effects::{EffectOverride, EffectRequest, RenderEffects};
 pub use fly::{Flyer, LOOK, SPEED, TURN};
-pub use forward::{DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, SHADOW_LOD_BIAS};
+pub use forward::{
+    DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, SHADOW_LOD_BIAS, SkinnedInstanceDesc,
+};
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
     GraphError, GraphImageBarrier, ImageId, ImportField, ImportedBuffer, ImportedImage,
@@ -208,8 +210,8 @@ pub use orbit::OrbitCamera;
 pub use scene::{Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, ProbeGrid, SceneDesc};
 pub use shadow::Cascades;
 pub use skinning::{
-    SkinRange, SkinnedRegion, Skinning, SkinningDesc, SkinningError, blend, normal_basis,
-    skin_vertex,
+    SkinRange, SkinnedMesh, SkinnedRegion, Skinning, SkinningDesc, SkinningError, blend,
+    normal_basis, skin_vertex,
 };
 pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,

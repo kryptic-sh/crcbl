@@ -34,6 +34,31 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
   never seen a document that uses them.
 
+### Nothing draws a skinned mesh yet, and the seam has three limits
+
+`crcbl_render::forward` gained the seam an application reaches the skinning pass
+through — `reserve_skinned`, `add_skinned_instance`, `begin_skinned_frame`,
+`add_skinned_passes` — and `crcbl_scene::gltf_render` carries a primitive's
+per-vertex bindings out as `MeshOrigin::bindings`. **No application calls any of
+it.** `apps/viewer` still draws a skeleton rather than skinned geometry, and the
+demo that would close it is `docs/plan/sample/09-puppet.md`. Until one does, the
+seam is exercised only by `crcbl-render`'s own tests, and the kernel runs on no
+backend but Vulkan (see the entry below).
+
+Three things a caller meets that are documented rather than fixed:
+
+- **A `Geometry::Dag` cannot be skinned.** Its coarser levels are separate
+  vertex runs no dispatch writes, so `ForwardRenderer::reserve_skinned` refuses
+  one by name. A skinned mesh therefore has no LOD.
+- **An alias entry carries the bind pose's bounding box**, so a mesh deformed
+  outside it is culled while still on screen. The box the dispatch will fill is
+  a property of a palette the reservation has never seen; fixing it means either
+  a caller-supplied bound or a pass that computes one.
+- **A binding does not arrive with its palette.** Joint indices are relative to
+  the skin the _drawing node_ wears, and neither `InstanceDesc` nor `MeshOrigin`
+  names a node — so building a `SkinRange` still takes the `GltfScene` the
+  conversion read, not just the `RenderScene` it produced.
+
 ### The skinning rig is validated late, and only the vk leg runs the kernel
 
 `crates/crcbl-vk/tests/vk_e2e/skinning.rs` dispatches

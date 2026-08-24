@@ -683,3 +683,194 @@ pub fn rigged_json(buffer: &str) -> String {
 }}"#
     )
 }
+
+// ---------------------------------------------------------------------------
+// The skinned pair
+// ---------------------------------------------------------------------------
+
+/// The four corners of [`skinned_pair_json`]'s skinned quad, counter-clockwise
+/// seen from `+Z`.
+#[cfg(test)]
+pub(crate) const QUAD_POSITIONS: [[f32; 3]; 4] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+];
+
+/// Two triangles over those corners.
+///
+/// Deliberately neither the identity nor a permutation: corners 0 and 2 are
+/// each named twice and corner 3 once, so a per-vertex run that a de-indexing
+/// step took in *position* order instead of in emitted order comes out both the
+/// wrong length and the wrong values. An index list of `[0, 1, 2, 3, ...]`
+/// would let that mistake pass on the first three vertices.
+#[cfg(test)]
+pub(crate) const QUAD_INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
+
+/// Which joint each corner of the quad is bound to.
+///
+/// A different leading joint per corner — the whole point of the fixture is
+/// that a binding which arrived from the wrong corner names a different joint,
+/// which the rigged triangle's `JOINTS` cannot show because two of its three
+/// vertices are bound alike.
+#[cfg(test)]
+pub(crate) const QUAD_JOINTS: [[u16; 4]; 4] =
+    [[0, 1, 0, 0], [1, 2, 0, 0], [2, 3, 0, 0], [3, 0, 0, 0]];
+
+/// How much of each corner its two joints own, in `QUAD_JOINTS`' order.
+///
+/// Each pair sums to one, as the specification asks, and no two corners share a
+/// split — so a run that lost its order is a different set of floats rather
+/// than the same one.
+#[cfg(test)]
+pub(crate) const QUAD_WEIGHTS: [[f32; 4]; 4] = [
+    [0.25, 0.75, 0.0, 0.0],
+    [0.5, 0.5, 0.0, 0.0],
+    [0.75, 0.25, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.0],
+];
+
+/// The bytes [`skinned_pair_json`]'s accessors read.
+///
+/// | bytes      | what                                          |
+/// | ---------- | --------------------------------------------- |
+/// | `0..48`    | 4 × `[f32; 3]` [`QUAD_POSITIONS`]             |
+/// | `48..60`   | 6 × `u16` [`QUAD_INDICES`]                    |
+/// | `60..92`   | 4 × `[u16; 4]` [`QUAD_JOINTS`]                |
+/// | `92..156`  | 4 × `[f32; 4]` [`QUAD_WEIGHTS`]               |
+/// | `156..192` | 3 × `[f32; 3]` `POSITIONS`, the triangle again |
+/// | `192..228` | 3 × `[f32; 3]` `NORMALS`                      |
+/// | `228..234` | 3 × `u16` `INDICES`                           |
+///
+/// Every accessor begins on a multiple of four, which is stricter than the
+/// specification's rule that an offset be a multiple of its component size and
+/// costs two of these nothing.
+#[cfg(test)]
+pub(crate) fn skinned_pair_bin() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for position in QUAD_POSITIONS {
+        for component in position {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    for index in QUAD_INDICES {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    for joints in QUAD_JOINTS {
+        for index in joints {
+            bytes.extend_from_slice(&index.to_le_bytes());
+        }
+    }
+    for weights in QUAD_WEIGHTS {
+        for weight in weights {
+            bytes.extend_from_slice(&weight.to_le_bytes());
+        }
+    }
+    for position in POSITIONS {
+        for component in position {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    for normal in NORMALS {
+        for component in normal {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    for index in INDICES {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    bytes
+}
+
+/// A document of two meshes: an unskinned triangle that declares `NORMAL`, then
+/// a **skinned quad that does not**.
+///
+/// The pair is the shape [`rigged_json`] cannot be. That document's one
+/// primitive declares `NORMAL`, so it only ever exercises the conversion's
+/// one-vertex-per-position path; this one exercises the other, where a client
+/// must calculate the flat normals the file left out and has to de-index the
+/// triangle list to do it. Putting an unskinned primitive in the same document
+/// makes "which run belongs to which primitive" a question with a wrong answer
+/// available, and putting it **first** makes it a question with a wrong answer
+/// that a skip can expose: the triangle is the one whose index accessor a test
+/// can shorten to a partial triangle, which is refused by the meshlet build
+/// rather than by the importer, leaving the skinned quad as the only converted
+/// mesh and no longer at the row its document index would suggest.
+///
+/// No animation and no `inverseBindMatrices`: the skin is here so the quad's
+/// joint indices have something to be indices *into*, and the specification
+/// defines a skin without them as binding at identity. The buffer's
+/// `byteLength` is measured off [`skinned_pair_bin`] rather than written out,
+/// so the two cannot drift.
+#[cfg(test)]
+pub(crate) fn skinned_pair_json() -> String {
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0, 1, 2] }}],
+  "nodes": [
+    {{ "name": "plain-triangle", "mesh": 0 }},
+    {{ "name": "skinned-quad", "mesh": 1, "skin": 0 }},
+    {{ "name": "joint-root", "children": [3, 4, 5] }},
+    {{ "name": "joint-a" }},
+    {{ "name": "joint-b" }},
+    {{ "name": "joint-c" }}
+  ],
+  "meshes": [
+    {{
+      "name": "plain-triangle",
+      "primitives": [{{
+        "attributes": {{ "POSITION": 4, "NORMAL": 5 }},
+        "indices": 6
+      }}]
+    }},
+    {{
+      "name": "skinned-quad",
+      "primitives": [{{
+        "attributes": {{ "POSITION": 0, "JOINTS_0": 2, "WEIGHTS_0": 3 }},
+        "indices": 1
+      }}]
+    }}
+  ],
+  "skins": [{{ "name": "quad-rig", "joints": [2, 3, 4, 5] }}],
+  "accessors": [
+    {{
+      "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+      "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+    }},
+    {{ "bufferView": 1, "componentType": 5123, "count": 6, "type": "SCALAR" }},
+    {{ "bufferView": 2, "componentType": 5123, "count": 4, "type": "VEC4" }},
+    {{ "bufferView": 3, "componentType": 5126, "count": 4, "type": "VEC4" }},
+    {{
+      "bufferView": 4, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+    }},
+    {{ "bufferView": 5, "componentType": 5126, "count": 3, "type": "VEC3" }},
+    {{ "bufferView": 6, "componentType": 5123, "count": 3, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": 48 }},
+    {{ "buffer": 0, "byteOffset": 48, "byteLength": 12 }},
+    {{ "buffer": 0, "byteOffset": 60, "byteLength": 32 }},
+    {{ "buffer": 0, "byteOffset": 92, "byteLength": 64 }},
+    {{ "buffer": 0, "byteOffset": 156, "byteLength": 36 }},
+    {{ "buffer": 0, "byteOffset": 192, "byteLength": 36 }},
+    {{ "buffer": 0, "byteOffset": 228, "byteLength": 6 }}
+  ],
+  "buffers": [{{ "byteLength": {} }}]
+}}"#,
+        skinned_pair_bin().len()
+    )
+}
+
+/// [`import_glb`] for the skinned pair, whose buffer is a different length.
+///
+/// Takes the JSON rather than building it so that a case which mutates the
+/// document with [`replacing`] — a primitive made unusable, say — imports
+/// through the same path as the intact one.
+#[cfg(test)]
+pub(crate) fn import_skinned_pair_glb(json: &str) -> Result<GltfScene, StorageError> {
+    import_glb_bytes(&glb(json, Some(&skinned_pair_bin())))
+}

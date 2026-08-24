@@ -47,6 +47,54 @@
 //! a two-primitive mesh drawn by three nodes becomes two resident meshes and six
 //! instances. [`RenderScene::instances`] is already in that expanded form.
 //!
+//! # The rig rides along with the vertices, because it cannot be re-derived
+//!
+//! A skinned primitive carries [`GltfPrimitive::joints`] and
+//! [`GltfPrimitive::weights`], one of each per position. The vertices this
+//! module emits are **not** always one per position: a primitive with no
+//! `NORMAL` is de-indexed so that every triangle gets its own three vertices,
+//! and nothing in the emitted run says which of the two shapes it got. So a
+//! consumer holding only [`MeshDesc`]s cannot pair a vertex with the binding it
+//! was imported with, and the pairing has to be made here, by the code that
+//! does the expansion.
+//!
+//! [`RenderScene::origins`] is where it lands: one [`MeshOrigin`] per
+//! [`SceneDesc::meshes`] row, in that order, holding the row's bindings in
+//! **emitted-vertex order** and exactly as long as its vertices — empty for an
+//! unskinned primitive. Each is a
+//! [`crcbl_shaders::skinning::SkinBinding`], which is the record
+//! [`SkinRange::bindings`](crcbl_render::skinning::SkinRange::bindings) takes,
+//! so a caller passes the slice rather than converting it first. That is
+//! [`mesh::GpuMaterial`]'s seam again — this crate already produces the
+//! shader's own records instead of a parallel copy of them — and it adds no
+//! dependency: the record lives in `crcbl-shaders`, which the bake side of this
+//! crate links anyway.
+//!
+//! A primitive the conversion **skips** — one with no triangles, or one whose
+//! meshlet build failed — produces no [`MeshDesc`], so it has no [`MeshOrigin`]
+//! either and its bindings go with the geometry they indexed. There is no
+//! second [`Skip`] for the rig: a binding array is indexed *by* the vertices
+//! that are gone, so a message about it would report one loss twice, and the
+//! [`Skip`] already pushed for the primitive is the record.
+//!
+//! A document mixing skinned and unskinned primitives therefore comes back as
+//! one entry per primitive that was converted, each carrying a full run or an
+//! empty one. [`MeshOrigin::mesh`] and [`MeshOrigin::primitive`] name the glTF
+//! primitive the row came from, which is also the mapping from a converted mesh
+//! back to its primitive that nothing exposed before — the hole a skip leaves
+//! is exactly why reading it off the row index does not work.
+//!
+//! # What the bindings still do not come with
+//!
+//! A binding's joint indices are relative to the *skin the drawing node wears*,
+//! and a skin is a property of a node rather than of a primitive. Neither
+//! [`InstanceDesc`] nor [`MeshOrigin`] names the node it came from, so the
+//! palette a [`SkinRange`](crcbl_render::skinning::SkinRange) needs beside its
+//! bindings cannot yet be built from a [`RenderScene`] alone; it takes the
+//! [`GltfScene`] the conversion read, whose [`GltfScene::instances`] carry the
+//! node. Closing that is a change to what an instance is, not to what a mesh
+//! is, and this module does not make it.
+//!
 //! # Material row 0 is the glTF default material
 //!
 //! [`SceneDesc::materials`]' first row is what an instance written without a
@@ -98,6 +146,7 @@ use crcbl_render::scene::{
     Capacities, Geometry, InstanceDesc, MeshDesc, PAGE_EXTENT, PageDesc, ProbeGrid, SceneDesc,
 };
 use crcbl_shaders::mesh::{self, MeshVertex, VERTEX_STRIDE};
+use crcbl_shaders::skinning::SkinBinding;
 use glam::{Mat4, Vec3};
 
 use crate::gltf_import::{GltfPrimitive, GltfScene};
@@ -155,10 +204,37 @@ pub struct RenderScene {
     /// Already expanded per primitive, and already sized for by
     /// [`SceneDesc::capacities`] — see the [module docs](self).
     pub instances: Vec<InstanceDesc>,
+    /// One entry per [`SceneDesc::meshes`] row, in the same order: the glTF
+    /// primitive that row was made from, and the skin bindings its vertices
+    /// carry.
+    ///
+    /// `origins[i]` describes `scene.meshes[i]`. See the [module docs](self)
+    /// for why the bindings are produced here and what a skipped primitive
+    /// leaves behind.
+    pub origins: Vec<MeshOrigin>,
     /// Every [`Skip`], in the order they were found.
     ///
     /// Empty is the whole file arriving intact.
     pub skipped: Vec<Skip>,
+}
+
+/// Which glTF primitive one [`SceneDesc::meshes`] row was made from, and the
+/// skin bindings its vertices carry.
+///
+/// A primitive the conversion skipped has no row and so no entry here, which is
+/// why [`mesh`](Self::mesh) and [`primitive`](Self::primitive) are carried
+/// rather than inferred from the position in [`RenderScene::origins`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeshOrigin {
+    /// Which of [`GltfScene::meshes`] the row's primitive belongs to.
+    pub mesh: usize,
+    /// Which of that mesh's [`GltfPrimitive`]s it is.
+    pub primitive: usize,
+    /// One [`SkinBinding`] per emitted vertex of the row, in the same order —
+    /// the slice
+    /// [`SkinRange::bindings`](crcbl_render::skinning::SkinRange::bindings)
+    /// takes, and **empty** for a primitive the file gave no `JOINTS_0`.
+    pub bindings: Vec<SkinBinding>,
 }
 
 /// Convert an imported document into what the forward renderer draws.
@@ -179,7 +255,7 @@ pub fn build_render_scene(scene: &GltfScene, key: &Path) -> RenderScene {
 
     let (page, layer_of_image) = pack_page(scene, &mut skips);
     let materials = material_rows(scene, &layer_of_image, &mut skips);
-    let (meshes, slots) = resident_meshes(scene, &mut skips);
+    let (meshes, origins, slots) = resident_meshes(scene, &mut skips);
     let instances = place_instances(scene, &slots, &mut skips);
 
     let vertices: usize = meshes.iter().map(vertex_count).sum();
@@ -200,6 +276,7 @@ pub fn build_render_scene(scene: &GltfScene, key: &Path) -> RenderScene {
             probes: ProbeGrid::default(),
         },
         instances,
+        origins,
         skipped: skips.list,
     }
 }
@@ -547,9 +624,14 @@ fn material_rows(
 /// instance of it places nothing rather than placing the primitive beside it.
 type Slots = Vec<Vec<Option<usize>>>;
 
-/// One [`MeshDesc`] per usable glTF primitive, in document order.
-fn resident_meshes(scene: &GltfScene, skips: &mut Skips<'_>) -> (Vec<MeshDesc<'static>>, Slots) {
+/// One [`MeshDesc`] per usable glTF primitive, in document order, and one
+/// [`MeshOrigin`] beside each.
+fn resident_meshes(
+    scene: &GltfScene,
+    skips: &mut Skips<'_>,
+) -> (Vec<MeshDesc<'static>>, Vec<MeshOrigin>, Slots) {
     let mut meshes = Vec::new();
+    let mut origins = Vec::new();
     let mut slots: Slots = Vec::with_capacity(scene.meshes().len());
     for (mesh_index, mesh) in scene.meshes().iter().enumerate() {
         let mut mesh_slots = Vec::with_capacity(mesh.primitives().len());
@@ -580,8 +662,8 @@ fn resident_meshes(scene: &GltfScene, skips: &mut Skips<'_>) -> (Vec<MeshDesc<'s
                 );
             }
 
-            let (positions, vertices, indices) = expand(primitive);
-            let clusters = match build_meshlets(&positions, &indices) {
+            let expanded = expand(primitive);
+            let clusters = match build_meshlets(&expanded.positions, &expanded.indices) {
                 Ok(build) => build.into_clusters(),
                 Err(error) => {
                     skips.push(
@@ -594,22 +676,41 @@ fn resident_meshes(scene: &GltfScene, skips: &mut Skips<'_>) -> (Vec<MeshDesc<'s
                 }
             };
             mesh_slots.push(Some(meshes.len()));
+            origins.push(MeshOrigin {
+                mesh: mesh_index,
+                primitive: primitive_index,
+                bindings: expanded.bindings,
+            });
             meshes.push(MeshDesc {
                 label: Cow::Owned(at()),
                 geometry: Geometry::Flat {
-                    vertices: Cow::Owned(vertex_bytes(&vertices)),
-                    indices: Cow::Owned(indices),
+                    vertices: Cow::Owned(vertex_bytes(&expanded.vertices)),
+                    indices: Cow::Owned(expanded.indices),
                     clusters,
                 },
             });
         }
         slots.push(mesh_slots);
     }
-    (meshes, slots)
+    (meshes, origins, slots)
+}
+
+/// What [`expand`] made of one primitive.
+struct Expanded {
+    /// The emitted vertices' positions, which is what the meshlet build reads.
+    positions: Vec<[f32; 3]>,
+    /// The emitted vertices in the renderer's own record, one per entry of
+    /// [`Expanded::positions`].
+    vertices: Vec<MeshVertex>,
+    /// The triangle list over them.
+    indices: Vec<u32>,
+    /// One binding per emitted vertex, in the same order, or empty for an
+    /// unskinned primitive — see the [module docs](self).
+    bindings: Vec<SkinBinding>,
 }
 
 /// A primitive's vertices in the renderer's own record, with the positions and
-/// indices the meshlet build reads.
+/// indices the meshlet build reads and the skin bindings that pair with them.
 ///
 /// **A primitive with no `NORMAL` is de-indexed and given flat face normals**,
 /// which is what the glTF specification requires of a client: "When normals are
@@ -619,7 +720,14 @@ fn resident_meshes(scene: &GltfScene, skips: &mut Skips<'_>) -> (Vec<MeshDesc<'s
 /// `crcbl_shaders::mesh::cube_vertices` does by hand for the engine's own cube.
 /// Doing anything else here is what makes an exported mesh light as a
 /// featureless blob.
-fn expand(primitive: &GltfPrimitive) -> (Vec<[f32; 3]>, Vec<MeshVertex>, Vec<u32>) {
+///
+/// That expansion is why the bindings are produced here: on the indexed path an
+/// emitted vertex is input vertex `n`, on the de-indexed one it is input vertex
+/// `indices[n]`, and the emitted run carries no trace of which happened. So the
+/// input vertex each emitted vertex came from is recorded as the expansion runs
+/// and the bindings are read through it, rather than being re-derived by a
+/// consumer that cannot tell the two shapes apart.
+fn expand(primitive: &GltfPrimitive) -> Expanded {
     let uv_at = |index: usize| {
         primitive
             .tex_coords()
@@ -635,11 +743,18 @@ fn expand(primitive: &GltfPrimitive) -> (Vec<[f32; 3]>, Vec<MeshVertex>, Vec<u32
             .enumerate()
             .map(|(index, position)| vertex(*position, primitive.normals()[index], uv_at(index)))
             .collect();
-        return (positions, vertices, primitive.indices().to_vec());
+        let bindings = bindings_at(primitive, 0..positions.len());
+        return Expanded {
+            positions,
+            vertices,
+            indices: primitive.indices().to_vec(),
+            bindings,
+        };
     }
 
     let mut positions = Vec::with_capacity(primitive.indices().len());
     let mut vertices = Vec::with_capacity(primitive.indices().len());
+    let mut sources = Vec::with_capacity(primitive.indices().len());
     for corners in primitive.indices().chunks_exact(3) {
         let corner = |at: usize| primitive.positions()[corners[at] as usize];
         let (a, b, c) = (
@@ -655,10 +770,46 @@ fn expand(primitive: &GltfPrimitive) -> (Vec<[f32; 3]>, Vec<MeshVertex>, Vec<u32
         for (at, &index) in corners.iter().enumerate() {
             positions.push(corner(at));
             vertices.push(vertex(corner(at), face.to_array(), uv_at(index as usize)));
+            // Pushed here rather than re-read off `indices` afterwards so that
+            // the two cannot disagree: whatever this loop chooses to emit — a
+            // trailing partial triangle is dropped by `chunks_exact`, for one —
+            // the binding order is chosen by the same statement as the vertex
+            // order.
+            sources.push(index as usize);
         }
     }
+    let bindings = bindings_at(primitive, sources.into_iter());
     let indices = (0..u32::try_from(positions.len()).unwrap_or(u32::MAX)).collect();
-    (positions, vertices, indices)
+    Expanded {
+        positions,
+        vertices,
+        indices,
+        bindings,
+    }
+}
+
+/// One [`SkinBinding`] per entry of `order`, or no bindings at all for a
+/// primitive the file gave no `JOINTS_0`.
+///
+/// `order` is the input vertex each emitted vertex came from — the identity on
+/// the indexed path, `indices[n]` on the de-indexed one. The import refuses a
+/// primitive carrying one of `JOINTS_0`/`WEIGHTS_0` without the other and one
+/// whose attribute is not as long as `POSITION`, so an index good for a
+/// position is good for a binding, and the empty case is all-or-nothing rather
+/// than per-vertex.
+///
+/// The `u16` joint indices widen to the `u32` the GPU record holds;
+/// [`SkinBinding::joints`] carries the argument for widening over packing.
+fn bindings_at(primitive: &GltfPrimitive, order: impl Iterator<Item = usize>) -> Vec<SkinBinding> {
+    if primitive.joints().is_empty() {
+        return Vec::new();
+    }
+    order
+        .map(|index| SkinBinding {
+            joints: primitive.joints()[index].map(u32::from),
+            weights: primitive.weights()[index],
+        })
+        .collect()
 }
 
 /// One vertex in `crcbl_shaders::mesh`'s record.
@@ -849,8 +1000,10 @@ fn capacities_for(
 mod tests {
     use super::*;
     use crate::gltf_fixture::{
-        BASE_COLOR, BIN_CHUNK_BUFFER, IMAGE_TEXELS, glb, import_glb, import_glb_bytes, png_bytes,
-        replacing, textured_glb, textured_parts, triangle_json,
+        BASE_COLOR, BIN_CHUNK_BUFFER, IMAGE_TEXELS, JOINTS, QUAD_INDICES, QUAD_JOINTS,
+        QUAD_POSITIONS, QUAD_WEIGHTS, WEIGHTS, glb, import_glb, import_glb_bytes,
+        import_rigged_glb, import_skinned_pair_glb, png_bytes, replacing, rigged_json,
+        skinned_pair_bin, skinned_pair_json, textured_glb, textured_parts, triangle_json,
     };
     use crcbl_sprite::load::Rgba8;
 
@@ -1370,6 +1523,212 @@ mod tests {
         assert_eq!(converted.scene.materials[1].base_color_texture, 1);
         for vertex in vertices_of(&converted.scene.meshes[0]) {
             assert_eq!(vertex.uv, [0.0; 4]);
+        }
+    }
+
+    // -- skin bindings -----------------------------------------------------
+
+    /// The skinned pair, converted, with nothing about it unsupported.
+    fn convert_pair(json: &str) -> RenderScene {
+        let scene = import_skinned_pair_glb(json).expect("the fixture imports");
+        build_render_scene(&scene, Path::new(KEY))
+    }
+
+    /// What the file bound vertex `index` of the quad with, in the record the
+    /// skinning pass reads.
+    fn quad_binding(index: usize) -> SkinBinding {
+        SkinBinding {
+            joints: QUAD_JOINTS[index].map(u32::from),
+            weights: QUAD_WEIGHTS[index],
+        }
+    }
+
+    /// The fixture is held to the format, not merely to what this crate
+    /// accepts: the importer parses without validating, so a bad offset or a
+    /// `POSITION` with no `min`/`max` would sail through it and leave every
+    /// assertion below testing a document no other tool would load.
+    #[test]
+    fn the_skinned_pair_fixture_is_a_document_the_validator_accepts() {
+        let bytes = glb(&skinned_pair_json(), Some(&skinned_pair_bin()));
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("the fixture should validate");
+        assert_eq!(gltf.document.skins().count(), 1, "the quad has a skin");
+        assert_eq!(
+            gltf.document.meshes().count(),
+            2,
+            "a skinned one and a plain one"
+        );
+    }
+
+    #[test]
+    fn a_skinned_primitive_keeps_its_bindings_where_the_vertices_pass_straight_through() {
+        let scene = import_rigged_glb(&rigged_json(BIN_CHUNK_BUFFER)).expect("it imports");
+        let converted = build_render_scene(&scene, Path::new(KEY));
+
+        assert_eq!(converted.skipped, [], "nothing here is unsupported");
+        let vertices = vertices_of(&converted.scene.meshes[0]);
+        assert_eq!(
+            vertices.len(),
+            JOINTS.len(),
+            "the rigged fixture declares NORMAL, so its vertices are its positions"
+        );
+
+        assert_eq!(converted.origins.len(), converted.scene.meshes.len());
+        let origin = &converted.origins[0];
+        assert_eq!((origin.mesh, origin.primitive), (0, 0));
+        assert_eq!(
+            origin.bindings.len(),
+            vertices.len(),
+            "a run has to be exactly as long as the vertices it describes, or the \
+             dispatch over it skins the wrong ones"
+        );
+        let expected: Vec<SkinBinding> = JOINTS
+            .iter()
+            .zip(WEIGHTS)
+            .map(|(joints, weights)| SkinBinding {
+                joints: joints.map(u32::from),
+                weights,
+            })
+            .collect();
+        assert_eq!(
+            origin.bindings, expected,
+            "the joints widen to u32 and the weights arrive unrenormalised, in the \
+             document's own order"
+        );
+    }
+
+    /// The case a consumer could not reconstruct: with no `NORMAL` the triangle
+    /// list is de-indexed, so emitted vertex `n` is input vertex `indices[n]`
+    /// and its binding has to follow it there.
+    #[test]
+    fn a_de_indexed_primitive_carries_the_binding_of_the_vertex_each_corner_names() {
+        let converted = convert_pair(&skinned_pair_json());
+        assert_eq!(converted.skipped, [], "{:?}", converted.skipped);
+
+        let quad = &converted.origins[1];
+        assert_eq!((quad.mesh, quad.primitive), (1, 0));
+        let vertices = vertices_of(&converted.scene.meshes[1]);
+        assert_eq!(
+            vertices.len(),
+            QUAD_INDICES.len(),
+            "no NORMAL, so the list is expanded to a vertex per corner of every triangle"
+        );
+        assert_eq!(quad.bindings.len(), vertices.len());
+        assert_ne!(
+            quad.bindings.len(),
+            QUAD_POSITIONS.len(),
+            "a run left in position order would be shorter than the vertices, which is \
+             the failure this fixture is shaped to produce"
+        );
+
+        for (emitted, &source) in QUAD_INDICES.iter().enumerate() {
+            let source = source as usize;
+            let position = QUAD_POSITIONS[source];
+            assert_eq!(
+                vertices[emitted].position,
+                [position[0], position[1], position[2], 1.0],
+                "emitted vertex {emitted} is corner {source}"
+            );
+            assert_eq!(
+                quad.bindings[emitted],
+                quad_binding(source),
+                "so its binding is corner {source}'s, not vertex {emitted}'s"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unskinned_primitive_emits_no_bindings_rather_than_default_ones() {
+        let converted = convert_json(&triangle_json(BIN_CHUNK_BUFFER));
+
+        assert_eq!(converted.origins.len(), 1);
+        assert_eq!(
+            converted.origins[0].bindings,
+            [],
+            "a primitive with no JOINTS_0 gets an empty run; a run of zeroed bindings \
+             would bind every vertex to joint 0 at no weight and collapse the mesh"
+        );
+    }
+
+    #[test]
+    fn a_document_mixing_skinned_and_unskinned_primitives_keeps_the_two_apart() {
+        let converted = convert_pair(&skinned_pair_json());
+        assert_eq!(converted.skipped, [], "{:?}", converted.skipped);
+
+        assert_eq!(converted.scene.meshes.len(), 2);
+        assert_eq!(converted.origins.len(), 2);
+        assert_eq!(
+            converted
+                .origins
+                .iter()
+                .map(|origin| (origin.mesh, origin.primitive))
+                .collect::<Vec<_>>(),
+            [(0, 0), (1, 0)],
+            "one entry per converted primitive, in document order"
+        );
+        for (index, origin) in converted.origins.iter().enumerate() {
+            let vertices = vertices_of(&converted.scene.meshes[index]).len();
+            assert!(
+                origin.bindings.is_empty() || origin.bindings.len() == vertices,
+                "run {index} is {} long against {vertices} vertices",
+                origin.bindings.len()
+            );
+        }
+        assert_eq!(
+            converted.origins[0].bindings,
+            [],
+            "the plain triangle's run stays empty even though the document has a skin"
+        );
+        assert_eq!(converted.origins[1].bindings.len(), QUAD_INDICES.len());
+    }
+
+    /// A skipped primitive takes its rig with it and leaves no entry, which is
+    /// why an entry names the primitive it came from instead of being found by
+    /// its position in the document.
+    #[test]
+    fn a_skipped_primitive_leaves_no_run_and_the_entry_after_it_still_names_itself() {
+        // Two indices is not a whole triangle, which the importer accepts and
+        // the meshlet build refuses — so mesh 0 is dropped by the conversion
+        // rather than a step earlier.
+        let json = replacing(
+            &skinned_pair_json(),
+            r#"{ "bufferView": 6, "componentType": 5123, "count": 3, "type": "SCALAR" }"#,
+            r#"{ "bufferView": 6, "componentType": 5123, "count": 2, "type": "SCALAR" }"#,
+        );
+        let converted = convert_pair(&json);
+
+        assert_eq!(
+            converted
+                .skipped
+                .iter()
+                .map(|skip| (skip.feature, skip.at.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("primitive", "mesh 0 \"plain-triangle\" primitive 0"),
+                ("node", "node 0 \"plain-triangle\""),
+            ],
+            "the primitive is reported where it failed and the node that drew it is \
+             reported for placing nothing; neither message is about a rig, because the \
+             one that was lost indexed vertices that are not there"
+        );
+
+        assert_eq!(converted.scene.meshes.len(), 1, "only the quad converted");
+        assert_eq!(converted.origins.len(), 1);
+        assert_eq!(
+            (converted.origins[0].mesh, converted.origins[0].primitive),
+            (1, 0),
+            "row 0 came from mesh 1, so a caller reading a document index off a row \
+             index would name the primitive that was skipped"
+        );
+        assert_eq!(
+            converted.origins[0].bindings.len(),
+            QUAD_INDICES.len(),
+            "the surviving run is still the quad's, whole"
+        );
+        for (emitted, &source) in QUAD_INDICES.iter().enumerate() {
+            assert_eq!(
+                converted.origins[0].bindings[emitted],
+                quad_binding(source as usize)
+            );
         }
     }
 }
