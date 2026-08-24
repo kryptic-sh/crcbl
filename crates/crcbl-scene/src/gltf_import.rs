@@ -232,8 +232,8 @@ impl GltfScene {
     /// The document's `skins` array, in file order.
     ///
     /// Empty for the overwhelming majority of documents, which have no rig.
-    /// Which skin a node wears is not here: it is the node's own `skin` field,
-    /// and nothing in this crate poses a skeleton yet — see the [module
+    /// Which skin a node wears is [`GltfNode::skin`] rather than anything here,
+    /// and nothing in this crate poses a skeleton — see the [module
     /// docs](self).
     #[inline]
     #[must_use]
@@ -464,6 +464,7 @@ pub enum GltfSamples {
 pub struct GltfNode {
     name: Option<String>,
     mesh: Option<usize>,
+    skin: Option<usize>,
     local_transform: Mat4,
     children: Vec<usize>,
     lod_nodes: Vec<usize>,
@@ -486,6 +487,26 @@ impl GltfNode {
     #[must_use]
     pub const fn mesh(&self) -> Option<usize> {
         self.mesh
+    }
+
+    /// Which of [`GltfScene::skins`] deforms the mesh this node draws, if any.
+    ///
+    /// **The one fact that says an instance is skinned rather than scenery.**
+    /// A rigged mesh is ordinary geometry until a node wears a skin over it,
+    /// and the same mesh may appear under a second node with no skin at all —
+    /// so a mesh's `JOINTS_0` does not decide it and cannot be made to.
+    ///
+    /// The joint indices in that mesh's bindings are relative to *this* skin's
+    /// [`GltfSkin::joints`], which is why a palette cannot be built without it.
+    ///
+    /// [`Mat4::IDENTITY`] is what a consumer should use in place of
+    /// [`local_transform`](Self::local_transform) when this is `Some`: the
+    /// specification requires the transform of a skinned mesh's node to be
+    /// ignored, the joints carrying the placement instead.
+    #[inline]
+    #[must_use]
+    pub const fn skin(&self) -> Option<usize> {
+        self.skin
     }
 
     /// This node's own transform, parent excluded — glTF's `matrix`, or its
@@ -1314,8 +1335,8 @@ fn read_images(
     Ok(images)
 }
 
-/// The document's `nodes` array: name, mesh, local transform, children and
-/// `MSFT_lod` each.
+/// The document's `nodes` array: name, mesh, skin, local transform, children
+/// and `MSFT_lod` each.
 fn read_nodes(document: &gltf::Document, key: &Path) -> Result<Vec<GltfNode>, StorageError> {
     let nodes = document.nodes().len();
     document
@@ -1328,6 +1349,9 @@ fn read_nodes(document: &gltf::Document, key: &Path) -> Result<Vec<GltfNode>, St
                 // `children()` below cannot reach the `unwrap` each has behind
                 // it.
                 mesh: node.mesh().map(|mesh| mesh.index()),
+                // `check_nodes` bounds-checks this one too, so the `unwrap`
+                // behind the typed `skin()` is out of reach as well.
+                skin: node.skin().map(|skin| skin.index()),
                 local_transform: local_transform(&node),
                 children: node.children().map(|child| child.index()).collect(),
                 lod_nodes: read_msft_lod(&node, nodes, key)?,
@@ -2005,6 +2029,28 @@ mod tests {
         );
     }
 
+    /// **Only the node that wears the skin says so**, and that is the fact a
+    /// consumer needs to tell a skinned instance from scenery.
+    ///
+    /// A mesh's `JOINTS_0` cannot decide it. The same rigged mesh may be drawn
+    /// again under a node with no skin — legal glTF, and what
+    /// `apps/viewer`'s demo document does deliberately — and skinning that
+    /// second copy would draw it wherever the joints happen to be. So the
+    /// skinned node reporting `Some` is asserted together with the joint nodes
+    /// reporting `None`: the first alone would pass for an importer that put a
+    /// skin on every node.
+    #[test]
+    fn only_the_node_that_wears_the_skin_reports_one() {
+        let scene = import_rigged_glb(&rigged_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        let worn: Vec<Option<usize>> = scene.nodes().iter().map(GltfNode::skin).collect();
+        assert_eq!(
+            worn,
+            [Some(0), None, None],
+            "the fixture's node 0 draws the mesh and wears skin 0; nodes 1 and 2 are its joints"
+        );
+    }
+
     /// The rigged fixture's one clip arrives with its channel's target, its
     /// keyframe times and its rotations.
     #[test]
@@ -2185,6 +2231,7 @@ mod tests {
                 GltfNode {
                     name: Some("root".to_owned()),
                     mesh: None,
+                    skin: None,
                     local_transform: Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
                     children: vec![1],
                     lod_nodes: Vec::new(),
@@ -2192,6 +2239,7 @@ mod tests {
                 GltfNode {
                     name: Some("leaf".to_owned()),
                     mesh: Some(0),
+                    skin: None,
                     local_transform: Mat4::from_translation(glam::Vec3::new(0.0, 5.0, 0.0)),
                     children: Vec::new(),
                     lod_nodes: Vec::new(),

@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_scene::GltfNode::skin`, which node a document's skin is worn by.**
+  The importer read the `skins` array but never `node.skin`, so nothing
+  downstream could tell a skinned instance from scenery — and a mesh's
+  `JOINTS_0` cannot decide it, because the same rigged mesh may legally be drawn
+  again under a node with no skin. This is the fact a caller pairs a
+  `MeshOrigin`'s bindings with a palette through. `gltf_check` now bounds-checks
+  it as well: a node naming a skin that is not there used to reach `gltf`'s own
+  `unwrap` and abort the process, which is exactly what that module exists to
+  prevent.
+
 - **The GPU skinning compute shader, `crcbl-shaders`' `skinning.slang`, and
   `crcbl_shaders::skinning`, which pins its layout.**
   `docs/plan/17-animation.md`'s skinning prepass: a joint palette and a run of

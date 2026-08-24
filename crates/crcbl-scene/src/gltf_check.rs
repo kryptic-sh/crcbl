@@ -466,6 +466,18 @@ fn check_nodes(root: &Root, key: &Path) -> Result<(), StorageError> {
                 ),
             ));
         }
+        if let Some(skin) = node.skin
+            && skin.value() >= root.skins.len()
+        {
+            return Err(malformed(
+                key,
+                format!(
+                    "node {index} wears skin {}, and there are {}",
+                    skin.value(),
+                    root.skins.len()
+                ),
+            ));
+        }
         for child in node.children.iter().flatten() {
             if child.value() >= root.nodes.len() {
                 return Err(malformed(
@@ -830,9 +842,9 @@ mod tests {
 
     /// The rigged fixture is real glTF, and its geometry survives the rig.
     ///
-    /// This asserts nothing about skins or animations being *read* — they are
-    /// not, yet. What it pins is that the document parses, which is the part a
-    /// hand-written buffer layout gets wrong: an accessor whose offset is not a
+    /// This asserts nothing about what the importer makes of the rig —
+    /// `gltf_import`'s own tests do that. What it pins is that the document
+    /// parses, which is the part a hand-written buffer layout gets wrong: an accessor whose offset is not a
     /// multiple of its component size, a `bufferView` that runs past the
     /// buffer, or a `JOINTS_0` declared as float would all fail here rather
     /// than much later, in whatever first tries to read them.
@@ -849,10 +861,10 @@ mod tests {
     /// The test above only asks that the document parses, and a hand-written
     /// buffer layout can be well-formed and still wrong: shifting the payload
     /// while leaving every `byteOffset` alone leaves each accessor in range and
-    /// reading the wrong bytes. Nothing in the importer reads a skin yet, so the
-    /// values are checked here against the constants the fixture was built
-    /// from — otherwise the extraction that comes next would be written against
-    /// a rig nobody had confirmed.
+    /// reading the wrong bytes. The values are read straight out of `gltf` here
+    /// and compared against the constants the fixture was built from, so the
+    /// rig the importer's own tests assert on is one that has been confirmed
+    /// independently of the importer.
     #[test]
     fn the_rigged_fixture_holds_the_rig_it_declares() {
         use crate::gltf_fixture::{CLIP_ROTATIONS, CLIP_TIMES, INVERSE_BIND, rigged_bin};
@@ -1268,6 +1280,11 @@ mod tests {
                 r#""joints": [1, 2]"#,
                 r#""joints": [1, 9]"#,
                 "names joint node 9, and there are 3 nodes",
+            ),
+            (
+                r#""skin": 0"#,
+                r#""skin": 7"#,
+                "wears skin 7, and there are 1",
             ),
             (
                 r#""skeleton": 1"#,

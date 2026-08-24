@@ -56,8 +56,39 @@ Three things a caller meets that are documented rather than fixed:
   a caller-supplied bound or a pass that computes one.
 - **A binding does not arrive with its palette.** Joint indices are relative to
   the skin the _drawing node_ wears, and neither `InstanceDesc` nor `MeshOrigin`
-  names a node — so building a `SkinRange` still takes the `GltfScene` the
-  conversion read, not just the `RenderScene` it produced.
+  names a node — so pairing the two takes the `GltfScene` the conversion read,
+  walking its instances in step with `RenderScene::origins` and reading
+  `GltfNode::skin`. See the entry below.
+
+### `apps/viewer` still draws its document's bind pose
+
+The importer now reports which node wears a skin (`GltfNode::skin`), which was
+the one fact that was missing, but no application consumes it yet. What a
+follow-up needs, all verified rather than assumed:
+
+- **The viewer never builds a `Geometry::Dag`**, so `reserve_skinned`'s
+  documented panic is unreachable from it: `gltf_render::resident_meshes` emits
+  `Geometry::Flat` for every row it makes, and `index_count`'s `Dag` arm carries
+  a comment saying the module builds no DAGs. No guard is needed, only the note.
+- **Instance to node is reconstructible** without a further importer change.
+  `gltf_render::place_instances` walks `GltfScene::instances` in order and
+  pushes one `InstanceDesc` per non-skipped primitive of that placement's mesh,
+  in primitive order; `RenderScene::origins` is in `(mesh, primitive)` document
+  order. Re-walking both in step recovers the node behind each instance, and
+  `GltfNode::skin` then gives its skin.
+- **The capacities must be raised by the viewer, and can be.**
+  `gltf_render::capacities_for` sizes `vertices` and `meshes` to exactly what
+  the description holds, with no headroom, and a skinned primitive costs two
+  extra mesh-table entries and two extra vertex regions. `SceneDesc::capacities`
+  is a public field, so the viewer can add the headroom after
+  `build_render_scene` and before `ForwardRenderer::with_scene`.
+- **`crate::anim::Player` needs one accessor**, `palette().matrices()`, to hand
+  the frame's palette to `SkinRange`; the field exists and is private.
+- **Do not decide skinning from a mesh's `JOINTS_0`.** The same rigged mesh may
+  be drawn again under a node with no skin — `demo_model::nodes_json` does
+  exactly that with `crate.far` — and skinning that copy draws it wherever the
+  joints are. A pixel-hash browser check would still pass over the wrong
+  picture, so the check must be paired with the skin the node actually wears.
 
 ### The skinning rig is validated late, and only the vk leg runs the kernel
 
