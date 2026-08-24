@@ -26,3 +26,35 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# There is one Windows desktop and these tests take hold of it: they make a
+# window the foreground so `ClipCursor` and `SetCursorPos` are allowed to run,
+# and they put payloads on the machine-wide clipboard. nextest runs tests in
+# parallel processes, so without this they contend with *each other* — and the
+# clipboard suite includes a test whose whole job is to empty the clipboard,
+# which is what a sibling's round-trip read comes back `Empty` from. The class
+# is written up in `docs/backlog.md`; every instance so far has been on
+# `windows-latest`.
+#
+# One at a time rather than a retry or a longer budget: a retry hides the race
+# and a budget only widens the window it happens in, while serialising removes
+# our own half of the contention outright. A foreign process holding the
+# clipboard is what the tests' own retry budgets are for and is not this.
+#
+# The whole `win32::shell` suite rather than the clipboard tests alone, because
+# the foreground is the same kind of shared resource and the same class of
+# failure has hit `hiding_the_cursor_...` and `confining_the_pointer_...` too.
+# It costs nothing worth measuring: they are a few dozen tests of about a tenth
+# of a second each, and they only exist on Windows at all.
+[test-groups]
+windows-desktop = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/^win32::shell::tests::/)'
+test-group = 'windows-desktop'
+
+# Repeated for the same reason `slow-timeout` is: a profile does not inherit
+# the default profile's overrides, and CI runs `--profile ci`.
+[[profile.ci.overrides]]
+filter = 'test(/^win32::shell::tests::/)'
+test-group = 'windows-desktop'

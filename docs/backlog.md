@@ -10241,13 +10241,23 @@ that test is _about_ contention — it asserts the open was not refused — so a
 foreign holder is the case its retry budget exists for, not a reason to fail
 before starting.
 
-**The focus half is not fixed** and remains the open decision below.
-
 Two failures in one session, both on commits that had nothing to do with
 windowing (a `Revert` and a mesh-shader reland), both cleared by re-running the
 same job unchanged.
 
-**Wants a decision rather than another re-run.**
+**Decided, 2026-08-24, and none of the three options above is what shipped.**
+All of them treat the contention as foreign, and most of it was not: nextest
+runs tests in parallel _processes_, so this suite was contending with itself —
+several of its tests take the foreground, and one of them empties the clipboard
+while a sibling is reading back what it just wrote. `.config/nextest.toml` now
+puts every `win32::shell::tests::` test in a `windows-desktop` test group capped
+at one thread. No assertion was weakened, no retry was added, and no test left
+the default suite.
+
+**What that does not fix** is a foreign process on the runner taking the
+foreground or the clipboard, which is what the tests' own retry budgets are for.
+If the class recurs after this, that is the remaining half, and it is a
+different question from the one this entry was open on.
 
 ## What MTL6 settled, and what it leaves for a decision
 
@@ -16756,18 +16766,37 @@ machine-wide resource with no fair queue, so any other process on the runner
 holding it starves this one; the test's own retry budget gave up after eight
 attempts inside 70 ms.
 
-**Not investigated, and not mine** — the run also carried an unrelated vk change
-and the failure is in a crate that change does not touch. Recorded because a
-once-off on a shared runner and a real regression look identical from one red
-job, and the next person to see it should know it has happened before rather
-than starting from nothing.
+**It recurred on `e7d09be`**, in a different test of the same suite and with a
+different symptom:
 
-What it would take: decide whether the retry budget is the right shape for a
-resource another process can hold indefinitely. Backing off longer trades CI
-time for flakiness; giving up and skipping when the clipboard is held by another
-process turns a flake into a silent gap, which is worse. Neither is obviously
-right, and the failure rate is one observation, so measuring comes first — grep
-the last N Windows runs for this message before changing anything.
+```
+both_offered_formats_round_trip_and_the_reader_picks
+assertion `left == right` failed: the engine's own format is lossless, padding and all
+  left: Empty
+ right: Bytes([40, 107, 105, 110, 100, ...])
+```
+
+Not a refused open this time — a successful read that came back **empty**, which
+means something emptied the clipboard between the write and the read.
+
+**Measured before changing anything, as this entry asked.** Of the last
+twenty-five CI runs, two failed on the Windows leg for this class and no others
+did; a third Windows failure in that window was a compile error that failed
+every leg. Two observations of a shared-resource race in twenty-five runs.
+
+**What the second symptom identifies is us.** nextest runs tests in parallel
+processes, and this very suite contains
+`an_empty_offer_empties_the_clipboard_and_an_empty_payload_does_not` — a test
+whose whole job is to empty the machine-wide clipboard. A sibling reading back
+its own payload getting `Empty` is exactly what that looks like from the other
+side.
+
+**Fixed by serialising the suite against itself**, not by a retry or a wider
+budget: `.config/nextest.toml` groups every `win32::shell::tests::` test into
+`windows-desktop` with `max-threads = 1`. The foreground half of the class — see
+the entry above — is the same shared-desktop problem and is covered by the same
+group. What remains is contention from processes that are not ours, which the
+tests' retry budgets already exist for.
 
 ## `apps/orbit` — what the first slice left (2026-08-24)
 
