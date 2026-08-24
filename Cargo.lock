@@ -254,6 +254,7 @@ dependencies = [
 name = "crcbl"
 version = "0.1.0"
 dependencies = [
+ "crcbl-anim",
  "crcbl-assets",
  "crcbl-audio",
  "crcbl-client",
@@ -283,6 +284,13 @@ dependencies = [
  "png",
  "tempfile",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "crcbl-anim"
+version = "0.1.0"
+dependencies = [
+ "glam",
 ]
 
 [[package]]

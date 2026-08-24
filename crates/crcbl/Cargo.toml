@@ -36,6 +36,7 @@ crcbl-ui = { workspace = true }
 # through the umbrella: a caller could name the function and could not name its
 # argument. `apps/viewer` is what found it, which is what `apps/bare`'s docs say
 # a sample is for.
+crcbl-anim = { workspace = true }
 crcbl-assets = { workspace = true }
 crcbl-audio = { workspace = true }
 crcbl-client = { workspace = true }

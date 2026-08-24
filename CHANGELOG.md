@@ -16,6 +16,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-anim`, a new crate: skeletal animation's runtime half.** A `Skeleton`
+  is joints in palette order, each with a parent index, an inverse bind matrix
+  and a rest pose; a `Clip` is `Channel`s of keyframes over it;
+  `Clip::sample_into` turns a clip and a time in seconds into one local `Trs`
+  per joint, and `Palette::compute` composes those down the hierarchy and folds
+  in the inverse binds to give the matrices a skinning shader consumes. All
+  three glTF interpolation modes are implemented against the specification's
+  Appendix C and quoted where each is: `STEP`, `LINEAR` — which is _spherical_
+  for a rotation and linear for anything else — and `CUBICSPLINE`, whose
+  tangents are scaled by the segment duration and whose rotations are
+  normalized. Reachable as `crcbl::anim`.
+
+  Deliberately only that much of `docs/plan/17-animation.md`: no blending, no
+  state machine, no root motion and no GPU skinning, each of which is a later
+  slice with its own consumer. It also does **not** depend on `crcbl-scene` — it
+  takes the joint hierarchy as parent indices and the curves as plain arrays, so
+  playing a cooked clip links no glTF parser.
+
+  Three shapes are ordinary rather than errors, and each has a defined answer: a
+  channel naming a joint this skeleton has not got is skipped (a clip drives a
+  document's nodes, not only one skin's joints), a joint no channel drives keeps
+  its **rest** pose rather than the identity (identity would collapse the bone
+  onto its parent), and a time outside the clip holds the nearest keyframe
+  rather than wrapping (looping is the caller's modulo, and a clip that must
+  hold its last pose could not say so otherwise). Sampling allocates nothing per
+  frame and finds its keyframe segment by binary search.
+
 - **The browser viewer takes a document the visitor drops on it.** Drag a `.glb`
   or `.gltf` onto the canvas and it opens through the same loader a path does:
   the camera re-frames on the new bounds, the listing panel rebuilds, and a file

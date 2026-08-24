@@ -1,0 +1,21 @@
+[package]
+name = "crcbl-anim"
+description = "Crucible skeletal animation: clip sampling and joint palettes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `glam` and nothing else, and the absence of `crcbl-scene` is the design rather
+# than an omission. This crate owns the runtime types and the maths;
+# `crates/crcbl-scene/src/gltf_import.rs` owns the parse. Turning a `GltfSkin`
+# and a `GltfClip` into a `Skeleton` and a `Clip` is a few dozen lines of index
+# bookkeeping that belongs to whoever holds both — and a *second* consumer
+# needing the same conversion is what would justify extracting it here. Until
+# then a dependency arrow from the animation runtime to a glTF parser would put
+# that parser in every browser build that plays a cooked clip.
+[dependencies]
+glam = { workspace = true }
+
+[lints]
+workspace = true
