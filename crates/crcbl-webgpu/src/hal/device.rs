@@ -435,14 +435,15 @@ impl WebGpuDevice {
         }
     }
 
-    /// Holds every buffer binding in a bind group to the two rules its slot
-    /// carries: the range ceiling for its kind, and — for a slot a shader
-    /// writes — device-local memory.
+    /// Holds every buffer binding in a bind group to the three rules its slot
+    /// carries: the offset alignment for its kind, the range ceiling for its
+    /// kind, and — for a slot a shader writes — device-local memory.
     ///
-    /// Both need the slot's [`BindingKind`], which is in the *layout*, and the
-    /// buffer's size and location, which are in the buffer. This device records
-    /// both, so both are decidable here; before it did, neither was decidable
-    /// at all and the descriptor went to the wire.
+    /// All three need the slot's [`BindingKind`], which is in the *layout*; the
+    /// last two also need the buffer's size and location, which are in the
+    /// buffer. This device records both, so all three are decidable here;
+    /// before it did, none was decidable at all and the descriptor went to the
+    /// wire.
     ///
     /// A layout or a buffer this device did not issue is
     /// [`HalError::InvalidHandle`], and a binding the layout does not declare
@@ -474,6 +475,19 @@ impl WebGpuDevice {
                     entry.binding
                 )));
             };
+            // The seam's rule, and the only one of the three that needs no
+            // buffer record at all: the alignment turns on the slot and the
+            // offset is in the descriptor. A browser reports the violation as a
+            // `GPUValidationError` on the queue, which is asynchronous and
+            // names the binding index inside a sentence about `GPUBufferBinding`
+            // — arriving after `create_bind_group` has already returned a
+            // handle the caller went on using.
+            crcbl_hal::check_binding_offset_alignment(
+                &self.caps.limits,
+                *kind,
+                entry.binding,
+                offset,
+            )?;
             let state = *buffers
                 .get(&buffer.to_bits())
                 .ok_or_else(|| HalError::invalid_handle("buffer", buffer))?;

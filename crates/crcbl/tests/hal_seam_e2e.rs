@@ -1907,6 +1907,137 @@ fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
 
 // --- handles, ranges and refusals ------------------------------------------
 
+/// **A bind's dynamic offsets are held to the layout that declared them.**
+///
+/// Two rules, both `crcbl_hal::check_dynamic_offsets`': one offset per
+/// dynamic-offset binding the layout declares, and each a multiple of the
+/// device's alignment for that slot's kind. `crcbl-vk`, `crcbl-mtl` and
+/// `crcbl-dx12` have always checked them and the null backend does now — but
+/// **nothing was watching any of the call sites.** Neutering `crcbl-vk`'s so it
+/// always passes leaves its 139 unit tests, its 53 e2e tests and this whole
+/// suite green, because every existing caller passes offsets that are correct
+/// by construction. That is the hole this closes.
+///
+/// **The count arm is the load-bearing one**, because it needs nothing from the
+/// device: one offset short shifts every later offset onto the wrong slot,
+/// which on a real frame is per-draw data read from another draw's window. The
+/// alignment arm can only run where the device asks for more than byte
+/// alignment — where it asks for one, every offset is aligned and there is no
+/// rule left to break, so skipping it there is the rule being vacuous rather
+/// than the test being lazy.
+///
+/// A compute pass rather than a render pass: `bind_group` needs an open scope
+/// on some backends, and a render pass with no attachments is not a thing Metal
+/// will build.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_binds_dynamic_offsets_are_held_to_the_layout_that_declared_them() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let limits = device.caps().limits;
+    let alignment = limits.min_uniform_buffer_offset_alignment.max(1);
+
+    // Four windows, so an aligned offset of one stride is a real place to look
+    // and not past the end.
+    const WINDOWS: u64 = 4;
+    let window = alignment;
+    let buffer = device
+        .create_buffer(&crcbl::hal::BufferDesc {
+            label: Some("dynamic offset windows"),
+            size: window * WINDOWS,
+            usage: crcbl::hal::BufferUsage::UNIFORM,
+            memory: crcbl::hal::MemoryLocation::DeviceLocal,
+        })
+        .expect("a uniform buffer");
+    let layout = device
+        .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
+            label: Some("one dynamic uniform"),
+            entries: &[crcbl::hal::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crcbl::hal::ShaderStages::COMPUTE,
+                kind: crcbl::hal::BindingKind::UniformBuffer { dynamic: true },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            }],
+        })
+        .expect("a dynamic uniform binding");
+    let group = device
+        .create_bind_group(&crcbl::hal::BindGroupDesc {
+            label: Some("dynamic offset group"),
+            layout,
+            entries: &[crcbl::hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::Buffer {
+                    buffer,
+                    offset: 0,
+                    size: window,
+                },
+            }],
+            variable_count: None,
+        })
+        .expect("a bind group over one window");
+    let pipeline_layout = device
+        .create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
+            label: Some("dynamic offset probe"),
+            bind_group_layouts: &[layout],
+            push_constants: None,
+        })
+        .expect("a pipeline layout");
+    let queue = device
+        .queue(crcbl::hal::QueueKind::Compute)
+        .or_else(|| device.queue(crcbl::hal::QueueKind::Graphics))
+        .expect("a queue that takes compute work");
+
+    let bind_with = |offsets: &[u32]| {
+        let mut encoder = device.create_command_encoder(&crcbl::hal::CommandEncoderDesc {
+            label: Some("dynamic offset probe"),
+            queue,
+        });
+        encoder.begin_compute_pass(&crcbl::hal::ComputePassDesc {
+            label: Some("dynamic offset probe"),
+            timestamp_writes: None,
+        });
+        encoder.bind_group(0, group, offsets, pipeline_layout);
+        encoder.end_compute_pass();
+        encoder.finish()
+    };
+
+    // The accepting arm, first, so a backend that refused every bind would fail
+    // here rather than satisfying the refusals below.
+    match bind_with(&[u32::try_from(window).expect("an alignment fits a u32")]) {
+        Ok(command_buffer) => device.destroy_command_buffer(command_buffer),
+        Err(error) => panic!(
+            "one aligned offset for one dynamic binding is the call this rule exists to              permit, and it was refused: {error:?}"
+        ),
+    }
+
+    let refused = |offsets: &[u32], what: &str| match bind_with(offsets) {
+        Err(error) => assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{what} is a bad descriptor rather than a backend failure: {error:?}"
+        ),
+        Ok(command_buffer) => {
+            device.destroy_command_buffer(command_buffer);
+            panic!(
+                "{what} was recorded — this backend is not checking a bind's dynamic offsets                  against the layout, so a caller's mistake reaches the driver"
+            );
+        }
+    };
+
+    refused(&[], "no offsets at all for a layout declaring one");
+    refused(&[0, 0], "two offsets for a layout declaring one");
+    if alignment > 1 {
+        refused(&[1], "an offset of one byte where the device asks for more");
+    }
+
+    device.destroy_pipeline_layout(pipeline_layout);
+    device.destroy_bind_group(group);
+    device.destroy_bind_group_layout(layout);
+    device.destroy_buffer(buffer);
+    headless.finish();
+}
+
 /// **A view of an acquired frame is checked against the frame's own shape.**
 ///
 /// `ImageViewDesc::check` is only as good as the shape each backend records for

@@ -16491,10 +16491,14 @@ survey. Treat every one as a claim until read.
   as declined for making anisotropic filtering permanently unreachable on
   WebGPU. What is genuinely missing is the refusal test on the four backends
   where the limit is a real ceiling.
-- **Binding offset alignment** against `min_uniform_buffer_offset_alignment` /
-  `min_storage_buffer_offset_alignment`: kept by vk, mtl and dx12, absent from
-  null and webgpu. Mild in itself, but the null backend is the reference, so
-  again no no-GPU test can guard a backend that drops its check.
+- **Binding offset alignment: shipped, except the bind-time half on webgpu.**
+  Both rules are now `crcbl_hal::check_binding_offset_alignment` and
+  `check_dynamic_offsets`, called by `crcbl-vk` and the null backend;
+  `crcbl-webgpu` calls the first at `create_bind_group` and **cannot** call the
+  second, because `bind_group` is an encoder method and the encoder can reach
+  neither the device's `Limits` nor its `layouts` table. That is the decision
+  recorded under "should `crcbl-webgpu`'s encoder see device state?" above, and
+  this is now the second rule waiting on it.
 - **The seam and the suite contradict each other on `destroy_surface`.** The
   seam says every swapchain on a surface must already be destroyed; the agnostic
   suite's `a_swapchain_keeps_working_after_its_surface_handle_is_destroyed`

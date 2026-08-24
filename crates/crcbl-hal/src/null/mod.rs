@@ -99,9 +99,9 @@ use crcbl_core::{Handle, SurfaceTarget};
 use crate::indirect::{IndirectPlan, plan_count_structures, plan_structures, structure_bytes};
 use crate::{
     AcquiredFrame, AdapterId, AdapterInfo, BackendKind, Barriers, BindGroupDesc, BindGroupEntry,
-    BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferCopy, BufferDesc,
-    BufferHandle, BufferImageCopy, Capability, CommandBufferHandle, CommandEncoder,
-    CommandEncoderDesc, CompositeAlpha, ComputePassDesc, ComputePipelineDesc,
+    BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry, BindGroupLayoutHandle, BindingKind,
+    BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, Capability, CommandBufferHandle,
+    CommandEncoder, CommandEncoderDesc, CompositeAlpha, ComputePassDesc, ComputePipelineDesc,
     ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DeviceRequestState, DeviceType,
     DisplayTiming, DrawIndirect, DrawIndirectCount, Features, Format, GraphicsPipelineDesc,
     GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc, ImageHandle, ImageType, ImageUsage,
@@ -1670,6 +1670,7 @@ impl Device for NullDevice {
         Box::new(NullEncoder {
             recorder: self.recorder.clone(),
             device_id: self.device_id,
+            limits: self.caps.limits,
             label: desc.label.map(ToOwned::to_owned),
             commands: Vec::new(),
             scope: Scope::Outside,
@@ -2203,6 +2204,7 @@ impl NullDevice {
             self.check_binding(&entry.resource)?;
             self.check_shader_writable_memory(declared.kind, &entry.resource, entry.binding)?;
             self.check_binding_range(declared.kind, &entry.resource, entry.binding)?;
+            self.check_binding_offset(declared.kind, &entry.resource, entry.binding)?;
         }
         Ok(())
     }
@@ -2324,6 +2326,32 @@ impl NullDevice {
         )))
     }
 
+    /// Refuses a buffer binding whose offset is not a multiple of the
+    /// alignment its slot requires.
+    ///
+    /// [`crate::check_binding_offset_alignment`] is the rule; this resolves the
+    /// offset out of the resource and hands it over. It needs no buffer record
+    /// at all — the alignment turns on the *slot*, and the offset is in the
+    /// descriptor — which is what makes it decidable here where every no-GPU
+    /// test meets it. Before it existed, `crcbl-vk` and the two deferred
+    /// backends each refused it and the reference implementation could not
+    /// state the rule, so a misaligned offset was a bind group that this
+    /// backend built and a driver later read from the wrong bytes.
+    ///
+    /// The bind-time half is [`crate::check_dynamic_offsets`], which
+    /// `NullEncoder::bind_group` calls.
+    fn check_binding_offset(
+        &self,
+        kind: crate::BindingKind,
+        resource: &crate::BindingResource,
+        binding: u32,
+    ) -> Result<(), HalError> {
+        let crate::BindingResource::Buffer { offset, .. } = resource else {
+            return Ok(());
+        };
+        crate::check_binding_offset_alignment(&self.caps.limits, kind, binding, *offset)
+    }
+
     fn check_binding(&self, resource: &crate::BindingResource) -> Result<(), HalError> {
         match resource {
             crate::BindingResource::Buffer { buffer, .. } => {
@@ -2412,6 +2440,16 @@ struct NullEncoder {
     recorder: Recorder,
     /// Owner id every handle a recorded command names must match.
     device_id: u64,
+    /// This device's [`Limits`], copied at creation.
+    ///
+    /// The seam's two `min_*_buffer_offset_alignment` fields are the only thing
+    /// read out of it, and they are what
+    /// [`crate::check_dynamic_offsets`] measures a bind's offsets against — a
+    /// rule that arrives at `bind_group` rather than at bind-group creation, so
+    /// the device that knows the numbers is not in the room by then. Copied
+    /// rather than reached through the recorder because [`Limits`] is `Copy`
+    /// and an encoder outlives no device it was made by.
+    limits: Limits,
     label: Option<String>,
     commands: Vec<Command>,
     scope: Scope,
@@ -2616,17 +2654,94 @@ impl NullEncoder {
         let Err(error) = planned else {
             return;
         };
+        self.report_refusal(error, |message| ValidationError::InvalidIndirectArguments {
+            command,
+            message,
+        });
+    }
+
+    /// Requires a bind's dynamic offsets to obey the seam's rules for filling
+    /// the dynamic-offset slots a layout declares —
+    /// [`crate::check_dynamic_offsets`].
+    ///
+    /// This backend resolves no driver object and can still answer both rules,
+    /// because it recorded the layout a bind group was created against and the
+    /// slots that layout declares. That is the point of checking here:
+    /// `crcbl-vk` needs a device and a `VkDescriptorSetLayout` to reach the
+    /// same verdict, and this reaches it in a unit test.
+    ///
+    /// A refusal goes where [`report_indirect`](Self::report_indirect) sends
+    /// one, and for the same reason.
+    fn need_dynamic_offsets(
+        &mut self,
+        command: &'static str,
+        group: BindGroupHandle,
+        offsets: &[u32],
+    ) {
+        let Some(dynamic) = self.dynamic_slots(group) else {
+            // A dead or foreign bind group, already reported by `need_live` —
+            // or a layout destroyed since the group was built, which is legal
+            // everywhere and leaves nothing to measure the offsets against.
+            return;
+        };
+        let Err(error) = crate::check_dynamic_offsets(&self.limits, &dynamic, offsets) else {
+            return;
+        };
+        self.report_refusal(error, |message| ValidationError::InvalidDynamicOffsets {
+            command,
+            message,
+        });
+    }
+
+    /// The dynamic-offset slots of the layout a bind group was created
+    /// against, sorted by binding number, or `None` if either handle no longer
+    /// resolves.
+    ///
+    /// The sort is the seam's rule rather than tidiness:
+    /// [`CommandEncoder::bind_group`] states that `dynamic_offsets` is
+    /// positional and in binding order, so this order is what makes offset *i*
+    /// the one belonging to slot *i*.
+    fn dynamic_slots(&self, group: BindGroupHandle) -> Option<Vec<BindGroupLayoutEntry>> {
+        let state = self.recorder.lock();
+        let object = state.get(ObjectKind::BindGroup, group.to_bits())?;
+        let Detail::BindGroup { layout, .. } = &object.detail else {
+            unreachable!("a bind group handle always carries bind group detail");
+        };
+        let layout = state.get(ObjectKind::BindGroupLayout, layout.to_bits())?;
+        let Detail::BindGroupLayout { entries, .. } = &layout.detail else {
+            unreachable!("a bind group layout handle always carries layout detail");
+        };
+        let mut dynamic: Vec<BindGroupLayoutEntry> = entries
+            .iter()
+            .copied()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    BindingKind::UniformBuffer { dynamic: true }
+                        | BindingKind::StorageBuffer { dynamic: true, .. }
+                )
+            })
+            .collect();
+        dynamic.sort_by_key(|entry| entry.binding);
+        Some(dynamic)
+    }
+
+    /// Records and remembers a refusal a unit-returning recording method
+    /// cannot return.
+    ///
+    /// The two places above both need it, and `wrap` is the only part that
+    /// differs: which [`ValidationError`] the refusal is recorded as. The
+    /// message itself is the seam's own, unchanged, so the recorded violation
+    /// and the [`HalError`] `finish` returns say the same thing.
+    fn report_refusal(&mut self, error: HalError, wrap: impl FnOnce(String) -> ValidationError) {
         let message = match error {
+            // The seam's checks document `InvalidDescriptor` as the only
+            // refusal they have; anything else still crosses rather than being
+            // dropped.
             HalError::InvalidDescriptor(message) => message,
-            // The seam's plan functions document `InvalidDescriptor` as the
-            // only refusal they have; anything else still crosses rather than
-            // being dropped.
             other => other.to_string(),
         };
-        self.fail(ValidationError::InvalidIndirectArguments {
-            command,
-            message: message.clone(),
-        });
+        self.fail(wrap(message.clone()));
         if self.failed.is_none() {
             self.failed = Some(HalError::InvalidDescriptor(message));
         }
@@ -2806,6 +2921,7 @@ impl CommandEncoder for NullEncoder {
     ) {
         self.need_any_pass("BindGroup");
         self.need_live("BindGroup", ObjectKind::BindGroup, group.to_bits());
+        self.need_dynamic_offsets("BindGroup", group, dynamic_offsets);
         self.record(Command::BindGroup {
             slot,
             group,

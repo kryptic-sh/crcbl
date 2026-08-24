@@ -978,9 +978,11 @@ impl CommandEncoder for VkCommandEncoder {
                 return;
             }
         };
-        if let Err(error) =
-            check_dynamic_offsets(&self.device.caps.limits, &dynamic_kinds, dynamic_offsets)
-        {
+        if let Err(error) = crcbl_hal::check_dynamic_offsets(
+            &self.device.caps.limits,
+            &dynamic_kinds,
+            dynamic_offsets,
+        ) {
             drop(state);
             self.fail(error);
             return;
@@ -1610,42 +1612,6 @@ impl VkCommandEncoder {
     }
 }
 
-/// Checks the dynamic offsets a bind names against the layout that declared the
-/// slots they fill.
-///
-/// Pure, so the alignment policy — which is one of the two `Limits` fields the
-/// backend populated and never read — has a unit test rather than a GPU.
-fn check_dynamic_offsets(
-    limits: &crcbl_hal::Limits,
-    dynamic: &[crcbl_hal::BindGroupLayoutEntry],
-    offsets: &[u32],
-) -> Result<(), HalError> {
-    if offsets.len() != dynamic.len() {
-        return Err(HalError::InvalidDescriptor(format!(
-            "bind_group was given {} dynamic offset(s) but the layout declares {} \
-             dynamic-offset binding(s)",
-            offsets.len(),
-            dynamic.len()
-        )));
-    }
-    for (entry, offset) in dynamic.iter().zip(offsets) {
-        let alignment = match entry.kind {
-            crcbl_hal::BindingKind::UniformBuffer { .. } => {
-                limits.min_uniform_buffer_offset_alignment
-            }
-            _ => limits.min_storage_buffer_offset_alignment,
-        };
-        if alignment > 1 && !u64::from(*offset).is_multiple_of(alignment) {
-            return Err(HalError::InvalidDescriptor(format!(
-                "dynamic offset {offset} for binding {} is not a multiple of this device's \
-                 {alignment}-byte alignment",
-                entry.binding
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// The error a barrier reports when a requested queue-ownership transfer names
 /// a queue this device does not have.
 ///
@@ -1691,7 +1657,9 @@ fn buffer_image_region(copy: &BufferImageCopy) -> vk::BufferImageCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_hal::{BindGroupLayoutEntry, BindingKind, Limits, ShaderStages};
+    use crcbl_hal::{
+        BindGroupLayoutEntry, BindingKind, Limits, ShaderStages, check_dynamic_offsets,
+    };
 
     fn dynamic(binding: u32, uniform: bool) -> BindGroupLayoutEntry {
         BindGroupLayoutEntry {

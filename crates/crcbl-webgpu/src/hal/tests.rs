@@ -1277,6 +1277,116 @@ fn a_buffer_binding_is_held_to_its_slots_ceiling_and_memory() {
     assert_eq!(names(&channel).len(), encoded + 3);
 }
 
+/// A buffer binding's offset is held to the alignment its slot requires, which
+/// this backend used to send to the wire unmeasured.
+///
+/// [`crcbl_hal::check_binding_offset_alignment`] is the rule, and it needs only
+/// the slot's [`BindingKind`] and the offset in the descriptor — no buffer
+/// record at all — so it is the cheapest of the three rules
+/// `check_buffer_bindings` answers and was the one missing. A browser reports
+/// the violation as a `GPUValidationError` on the queue: asynchronous, so it
+/// arrives after `create_bind_group` has already returned a handle the caller
+/// went on using.
+///
+/// The device here is opened on [`Limits::desktop`] rather than the suite's
+/// usual [`Limits::minimum`], because the two alignments are equal on the
+/// minimum (256 apiece) and an offset legal in one slot and refused in the
+/// other is what shows the check reads the *slot* rather than one shared
+/// number.
+///
+/// **The accepting arm runs first**, and the wire is counted at the end: a
+/// check that refused every binding would satisfy both refusals below and
+/// break every frame.
+#[test]
+fn a_binding_offset_is_held_to_its_slots_alignment() {
+    let channel = SharedChannel::new();
+    let device = WebGpuDevice::new(
+        channel.clone(),
+        DeviceCaps {
+            features: Features::COMPUTE,
+            limits: Limits::desktop(),
+        },
+        HandlePool::new(),
+    );
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    assert_eq!(Limits::desktop().min_uniform_buffer_offset_alignment, 64);
+    assert_eq!(Limits::desktop().min_storage_buffer_offset_alignment, 16);
+
+    let layout_of = |kind| {
+        device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("one buffer"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    kind,
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                }],
+            })
+            .expect("one buffer binding")
+    };
+    let uniform = layout_of(BindingKind::UniformBuffer { dynamic: false });
+    let storage = layout_of(BindingKind::StorageBuffer {
+        read_only: true,
+        dynamic: false,
+    });
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            size: 4096,
+            memory: MemoryLocation::DeviceLocal,
+            ..buffer_desc()
+        })
+        .expect("a buffer");
+    let group_of = |layout, offset| {
+        device.create_bind_group(&BindGroupDesc {
+            label: None,
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: BindingResource::Buffer {
+                    buffer,
+                    offset,
+                    size: 256,
+                },
+            }],
+            variable_count: None,
+        })
+    };
+    let encoded = names(&channel).len();
+
+    group_of(uniform, 128).expect("128 is a multiple of 64");
+    group_of(storage, 32).expect("32 is a multiple of 16");
+
+    // 32 is a legal *storage* offset and an illegal uniform one.
+    let error = group_of(uniform, 32).expect_err("32 is not a multiple of 64");
+    let text = format!("{error}");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{text}");
+    assert!(text.contains("binding 0"), "{text}");
+    assert!(text.contains("64-byte"), "{text}");
+
+    let error = group_of(storage, 8).expect_err("8 is not a multiple of 16");
+    let text = format!("{error}");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{text}");
+    assert!(text.contains("16-byte"), "{text}");
+
+    let after = names(&channel);
+    assert_eq!(
+        after.len(),
+        encoded + 2,
+        "the two aligned bindings encoded and neither refusal did: {after:?}"
+    );
+}
+
 /// A present with no frame to present, which three backends refuse and this one
 /// answered `Ok` to.
 ///

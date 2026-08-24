@@ -1189,27 +1189,20 @@ fn write_descriptors(
                 offset,
                 size,
             } => {
-                // `Limits::min_*_buffer_offset_alignment` was populated by
-                // `adapter.rs` and read by nothing, so a misaligned binding
-                // offset became `VUID-VkWriteDescriptorSet-descriptorType-00327`
-                // in the driver instead of an `InvalidDescriptor` naming the
-                // binding.
-                let alignment = match slot.kind {
-                    BindingKind::UniformBuffer { .. } => {
-                        inner.caps.limits.min_uniform_buffer_offset_alignment
-                    }
-                    BindingKind::StorageBuffer { .. } => {
-                        inner.caps.limits.min_storage_buffer_offset_alignment
-                    }
-                    _ => 1,
-                };
-                if alignment > 1 && !offset.is_multiple_of(alignment) {
-                    return Err(HalError::InvalidDescriptor(format!(
-                        "binding {}'s buffer offset {offset} is not a multiple of this device's \
-                         {alignment}-byte alignment for {:?}",
-                        entry.binding, slot.kind
-                    )));
-                }
+                // The seam's rule, not this backend's: `Limits` says the two
+                // `min_*_buffer_offset_alignment` fields are alignments a
+                // binding offset must be a multiple of, and one enforcement per
+                // backend is a rule that holds on one backend. Left to Vulkan a
+                // misaligned offset is
+                // `VUID-VkWriteDescriptorSet-descriptorType-00327`, a
+                // validation message naming a descriptor type rather than the
+                // caller's binding.
+                crcbl_hal::check_binding_offset_alignment(
+                    &inner.caps.limits,
+                    slot.kind,
+                    entry.binding,
+                    offset,
+                )?;
                 // Same story for the two range limits: a binding longer than
                 // the slot allows is
                 // `VUID-VkWriteDescriptorSet-descriptorType-00332` (uniform) or

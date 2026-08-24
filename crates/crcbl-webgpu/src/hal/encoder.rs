@@ -192,6 +192,25 @@ impl CommandEncoder for WebGpuCommandEncoder {
 
     // --- bindings, shared by both scopes ---
 
+    /// # The dynamic-offset rule is **not** checked here
+    ///
+    /// [`crcbl_hal::check_dynamic_offsets`] states it — one offset per
+    /// dynamic-offset binding the layout declares, in binding order, each a
+    /// multiple of the alignment its slot requires — and the null backend and
+    /// `crcbl-vk` both call it. This encoder does not, and a violation
+    /// therefore goes to the wire: it holds a [`SharedChannel`] and a
+    /// [`HandlePool`] and nothing else, so it can reach neither the device's
+    /// [`Limits`](crcbl_hal::Limits) nor the `layouts` table
+    /// `WebGpuDevice::check_buffer_bindings` reads the slot kinds out of. There
+    /// is no layout here to resolve `group` against, so the rule is not one
+    /// this type can answer at all.
+    ///
+    /// The *static* half of the same rule — a bind group's own buffer offsets —
+    /// **is** enforced, at `WebGpuDevice::create_bind_group`, where the layout
+    /// table is in reach. Only the bind-time half is missing.
+    ///
+    /// Giving the encoder that state is a design decision rather than an
+    /// oversight, and it is not made here.
     fn bind_group(
         &mut self,
         slot: u32,

@@ -559,6 +559,121 @@ pub struct BindGroupDesc<'a> {
     pub variable_count: Option<u32>,
 }
 
+/// Checks one buffer binding's own offset against the alignment the slot it
+/// fills requires.
+///
+/// **Every backend calls this**, for
+/// [`BindGroupLayoutDesc::check_entries`]'s reason. The rule is the seam's:
+/// [`Limits`] says outright that
+/// [`min_uniform_buffer_offset_alignment`](Limits::min_uniform_buffer_offset_alignment)
+/// and
+/// [`min_storage_buffer_offset_alignment`](Limits::min_storage_buffer_offset_alignment)
+/// are "alignments a binding offset must be a multiple of" rather than
+/// ceilings, and a rule stated at the seam and enforced in one backend is a
+/// rule that holds on one backend. Before this lived here, a misaligned offset
+/// reached the driver as `VUID-VkWriteDescriptorSet-descriptorType-00327` — a
+/// validation message naming a descriptor type rather than the caller's
+/// binding, and only with the layers loaded.
+///
+/// An alignment of `1` accepts every offset, which is what a device reporting
+/// no requirement means.
+///
+/// # A slot holding no buffer carries no rule
+///
+/// Sampled images, storage images and samplers take no offset, so they are
+/// accepted. Callers reach here only for a [`BindingResource::Buffer`] that has
+/// already been held to a buffer slot, so that arm is a default rather than a
+/// decision. [`check_dynamic_offsets`] falls back the other way and says why.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`], naming the binding, the offset, the
+/// alignment and the kind of slot it came from.
+pub fn check_binding_offset_alignment(
+    limits: &Limits,
+    kind: BindingKind,
+    binding: u32,
+    offset: u64,
+) -> Result<(), HalError> {
+    let alignment = match kind {
+        BindingKind::UniformBuffer { .. } => limits.min_uniform_buffer_offset_alignment,
+        BindingKind::StorageBuffer { .. } => limits.min_storage_buffer_offset_alignment,
+        _ => 1,
+    };
+    if alignment > 1 && !offset.is_multiple_of(alignment) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "binding {binding}'s buffer offset {offset} is not a multiple of this device's \
+             {alignment}-byte alignment for {kind:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Checks the dynamic offsets a bind names against the layout that declared the
+/// slots they fill.
+///
+/// The other half of [`check_binding_offset_alignment`]: a dynamic offset is
+/// added to the descriptor's own offset before the shader sees it, so it has to
+/// satisfy the same alignment, and it arrives at
+/// [`bind_group`](crate::CommandEncoder::bind_group) rather than at bind-group
+/// creation. Vulkan reports a violation as
+/// `VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01971`, which is the same
+/// diagnostic problem the static rule has.
+///
+/// `dynamic` is the layout's **own** dynamic-offset bindings — those declaring
+/// [`BindingKind::UniformBuffer`] or [`BindingKind::StorageBuffer`] with
+/// `dynamic: true` — sorted by binding number, because
+/// [`bind_group`](crate::CommandEncoder::bind_group) states that
+/// `dynamic_offsets` is positional and in binding order. Pure, so the alignment
+/// policy has a unit test rather than a GPU.
+///
+/// # Why the fallback arm differs from the static check's
+///
+/// A slot in `dynamic` is a buffer slot by construction: the caller filtered it
+/// out of the layout on exactly that predicate. So the arm that is not uniform
+/// is a storage buffer, and it takes the storage alignment — where
+/// [`check_binding_offset_alignment`] walks a slice that legitimately holds
+/// image and sampler slots and treats an unknown kind as carrying no rule. An
+/// entry of some other kind reaching here is a caller that filtered wrong, and
+/// checking it against an alignment is a stricter answer than waving it
+/// through.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] when the number of offsets does not match
+/// the number of dynamic-offset bindings — the count is what makes the
+/// positional mapping meaningful, and one too few silently shifts every later
+/// offset onto the wrong slot — or when an offset is not a multiple of its
+/// binding's alignment.
+pub fn check_dynamic_offsets(
+    limits: &Limits,
+    dynamic: &[BindGroupLayoutEntry],
+    offsets: &[u32],
+) -> Result<(), HalError> {
+    if offsets.len() != dynamic.len() {
+        return Err(HalError::InvalidDescriptor(format!(
+            "bind_group was given {} dynamic offset(s) but the layout declares {} \
+             dynamic-offset binding(s)",
+            offsets.len(),
+            dynamic.len()
+        )));
+    }
+    for (entry, offset) in dynamic.iter().zip(offsets) {
+        let alignment = match entry.kind {
+            BindingKind::UniformBuffer { .. } => limits.min_uniform_buffer_offset_alignment,
+            _ => limits.min_storage_buffer_offset_alignment,
+        };
+        if alignment > 1 && !u64::from(*offset).is_multiple_of(alignment) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "dynamic offset {offset} for binding {} is not a multiple of this device's \
+                 {alignment}-byte alignment",
+                entry.binding
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A push-constant / root-constant range.
 ///
 /// Requires [`Features::PUSH_CONSTANTS`](crate::Features::PUSH_CONSTANTS).
@@ -1889,6 +2004,119 @@ mod tests {
             1,
             "a device with no bindless ceiling still owes a creatable binding"
         );
+    }
+
+    /// A dynamic-offset slot of one kind, for the two checks below.
+    fn dynamic_slot(binding: u32, uniform: bool) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::ALL,
+            kind: if uniform {
+                BindingKind::UniformBuffer { dynamic: true }
+            } else {
+                BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: true,
+                }
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        }
+    }
+
+    /// The two [`Limits`] fields that are an alignment rather than a ceiling.
+    /// A misaligned binding offset used to reach the driver as a VU violation
+    /// naming a descriptor type instead of an `InvalidDescriptor` naming the
+    /// binding.
+    #[test]
+    fn a_binding_offset_is_checked_against_its_own_kinds_alignment() {
+        let limits = Limits::desktop();
+        assert_eq!(limits.min_uniform_buffer_offset_alignment, 64);
+        assert_eq!(limits.min_storage_buffer_offset_alignment, 16);
+        let uniform = BindingKind::UniformBuffer { dynamic: false };
+        let storage = BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        };
+
+        // The accepting half: without it every rejection below is satisfied by
+        // a check that refuses everything.
+        check_binding_offset_alignment(&limits, uniform, 0, 128).expect("128 is a multiple of 64");
+        check_binding_offset_alignment(&limits, storage, 1, 32).expect("32 is a multiple of 16");
+
+        // 32 is a legal *storage* offset and an illegal uniform one, which is
+        // exactly why one shared alignment would be wrong.
+        let error = check_binding_offset_alignment(&limits, uniform, 0, 32)
+            .expect_err("32 is not a multiple of 64");
+        let text = error.to_string();
+        assert!(text.contains("binding 0"), "{text}");
+        assert!(text.contains("64-byte"), "{text}");
+
+        let error = check_binding_offset_alignment(&limits, storage, 1, 8)
+            .expect_err("8 is not a multiple of 16");
+        assert!(error.to_string().contains("binding 1"), "{error}");
+    }
+
+    /// An image or sampler slot takes no offset, so it carries no rule — and a
+    /// device reporting an alignment of 1 requires nothing of any slot. Both
+    /// halves accept, which is what keeps the check from being one that
+    /// refuses everything.
+    #[test]
+    fn an_alignment_of_one_and_a_slotless_kind_accept_every_offset() {
+        let limits = Limits::desktop();
+        let sampler = BindingKind::Sampler { comparison: false };
+        check_binding_offset_alignment(&limits, sampler, 0, 3)
+            .expect("a sampler slot takes no offset");
+
+        let mut unaligned = limits;
+        unaligned.min_uniform_buffer_offset_alignment = 1;
+        unaligned.min_storage_buffer_offset_alignment = 1;
+        for kind in [
+            BindingKind::UniformBuffer { dynamic: false },
+            BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: false,
+            },
+        ] {
+            check_binding_offset_alignment(&unaligned, kind, 7, 3)
+                .expect("an alignment of 1 accepts every offset");
+        }
+    }
+
+    /// The bind-time half of the same rule: a dynamic offset is added to the
+    /// descriptor's own offset, so it satisfies the same alignment.
+    #[test]
+    fn dynamic_offsets_are_checked_against_the_right_alignment() {
+        let limits = Limits::desktop();
+        let slots = [dynamic_slot(0, true), dynamic_slot(1, false)];
+
+        check_dynamic_offsets(&limits, &slots, &[128, 32]).expect("both are aligned");
+
+        let error = check_dynamic_offsets(&limits, &slots, &[32, 32])
+            .expect_err("32 is not a multiple of 64");
+        assert!(error.to_string().contains("binding 0"), "{error}");
+
+        let error = check_dynamic_offsets(&limits, &slots, &[128, 8])
+            .expect_err("8 is not a multiple of 16");
+        assert!(error.to_string().contains("binding 1"), "{error}");
+
+        let mut unaligned = limits;
+        unaligned.min_uniform_buffer_offset_alignment = 1;
+        unaligned.min_storage_buffer_offset_alignment = 1;
+        check_dynamic_offsets(&unaligned, &slots, &[3, 7])
+            .expect("an alignment of 1 accepts every offset");
+    }
+
+    /// A count mismatch is a caller bug too: `dynamic_offsets` is positional,
+    /// so one too few silently shifts every later offset onto the wrong slot.
+    #[test]
+    fn the_offset_count_must_match_the_layouts_dynamic_bindings() {
+        let limits = Limits::desktop();
+        let slots = [dynamic_slot(0, true)];
+        assert!(check_dynamic_offsets(&limits, &slots, &[]).is_err());
+        assert!(check_dynamic_offsets(&limits, &slots, &[0, 0]).is_err());
+        check_dynamic_offsets(&limits, &[], &[]).expect("no dynamic bindings, no offsets");
+        check_dynamic_offsets(&limits, &slots, &[0]).expect("one binding, one aligned offset");
     }
 
     #[test]

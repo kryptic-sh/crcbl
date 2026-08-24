@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The null backend and `crcbl-webgpu` hold a buffer binding to its slot's
+  offset alignment.** `Limits::min_uniform_buffer_offset_alignment` and
+  `min_storage_buffer_offset_alignment` are documented as alignments a binding
+  offset must be a multiple of, and neither backend mentioned either limit — so
+  a misaligned offset became `VUID-VkWriteDescriptorSet-descriptorType-00327` in
+  a driver rather than an `InvalidDescriptor` naming the binding, and the
+  reference backend could not state the rule at all. The null backend also now
+  checks a bind's **dynamic** offsets against the layout that declared them: one
+  per dynamic-offset binding, each aligned.
+
+  Both rules moved out of `crcbl-vk` to the seam as
+  `crcbl_hal::check_binding_offset_alignment` and
+  `crcbl_hal::check_dynamic_offsets`, so there is one copy. `crcbl-webgpu`
+  enforces the first and not the second, and its `bind_group` says so: that
+  method is on the encoder, which can reach neither the device's limits nor its
+  layout table.
+
 - **`crcbl-vk` and the null backend check a count-buffer draw's offsets, not
   just its handles.** `draw_indirect_count` and `draw_indexed_indirect_count`
   took `args_offset`, `count_offset`, `max_draw_count` and `stride` on trust,

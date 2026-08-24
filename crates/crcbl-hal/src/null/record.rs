@@ -575,6 +575,28 @@ pub enum ValidationError {
         /// The seam's refusal, unchanged.
         message: String,
     },
+    /// A bind's dynamic offsets break one of the rules
+    /// [`check_dynamic_offsets`](crate::check_dynamic_offsets) states: one
+    /// offset per dynamic-offset binding the layout declares, in binding
+    /// order, each a multiple of the alignment its slot requires.
+    ///
+    /// `message` is the seam's own refusal, verbatim, and the same string
+    /// [`CommandEncoder::finish`](crate::CommandEncoder::finish) returns inside
+    /// a [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor) —
+    /// [`InvalidIndirectArguments`](Self::InvalidIndirectArguments)'s
+    /// arrangement, for its reason: `bind_group` returns `()` and cannot report
+    /// one inline. Neither mistake is one an API reports usefully. A misaligned
+    /// dynamic offset is `VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01971`,
+    /// and a miscounted one is not a violation at all — the offsets are
+    /// positional, so one too few silently shifts every later offset onto the
+    /// wrong slot and the shader reads the wrong bytes.
+    #[error("`{command}` was given dynamic offsets the seam refuses: {message}")]
+    InvalidDynamicOffsets {
+        /// Command name, from [`Command::name`].
+        command: &'static str,
+        /// The seam's refusal, unchanged.
+        message: String,
+    },
     /// A command referenced a handle that was never created or has been
     /// destroyed.
     #[error("`{command}` referenced a dead {kind} handle {bits:#x}")]

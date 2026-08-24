@@ -257,7 +257,7 @@ pub use pipeline::{
     MeshPipelineDesc, MultisampleState, PORTABLE_STORAGE_BUFFERS_PER_STAGE, PipelineLayout,
     PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState, PrimitiveTopology,
     PushConstantRange, SampleType, StencilFaceState, StencilOp, StencilState, Viewport,
-    check_portable_storage_buffers,
+    check_binding_offset_alignment, check_dynamic_offsets, check_portable_storage_buffers,
 };
 pub use query::{QueryKind, QuerySet, QuerySetDesc, QuerySetHandle};
 pub use readback::{Readback, ReadbackDesc, ReadbackHandle, ReadbackState};

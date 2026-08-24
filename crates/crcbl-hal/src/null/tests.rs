@@ -4432,18 +4432,29 @@ fn a_polled_device_stamps_its_own_ownership_like_any_other() {
 /// carries no number to compare: a check reading only explicit sizes would pass
 /// every `whole_buffer` binding, which is most of them. The `offset` case is
 /// what shows the sentinel is resolved against what is actually bound — one
-/// byte in, the same over-large buffer fits.
+/// alignment in, the same over-large buffer fits.
+///
+/// The step is the slot's own
+/// [`Limits::min_uniform_buffer_offset_alignment`](crate::Limits::min_uniform_buffer_offset_alignment)
+/// or
+/// [`min_storage_buffer_offset_alignment`](crate::Limits::min_storage_buffer_offset_alignment)
+/// rather than one byte, because a binding offset is held to that alignment
+/// too — see
+/// [`check_binding_offset_alignment`](crate::check_binding_offset_alignment).
+/// A one-byte step is a binding no device this backend stands in for accepts,
+/// so it is not the way to spell "a little way into the buffer".
 #[test]
 fn a_buffer_range_over_the_slots_limit_is_refused() {
     let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let limits = device.caps().limits;
 
-    for (kind, ceiling, named) in [
+    for (kind, ceiling, named, alignment) in [
         (
             BindingKind::UniformBuffer { dynamic: false },
             limits.max_uniform_buffer_range,
             "max_uniform_buffer_range",
+            limits.min_uniform_buffer_offset_alignment,
         ),
         (
             BindingKind::StorageBuffer {
@@ -4452,6 +4463,7 @@ fn a_buffer_range_over_the_slots_limit_is_refused() {
             },
             limits.max_storage_buffer_range,
             "max_storage_buffer_range",
+            limits.min_storage_buffer_offset_alignment,
         ),
     ] {
         let layout = device
@@ -4468,8 +4480,8 @@ fn a_buffer_range_over_the_slots_limit_is_refused() {
             .expect("a single-buffer layout");
         let buffer = device
             .create_buffer(&BufferDesc {
-                label: Some("one byte too long"),
-                size: ceiling + 1,
+                label: Some("one aligned step too long"),
+                size: ceiling + alignment,
                 usage: BufferUsage::UNIFORM | BufferUsage::STORAGE,
                 memory: MemoryLocation::DeviceLocal,
             })
@@ -4491,22 +4503,30 @@ fn a_buffer_range_over_the_slots_limit_is_refused() {
             })
         };
 
-        for (case, offset, size) in [
-            ("whole buffer", 0, crate::BindingResource::WHOLE_BUFFER),
-            ("explicit size", 0, ceiling + 1),
+        // `bound` is what each spelling actually binds, which is the number the
+        // refusal has to name: the sentinel covers the whole buffer, the
+        // explicit size covers what it says.
+        for (case, offset, size, bound) in [
+            (
+                "whole buffer",
+                0,
+                crate::BindingResource::WHOLE_BUFFER,
+                ceiling + alignment,
+            ),
+            ("explicit size", 0, ceiling + 1, ceiling + 1),
         ] {
             let error = group_of(offset, size).expect_err("a range over the ceiling");
             let text = error.to_string();
             assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
             assert!(text.contains("binding 0"), "{case}: {text}");
             assert!(text.contains(named), "{case}: {text}");
-            assert!(text.contains(&(ceiling + 1).to_string()), "{case}: {text}");
+            assert!(text.contains(&bound.to_string()), "{case}: {text}");
             assert!(text.contains(&ceiling.to_string()), "{case}: {text}");
         }
 
         // Exactly the ceiling is allowed, by either spelling.
-        group_of(1, crate::BindingResource::WHOLE_BUFFER)
-            .expect("one byte in, the rest of the buffer is exactly the ceiling");
+        group_of(alignment, crate::BindingResource::WHOLE_BUFFER)
+            .expect("one aligned step in, the rest of the buffer is exactly the ceiling");
         group_of(0, ceiling).expect("a range of exactly the ceiling");
     }
 }
@@ -4875,4 +4895,261 @@ fn a_count_limited_draw_is_held_to_the_seams_argument_rules() {
 
     device.destroy_buffer(args);
     device.destroy_buffer(counts);
+}
+
+/// **A buffer binding's offset is held to the alignment its slot requires, with
+/// no device in the room.**
+///
+/// [`Limits`] says outright that
+/// [`min_uniform_buffer_offset_alignment`](crate::Limits::min_uniform_buffer_offset_alignment)
+/// and
+/// [`min_storage_buffer_offset_alignment`](crate::Limits::min_storage_buffer_offset_alignment)
+/// are alignments a binding offset must be a multiple of rather than ceilings,
+/// and until [`crate::check_binding_offset_alignment`] existed only `crcbl-vk`
+/// and the two deferred backends read either field — so the reference
+/// implementation, which is what every no-GPU test measures a backend against,
+/// could not state the rule at all. Vulkan reports the violation as
+/// `VUID-VkWriteDescriptorSet-descriptorType-00327`: a validation message
+/// naming a descriptor type rather than the caller's binding, and only with the
+/// layers loaded.
+///
+/// **The accepting half runs first.** The two alignments differ on the desktop
+/// preset — 64 for uniform, 16 for storage — so an offset legal in one slot is
+/// refused in the other, which is what shows the check reads the slot rather
+/// than one shared number.
+#[test]
+fn a_binding_offset_is_held_to_its_slots_alignment() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+    let limits = device.caps().limits;
+    assert_eq!(limits.min_uniform_buffer_offset_alignment, 64);
+    assert_eq!(limits.min_storage_buffer_offset_alignment, 16);
+
+    let slot = |binding, kind| BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        kind,
+        count: 1,
+        flags: crate::BindingFlags::empty(),
+    };
+    let layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: Some("one of each buffer kind"),
+            entries: &[
+                slot(0, BindingKind::UniformBuffer { dynamic: false }),
+                slot(
+                    1,
+                    BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                ),
+            ],
+        })
+        .expect("a two-buffer layout");
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some("bound at several offsets"),
+            size: 1024,
+            usage: BufferUsage::UNIFORM | BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("buffer");
+    let group_of = |uniform_offset, storage_offset| {
+        let at = |binding, offset| BindGroupEntry {
+            binding,
+            array_index: 0,
+            resource: crate::BindingResource::Buffer {
+                buffer,
+                offset,
+                size: 256,
+            },
+        };
+        device.create_bind_group(&BindGroupDesc {
+            label: None,
+            layout,
+            entries: &[at(0, uniform_offset), at(1, storage_offset)],
+            variable_count: None,
+        })
+    };
+
+    let group = group_of(128, 32).expect("128 is a multiple of 64 and 32 of 16");
+    device.destroy_bind_group(group);
+
+    // 32 is a legal *storage* offset and an illegal uniform one.
+    let error = group_of(32, 32).expect_err("32 is not a multiple of 64");
+    let text = error.to_string();
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+    assert!(text.contains("binding 0"), "{text}");
+    assert!(text.contains("64-byte"), "{text}");
+
+    let error = group_of(128, 8).expect_err("8 is not a multiple of 16");
+    let text = error.to_string();
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+    assert!(text.contains("binding 1"), "{text}");
+    assert!(text.contains("16-byte"), "{text}");
+
+    device.destroy_buffer(buffer);
+    device.destroy_bind_group_layout(layout);
+}
+
+/// **A bind's dynamic offsets are held to the same alignment, and to the count
+/// the layout declares.**
+///
+/// The bind-time half of the rule above — [`crate::check_dynamic_offsets`]. A
+/// dynamic offset is added to the descriptor's own offset before the shader
+/// sees it, so it satisfies the same alignment, and Vulkan reports a violation
+/// as `VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01971`. The count is the
+/// worse of the two to get wrong and is not a violation of anything: the
+/// offsets are positional, so one too few silently shifts every later offset
+/// onto the wrong slot and the shader reads the wrong bytes with nothing
+/// objecting anywhere.
+///
+/// This backend answers both out of what it already recorded — the layout a
+/// bind group was created against, and the slots that layout declares — where
+/// `crcbl-vk` needs a device and a `VkDescriptorSetLayout` to reach the same
+/// verdict and `crcbl-webgpu`'s encoder cannot reach a layout at all.
+///
+/// **The accepting bind runs first**, and it is the shape `crcbl-render` uses
+/// for per-draw data: a dynamic uniform buffer stepped by a multiple of the
+/// device's own alignment.
+#[test]
+fn a_binds_dynamic_offsets_are_held_to_the_layouts_slots() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Compute).expect("compute queue");
+    let limits = device.caps().limits;
+
+    let slot = |binding, kind| BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        kind,
+        count: 1,
+        flags: crate::BindingFlags::empty(),
+    };
+    let layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: Some("two dynamic slots"),
+            entries: &[
+                slot(0, BindingKind::UniformBuffer { dynamic: true }),
+                slot(
+                    1,
+                    BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: true,
+                    },
+                ),
+            ],
+        })
+        .expect("a two-slot dynamic layout");
+    let pipeline_layout = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("dynamic"),
+            bind_group_layouts: &[layout],
+            push_constants: None,
+        })
+        .expect("pipeline layout");
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some("per-draw data"),
+            size: 1024,
+            usage: BufferUsage::UNIFORM | BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("buffer");
+    let at = |binding| BindGroupEntry {
+        binding,
+        array_index: 0,
+        resource: crate::BindingResource::Buffer {
+            buffer,
+            offset: 0,
+            size: 256,
+        },
+    };
+    let group = device
+        .create_bind_group(&BindGroupDesc {
+            label: Some("dynamic"),
+            layout,
+            entries: &[at(0), at(1)],
+            variable_count: None,
+        })
+        .expect("both offsets are zero, which every alignment divides");
+
+    let pass = ComputePassDesc {
+        label: Some("dynamic"),
+        timestamp_writes: None,
+    };
+
+    recorder.clear();
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    encoder.begin_compute_pass(&pass);
+    encoder.bind_group(
+        0,
+        group,
+        &[
+            u32::try_from(limits.min_uniform_buffer_offset_alignment * 2).expect("64 fits a u32"),
+            u32::try_from(limits.min_storage_buffer_offset_alignment * 2).expect("16 fits a u32"),
+        ],
+        pipeline_layout,
+    );
+    encoder.end_compute_pass();
+    encoder
+        .finish()
+        .expect("both offsets are aligned and counted");
+    recorder.assert_valid();
+    assert_eq!(
+        recorder.command_names(),
+        vec!["BeginComputePass", "BindGroup", "EndComputePass"]
+    );
+
+    // One encoder per refusal: the first hard failure is the one `finish`
+    // reports, so a second on the same encoder would be masked.
+    for (what, offsets, expected) in [
+        (
+            "32 is a legal storage offset and an illegal uniform one",
+            &[32u32, 32][..],
+            "binding 0",
+        ),
+        ("8 is not a multiple of 16", &[128, 8][..], "binding 1"),
+        (
+            "one offset short shifts every later one onto the wrong slot",
+            &[128][..],
+            "dynamic-offset binding(s)",
+        ),
+        ("no offsets at all", &[][..], "dynamic-offset binding(s)"),
+    ] {
+        recorder.clear();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_compute_pass(&pass);
+        encoder.bind_group(0, group, offsets, pipeline_layout);
+        encoder.end_compute_pass();
+
+        let Err(HalError::InvalidDescriptor(reported)) = encoder.finish() else {
+            panic!("{what} must fail the finish with an InvalidDescriptor");
+        };
+        assert!(reported.contains(expected), "{what}: {reported}");
+        let errors = recorder.validation_errors();
+        let Some(ValidationError::InvalidDynamicOffsets {
+            command, message, ..
+        }) = errors
+            .iter()
+            .find(|error| matches!(error, ValidationError::InvalidDynamicOffsets { .. }))
+        else {
+            panic!("{what} must be recorded as well as reported: {errors:?}");
+        };
+        assert_eq!(*command, "BindGroup", "{what}");
+        assert_eq!(
+            *message, reported,
+            "{what}: `finish` reports the seam's own message, unchanged"
+        );
+        assert!(
+            recorder.command_names().is_empty(),
+            "{what}: a failed finish commits nothing"
+        );
+    }
+
+    device.destroy_bind_group(group);
+    device.destroy_buffer(buffer);
+    device.destroy_pipeline_layout(pipeline_layout);
+    device.destroy_bind_group_layout(layout);
 }
