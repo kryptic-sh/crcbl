@@ -60,6 +60,34 @@ pub enum DrawCommand {
         /// RGBA border colour.
         color: [f32; 4],
     },
+    /// A straight segment stroked to a given thickness.
+    Line {
+        /// One end, in screen-space.
+        from: Vec2,
+        /// The other end, in screen-space.
+        to: Vec2,
+        /// Stroke width in pixels, centred on the segment.
+        thickness: f32,
+        /// RGBA stroke colour.
+        color: [f32; 4],
+    },
+    /// A connected run of segments stroked to a given thickness.
+    ///
+    /// A point that is not finite **breaks** the run rather than being
+    /// dropped: joining its neighbours would draw a chord that is not in the
+    /// caller's data, which is exactly the artefact a diverging simulation
+    /// would hide behind. A broken run is never closed.
+    Polyline {
+        /// The vertices, in order and in screen-space.
+        points: Vec<Vec2>,
+        /// Stroke width in pixels, centred on the run.
+        thickness: f32,
+        /// Whether to stroke the closing segment from the last point back to
+        /// the first, joining the seam like any other corner.
+        closed: bool,
+        /// RGBA stroke colour.
+        color: [f32; 4],
+    },
     /// A single line of text rendered from the glyph atlas.
     Text {
         /// Top-left anchor of the text's em box — *not* a baseline. The first
@@ -110,6 +138,36 @@ impl DrawList {
         });
     }
 
+    /// Push a straight line segment, stroked centred on the segment.
+    pub fn line(&mut self, from: Vec2, to: Vec2, thickness: f32, color: [f32; 4]) {
+        self.commands.push(DrawCommand::Line {
+            from,
+            to,
+            thickness,
+            color,
+        });
+    }
+
+    /// Push a connected run of segments, stroked centred on the run.
+    ///
+    /// Corners are bevelled. Set `closed` to stroke the segment from the last
+    /// point back to the first as well; see [`DrawCommand::Polyline`] for what
+    /// a non-finite point does.
+    pub fn polyline(
+        &mut self,
+        points: impl Into<Vec<Vec2>>,
+        thickness: f32,
+        closed: bool,
+        color: [f32; 4],
+    ) {
+        self.commands.push(DrawCommand::Polyline {
+            points: points.into(),
+            thickness,
+            closed,
+            color,
+        });
+    }
+
     /// Push a text command.
     pub fn text(&mut self, pos: Vec2, text: impl Into<String>, color: [f32; 4], size: f32) {
         self.commands.push(DrawCommand::Text {
@@ -154,7 +212,8 @@ impl DrawList {
     /// Returns `(vertices, indices)` in a format a render backend can upload
     /// directly. Each `Rect` becomes one quad (4 vertices, 6 indices).
     /// `RectOutline` becomes 4 thin quads — one per side — forming a hollow
-    /// border.
+    /// border. `Line` and `Polyline` become one quad per segment plus one
+    /// bevel triangle per corner.
     ///
     /// `Text` commands are expanded when `atlas` is `Some`: each glyph becomes
     /// one textured quad with UV coordinates into the atlas. When `atlas` is
@@ -239,6 +298,36 @@ impl DrawList {
                         Vec2::new(max.x, inner_max.y),
                     );
                 }
+                DrawCommand::Line {
+                    from,
+                    to,
+                    thickness,
+                    color,
+                } => {
+                    push_stroke(
+                        &[*from, *to],
+                        false,
+                        *thickness,
+                        *color,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                }
+                DrawCommand::Polyline {
+                    points,
+                    thickness,
+                    closed,
+                    color,
+                } => {
+                    push_stroke(
+                        points,
+                        *closed,
+                        *thickness,
+                        *color,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                }
                 DrawCommand::Text {
                     pos,
                     text,
@@ -269,6 +358,166 @@ impl DrawList {
         }
         (vertices, indices)
     }
+}
+
+/// Stroke a run of points, centred on the path, and push the triangles.
+///
+/// A point that is not finite splits the run in two rather than being dropped:
+/// dropping it would connect its neighbours with a chord the caller never
+/// asked for, and a straight line across a discontinuity reads as data. A run
+/// that was split is never closed, because its two ends are no longer known to
+/// belong together.
+///
+/// Consecutive points closer together than one representable step are merged,
+/// so every segment handed to [`push_run`] has a direction.
+fn push_stroke(
+    points: &[Vec2],
+    closed: bool,
+    thickness: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<Vertex2d>,
+    indices: &mut Vec<u32>,
+) {
+    let half = thickness * 0.5;
+    if half.is_nan() || half <= 0.0 || half.is_infinite() {
+        return;
+    }
+
+    let mut run: Vec<Vec2> = Vec::with_capacity(points.len());
+    let mut split = false;
+    for &point in points {
+        if !point.is_finite() {
+            split = true;
+            push_run(&run, false, half, color, vertices, indices);
+            run.clear();
+            continue;
+        }
+        if run.last().is_none_or(|&last| (point - last).length() > 0.0) {
+            run.push(point);
+        }
+    }
+    push_run(&run, closed && !split, half, color, vertices, indices);
+}
+
+/// Stroke one unbroken run whose consecutive points are all distinct.
+///
+/// Each segment becomes a quad offset by `half` along the segment's normal.
+/// Corners are bevelled: a single triangle fills the wedge that opens on the
+/// outside of the turn, which is where the two quads leave a gap. The inside
+/// of the turn needs nothing — the quads already overlap there, and painting
+/// it again would blend a translucent stroke against itself.
+///
+/// Bevel rather than miter deliberately. A miter joint's length grows without
+/// bound as the turn sharpens, so it needs a limit and a fallback to this same
+/// bevel anyway; going straight to the bevel is one triangle, no division, and
+/// no angle at which it degenerates.
+fn push_run(
+    points: &[Vec2],
+    closed: bool,
+    half: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<Vertex2d>,
+    indices: &mut Vec<u32>,
+) {
+    // A closing segment needs a third point to be anything but a retrace of
+    // the run, and it needs the two ends to actually differ — a caller that
+    // repeated the first point to close the shape has already drawn it.
+    let closed =
+        closed && points.len() >= 3 && (points[points.len() - 1] - points[0]).length() > 0.0;
+
+    let count = points.len();
+    if count < 2 {
+        return;
+    }
+    let segments = if closed { count } else { count - 1 };
+
+    let mut directions: Vec<Vec2> = Vec::with_capacity(segments);
+    for index in 0..segments {
+        let delta = points[(index + 1) % count] - points[index];
+        directions.push(delta / delta.length());
+    }
+
+    let normal = |direction: Vec2| Vec2::new(-direction.y, direction.x) * half;
+
+    for index in 0..segments {
+        let (a, b) = (points[index], points[(index + 1) % count]);
+        let offset = normal(directions[index]);
+        push_quad_free(
+            a + offset,
+            b + offset,
+            b - offset,
+            a - offset,
+            color,
+            vertices,
+            indices,
+        );
+    }
+
+    // One joint per interior corner, plus the seam when the run is closed.
+    let joints = if closed { segments } else { segments - 1 };
+    for index in 0..joints {
+        let incoming = directions[index];
+        let outgoing = directions[(index + 1) % segments];
+        // `perp_dot` is positive when the path turns towards the +normal side,
+        // which is the inside of the bend; the gap is on the other one.
+        let turn = incoming.perp_dot(outgoing);
+        if turn == 0.0 {
+            continue;
+        }
+        let side = if turn > 0.0 { -1.0 } else { 1.0 };
+        let corner = points[(index + 1) % count];
+        push_triangle(
+            corner,
+            corner + normal(incoming) * side,
+            corner + normal(outgoing) * side,
+            color,
+            vertices,
+            indices,
+        );
+    }
+}
+
+/// Push one quad from four corners in order, for primitives that are not
+/// axis-aligned. `p0`..`p3` must wind consistently; the stroke code emits them
+/// as (start left, end left, end right, start right).
+fn push_quad_free(
+    p0: Vec2,
+    p1: Vec2,
+    p2: Vec2,
+    p3: Vec2,
+    color: [f32; 4],
+    vertices: &mut Vec<Vertex2d>,
+    indices: &mut Vec<u32>,
+) {
+    let base = vertices.len() as u32;
+    for pos in [p0, p1, p2, p3] {
+        vertices.push(Vertex2d {
+            pos,
+            uv: Vec2::ZERO,
+            color,
+        });
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+/// Push one untextured triangle, used for stroke corners.
+fn push_triangle(
+    p0: Vec2,
+    p1: Vec2,
+    p2: Vec2,
+    color: [f32; 4],
+    vertices: &mut Vec<Vertex2d>,
+    indices: &mut Vec<u32>,
+) {
+    let base = vertices.len() as u32;
+    for pos in [p0, p1, p2] {
+        vertices.push(Vertex2d {
+            pos,
+            uv: Vec2::ZERO,
+            color,
+        });
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2]);
 }
 
 /// Push one axis-aligned quad — 4 vertices, 6 indices — for use by
@@ -317,6 +566,9 @@ unsafe impl bytemuck::Zeroable for Vertex2d {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An opaque colour for tests that only care about geometry.
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
     #[test]
     fn new_draw_list_is_empty() {
@@ -809,5 +1061,260 @@ mod tests {
             hash, 15_130_871_412_783_076_140,
             "empty draw-list hash changed"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stroked lines
+    // -----------------------------------------------------------------------
+
+    /// Whether `point` lies inside the triangle `a`,`b`,`c`, edges included.
+    ///
+    /// Sign-of-cross-product test against each edge; a point is inside when it
+    /// is on the same side of all three, which for a degenerate triangle is
+    /// never true away from the line itself.
+    fn inside(point: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
+        let edge = |p: Vec2, q: Vec2| (q - p).perp_dot(point - p);
+        let (x, y, z) = (edge(a, b), edge(b, c), edge(c, a));
+        let negative = x < 0.0 || y < 0.0 || z < 0.0;
+        let positive = x > 0.0 || y > 0.0 || z > 0.0;
+        !(negative && positive)
+    }
+
+    /// Whether any emitted triangle covers `point`.
+    fn covered(point: Vec2, vertices: &[Vertex2d], indices: &[u32]) -> bool {
+        indices.chunks_exact(3).any(|t| {
+            inside(
+                point,
+                vertices[t[0] as usize].pos,
+                vertices[t[1] as usize].pos,
+                vertices[t[2] as usize].pos,
+            )
+        })
+    }
+
+    #[test]
+    fn a_line_is_stroked_centred_on_the_segment() {
+        let mut dl = DrawList::new();
+        dl.line(Vec2::new(0.0, 10.0), Vec2::new(100.0, 10.0), 4.0, RED);
+        let (vertices, indices) = dl.to_triangles(None, 1.0);
+
+        assert_eq!(vertices.len(), 4, "one quad");
+        assert_eq!(indices.len(), 6);
+        let ys: Vec<f32> = vertices.iter().map(|v| v.pos.y).collect();
+        let lo = ys.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        // Centred, not offset to one side: half the thickness each way.
+        assert_eq!((lo, hi), (8.0, 12.0), "{ys:?}");
+    }
+
+    #[test]
+    fn a_diagonal_stroke_is_as_wide_as_its_thickness() {
+        let (from, to) = (Vec2::new(10.0, 10.0), Vec2::new(50.0, 90.0));
+        let mut dl = DrawList::new();
+        dl.line(from, to, 6.0, RED);
+        let (vertices, _) = dl.to_triangles(None, 1.0);
+
+        // Measured across the segment, not along an axis: an implementation
+        // that offset by `half` in x and y would pass an axis-aligned check
+        // and be too wide here by root two.
+        let direction = (to - from).normalize();
+        let across = Vec2::new(-direction.y, direction.x);
+        let offsets: Vec<f32> = vertices.iter().map(|v| across.dot(v.pos - from)).collect();
+        let lo = offsets.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = offsets.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (hi - lo - 6.0).abs() < 1.0e-4,
+            "width {} from {offsets:?}",
+            hi - lo
+        );
+        assert!((lo + hi).abs() < 1.0e-4, "not centred: {lo} .. {hi}");
+    }
+
+    #[test]
+    fn a_corner_is_filled_rather_than_left_notched() {
+        // A right-angle turn. Without a join the two quads meet at the inside
+        // corner only and leave a square notch on the outside, which is the
+        // artefact this whole helper exists to avoid.
+        let corner = Vec2::new(50.0, 50.0);
+        let thickness = 10.0;
+        let mut dl = DrawList::new();
+        dl.polyline(
+            vec![Vec2::new(0.0, 50.0), corner, Vec2::new(50.0, 0.0)],
+            thickness,
+            false,
+            RED,
+        );
+        let (vertices, indices) = dl.to_triangles(None, 1.0);
+
+        // The elbow opens down-and-right: the two segment quads reach only to
+        // `corner` along their own axis, so the square just outside it belongs
+        // to neither and the bevel is the only thing that can fill it. The
+        // up-and-right side is *inside* the second quad and stays covered even
+        // with no join at all, which is why it is the wrong place to look.
+        let half = thickness * 0.5;
+        let outer = corner + Vec2::new(half, half) * 0.3;
+        let inner = corner + Vec2::new(half, -half) * 0.3;
+        assert!(
+            covered(outer, &vertices, &indices),
+            "the notch outside the turn at {outer:?} is not covered"
+        );
+        assert!(
+            covered(inner, &vertices, &indices),
+            "the inside of the turn at {inner:?} came uncovered"
+        );
+        // A bevel cuts the corner rather than extending to the miter point, so
+        // the far tip of that square stays open. Pinning it keeps a future
+        // switch to miters from passing this test silently.
+        let tip = corner + Vec2::new(half, half) * 0.95;
+        assert!(
+            !covered(tip, &vertices, &indices),
+            "the bevel reached {tip:?}, which is past where a bevel ends"
+        );
+    }
+
+    #[test]
+    fn a_closed_polyline_strokes_the_seam() {
+        let square = vec![
+            Vec2::new(10.0, 10.0),
+            Vec2::new(90.0, 10.0),
+            Vec2::new(90.0, 90.0),
+            Vec2::new(10.0, 90.0),
+        ];
+        let mut open = DrawList::new();
+        open.polyline(square.clone(), 4.0, false, RED);
+        let mut closed = DrawList::new();
+        closed.polyline(square, 4.0, true, RED);
+
+        let (_, open_indices) = open.to_triangles(None, 1.0);
+        let (closed_vertices, closed_indices) = closed.to_triangles(None, 1.0);
+        assert!(
+            closed_indices.len() > open_indices.len(),
+            "closing added nothing: {} vs {}",
+            closed_indices.len(),
+            open_indices.len()
+        );
+        // The closing edge runs down the left side; nothing on the open run
+        // draws there.
+        assert!(
+            covered(Vec2::new(10.0, 50.0), &closed_vertices, &closed_indices),
+            "the seam segment was not stroked"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_point_breaks_the_run_instead_of_bridging_it() {
+        let mut dl = DrawList::new();
+        dl.polyline(
+            vec![
+                Vec2::new(0.0, 50.0),
+                Vec2::new(20.0, 50.0),
+                Vec2::new(f32::NAN, f32::NAN),
+                Vec2::new(80.0, 50.0),
+                Vec2::new(100.0, 50.0),
+            ],
+            4.0,
+            false,
+            RED,
+        );
+        let (vertices, indices) = dl.to_triangles(None, 1.0);
+
+        assert!(
+            covered(Vec2::new(10.0, 50.0), &vertices, &indices),
+            "the run before the break was dropped"
+        );
+        assert!(
+            covered(Vec2::new(90.0, 50.0), &vertices, &indices),
+            "the run after the break was dropped"
+        );
+        // The gap is the point: a chord across it is data the caller never
+        // supplied.
+        assert!(
+            !covered(Vec2::new(50.0, 50.0), &vertices, &indices),
+            "the break was bridged"
+        );
+    }
+
+    #[test]
+    fn strokes_with_no_extent_draw_nothing() {
+        let point = Vec2::new(5.0, 5.0);
+        for (name, list) in [
+            ("zero thickness", {
+                let mut dl = DrawList::new();
+                dl.line(Vec2::ZERO, Vec2::new(10.0, 0.0), 0.0, RED);
+                dl
+            }),
+            ("negative thickness", {
+                let mut dl = DrawList::new();
+                dl.line(Vec2::ZERO, Vec2::new(10.0, 0.0), -4.0, RED);
+                dl
+            }),
+            ("nan thickness", {
+                let mut dl = DrawList::new();
+                dl.line(Vec2::ZERO, Vec2::new(10.0, 0.0), f32::NAN, RED);
+                dl
+            }),
+            ("infinite thickness", {
+                let mut dl = DrawList::new();
+                dl.line(Vec2::ZERO, Vec2::new(10.0, 0.0), f32::INFINITY, RED);
+                dl
+            }),
+            ("a segment of zero length", {
+                let mut dl = DrawList::new();
+                dl.line(point, point, 4.0, RED);
+                dl
+            }),
+            ("a single point", {
+                let mut dl = DrawList::new();
+                dl.polyline(vec![point], 4.0, true, RED);
+                dl
+            }),
+            ("no points at all", {
+                let mut dl = DrawList::new();
+                dl.polyline(Vec::new(), 4.0, true, RED);
+                dl
+            }),
+            ("every point the same", {
+                let mut dl = DrawList::new();
+                dl.polyline(vec![point, point, point], 4.0, true, RED);
+                dl
+            }),
+        ] {
+            let (vertices, indices) = list.to_triangles(None, 1.0);
+            assert!(
+                vertices.is_empty() && indices.is_empty(),
+                "{name} emitted {} vertices",
+                vertices.len()
+            );
+        }
+    }
+
+    #[test]
+    fn every_stroke_triangle_indexes_a_vertex_that_exists() {
+        // The stroke helpers push vertices and indices from two places, so a
+        // base-offset slip would go unnoticed by the coverage checks above.
+        let mut dl = DrawList::new();
+        dl.line(Vec2::ZERO, Vec2::new(10.0, 10.0), 3.0, RED);
+        dl.polyline(
+            vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(30.0, 5.0),
+                Vec2::new(10.0, 40.0),
+            ],
+            3.0,
+            true,
+            RED,
+        );
+        dl.rect(Vec2::ZERO, Vec2::new(4.0, 4.0), RED);
+        let (vertices, indices) = dl.to_triangles(None, 1.0);
+
+        assert_eq!(indices.len() % 3, 0);
+        assert!(!indices.is_empty());
+        for &index in &indices {
+            assert!(
+                (index as usize) < vertices.len(),
+                "index {index} of {} vertices",
+                vertices.len()
+            );
+        }
     }
 }

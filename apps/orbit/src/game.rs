@@ -852,6 +852,10 @@ pub struct RenderState {
     pub ship: [f64; 2],
     /// Which way the engine points, in the same plane.
     pub attitude: [f64; 2],
+    /// Whether [`path`](Self::path) comes back round to its own first point,
+    /// so the map can stroke the closing arc as well. False on a trajectory
+    /// that escapes, whose samples stop where the map stops.
+    pub path_closed: bool,
     /// The trajectory ahead, in the same plane. Refilled rather than
     /// reallocated.
     ///
@@ -1130,6 +1134,7 @@ impl Game {
         out.attitude = [flight.attitude.x, flight.attitude.y];
 
         out.path.clear();
+        out.path_closed = false;
         // **Only where there is a trajectory to draw.** A ship going straight
         // up from a standstill has exactly zero angular momentum — this planet
         // does not rotate, so the launch is radial — and the conic through that
@@ -1143,18 +1148,20 @@ impl Game {
             // an hour of it, which is as far ahead as a map at this scale can
             // show.
             let span = out.period.unwrap_or(3_600.0);
+            // The samples span one whole period without repeating the first
+            // point, so the arc from the last back to it is the map's to draw.
+            out.path_closed = out.period.is_some();
             let mu = flight.frames.mu(flight.frame);
             for sample in 0..PATH_SAMPLES {
                 let ahead = span * sample as f64 / PATH_SAMPLES as f64;
                 let at = propagate(mu, flight.ship, ahead);
                 let point = at.position.delta(WorldPos::ORIGIN);
-                // A sample that came back non-finite would reach the vertex
-                // buffer as a NaN and take the whole draw with it. Dropping it
-                // leaves a gap in a dotted line, which is what a gap looks
-                // like.
-                if point.is_finite() {
-                    out.path.push([point.x, point.y]);
-                }
+                // A non-finite sample is pushed rather than dropped.
+                // `DrawList::polyline` breaks its run at one instead of
+                // joining across it, so a propagator that diverged shows as
+                // the gap it is; dropping the sample here would hand the map a
+                // shorter but unbroken curve and hide it.
+                out.path.push([point.x, point.y]);
             }
         }
     }

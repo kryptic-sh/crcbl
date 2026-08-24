@@ -12,14 +12,17 @@
 //!                        W/S throttle   A/D turn   . , warp
 //! ```
 //!
-//! # Why the orbit is a row of dots
+//! # The orbit is a stroked curve
 //!
-//! [`DrawList`] draws axis-aligned rectangles and text, and the engine has no
-//! line primitive anywhere — so a curve is drawn as the points it was sampled
-//! at. That suits this one: the samples *are* the propagator's answers, spread
-//! evenly in **time** rather than in angle, so they bunch up at apoapsis and
-//! spread out at periapsis and the picture shows where the ship spends its
-//! orbit. `docs/backlog.md` carries the line primitive the 3D milestone wants.
+//! The trajectory is one [`DrawList::polyline`] through the propagator's own
+//! samples, closed when the orbit comes back round. The samples are spread
+//! evenly in **time** rather than in angle, so the vertices bunch at apoapsis
+//! and spread at periapsis — which costs nothing here, because a stroked run
+//! is smoothest exactly where its vertices are densest.
+//!
+//! A sample that came back non-finite is passed through rather than dropped:
+//! `polyline` breaks its run at one, so a propagator that diverged draws the
+//! gap instead of a curve that quietly skips it.
 //!
 //! The planet and its atmosphere are filled discs, drawn as a stack of
 //! horizontal rectangles — the one shape a rectangle primitive can fill exactly
@@ -66,11 +69,10 @@ const WARNING: [f32; 4] = [0.95, 0.42, 0.36, 1.0];
 /// a mesh.
 const DISC_ROWS: usize = 72;
 
-/// The side of the square the ship and each path sample are drawn as, in
-/// pixels.
+/// The side of the square the ship is drawn as, in pixels.
 const SHIP_SIZE: f32 = 5.0;
-/// See [`SHIP_SIZE`].
-const PATH_SIZE: f32 = 2.0;
+/// How wide the trajectory and the engine plume are stroked, in pixels.
+const PATH_WIDTH: f32 = 2.0;
 
 /// How much of the smaller screen dimension the whole map fits inside.
 const MAP_FILL: f32 = 0.82;
@@ -180,26 +182,23 @@ fn draw_map(list: &mut DrawList, width: f32, height: f32, state: &RenderState) {
         GROUND,
     );
 
-    for point in &state.path {
-        let at = map.at(*point);
-        dot(list, at, PATH_SIZE, PATH);
-    }
+    // `map.at` is total, so a non-finite sample arrives here still non-finite
+    // and `polyline` splits the run on it rather than bridging the gap.
+    let path: Vec<Vec2> = state.path.iter().map(|point| map.at(*point)).collect();
+    list.polyline(path, PATH_WIDTH, state.path_closed, PATH);
 
     // The engine's plume, drawn before the ship so the ship sits on top of it:
-    // a short line of dots out the back, as long as the throttle is open.
+    // a stroke out the back, as long as the throttle is open.
     let ship = map.at(state.ship);
     if state.throttle > 0.0 && state.fuel > 0.0 {
         let back = Vec2::new(-state.attitude[0] as f32, state.attitude[1] as f32);
         let reach = SHIP_SIZE * 4.0 * state.throttle as f32;
-        for step in 1..=4 {
-            let along = reach * step as f32 / 4.0;
-            dot(
-                list,
-                Vec2::new(ship.x + back.x * along, ship.y + back.y * along),
-                PATH_SIZE,
-                FLAME,
-            );
-        }
+        list.line(
+            ship,
+            Vec2::new(ship.x + back.x * reach, ship.y + back.y * reach),
+            PATH_WIDTH,
+            FLAME,
+        );
     }
     dot(list, ship, SHIP_SIZE, SHIP);
 }

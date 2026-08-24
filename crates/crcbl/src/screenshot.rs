@@ -3413,16 +3413,18 @@ mod tests {
         }
     }
 
-    /// The UI scene has to exercise all three command kinds — a frame of
+    /// The UI scene has to exercise rectangles, outlines and text — a frame of
     /// rectangles never samples the glyph atlas, so a broken atlas binding
-    /// would draw an identical picture on both backends.
+    /// would draw an identical picture on both backends. Strokes are asserted
+    /// absent rather than ignored, so adding one to the scene has to come back
+    /// here and say what the comparison should expect of it.
     #[test]
     fn the_ui_scene_draws_text_a_rect_and_an_outline_inside_the_frame() {
         use crate::ui::draw_list::DrawCommand;
 
         for extent in [(256u32, 192u32), (97, 61), (1920, 1080)] {
             let list = ui_draw_list(extent);
-            let (mut rects, mut outlines, mut texts) = (0, 0, 0);
+            let (mut rects, mut outlines, mut texts, mut strokes) = (0, 0, 0, 0);
             for command in list.commands() {
                 match command {
                     DrawCommand::Rect { min, max, .. } => {
@@ -3434,6 +3436,9 @@ mod tests {
                         );
                     }
                     DrawCommand::RectOutline { .. } => outlines += 1,
+                    // The scene draws no strokes; counted so that adding one
+                    // later has to come back here and say what it expects.
+                    DrawCommand::Line { .. } | DrawCommand::Polyline { .. } => strokes += 1,
                     // The glyphs' extent is the atlas's business, so only the
                     // anchor is checked here.
                     DrawCommand::Text { pos, .. } => {
@@ -3446,8 +3451,9 @@ mod tests {
                 }
             }
             assert!(
-                rects >= 2 && outlines == 1 && texts >= 1,
-                "{extent:?}: {rects} rect(s), {outlines} outline(s), {texts} text(s)"
+                rects >= 2 && outlines == 1 && texts >= 1 && strokes == 0,
+                "{extent:?}: {rects} rect(s), {outlines} outline(s), {texts} text(s), \
+                 {strokes} stroke(s)"
             );
         }
     }

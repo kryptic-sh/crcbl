@@ -16752,16 +16752,6 @@ with the flight instruments over it. What that leaves:
   next milestone and both want the same thing first: a sphere mesh and a camera,
   which `apps/quarry` and `apps/lantern` already have working examples of.
 
-- **There is no line primitive anywhere in the engine.** `crcbl::ui::DrawList`
-  has `rect`, `rect_outline` and `text`, and neither `crcbl-render` nor
-  `crcbl-ui` has a line, polyline or debug-draw path. `page.rs` draws the
-  trajectory as the points it was sampled at, which reads well and is honest —
-  the dots bunch where the ship is slow — but `06-orbit.md` asks for "orbit path
-  debug draw" and `05-physics.md` asks for debug draw of contacts, sweeps, fat
-  AABBs, BVH bounds and islands, none of which is a rectangle. That is one
-  primitive with at least six consumers, so it is worth its own slice rather
-  than a helper inside a sample.
-
 - **The moon exists and nothing goes there.** `Flight::new` builds the moon's
   frame with its Laplace sphere of influence, and `cross_boundaries` would hand
   the ship over on a crossing, but the autopilot stops once the orbit is made
@@ -16782,22 +16772,22 @@ with the flight instruments over it. What that leaves:
   thousand revolutions, but nothing has run _this sample_ at ×1000 for long
   enough to say the frame hierarchy, the fuel and the phase logic survive it.
 
-## The engine has no line primitive (2026-08-24)
+## There is still no world-space debug draw (2026-08-24)
 
-Raised by `apps/orbit`, but not its problem alone. `crcbl::ui::draw_list` offers
-`rect`, `rect_outline` and `text`; there is no line, polyline or thick stroke,
-on the UI layer or the render layer. Consumers that want one today:
+The **UI-space** half of this has shipped: `DrawList::line` and
+`DrawList::polyline` stroke segments and connected runs with bevelled corners,
+and `apps/orbit` draws its trajectory and plume with them. That covers any
+overlay whose lines live in screen space.
 
-- `apps/orbit`'s trajectory, which draws sampled points instead.
-- `docs/plan/05-physics.md`'s debug draw — contacts, sweeps, fat AABBs, BVH
-  bounds, islands.
-- `docs/plan/sample/06-orbit.md`'s "orbit path debug draw" by name.
+It does **not** cover the other shape, and the two were never the same feature.
+`docs/plan/05-physics.md`'s debug draw — contacts, sweeps, fat AABBs, BVH
+bounds, islands — wants lines that are _in the scene_, so they have to be
+transformed by the camera and depth-tested against the geometry they annotate.
+Nothing in `crcbl-render` does that today. The HAL can already express
+`LineList` and `LineStrip` and no pass uses either, so the missing piece is a
+render pass and its pipeline, not a primitive.
 
-Two shapes are possible and they are not the same feature. A **UI-space
-polyline** in `DrawList` is small — the compositor already builds triangles, and
-a stroke is two triangles a segment — and would serve the map and any 2D
-overlay. A **world-space debug-draw pass** is the bigger one and is what the
-physics debug views actually want, because their lines are in the scene and have
-to depth-test against it. Doing the first does not give the second.
-
-Not started, and worth a decision on which comes first before either does.
+Not started. Worth noting that thin hardware lines are one pixel wide and not
+uniformly supported, so the same triangle-expansion `push_stroke` does for the
+UI is likely the right answer there too — which is an argument for lifting that
+helper rather than writing a second one.

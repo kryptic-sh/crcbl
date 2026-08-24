@@ -124,6 +124,8 @@ pub struct PageStats {
     pub outlines: usize,
     /// Text spans.
     pub text: usize,
+    /// Stroked lines and polylines.
+    pub strokes: usize,
 }
 
 impl PageStats {
@@ -136,6 +138,7 @@ impl PageStats {
                 DrawCommand::Rect { .. } => stats.rects += 1,
                 DrawCommand::RectOutline { .. } => stats.outlines += 1,
                 DrawCommand::Text { .. } => stats.text += 1,
+                DrawCommand::Line { .. } | DrawCommand::Polyline { .. } => stats.strokes += 1,
             }
         }
         stats
@@ -144,7 +147,7 @@ impl PageStats {
     /// Every command the page emitted.
     #[must_use]
     pub const fn total(&self) -> usize {
-        self.rects + self.outlines + self.text
+        self.rects + self.outlines + self.text + self.strokes
     }
 }
 
@@ -610,6 +613,11 @@ mod tests {
                     DrawCommand::Rect { min, max, .. }
                     | DrawCommand::RectOutline { min, max, .. } => (*min, *max),
                     DrawCommand::Text { pos, .. } => (*pos, *pos),
+                    DrawCommand::Line { from, to, .. } => (from.min(*to), from.max(*to)),
+                    DrawCommand::Polyline { points, .. } => points.iter().fold(
+                        (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+                        |(min, max), point| (min.min(*point), max.max(*point)),
+                    ),
                 };
                 assert!(
                     min.x >= 0.0 && min.y >= 0.0 && max.x <= screen.x && max.y <= screen.y,

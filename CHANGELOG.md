@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`DrawList::line` and `DrawList::polyline`** — stroked segments and connected
+  runs, the UI layer's first primitive that is not axis-aligned. Both take a
+  thickness in pixels and stroke centred on the path; a polyline can close, and
+  its corners are bevelled. A point that is not finite **breaks** the run rather
+  than being dropped, so a caller whose data diverged draws the gap instead of a
+  chord it never asked for. `apps/orbit` draws its trajectory and engine plume
+  with them; the map used to be a row of squares because nothing in the engine
+  could draw a curve.
+
 - **`apps/orbit` runs in a browser.** The ninth demo on the site, and the
   physics pillar's acceptance test: a rocket off a pad, through an atmosphere
   that fights it, into an orbit it holds. Burning or in the air, the flight is
