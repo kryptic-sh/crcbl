@@ -361,6 +361,16 @@ pub struct Viewer {
     reloads: u64,
     instances: usize,
     skipped: usize,
+    /// How many joints the document's skins declare — `crate::model::Rig`'s
+    /// count, and the whole of the rig that reaches a number on a panel.
+    ///
+    /// **A count and never a name.** The clip names are on the listing panel;
+    /// this row and the `[HUD]` line take the number alone, because a clip name
+    /// is arbitrary text out of someone else's file and the heartbeat is parsed
+    /// as `name: value` pairs by `web/tools/browser-e2e.mjs` and by this
+    /// module's own tests. One space or one colon in a name would take the
+    /// parse apart.
+    joints: usize,
     /// What the frames are being drawn with, re-read each [`Viewer::draw`] off
     /// the renderer.
     ///
@@ -535,6 +545,7 @@ fn assemble<S: Shell + ?Sized>(
             listing,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
+            joints: model.rig.joints,
             effects,
         },
         options.common.loop_config(),
@@ -692,6 +703,7 @@ impl Viewer {
         self.bounds = model.bounds;
         self.instances = model.render.instances.len();
         self.skipped = model.skipped().len();
+        self.joints = model.rig.joints;
         // Rebuilt rather than edited row by row, because every row is the
         // document's; the panel's own visibility is the one thing that is not,
         // so it is the one thing carried across.
@@ -1008,11 +1020,17 @@ impl HostedGame for Viewer {
 
 /// The viewer's own rows on the debug panel.
 ///
-/// The three numbers a person looking at an unfamiliar document wants and
-/// cannot get any other way: how much of it was placed, how much of it was
-/// refused, and how far away the camera has ended up — which is what says
-/// "nothing is on screen because you zoomed past it" rather than "nothing is on
-/// screen because the file is empty".
+/// The numbers a person looking at an unfamiliar document wants and cannot get
+/// any other way: how much of it was placed, how much of it was refused, how
+/// big a skeleton it brought, and how far away the camera has ended up — which
+/// is what says "nothing is on screen because you zoomed past it" rather than
+/// "nothing is on screen because the file is empty".
+///
+/// `joints` is the rig, reduced to the one thing that fits a row. Nothing here
+/// poses a skeleton, so it is the only sign the panel gives that the import
+/// read one at all; the clip *names* are on the listing behind
+/// [`LISTING_KEY`], because a name out of someone else's file is not something
+/// a `name: value` row can carry safely.
 ///
 /// The last two rows are the debug views, and both report the frame that was
 /// **drawn**: the wireframe's field holds what the device answered rather than
@@ -1031,8 +1049,17 @@ impl Viewer {
     ///
     /// **This sample has no simulation to report**, so what it names is the
     /// document: how many instances of it reached the renderer, how much of it
-    /// the conversion could not bring in, and where the camera is. A CI log has
-    /// no debug panel to read and neither has a browser gate.
+    /// the conversion could not bring in, how many joints its skins declare, and
+    /// where the camera is. A CI log has no debug panel to read and neither has
+    /// a browser gate.
+    ///
+    /// **Counts only, and `joints` is why that is written down.** Every value
+    /// on this line is a number or a fixed word, because
+    /// `web/tools/browser-e2e.mjs` and this module's tests read the line as
+    /// `name: value` pairs separated by runs of spaces. A clip name would be
+    /// arbitrary text out of a document nobody here wrote — one with a space or
+    /// a colon in it takes that parse apart — so the names stay on the listing
+    /// panel and only the joint count comes here.
     ///
     /// **`turn` is here for that gate specifically.**
     /// `web/tools/browser-e2e.mjs` proves a page is running rather than merely
@@ -1047,11 +1074,12 @@ impl Viewer {
             return;
         }
         crcbl::log::info!(
-            "[HUD] tick: {}  instances: {}  skipped: {}  dist: {:.2}  turn: {:.1}  \
+            "[HUD] tick: {}  instances: {}  skipped: {}  joints: {}  dist: {:.2}  turn: {:.1}  \
              wireframe: {}  normals: {}",
             self.ticks,
             self.instances,
             self.skipped,
+            self.joints,
             self.orbit.distance(),
             self.turned.to_degrees() % 360.0,
             if self.wireframe { "on" } else { "off" },
@@ -1065,6 +1093,7 @@ impl DebugModule for Viewer {
         out.set_title("viewer");
         out.row("instances", format_args!("{}", self.instances));
         out.row("skipped", format_args!("{}", self.skipped));
+        out.row("joints", format_args!("{}", self.joints));
         out.row("dist", format_args!("{:.2}", self.orbit.distance()));
         // Wrapped to one turn so the row stays readable; it is the value the
         // browser gate watches for a frame advancing under its own steam.
@@ -1747,6 +1776,48 @@ mod tests {
             !ui_text(&engine).iter().any(|t| t == "frame"),
             "F3 hides it again",
         );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The `joints` row is the document's rig, and it is a count and nothing
+    /// else.**
+    ///
+    /// Over the browser demo's own document, which is the one document this
+    /// application ships with a rig in it — see [`crate::demo_model`] — and the
+    /// one `web/tools/browser-e2e.mjs` waits on. The gate reads the same number
+    /// off the `[HUD]` line that this reads off the panel, so a summary that
+    /// stopped reaching [`Viewer`] fails here rather than as a browser run that
+    /// times out.
+    ///
+    /// The listing panel is left closed. It draws a `joints` row of its own and
+    /// [`row_value`] refuses a label that appears twice, which is the same
+    /// collision `instances` already has.
+    #[test]
+    fn the_debug_panel_reports_the_documents_joint_count() {
+        let (_dir, mut options) = model_at(&crate::demo_model::demo_glb(), 16);
+        options.common.debug_overlay = Some(false);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_press(window, DEBUG_OVERLAY_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        let drawn = ui_text(&engine);
+        assert_eq!(
+            row_value(&drawn, "joints"),
+            "2",
+            "the demo document's skin binds two joints: {drawn:?}",
+        );
+        assert_eq!(
+            row_value(&drawn, "instances"),
+            "3",
+            "and the joints placed nothing, so the instance count is unmoved: {drawn:?}",
+        );
+
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

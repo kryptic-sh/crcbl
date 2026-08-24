@@ -87,4 +87,4 @@ pub use args::{DEFAULT_TICK_HZ, Invocation, Options, USAGE, parse};
 pub use controls::Controls;
 pub use listing::Listing;
 pub use menu::{MenuKind, Menus};
-pub use model::{LoadError, Model, load, load_from, world_bounds};
+pub use model::{LoadError, Model, Rig, load, load_from, world_bounds};

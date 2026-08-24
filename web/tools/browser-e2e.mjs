@@ -388,8 +388,21 @@ const EXPECTATIONS = {
     // `instances` is the document's own three, so this also says the generated
     // `.glb` reached the renderer rather than an empty scene arriving as a
     // successful boot.
+    //
+    // `joints` is the demo document's rig — a skin over two joint nodes, built
+    // by `apps/viewer/src/demo_model.rs`. Nothing in this engine poses a
+    // skeleton, so the count on the heartbeat is the *only* place a browser can
+    // see that the import read one: `crcbl::scene::GltfScene::skins` reaching
+    // `crate::model::Rig` reaching the `[HUD]` line. Asked for by its value
+    // rather than by "is a number", because zero is what both a document with
+    // no rig and an import that dropped the skin report. Counts only on this
+    // line — the clip names are on the viewer's own listing panel, since a name
+    // out of someone else's file could hold the space or the colon this parse
+    // is made of.
     waiting: (line) =>
-      line.includes('[HUD] tick:') && line.includes('instances: 3'),
+      line.includes('[HUD] tick:') &&
+      line.includes('instances: 3') &&
+      line.includes('joints: 2'),
     moving: /turn: ([\d.]+)/,
     movingLabel: 'the turntable carries the camera under its own steam',
   },

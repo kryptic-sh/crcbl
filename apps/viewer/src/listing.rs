@@ -47,6 +47,17 @@
 //!   it once the run is over; a person looking at the window needs it while
 //!   they are looking, because "one instance" beside a mesh count of forty is
 //!   exactly the shape of a scene graph that did not survive.
+//! * **`joints` and `clips`, or `rig: none`.** Whether the file brought a
+//!   skeleton with it, how big it is, and what its animations are called.
+//!   Nothing in this engine poses a skeleton or plays a clip yet, so the panel
+//!   is the *only* place a rig is visible at all: a document whose skin or
+//!   whose animations the import dropped looks exactly like one that never had
+//!   them, and these two rows are the difference. The clips are named rather
+//!   than counted because a name is what an artist asked for by name and a
+//!   count is not — they share one row, joined, for the reason there is no row
+//!   per mesh either. A document with no rig says `none` on one row instead of
+//!   drawing two zeroes, which is a fact about the file rather than a hole in
+//!   the panel.
 //! * **`size` and `centre`.** The box
 //!   [`OrbitCamera::frame`](crcbl::render::OrbitCamera::frame) was pointed at, in
 //!   metres — which is glTF's unit, and therefore how a file exported in
@@ -211,6 +222,23 @@ impl Listing {
         ));
 
         lines.push(row("instances", model.render.instances.len().to_string()));
+
+        // One row saying so, rather than a `joints` of zero beside a `clips` of
+        // nothing: those two read as a rig that was lost on the way in, and
+        // most documents simply have none.
+        if model.rig.is_empty() {
+            lines.push(row("rig", "none".to_string()));
+        } else {
+            lines.push(row("joints", model.rig.joints.to_string()));
+            lines.push(row(
+                "clips",
+                if model.rig.clips.is_empty() {
+                    "none".to_string()
+                } else {
+                    model.rig.clips.join(", ")
+                },
+            ));
+        }
 
         let size = model.bounds.half_extent() * 2.0;
         lines.push(row(
@@ -576,6 +604,15 @@ mod tests {
             "none",
             "the page's opaque-white layer is the renderer's, not the document's",
         );
+        assert_eq!(
+            value_of(&lines, "rig"),
+            "none",
+            "a document that declares no skin and no clip says so on one row",
+        );
+        assert!(
+            !lines.iter().any(|line| line == "joints" || line == "clips"),
+            "and it draws neither of the rows a rig would: {lines:#?}",
+        );
 
         // A one-metre quad in the XY plane, on a node that translates it — so
         // both of these fail if the box were the local one or the renderer's.
@@ -718,12 +755,12 @@ mod tests {
     ///
     /// The numbers are exact rather than "fewer than before", which is what
     /// makes the tail's arithmetic checkable: the skewed fixture's listing is a
-    /// heading, nine rows, the skip heading and one skip; a window holding ten
-    /// lines spends one of them on the tail, so nine are drawn and three go.
+    /// heading, ten rows, the skip heading and one skip; a window holding ten
+    /// lines spends one of them on the tail, so nine are drawn and four go.
     #[test]
     fn a_short_window_drops_the_tail_and_says_how_much_it_dropped() {
         let (_dir, listing) = shown("skewed.glb", &fixture::skewed_glb());
-        assert_eq!(listing.lines.len(), 12, "{:#?}", listing.lines);
+        assert_eq!(listing.lines.len(), 13, "{:#?}", listing.lines);
 
         let padding = DebugStyle::default().padding;
         let short = Vec2::new(1280.0, 2.0 * (MARGIN + padding) + 10.0 * LINE_HEIGHT);
@@ -736,7 +773,7 @@ mod tests {
         );
         assert_eq!(
             cut.last().map(String::as_str),
-            Some("+3 more, all of them on stderr"),
+            Some("+4 more, all of them on stderr"),
             "the last line has to account for exactly what is missing: {cut:#?}",
         );
         assert!(
@@ -744,8 +781,8 @@ mod tests {
             "the dropped lines are the exposure row and the skip section, which are last: {cut:#?}",
         );
         assert_eq!(
-            value_of(&cut, "centre"),
-            "0.000, 0.000, 0.000",
+            value_of(&cut, "size"),
+            "1.000 x 2.000 x 0.000 m",
             "the ninth line is still drawn in full: {cut:#?}",
         );
 
@@ -808,5 +845,45 @@ mod tests {
             DrawCommand::Rect { min, max, .. } => Some((*min, *max)),
             _ => None,
         })
+    }
+
+    /// **A rigged document's clips are named on the panel, and its joints are
+    /// counted.**
+    ///
+    /// Over the browser demo's own document, because that is the one document
+    /// this application ships and the one `web/tools/browser-e2e.mjs` reads a
+    /// joint count off — a panel and a gate that disagreed about the same file
+    /// would be two answers to one question.
+    ///
+    /// The clip is asserted by **name**. Nothing in this engine plays one yet,
+    /// so a count would be the same number whether the importer read the
+    /// animation's name, dropped it, or reported the wrong clip entirely.
+    #[test]
+    fn a_rigged_document_counts_its_joints_and_names_its_clips() {
+        let (_dir, listing) = shown("rigged.glb", &crate::demo_model::demo_glb());
+        let lines = drawn(&listing, ROOMY);
+
+        assert_eq!(value_of(&lines, "joints"), "2");
+        assert_eq!(value_of(&lines, "clips"), "lid-swing");
+        assert!(
+            !lines.iter().any(|line| line == "rig"),
+            "the `rig` row is the one a document with no rig gets instead: {lines:#?}",
+        );
+    }
+
+    /// **A document that animates without rigging still reports its clip**, and
+    /// an unnamed one is drawn as the stand-in `crate::model::Rig` documents
+    /// rather than as a blank.
+    ///
+    /// The half of the panel a joint count alone would lose: this document has
+    /// no skin, so `joints` is zero, and a listing that asked only about joints
+    /// would print `rig: none` over a file with an animation in it.
+    #[test]
+    fn a_document_that_animates_without_a_skin_still_lists_its_clip() {
+        let (_dir, listing) = shown("clip.glb", &fixture::unnamed_clip_glb());
+        let lines = drawn(&listing, ROOMY);
+
+        assert_eq!(value_of(&lines, "joints"), "0");
+        assert_eq!(value_of(&lines, "clips"), "(unnamed clip 0)");
     }
 }

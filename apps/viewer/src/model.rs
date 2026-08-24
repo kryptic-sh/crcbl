@@ -61,6 +61,49 @@ pub struct Model {
     /// See [`world_bounds`] for what "the document declares" includes and what
     /// it therefore is not.
     pub bounds: Aabb,
+    /// What the document's skins and animations amount to — see [`Rig`].
+    pub rig: Rig,
+}
+
+/// What a document's rig amounts to, as much of it as this application reports.
+///
+/// **A summary, not the rig.** [`crcbl::scene::GltfScene`] holds the joints, the
+/// bind matrices and every keyframe; nothing in this engine poses a skeleton
+/// yet, so a viewer that carried the whole imported scene around would be
+/// keeping it for a renderer that cannot use it. What a person looking at an
+/// unfamiliar file needs is the two facts that say whether the rig survived the
+/// import at all: how big the skeleton is, and what the file's animations are
+/// called.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rig {
+    /// How many joints the document's skins declare, summed over every skin.
+    ///
+    /// A sum rather than a per-skin list because the count is a scale — "this
+    /// file has a skeleton in it, and it is about this big" — and the panel
+    /// that draws it has no room for a row per skin. Zero for the great
+    /// majority of documents, which declare no skin at all.
+    ///
+    /// Skins can share joint nodes, so this can exceed the number of *nodes*
+    /// that are joints. It is what the file declares, which is the number that
+    /// moves when an import stops reading one of them.
+    pub joints: usize,
+    /// The document's animation clips, named, in file order.
+    ///
+    /// glTF does not require an animation to carry a name, and a clip that has
+    /// none arrives here as `(unnamed clip N)` with `N` its index in that same
+    /// file order. A stand-in rather than a blank, because a panel drawing an
+    /// empty row says nothing about whether the clip is there; and one carrying
+    /// the index rather than a bare `(unnamed)`, because a document with
+    /// several of them would otherwise draw one name several times.
+    pub clips: Vec<String>,
+}
+
+impl Rig {
+    /// Whether the document declared no rig at all: no joint and no clip.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.joints == 0 && self.clips.is_empty()
+    }
 }
 
 impl Model {
@@ -224,11 +267,34 @@ pub fn load_from(
     }
 
     let render = crcbl::scene::gltf_render::build_render_scene(&imported, &key);
+    // Summarised here and the imported scene dropped: see `Rig`.
+    let rig = rig_of(&imported);
     Ok(Model {
         key,
         render,
         bounds,
+        rig,
     })
+}
+
+/// What [`Model::rig`] reports about `scene`.
+///
+/// Reads the skins and the clips and nothing else of them — the bind matrices
+/// and the keyframes stay in the [`GltfScene`], which this application drops
+/// once the conversion has run.
+fn rig_of(scene: &GltfScene) -> Rig {
+    Rig {
+        joints: scene.skins().iter().map(|skin| skin.joints().len()).sum(),
+        clips: scene
+            .clips()
+            .iter()
+            .enumerate()
+            .map(|(index, clip)| match clip.name() {
+                Some(name) => name.to_string(),
+                None => format!("(unnamed clip {index})"),
+            })
+            .collect(),
+    }
 }
 
 /// The box around every vertex the document places, in world space, or `None`
@@ -437,5 +503,46 @@ mod tests {
         let (_dir, path) = written("nan.glb", &fixture::nan_glb());
         let error = load(&path).expect_err("a NaN corner has no bounding box");
         assert!(matches!(error, LoadError::NonFiniteGeometry(_)), "{error}");
+    }
+
+    /// **A document with no rig reports none, and says so as an absence rather
+    /// than as a zero.**
+    ///
+    /// The overwhelming majority of files are this one, so it is the case
+    /// `crate::listing` draws most often — and `Rig::is_empty` is what it asks.
+    /// A summary that came back with a phantom joint or a phantom clip would
+    /// put a rig on the panel of every file anyone opens.
+    #[test]
+    fn a_document_with_no_skin_and_no_animation_reports_no_rig() {
+        let (_dir, path) = written("plain.glb", &fixture::quad_glb(Vec3::ZERO));
+        let model = load(&path).expect("the fixture loads");
+
+        assert_eq!(model.rig, Rig::default());
+        assert!(model.rig.is_empty());
+    }
+
+    /// **An animation with no name is still named on the panel**, by the
+    /// stand-in [`Rig::clips`] documents.
+    ///
+    /// glTF does not require an `animations` entry to carry a name, so this is
+    /// an ordinary document rather than a broken one, and the alternative — an
+    /// empty string in the list — draws a blank row that reads as a panel bug.
+    /// The index is in the stand-in so that a file with several unnamed clips
+    /// does not draw one name several times.
+    ///
+    /// This document has a clip and no skin, so it is also the case that says
+    /// `Rig::is_empty` asks about both: a rig summary that only looked at the
+    /// joints would call this one empty and lose the clip.
+    #[test]
+    fn an_animation_with_no_name_is_reported_by_its_place_in_the_file() {
+        let (_dir, path) = written("clip.glb", &fixture::unnamed_clip_glb());
+        let model = load(&path).expect("the fixture loads");
+
+        assert_eq!(model.rig.joints, 0, "this document rigs nothing");
+        assert_eq!(model.rig.clips, ["(unnamed clip 0)"]);
+        assert!(
+            !model.rig.is_empty(),
+            "a document with a clip and no skin still has something to report",
+        );
     }
 }

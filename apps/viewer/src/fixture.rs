@@ -67,6 +67,7 @@ pub fn points_glb() -> Vec<u8> {
         std::slice::from_ref(&node_clause(Vec3::ZERO, true, Vec3::ONE)),
         POSITIONS,
         POINTS_MODE,
+        false,
     )
 }
 
@@ -135,8 +136,42 @@ pub fn two_quads_glb() -> Vec<u8> {
         ],
         POSITIONS,
         "",
+        false,
     )
 }
+
+/// A `.glb` carrying one animation, and the animation carries no name.
+///
+/// glTF does not require an `animations` entry to be named, so a document out
+/// of an exporter that did not write one is ordinary rather than broken — and
+/// [`crate::model::Rig`] has to have something to call it. This is the only
+/// fixture that reaches that stand-in, so without it the name `crate::model`
+/// substitutes is text no test ever reads.
+///
+/// **No skin, deliberately.** A document can animate a node without rigging
+/// anything, so this is a rig whose joint count is zero and whose clip list is
+/// not — which is the shape [`crate::model::Rig::is_empty`] has to get right,
+/// and the one a fixture with both would hide.
+#[must_use]
+pub fn unnamed_clip_glb() -> Vec<u8> {
+    document_with(
+        std::slice::from_ref(&node_clause(Vec3::ZERO, true, Vec3::ONE)),
+        POSITIONS,
+        "",
+        true,
+    )
+}
+
+/// [`unnamed_clip_glb`]'s keyframe times, in seconds.
+const CLIP_TIMES: [f32; 2] = [0.0, 1.0];
+
+/// Its rotation at each of those times, as `xyzw` quaternions: identity, then
+/// a half turn about `Z`.
+///
+/// Nothing asserts on these values. A sampler needs keyframes and the
+/// specification requires at least one, so they are the smallest pair that is
+/// still a curve.
+const CLIP_ROTATIONS: [[f32; 4]; 2] = [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.0]];
 
 /// The document's one node: translated to `at`, scaled by `scale`, drawing the
 /// mesh or not.
@@ -151,12 +186,27 @@ fn node_clause(at: Vec3, draws: bool, scale: Vec3) -> String {
 /// The whole document, with `node` as its single node and `positions` as its
 /// `POSITION` accessor's contents.
 fn document(node: &str, positions: [[f32; 3]; 4]) -> Vec<u8> {
-    document_with(std::slice::from_ref(&node.to_string()), positions, "")
+    document_with(
+        std::slice::from_ref(&node.to_string()),
+        positions,
+        "",
+        false,
+    )
 }
 
-/// [`document`], with every node in `nodes` in one scene and `mode` spliced
-/// into the mesh's one primitive.
-fn document_with(nodes: &[String], positions: [[f32; 3]; 4], mode: &str) -> Vec<u8> {
+/// [`document`], with every node in `nodes` in one scene, `mode` spliced into
+/// the mesh's one primitive, and an unnamed rotation clip on node 0 when
+/// `animated`.
+///
+/// The clip's accessors and buffer views are appended only for a document that
+/// declares one, so every other fixture here holds the accessors it always has
+/// — this module's point is one alteration per case.
+fn document_with(
+    nodes: &[String],
+    positions: [[f32; 3]; 4],
+    mode: &str,
+    animated: bool,
+) -> Vec<u8> {
     let mut bin = Vec::new();
     for value in positions.iter().chain(NORMALS.iter()).flatten() {
         bin.extend_from_slice(&value.to_le_bytes());
@@ -164,6 +214,46 @@ fn document_with(nodes: &[String], positions: [[f32; 3]; 4], mode: &str) -> Vec<
     let index_offset = bin.len();
     for index in INDICES {
         bin.extend_from_slice(&index.to_le_bytes());
+    }
+
+    let (mut animations, mut clip_accessors, mut clip_views) =
+        (String::new(), String::new(), String::new());
+    if animated {
+        // The indices leave the cursor on a multiple of four, which is what the
+        // float accessors below need their offsets to be.
+        let times_at = bin.len();
+        for time in CLIP_TIMES {
+            bin.extend_from_slice(&time.to_le_bytes());
+        }
+        let rotations_at = bin.len();
+        for component in CLIP_ROTATIONS.iter().flatten() {
+            bin.extend_from_slice(&component.to_le_bytes());
+        }
+        // No `"name"` on the animation: that absence is the whole fixture.
+        animations = r#"
+  "animations": [{
+    "channels": [{ "sampler": 0, "target": { "node": 0, "path": "rotation" } }],
+    "samplers": [{ "input": 3, "output": 4, "interpolation": "LINEAR" }]
+  }],"#
+            .to_string();
+        // `min` and `max` on a sampler's input because the specification
+        // requires them there — see `apps/viewer/src/demo_model.rs`.
+        clip_accessors = format!(
+            r#",
+    {{ "bufferView": 3, "componentType": 5126, "count": {}, "type": "SCALAR", "min": [{}], "max": [{}] }},
+    {{ "bufferView": 4, "componentType": 5126, "count": {}, "type": "VEC4" }}"#,
+            CLIP_TIMES.len(),
+            CLIP_TIMES[0],
+            CLIP_TIMES[CLIP_TIMES.len() - 1],
+            CLIP_ROTATIONS.len(),
+        );
+        clip_views = format!(
+            r#",
+    {{ "buffer": 0, "byteOffset": {times_at}, "byteLength": {} }},
+    {{ "buffer": 0, "byteOffset": {rotations_at}, "byteLength": {} }}"#,
+            rotations_at - times_at,
+            bin.len() - rotations_at,
+        );
     }
 
     // `metallicFactor` is written out as zero, for the reason
@@ -180,7 +270,7 @@ fn document_with(nodes: &[String], positions: [[f32; 3]; 4], mode: &str) -> Vec<
   "asset": {{ "version": "2.0" }},
   "scene": 0,
   "scenes": [{{ "nodes": [{scene}] }}],
-  "nodes": [{node}],
+  "nodes": [{node}],{animations}
   "meshes": [{{
     "name": "panel",
     "primitives": [{{
@@ -200,12 +290,12 @@ fn document_with(nodes: &[String], positions: [[f32; 3]; 4], mode: &str) -> Vec<
   "accessors": [
     {{ "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3" }},
     {{ "bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC3" }},
-    {{ "bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR" }}
+    {{ "bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR" }}{clip_accessors}
   ],
   "bufferViews": [
     {{ "buffer": 0, "byteOffset": 0, "byteLength": 48 }},
     {{ "buffer": 0, "byteOffset": 48, "byteLength": 48 }},
-    {{ "buffer": 0, "byteOffset": {index_offset}, "byteLength": 12 }}
+    {{ "buffer": 0, "byteOffset": {index_offset}, "byteLength": 12 }}{clip_views}
   ],
   "buffers": [{{ "byteLength": {} }}]
 }}"#,

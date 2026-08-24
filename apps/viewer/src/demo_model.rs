@@ -34,10 +34,26 @@
 //!
 //! The listing panel behind `I` reports what the document holds — see
 //! [`crate::listing`] — so a single grey box would make every row of it read
-//! `1` and prove nothing about the panel. Hence two meshes at three nodes with
-//! two visibly different materials: the mesh, node, material and instance
-//! counts are all distinct from each other and all greater than one, and the
-//! arrangement has depth for the orbit camera to turn around.
+//! `1` and prove nothing about the panel. Hence two meshes at three drawing
+//! nodes with two visibly different materials: the mesh, node, material and
+//! instance counts are all distinct from each other and all greater than one,
+//! and the arrangement has depth for the orbit camera to turn around.
+//!
+//! # It has a rig, and the rig is there to be reported
+//!
+//! [`crcbl::scene::GltfScene`] reads skins and animation clips, and nothing in
+//! this engine poses a skeleton yet — so the rig here is read, reported and not
+//! played. That is exactly why it is in the *demo* document rather than only in
+//! a test fixture: `crate::listing` names the clips and `crate::app`'s `[HUD]`
+//! line counts the joints, and over a document with no rig both would report
+//! nothing whether the import works or was never written. The browser gate in
+//! `web/tools/browser-e2e.mjs` requires the joint count this document declares,
+//! which is a check that can only pass because the rig is here.
+//!
+//! It is a skin over two joint nodes, `JOINTS_0` and `WEIGHTS_0` on the crate's
+//! primitive, and one clip that turns the upper joint. **A joint node draws
+//! nothing**, so it adds no instance and no vertex: the instance count is still
+//! three and the box the camera frames on is still the crates and the ground.
 
 use std::array;
 
@@ -111,6 +127,42 @@ const GROUND_HALF: [f32; 3] = [2.5, 0.0, 2.5];
 /// look alike for the first few degrees.
 const CRATE_YAW_DEGREES: f32 = 27.0;
 
+/// Which entries of the document's `nodes` array the crate's two joints are.
+///
+/// Written down because three places have to agree about them: the scene's root
+/// list, the skin's `joints`, and the animation channel's target node.
+const JOINT_NODES: [usize; 2] = [3, 4];
+
+/// Where the near crate stands, in metres.
+///
+/// Written down because the crate's node and the joint it hangs from both place
+/// it and have to agree — see [`nodes_json`].
+const CRATE_AT: [f32; 3] = [-0.7, 0.0, 0.0];
+
+/// Where each joint binds, as a height above the crate mesh's own origin.
+///
+/// The crate is a one-metre cube centred on its node, so a joint a quarter of a
+/// metre below the centre and one a quarter above it each sit in the middle of
+/// the half of the box they own — which is what makes [`bindings`] a straight
+/// split by the sign of a vertex's `Y`. Neither is zero, so neither inverse
+/// bind matrix is an identity: a rig whose matrices were all identities would
+/// read the same whether the importer applied them or ignored them.
+const JOINT_BIND_Y: [f32; 2] = [-0.25, 0.25];
+
+/// The clip's keyframe times, in seconds. Ascending, which glTF requires and
+/// which the `min`/`max` written onto the sampler's input accessor assumes.
+const CLIP_TIMES: [f32; 2] = [0.0, 1.0];
+
+/// How far the clip swings the upper joint about `Z`, in degrees.
+const LID_SWING_DEGREES: f32 = 45.0;
+
+/// What the document calls its one animation.
+///
+/// Named at all — glTF does not require an animation to carry a name — because
+/// [`crate::listing`] draws clip names, and a document whose only clip had none
+/// would show that panel nothing but the stand-in `crate::model` substitutes.
+const CLIP_NAME: &str = "lid-swing";
+
 /// The bytes of the demo document: a self-contained binary glTF.
 ///
 /// One JSON chunk and one BIN chunk, with no `uri` anywhere in it — no external
@@ -121,7 +173,9 @@ const CRATE_YAW_DEGREES: f32 = 27.0;
 /// other smaller and set back, standing on a ground plane at a third. Two
 /// materials, a warm one on the crates and a cool one on the ground, so the
 /// listing panel's material rows differ by more than their index and the single
-/// directional light has two albedos to separate.
+/// directional light has two albedos to separate. Then a rig over the crate —
+/// a skin, two joint nodes and one clip — for the reason the [module
+/// docs](self) give.
 ///
 /// Open it the way `apps/viewer/src/model.rs` documents: file it in a
 /// [`MemorySource`](crcbl::assets::MemorySource) under the name it should be
@@ -132,17 +186,21 @@ pub fn demo_glb() -> Vec<u8> {
     let parts = [crate_part(), ground_part()];
 
     // The BIN chunk and the two JSON arrays that index into it are built in one
-    // pass, because they have to agree: view `3n` holds part `n`'s positions,
-    // `3n + 1` its normals, `3n + 2` its indices, and every accessor sits on the
-    // view of the same number.
+    // pass, because they have to agree: every accessor is pushed beside the view
+    // it reads, so the two arrays are the same length and an accessor's own
+    // index is `accessors.len()` at the moment it is written. Nothing indexes
+    // either array by position — a skinned part carries more accessors than an
+    // unskinned one — so each index that the mesh, skin and animation JSON needs
+    // is taken as it is made.
     let mut bin = Vec::new();
     let mut accessors = Vec::new();
     let mut views = Vec::new();
     let mut meshes = Vec::new();
-    for (index, part) in parts.iter().enumerate() {
+    for part in &parts {
+        let first = accessors.len();
         let (min, max) = position_bounds(&part.positions);
-        let positions = push_vec3(&mut bin, &part.positions);
-        let normals = push_vec3(&mut bin, &part.normals);
+        let positions = push_floats(&mut bin, &part.positions);
+        let normals = push_floats(&mut bin, &part.normals);
         let indices = push_u16(&mut bin, &part.indices);
 
         accessors.push(format!(
@@ -166,22 +224,77 @@ pub fn demo_glb() -> Vec<u8> {
         ));
         views.push(view_json(&indices));
 
-        let first = index * 3;
+        let mut attributes = format!(r#""POSITION": {first}, "NORMAL": {}"#, first + 1);
+        if let Some(rig) = &part.rig {
+            let joint_bytes = push_u16(&mut bin, rig.joints.as_flattened());
+            let weight_bytes = push_floats(&mut bin, &rig.weights);
+            attributes.push_str(&format!(
+                r#", "JOINTS_0": {}, "WEIGHTS_0": {}"#,
+                accessors.len(),
+                accessors.len() + 1,
+            ));
+            // `UNSIGNED_SHORT`, because the specification's `JOINTS_0` is an
+            // unsigned byte or short and never a float.
+            accessors.push(format!(
+                r#"{{ "bufferView": {}, "componentType": 5123, "count": {}, "type": "VEC4" }}"#,
+                views.len(),
+                rig.joints.len(),
+            ));
+            views.push(view_json(&joint_bytes));
+            accessors.push(format!(
+                r#"{{ "bufferView": {}, "componentType": 5126, "count": {}, "type": "VEC4" }}"#,
+                views.len(),
+                rig.weights.len(),
+            ));
+            views.push(view_json(&weight_bytes));
+        }
+
         meshes.push(format!(
             r#"{{
     "name": "{}",
     "primitives": [{{
-      "attributes": {{ "POSITION": {first}, "NORMAL": {} }},
+      "attributes": {{ {attributes} }},
       "indices": {},
       "material": {}
     }}]
   }}"#,
             part.name,
-            first + 1,
             first + 2,
             part.material,
         ));
     }
+
+    // The rig's own accessors, after both parts' — see the note above the loop
+    // for why they are simply the next ones rather than fixed indices.
+    let inverse_bind_bytes = push_floats(&mut bin, &inverse_binds());
+    let time_bytes = push_floats(&mut bin, &CLIP_TIMES.map(|second| [second]));
+    let rotation_bytes = push_floats(&mut bin, &clip_rotations());
+    let inverse_binds_at = accessors.len();
+    accessors.push(format!(
+        r#"{{ "bufferView": {}, "componentType": 5126, "count": {}, "type": "MAT4" }}"#,
+        views.len(),
+        JOINT_BIND_Y.len(),
+    ));
+    views.push(view_json(&inverse_bind_bytes));
+    // `min` and `max` because the specification requires them on an animation
+    // sampler's input, so a player can know a clip's duration without walking
+    // its samples. The same reason `POSITION` above carries a pair.
+    let times_at = accessors.len();
+    accessors.push(format!(
+        r#"{{ "bufferView": {}, "componentType": 5126, "count": {}, "type": "SCALAR", "min": [{}], "max": [{}] }}"#,
+        views.len(),
+        CLIP_TIMES.len(),
+        CLIP_TIMES[0],
+        CLIP_TIMES[CLIP_TIMES.len() - 1],
+    ));
+    views.push(view_json(&time_bytes));
+    let rotations_at = accessors.len();
+    accessors.push(format!(
+        r#"{{ "bufferView": {}, "componentType": 5126, "count": {}, "type": "VEC4" }}"#,
+        views.len(),
+        CLIP_TIMES.len(),
+    ));
+    views.push(view_json(&rotation_bytes));
 
     // `metallicFactor` is written out for the reason `apps/viewer/src/fixture.rs`
     // and `crates/crcbl/tests/gltf_e2e.rs` both give: glTF's default material is
@@ -191,9 +304,20 @@ pub fn demo_glb() -> Vec<u8> {
         r#"{{
   "asset": {{ "version": "2.0", "generator": "crcbl viewer demo" }},
   "scene": 0,
-  "scenes": [{{ "name": "demo", "nodes": [0, 1, 2] }}],
+  "scenes": [{{ "name": "demo", "nodes": [0, 1, 2, {}] }}],
   "nodes": [{}],
   "meshes": [{}],
+  "skins": [{{
+    "name": "crate-rig",
+    "skeleton": {},
+    "joints": [{}, {}],
+    "inverseBindMatrices": {inverse_binds_at}
+  }}],
+  "animations": [{{
+    "name": "{CLIP_NAME}",
+    "channels": [{{ "sampler": 0, "target": {{ "node": {}, "path": "rotation" }} }}],
+    "samplers": [{{ "input": {times_at}, "output": {rotations_at}, "interpolation": "LINEAR" }}]
+  }}],
   "materials": [
     {{
       "name": "crate-paint",
@@ -216,8 +340,13 @@ pub fn demo_glb() -> Vec<u8> {
   "bufferViews": [{}],
   "buffers": [{{ "byteLength": {} }}]
 }}"#,
+        JOINT_NODES[0],
         nodes_json(),
         meshes.join(", "),
+        JOINT_NODES[0],
+        JOINT_NODES[0],
+        JOINT_NODES[1],
+        JOINT_NODES[1],
         accessors.join(", "),
         views.join(", "),
         bin.len(),
@@ -236,6 +365,12 @@ struct Part {
     name: &'static str,
     /// Which of the document's materials the primitive names.
     material: usize,
+    /// The skinning attributes, on the one part that has them.
+    ///
+    /// `None` on a part the skin does not reach, which writes no `JOINTS_0` and
+    /// no `WEIGHTS_0` at all — the two are a pair, and a primitive carrying one
+    /// without the other is not a document the specification allows.
+    rig: Option<Bindings>,
     /// `POSITION`, in the mesh's own space.
     positions: Vec<[f32; 3]>,
     /// `NORMAL`, one per position. Present because the demo is lit by a single
@@ -243,6 +378,66 @@ struct Part {
     normals: Vec<[f32; 3]>,
     /// Triangle indices, two per face, counter-clockwise seen from outside.
     indices: Vec<u16>,
+}
+
+/// A part's `JOINTS_0` and `WEIGHTS_0`, one entry of each per vertex.
+///
+/// The two together rather than two fields on [`Part`], because they are only
+/// ever written as a pair and are the same length by construction — see
+/// [`bindings`], which is the only thing that makes one.
+struct Bindings {
+    /// Which joint of the skin owns each vertex, as indices into the skin's own
+    /// `joints` array — not into the document's nodes.
+    joints: Vec<[u16; 4]>,
+    /// How much of each vertex each of those joints owns.
+    weights: Vec<[f32; 4]>,
+}
+
+/// Binds `positions` rigidly to the two joints [`JOINT_BIND_Y`] places: the
+/// lower half of the box to the lower joint, the upper half to the upper one.
+///
+/// Rigid, so the leading slot takes the whole vertex and the three past it
+/// carry no weight — which is what a rig a person would author for a hinged lid
+/// looks like, and it keeps the weights something a reader can check by eye.
+fn bindings(positions: &[[f32; 3]]) -> Bindings {
+    Bindings {
+        joints: positions
+            .iter()
+            .map(|&[_, y, _]| [u16::from(y >= 0.0), 0, 0, 0])
+            .collect(),
+        weights: vec![[1.0, 0.0, 0.0, 0.0]; positions.len()],
+    }
+}
+
+/// Each joint's inverse bind matrix — world to joint-local at bind time —
+/// column-major, which is the order glTF stores a `MAT4` in.
+///
+/// Both joints bind at a pure translation up the `Y` axis, and the inverse of a
+/// translation is the opposite translation; the last column is where a
+/// column-major matrix keeps one. So joint `n`'s matrix undoes exactly the
+/// placement of joint node `n`, and the bind pose reproduces the mesh as it is
+/// written — which is the property that makes this a rig rather than two
+/// matrices that happen to parse.
+fn inverse_binds() -> [[f32; 16]; 2] {
+    JOINT_BIND_Y.map(|y| {
+        [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, -y, 0.0, 1.0,
+        ]
+    })
+}
+
+/// The upper joint's rotation at each of [`CLIP_TIMES`], as `xyzw` quaternions
+/// — the order the format stores them in.
+///
+/// Identity, then [`LID_SWING_DEGREES`] about `Z`. Built from `sin_cos` of
+/// *half* the angle rather than from decimals typed out, because a quaternion
+/// carries `θ/2` and that is the step a hand-written one gets wrong silently.
+fn clip_rotations() -> [[f32; 4]; 2] {
+    let (sin, cos) = (LID_SWING_DEGREES.to_radians() * 0.5).sin_cos();
+    [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, sin, cos]]
 }
 
 /// The crate: a cube with flat-shaded faces.
@@ -262,6 +457,7 @@ fn crate_part() -> Part {
     Part {
         name: "crate",
         material: 0,
+        rig: Some(bindings(&positions)),
         positions,
         normals,
         indices,
@@ -278,6 +474,7 @@ fn ground_part() -> Part {
     Part {
         name: "ground",
         material: 1,
+        rig: None,
         positions: corners(&UP, GROUND_HALF).to_vec(),
         normals: vec![UP.normal; 4],
         indices: quad_indices(0).to_vec(),
@@ -308,7 +505,29 @@ fn quad_indices(base: u16) -> [u16; 6] {
     [base, base + 1, base + 2, base, base + 2, base + 3]
 }
 
-/// The document's three nodes: the ground, and the crate at two placements.
+/// The document's five nodes: the ground, the crate at two placements, and the
+/// two joints the skin binds to.
+///
+/// The joints are a parent and its child, offset from each other by
+/// [`JOINT_BIND_Y`]. Neither draws a mesh, so neither becomes an instance and
+/// neither moves the box `crate::model::world_bounds` computes — a joint is a
+/// coordinate frame and nothing else. The crate wears the skin; `crate.far`
+/// draws the same mesh without one, which is what a document that reuses a
+/// rigged mesh as scenery looks like and is legal glTF: it is the reverse — a
+/// node naming a skin whose mesh has no bindings — that the specification
+/// refuses.
+///
+/// **The lower joint carries the crate's placement, and that is the whole
+/// reason it is written where it is.** glTF is explicit that "the transform of
+/// the skinned mesh node MUST be ignored": a renderer that skins draws the
+/// crate wherever its *joints* are, and only a renderer that does not skin —
+/// which is every renderer in this engine today — draws it at its node. Put the
+/// placement on the node alone and those two answers differ, so the crate would
+/// jump the day skinning lands. Put it on the joint as well and they agree, at
+/// the bind pose, exactly: joint 0's global transform composed with its inverse
+/// bind is `T(x, y, z)·R·T(0, -y, 0)`, and a `Y` translation commutes with a `Y`
+/// rotation, so that is `T(x, 0, z)·R` — the node's own placement, which is what
+/// [`the_bind_pose_puts_the_crate_where_its_node_does`] asserts.
 ///
 /// Every scale here is uniform, and that is not incidental. An unequally scaled
 /// instance is one `crcbl::scene::gltf_render::build_render_scene` reports a
@@ -320,12 +539,27 @@ fn nodes_json() -> String {
     // A rotation about `Y` is the quaternion `(0, sin(θ/2), 0, cos(θ/2))`, in
     // glTF's `[x, y, z, w]` order.
     let (sin, cos) = (CRATE_YAW_DEGREES.to_radians() * 0.5).sin_cos();
+    let [x, _, z] = CRATE_AT;
+    let [base_y, lid_y] = JOINT_BIND_Y;
+    // The upper joint is the lower one's child, so its own translation is the
+    // step between them rather than its height.
+    let step = lid_y - base_y;
+    let lid = JOINT_NODES[1];
+    // One string for the turn, written into the crate and into the joint it
+    // hangs from, so the two cannot drift apart — see this function's docs for
+    // why they have to agree.
+    let turn = format!(r#""rotation": [0.0, {sin}, 0.0, {cos}]"#);
+    let crate_at = CRATE_AT;
     format!(
         r#"
     {{ "name": "ground", "mesh": 1, "translation": [0.0, -0.5, 0.0] }},
-    {{ "name": "crate", "mesh": 0, "translation": [-0.7, 0.0, 0.0], "rotation": [0.0, {sin}, 0.0, {cos}] }},
-    {{ "name": "crate.far", "mesh": 0, "translation": [1.0, -0.2, -1.1], "scale": [0.6, 0.6, 0.6] }}
-  "#
+    {{ "name": "crate", "mesh": 0, "skin": 0, "translation": {}, {turn} }},
+    {{ "name": "crate.far", "mesh": 0, "translation": [1.0, -0.2, -1.1], "scale": [0.6, 0.6, 0.6] }},
+    {{ "name": "joint.base", "children": [{lid}], "translation": {}, {turn} }},
+    {{ "name": "joint.lid", "translation": [0.0, {step}, 0.0] }}
+  "#,
+        vec3_json(crate_at),
+        vec3_json([x, base_y, z]),
     )
 }
 
@@ -360,7 +594,12 @@ struct View {
 
 /// Appends `values` to `bin` as little-endian `f32`, and reports the view now
 /// holding them.
-fn push_vec3(bin: &mut Vec<u8>, values: &[[f32; 3]]) -> View {
+///
+/// Generic over the element's width because the document holds five shapes of
+/// float accessor — positions and normals, weights and rotations, the bind
+/// matrices, and the keyframe times as one-component elements — and they differ
+/// only in the number the JSON beside them calls a `type`.
+fn push_floats<const N: usize>(bin: &mut Vec<u8>, values: &[[f32; N]]) -> View {
     let offset = bin.len();
     for value in values.iter().flatten() {
         bin.extend_from_slice(&value.to_le_bytes());
@@ -521,7 +760,8 @@ mod tests {
             model.bounds
         );
     }
-    use crcbl::scene::{GltfScene, import_gltf};
+    use crcbl::math::{Mat4, Quat, Vec3};
+    use crcbl::scene::{GltfSamples, GltfScene, import_gltf};
     use std::path::Path;
 
     /// What the browser calls the document. Nothing resolves it against a
@@ -623,11 +863,15 @@ mod tests {
         let scene = imported();
 
         assert_eq!(scene.meshes().len(), 2, "the crate and the ground");
-        assert_eq!(scene.nodes().len(), 3, "the ground and two crates");
+        assert_eq!(
+            scene.nodes().len(),
+            5,
+            "the ground, two crates and the rig's two joints",
+        );
         assert_eq!(
             scene.instances().len(),
             3,
-            "every node draws, so every one is an instance",
+            "the joints draw nothing, so only the ground and the crates are instances",
         );
 
         let materials = scene.materials();
@@ -642,5 +886,243 @@ mod tests {
                 .all(|material| material.base_color.iter().all(|c| c.is_finite())),
             "{materials:?}",
         );
+    }
+
+    /// **The document really is rigged, and rigged the way this module says.**
+    ///
+    /// The check the browser gate leans on. `web/tools/browser-e2e.mjs` waits
+    /// for `joints: 2` on the viewer's heartbeat, and that number is only ever
+    /// right by accident unless the skin, its joint list and its bind matrices
+    /// all survive into the imported scene — so this asserts each of them here,
+    /// where a failure names which one went, rather than leaving a browser run
+    /// to time out on a line that never arrives.
+    ///
+    /// The bind matrices are checked by what they *do*: joint `n`'s matrix has
+    /// to carry joint node `n`'s bind position back to the origin. A pair of
+    /// identities parses, imports and reports two joints, and would pass every
+    /// assertion here that only counted things.
+    #[test]
+    fn the_demo_document_carries_the_rig_the_browser_gate_counts() {
+        let scene = imported();
+
+        let [skin] = scene.skins() else {
+            panic!("the demo declares exactly one skin: {:?}", scene.skins());
+        };
+        assert_eq!(skin.name(), Some("crate-rig"));
+        assert_eq!(skin.joints(), JOINT_NODES, "the skin's own joint nodes");
+        assert_eq!(
+            skin.skeleton(),
+            Some(JOINT_NODES[0]),
+            "the lower joint is the root the document names",
+        );
+
+        assert_eq!(skin.inverse_binds().len(), JOINT_BIND_Y.len());
+        for (joint, (&matrix, &bind_y)) in
+            skin.inverse_binds().iter().zip(&JOINT_BIND_Y).enumerate()
+        {
+            let bound = Vec3::new(0.0, bind_y, 0.0);
+            let undone = matrix.transform_point3(bound);
+            assert!(
+                undone.length() < 1e-6,
+                "joint {joint}'s inverse bind leaves its bind pose at {undone:?}, not at the \
+                 origin",
+            );
+            assert_ne!(
+                matrix,
+                Mat4::IDENTITY,
+                "joint {joint}'s inverse bind is an identity, which says nothing",
+            );
+        }
+    }
+
+    /// **Skinning the bind pose puts the crate exactly where its node does.**
+    ///
+    /// glTF says "the transform of the skinned mesh node MUST be ignored", so a
+    /// renderer that skins reads the crate's placement off its *joints* and a
+    /// renderer that does not — every renderer in this engine today — reads it
+    /// off the node. Those are two answers to one question, and this is the
+    /// assertion that they are the same answer: joint 0's global transform
+    /// composed with its inverse bind has to equal the crate node's own
+    /// placement. Without it the crate moves the day skinning lands, and the
+    /// only thing that would notice is a person looking at the demo.
+    ///
+    /// Checked at both joints, because the crate's vertices hang off both.
+    #[test]
+    fn the_bind_pose_puts_the_crate_where_its_node_does() {
+        let [x, _, z] = CRATE_AT;
+        let [base_y, lid_y] = JOINT_BIND_Y;
+        let turn = Quat::from_rotation_y(CRATE_YAW_DEGREES.to_radians());
+        let node = Mat4::from_rotation_translation(turn, Vec3::from(CRATE_AT));
+        // The document's own hierarchy: the lower joint carries the placement,
+        // and the upper one is its child a step above it.
+        let base = Mat4::from_rotation_translation(turn, Vec3::new(x, base_y, z));
+        let lid = base * Mat4::from_translation(Vec3::new(0.0, lid_y - base_y, 0.0));
+
+        for (joint, global) in [base, lid].into_iter().enumerate() {
+            let skinned = global * Mat4::from_cols_array(&inverse_binds()[joint]);
+            // A cube corner rather than the origin: the origin is where every
+            // one of these transforms agrees by construction, so it is the one
+            // point that would pass whatever the rotation did.
+            let corner = Vec3::new(0.5, 0.5, 0.5);
+            let by_skin = skinned.transform_point3(corner);
+            let by_node = node.transform_point3(corner);
+            assert!(
+                by_skin.distance(by_node) < 1e-5,
+                "joint {joint} skins the bind pose to {by_skin:?} and the node draws it at \
+                 {by_node:?}",
+            );
+        }
+    }
+
+    /// **The crate's node and the joint it hangs from are placed together in
+    /// the document**, which is what makes the test above true of the emitted
+    /// file rather than only of the arithmetic.
+    ///
+    /// The one above builds both transforms out of the same constants, so it
+    /// says the algebra works and cannot say the JSON uses it. This reads the
+    /// artefact: the turn has to be the identical text on both nodes, and the
+    /// joint has to stand over the crate — same `X` and `Z`, its own height.
+    #[test]
+    fn the_crate_and_its_joint_are_placed_together() {
+        let nodes = nodes_json();
+        let field = |name: &str, field: &str| {
+            let at = nodes
+                .find(&format!(r#""name": "{name}""#))
+                .unwrap_or_else(|| panic!("no node called {name} in {nodes}"));
+            let rest = &nodes[at..];
+            let end = rest.find('}').expect("a node's object ends");
+            let node = &rest[..end];
+            let found = node
+                .find(&format!(r#""{field}""#))
+                .unwrap_or_else(|| panic!("{name} carries no {field}: {node}"));
+            let value = &node[found..];
+            let close = value.find(']').expect("an array ends");
+            value[..=close].to_string()
+        };
+
+        assert_eq!(
+            field("crate", "rotation"),
+            field("joint.base", "rotation"),
+            "the joint has to be turned exactly as the crate is",
+        );
+        let [x, _, z] = CRATE_AT;
+        assert_eq!(
+            field("joint.base", "translation"),
+            format!(r#""translation": {}"#, vec3_json([x, JOINT_BIND_Y[0], z])),
+            "the joint has to stand over the crate, at its own height",
+        );
+    }
+
+    /// **The bindings are on the crate and are the split this module describes**
+    /// — the lower half of the box on the lower joint, the upper half on the
+    /// upper one.
+    ///
+    /// Both joints have to be *used*: a document that bound every vertex to
+    /// joint 0 still declares two of them, still reports `joints: 2`, and is a
+    /// rig with a limb nothing hangs off. And the ground carries no bindings at
+    /// all, which is the other half of the claim — `JOINTS_0` written onto
+    /// every primitive would make the attribute meaningless as evidence.
+    #[test]
+    fn the_crates_vertices_are_bound_to_both_joints_and_the_grounds_to_neither() {
+        let scene = imported();
+        let mesh = scene
+            .meshes()
+            .iter()
+            .find(|mesh| mesh.name() == Some("crate"))
+            .expect("the crate mesh");
+        let [primitive] = mesh.primitives() else {
+            panic!("the crate is one primitive");
+        };
+
+        assert_eq!(primitive.joints().len(), primitive.positions().len());
+        assert_eq!(primitive.weights().len(), primitive.positions().len());
+        for (vertex, (&[_, y, _], &joints)) in primitive
+            .positions()
+            .iter()
+            .zip(primitive.joints())
+            .enumerate()
+        {
+            assert_eq!(
+                joints[0],
+                u16::from(y >= 0.0),
+                "vertex {vertex} at y {y} is on the wrong joint",
+            );
+        }
+        for (vertex, &weights) in primitive.weights().iter().enumerate() {
+            let total: f32 = weights.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-6,
+                "vertex {vertex}'s weights come to {total}, so it is partly unbound",
+            );
+        }
+        for joint in 0..u16::try_from(JOINT_BIND_Y.len()).expect("a joint count fits a u16") {
+            assert!(
+                primitive.joints().iter().any(|slots| slots[0] == joint),
+                "no vertex is bound to joint {joint}",
+            );
+        }
+
+        let ground = scene
+            .meshes()
+            .iter()
+            .find(|mesh| mesh.name() == Some("ground"))
+            .expect("the ground mesh");
+        for primitive in ground.primitives() {
+            assert!(primitive.joints().is_empty(), "the ground wears no skin");
+            assert!(primitive.weights().is_empty(), "nor any weights");
+        }
+    }
+
+    /// **The clip is one rotation channel on the upper joint**, with the
+    /// keyframes this module wrote.
+    ///
+    /// A clip the importer read as a translation channel, or as a channel on
+    /// the wrong node, is one that parses and animates the wrong thing — and
+    /// the joint count the browser gate reads would not notice either.
+    #[test]
+    fn the_demo_documents_clip_turns_the_upper_joint() {
+        let scene = imported();
+
+        let [clip] = scene.clips() else {
+            panic!("the demo declares exactly one clip: {:?}", scene.clips());
+        };
+        assert_eq!(clip.name(), Some(CLIP_NAME));
+
+        let [channel] = clip.channels() else {
+            panic!("the clip is one channel: {:?}", clip.channels());
+        };
+        assert_eq!(
+            channel.node(),
+            JOINT_NODES[1],
+            "the lid joint is what turns"
+        );
+        assert_eq!(channel.times(), CLIP_TIMES);
+        match channel.samples() {
+            GltfSamples::Rotations(rotations) => {
+                assert_eq!(rotations.as_slice(), clip_rotations());
+            }
+            other => panic!("the channel drives a rotation, not {other:?}"),
+        }
+    }
+
+    /// **The rig reaches the [`Model`](crate::model::Model) the panels read**,
+    /// which is the number `web/tools/browser-e2e.mjs` waits for and the text
+    /// `crate::listing` draws.
+    ///
+    /// Asserted through [`demo_document`] rather than through the importer,
+    /// because the gap this closes is the one between a document that holds a
+    /// rig and an application that reports one: `crate::model::load_from` is
+    /// where the imported scene is summarised and then dropped.
+    #[test]
+    fn the_demo_documents_rig_reaches_the_model_the_panels_read() {
+        let model = demo_document().expect("the generated document loads");
+
+        assert_eq!(
+            model.rig.joints,
+            JOINT_BIND_Y.len(),
+            "the joint count on the `[HUD]` line and the browser gate's predicate",
+        );
+        assert_eq!(model.rig.clips, [CLIP_NAME]);
+        assert!(!model.rig.is_empty());
     }
 }

@@ -16,6 +16,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer` reports the rig of the document it opened.** The listing panel
+  behind `I` names the file's animation clips and counts the joints its skins
+  declare, or says `rig: none` for a document that brought neither — most of
+  them. An animation the file left unnamed, which glTF allows, is drawn as
+  `(unnamed clip N)` with its place in the file, rather than as a blank row. The
+  `[HUD]` heartbeat and the `F3` panel carry the joint count as well, and only
+  the count: a clip name is arbitrary text out of someone else's document, and
+  that line is parsed as `name: value` pairs. `Model::rig` is the new
+  `viewer::Rig` summary — nothing here poses a skeleton yet, so a rig is
+  something the viewer reports rather than plays.
+
+- **The browser demo's document has a rig to report.** The `.glb`
+  `apps/viewer/src/demo_model.rs` generates now carries a skin over two joint
+  nodes with real inverse bind matrices, `JOINTS_0`/`WEIGHTS_0` binding the
+  crate's lower and upper halves to a joint each, and one clip that turns the
+  upper one. A joint node draws nothing, so the demo still places three
+  instances and still frames on the same box. The lower joint carries the
+  crate's own placement, because glTF says a skinned mesh node's transform must
+  be ignored — so a renderer that skins and this one, which does not, draw the
+  crate in the same place. The browser gate requires the joint count off the
+  heartbeat, which is what makes the import's new skin and clip reading
+  something a check can fail on.
+
 - **The glTF importer reads skins and animations.** `GltfScene::skins` is the
   document's `skins` array — joint node indices, inverse bind matrices as
   `glam::Mat4`, and the skeleton root — and `GltfScene::clips` is its
