@@ -438,10 +438,42 @@ struct GpuInstance
     uint sector;
     /// Per-instance bits. Bit 0 says the element is a live instance rather than
     /// a removed one's leftovers, and `cull.slang` — which is the only thing
-    /// that walks the array — is what reads it. A draw addresses the instance
-    /// it was told to, so nothing here does.
+    /// that walks the array — is what reads it. Bit 1 is
+    /// `INSTANCE_BASE_VERTEX_OVERRIDE`, which the vertex stage below reads. A
+    /// draw addresses the instance it was told to, so nothing here asks about
+    /// the liveness bit.
     uint flags;
+    /// The pool vertex this instance's indices are relative to, read **instead
+    /// of** the mesh entry's when `INSTANCE_BASE_VERTEX_OVERRIDE` is set in
+    /// `flags` and ignored when it is not. A deformed instance names its
+    /// **source** mesh above and carries the base of the region a skinning
+    /// dispatch wrote it into here, so the bucket, the level tables and the
+    /// bounding box all still resolve through the mesh it was made from.
+    uint base_vertex;
+    /// Pads the record to a multiple of the transform's 16-byte alignment.
+    ///
+    /// **Spelled out rather than left to the layout rules**, because the four
+    /// targets do not agree about the tail: `std430` and Metal round the struct
+    /// up to that alignment and DXIL's structured-buffer stride does not, so a
+    /// record ending at the field above is 96 bytes in SPIR-V, WGSL and MSL and
+    /// 84 in DXIL — one buffer, two element sizes, and nothing that reports it.
+    /// `DrawConstants` below carries the same pair for `std140`'s version of the
+    /// same rule.
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
+
+
+/// `GpuInstance::flags` bit 1: resolve this instance's base vertex out of
+/// `GpuInstance::base_vertex` rather than out of the mesh entry the draw
+/// selected, matching `crcbl_shaders::mesh::GpuInstance::BASE_VERTEX_OVERRIDE`.
+///
+/// **A bit rather than a sentinel in the field**: zero is a legal base vertex,
+/// so no in-range value is free to mean "no override", and an element nothing
+/// has written has to read as "no override" rather than as "draw out of vertex
+/// zero". The Rust constant carries the rest of that argument.
+static const uint INSTANCE_BASE_VERTEX_OVERRIDE = 2;
 
 /// One resident mesh's range in the geometry pools **and its local-space
 /// bounds**, matching `crcbl_shaders::mesh::GpuMesh`.
@@ -983,7 +1015,17 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // came from the draw call itself, which is what §3.3's cull pass needs in
     // order to emit draws the CPU never looked at.
     GpuMesh mesh = meshes[draw.mesh];
-    MeshVertex vertex = vertices[index + mesh.base_vertex];
+    // **Unless the instance overrides it.** A skinned instance's vertices are a
+    // run of the pool a compute dispatch deformed them into, which belongs to no
+    // mesh entry and changes every frame, so the instance carries the base and
+    // goes on naming its source mesh everywhere else. Without the bit the
+    // bucket stays authoritative, and it has to: a DAG's level is chosen per
+    // instance on the GPU and the base belongs to the *selected* level, which is
+    // the entry `draw_gen.slang` put in this block.
+    uint base_vertex = (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) != 0u
+        ? instance.base_vertex
+        : mesh.base_vertex;
+    MeshVertex vertex = vertices[index + base_vertex];
 
     float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
 

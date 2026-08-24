@@ -232,7 +232,23 @@ struct GpuInstance
     uint material;
     uint sector;
     uint flags;
+    /// The pool vertex this instance's indices are relative to, read **instead
+    /// of** the mesh entry's when `INSTANCE_BASE_VERTEX_OVERRIDE` is set in
+    /// `flags` and ignored when it is not. A deformed instance names its
+    /// **source** mesh above and carries the base of the region a skinning
+    /// dispatch wrote it into here, so the bucket, the level tables and the
+    /// bounding box all still resolve through the mesh it was made from.
+    uint base_vertex;
+    /// Pads the record to a multiple of the transform's alignment, matching
+    /// `mesh.slang` — where the four targets' disagreement about the tail is
+    /// written out.
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
+
+/// Matching `static const uint INSTANCE_BASE_VERTEX_OVERRIDE` in `mesh.slang`.
+static const uint INSTANCE_BASE_VERTEX_OVERRIDE = 2;
 
 /// Matching `struct GpuMesh` in `mesh.slang`.
 struct GpuMesh
@@ -1283,6 +1299,16 @@ void emit_cluster(
     // is a single level.
     uint level_base = cluster_select[cluster_index].vertex_base;
 
+    // **Or the instance's own base, when it carries one.** `mesh.slang`'s
+    // vertex stage reads the same bit for the same reason: a skinned instance's
+    // vertices are a run a compute dispatch deformed them into rather than a
+    // mesh entry's, and it goes on naming its source mesh so that everything
+    // else — this bucket, the level tables, the bounding box — still resolves.
+    // A skinned mesh has one level, so `level_base` is zero on that arm.
+    uint base_vertex = (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) != 0u
+        ? instance.base_vertex
+        : mesh.base_vertex;
+
     // Once for the cluster, not once per vertex: the instance is fixed for the
     // whole meshlet, so the three cross products are amortised over every
     // vertex the loop below writes.
@@ -1291,7 +1317,7 @@ void emit_cluster(
     for (uint v = lane; v < cluster.vertex_count; v += THREADS)
     {
         uint index = cluster_vertices[cluster.vertex_offset + v];
-        MeshVertex vertex = vertices[index + mesh.base_vertex + level_base];
+        MeshVertex vertex = vertices[index + base_vertex + level_base];
 
         float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
 

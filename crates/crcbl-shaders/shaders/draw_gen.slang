@@ -193,8 +193,23 @@ struct GpuInstance
     uint sector;
     /// Per-instance bits. Bit 0 is the live bit `cull.slang` reads; an index in
     /// the visible list is a live instance by construction, so nothing here
-    /// asks.
+    /// asks. Bit 1 is the base-vertex override the raster stages read, and this
+    /// pass buckets by mesh rather than by base, so nothing here asks about that
+    /// one either.
     uint flags;
+    /// The pool vertex this instance's indices are relative to, read **instead
+    /// of** the mesh entry's when `INSTANCE_BASE_VERTEX_OVERRIDE` is set in
+    /// `flags` and ignored when it is not. A deformed instance names its
+    /// **source** mesh above and carries the base of the region a skinning
+    /// dispatch wrote it into here, so the bucket, the level tables and the
+    /// bounding box all still resolve through the mesh it was made from.
+    uint base_vertex;
+    /// Pads the record to a multiple of the transform's alignment, matching
+    /// `mesh.slang` — where the four targets' disagreement about the tail is
+    /// written out.
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 /// One resident mesh's range in the geometry pools **and its local-space

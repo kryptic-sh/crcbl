@@ -82,10 +82,24 @@ struct GpuInstance
     /// anything are §3.3's, so today every instance is in sector 0 and
     /// `transform` is effectively model → world.
     uint sector;
-    /// Per-instance bits. Bit 0 is `INSTANCE_LIVE` below, and it is the only
-    /// one defined: clear means this element holds a removed instance's
-    /// leftovers, and the entry point rejects it before reading anything else.
+    /// Per-instance bits. Bit 0 is `INSTANCE_LIVE` below: clear means this
+    /// element holds a removed instance's leftovers, and the entry point
+    /// rejects it before reading anything else. Bit 1 is the base-vertex
+    /// override the raster stages read; nothing here does.
     uint flags;
+    /// The pool vertex this instance's indices are relative to, read **instead
+    /// of** the mesh entry's when `INSTANCE_BASE_VERTEX_OVERRIDE` is set in
+    /// `flags` and ignored when it is not. A deformed instance names its
+    /// **source** mesh above and carries the base of the region a skinning
+    /// dispatch wrote it into here, so the bucket, the level tables and the
+    /// bounding box all still resolve through the mesh it was made from.
+    uint base_vertex;
+    /// Pads the record to a multiple of the transform's alignment, matching
+    /// `mesh.slang` — where the four targets' disagreement about the tail is
+    /// written out.
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 /// `GpuInstance::flags` bit 0: this element is a live instance, matching

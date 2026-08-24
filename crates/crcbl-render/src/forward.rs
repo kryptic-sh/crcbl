@@ -685,11 +685,11 @@ impl EmitTail {
 /// Where a skinned object is, and what it draws: [`InstanceDesc`] with a
 /// [`SkinnedMesh`] where the description's mesh index would be.
 ///
-/// The mesh is a reservation rather than an index because a skinned draw does
-/// not name a mesh at all — it names a *run of the vertex pool* the skinning
-/// dispatch fills, and which of the reservation's two runs that is changes every
-/// frame. [`ForwardRenderer::begin_skinned_frame`] is what keeps it current, so
-/// nothing here carries a parity.
+/// The mesh is a reservation rather than an index because a skinned draw is not
+/// only a mesh — it also names a *run of the vertex pool* the skinning dispatch
+/// fills, and which of the reservation's two runs that is changes every frame.
+/// [`ForwardRenderer::begin_skinned_frame`] is what keeps it current, so nothing
+/// here carries a parity.
 #[derive(Clone, Copy, Debug)]
 pub struct SkinnedInstanceDesc<'a> {
     /// The region this object is drawn out of, from
@@ -754,7 +754,7 @@ pub struct ForwardRenderer {
     /// a bare index and a [`MeshHandle`] is generational.
     skinnable_meshes: Vec<Option<MeshHandle>>,
     /// Every object [`ForwardRenderer::add_skinned_instance`] placed, with the
-    /// two mesh-table ids it alternates between.
+    /// two base vertices it alternates between.
     ///
     /// The list [`ForwardRenderer::begin_skinned_frame`] walks to point each one
     /// at the half of its region *this* frame's dispatch fills. Entries whose
@@ -1895,17 +1895,24 @@ impl ResidentMesh {
 }
 
 /// One skinned object the renderer re-points every frame: the instance, and the
-/// mesh-table id it draws through under each parity.
+/// base vertex it draws out of under each parity.
 ///
-/// The ids are copied out of the [`SkinnedMesh`] rather than borrowed from it,
+/// The bases are copied out of the [`SkinnedMesh`] rather than borrowed from it,
 /// so placing an object does not tie the renderer's lifetime to the caller's
 /// reservation — the renderer never needs the region again, only the two
 /// numbers.
 #[derive(Clone, Copy, Debug)]
 struct SkinnedInstance {
     handle: InstanceHandle,
-    /// Indexed by parity, in [`SkinnedMesh::mesh_id`]'s indexing.
-    ids: [u32; 2],
+    /// Indexed by parity, in [`crate::skinning::SkinnedRegion::base`]'s
+    /// indexing.
+    bases: [u32; 2],
+}
+
+/// The two base vertices an object drawn out of `mesh` alternates between, in
+/// [`SkinnedInstance::bases`]' indexing.
+fn skinned_bases(mesh: &SkinnedMesh) -> [u32; 2] {
+    [mesh.region().base(0), mesh.region().base(1)]
 }
 
 /// One shadow cull's per-frame buffers, read out of its [`DrawGen`] before that
@@ -2373,14 +2380,16 @@ impl ForwardRenderer {
         // **Sized by the mesh table's capacity, not by the meshes resident in
         // it**, because that is the invariant `draw_gen.slang`'s
         // `mesh_levels_of` states and indexes on: "every entry an instance can
-        // name is filled". An instance may name any table slot — a
-        // `MeshPool::alias` hands out one past every description mesh — and the
-        // read is unbounded, so a table sized to the description alone is an
-        // out-of-range read of whatever the packer laid down next. What it finds
-        // there decides the frame: zeros resolve to mesh 0 and draw another
-        // mesh's geometry, and a live `group_count` sends `select_level`'s loop
-        // over a count no allocation backs, which on radv is a hard GPU recovery
-        // rather than a wrong picture.
+        // name is filled". The read is unbounded and an instance's mesh id is a
+        // bare table index, so a table sized to the description alone is an
+        // out-of-range read of whatever the packer laid down next for any id the
+        // description did not fill. What it finds there decides the frame: zeros
+        // resolve to mesh 0 and draw another mesh's geometry, and a live
+        // `group_count` sends `select_level`'s loop over a count no allocation
+        // backs, which on radv is a hard GPU recovery rather than a wrong
+        // picture. That is not a hypothetical: it is what a skinned instance
+        // naming an alias entry did until 2026-08, before it learned to name its
+        // source mesh instead.
         let table_len = usize::try_from(scene.capacities.meshes)
             .unwrap_or(usize::MAX)
             .max(
@@ -4129,7 +4138,8 @@ impl ForwardRenderer {
     /// 3. points every object placed by
     ///    [`add_skinned_instance`](Self::add_skinned_instance) at the half of its
     ///    region the parity now names;
-    /// 4. uploads the instance delta, so those ids are the ones this frame draws.
+    /// 4. uploads the instance delta, so those bases are the ones this frame
+    ///    draws.
     ///
     /// Do those three and four in the other order and the objects carry the
     /// previous frame's half — a character posed one frame late, every frame,
@@ -4695,28 +4705,27 @@ impl ForwardRenderer {
         self.pool.vertex_buffer()
     }
 
-    /// Reserves a skinned region for description mesh `mesh`, with the two
-    /// mesh-table entries a draw of it selects between.
+    /// Reserves a skinned region for description mesh `mesh`.
     ///
     /// The whole of what a caller needs to skin something, in one value: hand
     /// [`SkinnedMesh::skin_range`] a palette and a set of bindings to get the
     /// frame's [`SkinRange`], hand the result to
     /// [`begin_skinned_frame`](Self::begin_skinned_frame), and place it with
-    /// [`add_skinned_instance`](Self::add_skinned_instance). The bases, the
-    /// parity and the table ids never have to be spelled by the caller at all —
-    /// see [`crate::skinning::SkinnedMesh`] for why there are two entries.
+    /// [`add_skinned_instance`](Self::add_skinned_instance). The bases and the
+    /// parity never have to be spelled by the caller at all — see
+    /// [`crate::skinning::SkinnedMesh`], where the ping-pong lives.
     ///
-    /// **The mesh keeps its own entry**, so the same description mesh can be
-    /// drawn skinned through this and in its bind pose through
-    /// [`add_instance`](Self::add_instance) in the same frame.
+    /// **The mesh keeps its own entry and the region takes none**, so the same
+    /// description mesh can be drawn skinned through this and in its bind pose
+    /// through [`add_instance`](Self::add_instance) in the same frame, both
+    /// resolving through the one table entry it already had.
     ///
     /// Give it back with [`release_skinned`](Self::release_skinned).
     ///
     /// # Errors
     ///
     /// Whatever [`SkinnedMesh::reserve`] refuses: a vertex pool with no room for
-    /// both halves, or a mesh table with no room for both entries. **Two of each
-    /// per skinned primitive** is what a scene's
+    /// both halves. **Two vertex runs per skinned primitive** is what a scene's
     /// [`Capacities`](crate::scene::Capacities) has to have been sized for.
     ///
     /// # Panics
@@ -4727,40 +4736,25 @@ impl ForwardRenderer {
     /// A DAG is refused rather than skinned wrongly: its coarser levels are
     /// separate vertex runs no dispatch writes, so a cut that descended past
     /// level 0 would draw whatever the pool happened to be holding there.
-    pub fn reserve_skinned(
-        &mut self,
-        device: &dyn Device,
-        mesh: usize,
-    ) -> Result<SkinnedMesh, MeshPoolError> {
+    pub fn reserve_skinned(&mut self, mesh: usize) -> Result<SkinnedMesh, MeshPoolError> {
         let source = self.skinnable_meshes[mesh].unwrap_or_else(|| {
             panic!(
                 "description mesh {mesh} is a Geometry::Dag, whose coarser levels are vertex \
                  runs no skinning dispatch writes; only a flat mesh can be skinned"
             )
         });
-        SkinnedMesh::reserve(device, &mut self.pool, source)
+        SkinnedMesh::reserve(&mut self.pool, source)
     }
 
-    /// Clears both of `skinned`'s table entries and gives its region back to the
-    /// vertex pool.
+    /// Gives `skinned`'s region back to the vertex pool.
     ///
     /// The device must not still be drawing it: this records no barrier, on
     /// [`SkinnedMesh::release`]'s terms. Objects placed through it are **not**
     /// removed — [`remove_instance`](Self::remove_instance) is what does that,
-    /// and an instance still naming a released entry draws nothing, because a
-    /// cleared entry is the empty range.
-    ///
-    /// # Errors
-    ///
-    /// [`MeshPoolError::Hal`] if an entry could not be cleared, in which case
-    /// nothing is released — see [`SkinnedMesh::release`], which is where that
-    /// trade is argued.
-    pub fn release_skinned(
-        &mut self,
-        device: &dyn Device,
-        skinned: SkinnedMesh,
-    ) -> Result<(), MeshPoolError> {
-        skinned.release(device, &mut self.pool)
+    /// and an instance left behind goes on drawing its source mesh's geometry
+    /// out of vertices the pool has handed back. Remove the objects first.
+    pub fn release_skinned(&mut self, skinned: SkinnedMesh) {
+        skinned.release(&mut self.pool);
     }
 
     /// Places a skinned object in the scene.
@@ -4792,13 +4786,13 @@ impl ForwardRenderer {
     ) -> Result<InstanceHandle, InstancePoolError> {
         // Parity zero, and it never reaches the GPU as such: the instance pool
         // uploads by delta at `begin_skinned_frame`, which re-points every entry
-        // of the list below before it flushes. What this writes is the record's
-        // other four-fifths.
+        // of the list below before it flushes. What this writes is the rest of
+        // the record.
         let instance = self.skinned_gpu_instance(desc, 0);
         let handle = self.instances.insert(&instance)?;
         self.skinned_instances.push(SkinnedInstance {
             handle,
-            ids: [desc.mesh.mesh_id(0), desc.mesh.mesh_id(1)],
+            bases: skinned_bases(desc.mesh),
         });
         Ok(handle)
     }
@@ -4823,19 +4817,26 @@ impl ForwardRenderer {
         if !self.instances.set(handle, &instance) {
             return;
         }
-        let ids = [desc.mesh.mesh_id(0), desc.mesh.mesh_id(1)];
+        let bases = skinned_bases(desc.mesh);
         match self
             .skinned_instances
             .iter_mut()
             .find(|entry| entry.handle == handle)
         {
-            Some(entry) => entry.ids = ids,
-            None => self.skinned_instances.push(SkinnedInstance { handle, ids }),
+            Some(entry) => entry.bases = bases,
+            None => self
+                .skinned_instances
+                .push(SkinnedInstance { handle, bases }),
         }
     }
 
     /// A skinned object's record, at one parity — [`gpu_instance`](Self::gpu_instance)
-    /// with a region's table id where a description mesh's would be.
+    /// with the region's base vertex carried in the record and the bit that says
+    /// to read it.
+    ///
+    /// The mesh id is the **source** mesh's, not a second entry's, so the bucket
+    /// this instance is scattered into, the levels it selects through and the
+    /// box it is culled against are the ones the undeformed mesh already had.
     fn skinned_gpu_instance(
         &self,
         desc: &SkinnedInstanceDesc<'_>,
@@ -4843,8 +4844,10 @@ impl ForwardRenderer {
     ) -> mesh::GpuInstance {
         mesh::GpuInstance {
             transform: desc.transform.to_cols_array(),
-            mesh: desc.mesh.mesh_id(parity),
+            mesh: desc.mesh.mesh_id(),
             material: self.material_ids[desc.material],
+            flags: mesh::GpuInstance::BASE_VERTEX_OVERRIDE,
+            base_vertex: desc.mesh.region().base(parity),
             ..mesh::GpuInstance::default()
         }
     }
@@ -4862,12 +4865,13 @@ impl ForwardRenderer {
             ..
         } = self;
         skinned_instances.retain(|entry| {
-            // The record as the pool holds it, so the transform and material the
-            // caller last set survive: only the mesh id is this call's.
+            // The record as the pool holds it, so the transform, the material
+            // and the mesh the caller last set survive: only the base vertex is
+            // this call's.
             let Some(mut instance) = instances.get(entry.handle) else {
                 return false;
             };
-            instance.mesh = entry.ids[(parity & 1) as usize];
+            instance.base_vertex = entry.bases[(parity & 1) as usize];
             instances.set(entry.handle, &instance);
             true
         });
@@ -8629,10 +8633,10 @@ mod tests {
     ///
     /// `draw_gen.slang`'s `mesh_levels_of` reads `gen.mesh_levels_at + mesh *
     /// MESH_LEVELS_WORDS` with no bound, and says in its own doc comment that
-    /// "every entry an instance can name is filled". An instance can name any
-    /// table slot — [`MeshPool::alias`] hands out one past every description
-    /// mesh — so a table sized to the description alone makes that read land in
-    /// whatever the packer put next.
+    /// "every entry an instance can name is filled". An instance's mesh id is a
+    /// bare table index, so a table sized to the description alone makes that
+    /// read land in whatever the packer put next for any slot the description
+    /// left empty.
     ///
     /// Growing the capacity by a known number of slots grows the tables buffer
     /// by exactly what those slots occupy: one `MeshLevels` record and one
@@ -11421,7 +11425,7 @@ mod tests {
             let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb)
                 .expect("the null backend accepts every descriptor");
             let skinned = renderer
-                .reserve_skinned(device, DEMO_CUBE)
+                .reserve_skinned(DEMO_CUBE)
                 .expect("a default pool has room for two halves of a cube");
             let skinning = Skinning::new(
                 device,
@@ -11470,9 +11474,7 @@ mod tests {
         }
 
         fn destroy(mut self, device: &dyn Device) {
-            self.renderer
-                .release_skinned(device, self.skinned)
-                .expect("the null backend writes every buffer");
+            self.renderer.release_skinned(self.skinned);
             self.skinning.destroy(device);
             self.renderer.destroy(device);
         }
@@ -11495,70 +11497,69 @@ mod tests {
             .count()
     }
 
-    /// **A skinned primitive takes two mesh-table entries, and neither is ever
-    /// rewritten.**
+    /// **A skinned primitive takes no mesh-table entry of its own, and nothing
+    /// rewrites the one it draws through.**
     ///
     /// [`crate::mesh_pool`]'s table is one host-visible buffer rather than a ring
     /// precisely because nothing rewrites an entry between frames, so a design
-    /// that re-pointed one entry at the half a frame writes would be wrong only
-    /// on the frames that overlap — which is to say invisibly. Both halves of
-    /// that are asserted here: the two entries carry the two bases, and after
-    /// several skinned frames each has been written exactly once.
+    /// that re-pointed an entry at the half a frame writes would be wrong only
+    /// on the frames that overlap — which is to say invisibly. What alternates
+    /// instead is a field of the *instance*, and instances go through a ring.
     ///
-    /// The bind pose keeps its own entry throughout, which is what lets the same
-    /// mesh be drawn skinned and unskinned in one frame.
+    /// So a skinned object draws through the source mesh's own entry: the same
+    /// id [`add_instance`](ForwardRenderer::add_instance) would give it, still
+    /// carrying the bind pose's base vertex, still written exactly once after
+    /// four skinned frames. That shared entry is also what lets one mesh be
+    /// drawn skinned and unskinned in the same frame.
     #[test]
-    fn a_skinned_mesh_takes_two_table_entries_and_neither_is_ever_rewritten() {
+    fn a_skinned_mesh_takes_no_table_entry_and_rewrites_none() {
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut fixture = SkinnedFixture::build(device, queue);
 
         let bind_pose_id = fixture.renderer.mesh_ids[DEMO_CUBE];
-        let even_id = fixture.skinned.mesh_id(0);
-        let odd_id = fixture.skinned.mesh_id(1);
-        assert!(
-            even_id != odd_id && even_id != bind_pose_id && odd_id != bind_pose_id,
-            "three distinct entries: the bind pose's and one per parity, not {bind_pose_id}, \
-             {even_id}, {odd_id}"
+        assert_eq!(
+            fixture.skinned.mesh_id(),
+            bind_pose_id,
+            "a skinned instance names the mesh it was deformed from, so the bucket, the level \
+             tables and the bounding box all resolve as the bind pose's"
         );
 
         let bind_pose = mesh_entry(&recorder, &fixture.renderer, bind_pose_id);
-        let even = mesh_entry(&recorder, &fixture.renderer, even_id);
-        let odd = mesh_entry(&recorder, &fixture.renderer, odd_id);
         assert_eq!(
-            (even.base_vertex, odd.base_vertex),
-            (
-                fixture.skinned.region().base(0),
-                fixture.skinned.region().base(1)
-            ),
-            "each entry names the half of the region its parity is written into"
+            bind_pose.base_vertex,
+            fixture.skinned.input_base(),
+            "the entry goes on naming the bind pose the dispatch reads, not either half it \
+             writes"
         );
+        for parity in 0..2 {
+            assert_ne!(
+                fixture.skinned.region().base(parity),
+                bind_pose.base_vertex,
+                "half {parity} must not be the bind pose, which the kernel reads while it \
+                 writes them"
+            );
+        }
         assert_ne!(
-            even.base_vertex, odd.base_vertex,
+            fixture.skinned.region().base(0),
+            fixture.skinned.region().base(1),
             "the two halves are separate reservations, or the ping-pong is one buffer"
         );
+
+        // Counted before the frames rather than compared against a literal:
+        // `MeshPool::new` clears the whole table with one write at offset zero,
+        // which lands on this entry too, so the number here is the pool's
+        // start-up and not this test's business. What the loop below has to
+        // leave alone is whatever it is.
+        let writes_before = table_writes(&recorder, &fixture.renderer, bind_pose_id);
         assert!(
-            even.base_vertex != bind_pose.base_vertex && odd.base_vertex != bind_pose.base_vertex,
-            "neither half is the bind pose, which the kernel reads while it writes them"
-        );
-        assert_eq!(
-            (
-                even.base_index,
-                even.index_count,
-                even.bounds_min,
-                even.bounds_max
-            ),
-            (
-                bind_pose.base_index,
-                bind_pose.index_count,
-                bind_pose.bounds_min,
-                bind_pose.bounds_max
-            ),
-            "a deformation changes neither the indices nor — as far as this table knows — the box"
+            writes_before > 0,
+            "the entry was written at least once before any frame ran, or the counter below \
+             is counting nothing and the comparison after the frames is vacuous"
         );
 
         // Four frames, which is two of each parity: enough that a design
-        // rewriting one entry per frame would have written four times.
+        // rewriting an entry per frame would have written four more times.
         let imported = swapchain_image_at(device, TEST_EXTENT);
         let mut pool = crate::TransientPool::new();
         for _ in 0..4 {
@@ -11575,14 +11576,13 @@ mod tests {
             graph.compile(&pool).expect("a legal frame");
         }
 
-        for (parity, id) in [(0, even_id), (1, odd_id)] {
-            assert_eq!(
-                table_writes(&recorder, &fixture.renderer, id),
-                1,
-                "entry {id} — parity {parity} — must have been written once, when the region \
-                 was reserved, and never again"
-            );
-        }
+        assert_eq!(
+            table_writes(&recorder, &fixture.renderer, bind_pose_id),
+            writes_before,
+            "entry {bind_pose_id} was written again by a skinned frame; the whole reason this \
+             table is one buffer rather than a ring is that nothing rewrites an entry between \
+             frames"
+        );
 
         fixture.destroy(device);
         pool.destroy(device);
@@ -11591,18 +11591,22 @@ mod tests {
         recorder.assert_valid();
     }
 
-    /// **A skinned object's recorded mesh id follows the parity of the frame it
-    /// is drawn in.**
+    /// **A skinned object's recorded base vertex follows the parity of the frame
+    /// it is drawn in**, and it carries the bit that makes a shader read it.
     ///
-    /// The other half of the two-entry design: the entries never move, so what
-    /// has to alternate is which of them an *instance* names — and it has to
-    /// alternate in the buffer the frame actually draws from, which is why this
-    /// reads the instance ring's bytes rather than the host's mirror.
+    /// The other half of the design: the table entry never moves, so what has to
+    /// alternate is a field of the *instance* — and it has to alternate in the
+    /// buffer the frame actually draws from, which is why this reads the
+    /// instance ring's bytes rather than the host's mirror.
     ///
-    /// The second assertion is what stops this passing with the parity ignored:
-    /// two consecutive frames must have named **different** entries.
+    /// Three claims, and the last two are what stop the first being vacuous. The
+    /// base must be the one this frame's parity names; the record must carry
+    /// [`GpuInstance::BASE_VERTEX_OVERRIDE`](mesh::GpuInstance::BASE_VERTEX_OVERRIDE),
+    /// without which the raster stages read the mesh entry and the field is
+    /// decoration; and two consecutive frames must have named **different**
+    /// halves, without which a renderer ignoring the parity entirely would pass.
     #[test]
-    fn a_skinned_draw_names_the_half_the_frames_dispatch_filled() {
+    fn a_skinned_draw_carries_the_base_the_frames_dispatch_filled() {
         let (recorder, device, queue) = open();
         let device = device.as_ref();
         let mut fixture = SkinnedFixture::build(device, queue);
@@ -11615,7 +11619,7 @@ mod tests {
             })
             .expect("a pool of thousands has room for one object");
 
-        let mut named = Vec::new();
+        let mut carried = Vec::new();
         for _ in 0..2 {
             fixture.begin(device);
             let parity = fixture.skinning.parity();
@@ -11634,14 +11638,25 @@ mod tests {
                     .expect("one whole instance"),
             );
             assert_eq!(
-                instance.mesh,
-                fixture.skinned.mesh_id(parity),
-                "the buffer this frame draws from must name the entry parity {parity} writes"
+                instance.base_vertex,
+                fixture.skinned.region().base(parity),
+                "the buffer this frame draws from must carry the base parity {parity} writes"
             );
-            named.push(instance.mesh);
+            assert_eq!(
+                instance.flags & mesh::GpuInstance::BASE_VERTEX_OVERRIDE,
+                mesh::GpuInstance::BASE_VERTEX_OVERRIDE,
+                "without the bit the raster stages resolve the mesh entry's base and this \
+                 field is never read"
+            );
+            assert_eq!(
+                instance.mesh, fixture.renderer.mesh_ids[DEMO_CUBE],
+                "and the record still names the source mesh, which is what its bucket, its \
+                 levels and its bounding box resolve through"
+            );
+            carried.push(instance.base_vertex);
         }
         assert_ne!(
-            named[0], named[1],
+            carried[0], carried[1],
             "two consecutive frames must have drawn different halves, or a renderer that \
              ignored the parity entirely would pass this"
         );

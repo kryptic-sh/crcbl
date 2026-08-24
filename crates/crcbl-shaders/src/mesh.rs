@@ -132,10 +132,23 @@ pub const FRAME_UNIFORMS_SIZE: usize =
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
-/// One `float4x4` (64) then four `uint` (4 each). Checked against the
-/// `ArrayStride 80` and the `Offset` decorations `slangc` emits by this
-/// module's `the_instance_layout_matches_the_offsets_slangc_emits`.
-pub const INSTANCE_STRIDE: usize = 80;
+/// One `float4x4` (64) then five `uint` (4 each) and three `uint` of explicit
+/// padding, which is what makes the record the same size on all four targets:
+/// `std430`, WGSL and MSL round a struct up to its alignment and DXIL's
+/// structured-buffer stride does not, so the tail is declared in the shader
+/// rather than left to each target's rule. Checked against the `ArrayStride 96`
+/// and the `Offset` decorations `slangc` emits by this module's
+/// `the_instance_layout_matches_the_offsets_slangc_emits`.
+pub const INSTANCE_STRIDE: usize = 96;
+
+/// `uint` lanes of declared padding at the end of a [`GpuInstance`], past the
+/// last field a shader reads.
+///
+/// Named because [`GpuInstance::to_bytes`] has to leave exactly this many
+/// untouched and `the_instance_layout_matches_the_offsets_slangc_emits` has to
+/// find exactly this many zeroed — see [`INSTANCE_STRIDE`], which is where the
+/// four targets' disagreement about an implicit tail is written out.
+pub const INSTANCE_PAD_WORDS: usize = 3;
 
 /// Bytes per [`GpuMesh`], and the stride of the mesh-table storage buffer.
 ///
@@ -539,6 +552,23 @@ pub struct GpuInstance {
     ///
     /// [`crcbl_hal::Features`]: https://docs.rs/crcbl-hal
     pub flags: u32,
+    /// The pool vertex this instance's indices are relative to, read **instead
+    /// of** the mesh table's when [`GpuInstance::BASE_VERTEX_OVERRIDE`] is set
+    /// in [`GpuInstance::flags`] and ignored when it is not.
+    ///
+    /// What makes a deformed instance drawable: [`crate::skinning`]'s dispatch
+    /// writes a skinned copy of a mesh's vertices into a run of the same pool,
+    /// and this is how the instance drawn out of that run says where it is. The
+    /// instance goes on naming its **source** mesh in [`GpuInstance::mesh`], so
+    /// the bucket it is scattered into, the level tables it resolves through and
+    /// the bounding box it is culled against are the source mesh's and need no
+    /// entry of their own.
+    ///
+    /// **The bucket stays authoritative without the bit**, which is what a
+    /// `Geometry::Dag` needs: its level is chosen per instance on the GPU and
+    /// the base belongs to the *selected* level, not to the entry the instance
+    /// names.
+    pub base_vertex: u32,
 }
 
 impl GpuInstance {
@@ -556,6 +586,25 @@ impl GpuInstance {
     /// [`GpuInstance::default`] has no bit set for that reason.
     pub const LIVE: u32 = 1 << 0;
 
+    /// [`GpuInstance::flags`] bit 1: read this record's
+    /// [`base_vertex`](GpuInstance::base_vertex) instead of the base vertex of
+    /// the mesh entry the draw resolved.
+    ///
+    /// **A bit rather than a sentinel in the field**, because zero is a legal
+    /// base vertex — it is the pool's first run — so no in-range value is free
+    /// to mean "no override". A sentinel would have to be [`u32::MAX`], which is
+    /// not what a zeroed element holds, and a zeroed element reading as "draw
+    /// out of vertex 0" is the direction that fails towards drawing something.
+    /// The bit keeps [`GpuInstance::default`] all zeroes, which is the property
+    /// [`GpuInstance::LIVE`] rests on.
+    ///
+    /// **And a bit rather than spare bits of an existing field.** Packing the
+    /// base into what is left of `flags` or `sector` would cap the vertex pool
+    /// at whatever those bits address, silently, at a size nothing in the code
+    /// names. The record is one `uint` wider instead, which costs a whole
+    /// 16-byte lane — see [`INSTANCE_STRIDE`].
+    pub const BASE_VERTEX_OVERRIDE: u32 = 1 << 1;
+
     /// The bytes one storage-buffer element holds, in `std430` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; INSTANCE_STRIDE] {
@@ -565,11 +614,20 @@ impl GpuInstance {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        for value in [self.mesh, self.material, self.sector, self.flags] {
+        for value in [
+            self.mesh,
+            self.material,
+            self.sector,
+            self.flags,
+            self.base_vertex,
+        ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        debug_assert_eq!(at, INSTANCE_STRIDE);
+        // Short of the stride, and deliberately: the lanes past the last field
+        // are the padding `shaders/mesh.slang` declares, and they stay as this
+        // buffer was initialised.
+        debug_assert_eq!(INSTANCE_STRIDE - at, INSTANCE_PAD_WORDS * size_of::<u32>());
         bytes
     }
 
@@ -604,6 +662,7 @@ impl GpuInstance {
             material: uint_at(68),
             sector: uint_at(72),
             flags: uint_at(76),
+            base_vertex: uint_at(80),
         }
     }
 }
@@ -1899,14 +1958,14 @@ mod tests {
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the
-    /// disassembly. The four ids are the same width and would silently
+    /// disassembly. The five ids are the same width and would silently
     /// permute — a mesh id read as a material id is a picture, not a crash —
     /// so the byte each lands on is pinned rather than assumed.
     #[test]
     fn the_instance_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuInstance_std430 ArrayStride 80`, and
+        // `OpDecorate %_runtimearr_GpuInstance_std430 ArrayStride 96`, and
         // `OpMemberDecorate %GpuInstance_std430 n Offset …`.
-        assert_eq!(INSTANCE_STRIDE, 80);
+        assert_eq!(INSTANCE_STRIDE, 96);
         assert_eq!(
             INSTANCE_STRIDE % 16,
             0,
@@ -1921,6 +1980,7 @@ mod tests {
             material: 3,
             sector: 4,
             flags: 5,
+            base_vertex: 6,
         };
         let bytes = instance.to_bytes();
         assert_eq!(bytes.len(), INSTANCE_STRIDE);
@@ -1934,10 +1994,62 @@ mod tests {
         assert_eq!(uint_at(68), 3, "material at offset 68");
         assert_eq!(uint_at(72), 4, "sector at offset 72");
         assert_eq!(uint_at(76), 5, "flags at offset 76");
+        assert_eq!(uint_at(80), 6, "base_vertex at offset 80");
+        // The lanes `std430`'s rounding-up adds are padding, and a record that
+        // wrote a field into them would be a field the shader reads at another
+        // offset. Written rather than assumed: this buffer is uploaded whole.
+        let pad = INSTANCE_STRIDE - INSTANCE_PAD_WORDS * size_of::<u32>();
+        assert_eq!(pad, 84, "the last field ends at byte 84");
+        assert!(
+            bytes[pad..].iter().all(|byte| *byte == 0),
+            "the tail past the last field is padding and is zero: {:?}",
+            &bytes[pad..]
+        );
 
-        // And the decode agrees with the encode, field for field — four `u32`s
+        // And the decode agrees with the encode, field for field — five `u32`s
         // in a row would permute silently, and this is what says they did not.
         assert_eq!(GpuInstance::from_bytes(&bytes), instance);
+    }
+
+    /// The base-vertex override is bit 1 of the flags word, it is not the
+    /// liveness bit, and a default record has neither.
+    ///
+    /// The default is again the half that matters: an element nothing has
+    /// written must not read as "draw out of pool vertex 0", which is what a
+    /// sentinel in the field itself would have made it — see
+    /// [`GpuInstance::BASE_VERTEX_OVERRIDE`], where that choice is argued.
+    #[test]
+    fn a_default_instance_overrides_no_base_vertex() {
+        assert_eq!(GpuInstance::BASE_VERTEX_OVERRIDE, 2);
+        assert_eq!(
+            GpuInstance::BASE_VERTEX_OVERRIDE & GpuInstance::LIVE,
+            0,
+            "the two bits are separate, or setting one would set the other"
+        );
+        assert_eq!(
+            GpuInstance::default().flags & GpuInstance::BASE_VERTEX_OVERRIDE,
+            0
+        );
+        assert_eq!(GpuInstance::default().base_vertex, 0);
+
+        // And the bit survives the round trip through the bytes a shader reads,
+        // beside a base a shader would resolve.
+        let deformed = GpuInstance {
+            flags: GpuInstance::LIVE | GpuInstance::BASE_VERTEX_OVERRIDE,
+            base_vertex: 1024,
+            ..GpuInstance::default()
+        };
+        let bytes = deformed.to_bytes();
+        assert_eq!(
+            u32::from_le_bytes(bytes[76..80].try_into().expect("4"))
+                & GpuInstance::BASE_VERTEX_OVERRIDE,
+            GpuInstance::BASE_VERTEX_OVERRIDE
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[80..84].try_into().expect("4")),
+            1024
+        );
+        assert_eq!(GpuInstance::from_bytes(&bytes), deformed);
     }
 
     /// The liveness bit is bit 0 of the flags word, and a default record does

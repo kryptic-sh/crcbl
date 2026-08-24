@@ -14,7 +14,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`GpuInstance` gained `base_vertex` and `INSTANCE_STRIDE` is 96 bytes**,
+  was 80. The shader declares its three `uint` of tail padding **explicitly**,
+  because DXIL's structured-buffer stride does not round up where `std430`, WGSL
+  and MSL do: letting the tail be implicit gave one buffer two element sizes, 96
+  on three backends and 84 on the fourth, with nothing to report it.
+- **`MeshPool::alias` is removed**, along with the two-mesh-table-entry design
+  it existed for. `SkinnedMesh::reserve` and `release` no longer take a `Device`
+  and cannot fail on one; `SkinnedMesh::mesh_id` takes no parity and answers the
+  source mesh's id; `ForwardRenderer::reserve_skinned` no longer takes a
+  `Device`, and `release_skinned` takes none and returns nothing. A skinned
+  primitive costs two vertex runs and **no** mesh-table entries, so
+  `Capacities::meshes` no longer has to be sized for one.
+
 ### Fixed
+
+- **A skinned mesh drew its bind pose, on every backend.** The vertex stage
+  resolved its base vertex through the _draw's bucket_, and no skinned region
+  has a bucket — buckets are built once, from the description's meshes — so the
+  skinning dispatch's output was written correctly every frame and never read. A
+  skinned instance now names its **source** mesh and carries the base of the
+  region it was deformed into, read by `mesh.slang` and `mesh_cluster.slang`
+  when `GpuInstance::flags` carries `GpuInstance::BASE_VERTEX_OVERRIDE`. The
+  bucket stays authoritative without the bit, which a `Geometry::Dag` needs: its
+  level is chosen per instance on the GPU and its base belongs to the selected
+  level.
+
+  Both raster and mesh-shader paths were wrong, and both are now covered by a
+  test that renders a skinned cube and reads the pixels back — the kind of test
+  whose absence let a subsystem pass every gate in the workspace while drawing
+  one fixed pose.
 
 - **A `GpuInstance` naming a mesh-table slot the description never filled no
   longer reads past the level-selection tables.** `draw_gen.slang`'s

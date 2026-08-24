@@ -18,13 +18,17 @@ struct GpuInstance_std430_0
     @align(4) material_0 : u32,
     @align(8) sector_0 : u32,
     @align(4) flags_0 : u32,
+    @align(16) base_vertex_0 : u32,
+    @align(4) pad0_0 : u32,
+    @align(8) pad1_0 : u32,
+    @align(4) pad2_0 : u32,
 };
 
 @binding(1) @group(0) var<storage, read> instances_0 : array<GpuInstance_std430_0>;
 
 struct GpuMesh_std430_0
 {
-    @align(4) base_vertex_0 : u32,
+    @align(4) base_vertex_1 : u32,
     @align(4) base_index_0 : u32,
     @align(4) index_count_0 : u32,
     @align(4) min_x_0 : f32,

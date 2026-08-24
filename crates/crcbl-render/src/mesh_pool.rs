@@ -125,19 +125,18 @@
 //! It is also why the mesh table is one host-visible buffer rather than a ring
 //! like [`crate::instance_pool`]'s: nothing rewrites an entry between frames, so
 //! there is no frame still reading the value a write would replace. The three
-//! calls that write it — [`MeshPool::upload`], [`MeshPool::alias`] and
-//! [`MeshPool::free`] — each write a given entry once, and the first two are the
-//! same calls the pools' own space moves under. P9's streaming path is where
-//! that, the free lists and `flush` all stop being start-up-only together.
+//! calls that write it — [`MeshPool::upload`] and [`MeshPool::free`] — each
+//! write a given entry once, and both are the same calls the pools' own space
+//! moves under. P9's streaming path is where that, the free lists and `flush`
+//! all stop being start-up-only together.
 //!
-//! **[`MeshPool::alias`] is what keeps that true for skinning**, which is the
-//! one thing in the engine whose base vertex changes every frame:
-//! [`crate::skinning::SkinnedRegion`] alternates halves, so pointing one entry
-//! at the half a frame writes would be a rewrite between frames — the exact
-//! thing this table has no ring to survive, and it would be wrong only on the
-//! frames that overlap. A skinned primitive takes **two** entries instead, one
-//! per parity, each written once when the region is reserved, and the draw
-//! selects between them.
+//! **Skinning does not disturb that**, even though it is the one thing in the
+//! engine whose base vertex changes every frame:
+//! [`crate::skinning::SkinnedRegion`] alternates halves, and what alternates is
+//! a field of the *instance* — see
+//! [`GpuInstance::base_vertex`](crcbl_shaders::mesh::GpuInstance::base_vertex).
+//! Instances go through [`crate::instance_pool`], which **is** a ring, so no
+//! entry of this table is ever rewritten between frames.
 
 use core::ops::Range;
 use core::time::Duration;
@@ -350,14 +349,6 @@ struct Resident {
     /// The timeline value the upload's submit signals. The mesh is resident
     /// once [`MeshPool::completed`] has reached it.
     ready_at: u64,
-    /// Whether [`MeshPool::free`] returns `range`'s vertices and indices to the
-    /// free lists.
-    ///
-    /// False for an entry [`MeshPool::alias`] handed out, which names a vertex
-    /// run somebody else reserved and indices some other mesh uploaded. Freeing
-    /// one clears its table entry and gives nothing back, because it took
-    /// nothing: the alternative is a free list handed the same addresses twice.
-    owns_space: bool,
 }
 
 /// A staging buffer and command buffer that cannot be released until the copy
@@ -665,7 +656,6 @@ impl MeshPool {
                 range,
                 vertex_count,
                 ready_at,
-                owns_space: true,
             })
             .cast();
         // The slot the pool just handed out is the table entry this mesh owns,
@@ -910,11 +900,6 @@ impl MeshPool {
     /// handle answers `false` rather than corrupting the free list, because the
     /// handle's generation has moved on.
     ///
-    /// **An entry [`MeshPool::alias`] handed out gives no space back**, because
-    /// it took none: its vertices are a run somebody else reserved and its
-    /// indices are another mesh's. Clearing the entry is the whole of what
-    /// freeing one does.
-    ///
     /// # Errors
     ///
     /// [`MeshPoolError::Hal`] if the entry could not be cleared, in which case
@@ -925,12 +910,10 @@ impl MeshPool {
         };
         self.write_entry(device, handle.index(), &MeshRange::default())?;
         self.meshes.remove(handle.cast());
-        if resident.owns_space {
-            self.vertex_alloc
-                .free(resident.range.base_vertex, resident.vertex_count);
-            self.index_alloc
-                .free(resident.range.base_index, resident.range.index_count);
-        }
+        self.vertex_alloc
+            .free(resident.range.base_vertex, resident.vertex_count);
+        self.index_alloc
+            .free(resident.range.base_index, resident.range.index_count);
         Ok(true)
     }
 
@@ -944,96 +927,6 @@ impl MeshPool {
     #[must_use]
     pub fn vertex_count(&self, handle: MeshHandle) -> Option<u32> {
         self.resident(handle).map(|resident| resident.vertex_count)
-    }
-
-    /// Adds a **second mesh-table entry** for `source`'s indices at a different
-    /// base vertex, and returns the handle naming it.
-    ///
-    /// The one way to point a draw at vertices a mesh did not upload, and the
-    /// reason it has to exist is the [module docs](self)' base-vertex decision:
-    /// a draw passes zero for its own base and the shader reads the number out
-    /// of this table, so "draw this mesh out of that run" is a table entry and
-    /// cannot be a draw argument. [`crate::skinning::SkinnedMesh`] is what
-    /// builds on it.
-    ///
-    /// The entry is written **once, here**, and cleared once by
-    /// [`free`](Self::free). Nothing rewrites it, which is the property the
-    /// [module docs](self) rest the table's lack of a ring on — and the reason a
-    /// region written on alternating frames takes two of these rather than one
-    /// entry rewritten per frame.
-    ///
-    /// It carries `source`'s first index, its index count and **its bind-pose
-    /// bounding box**. The first two a deformation does not change; the box it
-    /// does, and nothing here can do better — the box a skinning dispatch will
-    /// actually fill is a property of a joint palette this call has never seen.
-    /// So a mesh deformed outside the box its bind pose fits in is culled by
-    /// [`crate::cull`] while it is on screen, which is a picture with a hole in
-    /// it rather than an error.
-    ///
-    /// **It owns no pool space.** `base_vertex` names a run somebody else
-    /// reserved and the indices are `source`'s, so freeing it returns nothing to
-    /// either free list. Freeing `source` while an alias of it is live leaves
-    /// that alias naming index bytes the pool has handed back — release the
-    /// alias first, which
-    /// [`SkinnedMesh::release`](crate::skinning::SkinnedMesh::release) does.
-    ///
-    /// # Errors
-    ///
-    /// [`MeshPoolError::NotResident`] if `source` is not a resident mesh of this
-    /// pool, [`MeshPoolError::MeshTableFull`] when every table entry is spoken
-    /// for — an alias costs one, so a scene with skinned meshes sizes
-    /// [`MeshPoolDesc::mesh_capacity`] for them — and [`MeshPoolError::Hal`] if
-    /// the entry could not be written, after which nothing is left allocated.
-    pub fn alias(
-        &mut self,
-        device: &dyn Device,
-        source: MeshHandle,
-        base_vertex: u32,
-    ) -> Result<MeshHandle, MeshPoolError> {
-        // Residency rather than mere existence, on `MeshPool::table_index`'s
-        // terms: an alias of a mesh whose indices have not landed is an entry a
-        // draw could be recorded against, and the whole of the residency gate is
-        // that a caller cannot obtain one.
-        let Some(resident) = self.resident(source).copied() else {
-            return Err(MeshPoolError::NotResident { handle: source });
-        };
-        // Before the slot is taken, exactly as `upload` checks it: a full table
-        // costs no allocation to give back.
-        let in_use = self.table_slots_in_use();
-        if in_use >= self.table_capacity {
-            return Err(MeshPoolError::MeshTableFull {
-                capacity: self.table_capacity,
-                in_use,
-            });
-        }
-        let range = MeshRange {
-            base_vertex,
-            ..resident.range
-        };
-        let handle: MeshHandle = self
-            .meshes
-            .insert(Resident {
-                range,
-                // The source's, so `vertex_count` answers for an alias what it
-                // answers for the mesh it aliases. Nothing frees against it —
-                // `owns_space` is what decides that.
-                vertex_count: resident.vertex_count,
-                // The source's too: it is resident, so this is at or below
-                // `completed` and the alias is resident from the moment it
-                // exists.
-                ready_at: resident.ready_at,
-                owns_space: false,
-            })
-            .cast();
-        match self.write_entry(device, handle.index(), &range) {
-            Ok(()) => Ok(handle),
-            Err(error) => {
-                // An entry no shader can resolve is not an entry: the slot goes
-                // back rather than being held by something nothing can draw.
-                self.meshes.remove(handle.cast());
-                Err(error)
-            }
-        }
     }
 
     /// Takes `count` vertices of the pool for a run **no upload fills**, and
