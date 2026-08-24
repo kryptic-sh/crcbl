@@ -838,8 +838,16 @@ mod tests {
             squashed.is_normalized(),
             "{squashed:?} is not a unit quaternion",
         );
+        // The **dot product**, not `angle_between`. Two quaternions this close
+        // have a dot of one to within an ulp, and `acos` at one is where a
+        // single ulp becomes a milliradian — so an angle threshold tight enough
+        // to mean anything measures the runner's `acos` rather than this
+        // conversion, and `a_rotation_keyframe_arrives_normalized` failed on
+        // macOS alone for exactly that. `abs` because `q` and `-q` are the same
+        // rotation.
+        let turn = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
         assert!(
-            squashed.angle_between(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)) < 1e-5,
+            squashed.dot(turn).abs() > 1.0 - 1e-6,
             "normalizing turned it into a different rotation: {squashed:?}",
         );
         assert_eq!(
