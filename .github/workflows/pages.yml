@@ -32,10 +32,19 @@ env:
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
-# A superseded deploy is worth cancelling; two of them racing to publish is not.
+# A superseded PR build is worth cancelling. A superseded *deploy* is not: the
+# publish step is the only thing that moves the live site, so killing a run
+# that has reached it drops that commit's site and nothing retries it. Pushes
+# landing faster than a deploy takes then chain — each run cancels the one
+# before it — and the site silently stays at whichever commit last got to
+# finish. That is how the orbit demo built green and never appeared.
+#
+# So branches queue instead: GitHub keeps at most one pending run per group, so
+# main gets "current run finishes, newest push runs next" rather than a
+# cancellation chain. This is what GitHub's own Pages starter workflow does.
 concurrency:
   group: pages-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
