@@ -15,14 +15,16 @@
 //!
 //! L1 today is the force pipeline and one integrator: [`GravityForce`],
 //! [`DragForce`], [`DampingForce`] and [`ThrustForce`] feed
-//! [`SemiImplicitEuler`] through [`ForceProvider`]. Atmosphere models, Kepler
-//! on-rails propagation and reference-frame hierarchies are still planned.
+//! [`SemiImplicitEuler`] through [`ForceProvider`]. [`Atmosphere`] and its
+//! quadratic [`AtmosphericDrag`] have landed; Kepler on-rails propagation and
+//! reference-frame hierarchies are still planned.
 //!
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
 //! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
 //!
 //! See `docs/plan/05-physics.md` for the full design.
 
+pub mod atmosphere;
 pub mod broadphase;
 pub mod collider;
 pub mod components;
@@ -32,6 +34,7 @@ pub mod query;
 pub mod system;
 pub mod world;
 
+pub use atmosphere::{Atmosphere, AtmosphericDrag};
 pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};

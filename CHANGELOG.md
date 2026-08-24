@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_phys::Atmosphere` and `AtmosphericDrag`** — an exponential
+  density-vs-altitude profile around a spherical body, and the quadratic drag
+  `F = ½ρv²·Cd·A` a body moving through it feels. Terminal velocity is not
+  written anywhere: it emerges where the drag balances what is pulling the body
+  down, and the tests measure it against `√(2mg / ρ·Cd·A)` rather than against a
+  number the module chose. `Atmosphere::EARTH` is the ISO 2533 sea-level density
+  with a troposphere-fit scale height and the Kármán line as its ceiling; above
+  that ceiling there is no air at all, which is the boundary an on-rails orbit
+  propagator will hand back to live integration at. This is separate from
+  `DragForce`, which is linear damping and stays — the two have different
+  terminal velocities and neither is a better version of the other.
+
 - **`apps/viewer` runs in a browser.** It is the eighth demo on the site, built
   by `web/build.sh` and driven by the browser e2e gate like the rest. A tab has
   no path to type and no directory to root an asset source at, so it opens a
