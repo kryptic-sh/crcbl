@@ -526,8 +526,9 @@ fn quad_indices(base: u16) -> [u16; 6] {
 /// jump the day skinning lands. Put it on the joint as well and they agree, at
 /// the bind pose, exactly: joint 0's global transform composed with its inverse
 /// bind is `T(x, y, z)·R·T(0, -y, 0)`, and a `Y` translation commutes with a `Y`
-/// rotation, so that is `T(x, 0, z)·R` — the node's own placement, which is what
-/// [`the_bind_pose_puts_the_crate_where_its_node_does`] asserts.
+/// rotation, so that is `T(x, 0, z)·R` — the node's own placement, which is
+/// what this module's `the_bind_pose_puts_the_crate_where_its_node_does`
+/// asserts.
 ///
 /// Every scale here is uniform, and that is not incidental. An unequally scaled
 /// instance is one `crcbl::scene::gltf_render::build_render_scene` reports a
