@@ -9,16 +9,16 @@
 //! | Layer | Contents | Status |
 //! | ----- | -------- | ------ |
 //! | **L0** | Queries + kinematics: ray/segment/sweep/overlap, trigger volumes | Current |
-//! | **L1** | Forces + ballistics + orbits: gravity, drag, thrust, integrators | Forces + integrator current; ballistics/orbits planned |
+//! | **L1** | Forces + ballistics + orbits: gravity, drag, thrust, integrators, Kepler propagation | Current |
 //! | **CCD** | Swept collision: TOI, motion-inflated broadphase | Current |
 //! | **L2** | Contact solver: sequential impulses, warm starting, islands | Stretch |
 //!
 //! L1 today is the force pipeline and one integrator: [`GravityForce`],
 //! [`DragForce`], [`DampingForce`] and [`ThrustForce`] feed
 //! [`SemiImplicitEuler`] through [`ForceProvider`]. [`Atmosphere`] and its
-//! quadratic [`AtmosphericDrag`] have landed, and so has the [`Frames`]
-//! hierarchy with its sphere-of-influence crossings; Kepler on-rails
-//! propagation is still planned.
+//! quadratic [`AtmosphericDrag`] have landed, the [`Frames`] hierarchy carries
+//! sphere-of-influence crossings, and [`propagate`] is the analytic Kepler
+//! solution a coasting body is put on rails with.
 //!
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
 //! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
@@ -32,6 +32,7 @@ pub mod components;
 pub mod forces;
 pub mod frames;
 pub mod integrator;
+pub mod orbit;
 pub mod query;
 pub mod system;
 pub mod world;
@@ -43,6 +44,7 @@ pub use components::{ColliderComponent, RigidBody, Transform};
 pub use forces::{DampingForce, DragForce, ForceProvider, GravityForce, ThrustForce};
 pub use frames::{FrameId, Frames, State, sphere_of_influence};
 pub use integrator::{Integrator, SemiImplicitEuler};
+pub use orbit::{Orbit, propagate};
 pub use query::{
     ShapeHit, ray_vs_aabb, ray_vs_capsule, ray_vs_sphere, sphere_overlaps_aabb,
     sphere_overlaps_capsule, sphere_overlaps_sphere, swept_sphere_vs_aabb, swept_sphere_vs_capsule,

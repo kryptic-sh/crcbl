@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_phys::propagate` and `Orbit`** — analytic Kepler propagation, so a
+  coasting body's position at time `t` costs the same whether `t` is a second or
+  a century away and drifts by nothing in between. It is the universal-variable
+  formulation, which is one code path for every conic: a circular parking orbit,
+  a transfer ellipse and an escape hyperbola all go through the same solve, and
+  none of the angular elements that are undefined for a circular or equatorial
+  orbit is ever formed. `Orbit` reports the quantities a flight UI can always
+  show — semi-major axis, eccentricity, periapsis, apoapsis, period, specific
+  energy — and returns `None` for the period and apoapsis of an orbit that does
+  not come back rather than a zero that reads like one. Ten thousand chained
+  propagations of a geostationary orbit leave its energy and semi-major axis
+  within a billionth of where they started.
+
 - **`crcbl_phys::Frames`** — a hierarchy of reference frames (star → planet →
   moon → vehicle) with explicit sphere-of-influence crossings. `Frames::convert`
   reads a `State` given in one frame as it stands in another by walking to their
