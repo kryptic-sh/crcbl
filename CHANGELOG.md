@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk`, the null backend and `crcbl-webgpu` refuse an image whose shape
+  no API can build.** `ImageDesc::check` now states two rules the seam owed: an
+  `ImageType::D1` image has a height of 1 — which `Extent3d::height` had
+  documented all along without anything enforcing it — and a multisampled image
+  is two-dimensional with exactly one mip level. Both are the graphics APIs'
+  rules rather than this seam's (`VUID-VkImageCreateInfo-imageType-00956` and
+  `VUID-VkImageCreateInfo-samples-02257`), and `crcbl-mtl` and `crcbl-dx12` were
+  already refusing the first and the mip half from their own copies. So the
+  answer stopped depending on which backend the frame ran on.
+
 - **`crcbl-vk`, the null backend and `crcbl-webgpu` refuse a malformed indirect
   draw instead of handing it to a driver.** All three passed `DrawIndirect`'s
   `offset`, `stride` and `draw_count` straight through. On Vulkan a misaligned

@@ -415,6 +415,9 @@ pub struct ImageDesc<'a> {
     /// Mip levels. Use [`Extent3d::full_mip_levels`] for a full chain.
     pub mip_levels: u32,
     /// Samples per texel; `1` for everything except MSAA targets.
+    ///
+    /// Above `1` this must be a [`ImageType::D2`] image with one mip
+    /// level: see [`check`](Self::check), which refuses the rest.
     pub samples: u32,
     /// Permitted uses.
     pub usage: ImageUsage,
@@ -446,6 +449,19 @@ impl ImageDesc<'_> {
             return Err(HalError::InvalidDescriptor(
                 "image extent must be non-zero in every dimension".to_string(),
             ));
+        }
+        // [`Extent3d::height`] already says "1 for `ImageType::D1`", and until
+        // now nothing held anyone to it. `crcbl-mtl` and `crcbl-dx12` each
+        // refused it from their own copies of the rules while the three
+        // backends that call this served it, so the seam stating it is what
+        // makes the answer the same everywhere. It is the API's rule rather
+        // than this seam's: `VUID-VkImageCreateInfo-imageType-00956`, and
+        // WebGPU's `GPUTextureDescriptor` validation says the same.
+        if self.image_type == ImageType::D1 && extent.height != 1 {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a D1 image is {} texels high, and a 1D image has a height of 1",
+                extent.height
+            )));
         }
         // A 3D image is bounded by `max_image_3d` on **every** axis, including
         // its depth; a 1D/2D one by `max_image_2d` on width and height and by
@@ -496,6 +512,28 @@ impl ImageDesc<'_> {
                 "{} samples is not a power of two in 1..={}",
                 self.samples, limits.max_sample_count
             )));
+        }
+        // A multisampled image is two-dimensional and has one mip on every API
+        // underneath — `VUID-VkImageCreateInfo-samples-02257` states both, and
+        // Metal and D3D12 refuse both from their own copies of the rules. The
+        // seam was silent, so the three backends that call this accepted a
+        // descriptor two backends rejected, and a driver was handed a request
+        // it has no answer for. There is nothing to resolve a second mip of a
+        // multisampled image *from*: the resolve is what produces the
+        // single-sampled texels a chain would be built out of.
+        if self.samples > 1 {
+            if self.image_type != ImageType::D2 {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "a {:?} image asks for {} samples, and only a D2 image is multisampled",
+                    self.image_type, self.samples
+                )));
+            }
+            if self.mip_levels != 1 {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "a {}-sample image asks for {} mip levels, and a multisampled image has one",
+                    self.samples, self.mip_levels
+                )));
+            }
         }
         if self.usage.is_empty() {
             return Err(HalError::InvalidDescriptor(
@@ -614,6 +652,77 @@ impl Default for SamplerDesc<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The two shape rules the seam owed and nobody enforced.**
+    ///
+    /// [`Extent3d::height`] has always said "1 for `ImageType::D1`", and
+    /// nothing held a caller to it. The multisample rules were not stated at
+    /// all, yet `crcbl-mtl` and `crcbl-dx12` refused both from their own copies
+    /// while `crcbl-vk`, the null backend and `crcbl-webgpu` — the three that
+    /// call [`check`](ImageDesc::check) — served them. Two backends refusing
+    /// what three accept is the divergence; the seam saying which is the fix.
+    ///
+    /// Both are the API's rules rather than this seam's:
+    /// `VUID-VkImageCreateInfo-imageType-00956` for the first and
+    /// `VUID-VkImageCreateInfo-samples-02257` for the other two.
+    ///
+    /// **What turns it red.** Dropping the D1 rule — the first refusal.
+    /// Dropping the `ImageType` half of the multisample rule — the second.
+    /// Dropping the mip half — the third. And the accepting arms are what stop
+    /// the refusals going vacuous: a `check` that refused every image would
+    /// satisfy all three `expect_err`s and nothing else here would notice.
+    #[test]
+    fn a_one_dimensional_or_multisampled_image_is_held_to_its_shape() {
+        let limits = Limits::minimum();
+        let image = |image_type, extent, mip_levels, samples| ImageDesc {
+            label: None,
+            image_type,
+            extent,
+            format: Format::Rgba8Unorm,
+            mip_levels,
+            samples,
+            usage: ImageUsage::SAMPLED,
+        };
+        let line = Extent3d {
+            width: 64,
+            height: 1,
+            depth_or_layers: 1,
+        };
+        let square = Extent3d::d2(64, 64);
+
+        image(ImageType::D1, line, 1, 1)
+            .check(&limits)
+            .expect("a 1D image one texel high is the shape the field describes");
+        image(ImageType::D2, square, 1, 4)
+            .check(&limits)
+            .expect("a four-sample 2D image with one mip is what MSAA is");
+        image(ImageType::D2, square, 7, 1)
+            .check(&limits)
+            .expect("a single-sampled image may carry its whole chain");
+
+        for (desc, what) in [
+            (
+                image(ImageType::D1, square, 1, 1),
+                "a 1D image 64 texels high",
+            ),
+            (
+                image(ImageType::D3, square, 1, 4),
+                "a multisampled 3D image",
+            ),
+            (
+                image(ImageType::D2, square, 7, 4),
+                "a multisampled image with a mip chain",
+            ),
+        ] {
+            let error = desc
+                .check(&limits)
+                .expect_err(&format!("{what} must be refused"));
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn mip_chain_length_matches_the_textbook_formula() {

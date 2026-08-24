@@ -5730,7 +5730,6 @@ in `crates/crcbl-hal/src/resource.rs` with no check anywhere and no named owner:
   question lands on whatever creates the image.
 - **`ImageViewDesc::format` "must be compatible with" the image's format**, and
   nothing defines compatibility or says who checks it.
-- **`Extent3d::height` says "`1` for `ImageType::D1`"**, also unenforced.
 
 All three land on the WebGPU replayer in the slice that executes these commands,
 and it has nothing to enforce them against: it sees the descriptor and not the
@@ -16517,10 +16516,16 @@ silently accepts or substitutes. All unverified by me.
 - `mip_levels` past the full chain: refused by the same three; mtl passes it to
   `MTLTextureDescriptor` and dx12 surfaces it as `E_INVALIDARG` →
   `HalError::Backend` rather than the `InvalidDescriptor` it is.
-- `ImageType::D1` with `height != 1`, and a multisampled image with more than
-  one mip: **refused by mtl and dx12, served by null, vk and webgpu.** The seam
-  is silent on both, so two backends refuse what three accept. The seam should
-  say which it is.
+- **A multisampled image must be two-dimensional, and only three backends say
+  so.** `ImageDesc::check` now refuses it, so `crcbl-vk`, the null backend and
+  `crcbl-webgpu` do; `crcbl-mtl` (`create_image`) and `crcbl-dx12`
+  (`validate::check_image`) check the mip half of the rule and the D1 height
+  rule but not this one — verified by reading both. It is
+  `VUID-VkImageCreateInfo-samples-02257`'s other half, and there is nothing to
+  resolve a multisampled volume _from_. Left because closing it means editing a
+  deferred backend for something no caller does; the cost is that
+  `an_image_of_an_impossible_shape_is_refused` deliberately omits that arm, and
+  says so, or it would fail on Windows and macOS.
 - `anisotropy < 1.0`: refused by vk, mtl and dx12; accepted by null and webgpu.
   The seam states only the ceiling.
 - `ImageViewDesc::format` differing from the image's: the seam permits it and

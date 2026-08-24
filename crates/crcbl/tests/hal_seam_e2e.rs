@@ -1907,6 +1907,127 @@ fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
 
 // --- handles, ranges and refusals ------------------------------------------
 
+/// **An image whose shape no API can build is refused by every backend.**
+///
+/// Two rules, and both were being answered differently depending on where the
+/// frame ran. `Extent3d::height` has always documented "1 for `ImageType::D1`";
+/// a multisampled image having exactly one mip is
+/// `VUID-VkImageCreateInfo-samples-02257` and is in `MTLTextureDescriptor`'s and
+/// D3D12's headers too. `crcbl-mtl` and `crcbl-dx12` refused both from their own
+/// copies of the rules, while `crcbl-vk`, the null backend and `crcbl-webgpu`
+/// served them, because the seam's `ImageDesc::check` — the only thing those
+/// three consult — did not state either one. This is the test that stops the
+/// answer depending on the backend again.
+///
+/// **The accepting arms are half the test.** A `check` that refused every image
+/// would satisfy both refusals and leave the engine unable to make a texture;
+/// the accepted D1 line and the accepted four-sample target are what say the
+/// rules refuse the shape rather than the kind.
+///
+/// **The wording is not asserted**, for the reason
+/// [`an_indirect_draw_at_a_misaligned_offset_is_refused`] gives: the two
+/// deferred backends word these refusals their own way, so only the error kind
+/// is common ground.
+///
+/// A multisampled image also has to be two-dimensional, and that rule is
+/// deliberately **not** here: `crcbl-mtl` and `crcbl-dx12` do not check it, so
+/// asserting it agnostically would fail on Windows and macOS for a gap on
+/// backends nobody is working on. `docs/backlog.md` carries it.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn an_image_of_an_impossible_shape_is_refused() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let limits = device.caps().limits;
+    // The floor every backend promises, so neither multisampled arm can be
+    // refused for the sample count instead of the shape under test.
+    const SAMPLES: u32 = 4;
+    assert!(
+        limits.max_sample_count >= SAMPLES,
+        "this device reports max_sample_count {}, so the multisampled arms below would be \
+         refused for the count rather than the shape and would prove nothing",
+        limits.max_sample_count
+    );
+
+    let image = |image_type, extent, mip_levels, samples, usage| ImageDesc {
+        label: Some("impossible shape"),
+        image_type,
+        extent,
+        format: Format::Rgba8UnormSrgb,
+        mip_levels,
+        samples,
+        usage,
+    };
+    let line = Extent3d {
+        width: 64,
+        height: 1,
+        depth_or_layers: 1,
+    };
+    let square = Extent3d::d2(64, 64);
+
+    let accepted = [
+        (
+            image(ImageType::D1, line, 1, 1, ImageUsage::SAMPLED),
+            "a 1D image one texel high",
+        ),
+        (
+            image(
+                ImageType::D2,
+                square,
+                1,
+                SAMPLES,
+                ImageUsage::COLOR_ATTACHMENT,
+            ),
+            "a four-sample 2D target with one mip",
+        ),
+    ]
+    .map(|(desc, what)| {
+        (
+            device
+                .create_image(&desc)
+                .unwrap_or_else(|error| panic!("{what} is a shape every API builds: {error:?}")),
+            what,
+        )
+    });
+
+    for (desc, what) in [
+        (
+            image(ImageType::D1, square, 1, 1, ImageUsage::SAMPLED),
+            "a 1D image 64 texels high",
+        ),
+        (
+            image(
+                ImageType::D2,
+                square,
+                7,
+                SAMPLES,
+                ImageUsage::COLOR_ATTACHMENT,
+            ),
+            "a multisampled image carrying a mip chain",
+        ),
+    ] {
+        let error = match device.create_image(&desc) {
+            Err(error) => error,
+            Ok(image) => {
+                device.destroy_image(image);
+                panic!(
+                    "{what} was served — this backend built an image the seam calls impossible, \
+                     and the driver was handed a descriptor two other backends refuse"
+                );
+            }
+        };
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{what} is a bad descriptor rather than a backend failure: {error:?}"
+        );
+    }
+
+    for (image, _) in accepted {
+        device.destroy_image(image);
+    }
+    headless.finish();
+}
+
 /// **A misaligned indirect offset is refused before a driver reads it.**
 ///
 /// The rule is [`crcbl_hal::indirect`]'s, and it is the one whose absence was
