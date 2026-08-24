@@ -149,7 +149,7 @@ fn into_loop_error(error: crate::app::ViewerError) -> crcbl::engine::LoopError {
 /// The options a page opens with.
 ///
 /// Spelled out rather than taken from a `Default` on
-/// [`Options`](crate::args::Options), because that type has no sensible one:
+/// [`crate::args::Options`], because that type has no sensible one:
 /// its `model` is the file the native viewer was told to open, and a `Default`
 /// would have to invent a path that names nothing — the kind of placeholder
 /// that reads as a real value everywhere it is later used. There is no argv in
