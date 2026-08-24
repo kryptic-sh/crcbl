@@ -16772,6 +16772,43 @@ with the flight instruments over it. What that leaves:
   thousand revolutions, but nothing has run _this sample_ at ×1000 for long
   enough to say the frame hierarchy, the fuel and the phase logic survive it.
 
+## viewer stalls intermittently in the macOS browser gate (2026-08-24)
+
+`Pages` job "probe the seam on macOS", step "Render viewer in a real browser",
+went red on `f5dc023` with 39/41:
+
+```
+FAIL the turntable carries the camera under its own steam — it never changed
+FAIL the canvas changes between frames while the simulation runs
+     — 1 distinct frame(s) across 16 samples
+```
+
+**Intermittent, and not caused by the commit it failed on.** The same job passed
+on `3117aaa` and `35f397b`; `f5dc023` added the `apps/bracket` crate and touched
+nothing `viewer` links. So this is a pre-existing stall that only became visible
+when viewer was added to the browser gate at `3117aaa` — before that the gate
+had never run on viewer at all, on any runner.
+
+**What the numbers rule out.** Group D samples the canvas 16 times with 50 ms
+between reads, so the window is roughly eight hundred milliseconds: a demo
+drawing even two frames a second would register a change. And group C only
+starts sampling once a HUD line reports `instances: 3`, so the document was
+loaded and the scene populated before either check ran. The run really did stop
+producing frames, rather than being sampled too tightly or caught mid-load.
+
+**Where to look.** `apps/viewer/src/app.rs`'s turntable advances by
+`TURNTABLE_RATE * frame.render_dt`, guarded by `!self.handed_over`. Two
+candidates, and they are distinguishable: a `render_dt` that has collapsed to
+zero would freeze the turntable while frames still present, whereas a page whose
+`requestAnimationFrame` has been throttled would freeze both — and both froze
+here, which points at the second. The adapter is not the variable: the log shows
+`apple` granted and the known-colour readback passing on it.
+
+**Do not fix this by widening the sample window or retrying the check.** It asks
+a real question — does the demo advance on its own — and a stall is the answer
+it is meant to catch. Reproducing it needs a macOS runner; nothing here can.
+Relevant that macOS runner images differ in what they will run.
+
 ## sandbox is not in the windowed gate (2026-08-24)
 
 `tools/run-samples-windowed.sh` is the only check that a sample brings up a real
