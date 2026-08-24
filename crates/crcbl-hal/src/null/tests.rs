@@ -2556,6 +2556,17 @@ fn nested_passes_are_rejected() {
 /// render graph's own suite will assert on at P1.
 #[test]
 fn a_gpu_driven_frame_records_the_expected_stream() {
+    /// Bytes the frame's argument buffer holds.
+    ///
+    /// It is also what bounds the draw's `max_draw_count` below, which is why
+    /// the two are derived from one constant rather than written twice:
+    /// `max_draw_count` is the ceiling on what the GPU *could* read whatever
+    /// the count buffer ends up saying, so every structure it names has to be
+    /// inside this. The frame used to name 4096 draws — this figure read as a
+    /// count rather than a size — which is twenty times the buffer it reads
+    /// from, and every byte of the overrun is somebody else's memory.
+    const ARGS_BUFFER_BYTES: u64 = 1 << 12;
+
     let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     let queue = device.queue(QueueKind::Graphics).expect("queue");
@@ -2572,7 +2583,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
     let draw_args = device
         .create_buffer(&BufferDesc {
             label: Some("draw args"),
-            size: 1 << 12,
+            size: ARGS_BUFFER_BYTES,
             usage: crate::BufferUsage::INDIRECT | crate::BufferUsage::STORAGE,
             memory: MemoryLocation::DeviceLocal,
         })
@@ -2808,8 +2819,9 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         args_offset: 0,
         count_buffer: draw_count,
         count_offset: 0,
-        max_draw_count: 4096,
-        stride: 20,
+        max_draw_count: u32::try_from(ARGS_BUFFER_BYTES / crate::DRAW_INDEXED_ARGS_BYTES)
+            .expect("the structures that fit the argument buffer"),
+        stride: u32::try_from(crate::DRAW_INDEXED_ARGS_BYTES).expect("five words"),
     });
     encoder.end_render_pass();
 
@@ -4666,4 +4678,201 @@ fn an_indirect_draw_is_held_to_the_seams_argument_rules() {
     }
 
     device.destroy_buffer(args);
+}
+
+/// **A count-limited draw is held to the seam's rules too — the argument array
+/// its plain form already had, and the count word's own offset and bound.**
+///
+/// [`crate::indirect::plan_count_structures`] states them, and this backend is
+/// again the only one that can answer every one without a device: `crcbl-vk`
+/// needs a live device to measure either buffer and `crcbl-webgpu` refuses the
+/// call outright, WebGPU having no count-buffer draw. None of these is a
+/// mistake an API reports: `vkCmdDrawIndirectCount` states `countBufferOffset`'s
+/// alignment and range as valid-usage conditions with no error code behind them,
+/// so a count word past the end of its buffer means the driver fetches a draw
+/// count out of whatever is there and issues that many draws.
+///
+/// **The legal draws are half the test.** `crcbl-render`'s `EmitTail::Count`
+/// path records one of these per bucket every frame, so a check that refused
+/// them all would satisfy every refusal below and break the engine. The
+/// accepting side runs first, and it includes the case that would go red if the
+/// buffers were measured by their recorded `bytes` rather than their `size`:
+/// both are device-local, so `bytes` is empty and every count-limited draw
+/// would be refused.
+///
+/// **What turns it red.** Dropping the check from `draw_indirect_count` or
+/// `draw_indexed_indirect_count` turns its refusals green; measuring the
+/// *argument* buffer where the *count* buffer belongs accepts the count word
+/// hanging off the end of the smaller one; using
+/// [`structure_bytes`](crate::structure_bytes)`(false)` for the indexed form
+/// accepts a 16-byte stride that skips a word of every structure after the
+/// first.
+#[test]
+fn a_count_limited_draw_is_held_to_the_seams_argument_rules() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
+    let indirect_buffer = |label, size| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size,
+                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("buffer")
+    };
+    let args = indirect_buffer("count draw args", 64);
+    // Two `u32` counts, so an offset of 4 is the last one that fits.
+    let counts = indirect_buffer("count draw counts", 8);
+    let pass = RenderPassDesc {
+        label: Some("indirect count"),
+        color_attachments: &[],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(16, 16),
+        timestamp_writes: None,
+    };
+
+    recorder.clear();
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    encoder.begin_render_pass(&pass);
+    // Two structures 32 bytes apart from offset 0 — a padded stride — with the
+    // count at the last offset its 8-byte buffer has room for. Last argument
+    // byte read is 32 + 16 = 48, inside 64.
+    encoder.draw_indirect_count(&DrawIndirectCount {
+        args,
+        args_offset: 0,
+        count_buffer: counts,
+        count_offset: 4,
+        max_draw_count: 2,
+        stride: 32,
+    });
+    // Up to one draw never strides, so `stride: 0` is legal here for the reason
+    // it is legal in the plain form.
+    encoder.draw_indexed_indirect_count(&DrawIndirectCount {
+        args,
+        args_offset: 44,
+        count_buffer: counts,
+        count_offset: 0,
+        max_draw_count: 1,
+        stride: 0,
+    });
+    encoder.end_render_pass();
+    encoder.finish().expect("both draws obey the seam's rules");
+    recorder.assert_valid();
+    assert_eq!(
+        recorder.command_names(),
+        vec![
+            "BeginRenderPass",
+            "DrawIndirectCount",
+            "DrawIndexedIndirectCount",
+            "EndRenderPass",
+        ]
+    );
+
+    // One encoder per refusal: the first hard failure is the one `finish`
+    // reports, so a second on the same encoder would be masked.
+    for (what, command, indexed, draw) in [
+        (
+            "a count offset that is not a multiple of four",
+            "DrawIndirectCount",
+            false,
+            DrawIndirectCount {
+                args,
+                args_offset: 0,
+                count_buffer: counts,
+                count_offset: 2,
+                max_draw_count: 1,
+                stride: 16,
+            },
+        ),
+        (
+            "a count word whose last byte is past its 8-byte buffer",
+            "DrawIndirectCount",
+            false,
+            DrawIndirectCount {
+                args,
+                args_offset: 0,
+                count_buffer: counts,
+                count_offset: 8,
+                max_draw_count: 1,
+                stride: 16,
+            },
+        ),
+        (
+            "an argument offset that is not a multiple of four",
+            "DrawIndirectCount",
+            false,
+            DrawIndirectCount {
+                args,
+                args_offset: 2,
+                count_buffer: counts,
+                count_offset: 0,
+                max_draw_count: 1,
+                stride: 16,
+            },
+        ),
+        (
+            "a stride below one 20-byte indexed structure",
+            "DrawIndexedIndirectCount",
+            true,
+            DrawIndirectCount {
+                args,
+                args_offset: 0,
+                count_buffer: counts,
+                count_offset: 0,
+                max_draw_count: 2,
+                stride: 16,
+            },
+        ),
+        (
+            "two structures 32 bytes apart from offset 32 of a 64-byte buffer",
+            "DrawIndirectCount",
+            false,
+            DrawIndirectCount {
+                args,
+                args_offset: 32,
+                count_buffer: counts,
+                count_offset: 0,
+                max_draw_count: 2,
+                stride: 32,
+            },
+        ),
+    ] {
+        recorder.clear();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_render_pass(&pass);
+        if indexed {
+            encoder.draw_indexed_indirect_count(&draw);
+        } else {
+            encoder.draw_indirect_count(&draw);
+        }
+        encoder.end_render_pass();
+
+        let Err(HalError::InvalidDescriptor(reported)) = encoder.finish() else {
+            panic!("{what} must fail the finish with an InvalidDescriptor");
+        };
+        let errors = recorder.validation_errors();
+        let Some(ValidationError::InvalidIndirectArguments {
+            command: recorded_command,
+            message,
+        }) = errors
+            .iter()
+            .find(|error| matches!(error, ValidationError::InvalidIndirectArguments { .. }))
+        else {
+            panic!("{what} must be recorded as well as reported: {errors:?}");
+        };
+        assert_eq!(*recorded_command, command, "{what}");
+        assert_eq!(
+            *message, reported,
+            "{what}: `finish` reports the seam's own message, unchanged"
+        );
+        assert!(
+            recorder.command_names().is_empty(),
+            "{what}: a failed finish commits nothing"
+        );
+    }
+
+    device.destroy_buffer(args);
+    device.destroy_buffer(counts);
 }

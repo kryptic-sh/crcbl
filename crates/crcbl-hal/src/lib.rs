@@ -244,8 +244,9 @@ pub use device::{
 pub use error::{HalError, SurfaceError};
 pub use format::{Format, IndexFormat};
 pub use indirect::{
-    DRAW_ARGS_BYTES, DRAW_INDEXED_ARGS_BYTES, INDIRECT_OFFSET_ALIGNMENT, IndirectPlan,
-    MESH_DISPATCH_ARGS_BYTES, check_layout, plan_mesh_indirect, plan_structures, structure_bytes,
+    DRAW_ARGS_BYTES, DRAW_COUNT_BYTES, DRAW_INDEXED_ARGS_BYTES, INDIRECT_OFFSET_ALIGNMENT,
+    IndirectPlan, MESH_DISPATCH_ARGS_BYTES, check_layout, plan_count_structures,
+    plan_mesh_indirect, plan_structures, structure_bytes,
 };
 pub use pipeline::{
     BindGroup, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayout,

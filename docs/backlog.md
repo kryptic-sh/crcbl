@@ -16562,16 +16562,6 @@ slice deliberately did not do.
   it records really does run past its buffer. **Fix the test, not the guard** —
   and note that mesh shading is a `parity_blockers()` row on both deferred
   backends, so this is Vulkan-and-WebGPU work whichever way it goes.
-- **The count-buffer draws are unchecked on every backend.**
-  `draw_indirect_count` and `draw_indexed_indirect_count` take
-  `DrawIndirectCount`, a different struct with `args_offset` and
-  `max_draw_count`, and the seam has no entry point for it at all —
-  `crcbl_hal::indirect` covers `DrawIndirect` only. `crcbl-mtl` has its own
-  `plan_indirect_count` and `crcbl-dx12` its own copy; the three backends just
-  wired have nothing. Same class of undetectable mistake as the one just closed:
-  a misaligned count offset is read by the driver with no error returned. WebGPU
-  has no count-buffer draw at all, so its answer there stays `Unsupported` and
-  the work is the seam plus `crcbl-vk` plus the null backend.
 - **`crcbl-webgpu` does not enforce the bound, by design.** Its encoder holds a
   channel and a handle pool and cannot reach a buffer's length, so it calls
   `check_layout` (offset and stride) and leaves the bound to the browser, which

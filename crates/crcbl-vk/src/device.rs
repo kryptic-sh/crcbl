@@ -1065,7 +1065,9 @@ impl DeviceInner {
     /// range limit, and the location to refuse a host-visible buffer bound
     /// where a shader will write to it. The indirect draws need the size as
     /// well, to hold an argument array inside the buffer it is read from —
-    /// `crcbl_hal::indirect::plan_structures` — and read no location.
+    /// `crcbl_hal::indirect::plan_structures`, and
+    /// `crcbl_hal::indirect::plan_count_structures` for the count word too —
+    /// and read no location.
     pub(crate) fn buffer_raw_size_and_location(
         &self,
         state: &DeviceState,

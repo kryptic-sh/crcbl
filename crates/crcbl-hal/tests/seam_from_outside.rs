@@ -26,12 +26,24 @@
 //! tail.
 
 use crcbl_hal::null::{Command, NullInstance, ObjectKind, Recorder};
+
+/// Bytes of the buffer the frame's argument structures live in.
+///
+/// Named, and the draw count below derived from it, because they were two bare
+/// literals that had already drifted: the count said 1024 structures of 20
+/// bytes — 20,480 bytes — out of this 4,096-byte buffer, and nothing noticed
+/// until `crcbl_hal::indirect` started checking the span. A fixture that reads
+/// five times past the end of its own buffer is not a frame worth asserting on.
+const DRAW_ARGS_BUFFER_BYTES: u64 = 4096;
+
+/// The most argument structures [`DRAW_ARGS_BUFFER_BYTES`] can actually hold.
+const MAX_DRAWS_THAT_FIT: u32 = (DRAW_ARGS_BUFFER_BYTES / DRAW_INDEXED_ARGS_BYTES) as u32;
 use crcbl_hal::{
     AdapterInfo, Barriers, BufferBarrier, BufferDesc, BufferHandle, BufferUsage, ClearValue,
     ColorAttachment, ColorTargetState, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
-    DepthStencilAttachment, DepthStencilState, Device, DeviceCaps, DeviceDesc, DeviceRequestState,
-    DrawIndirect, DrawIndirectCount, Extent3d, Features, Format, GeometryPath,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
+    DRAW_INDEXED_ARGS_BYTES, DepthStencilAttachment, DepthStencilState, Device, DeviceCaps,
+    DeviceDesc, DeviceRequestState, DrawIndirect, DrawIndirectCount, Extent3d, Features, Format,
+    GeometryPath, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
     Instance, LoadOp, MemoryLocation, MultisampleState, PendingDevice, PresentInfo, PresentMode,
     PrimitiveState, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d,
@@ -170,7 +182,7 @@ fn setup(instance: &dyn Instance) -> Frame {
     let draw_args: BufferHandle = device
         .create_buffer(&BufferDesc {
             label: Some("draw args"),
-            size: 4096,
+            size: DRAW_ARGS_BUFFER_BYTES,
             usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
             memory: MemoryLocation::DeviceLocal,
         })
@@ -323,8 +335,8 @@ fn render(frame: &Frame) {
             args_offset: 0,
             count_buffer: frame.draw_count,
             count_offset: 0,
-            max_draw_count: 1024,
-            stride: 20,
+            max_draw_count: MAX_DRAWS_THAT_FIT,
+            stride: DRAW_INDEXED_ARGS_BYTES as u32,
         });
     } else {
         // No GPU-read count: one indirect call per bucket, fixed on the CPU.
@@ -332,7 +344,7 @@ fn render(frame: &Frame) {
             args: frame.draw_args,
             offset: 0,
             draw_count: 1,
-            stride: 20,
+            stride: DRAW_INDEXED_ARGS_BYTES as u32,
         });
     }
 

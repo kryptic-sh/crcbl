@@ -16,14 +16,16 @@
 //!
 //! # It reads no argument bytes and resolves no handle
 //!
-//! Everything here is arithmetic over a [`DrawIndirect`] and the length of the
-//! buffer it names, so it is compiled and unit-tested on every host, with no
+//! Everything here is arithmetic over a [`DrawIndirect`] — or a
+//! [`DrawIndirectCount`], which adds the offset of the count word to the same
+//! array — and the lengths of the buffers they name, so it is compiled and
+//! unit-tested on every host, with no
 //! device in the room. That matters because none of these mistakes is one the
 //! APIs report usefully: an out-of-range indirect offset is undefined on
 //! Vulkan, and on Metal it raises — which aborts the process rather than
 //! returning something a caller could report.
 
-use crate::{DrawIndirect, HalError};
+use crate::{DrawIndirect, DrawIndirectCount, HalError};
 
 /// Alignment an indirect draw's argument offset must have.
 ///
@@ -60,6 +62,16 @@ pub const DRAW_INDEXED_ARGS_BYTES: u64 = 20;
 /// [`draw_mesh_tasks_indirect`](crate::CommandEncoder::draw_mesh_tasks_indirect)
 /// documents them.
 pub const MESH_DISPATCH_ARGS_BYTES: u64 = 12;
+
+/// Bytes of the draw count a count-limited draw reads out of GPU memory: one
+/// `u32`.
+///
+/// Fixed by the APIs, and identical across them: Vulkan's
+/// `vkCmdDrawIndirectCount` reads a `uint32_t` at `countBufferOffset` and
+/// D3D12's `ExecuteIndirect` reads one at `CountBufferOffset`. It is what
+/// bounds [`DrawIndirectCount::count_offset`] against the buffer
+/// [`count_buffer`](DrawIndirectCount::count_buffer) names.
+pub const DRAW_COUNT_BYTES: u64 = 4;
 
 /// A validated indirect draw: where the first argument structure is, how far
 /// apart the rest are, and how many there are.
@@ -202,6 +214,72 @@ pub fn plan_structures(
     }))
 }
 
+/// [`plan_structures`] for a **count-limited** draw, whose draw count is read
+/// from a second buffer rather than named by the caller.
+///
+/// `args_length` is the size of the buffer [`DrawIndirectCount::args`] names
+/// and `count_length` the size of the one
+/// [`count_buffer`](DrawIndirectCount::count_buffer) names, both already
+/// resolved by the backend; `None` is a draw of nothing, which is
+/// [`plan_structures`]' answer to a `draw_count` of zero for the same reason —
+/// there is no structure to read and no count to fetch.
+///
+/// **The plan covers every structure the draw *could* reach**, which is
+/// `max_draw_count` of them and not what this frame's count buffer happens to
+/// hold: the count is a value nobody on this side can see. That makes the args
+/// half of this exactly [`plan_structures`] over the same draw, and it is
+/// written as that call rather than as a second copy of the stride and span
+/// rules.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] when
+/// [`count_offset`](DrawIndirectCount::count_offset) is not a multiple of
+/// [`INDIRECT_OFFSET_ALIGNMENT`], when the [`DRAW_COUNT_BYTES`] count word does
+/// not fit inside the count buffer, or for any of [`plan_structures`]' reasons
+/// about the argument array.
+pub fn plan_count_structures(
+    draw: &DrawIndirectCount,
+    args: u64,
+    args_length: u64,
+    count_length: u64,
+) -> Result<Option<IndirectPlan>, HalError> {
+    if draw.max_draw_count == 0 {
+        return Ok(None);
+    }
+    if !draw.count_offset.is_multiple_of(INDIRECT_OFFSET_ALIGNMENT) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a count-limited draw's count offset {} is not a multiple of \
+             {INDIRECT_OFFSET_ALIGNMENT}",
+            draw.count_offset
+        )));
+    }
+    // The count is one `u32` and a backend reads it by offset, so a count word
+    // hanging off the end of its buffer is a read of somebody else's memory
+    // rather than an API-side refusal.
+    if draw
+        .count_offset
+        .checked_add(DRAW_COUNT_BYTES)
+        .is_none_or(|end| end > count_length)
+    {
+        return Err(HalError::InvalidDescriptor(format!(
+            "a count-limited draw reads its u32 count at offset {} of a {count_length}-byte \
+             buffer",
+            draw.count_offset
+        )));
+    }
+    plan_structures(
+        &DrawIndirect {
+            args: draw.args,
+            offset: draw.args_offset,
+            draw_count: draw.max_draw_count,
+            stride: draw.stride,
+        },
+        args,
+        args_length,
+    )
+}
+
 /// Bytes of one argument structure for the indexed or non-indexed form.
 pub const fn structure_bytes(indexed: bool) -> u64 {
     if indexed {
@@ -229,6 +307,23 @@ mod tests {
             args: buffer(),
             offset,
             draw_count,
+            stride,
+        }
+    }
+
+    /// One count-limited draw, as [`plan_count_structures`] is asked for it.
+    fn counted(
+        args_offset: u64,
+        count_offset: u64,
+        max_draw_count: u32,
+        stride: u32,
+    ) -> DrawIndirectCount {
+        DrawIndirectCount {
+            args: buffer(),
+            args_offset,
+            count_buffer: buffer(),
+            count_offset,
+            max_draw_count,
             stride,
         }
     }
@@ -382,6 +477,129 @@ mod tests {
             ),
         ] {
             let Err(error) = check_layout(&draw, args) else {
+                panic!("{what} must be refused");
+            };
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
+    }
+
+    /// **A count-limited draw is held to the argument rules its plain form
+    /// already has, plus the two the count word brings.**
+    ///
+    /// The count is read from GPU memory, so nothing here can see how many
+    /// draws happen — which is why the plan covers `max_draw_count` structures
+    /// and why the count word's own offset has to be judged separately. Neither
+    /// mistake is one the APIs report: `vkCmdDrawIndirectCount` states
+    /// `countBufferOffset`'s alignment and range as valid-usage conditions with
+    /// no error code behind them, so an over-run offset means the driver
+    /// fetches a draw count out of whatever is there.
+    ///
+    /// **The legal draws are half the test.** `crcbl-render`'s `EmitTail::Count`
+    /// path records one of these per bucket every frame, so a check that
+    /// refused everything would satisfy the refusals below and break the
+    /// engine; the accepting side runs first, exact fits included.
+    ///
+    /// **What turns it red.** Dropping the count-offset alignment or the count
+    /// bound turns one refusal green; writing either bound as `>=` refuses the
+    /// exact fits above them; delegating the argument array to anything other
+    /// than [`plan_structures`] over `max_draw_count` structures turns the
+    /// stride and span refusals green, since those rules live only there.
+    #[test]
+    fn a_count_limited_draw_checks_the_count_word_and_the_argument_array() {
+        // A draw of nothing reads neither buffer, which is `plan_structures`'
+        // answer to a `draw_count` of zero and has to be this one's too.
+        assert_eq!(
+            plan_count_structures(&counted(2, 2, 0, 3), DRAW_ARGS_BYTES, 0, 0)
+                .expect("a draw of nothing"),
+            None
+        );
+
+        // Two structures at offset 32 of a 64-byte buffer and the count one
+        // word into an 8-byte one: both spans end exactly at the end, which is
+        // the layout `exercise_draw_indirect_count` in the seam's e2e suite
+        // actually records.
+        let tight = plan_count_structures(&counted(32, 4, 2, 16), DRAW_ARGS_BYTES, 64, 8)
+            .expect("two tight structures and a count that both fit exactly")
+            .expect("a draw of up to two");
+        assert_eq!(tight.first, 32);
+        assert_eq!(tight.stride, DRAW_ARGS_BYTES);
+        assert_eq!(tight.count, 2);
+        let offsets: Vec<u64> = (0..tight.count).map(|index| tight.offset(index)).collect();
+        assert_eq!(offsets, vec![32, 48]);
+
+        // A one-draw caller never strides, so `stride: 0` is legal here for the
+        // reason it is legal in `check_layout`, and the plan reports the
+        // structure's own width.
+        let one = plan_count_structures(&counted(0, 0, 1, 0), DRAW_INDEXED_ARGS_BYTES, 20, 4)
+            .expect("one indexed structure filling its buffer")
+            .expect("a draw of up to one");
+        assert_eq!(one.stride, DRAW_INDEXED_ARGS_BYTES);
+
+        // A padded stride is honoured rather than tightened, as it is for the
+        // plain form.
+        let padded = plan_count_structures(&counted(8, 12, 3, 32), DRAW_ARGS_BYTES, 88, 16)
+            .expect("three structures 32 bytes apart from offset 8")
+            .expect("a draw of up to three");
+        let offsets: Vec<u64> = (0..padded.count)
+            .map(|index| padded.offset(index))
+            .collect();
+        assert_eq!(offsets, vec![8, 40, 72]);
+
+        for (draw, args, args_length, count_length, what) in [
+            (
+                counted(0, 2, 1, 0),
+                DRAW_ARGS_BYTES,
+                64,
+                16,
+                "a count offset that is not a multiple of four",
+            ),
+            (
+                counted(0, 4, 1, 0),
+                DRAW_ARGS_BYTES,
+                64,
+                7,
+                "a count word whose last byte is past the end",
+            ),
+            (
+                counted(0, u64::MAX - 3, 1, 0),
+                DRAW_ARGS_BYTES,
+                64,
+                8,
+                "a count offset whose end overflows",
+            ),
+            (
+                counted(2, 0, 1, 0),
+                DRAW_ARGS_BYTES,
+                64,
+                8,
+                "an argument offset that is not a multiple of four",
+            ),
+            (
+                counted(0, 0, 2, 8),
+                DRAW_ARGS_BYTES,
+                64,
+                8,
+                "a stride below one 16-byte structure",
+            ),
+            (
+                counted(0, 0, 2, 18),
+                DRAW_ARGS_BYTES,
+                64,
+                8,
+                "a stride that is not a multiple of four",
+            ),
+            (
+                counted(32, 4, 2, 16),
+                DRAW_ARGS_BYTES,
+                63,
+                8,
+                "two tight structures one byte past the argument buffer",
+            ),
+        ] {
+            let Err(error) = plan_count_structures(&draw, args, args_length, count_length) else {
                 panic!("{what} must be refused");
             };
             assert!(

@@ -96,7 +96,7 @@ use core::time::Duration;
 
 use crcbl_core::{Handle, SurfaceTarget};
 
-use crate::indirect::{plan_structures, structure_bytes};
+use crate::indirect::{IndirectPlan, plan_count_structures, plan_structures, structure_bytes};
 use crate::{
     AcquiredFrame, AdapterId, AdapterInfo, BackendKind, Barriers, BindGroupDesc, BindGroupEntry,
     BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferCopy, BufferDesc,
@@ -2538,41 +2538,89 @@ impl NullEncoder {
     /// created it. That is the point of checking here: `crcbl-vk` needs a
     /// device to reach the same verdict, and this reaches it in a unit test.
     ///
-    /// A refusal goes two places. It is recorded, like every other violation,
-    /// so a test sees the whole frame's worth; and it is remembered in
-    /// [`failed`](Self::failed), because a recording method returns `()` and
-    /// [`finish`](CommandEncoder::finish) is the first thing that can report
-    /// it — the arrangement `create_command_encoder` already uses for a queue
-    /// it cannot accept.
+    /// A refusal goes where [`report_indirect`](Self::report_indirect) sends
+    /// it.
     fn need_indirect_arguments(
         &mut self,
         command: &'static str,
         draw: &DrawIndirect,
         indexed: bool,
     ) {
-        let length = {
-            let state = self.recorder.lock();
-            let Some(object) = state.get(ObjectKind::Buffer, draw.args.to_bits()) else {
-                // A dead or foreign handle, already reported by `need_live`.
-                // There is no buffer to measure the arguments against.
-                return;
-            };
-            let Detail::Buffer { size, .. } = &object.detail else {
-                unreachable!("a buffer handle always carries buffer detail");
-            };
-            // `size`, not `bytes.len()`: only a mappable buffer keeps its
-            // contents, and an argument buffer is device-local everywhere it
-            // matters.
-            *size
+        let Some(length) = self.buffer_size(draw.args) else {
+            // A dead or foreign handle, already reported by `need_live`. There
+            // is no buffer to measure the arguments against.
+            return;
         };
-        let Err(error) = plan_structures(draw, structure_bytes(indexed), length) else {
+        self.report_indirect(
+            command,
+            plan_structures(draw, structure_bytes(indexed), length),
+        );
+    }
+
+    /// [`need_indirect_arguments`](Self::need_indirect_arguments) for a
+    /// count-limited draw, which is the same argument array plus the count word
+    /// in a second buffer — [`plan_count_structures`].
+    ///
+    /// The count buffer is measured the same way and for the same reason: a
+    /// count word hanging off the end of it is a draw count read from
+    /// somebody else's memory, and no API reports it.
+    fn need_indirect_count_arguments(
+        &mut self,
+        command: &'static str,
+        draw: &DrawIndirectCount,
+        indexed: bool,
+    ) {
+        let (Some(args_length), Some(count_length)) = (
+            self.buffer_size(draw.args),
+            self.buffer_size(draw.count_buffer),
+        ) else {
+            // A dead or foreign handle, already reported by `need_live`.
+            return;
+        };
+        self.report_indirect(
+            command,
+            plan_count_structures(draw, structure_bytes(indexed), args_length, count_length),
+        );
+    }
+
+    /// The size a live buffer of this device's was created with, or `None` for
+    /// a handle that no longer resolves.
+    ///
+    /// **`size`, not `bytes.len()`**: only a mappable buffer keeps its
+    /// contents, and an argument buffer is device-local everywhere it matters,
+    /// so a length taken from `bytes` would be zero and would refuse every
+    /// legitimate draw.
+    fn buffer_size(&self, buffer: BufferHandle) -> Option<u64> {
+        let state = self.recorder.lock();
+        let object = state.get(ObjectKind::Buffer, buffer.to_bits())?;
+        let Detail::Buffer { size, .. } = &object.detail else {
+            unreachable!("a buffer handle always carries buffer detail");
+        };
+        Some(*size)
+    }
+
+    /// Records and remembers a refusal from [`crate::indirect`], and lets an
+    /// accepted plan pass.
+    ///
+    /// A refusal goes two places. It is recorded, like every other violation,
+    /// so a test sees the whole frame's worth; and it is remembered in
+    /// [`failed`](Self::failed), because a recording method returns `()` and
+    /// [`finish`](CommandEncoder::finish) is the first thing that can report
+    /// it — the arrangement `create_command_encoder` already uses for a queue
+    /// it cannot accept.
+    fn report_indirect(
+        &mut self,
+        command: &'static str,
+        planned: Result<Option<IndirectPlan>, HalError>,
+    ) {
+        let Err(error) = planned else {
             return;
         };
         let message = match error {
             HalError::InvalidDescriptor(message) => message,
-            // `plan_structures` documents `InvalidDescriptor` as the only
-            // refusal it has; anything else still crosses rather than being
-            // dropped.
+            // The seam's plan functions document `InvalidDescriptor` as the
+            // only refusal they have; anything else still crosses rather than
+            // being dropped.
             other => other.to_string(),
         };
         self.fail(ValidationError::InvalidIndirectArguments {
@@ -2823,6 +2871,7 @@ impl CommandEncoder for NullEncoder {
             ObjectKind::Buffer,
             draw.count_buffer.to_bits(),
         );
+        self.need_indirect_count_arguments("DrawIndirectCount", draw, false);
         self.record(Command::DrawIndirectCount(*draw));
     }
 
@@ -2838,6 +2887,7 @@ impl CommandEncoder for NullEncoder {
             ObjectKind::Buffer,
             draw.count_buffer.to_bits(),
         );
+        self.need_indirect_count_arguments("DrawIndexedIndirectCount", draw, true);
         self.record(Command::DrawIndexedIndirectCount(*draw));
     }
 

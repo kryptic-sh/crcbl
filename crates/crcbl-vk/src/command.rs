@@ -38,7 +38,7 @@ use std::sync::Arc;
 use ash::vk;
 use ash::vk::Handle as _;
 
-use crcbl_hal::indirect::{plan_structures, structure_bytes};
+use crcbl_hal::indirect::{plan_count_structures, plan_structures, structure_bytes};
 use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
@@ -1545,19 +1545,45 @@ impl VkCommandEncoder {
             return;
         }
         let state = self.device.state();
-        let (Ok(args), Ok(count)) = (
-            self.device.buffer_raw(&state, draw.args),
-            self.device.buffer_raw(&state, draw.count_buffer),
-        ) else {
-            drop(state);
-            self.fail(HalError::invalid_handle("buffer", draw.args));
-            return;
-        };
+        let resolved = self
+            .device
+            .buffer_raw_size_and_location(&state, draw.args)
+            .and_then(|(args, args_size, _)| {
+                self.device
+                    .buffer_raw_size_and_location(&state, draw.count_buffer)
+                    .map(|(count, count_size, _)| (args, args_size, count, count_size))
+            });
         drop(state);
+        let (args, args_size, count, count_size) = match resolved {
+            Ok(resolved) => resolved,
+            // `lookup` names the buffer that actually failed to resolve, and
+            // that error is what crosses: reporting `draw.args` for a bad
+            // `count_buffer` sends the caller looking at the handle that was
+            // fine.
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        // The seam's rules for the count word and for stepping the argument
+        // array. Vulkan reports them as badly here as it does for the plain
+        // form — `vkCmdDrawIndirectCount` states its own alignment and range
+        // conditions on `offset` and `countBufferOffset`, and no condition on
+        // either has an error code, so the driver reads a draw count and a set
+        // of arguments out of whatever is there. Refused here as a bad handle
+        // is: recording carries on and `finish` reports it.
+        if let Err(error) =
+            plan_count_structures(draw, structure_bytes(indexed), args_size, count_size)
+        {
+            self.fail(error);
+            return;
+        }
         self.use_object(args.as_raw());
         self.use_object(count.as_raw());
         // SAFETY: `self.raw` is recording inside a render pass; both buffers
-        // are live, have `INDIRECT` usage and are in `IndirectArgument` state.
+        // are live, have `INDIRECT` usage and are in `IndirectArgument` state,
+        // and both offsets, the stride and the bound have just been checked
+        // against their buffers' sizes.
         unsafe {
             if indexed {
                 self.device.raw.cmd_draw_indexed_indirect_count(

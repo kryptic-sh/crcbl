@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` and the null backend check a count-buffer draw's offsets, not
+  just its handles.** `draw_indirect_count` and `draw_indexed_indirect_count`
+  took `args_offset`, `count_offset`, `max_draw_count` and `stride` on trust,
+  which is the same undefined read the plain indirect form had: a driver given a
+  misaligned offset returns no error and reads argument structures from the
+  wrong bytes. The seam gained `plan_count_structures`, which adds the two rules
+  particular to this form — both offsets four-byte aligned, and the count word
+  fitting inside the count buffer — and delegates the argument array to
+  `plan_structures`, so the stride and span rules have one copy rather than two.
+  `crcbl-webgpu` still answers `Unsupported`, because WebGPU has no count-buffer
+  draw.
+
+  `crcbl-vk`'s resolve failure also named the argument buffer whichever of the
+  two was actually missing, so a bad count buffer reported the wrong handle.
+
 - **`crcbl-vk`, the null backend and `crcbl-webgpu` refuse an image view of mips
   or layers its image does not have.** All three passed the subresource straight
   through; on Vulkan that is
