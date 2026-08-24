@@ -571,15 +571,34 @@ mod tests {
     /// one so the fold in [`propagate`] cannot make the test trivial by
     /// returning its input.
     ///
-    /// The bounds are two orders of magnitude above what this measured, which
-    /// leaves room for a different `libm` on another platform without leaving
-    /// room for an actual defect: a propagator that had stopped conserving
-    /// anything would be out by kilometres, not micrometres.
+    /// The bound is [`DRIFT`], and it has to leave room for a different `libm`:
+    /// the Stumpff functions are built on `cos` and `cosh`, which are correct
+    /// to an ulp on every platform and to *the same* ulp on none, and ten
+    /// thousand chained steps amplify that disagreement. An earlier bound sized
+    /// from a Linux run reddened on macOS at eight parts in a billion — a
+    /// number that says nothing about the propagator and everything about whose
+    /// `cos` it ran on, so the bound is two orders above that rather than above
+    /// the Linux figure.
+    ///
+    /// What it still catches is a defect: a propagator that had stopped
+    /// conserving anything is out by kilometres, not by a hundred-millionth.
     #[test]
     fn ten_thousand_revolutions_leave_the_orbit_where_it_was() {
         const STEPS: u32 = 10_000;
         const STEP_FRACTION: f64 = 0.37;
         const RADIUS: f64 = 42_164_170.0;
+        /// How far any of the orbit's invariants may move over [`STEPS`]
+        /// chained propagations, as a fraction of itself.
+        const DRIFT: f64 = 1.0e-6;
+        /// How far the ship may be from where a quarter period puts it after
+        /// [`STEPS`] whole revolutions, in metres.
+        ///
+        /// Dominated by one rounding, not by the propagator: `STEPS · T` is a
+        /// single `f64` multiply, and an ulp of it at this period is a tenth of
+        /// a microsecond, which at orbital speed is a fraction of a millimetre.
+        /// That term is the same arithmetic everywhere, so this bound does not
+        /// depend on whose `libm` ran it.
+        const PHASE: f64 = 1.0e-2;
 
         let start = circular(RADIUS);
         let before = Orbit::from_state(EARTH_MU, start);
@@ -594,29 +613,48 @@ mod tests {
         let energy_drift =
             (after.specific_energy - before.specific_energy).abs() / before.specific_energy.abs();
         assert!(
-            energy_drift < 1.0e-9,
+            energy_drift < DRIFT,
             "specific energy drifted by {energy_drift} of itself over {STEPS} propagations"
         );
         let size_drift =
             (after.semi_major_axis - before.semi_major_axis).abs() / before.semi_major_axis;
         assert!(
-            size_drift < 1.0e-9,
+            size_drift < DRIFT,
             "the semi-major axis drifted by {size_drift} of itself"
         );
         assert!(
-            after.eccentricity < 1.0e-9,
+            after.eccentricity < DRIFT,
             "a circle stayed a circle only to e = {}",
             after.eccentricity
         );
 
-        // And the phase, which is what a symplectic integrator loses while
-        // keeping the energy: chaining must land where one direct propagation
-        // over the same total time does.
-        let direct = propagate(EARTH_MU, start, step * f64::from(STEPS));
-        let apart = chained.position.distance(direct.position);
+        // The radius, which is the claim the drifts above are about seen from
+        // the other side: after ten thousand of them the ship is still on the
+        // circle it started on rather than a little above or below it.
+        let radius = radius_of(chained);
         assert!(
-            apart < RADIUS * 1.0e-5,
-            "{STEPS} chained propagations ended {apart} m from the single one covering the same time"
+            (radius - RADIUS).abs() < RADIUS * DRIFT,
+            "after {STEPS} propagations the circular radius is {radius} m, not {RADIUS} m"
+        );
+
+        // **And the phase, which is what a symplectic integrator loses while
+        // keeping the energy.** Ten thousand periods and a quarter, in one
+        // call, must land exactly where a quarter period does — nothing has
+        // accumulated in between, because nothing was integrated.
+        //
+        // Measured against the quarter-period state rather than a written-down
+        // position, so the comparison is between two answers from the same
+        // formula and the tolerance is about the fold rather than about the
+        // orbit — see [`PHASE`]. Ten thousand revolutions is four hundred
+        // billion metres of travel, and the ship arrives inside a centimetre of
+        // where it would have been on the first one.
+        let period = before.period(EARTH_MU).expect("a circular orbit closes");
+        let far = propagate(EARTH_MU, start, f64::from(STEPS) * period + period / 4.0);
+        let quarter = propagate(EARTH_MU, start, period / 4.0);
+        let apart = far.position.distance(quarter.position);
+        assert!(
+            apart < PHASE,
+            "{STEPS} periods and a quarter landed {apart} m from a quarter period"
         );
     }
 
