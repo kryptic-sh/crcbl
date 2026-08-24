@@ -16479,18 +16479,6 @@ survey. Treat every one as a claim until read.
   from `D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT`. `crcbl-mtl` keeps it only
   incidentally, because its adapter sets both limits to `maxBufferLength`.
   `WHOLE_BUFFER` appears nowhere in the e2e suite.
-- **`create_sampler` above `max_sampler_anisotropy`.** Refused by null, vk, mtl
-  and dx12; `crcbl-webgpu` is said to encode `desc.anisotropy` with no check.
-  The e2e `exercise_sampler_anisotropy` drives only the accepting path, at
-  exactly the limit, so the refusal is untested on every backend. **Do not "fix"
-  the WebGPU half without reading "Anisotropy: the limit says one, the replayer
-  passes more through" above** — I checked, and they are the same item, not
-  adjacent ones. That backend reports `max_sampler_anisotropy: 1` to mean "no
-  ceiling this backend can guarantee", so enforcing the seam's ceiling there
-  refuses everything above 1, which is precisely the option that entry records
-  as declined for making anisotropic filtering permanently unreachable on
-  WebGPU. What is genuinely missing is the refusal test on the four backends
-  where the limit is a real ceiling.
 - **Binding offset alignment: shipped, except the bind-time half on webgpu.**
   Both rules are now `crcbl_hal::check_binding_offset_alignment` and
   `check_dynamic_offsets`, called by `crcbl-vk` and the null backend;
@@ -16679,3 +16667,33 @@ hit exactly this. Two ways to close it: add that metadata with
 the problem. Not fixed because nothing publishes this crate yet, and it is a
 decision about what the crate's default documentation should say rather than a
 bug in the prose.
+
+## Do `crcbl-mtl` and `crcbl-dx12` report an adapter's limits on a narrower device? (2026-08-24)
+
+`crcbl-vk` did, and it was a real bug: device caps were built as
+`features: granted, limits: <the adapter's>`, so every feature-gated limit
+overstated what the device would accept. Fixed by
+`adapter::gate_limits_on_features`, which both the adapter and the device now
+apply, and guarded by
+`a_devices_limits_are_narrowed_to_the_features_it_was_granted` in `crcbl-vk`'s
+`device_request.rs`.
+
+**The same shape is visible in the other two and is NOT verified.**
+`crcbl-mtl`'s `adapter.rs` builds
+`DeviceCaps { features, limits: limits_of(device, features) }` from what the
+adapter supports, and its `Device::caps` returns `self.inner.caps`;
+`crcbl-dx12`'s `Device::caps` does the same, and its `adapter.rs` gates
+`max_sampler_anisotropy` on a `features` whose provenance I did not trace.
+Whether either narrows at device open is the open question — I read the caps
+accessors, not the open paths.
+
+Not chased because both backends are deferred. What it would take: read each
+`open_device`/`request_device`, see whether the granted feature set is
+re-applied to the limits, and if not, mirror the vk fix.
+
+**The agnostic suite deliberately does not assert this**, which is why the gap
+can persist quietly. `a_sampler_above_the_anisotropy_ceiling_is_refused` takes
+its accepting value from `caps().features` rather than trusting `caps().limits`,
+precisely so a backend overstating a limit does not red the macOS and Windows
+runners for a bug that is its own. Closing the two backends' half is what would
+let that test assert the limit directly, which is the stronger rule.

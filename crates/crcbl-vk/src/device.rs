@@ -941,7 +941,18 @@ impl VkDevice {
             debug_ext,
             caps: DeviceCaps {
                 features: granted,
-                limits: record.info.caps.limits,
+                // The adapter's limits, narrowed to what this device was
+                // granted. Not the adapter's verbatim: those were gated on what
+                // the adapter *supports*, so a caller that declined a feature
+                // read a number here that the device it came from would then
+                // refuse — `max_sampler_anisotropy` reported 16 on a device
+                // whose `create_sampler` answered `Unsupported` above 1.0. See
+                // `crate::adapter::gate_limits_on_features`.
+                limits: {
+                    let mut limits = record.info.caps.limits;
+                    crate::adapter::gate_limits_on_features(&mut limits, granted);
+                    limits
+                },
             },
             // The adapter's, and zeroed there when the adapter had no
             // timestamps — not re-derived from `granted`, because a caller that

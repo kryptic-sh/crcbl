@@ -1965,6 +1965,95 @@ fn a_sampler_below_the_anisotropy_floor_is_refused() {
     headless.finish();
 }
 
+/// **A sampler above the device's anisotropy ceiling is refused.**
+///
+/// The other half of the floor rule, and the half nothing drove. `crcbl-vk`
+/// calls `SamplerDesc::check_anisotropy_ceiling`, the null backend calls it,
+/// and `crcbl-mtl` and `crcbl-dx12` each spell `anisotropy > cap` in their own
+/// `create_sampler` — four backends refusing, and no test anywhere asking one
+/// of them to. The capability exercise `exercise_sampler_anisotropy` asks for
+/// exactly the device's limit, which is the last accepting value, so it drives
+/// the ceiling right up to it and never over.
+///
+/// **The accepting arm is not a formality.** A backend that refused every
+/// sampler would satisfy the refusal below while leaving nothing able to filter
+/// a texture, and asking at the device's own cap is also what proves the cap is
+/// the boundary rather than somewhere below it.
+///
+/// **The headroom assertion is what stops this going vacuous.** The over-limit
+/// value is the cap plus one, and on a device reporting a cap near `f32::MAX`
+/// that addition rounds back to the cap itself and asks for nothing illegal at
+/// all. Every backend here reports 16.0, or 1.0 without the feature, so it
+/// holds — and if some future device does not, this fails loudly rather than
+/// passing on a descriptor that was legal all along.
+///
+/// `crcbl-webgpu` is absent from this suite, and would abstain anyway: it
+/// reports `max_sampler_anisotropy: 1` to mean "no ceiling this backend can
+/// guarantee", so enforcing the seam's ceiling there would refuse everything
+/// above 1 and put anisotropic filtering permanently out of reach. That is a
+/// recorded decision, not an oversight.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_sampler_above_the_anisotropy_ceiling_is_refused() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let limit = device.caps().limits.max_sampler_anisotropy;
+
+    // The last accepting value, taken from the device rather than written here
+    // — but only where the device can filter anisotropically at all. On one
+    // that was not granted `SAMPLER_ANISOTROPY`, anything above 1.0 is refused
+    // for a different reason entirely (`Unsupported`, not a bad descriptor),
+    // and a limit above 1.0 on such a device is a backend reporting a ceiling
+    // it will not honour rather than anything this rule is about.
+    let accepted = if device
+        .caps()
+        .features
+        .contains(Features::SAMPLER_ANISOTROPY)
+    {
+        limit
+    } else {
+        1.0
+    };
+    let at_the_cap = device
+        .create_sampler(&SamplerDesc {
+            label: Some("at the anisotropy ceiling"),
+            anisotropy: accepted,
+            ..SamplerDesc::default()
+        })
+        .expect("the largest value this device can actually be asked for is accepted");
+    device.destroy_sampler(at_the_cap);
+
+    let over = limit + 1.0;
+    assert!(
+        over > limit,
+        "this device reports max_sampler_anisotropy {limit}, and adding one to it rounds \
+         back to itself — so there is no over-limit value left to ask for and the refusal \
+         below would pass without refusing anything"
+    );
+
+    match device.create_sampler(&SamplerDesc {
+        label: Some("above the anisotropy ceiling"),
+        anisotropy: over,
+        ..SamplerDesc::default()
+    }) {
+        Err(error) => assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "anisotropy past the device's ceiling is a bad descriptor rather than a \
+             backend failure: {error:?}"
+        ),
+        Ok(sampler) => {
+            device.destroy_sampler(sampler);
+            panic!(
+                "this backend built a sampler asking for {over}x anisotropy on a device \
+                 whose limit is {limit}x — the caller gets whatever the driver silently \
+                 clamped to, and never learns the number it asked for was impossible"
+            );
+        }
+    }
+
+    headless.finish();
+}
+
 /// **A bind's dynamic offsets are held to the layout that declared them.**
 ///
 /// Two rules, both `crcbl_hal::check_dynamic_offsets`': one offset per

@@ -452,32 +452,21 @@ pub(crate) fn limits_of(
     vulkan_1_2_props: &vk::PhysicalDeviceVulkan12Properties<'_>,
     features: Features,
 ) -> Limits {
-    Limits {
+    let mut mapped = Limits {
         max_image_2d: limits.max_image_dimension2_d,
         max_image_3d: limits.max_image_dimension3_d,
         max_image_array_layers: limits.max_image_array_layers,
         max_storage_buffer_range: u64::from(limits.max_storage_buffer_range),
         max_uniform_buffer_range: u64::from(limits.max_uniform_buffer_range),
         max_bind_groups: limits.max_bound_descriptor_sets,
-        max_bindless_descriptors: if features.contains(Features::DESCRIPTOR_INDEXING) {
-            // The binding that matters for the bindless texture array. The
-            // update-after-bind limit is the real ceiling, not the plain one.
-            vulkan_1_2_props.max_descriptor_set_update_after_bind_sampled_images
-        } else {
-            0
-        },
-        max_push_constant_size: if features.contains(Features::PUSH_CONSTANTS) {
-            limits.max_push_constants_size
-        } else {
-            0
-        },
+        // The binding that matters for the bindless texture array. The
+        // update-after-bind limit is the real ceiling, not the plain one.
+        max_bindless_descriptors: vulkan_1_2_props
+            .max_descriptor_set_update_after_bind_sampled_images,
+        max_push_constant_size: limits.max_push_constants_size,
         max_color_attachments: limits.max_color_attachments,
         max_sample_count: common_sample_count(limits),
-        max_draw_indirect_count: if features.contains(Features::DRAW_INDIRECT_COUNT) {
-            limits.max_draw_indirect_count
-        } else {
-            1
-        },
+        max_draw_indirect_count: limits.max_draw_indirect_count,
         max_compute_workgroup_size: limits.max_compute_work_group_size,
         max_compute_invocations_per_workgroup: limits.max_compute_work_group_invocations,
         max_compute_workgroups_per_dimension: limits
@@ -488,11 +477,40 @@ pub(crate) fn limits_of(
         min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
         min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
         optimal_buffer_copy_offset_alignment: limits.optimal_buffer_copy_offset_alignment,
-        max_sampler_anisotropy: if features.contains(Features::SAMPLER_ANISOTROPY) {
-            limits.max_sampler_anisotropy
-        } else {
-            1.0
-        },
+        max_sampler_anisotropy: limits.max_sampler_anisotropy,
+    };
+    gate_limits_on_features(&mut mapped, features);
+    mapped
+}
+
+/// Lowers every feature-gated limit to its floor for the features present.
+///
+/// **Called twice, and deliberately.** [`limits_of`] gates on what the adapter
+/// *supports*; [`crate::device`] gates again on what a device was actually
+/// *granted*, because a caller that declined a feature would otherwise read the
+/// adapter's number out of `caps().limits` and then be refused by the very
+/// device that reported it — which is what `create_sampler` did with
+/// `max_sampler_anisotropy` until this existed.
+///
+/// Gating only ever lowers a value, so a second pass with a smaller feature set
+/// is exactly the narrowing wanted, and a second pass with the same set changes
+/// nothing.
+///
+/// One function rather than a floor written at each site: the adapter's copy and
+/// the device's copy of this rule are the same rule, and two copies is where
+/// they drift.
+pub(crate) fn gate_limits_on_features(limits: &mut Limits, features: Features) {
+    if !features.contains(Features::DESCRIPTOR_INDEXING) {
+        limits.max_bindless_descriptors = 0;
+    }
+    if !features.contains(Features::PUSH_CONSTANTS) {
+        limits.max_push_constant_size = 0;
+    }
+    if !features.contains(Features::DRAW_INDIRECT_COUNT) {
+        limits.max_draw_indirect_count = 1;
+    }
+    if !features.contains(Features::SAMPLER_ANISOTROPY) {
+        limits.max_sampler_anisotropy = 1.0;
     }
 }
 

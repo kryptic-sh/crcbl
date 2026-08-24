@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` reported an adapter's limits on a device that was granted less.**
+  A device's `caps()` narrowed `features` to what `vkCreateDevice` actually
+  granted but carried the adapter's `limits` verbatim, and four of those are
+  feature-gated. A device opened without `SAMPLER_ANISOTROPY` reported
+  `max_sampler_anisotropy: 16` and then answered `Unsupported` to every sampler
+  above 1.0; `max_push_constant_size`, `max_draw_indirect_count` and
+  `max_bindless_descriptors` overstated the same way. A caller reading a limit
+  to decide what to ask for — which is what the seam says the field is for — was
+  refused by the device that reported it. The gating is now one function the
+  adapter applies to what it supports and the device applies again to what it
+  was granted.
+
 - **`Instance::destroy_surface` documented a teardown order that does not
   exist.** Its one-line doc said every swapchain on a surface must already be
   destroyed. No backend requires that and four go out of their way not to:

@@ -268,3 +268,105 @@ fn the_selected_paths_agree_with_the_reported_features() {
         // `queries.rs` checks it against a clock.
     }
 }
+
+/// **A device's limits are narrowed to the features that device was granted,
+/// not the adapter's.**
+///
+/// `AdapterInfo::caps.limits` is gated on what the adapter *supports*. A device
+/// opened from it may be granted less, and until `gate_limits_on_features` ran
+/// twice this backend handed that device the adapter's numbers verbatim: on
+/// radv, a device that asked for nothing reported `max_sampler_anisotropy: 16`
+/// and then answered `Unsupported` to every sampler above 1.0. A caller reading
+/// the limit to decide what to ask for — which is exactly what the seam says
+/// the field is for — was refused by the device that reported it.
+///
+/// **Only one direction is asserted**: a feature absent means its limit is at
+/// the floor. The converse is not a rule, because a device may genuinely have
+/// `max_draw_indirect_count == 1` with the feature present.
+///
+/// The second device is the control. Without it, a backend that narrowed every
+/// limit to its floor unconditionally would pass the first half and have made
+/// the whole `Limits` struct useless — so where a feature *is* granted, its
+/// limit has to be above the floor it would otherwise have been pinned to.
+/// Asked for as `optional_features` so this runs on lavapipe, which has none of
+/// them, as well as on hardware that has them all.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_devices_limits_are_narrowed_to_the_features_it_was_granted() {
+    const GATED: Features = Features::SAMPLER_ANISOTROPY
+        .union(Features::DRAW_INDIRECT_COUNT)
+        .union(Features::PUSH_CONSTANTS)
+        .union(Features::DESCRIPTOR_INDEXING);
+
+    let instance = instance();
+    let adapter = instance.adapters().remove(0);
+
+    let bare = instance
+        .create_device(&DeviceDesc {
+            label: Some("granted nothing"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: None,
+        })
+        .expect("a device asking for no optional feature opens everywhere");
+    let caps = bare.caps();
+    assert!(
+        !caps.features.intersects(GATED),
+        "a device that asked for none of {GATED:?} was granted {:?}, so the assertions \
+         below would be checking nothing",
+        caps.features.intersection(GATED)
+    );
+    assert_eq!(
+        caps.limits.max_sampler_anisotropy, 1.0,
+        "without SAMPLER_ANISOTROPY, 1.0 is the only value create_sampler accepts, so it \
+         is the only ceiling this device can honestly report"
+    );
+    assert_eq!(
+        caps.limits.max_draw_indirect_count, 1,
+        "without DRAW_INDIRECT_COUNT a draw is one draw"
+    );
+    assert_eq!(
+        caps.limits.max_push_constant_size, 0,
+        "without PUSH_CONSTANTS there is nowhere to put one"
+    );
+    assert_eq!(
+        caps.limits.max_bindless_descriptors, 0,
+        "without DESCRIPTOR_INDEXING there is no bindless table to size"
+    );
+    drop(bare);
+
+    // The control: whatever this adapter does have, granted, must show up as a
+    // limit above the floor above. Only the anisotropy ceiling is checked,
+    // because it is the one Vulkan pins to a value — a device supporting the
+    // feature reports more than the 1.0 that means "off" — while the other
+    // three have adapter-dependent numbers this cannot predict.
+    let full = instance
+        .create_device(&DeviceDesc {
+            label: Some("granted whatever there is"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: GATED,
+            compatible_surface: None,
+        })
+        .expect("optional features never make an open fail");
+    let caps = full.caps();
+    if caps.features.contains(Features::SAMPLER_ANISOTROPY) {
+        assert!(
+            caps.limits.max_sampler_anisotropy > 1.0,
+            "{} grants SAMPLER_ANISOTROPY and then reports a ceiling of {}, which is the \
+             value that disables it — the narrowing flattened a limit it should have left \
+             alone",
+            adapter.name,
+            caps.limits.max_sampler_anisotropy
+        );
+    } else {
+        eprintln!(
+            "vk e2e: {} has no SAMPLER_ANISOTROPY, so the control arm asserted nothing",
+            adapter.name
+        );
+    }
+    drop(full);
+
+    instance.validation_report().assert_clean();
+}
