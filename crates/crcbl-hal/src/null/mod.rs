@@ -1175,12 +1175,13 @@ impl Device for NullDevice {
     }
 
     fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError> {
-        if desc.anisotropy > self.caps.limits.max_sampler_anisotropy {
-            return Err(HalError::InvalidDescriptor(format!(
-                "anisotropy {} exceeds max_sampler_anisotropy {}",
-                desc.anisotropy, self.caps.limits.max_sampler_anisotropy
-            )));
-        }
+        // The ceiling is the rule this backend already had, now stated once on
+        // the seam with the message that was here. The floor is the one it did
+        // not: `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all refused an
+        // anisotropy below the value that disables it while this backend — the
+        // reference the others are compared against — served it.
+        desc.check_anisotropy_floor()?;
+        desc.check_anisotropy_ceiling(&self.caps.limits)?;
         Ok(self.insert(ObjectKind::Sampler, desc.label, Detail::None))
     }
 

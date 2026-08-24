@@ -19,8 +19,8 @@ use crcbl_hal::{
     DeviceDesc, DeviceType, Extent3d, Features, Format, HalError, ImageAspect, ImageDesc,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, Instance, Limits,
     MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc, ReadbackState,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, SubmitInfo, SurfaceCaps, SurfaceHandle,
-    SwapchainDesc,
+    SamplerDesc, ShaderEntry, ShaderModuleDesc, ShaderStages, SubmitInfo, SurfaceCaps,
+    SurfaceHandle, SwapchainDesc,
 };
 
 use crate::ReplyWriter;
@@ -1023,6 +1023,81 @@ fn image_and_swapchain_descriptors_are_checked_before_anything_is_encoded() {
         names(&channel),
         vec!["CreateSwapchain", "ReconfigureSwapchain"]
     );
+}
+
+/// The anisotropy **floor**, which this backend ran no check for at all — and
+/// the ceiling, which it deliberately does not run.
+///
+/// `create_sampler` used to allocate a handle and encode the descriptor
+/// whatever was in it, so a `0.5` or a `NAN` crossed to the browser and came
+/// back — if at all — as `createSampler`'s sentence a frame later through
+/// `take_error`. The floor is device-independent, so it is the seam's answer
+/// here as on every other backend.
+///
+/// **The accepting arm above `1.0` is the load-bearing one.** This device
+/// reports `max_sampler_anisotropy: 1.0`, meaning "no ceiling this backend can
+/// guarantee" rather than "more than one is refused" — WebGPU has no query for
+/// a device's maximum. `16.0` being *accepted* against a reported limit of
+/// `1.0` is what pins that decision down: the day someone folds the floor and
+/// the ceiling into one call and wires it here, this is the assertion that goes
+/// red instead of anisotropic filtering going quietly unreachable. See
+/// `docs/backlog.md`, "Anisotropy: the limit says one, the replayer passes more
+/// through".
+#[test]
+fn a_samplers_anisotropy_is_held_to_the_floor_and_not_to_the_reported_ceiling() {
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    let sampler = |anisotropy| SamplerDesc {
+        label: Some("anisotropy"),
+        anisotropy,
+        ..SamplerDesc::default()
+    };
+
+    for (case, anisotropy) in [
+        ("below the floor", 0.5),
+        // Neither comparison catches this on its own: `NAN < 1.0` is `false`
+        // and so is `NAN > max`, which is how a NaN reached a driver on every
+        // backend before the floor was written to take it.
+        ("a NaN", f32::NAN),
+    ] {
+        let (channel, device) = device_on_fresh_channel();
+        let error = device
+            .create_sampler(&sampler(anisotropy))
+            .err()
+            .unwrap_or_else(|| panic!("{case} is below the value that disables anisotropy"));
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{case}: {error}"
+        );
+        assert!(
+            names(&channel).is_empty(),
+            "{case} reached the wire: {:?}",
+            names(&channel)
+        );
+    }
+
+    let ceiling = device_caps().limits.max_sampler_anisotropy;
+    assert_eq!(
+        ceiling, 1.0,
+        "this fixture is the reported-limit-of-one case the arm below is about"
+    );
+    for (case, anisotropy) in [
+        ("the floor exactly", 1.0),
+        ("well above the reported limit", 16.0),
+    ] {
+        let (channel, device) = device_on_fresh_channel();
+        device
+            .create_sampler(&sampler(anisotropy))
+            .unwrap_or_else(|error| panic!("{case} must reach the replayer: {error}"));
+        assert_eq!(names(&channel), vec!["CreateSampler"], "{case}");
+    }
 }
 
 /// A write or a readback past the end of the buffer it names, and a handle this

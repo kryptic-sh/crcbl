@@ -720,8 +720,18 @@ pub struct SamplerDesc<'a> {
     pub lod_min: f32,
     /// Highest mip level sampled.
     pub lod_max: f32,
-    /// Anisotropy; `1.0` disables. Capped by
-    /// [`Limits::max_sampler_anisotropy`](crate::Limits::max_sampler_anisotropy).
+    /// Anisotropy; `1.0` disables.
+    ///
+    /// **Bounded on both sides, and the two bounds are not the same kind of
+    /// rule.** The floor is `1.0` and belongs to the seam:
+    /// [`check_anisotropy_floor`](Self::check_anisotropy_floor) refuses
+    /// anything under it, on every backend, because the value that turns
+    /// anisotropy off is the smallest one that means anything. The ceiling is
+    /// [`Limits::max_sampler_anisotropy`](crate::Limits::max_sampler_anisotropy)
+    /// and belongs to the device:
+    /// [`check_anisotropy_ceiling`](Self::check_anisotropy_ceiling) refuses
+    /// what a device reports it cannot do, and a backend that cannot *query* a
+    /// maximum does not call it — see that method for which one and why.
     pub anisotropy: f32,
     /// When set, the sampler compares against a reference value instead of
     /// returning texels — hardware PCF for shadow maps.
@@ -746,6 +756,82 @@ impl Default for SamplerDesc<'_> {
             anisotropy: 1.0,
             compare: None,
         }
+    }
+}
+
+impl SamplerDesc<'_> {
+    /// Refuses an [`anisotropy`](Self::anisotropy) below the value that
+    /// disables it.
+    ///
+    /// **This is the half of the rule no device is asked about.** One is where
+    /// anisotropic filtering is off, so there is nothing under it to mean:
+    /// `0.5` is not "half as much filtering", it is a number every API
+    /// underneath reads as a ratio of one axis to another and none of them
+    /// defines below one. Vulkan states it as
+    /// `VUID-VkSamplerCreateInfo-anisotropyEnable-01071`, and `crcbl-mtl` and
+    /// `crcbl-dx12` each refused it from their own copies of the rules while
+    /// the null backend and `crcbl-webgpu` served it — the divergence this
+    /// exists to end.
+    ///
+    /// Separate from [`check_anisotropy_ceiling`](Self::check_anisotropy_ceiling)
+    /// rather than folded into one call, because the ceiling is not safe
+    /// everywhere the floor is: see that method.
+    ///
+    /// # Why the comparison is negated
+    ///
+    /// The refusal is written as "not at or above the floor" rather than
+    /// "below the floor" so that [`f32::NAN`] takes it. A NaN compares `false`
+    /// against *everything*, so `anisotropy < 1.0` waves it through and
+    /// `anisotropy > max` does too — it passed both checks on every backend and
+    /// reached a driver as `maxAnisotropy: NaN`. Do not simplify this back to
+    /// `<`.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming the value.
+    pub fn check_anisotropy_floor(&self) -> Result<(), HalError> {
+        // `is_nan() ||` rather than the negated comparison the sentence above
+        // describes: `!(x >= 1.0)` says the same thing and says it shorter, and
+        // clippy's `neg_cmp_op_on_partial_ord` rewrites it to the `<` that lets
+        // NaN through. This spelling is the one that survives the lint.
+        if self.anisotropy.is_nan() || self.anisotropy < 1.0 {
+            return Err(HalError::InvalidDescriptor(format!(
+                "anisotropy {} is below 1.0, which is the value that disables it",
+                self.anisotropy
+            )));
+        }
+        Ok(())
+    }
+
+    /// Refuses an [`anisotropy`](Self::anisotropy) above what the device
+    /// reports it can do.
+    ///
+    /// **Only a backend that can ask its device for a maximum calls this.** The
+    /// limit is a real ceiling on Vulkan, Metal and D3D12, and the null backend
+    /// answers whichever preset it was built with. `crcbl-webgpu` calls
+    /// [`check_anisotropy_floor`](Self::check_anisotropy_floor) and deliberately
+    /// not this one: WebGPU exposes no query for a device's maximum, so that
+    /// backend reports `max_sampler_anisotropy: 1` to mean "no ceiling this
+    /// backend can guarantee", and enforcing it there would refuse everything
+    /// above one and make anisotropic filtering unreachable. `docs/backlog.md`,
+    /// "Anisotropy: the limit says one, the replayer passes more through",
+    /// records that as considered and declined.
+    ///
+    /// That is why the two rules are two calls. A single check doing both would
+    /// read as the obvious tidying and would silently reverse that decision.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming the value and the limit it
+    /// passed.
+    pub fn check_anisotropy_ceiling(&self, limits: &Limits) -> Result<(), HalError> {
+        if self.anisotropy > limits.max_sampler_anisotropy {
+            return Err(HalError::InvalidDescriptor(format!(
+                "anisotropy {} exceeds max_sampler_anisotropy {}",
+                self.anisotropy, limits.max_sampler_anisotropy
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1018,6 +1104,76 @@ mod tests {
             "a comparison sampler must be asked for explicitly; a silent default \
              would be wrong under reversed-Z in one direction or the other"
         );
+    }
+
+    /// **The floor the seam stated only half of, and the NaN that walked
+    /// through both halves.**
+    ///
+    /// [`SamplerDesc::anisotropy`] documented its ceiling and never its floor,
+    /// so `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` refused a value below `1.0`
+    /// from their own copies of the rule while the null backend and
+    /// `crcbl-webgpu` served it. And every one of those copies was written
+    /// `anisotropy < 1.0`, which is `false` for a NaN — as is
+    /// `anisotropy > max` — so a `NAN` anisotropy passed both checks on all
+    /// five and reached a driver.
+    ///
+    /// **What turns it red.** Writing the floor as `< 1.0` — the NaN case, and
+    /// only that one, which is why it is here rather than left to the backends'
+    /// tests. Dropping the floor — the `0.5` case. Dropping the ceiling — the
+    /// past-the-limit case. And the accepting arms are what stop the refusals
+    /// going vacuous: a pair of checks that refused everything would satisfy
+    /// every `expect_err` here and nothing else would notice. `1.0` is the
+    /// floor exactly, and the limit is the ceiling exactly — the two values a
+    /// mistaken `>=`/`<=` would refuse.
+    #[test]
+    fn anisotropy_is_held_to_the_seams_floor_and_the_devices_ceiling() {
+        // `desktop` rather than `minimum`, whose ceiling is 1.0 — the floor and
+        // the ceiling would be the same number and neither refusal would be
+        // distinguishable from the other's.
+        let limits = Limits::desktop();
+        let ceiling = limits.max_sampler_anisotropy;
+        let sampler = |anisotropy| SamplerDesc {
+            anisotropy,
+            ..SamplerDesc::default()
+        };
+
+        for (case, anisotropy) in [("the floor exactly", 1.0), ("the ceiling exactly", ceiling)] {
+            sampler(anisotropy)
+                .check_anisotropy_floor()
+                .unwrap_or_else(|error| panic!("{case} is a value a sampler may ask for: {error}"));
+            sampler(anisotropy)
+                .check_anisotropy_ceiling(&limits)
+                .unwrap_or_else(|error| panic!("{case} is a value a sampler may ask for: {error}"));
+        }
+
+        for (case, anisotropy) in [("below the floor", 0.5), ("a NaN", f32::NAN)] {
+            let error = sampler(anisotropy)
+                .check_anisotropy_floor()
+                .expect_err(&format!("{case} must be refused"));
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{case}: {error:?}"
+            );
+            // The ceiling cannot stand in for either: `0.5 > ceiling` and
+            // `NaN > ceiling` are both `false`, so this is the call that has to
+            // catch them and the reason the floor is its own check.
+            sampler(anisotropy)
+                .check_anisotropy_ceiling(&limits)
+                .unwrap_or_else(|error| {
+                    panic!("{case} is under the ceiling, not over it: {error}")
+                });
+        }
+
+        let error = sampler(ceiling + 1.0)
+            .check_anisotropy_ceiling(&limits)
+            .expect_err("past the device's ceiling must be refused");
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "past the ceiling: {error:?}"
+        );
+        sampler(ceiling + 1.0)
+            .check_anisotropy_floor()
+            .expect("past the ceiling is still above the floor");
     }
 
     #[test]

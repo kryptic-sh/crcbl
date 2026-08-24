@@ -792,18 +792,13 @@ impl VkDevice {
         desc: &SamplerDesc<'_>,
     ) -> Result<SamplerHandle, HalError> {
         let caps = self.inner().caps;
-        if desc.anisotropy > caps.limits.max_sampler_anisotropy {
-            return Err(HalError::InvalidDescriptor(format!(
-                "anisotropy {} exceeds max_sampler_anisotropy {}",
-                desc.anisotropy, caps.limits.max_sampler_anisotropy
-            )));
-        }
-        if desc.anisotropy < 1.0 {
-            return Err(HalError::InvalidDescriptor(format!(
-                "anisotropy {} is below 1.0, which is the value that disables it",
-                desc.anisotropy
-            )));
-        }
+        // Both rules this used to spell out inline are now the seam's, with the
+        // messages that were here — this backend was the one enforcing both, so
+        // they had to stay exact. The floor also gained the NaN case the `<`
+        // here let through: `NAN < 1.0` is `false`, as is `NAN > max`, so a NaN
+        // anisotropy passed both of these and reached `max_anisotropy` below.
+        desc.check_anisotropy_floor()?;
+        desc.check_anisotropy_ceiling(&caps.limits)?;
         let anisotropy_enabled = desc.anisotropy > 1.0;
         if anisotropy_enabled && !caps.features.contains(Features::SAMPLER_ANISOTROPY) {
             return Err(HalError::Unsupported {

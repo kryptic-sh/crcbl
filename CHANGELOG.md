@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A sampler is held to an anisotropy floor, and a NaN no longer reaches a
+  driver.** `SamplerDesc::anisotropy` documented its ceiling and never its
+  floor, though `1.0` is the value that disables anisotropy and nothing below it
+  is a request. The null backend and `crcbl-webgpu` served anything; the floor
+  is now `SamplerDesc::check_anisotropy_floor` and every backend calls it.
+
+  It also refuses a NaN, which the old spelling did not: `anisotropy < 1.0` is
+  **false** for a NaN, and so is `anisotropy > max`, so a NaN passed both checks
+  on every backend and reached the driver unexamined. The floor is written to
+  catch it and says in its own comment why it is not spelled the shorter way.
+
+  The ceiling stayed separate from the floor rather than joining it in one
+  check, because `crcbl-webgpu` must not enforce it: that backend reports
+  `max_sampler_anisotropy: 1` to mean "no ceiling this backend can guarantee",
+  and refusing above it would make anisotropic filtering unreachable there. A
+  test now stands over that: wiring the ceiling into `crcbl-webgpu` fails.
+
 - **The null backend and `crcbl-webgpu` hold a buffer binding to its slot's
   offset alignment.** `Limits::min_uniform_buffer_offset_alignment` and
   `min_storage_buffer_offset_alignment` are documented as alignments a binding

@@ -1106,7 +1106,39 @@ impl Device for WebGpuDevice {
             .with(|channel| channel.encode(|stream| stream.destroy_image_view(view)));
     }
 
+    /// Enforces the seam's anisotropy **floor**, and deliberately not its
+    /// ceiling.
+    ///
+    /// [`SamplerDesc::check_anisotropy_floor`] is device-independent — one is
+    /// the value that disables anisotropy and nothing under it means anything
+    /// — so it is as true here as anywhere, and it is a rule this backend ran
+    /// none of: a `0.5` or a `NAN` was allocated a handle and encoded, and the
+    /// browser's `createSampler` throws about a sampler a frame later through
+    /// `take_error` rather than the seam refusing a descriptor.
+    ///
+    /// [`SamplerDesc::check_anisotropy_ceiling`] is **not** called, and the
+    /// omission is the decision rather than an oversight. WebGPU exposes no
+    /// query for a device's maximum anisotropy, so `halLimitsFor` in
+    /// `web/engine/gpu-replay.js` reports `max_sampler_anisotropy: 1` to mean
+    /// "no ceiling this backend can guarantee" — not "more than one is
+    /// refused". Running the seam's ceiling against that number would refuse
+    /// every anisotropy above one and make anisotropic filtering permanently
+    /// unreachable on this backend; `webgpuMaxAnisotropyFor` passes the ask to
+    /// `createSampler` and lets the device clamp instead. `docs/backlog.md`,
+    /// under "Anisotropy: the limit says one, the replayer passes more
+    /// through", records that refusal as considered and declined.
+    ///
+    /// So an anisotropy above the reported limit is accepted here and what the
+    /// device does with it is the device's answer. Nothing in this backend
+    /// checks it against a maximum, because there is no maximum to check it
+    /// against.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] for an anisotropy below `1.0`, a NaN
+    /// included.
     fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError> {
+        desc.check_anisotropy_floor()?;
         let handle: SamplerHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_sampler(handle, desc)));

@@ -1907,6 +1907,64 @@ fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
 
 // --- handles, ranges and refusals ------------------------------------------
 
+/// **A sampler below the anisotropy floor is refused by every backend.**
+///
+/// `1.0` is the value that *disables* anisotropy, so there is nothing below it
+/// left to ask for — a smaller number is a caller's arithmetic, not a request.
+/// The seam had only ever stated the ceiling; `crcbl-vk`, `crcbl-mtl` and
+/// `crcbl-dx12` each refused the floor from their own copy while the null
+/// backend and `crcbl-webgpu` served it.
+///
+/// **This also stands over `crcbl-vk`'s wiring, which nothing was watching.**
+/// Removing its floor call leaves both GPU suites green — every caller in the
+/// tree passes `1.0` or the device's own limit — so the rule was held up by
+/// review alone.
+///
+/// **The NaN arm is deliberately not here.** `SamplerDesc::check_anisotropy_floor`
+/// refuses a NaN, because it compares false against every bound and would
+/// otherwise reach a driver unexamined, but `crcbl-mtl` and `crcbl-dx12` spell
+/// their floor `anisotropy < 1.0` — which is false for NaN — so they still pass
+/// one through. Asserting it here would fail on Windows and macOS for a gap on
+/// backends nobody is working on; `docs/backlog.md` carries it instead.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_sampler_below_the_anisotropy_floor_is_refused() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    // The accepting arm first: a backend that refused every sampler would
+    // satisfy the refusal below and leave nothing able to sample a texture.
+    let disabled = device
+        .create_sampler(&SamplerDesc {
+            label: Some("anisotropy floor"),
+            anisotropy: 1.0,
+            ..SamplerDesc::default()
+        })
+        .expect("1.0 is the value that disables anisotropy, which every device takes");
+    device.destroy_sampler(disabled);
+
+    match device.create_sampler(&SamplerDesc {
+        label: Some("below the anisotropy floor"),
+        anisotropy: 0.5,
+        ..SamplerDesc::default()
+    }) {
+        Err(error) => assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "an anisotropy below the floor is a bad descriptor rather than a backend \
+             failure: {error:?}"
+        ),
+        Ok(sampler) => {
+            device.destroy_sampler(sampler);
+            panic!(
+                "half a sample was served — this backend built a sampler asking for less \
+                 filtering than the value that turns filtering off"
+            );
+        }
+    }
+
+    headless.finish();
+}
+
 /// **A bind's dynamic offsets are held to the layout that declared them.**
 ///
 /// Two rules, both `crcbl_hal::check_dynamic_offsets`': one offset per

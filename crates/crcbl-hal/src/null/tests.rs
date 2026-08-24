@@ -4116,6 +4116,55 @@ fn query_results_are_bounded_by_the_sets_size() {
     assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
 }
 
+/// This backend checked the anisotropy ceiling and never the floor, so a value
+/// below the one that disables anisotropy — and a `NAN`, which no backend's
+/// `< 1.0` caught — were served here while `crcbl-vk`, `crcbl-mtl` and
+/// `crcbl-dx12` refused them.
+///
+/// The `gpu_driven` preset rather than `portable`: the latter reports
+/// `max_sampler_anisotropy: 1.0`, where the floor and the ceiling are the same
+/// number and neither refusal is distinguishable from the other's.
+#[test]
+fn a_samplers_anisotropy_is_held_to_the_floor_as_well_as_the_ceiling() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+    let ceiling = device.caps().limits.max_sampler_anisotropy;
+    assert!(
+        ceiling > 1.0,
+        "this preset must report a real ceiling, got {ceiling}"
+    );
+    let sampler = |anisotropy| crate::SamplerDesc {
+        label: Some("anisotropy"),
+        anisotropy,
+        ..crate::SamplerDesc::default()
+    };
+
+    // The accepting arms first, so a `create_sampler` that refused everything
+    // could not satisfy the refusals below unnoticed.
+    for (case, anisotropy) in [("the floor exactly", 1.0), ("the ceiling exactly", ceiling)] {
+        device
+            .create_sampler(&sampler(anisotropy))
+            .unwrap_or_else(|error| panic!("{case} is a sampler this device can make: {error}"));
+    }
+
+    for (case, anisotropy) in [
+        ("below the floor", 0.5),
+        // `NAN < 1.0` and `NAN > ceiling` are both `false`, so the two
+        // comparison-shaped checks this backend and every other one had let it
+        // through to the driver.
+        ("a NaN", f32::NAN),
+        ("past the ceiling", ceiling + 1.0),
+    ] {
+        let error = device
+            .create_sampler(&sampler(anisotropy))
+            .expect_err(&format!("{case} must be refused"));
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{case}: {error:?}"
+        );
+    }
+}
+
 /// Image validation used to compare `max(width, height)` against
 /// `max_image_2d` for every image type, leaving `max_image_3d` read by nothing,
 /// a volume's depth checked against nothing, and `samples` unvalidated.

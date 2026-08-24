@@ -16530,8 +16530,17 @@ silently accepts or substitutes. All unverified by me.
   deferred backend for something no caller does; the cost is that
   `an_image_of_an_impossible_shape_is_refused` deliberately omits that arm, and
   says so, or it would fail on Windows and macOS.
-- `anisotropy < 1.0`: refused by vk, mtl and dx12; accepted by null and webgpu.
-  The seam states only the ceiling.
+- **A NaN anisotropy: refused by the three backends that call the seam, passed
+  through by the two that do not.** `SamplerDesc::check_anisotropy_floor`
+  refuses it, because a NaN compares false against every bound and would
+  otherwise reach a driver unexamined — which is what it did on every backend
+  until this slice. `crcbl-mtl`'s and `crcbl-dx12`'s `create_sampler` each spell
+  their floor `desc.anisotropy < 1.0`, and that is false for a NaN, so both
+  still serve one. Verified by reading both. Closing it is one line in each, but
+  it is a change to a deferred backend, so it is recorded rather than made; the
+  cost today is that `a_sampler_below_the_anisotropy_floor_is_refused`
+  deliberately omits the NaN arm and says so, or it would fail on Windows and
+  macOS. The sub-1.0 half of this row has shipped: every backend now refuses it.
 - `ImageViewDesc::format` differing from the image's: the seam permits it and
   mtl honours it except across depth, but **dx12 refuses every cross-format view
   uniformly, by design**. A documented seam promise one backend does not keep.

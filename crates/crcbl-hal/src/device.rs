@@ -701,8 +701,20 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     ///
     /// # Errors
     ///
-    /// [`HalError::InvalidDescriptor`] if anisotropy exceeds
-    /// [`Limits::max_sampler_anisotropy`](crate::Limits::max_sampler_anisotropy).
+    /// [`HalError::InvalidDescriptor`] if
+    /// [`anisotropy`](SamplerDesc::anisotropy) is below `1.0` — the value that
+    /// disables it, so there is nothing below it to ask for — or is a NaN,
+    /// which compares false against every bound and would otherwise reach a
+    /// driver unexamined. Both are
+    /// [`SamplerDesc::check_anisotropy_floor`], which every backend calls.
+    ///
+    /// Also [`HalError::InvalidDescriptor`] if it exceeds
+    /// [`Limits::max_sampler_anisotropy`](crate::Limits::max_sampler_anisotropy)
+    /// — [`SamplerDesc::check_anisotropy_ceiling`] — on every backend **except
+    /// `crcbl-webgpu`**, which reports that limit as `1.0` to mean "no ceiling
+    /// this backend can guarantee" rather than "more than one is refused". See
+    /// that method's own docs, and the backlog entry "Anisotropy: the limit
+    /// says one, the replayer passes more through".
     fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError>;
 
     /// Destroys a sampler.
