@@ -16735,3 +16735,69 @@ time for flakiness; giving up and skipping when the clipboard is held by another
 process turns a flake into a silent gap, which is worse. Neither is obviously
 right, and the failure rate is one observation, so measuring comes first — grep
 the last N Windows runs for this message before changing anything.
+
+## `apps/orbit` — what the first slice left (2026-08-24)
+
+`docs/plan/sample/06-orbit.md`'s milestones 1 and 2 are built: the ascent, the
+orbit, timewarp with its auto-drop, an autopilot that flies the whole thing so a
+browser page shows a flight to a visitor who never presses a key, and a map view
+with the flight instruments over it. What that leaves:
+
+- **The bodies are a map, not a scene.** The plan's scope says "the bodies and
+  the rocket are 3D and stay 3D; the 2D layer over them is sprites, not
+  hand-placed quads". Today the planet, its atmosphere, the trajectory and the
+  ship are all `DrawList` rectangles in `apps/orbit/src/page.rs`, drawn
+  orthographically in the orbital plane. Nothing is 3D and nothing is a sprite,
+  so the sample is currently **not** meeting sample rule 11 either. Both are the
+  next milestone and both want the same thing first: a sphere mesh and a camera,
+  which `apps/quarry` and `apps/lantern` already have working examples of.
+
+- **There is no line primitive anywhere in the engine.** `crcbl::ui::DrawList`
+  has `rect`, `rect_outline` and `text`, and neither `crcbl-render` nor
+  `crcbl-ui` has a line, polyline or debug-draw path. `page.rs` draws the
+  trajectory as the points it was sampled at, which reads well and is honest —
+  the dots bunch where the ship is slow — but `06-orbit.md` asks for "orbit path
+  debug draw" and `05-physics.md` asks for debug draw of contacts, sweeps, fat
+  AABBs, BVH bounds and islands, none of which is a rectangle. That is one
+  primitive with at least six consumers, so it is worth its own slice rather
+  than a helper inside a sample.
+
+- **The moon exists and nothing goes there.** `Flight::new` builds the moon's
+  frame with its Laplace sphere of influence, and `cross_boundaries` would hand
+  the ship over on a crossing, but the autopilot stops once the orbit is made
+  and no test flies a transfer. Milestone 3 is the transfer, and what it needs
+  on top of what is here is a way to _aim_: a target marker and a
+  closest-approach readout, or the sample is a matter of luck. The frame
+  machinery underneath it is tested in `crcbl-phys`.
+
+- **Landing is a radius test, not a contact.** `touch_down` compares the
+  altitude with the body's radius and calls anything under `LANDING_SPEED` a
+  landing. The plan's milestone 1 wants "landing legs = swept capsule contacts
+  with terrain" through L0's CCD, which `crcbl-phys` already has
+  (`swept_sphere_vs_*`, `Bvh`), and there is no terrain patch to sweep against
+  yet.
+
+- **Not verified: the flight over very long timewarp.** The tests fly a few
+  minutes of simulated time. `crcbl-phys` proves the propagator itself over ten
+  thousand revolutions, but nothing has run _this sample_ at ×1000 for long
+  enough to say the frame hierarchy, the fuel and the phase logic survive it.
+
+## The engine has no line primitive (2026-08-24)
+
+Raised by `apps/orbit`, but not its problem alone. `crcbl::ui::draw_list` offers
+`rect`, `rect_outline` and `text`; there is no line, polyline or thick stroke,
+on the UI layer or the render layer. Consumers that want one today:
+
+- `apps/orbit`'s trajectory, which draws sampled points instead.
+- `docs/plan/05-physics.md`'s debug draw — contacts, sweeps, fat AABBs, BVH
+  bounds, islands.
+- `docs/plan/sample/06-orbit.md`'s "orbit path debug draw" by name.
+
+Two shapes are possible and they are not the same feature. A **UI-space
+polyline** in `DrawList` is small — the compositor already builds triangles, and
+a stroke is two triangles a segment — and would serve the map and any 2D
+overlay. A **world-space debug-draw pass** is the bigger one and is what the
+physics debug views actually want, because their lines are in the scene and have
+to depth-test against it. Doing the first does not give the second.
+
+Not started, and worth a decision on which comes first before either does.

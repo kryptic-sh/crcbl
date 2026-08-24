@@ -393,6 +393,26 @@ const EXPECTATIONS = {
     moving: /turn: ([\d.]+)/,
     movingLabel: 'the turntable carries the camera under its own steam',
   },
+  // **The sample that flies itself.** orbit takes input, but a page that has
+  // just loaded has had none — and a rocket standing on its pad is the same
+  // still frame a stopped loop would draw. A script flies the ascent from the
+  // sixtieth tick, so `alt` climbs without anyone touching a key, and the first
+  // key a visitor presses ends the script for good. Group C reads it before
+  // group F touches anything.
+  orbit: {
+    key: null,
+    // Read off the *first* line, which is the ship still on the pad — so it
+    // cannot ask about the ascent. What it asks instead is that `apo:` is a
+    // number. A body at rest is at its own apoapsis, and the formula that used
+    // to compute one divided the semi-latus rectum by `1 - e`, which for a
+    // motionless ship is `0 / 0`: the readout came back `NaN`, and the flight
+    // computer that compared against it concluded it had already arrived and
+    // shut the engine down. A `NaN` reads as a number everywhere downstream,
+    // so the place to catch it is where it is printed.
+    waiting: (line) => line.includes('[HUD] tick:') && /\bapo: -?\d/.test(line),
+    moving: /alt: (-?[\d.]+)/,
+    movingLabel: 'the rocket climbs under its own steam',
+  },
 };
 
 const EXPECTED = EXPECTATIONS[SLUG];

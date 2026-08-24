@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/orbit` runs in a browser.** The ninth demo on the site, and the
+  physics pillar's acceptance test: a rocket off a pad, through an atmosphere
+  that fights it, into an orbit it holds. Burning or in the air, the flight is
+  integrated — inverse-square gravity, quadratic drag, thrust against a mass
+  that falls as the tank empties, four substeps a tick. Coasting in vacuum it is
+  propagated analytically instead, so timewarp to x1000 costs no more than x1
+  and drifts by nothing; opening the throttle or touching the top of the
+  atmosphere drops it back to x1 on the same tick, because the analytic solution
+  stops being true there. It flies itself until the first key is pressed, so a
+  page that has just loaded shows a flight rather than a rocket on a pad, and
+  the orbit drawn on the map is the propagator asked where the ship will be at
+  ninety-six times across one period rather than an ellipse fitted to it.
+
 - **`crcbl_phys::PointGravity`** — Newtonian gravity toward a body, falling off
   as the inverse square, alongside the uniform `GravityForce` that stays. A
   platformer wants the field; anything that goes high enough to notice gravity

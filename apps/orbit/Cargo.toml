@@ -1,0 +1,32 @@
+[package]
+name = "orbit"
+description = "Orbit — the physics pillar's acceptance test: launch, orbit, timewarp, land"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends, like every other sample.** `src/main.rs` owns
+# argv and the exit code, `src/web.rs` is an `extern "C"` entry point a browser's
+# JS shim drives once per `requestAnimationFrame`, and a bin crate has no
+# linkable artifact for the second. See `apps/breakout/Cargo.toml` at length.
+#
+# The lib is not called `orbit`: a lib and a bin of the same name in one package
+# write the same `orbit.wasm`, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_orbit"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "orbit"
+path = "src/main.rs"
+
+[dependencies]
+crcbl = { workspace = true }
+# The flight is written in `f64` vectors throughout — `crcbl::phys` speaks
+# `glam`'s and so does this sample, rather than converting at every call.
+glam = { workspace = true }
+
+[lints]
+workspace = true

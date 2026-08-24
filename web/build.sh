@@ -145,6 +145,7 @@ DEMOS=(
   "lantern:crcbl_lantern:demos/lantern"
   "quarry:crcbl_quarry:demos/quarry"
   "viewer:crcbl_viewer:demos/viewer"
+  "orbit:crcbl_orbit:demos/orbit"
 )
 
 profile_flag=()

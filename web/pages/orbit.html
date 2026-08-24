@@ -1,0 +1,97 @@
+<!--meta
+{
+  "out": "demos/orbit/index.html",
+  "slug": "orbit",
+  "name": "Orbit",
+  "title": "Orbit — Crucible",
+  "description": "A rocket launched, orbited and timewarped on Crucible's physics, drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/orbit", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/orbit\">apps/orbit</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/orbit/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Orbit</span></h1>
+  <p class="tagline">
+    The physics pillar's acceptance test, wearing a rocket costume. Launch,
+    climb through the air, reach an orbit, and warp along it a thousand times
+    faster than it happens.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>It is already flying. Press anything and it is yours.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Throttle</span>
+      <span><kbd>W</kbd> <kbd>S</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Turn, in the orbital plane</span>
+      <span><kbd>A</kbd> <kbd>D</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Timewarp, ×1 to ×1000</span>
+      <span><kbd>,</kbd> <kbd>.</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Launch, and restart after a landing</span>
+      <span><kbd>SPACE</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>
+    Two ways of moving a spacecraft, and the rule that switches between them.
+  </h3>
+  <p>
+    While the engine is burning or the ship is in the air, the flight is
+    <strong>integrated</strong>: gravity that falls off as the inverse square,
+    quadratic drag against an atmosphere whose density falls off exponentially
+    with altitude, and thrust against a mass that drops as the tank empties —
+    stepped four times per tick by a symplectic integrator. Terminal velocity on
+    the way down is not scripted anywhere; it is where the drag comes to balance
+    the weight.
+  </p>
+  <p>
+    Coasting in vacuum with the engine shut down, it is <strong>solved</strong>
+    instead. The ship's position at some time ahead is the answer to Kepler's
+    equation, which costs the same to ask for a second away as for a century —
+    so a tick at ×1000 advances a thousand seconds without integrating a
+    thousand times, and without the drift a thousand times the steps would
+    accumulate. Ten thousand revolutions later the ship arrives within a
+    centimetre of where it started, which is a test in the repository rather
+    than a claim on a page.
+  </p>
+  <p>
+    The switch between them is the whole point, and it is a rule rather than a
+    button: the analytic solution is only the truth while gravity is the only
+    force, so opening the throttle or touching the top of the atmosphere drops
+    the warp back to ×1 on the same tick. Try warping on the pad and the
+    controls will refuse you.
+  </p>
+  <p>
+    The orbit drawn on the map is not an ellipse fitted to the ship. It is the
+    same propagator asked where the ship will be at ninety-six times spread
+    evenly across one period — which is why the dots crowd together at the far
+    end of an eccentric orbit and spread out as it swings past the planet.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->
