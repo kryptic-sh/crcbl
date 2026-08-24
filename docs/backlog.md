@@ -16578,16 +16578,6 @@ slice deliberately did not do.
   it. Whoever un-defers them deletes both `resolve_count`s and lets the seam
   answer.
 
-- **`crcbl-vk`'s WSI row is still unwatched.** Its `ImageEntry` is built at
-  three sites: `create_image`, the WSI ring in `create_swapchain`, and
-  `build_offscreen_ring`. The agnostic
-  `a_view_of_an_acquired_frame_is_checked_against_the_frame` covers the
-  offscreen one — verified the hard way: sabotaging that row to `0/0` leaves all
-  53 vk e2e tests green and fails the agnostic test. The **WSI** row has no such
-  guard, because reaching it needs a real window and the windowed harnesses
-  (`run-x11-e2e.sh`, `run-wayland-e2e.sh`) take a frame's view through
-  `AcquiredFrame::view` rather than asking `create_image_view` for one. Closing
-  it means a windowed-harness case that builds a view through the seam call.
 - **`crcbl-vk` has no unit-level test for this rule.** Its `mod tests` holds
   only pure functions and the harness lives in `crates/crcbl-vk/tests/`, so the
   evidence that the vk path enforces it at all is the agnostic suite plus

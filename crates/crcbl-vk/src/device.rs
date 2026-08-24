@@ -132,6 +132,40 @@ pub(crate) struct ImageEntry {
     pub(crate) ring_reuse: bool,
 }
 
+impl ImageEntry {
+    /// The row a **ring** image files, WSI or offscreen.
+    ///
+    /// One mip of one layer, because that is what both rings ask for:
+    /// `create_swapchain` passes `imageArrayLayers: 1` and a swapchain image
+    /// never has a mip chain, and `build_offscreen_ring`'s
+    /// `vk::ImageCreateInfo` asks for both.
+    ///
+    /// **Written once so the guard reaches both rings.** The agnostic
+    /// `a_view_of_an_acquired_frame_is_checked_against_the_frame` can only
+    /// reach the offscreen ring — there is no window in a headless suite — so
+    /// with the pair spelled out at each ring the WSI copy was watched by
+    /// nothing, and two copies is where the covered one stays right and the
+    /// unwatched one drifts. There is now one pair to get wrong.
+    ///
+    /// `ring_reuse` is the one thing the two rings do not share, and it is the
+    /// parameter for that reason: a WSI image's acquire semaphore already
+    /// orders its reuse, an offscreen image comes back round with none.
+    fn ring(owner: u64, raw: vk::Image, format: Format, ring_reuse: bool) -> Self {
+        Self {
+            owner,
+            raw,
+            // The driver owns a ring image's memory in both cases.
+            memory: vk::DeviceMemory::null(),
+            format,
+            mip_levels: 1,
+            layers: 1,
+            // Destroying such a handle drops the name and leaves the image.
+            swapchain_owned: true,
+            ring_reuse,
+        }
+    }
+}
+
 /// An image view.
 #[derive(Debug)]
 pub(crate) struct ViewEntry {
@@ -3383,20 +3417,14 @@ impl VkDevice {
         let image_handles: Vec<ImageHandle> = images
             .iter()
             .map(|image| {
-                self.inner.stamp(state.images.insert(ImageEntry {
-                    owner: self.inner.id,
-                    raw: *image,
-                    memory: vk::DeviceMemory::null(),
-                    format: desc.format,
-                    // A WSI image is one mip of one layer: `create_swapchain`
-                    // asks `vkCreateSwapchainKHR` for `imageArrayLayers: 1` and
-                    // a swapchain image never has a mip chain.
-                    mip_levels: 1,
-                    layers: 1,
-                    swapchain_owned: true,
-                    // A WSI image's acquire semaphore already carries it.
-                    ring_reuse: false,
-                }))
+                // `ring_reuse: false` — a WSI image's acquire semaphore
+                // already orders its reuse.
+                self.inner.stamp(state.images.insert(ImageEntry::ring(
+                    self.inner.id,
+                    *image,
+                    desc.format,
+                    false,
+                )))
             })
             .collect();
         // These rows are `swapchain_owned`, so `destroy_image` /
@@ -3542,23 +3570,14 @@ impl VkDevice {
         let image_handles: Vec<ImageHandle> = images
             .iter()
             .map(|image| {
-                // The ring owns them, so `destroy_image` must not free one —
-                // the same rule a WSI image follows, for the same reason. The
-                // rule they do *not* share is `ring_reuse`: these come back
-                // round with no semaphore to order the reuse.
-                self.inner.stamp(state.images.insert(ImageEntry {
-                    owner: self.inner.id,
-                    ring_reuse: true,
-                    raw: *image,
-                    memory: vk::DeviceMemory::null(),
-                    format: desc.format,
-                    // One mip of one layer, exactly as a WSI image is — the
-                    // `vk::ImageCreateInfo` above in `build_offscreen_ring`
-                    // asks for both.
-                    mip_levels: 1,
-                    layers: 1,
-                    swapchain_owned: true,
-                }))
+                // `ring_reuse: true` — these come back round with no
+                // semaphore to order the reuse.
+                self.inner.stamp(state.images.insert(ImageEntry::ring(
+                    self.inner.id,
+                    *image,
+                    desc.format,
+                    true,
+                )))
             })
             .collect();
         let (views, view_handles) =
