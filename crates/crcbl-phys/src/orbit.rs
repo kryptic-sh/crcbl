@@ -161,10 +161,20 @@ impl Orbit {
 
     /// Distance at the furthest point, or `None` for an orbit that does not
     /// come back.
+    ///
+    /// From `a(1 + e)` rather than from the semi-latus rectum, which is the
+    /// opposite choice to [`periapsis`](Self::periapsis) and for the opposite
+    /// reason. The two are equal — `p = a(1 - e)(1 + e)` — but they fail at
+    /// different ends: `p / (1 - e)` cancels as `e` approaches one, and for a
+    /// **radial** trajectory, where the angular momentum is exactly zero, it is
+    /// `0 / 0`. That is not a corner case here. A rocket going straight up off
+    /// a planet that does not rotate is exactly radial, and it does have an
+    /// apoapsis: it is `2a`, the height it stops at before falling back, which
+    /// is what this returns.
     #[must_use]
     pub fn apoapsis(&self) -> Option<f64> {
         self.is_closed()
-            .then(|| self.semi_latus_rectum / (1.0 - self.eccentricity))
+            .then_some(self.semi_major_axis * (1.0 + self.eccentricity))
     }
 
     /// The orbital period in seconds, or `None` for an orbit that does not
@@ -736,6 +746,67 @@ mod tests {
         assert!(
             error < 1.0e-3,
             "an hour out and back came home {error} m adrift"
+        );
+    }
+
+    /// **A trajectory straight up still has a top.**
+    ///
+    /// Zero angular momentum is not a corner case: a rocket leaving a planet
+    /// that does not rotate is exactly radial, and so is anything dropped from
+    /// rest. The semi-latus rectum is zero there and the eccentricity is one,
+    /// so the apoapsis formula that divides one by the other is `0 / 0` — and a
+    /// `Some(NaN)` reads as a number everywhere downstream of it, which is how
+    /// it reached a flight computer that concluded it had already arrived.
+    #[test]
+    fn a_radial_trajectory_has_an_apoapsis_where_it_stops() {
+        const HEIGHT: f64 = 7_000_000.0;
+
+        // Dropped from rest: it is at its apoapsis already, and falls to the
+        // centre, so the periapsis is zero.
+        let dropped = State::new(
+            WorldPos::from_offset(DVec3::new(0.0, HEIGHT, 0.0)),
+            DVec3::ZERO,
+        );
+        let orbit = Orbit::from_state(EARTH_MU, dropped);
+        assert!(
+            orbit.is_closed(),
+            "a body dropped from rest comes back down"
+        );
+        let apoapsis = orbit.apoapsis().expect("a closed orbit has an apoapsis");
+        assert!(
+            (apoapsis - HEIGHT).abs() < 1.0e-6,
+            "a body at rest is at its own apoapsis, and this one reports {apoapsis} m"
+        );
+        assert!(
+            orbit.periapsis() < 1.0e-6,
+            "a radial fall reaches the centre, and this one stops at {} m",
+            orbit.periapsis()
+        );
+
+        // Thrown straight up: it stops higher than it started, and the two
+        // agree with the energy it was given.
+        let thrown = State::new(
+            WorldPos::from_offset(DVec3::new(0.0, HEIGHT, 0.0)),
+            DVec3::new(0.0, 1_000.0, 0.0),
+        );
+        let orbit = Orbit::from_state(EARTH_MU, thrown);
+        let apoapsis = orbit.apoapsis().expect("it comes back");
+        assert!(
+            apoapsis.is_finite(),
+            "a vertical throw has a finite top, not {apoapsis}"
+        );
+        assert!(
+            apoapsis > HEIGHT,
+            "thrown upwards it should stop above {HEIGHT} m, and it reports {apoapsis} m"
+        );
+        // **Checked against energy, not against the shape.** A radial body has
+        // no speed left at the top, so all of its energy is potential there and
+        // `E = -mu / r_apo` — which shares no term with `a(1 + e)` and would
+        // not move if the apsis formulas were wrong together.
+        let expected = -EARTH_MU / orbit.specific_energy;
+        assert!(
+            (apoapsis - expected).abs() < expected * 1.0e-9,
+            "the apoapsis {apoapsis} m disagrees with where the energy runs out, {expected} m"
         );
     }
 

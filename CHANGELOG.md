@@ -93,6 +93,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl_phys::Orbit::apoapsis` no longer returns `Some(NaN)` for a radial
+  trajectory.** It came from the semi-latus rectum over `1 - e`, which for a
+  body with no angular momentum is `0 / 0` — and that is not a corner case: a
+  rocket going straight up off a planet that does not rotate is exactly radial,
+  and so is anything dropped from rest. It is now `a(1 + e)`, which is the same
+  quantity for every other orbit, better conditioned near `e = 1`, and finite
+  here: the height the body stops at before falling back. `periapsis` keeps the
+  semi-latus form, which is the one that survives the other end.
+
 - **`crcbl-vk` answered the wrong error variant for anisotropy it cannot do.**
   `create_sampler` checked the ceiling before the feature, so on a device
   without `SAMPLER_ANISOTROPY` — whose honest ceiling is 1.0, the value that
