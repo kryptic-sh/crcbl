@@ -3118,6 +3118,20 @@ try {
   // does. It failed twice that way (lantern 2 -> 5 against a ceiling of six,
   // quarry 1 -> 2 against three), both strictly inside the bound.
   //
+  // **THE WINDOW IS SMALL BECAUSE EACH ONE IS BOUNDED BY `TIMEOUT_MS`, AND THE
+  // SLOWEST DEMO SETS THE SIZE.** Every window polls through `until`, so a
+  // window that the demo cannot finish inside the poll ceiling fails the check
+  // for want of frames rather than for anything it holds on to. quarry draws at
+  // roughly two frames every three seconds under SwiftShader on a CI runner —
+  // measured, not guessed: a 60-frame window took 91.7 s there against a 90 s
+  // ceiling, and the run before this comment failed with `drew fewer than 60
+  // more frames`. Three windows of this size cost the same total frames as the
+  // single 60-frame window that preceded them, so the step's wall clock is
+  // unchanged, while each window now finishes in about a third of its ceiling
+  // instead of just over it. Raising it buys no teeth — a leak that mints one
+  // object per frame moves the count by the window size, and any size at all
+  // makes it climb — so the size exists to fit the ceiling, not to catch more.
+  //
   // So the question asked is whether a kind climbs in **every** window rather
   // than in one. A ring saturates and stops; a leak does not, and the leak this
   // check exists for — a fresh image and view minted per frame and never
@@ -3125,7 +3139,7 @@ try {
   // and the false positive is gone. Per-kind ceilings were the alternative and
   // were not taken: they would put the engine's ring depths in this file, to be
   // silently wrong the day one changed.
-  const FRAMES_WATCHED = 60;
+  const FRAMES_WATCHED = 20;
   const WINDOWS = 3;
   const replayedNow = () => evaluate(page, `crcbl.gpu.stats().replayed`);
   const countsOf = (held) =>
