@@ -16611,3 +16611,56 @@ slice deliberately did not do.
   evidence that the vk path enforces it at all is the agnostic suite plus
   deliberate sabotage runs. That is real evidence but it is not a standing guard
   on the vk call site itself.
+
+## Decision: should `crcbl-webgpu`'s encoder see device state? (2026-08-24)
+
+`WebGpuCommandEncoder` holds a `SharedChannel` and a `HandlePool` and nothing
+else. The device holds the tables — `buffers`, `layouts`, `images`, `swapchains`
+— so any rule that needs to know something about a resource can be checked in a
+`Device` method and **cannot** be checked in an encoder method. That has now
+blocked two seam rules, which is what makes it a decision rather than a quirk:
+
+- **The indirect-draw bound.** `draw_indirect` calls
+  `crcbl_hal::indirect::check_layout` (offset and stride) and cannot call
+  `plan_structures`, which needs the args buffer's length. Every other backend
+  checks the bound.
+- **Dynamic-offset alignment and count.** `bind_group` receives the offsets and
+  the `PipelineLayoutHandle`, but resolving which of the layout's bindings are
+  dynamic needs the `layouts` map. `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` all
+  check both; the null backend does as of this slice.
+
+Neither is currently a `parity_blockers()` row, because neither is a capability
+divergence — the call works, it is the _checking_ that happens elsewhere.
+
+**Option A — leave it.** The browser validates the indirect range itself and
+reports a `GPUValidationError`, and it validates dynamic offsets too, so nothing
+is unchecked in the end; it is checked late, by a different party, with a
+different message. Cost: two seam rules whose answer on this backend is "the
+browser will tell you", and an asterisk on any claim that the seam's rules are
+enforced uniformly.
+
+**Option B — give the encoder a handle on the device's tables.** An
+`Arc<DeviceState>` holding the existing maps, cloned into the encoder at
+`create_command_encoder`. Closes both rules and any future one, and matches what
+`crcbl-vk` does (its encoder reaches `self.device.state()` freely). The real
+cost is **a mutex acquisition per recorded call on the hot path** — `bind_group`
+and `draw_indirect` run per draw, per frame — where today the encoder touches no
+shared state at all. An `RwLock`, or sharding per table, would soften it;
+measuring it before choosing is the honest route, and the browser gate's
+frame-timing numbers are where that would show.
+
+**Option C — check in the replayer instead.** `web/engine/gpu-replay.js` sees
+every resource. But `crates/crcbl-webgpu/src/writer.rs` already warns in its own
+comments that splitting enforcement between the encoder and the replayer is
+where "an unenforced rule both sides assume the other checks" hides, and this
+would put the seam's rules in JavaScript, in a second copy, in a language where
+nothing type-checks them against `crcbl_hal`. Recorded so it is not re-proposed:
+this is the option to avoid.
+
+**What I would pick, and why it is not simply done:** B, if the per-call lock
+measures as noise — it is the only option that makes the seam's rules mean the
+same thing on every backend, which is the whole point of the exhaustive
+`Capability` enum and the agnostic suites. It is not done here because it is a
+change to how every recording method on that backend works, it wants a
+measurement first, and it is not what either of the two slices that hit the wall
+was about. **Needs the user's call**, or an explicit decision to measure.
