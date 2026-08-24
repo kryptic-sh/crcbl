@@ -1664,22 +1664,32 @@ try {
   // simulation advancing under its own steam — which nothing on the JS side
   // could fake. The one check in this group every demo makes, including the one
   // that took no key to get here.
-  const positions = await until(async () => {
-    const seen = new Set(
+  const values = () =>
+    new Set(
       hud()
         .slice(beforeLaunch)
         .map((line) => line.match(EXPECTED.moving)?.[1])
         .filter(Boolean)
     );
+  const positions = await until(async () => {
+    const seen = values();
     return seen.size > 1 ? seen : null;
   });
+  // A failure here has two quite different causes and one of them is not about
+  // the value at all: a demo whose loop stopped logs no second heartbeat, and a
+  // demo that is running while the number is stuck logs many. "It never
+  // changed" reads as the second and is usually the first, so the report counts
+  // the lines as well as the values — see `apps/viewer`'s intermittent macOS
+  // stall in `docs/backlog.md`, which was diagnosed off exactly this number.
+  const beats = hud().length - beforeLaunch;
   check(
     'C',
     EXPECTED.movingLabel,
     Boolean(positions),
     positions
       ? `it took ${positions.size} values: ${[...positions].join(', ')}`
-      : 'it never changed'
+      : `it never changed — ${beats} HUD line(s) since the start, ` +
+          `${values().size} value(s): ${[...values()].join(', ') || 'none'}`
   );
 
   group('D — it renders');

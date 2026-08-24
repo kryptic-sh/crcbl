@@ -16842,6 +16842,21 @@ a real question — does the demo advance on its own — and a stall is the answ
 it is meant to catch. Reproducing it needs a macOS runner; nothing here can.
 Relevant that macOS runner images differ in what they will run.
 
+**It recurred on `57623d4`** (2026-08-24), same job, same 39/41, same two
+failures — so it is roughly one run in three rather than a one-off, and it reds
+the `Pages` workflow on `main` while the deploy itself succeeds.
+
+**The report now says which of the two candidates it is.** `it never changed`
+could not tell a demo whose loop stopped from a demo that is running while the
+number is stuck, and those want opposite investigations. Group C's motion check
+in `web/tools/browser-e2e.mjs` now counts the heartbeats it saw as well as the
+values, so the next occurrence answers it: a frozen-but-running viewer reads
+`89 HUD line(s) since the start, 1 value(s): 0.0` — measured here, by holding
+the turntable at zero and running the gate — and a stalled one will read a
+handful of lines or none. Until a failure carries that number, the
+`requestAnimationFrame`-throttling reading above is a hypothesis and not a
+finding.
+
 ## sandbox is not in the windowed gate (2026-08-24)
 
 `tools/run-samples-windowed.sh` is the only check that a sample brings up a real
