@@ -66,7 +66,8 @@ pub use cluster_dag::{
     ClusterDag, ClusterDagError, ClusterGroup, DagLevel, GroupBounds, build_cluster_dag,
 };
 pub use gltf_import::{
-    GltfImage, GltfInstance, GltfMesh, GltfNode, GltfPrimitive, GltfScene, GltfTexture, import_gltf,
+    GltfChannel, GltfClip, GltfImage, GltfInstance, GltfInterpolation, GltfMesh, GltfNode,
+    GltfPrimitive, GltfSamples, GltfScene, GltfSkin, GltfTexture, import_gltf,
 };
 #[cfg(feature = "render")]
 pub use gltf_render::{RenderScene, Skip, build_render_scene};

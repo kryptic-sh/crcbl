@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The glTF importer reads skins and animations.** `GltfScene::skins` is the
+  document's `skins` array — joint node indices, inverse bind matrices as
+  `glam::Mat4`, and the skeleton root — and `GltfScene::clips` is its
+  `animations` array, each clip a list of `GltfChannel`s carrying a target node,
+  keyframe times, an interpolation and the sampled translations, rotations,
+  scales or morph weights. `GltfPrimitive::joints` and `GltfPrimitive::weights`
+  are the per-vertex binding, empty for an unskinned primitive and otherwise as
+  long as `positions`. Component types are normalised the way the specification
+  defines them, so a `JOINTS_0` stored as bytes and a quaternion stored as
+  normalized shorts arrive as `u16` and `f32` rather than as raw numbers. This
+  is the source stage of `docs/plan/17-animation.md` and nothing plays it yet: a
+  rigged character still draws in its bind pose, and the two warnings that used
+  to say skins and animations were being skipped are gone because they no longer
+  are. Morph _targets_ are still dropped, and still warned about.
+
 - **`apps/bracket` — matchmaking, rating and a ladder, with no game attached.**
   Players queue, get paired by rating with a tolerance that widens as they wait,
   a stub resolves the match from true skill, and Elo moves.

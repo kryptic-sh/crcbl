@@ -50,6 +50,7 @@ use std::path::Path;
 
 use crcbl_assets::StorageError;
 use gltf::json::accessor::{ComponentType, Type};
+use gltf::json::animation::Property;
 use gltf::json::buffer::{MAX_BYTE_STRIDE, MIN_BYTE_STRIDE};
 use gltf::json::validation::Checked;
 use gltf::json::{Root, mesh::Semantic};
@@ -118,9 +119,12 @@ pub(crate) fn check_glb_header(bytes: &[u8], key: &Path) -> Result<(), StorageEr
 /// 3. every mesh primitive names accessors that exist and carry the types the
 ///    reader will cast them to;
 /// 4. every node, scene and default-scene index exists;
-/// 5. every image says where its bytes are;
-/// 6. every texture names an image and a sampler that exist;
-/// 7. every material's texture references name a texture that exists.
+/// 5. every skin names joints, a skeleton and bind matrices that exist;
+/// 6. every animation channel names a sampler, a node and accessors that exist,
+///    and a `path` and `interpolation` glTF defines;
+/// 7. every image says where its bytes are;
+/// 8. every texture names an image and a sampler that exist;
+/// 9. every material's texture references name a texture that exists.
 pub(crate) fn check_document(
     root: &Root,
     buffers: &[Vec<u8>],
@@ -130,6 +134,8 @@ pub(crate) fn check_document(
     check_accessors(root, key)?;
     check_meshes(root, key)?;
     check_nodes(root, key)?;
+    check_skins(root, key)?;
+    check_animations(root, key)?;
     check_images(root, key)?;
     check_textures(root, key)?;
     check_materials(root, key)
@@ -375,6 +381,27 @@ fn check_meshes(root: &Root, key: &Path) -> Result<(), StorageError> {
                         Type::Vec2,
                         &[ComponentType::F32, ComponentType::U8, ComponentType::U16],
                     )?,
+                    // The two component types glTF allows a joint index, and
+                    // the only two `ReadJoints` has variants for — anything
+                    // else is `unreachable!()` inside `Reader::read_joints`.
+                    Checked::Valid(Semantic::Joints(0)) => check_attribute(
+                        root,
+                        key,
+                        &named("JOINTS_0"),
+                        accessor.value(),
+                        Type::Vec4,
+                        &[ComponentType::U8, ComponentType::U16],
+                    )?,
+                    // `ReadWeights::into_f32` un-normalises the two integer
+                    // spellings, the same way `TEXCOORD_0`'s does.
+                    Checked::Valid(Semantic::Weights(0)) => check_attribute(
+                        root,
+                        key,
+                        &named("WEIGHTS_0"),
+                        accessor.value(),
+                        Type::Vec4,
+                        &[ComponentType::F32, ComponentType::U8, ComponentType::U16],
+                    )?,
                     // An attribute this importer does not read. Its accessor is
                     // still required to exist, because nothing stops a later
                     // slice reading it and an index that names nothing is a
@@ -480,6 +507,147 @@ fn check_nodes(root: &Root, key: &Path) -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+/// Every skin's joints, skeleton and `inverseBindMatrices` exist.
+///
+/// `gltf::Skin` resolves all three by `nth(index).unwrap()` — `joints()`,
+/// `skeleton()` and `inverse_bind_matrices()` each — so a skin naming a node or
+/// an accessor that is not there aborts the process. The matrix accessor is
+/// checked for its type as well as its existence, because
+/// `accessor::Iter::<[[f32; 4]; 4]>::new` asserts the element size it was
+/// handed.
+fn check_skins(root: &Root, key: &Path) -> Result<(), StorageError> {
+    for (index, skin) in root.skins.iter().enumerate() {
+        for joint in &skin.joints {
+            if joint.value() >= root.nodes.len() {
+                return Err(malformed(
+                    key,
+                    format!(
+                        "skin {index} names joint node {}, and there are {} nodes",
+                        joint.value(),
+                        root.nodes.len()
+                    ),
+                ));
+            }
+        }
+        if let Some(skeleton) = skin.skeleton
+            && skeleton.value() >= root.nodes.len()
+        {
+            return Err(malformed(
+                key,
+                format!(
+                    "skin {index} names skeleton node {}, and there are {} nodes",
+                    skeleton.value(),
+                    root.nodes.len()
+                ),
+            ));
+        }
+        if let Some(matrices) = skin.inverse_bind_matrices {
+            check_attribute(
+                root,
+                key,
+                &format!("skin {index}'s inverseBindMatrices"),
+                matrices.value(),
+                Type::Mat4,
+                &[ComponentType::F32],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Every animation channel can be read without `gltf` unwrapping something the
+/// file did not supply.
+///
+/// Five `unwrap`s over file contents live behind one channel:
+/// `Channel::sampler` is `samplers().nth(index).unwrap()`, `Target::node` is
+/// the same over the node array, `Target::property` and
+/// `Sampler::interpolation` unwrap a `Checked`, and `Sampler::input`/`output`
+/// index the accessor array. The output accessor's type depends on what the
+/// channel drives, so it is checked against the target's own path — a rotation
+/// channel whose output is not `VEC4` reaches an `unreachable!()` in
+/// `Reader::read_outputs`.
+fn check_animations(root: &Root, key: &Path) -> Result<(), StorageError> {
+    for (index, animation) in root.animations.iter().enumerate() {
+        for (channel_index, channel) in animation.channels.iter().enumerate() {
+            let at = format!("animation {index} channel {channel_index}");
+            if channel.target.node.value() >= root.nodes.len() {
+                return Err(malformed(
+                    key,
+                    format!(
+                        "{at} targets node {}, and there are {} nodes",
+                        channel.target.node.value(),
+                        root.nodes.len()
+                    ),
+                ));
+            }
+            let Checked::Valid(property) = channel.target.path else {
+                return Err(malformed(
+                    key,
+                    format!("{at} targets a path glTF does not define"),
+                ));
+            };
+            let sampler = animation
+                .samplers
+                .get(channel.sampler.value())
+                .ok_or_else(|| {
+                    malformed(
+                        key,
+                        format!(
+                            "{at} names sampler {}, and animation {index} has {}",
+                            channel.sampler.value(),
+                            animation.samplers.len()
+                        ),
+                    )
+                })?;
+            if matches!(sampler.interpolation, Checked::Invalid) {
+                return Err(malformed(
+                    key,
+                    format!("{at}'s sampler has an interpolation glTF does not define"),
+                ));
+            }
+            check_attribute(
+                root,
+                key,
+                &format!("{at}'s input"),
+                sampler.input.value(),
+                Type::Scalar,
+                &[ComponentType::F32],
+            )?;
+            // The variants `ReadOutputs` has for each path: a TRS curve is
+            // float triples, and a rotation or a morph weight may also arrive
+            // as a normalized integer, which `into_f32` un-normalises.
+            let (dimensions, components) = match property {
+                Property::Translation | Property::Scale => (Type::Vec3, &[ComponentType::F32][..]),
+                Property::Rotation => (Type::Vec4, NORMALIZABLE),
+                Property::MorphTargetWeights => (Type::Scalar, NORMALIZABLE),
+            };
+            check_attribute(
+                root,
+                key,
+                &format!("{at}'s output"),
+                sampler.output.value(),
+                dimensions,
+                components,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The component types a rotation or a morph weight may be stored as.
+///
+/// The float spelling plus the four normalized-integer ones the specification
+/// allows, which are exactly the variants `gltf`'s `Rotations` and
+/// `MorphTargetWeights` enums have — anything else is an `unreachable!()` in
+/// `Reader::read_outputs`.
+const NORMALIZABLE: &[ComponentType] = &[
+    ComponentType::F32,
+    ComponentType::I8,
+    ComponentType::U8,
+    ComponentType::I16,
+    ComponentType::U16,
+];
 
 /// Every image says where its bytes are, in a form
 /// [`gltf::image::Image::source`] can answer without panicking.
@@ -1071,6 +1239,112 @@ mod tests {
                 "{slot} was refused for {reason:?}"
             );
         }
+    }
+
+    /// [`refused`] for the rigged fixture, whose buffer is a different length.
+    #[track_caller]
+    fn refused_rig(json: &str) -> String {
+        match import_rigged_glb(json) {
+            Err(error) => error.to_string(),
+            Ok(scene) => {
+                panic!("this document should have been refused, and it imported: {scene:?}")
+            }
+        }
+    }
+
+    /// Every way a rig can name something that is not there, refused.
+    ///
+    /// Each of these is an `unwrap` inside `gltf` over a number the file
+    /// supplied — `Skin::joints`, `Skin::skeleton`, `Channel::sampler`,
+    /// `Target::node` — or an accessor whose element size `accessor::Iter`
+    /// asserts. Without the checks they would abort the process rather than
+    /// return, which is this module's whole reason to exist, so each is
+    /// exercised rather than assumed.
+    #[test]
+    fn every_malformed_rig_is_refused_with_the_reason_it_was_refused_for() {
+        let base = rigged_json(BIN_CHUNK_BUFFER);
+        for (from, to, because) in [
+            (
+                r#""joints": [1, 2]"#,
+                r#""joints": [1, 9]"#,
+                "names joint node 9, and there are 3 nodes",
+            ),
+            (
+                r#""skeleton": 1"#,
+                r#""skeleton": 9"#,
+                "names skeleton node 9, and there are 3 nodes",
+            ),
+            (
+                r#""inverseBindMatrices": 6"#,
+                r#""inverseBindMatrices": 9"#,
+                "inverseBindMatrices names accessor 9",
+            ),
+            (
+                r#""target": { "node": 2, "path": "rotation" }"#,
+                r#""target": { "node": 9, "path": "rotation" }"#,
+                "targets node 9, and there are 3 nodes",
+            ),
+            (
+                r#""channels": [{ "sampler": 0,"#,
+                r#""channels": [{ "sampler": 9,"#,
+                "names sampler 9, and animation 0 has 1",
+            ),
+            (
+                r#""samplers": [{ "input": 7, "output": 8"#,
+                r#""samplers": [{ "input": 9, "output": 8"#,
+                "input names accessor 9",
+            ),
+            (
+                r#""samplers": [{ "input": 7, "output": 8"#,
+                r#""samplers": [{ "input": 7, "output": 9"#,
+                "output names accessor 9",
+            ),
+        ] {
+            let reason = refused_rig(&replacing(&base, from, to));
+            assert!(
+                reason.contains(because),
+                "{to:?} was refused for {reason:?}, and the reason should say {because:?}"
+            );
+        }
+    }
+
+    /// A rotation channel whose output is not a quaternion is refused rather
+    /// than reaching `ReadOutputs`.
+    ///
+    /// Separate from the table because the mutation is a *type*, not an index:
+    /// accessor 8 stays in range and in bounds, so nothing before
+    /// `check_animations` has any reason to object — and
+    /// `Reader::read_outputs` matches a rotation's data type with an
+    /// `unreachable!()` arm.
+    #[test]
+    fn a_rotation_channel_whose_output_is_not_a_quaternion_is_refused() {
+        let json = replacing(
+            &rigged_json(BIN_CHUNK_BUFFER),
+            r#"{ "bufferView": 8, "componentType": 5126, "count": 2, "type": "VEC4" }"#,
+            r#"{ "bufferView": 8, "componentType": 5126, "count": 2, "type": "VEC3" }"#,
+        );
+        let reason = refused_rig(&json);
+        assert!(
+            reason.contains("output is Valid(Vec3)"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    /// `JOINTS_0` as a float is refused: `Reader::read_joints` has variants for
+    /// the two unsigned integer spellings the specification allows and an
+    /// `unreachable!()` for everything else.
+    #[test]
+    fn a_float_joints_attribute_is_refused() {
+        let json = replacing(
+            &rigged_json(BIN_CHUNK_BUFFER),
+            r#""JOINTS_0": 4"#,
+            r#""JOINTS_0": 5"#,
+        );
+        let reason = refused_rig(&json);
+        assert!(
+            reason.contains("JOINTS_0 is") && reason.contains("F32"),
+            "unexpected reason: {reason}"
+        );
     }
 
     /// Named separately from the table because the claim is about the mesh

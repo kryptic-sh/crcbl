@@ -83,17 +83,34 @@
 //! scene, so a level that only the instances knew about would be a level that
 //! vanished. See [`GltfNode::lod_nodes`] and [`crate::lod_resolve`].
 //!
+//! # The rig is read, and nothing here plays it
+//!
+//! [`GltfScene::skins`] and [`GltfScene::clips`] are the document's `skins` and
+//! `animations` arrays, and [`GltfPrimitive::joints`] and
+//! [`GltfPrimitive::weights`] are the per-vertex binding that ties a mesh to
+//! one. That is the whole of what `docs/plan/17-animation.md` calls its source
+//! stage: joint hierarchy, inverse bind matrices, and sampled TRS curves, in
+//! host memory and in the document's own units.
+//!
+//! **Reading is not playback.** Nothing in this crate poses a skeleton, blends
+//! a clip or skins a vertex — a joint palette is `crcbl-anim`'s, and the
+//! compute prepass that consumes one is the renderer's. A caller that imports a
+//! rigged character and draws it gets its bind pose, exactly as before; what
+//! changed is that the rig is now in the result rather than only in a warning.
+//!
 //! # What is parsed and dropped
 //!
-//! Skins and animations are in the format and are not read: the plan has them
-//! "parsed but unused until the animation feature lands", and a type nothing
-//! fills is worse than no type. Vertex colours, tangents, `TEXCOORD_1` and
-//! morph targets are read by nothing here and so are not extracted.
+//! Vertex colours, tangents and `TEXCOORD_1` are read by nothing here and so
+//! are not extracted, and neither is a second influence set — `JOINTS_1` and
+//! `WEIGHTS_1` — so a vertex arrives bound to at most four joints.
 //!
-//! **Each of those is warned about when a document actually uses it**, naming
-//! the file and the feature, rather than being silently absent from the result.
-//! A viewer that shows a rigged character in its bind pose has to be able to say
-//! so, and the only place that knows the document had a skin at all is here.
+//! **Morph targets are dropped and warned about**, naming the file and the
+//! count, rather than being silently absent from the result: a viewer showing a
+//! mesh at its base shape has to be able to say why, and the only place that
+//! knows the document had a morph target at all is here. A channel that
+//! *animates* morph weights is still read — see [`GltfSamples::MorphWeights`] —
+//! because a curve is a curve whether or not this importer extracted the shapes
+//! it drives.
 //!
 //! `MSFT_lod` is the one extension read, and only where it sits on a **node**.
 //! The extension is also defined on materials — a material chain for a mesh
@@ -113,6 +130,8 @@ use std::path::Path;
 use crcbl_assets::{AssetSource, StorageError};
 use crcbl_shaders::mesh::GpuMaterial;
 use glam::Mat4;
+use gltf::animation::Interpolation;
+use gltf::animation::util::ReadOutputs;
 use gltf::mesh::Mode;
 
 use crate::gltf_check::{check_document, check_glb_header, malformed};
@@ -131,6 +150,8 @@ pub struct GltfScene {
     images: Vec<GltfImage>,
     nodes: Vec<GltfNode>,
     instances: Vec<GltfInstance>,
+    skins: Vec<GltfSkin>,
+    clips: Vec<GltfClip>,
 }
 
 impl GltfScene {
@@ -197,6 +218,227 @@ impl GltfScene {
     pub fn instances(&self) -> &[GltfInstance] {
         &self.instances
     }
+
+    /// The document's `skins` array, in file order.
+    ///
+    /// Empty for the overwhelming majority of documents, which have no rig.
+    /// Which skin a node wears is not here: it is the node's own `skin` field,
+    /// and nothing in this crate poses a skeleton yet — see the [module
+    /// docs](self).
+    #[inline]
+    #[must_use]
+    pub fn skins(&self) -> &[GltfSkin] {
+        &self.skins
+    }
+
+    /// The document's `animations` array, in file order, one [`GltfClip`] each.
+    ///
+    /// Empty for a document with no animations — and also for one whose
+    /// `animations` array could not be deserialized at all, which is a warning
+    /// rather than a refusal; see [`import_gltf`].
+    #[inline]
+    #[must_use]
+    pub fn clips(&self) -> &[GltfClip] {
+        &self.clips
+    }
+}
+
+/// One entry of the document's `skins` array: which nodes are its joints, and
+/// what each joint's bind pose was.
+///
+/// The joint *hierarchy* is not repeated here. A joint is a node like any
+/// other, so its parent is its parent in [`GltfScene::nodes`], and a second
+/// copy of the tree would be a second answer to a question the node array
+/// already answers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GltfSkin {
+    name: Option<String>,
+    joints: Vec<usize>,
+    inverse_binds: Vec<Mat4>,
+    skeleton: Option<usize>,
+}
+
+impl GltfSkin {
+    /// The name the document gave this skin, if it gave one.
+    #[inline]
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The skin's joints, in the order the joint palette wants them: entry `n`
+    /// is the node that joint `n` of this skin is.
+    ///
+    /// Every entry is a valid index into [`GltfScene::nodes`] — one that is not
+    /// makes the document malformed rather than making this array shorter. The
+    /// order is the document's, and it is load-bearing: [`GltfPrimitive::joints`]
+    /// indexes *this* array, not the node array.
+    #[inline]
+    #[must_use]
+    pub fn joints(&self) -> &[usize] {
+        &self.joints
+    }
+
+    /// World → joint-local at bind time, one per entry of
+    /// [`joints`](Self::joints) and exactly as long.
+    ///
+    /// **A skin that declares none gets identities**, which is what the
+    /// specification defines their absence to mean: the matrices were
+    /// pre-applied to the vertices. Materialising them here rather than
+    /// answering `None` leaves the consumer one case instead of two, and the
+    /// two cases would have had the same arithmetic.
+    #[inline]
+    #[must_use]
+    pub fn inverse_binds(&self) -> &[Mat4] {
+        &self.inverse_binds
+    }
+
+    /// The node the document names as this skeleton's common root, if it names
+    /// one.
+    ///
+    /// A valid index into [`GltfScene::nodes`] where present. `None` is the
+    /// ordinary case and the specification defines it as "resolve joint
+    /// transforms against the scene root" — it is a hint about where the
+    /// hierarchy is rooted, not a joint, and it need not be one.
+    #[inline]
+    #[must_use]
+    pub const fn skeleton(&self) -> Option<usize> {
+        self.skeleton
+    }
+}
+
+/// One entry of the document's `animations` array: a name and the channels that
+/// make it move.
+///
+/// Nothing here is resampled, retimed or sorted. These are the file's own
+/// keyframes, in the file's own seconds, which is what
+/// `docs/plan/17-animation.md` asks of the source stage — the cook that turns
+/// them into fixed-rate curves is a later one and needs the samples it started
+/// from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GltfClip {
+    name: Option<String>,
+    channels: Vec<GltfChannel>,
+}
+
+impl GltfClip {
+    /// The name the document gave this animation, if it gave one.
+    #[inline]
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The clip's channels, in file order.
+    ///
+    /// Several channels can drive one node — a translation curve and a rotation
+    /// curve on the same joint is the usual case — so this is not keyed by node.
+    #[inline]
+    #[must_use]
+    pub fn channels(&self) -> &[GltfChannel] {
+        &self.channels
+    }
+}
+
+/// One animation channel: what it drives, when, and with what.
+///
+/// A glTF channel is a target plus a sampler, and the sampler is flattened into
+/// this type rather than shared: samplers are already per-animation, and a
+/// channel that had to look one up by index would be a fourth array to keep in
+/// step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GltfChannel {
+    node: usize,
+    times: Vec<f32>,
+    interpolation: GltfInterpolation,
+    samples: GltfSamples,
+}
+
+impl GltfChannel {
+    /// Which of [`GltfScene::nodes`] this channel drives.
+    ///
+    /// Always a valid index — a channel naming a node that does not exist makes
+    /// the document malformed.
+    #[inline]
+    #[must_use]
+    pub const fn node(&self) -> usize {
+        self.node
+    }
+
+    /// The keyframe times, in seconds, as the file gives them.
+    ///
+    /// Never empty: an accessor with a count of zero is refused before this is
+    /// built. The specification requires them to ascend and this importer does
+    /// not verify that it did — nothing here searches them, and a player that
+    /// does has to decide what a file that disobeys should look like.
+    #[inline]
+    #[must_use]
+    pub fn times(&self) -> &[f32] {
+        &self.times
+    }
+
+    /// How to read between two keyframes.
+    #[inline]
+    #[must_use]
+    pub const fn interpolation(&self) -> GltfInterpolation {
+        self.interpolation
+    }
+
+    /// The sampled values, one per keyframe — or three per keyframe under
+    /// [`GltfInterpolation::CubicSpline`], which stores an in-tangent, the
+    /// value and an out-tangent for each.
+    ///
+    /// That ratio is checked at import, so a channel whose samples do not line
+    /// up with its times makes the document malformed rather than arriving here
+    /// for a player to trip over.
+    #[inline]
+    #[must_use]
+    pub const fn samples(&self) -> &GltfSamples {
+        &self.samples
+    }
+}
+
+/// How an animation sampler reads between two keyframes — glTF's
+/// `interpolation`.
+///
+/// This crate's own enum rather than `gltf`'s, for the reason `crcbl-scene`
+/// keeps every other one: [`GltfScene`] is what leaves this crate, and a
+/// consumer of it should not have to depend on the parser to match on a result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GltfInterpolation {
+    /// Linearly between the two surrounding keyframes — spherically, for a
+    /// rotation.
+    Linear,
+    /// The earlier keyframe's value, until the later one.
+    Step,
+    /// A cubic spline, whose tangents share the sample array: see
+    /// [`GltfChannel::samples`].
+    CubicSpline,
+}
+
+/// What an animation channel drives, and the values it drives it with.
+///
+/// One variant per glTF `target.path`, and the variant *is* the path: a channel
+/// carrying rotations is a rotation channel, so a consumer matches once rather
+/// than matching a path and then trusting an array to agree with it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GltfSamples {
+    /// Node translations, in the document's own units.
+    Translations(Vec<[f32; 3]>),
+    /// Node rotations, as `xyzw` quaternions — the order the format stores
+    /// them, and the order [`glam::Quat::from_array`] reads.
+    ///
+    /// Normalised to `f32` whichever of the legal component types the file
+    /// used: the specification permits a quaternion stored as normalized
+    /// signed or unsigned bytes or shorts.
+    Rotations(Vec<[f32; 4]>),
+    /// Node scales, per axis.
+    Scales(Vec<[f32; 3]>),
+    /// Morph-target weights, `targets` of them per keyframe, flat.
+    ///
+    /// Read even though the targets themselves are not — see the [module
+    /// docs](self).
+    MorphWeights(Vec<f32>),
 }
 
 /// One entry of the document's `nodes` array: what it is called, what it draws,
@@ -372,14 +614,22 @@ impl GltfMesh {
 /// `POSITION` is refused, and one without an index accessor is given the
 /// trivial `0..vertex_count` so that every primitive here is indexed and the
 /// GPU path has one case rather than two.
-/// [`normals`](GltfPrimitive::normals) and
-/// [`tex_coords`](GltfPrimitive::tex_coords) are empty when the file has none,
+/// [`normals`](GltfPrimitive::normals),
+/// [`tex_coords`](GltfPrimitive::tex_coords),
+/// [`joints`](GltfPrimitive::joints) and
+/// [`weights`](GltfPrimitive::weights) are empty when the file has none,
 /// and otherwise have exactly as many entries as `positions`.
+///
+/// `joints` and `weights` are the two halves of one attribute and a file
+/// carrying one without the other is malformed, so they are empty together or
+/// filled together: a primitive is skinned or it is not.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GltfPrimitive {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     tex_coords: Vec<[f32; 2]>,
+    joints: Vec<[u16; 4]>,
+    weights: Vec<[f32; 4]>,
     indices: Vec<u32>,
     material: Option<usize>,
 }
@@ -407,6 +657,35 @@ impl GltfPrimitive {
     #[must_use]
     pub fn tex_coords(&self) -> &[[f32; 2]] {
         &self.tex_coords
+    }
+
+    /// `JOINTS_0` — which four of a skin's joints each vertex is bound to — or
+    /// empty if the file has none.
+    ///
+    /// These index [`GltfSkin::joints`], **not** [`GltfScene::nodes`]: they are
+    /// joint numbers within whichever skin the node drawing this primitive
+    /// wears. Widened to `u16` whichever of the two legal component types the
+    /// file used.
+    #[inline]
+    #[must_use]
+    pub fn joints(&self) -> &[[u16; 4]] {
+        &self.joints
+    }
+
+    /// `WEIGHTS_0` — how much of each vertex each of its four joints owns —
+    /// or empty if the file has none. Parallel to
+    /// [`joints`](Self::joints).
+    ///
+    /// Normalised to `f32` whichever of the legal component types the file
+    /// used: the specification permits weights stored as normalized bytes or
+    /// shorts as well as floats. It also asks that a vertex's four weights sum
+    /// to one, and this importer reports them as they were stored rather than
+    /// renormalising — a file whose weights do not sum is one whose author
+    /// should hear about it.
+    #[inline]
+    #[must_use]
+    pub fn weights(&self) -> &[[f32; 4]] {
+        &self.weights
     }
 
     /// Triangle indices. Every one is less than `positions().len()`.
@@ -528,7 +807,7 @@ pub fn import_gltf(source: &dyn AssetSource, key: &Path) -> Result<GltfScene, St
 /// Deserialize without `gltf`'s validation, which cannot be used — see
 /// [`crate::gltf_check`].
 ///
-/// # A document is not refused over an animation this importer discards
+/// # A document is not refused over an animation this importer cannot read
 ///
 /// `gltf_json::animation::Target` makes `node` a required field, and
 /// `KHR_animation_pointer` replaces it with a pointer into the document — so a
@@ -537,11 +816,12 @@ pub fn import_gltf(source: &dyn AssetSource, key: &Path) -> Result<GltfScene, St
 /// suite is one, and it lists nothing in `extensionsRequired`, so the
 /// specification says it has to load.
 ///
-/// It has to load here in particular, because [`warn_unsupported_extensions`]
-/// already
-/// skips every animation in every document and logs a line saying so. Refusing
-/// a file over a feature this code had decided to ignore is the shape of defect
-/// where a guard is present, correct, and ordered so it can never run.
+/// It has to load here in particular, because the extension is one
+/// [`warn_unsupported_extensions`] already reports and carries on past. Losing
+/// the mesh, the materials and the images of a file over an animation channel
+/// aimed at something this crate has no curve type for is a trade nobody
+/// benefits from — and it is the *whole* `animations` array that is lost, not
+/// only the pointer channel, because `serde` refuses the array as a unit.
 ///
 /// So a parse failure gets one retry with the `animations` array removed — see
 /// [`parse_without_animations`] — and the original error is what a caller hears
@@ -564,12 +844,12 @@ fn parse(bytes: &[u8], key: &Path) -> Result<gltf::Gltf, StorageError> {
 /// reports the error from the *first* attempt rather than one about a document
 /// this function has already altered.
 ///
-/// **Only `animations` is dropped, and only because nothing reads it.**
-/// `warn_unsupported_extensions` skips them for every document already, so
-/// removing the
-/// array loses nothing a successful parse would have kept — which is what makes
-/// this a repair rather than a way of forcing a file through. No other array
-/// has that property, so no other array is touched.
+/// **Only `animations` is dropped, and only because it is the array that
+/// refused to deserialize.** It is a real loss now that [`read_clips`] fills
+/// [`GltfScene::clips`] — this document's clips are gone, and the warning below
+/// says so — but it is the *smallest* one available: the alternative is losing
+/// the document. No other array has that property, so no other array is
+/// touched.
 fn parse_without_animations(bytes: &[u8], key: &Path) -> Option<gltf::Gltf> {
     // `check_glb_header` has already run in `parse`, so `Glb::from_slice`
     // cannot reach the subtraction overflow `crate::gltf_check` documents.
@@ -591,14 +871,14 @@ fn parse_without_animations(bytes: &[u8], key: &Path) -> Option<gltf::Gltf> {
     let root: gltf::json::Root = gltf::json::deserialize::from_value(value).ok()?;
 
     // The file, the feature and the reason — `docs/plan/sample/05-viewer.md`'s
-    // exit criterion for a document that does not arrive whole. Louder than
-    // `warn_unsupported_extensions`'s line about animations because this one has
-    // also
-    // lost the `animations` array itself, so nothing downstream can count them.
+    // exit criterion for a document that does not arrive whole. The count is
+    // taken before the array is discarded, because afterwards nothing
+    // downstream can say how many there were.
     crcbl_core::log::warn!(
         "{}: dropping {count} animation(s) this importer cannot deserialize — the document \
-         uses an extension that changes an animation channel's shape, and every animation is \
-         skipped anyway, so the rest of the document is loaded without them",
+         uses an extension that changes an animation channel's shape, and serde refuses the \
+         whole animations array over it, so the rest of the document is loaded without them \
+         and this file's clips are empty",
         key.display(),
     );
     Some(gltf::Gltf {
@@ -770,6 +1050,8 @@ fn build(
         materials,
         base_color_textures,
         images,
+        skins: read_skins(document, buffers, key)?,
+        clips: read_clips(document, buffers, key)?,
     })
 }
 
@@ -777,10 +1059,13 @@ fn build(
 /// does not read.
 ///
 /// A log line rather than a field on [`GltfScene`], because there is nothing for
-/// a caller to *do* with a skin this crate did not parse — the value is that a
-/// character standing in its bind pose has an explanation somewhere. The
+/// a caller to *do* with a morph target this crate did not parse — the value is
+/// that a mesh standing at its base shape has an explanation somewhere. The
 /// counts are the document's own, and the key is what makes a line actionable
 /// when a hundred files went past.
+///
+/// Skins and animations used to be counted here and are now read; see
+/// [`GltfScene::skins`] and [`GltfScene::clips`].
 fn warn_dropped_features(document: &gltf::Document, key: &Path) {
     let root = document.as_json();
     let morph_targets: usize = root
@@ -789,29 +1074,12 @@ fn warn_dropped_features(document: &gltf::Document, key: &Path) {
         .flat_map(|mesh| &mesh.primitives)
         .map(|primitive| primitive.targets.as_ref().map_or(0, Vec::len))
         .sum();
-    for (count, feature, effect) in [
-        (
-            root.skins.len(),
-            "skins",
-            "every skinned mesh draws in its bind pose",
-        ),
-        (
-            root.animations.len(),
-            "animations",
-            "nothing moves; playback is a post-MVP engine feature",
-        ),
-        (
-            morph_targets,
-            "morph targets",
-            "every mesh draws at its base shape",
-        ),
-    ] {
-        if count > 0 {
-            crcbl_core::log::warn!(
-                "{}: skipping {count} {feature}: this importer does not read them, so {effect}",
-                key.display(),
-            );
-        }
+    if morph_targets > 0 {
+        crcbl_core::log::warn!(
+            "{}: skipping {morph_targets} morph targets: this importer does not read them, \
+             so every mesh draws at its base shape",
+            key.display(),
+        );
     }
     warn_unsupported_extensions(root, key);
 
@@ -1051,7 +1319,35 @@ fn read_primitive(
         .read_tex_coords(0)
         .map(|read| read.into_f32().collect())
         .unwrap_or_default();
-    for (what, found) in [("NORMAL", normals.len()), ("TEXCOORD_0", tex_coords.len())] {
+    // `into_u16` and `into_f32` rather than a hand-read: the spec stores
+    // `JOINTS_0` as unsigned bytes or shorts and `WEIGHTS_0` as floats or
+    // *normalized* integers, and un-normalising a weight is the step a
+    // hand-read gets wrong.
+    let joints: Vec<[u16; 4]> = reader
+        .read_joints(0)
+        .map(|read| read.into_u16().collect())
+        .unwrap_or_default();
+    let weights: Vec<[f32; 4]> = reader
+        .read_weights(0)
+        .map(|read| read.into_f32().collect())
+        .unwrap_or_default();
+    if joints.is_empty() != weights.is_empty() {
+        return Err(malformed(
+            key,
+            format!(
+                "{at} has {} JOINTS_0 and {} WEIGHTS_0 values, and a skinned \
+                 primitive needs both",
+                joints.len(),
+                weights.len()
+            ),
+        ));
+    }
+    for (what, found) in [
+        ("NORMAL", normals.len()),
+        ("TEXCOORD_0", tex_coords.len()),
+        ("JOINTS_0", joints.len()),
+        ("WEIGHTS_0", weights.len()),
+    ] {
         if found != 0 && found != positions.len() {
             return Err(malformed(
                 key,
@@ -1077,9 +1373,161 @@ fn read_primitive(
         positions,
         normals,
         tex_coords,
+        joints,
+        weights,
         indices,
         material: primitive.material().index(),
     })
+}
+
+/// The document's `skins` array, joints and bind matrices each.
+///
+/// Every index here has already been checked against the node array by
+/// [`crate::gltf_check`], which is what makes `gltf`'s own accessors — each an
+/// `unwrap` on an index out of the file — safe to call.
+fn read_skins(
+    document: &gltf::Document,
+    buffers: &[Vec<u8>],
+    key: &Path,
+) -> Result<Vec<GltfSkin>, StorageError> {
+    document
+        .skins()
+        .map(|skin| {
+            let reader = skin.reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice));
+            let joints: Vec<usize> = skin.joints().map(|node| node.index()).collect();
+            // No `inverseBindMatrices` means "already applied to the vertices",
+            // which is the identity — see `GltfSkin::inverse_binds`.
+            let inverse_binds: Vec<Mat4> = match reader.read_inverse_bind_matrices() {
+                Some(read) => read.map(|cols| Mat4::from_cols_array_2d(&cols)).collect(),
+                None => vec![Mat4::IDENTITY; joints.len()],
+            };
+            if inverse_binds.len() != joints.len() {
+                return Err(malformed(
+                    key,
+                    format!(
+                        "skin {} has {} joints and {} inverse bind matrices",
+                        skin.index(),
+                        joints.len(),
+                        inverse_binds.len()
+                    ),
+                ));
+            }
+            Ok(GltfSkin {
+                name: skin.name().map(str::to_owned),
+                joints,
+                inverse_binds,
+                skeleton: skin.skeleton().map(|node| node.index()),
+            })
+        })
+        .collect()
+}
+
+/// The document's `animations` array, one [`GltfClip`] per entry.
+///
+/// Each channel's sampler is flattened into the channel — see [`GltfChannel`]
+/// — so a clip is a list of curves rather than a list of curves and a list of
+/// the arrays they point at.
+fn read_clips(
+    document: &gltf::Document,
+    buffers: &[Vec<u8>],
+    key: &Path,
+) -> Result<Vec<GltfClip>, StorageError> {
+    let buffer = |buffer: gltf::Buffer<'_>| buffers.get(buffer.index()).map(Vec::as_slice);
+    let mut clips = Vec::with_capacity(document.animations().len());
+    for animation in document.animations() {
+        let mut channels = Vec::new();
+        for channel in animation.channels() {
+            let at = format!(
+                "animation {} channel {}",
+                animation.index(),
+                channel.index()
+            );
+            let reader = channel.reader(buffer);
+            let times: Vec<f32> = reader
+                .read_inputs()
+                .ok_or_else(|| malformed(key, format!("{at}'s input accessor reads nothing")))?
+                .collect();
+            let samples = match reader
+                .read_outputs()
+                .ok_or_else(|| malformed(key, format!("{at}'s output accessor reads nothing")))?
+            {
+                ReadOutputs::Translations(read) => GltfSamples::Translations(read.collect()),
+                // `into_f32` because the spec permits a quaternion stored as a
+                // normalized integer, and un-normalising it is the step a
+                // hand-read gets wrong.
+                ReadOutputs::Rotations(read) => GltfSamples::Rotations(read.into_f32().collect()),
+                ReadOutputs::Scales(read) => GltfSamples::Scales(read.collect()),
+                ReadOutputs::MorphTargetWeights(read) => {
+                    GltfSamples::MorphWeights(read.into_f32().collect())
+                }
+            };
+            let interpolation = match channel.sampler().interpolation() {
+                Interpolation::Linear => GltfInterpolation::Linear,
+                Interpolation::Step => GltfInterpolation::Step,
+                Interpolation::CubicSpline => GltfInterpolation::CubicSpline,
+            };
+            check_sample_count(&times, &samples, interpolation, &at, key)?;
+            channels.push(GltfChannel {
+                node: channel.target().node().index(),
+                times,
+                interpolation,
+                samples,
+            });
+        }
+        clips.push(GltfClip {
+            name: animation.name().map(str::to_owned),
+            channels,
+        });
+    }
+    Ok(clips)
+}
+
+/// Refuse a channel whose samples do not line up with its keyframes.
+///
+/// One value per keyframe, or three under `CUBICSPLINE`, which stores an
+/// in-tangent, the value and an out-tangent for each. A morph-target channel is
+/// the one that carries several values per keyframe by design — one per target
+/// — so it is checked as a multiple rather than an equality.
+///
+/// Checked here rather than in [`crate::gltf_check`] because this is the count
+/// the reader actually produced, and because [`GltfChannel::samples`] promises
+/// it: a player that steps a curve indexes both arrays off one keyframe number.
+fn check_sample_count(
+    times: &[f32],
+    samples: &GltfSamples,
+    interpolation: GltfInterpolation,
+    at: &str,
+    key: &Path,
+) -> Result<(), StorageError> {
+    let per_keyframe = match interpolation {
+        GltfInterpolation::Linear | GltfInterpolation::Step => 1,
+        GltfInterpolation::CubicSpline => 3,
+    };
+    let expected = times.len() * per_keyframe;
+    let (what, found) = match samples {
+        GltfSamples::Translations(values) => ("translation", values.len()),
+        GltfSamples::Rotations(values) => ("rotation", values.len()),
+        GltfSamples::Scales(values) => ("scale", values.len()),
+        // Several weights per keyframe, one per morph target the mesh has, so
+        // the count has to divide rather than match.
+        GltfSamples::MorphWeights(values) => {
+            if values.len() % expected == 0 && !values.is_empty() {
+                return Ok(());
+            }
+            ("morph weight", values.len())
+        }
+    };
+    if found == expected {
+        return Ok(());
+    }
+    Err(malformed(
+        key,
+        format!(
+            "{at} has {} keyframes and {found} {what} values, and {interpolation:?} \
+             interpolation wants {expected}",
+            times.len()
+        ),
+    ))
 }
 
 /// Walk the scene's node forest, composing transforms, and emit one instance
@@ -1135,9 +1583,10 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
 mod tests {
     use super::*;
     use crate::gltf_fixture::{
-        Assets, BASE_COLOR, BIN_CHUNK_BUFFER, EXTERNAL_BUFFER, IMAGE_TEXELS, INDICES, NORMALS,
-        POSITIONS, TEX_COORDS, glb, import_glb, import_glb_bytes, import_gltf_text, png_bytes,
-        replacing, textured_glb, textured_parts, triangle_bin, triangle_json,
+        Assets, BASE_COLOR, BIN_CHUNK_BUFFER, CLIP_ROTATIONS, CLIP_TIMES, EXTERNAL_BUFFER,
+        IMAGE_TEXELS, INDICES, INVERSE_BIND, JOINTS, NORMALS, POSITIONS, TEX_COORDS, WEIGHTS, glb,
+        import_glb, import_glb_bytes, import_gltf_text, import_rigged_glb, png_bytes, replacing,
+        rigged_json, textured_glb, textured_parts, triangle_bin, triangle_json,
     };
 
     /// The row a glTF material with no `pbrMetallicRoughness` block imports as:
@@ -1181,15 +1630,15 @@ mod tests {
   "extensionsUsed": ["KHR_animation_pointer"],
   "#;
 
-    /// **A document is not refused over an animation this importer discards.**
+    /// **A document is not refused over an animation this importer cannot
+    /// deserialize.**
     ///
-    /// `report_unsupported` skips every animation in every document and logs a
-    /// line saying so, but a `KHR_animation_pointer` channel cannot even be
-    /// deserialized — `node` is a required field and that extension replaces it
-    /// — so the failure took the whole document with it. `AnimatedColorsCube`
-    /// from the Khronos suite lists **nothing** in `extensionsRequired`, so the
-    /// specification says it has to load, and before `parse_without_animations`
-    /// it did not.
+    /// A `KHR_animation_pointer` channel cannot be deserialized at all — `node`
+    /// is a required field and that extension replaces it — so the failure took
+    /// the whole document with it. `AnimatedColorsCube` from the Khronos suite
+    /// lists **nothing** in `extensionsRequired`, so the specification says it
+    /// has to load, and before `parse_without_animations` it did not. The cost
+    /// is this document's clips, which is why the repair is loud.
     ///
     /// The geometry is asserted, not just the `Ok`: a repair that dropped the
     /// animation and the mesh with it would satisfy "it loads" and be useless.
@@ -1434,6 +1883,163 @@ mod tests {
                 base_color: BASE_COLOR,
                 ..GLTF_DEFAULT_MATERIAL
             }]
+        );
+    }
+
+    /// The rigged fixture's skin arrives whole: its joints, its skeleton root
+    /// and its bind matrices.
+    ///
+    /// `gltf_check`'s `the_rigged_fixture_holds_the_rig_it_declares` reads the
+    /// same numbers straight out of the `gltf` crate. This one asserts they
+    /// made it through **[`import_gltf`]**, which is a different claim: the
+    /// fixture was already valid before this importer read a skin at all.
+    #[test]
+    fn a_skin_arrives_with_its_joints_skeleton_and_bind_matrices() {
+        let scene = import_rigged_glb(&rigged_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        assert_eq!(scene.skins().len(), 1, "{:?}", scene.skins());
+        let skin = &scene.skins()[0];
+        assert_eq!(skin.name(), Some("rig"));
+        assert_eq!(
+            skin.joints(),
+            [1, 2],
+            "the joints are the two joint nodes, in the document's order"
+        );
+        assert_eq!(
+            skin.skeleton(),
+            Some(1),
+            "the fixture names node 1 as the skeleton root"
+        );
+        assert_eq!(
+            skin.inverse_binds(),
+            INVERSE_BIND.map(|matrix| Mat4::from_cols_array(&matrix)),
+            "the bind matrices are the constants, column-major, in joint order"
+        );
+    }
+
+    /// The rigged fixture's one clip arrives with its channel's target, its
+    /// keyframe times and its rotations.
+    #[test]
+    fn a_clip_arrives_with_its_channel_times_and_rotations() {
+        let scene = import_rigged_glb(&rigged_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        assert_eq!(scene.clips().len(), 1, "{:?}", scene.clips());
+        let clip = &scene.clips()[0];
+        assert_eq!(clip.name(), Some("wave"));
+        assert_eq!(clip.channels().len(), 1);
+
+        let channel = &clip.channels()[0];
+        assert_eq!(
+            channel.node(),
+            2,
+            "the channel turns the tip joint, which is node 2"
+        );
+        assert_eq!(channel.times(), CLIP_TIMES);
+        assert_eq!(channel.interpolation(), GltfInterpolation::Linear);
+        assert_eq!(
+            channel.samples(),
+            &GltfSamples::Rotations(CLIP_ROTATIONS.to_vec()),
+            "a rotation channel's samples are quaternions, and the variant says so"
+        );
+    }
+
+    /// The rigged fixture's primitive carries its per-vertex binding, one
+    /// entry per position.
+    ///
+    /// The lengths are asserted against `positions` rather than against `3`:
+    /// what the consumer needs is that a vertex index reaches all four arrays,
+    /// and a hard-coded count would still pass if the geometry moved and the
+    /// binding did not.
+    #[test]
+    fn a_skinned_primitive_carries_its_joints_and_weights() {
+        let scene = import_rigged_glb(&rigged_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        let primitive = &scene.meshes()[0].primitives()[0];
+        assert_eq!(
+            primitive.joints(),
+            JOINTS,
+            "JOINTS_0 is UNSIGNED_SHORT here and arrives widened, not reinterpreted"
+        );
+        assert_eq!(primitive.weights(), WEIGHTS);
+        assert_eq!(primitive.joints().len(), primitive.positions().len());
+        assert_eq!(primitive.weights().len(), primitive.positions().len());
+    }
+
+    /// A skin with more joints than bind matrices is refused.
+    ///
+    /// [`GltfSkin::inverse_binds`] promises one matrix per joint, and the only
+    /// thing that makes that true is this refusal: the accessor stays in range
+    /// at a lower count, so nothing in [`crate::gltf_check`] has any reason to
+    /// object to a document whose two arrays are different lengths.
+    #[test]
+    fn a_skin_with_fewer_bind_matrices_than_joints_is_refused() {
+        let json = replacing(
+            &rigged_json(BIN_CHUNK_BUFFER),
+            r#"{ "bufferView": 6, "componentType": 5126, "count": 2, "type": "MAT4" }"#,
+            r#"{ "bufferView": 6, "componentType": 5126, "count": 1, "type": "MAT4" }"#,
+        );
+        let error = import_rigged_glb(&json).unwrap_err().to_string();
+        assert!(
+            error.contains("skin 0 has 2 joints and 1 inverse bind matrices"),
+            "unexpected reason: {error}"
+        );
+    }
+
+    /// A channel whose samples do not line up with its keyframes is refused.
+    ///
+    /// The mutation is the fixture's `interpolation`, not its data: under
+    /// `CUBICSPLINE` a sampler stores an in-tangent, a value and an out-tangent
+    /// per keyframe, so the two rotations that satisfy `LINEAR` are a third of
+    /// what this asks for. Nothing before `check_sample_count` objects — the
+    /// accessors are all in range and the right types — so this is the only
+    /// thing standing between a player and a channel it would index off the
+    /// end of.
+    #[test]
+    fn a_channel_with_the_wrong_number_of_samples_is_refused() {
+        let json = replacing(
+            &rigged_json(BIN_CHUNK_BUFFER),
+            r#""interpolation": "LINEAR""#,
+            r#""interpolation": "CUBICSPLINE""#,
+        );
+        let error = import_rigged_glb(&json).unwrap_err().to_string();
+        assert!(
+            error.contains("has 2 keyframes and 2 rotation values")
+                && error.contains("CubicSpline interpolation wants 6"),
+            "unexpected reason: {error}"
+        );
+    }
+
+    /// A document with no rig says so by being empty, not by being absent.
+    ///
+    /// The point of the four assertions is that presence stays
+    /// **distinguishable** from absence: a reader that filled these arrays with
+    /// defaults — an identity bind matrix per joint, a full weight on joint
+    /// zero — would satisfy every test above and make an unrigged mesh
+    /// indistinguishable from a rigged one.
+    #[test]
+    fn a_document_with_no_skin_or_animation_has_neither() {
+        let scene = import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        assert!(
+            scene.skins().is_empty(),
+            "the triangle has no skin: {:?}",
+            scene.skins()
+        );
+        assert!(
+            scene.clips().is_empty(),
+            "the triangle has no animation: {:?}",
+            scene.clips()
+        );
+        let primitive = &scene.meshes()[0].primitives()[0];
+        assert!(
+            primitive.joints().is_empty(),
+            "and so no JOINTS_0: {:?}",
+            primitive.joints()
+        );
+        assert!(
+            primitive.weights().is_empty(),
+            "and so no WEIGHTS_0: {:?}",
+            primitive.weights()
         );
     }
 

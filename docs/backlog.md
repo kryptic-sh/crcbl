@@ -3,6 +3,37 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The glTF rig is read and nothing consumes it
+
+`gltf_import` now fills `GltfScene::skins`, `GltfScene::clips`,
+`GltfPrimitive::joints` and `GltfPrimitive::weights` — the source stage of
+`docs/plan/17-animation.md`. That is the whole of what landed. What did not:
+
+- **Nothing downstream reads them.** `gltf_render::build_render_scene` does not
+  look at a skin, `apps/viewer` neither reports nor draws one, and the puppet
+  sample of `docs/plan/sample/09-puppet.md` has no crate yet. A rigged glTF
+  still draws in its bind pose, exactly as before; the difference is that the
+  rig is now in the result rather than only in a warning. Viewer was named as
+  this slice's consumer and is not wired.
+- **No pose, blend or palette math anywhere.** `crcbl-anim` is unwritten, and
+  `GltfInterpolation::CubicSpline` is carried through with its tangents
+  interleaved in `GltfChannel::samples` and nothing that knows how to evaluate
+  them.
+- **`JOINTS_1`/`WEIGHTS_1` are not read** and are not warned about either, so a
+  document binding a vertex to more than four joints loses the rest silently.
+  Deliberate for now — every plausible palette here is four-wide — but it is a
+  silent loss, which is the shape this importer otherwise avoids.
+- **Morph targets are still dropped**, and a channel animating their weights is
+  now read into `GltfSamples::MorphWeights`. So a document can arrive with
+  curves driving shapes that are not there. The warning names the dropped
+  targets and does not connect the two.
+- **Only the fixture exercises any of it.** `gltf_fixture::rigged_json` is one
+  skinned triangle, two joints, one linear rotation channel. Nothing has been
+  run against a real rigged asset — `CesiumMan`, `RiggedFigure`, `Fox` — so
+  whether the Khronos suite's rigs import is untested, not known.
+  `check_animations`' `CUBICSPLINE` and morph-weight arms in particular have
+  never seen a document that uses them.
+
 ### `OffscreenSetup::finish` cannot see a WebGPU device error
 
 `crcbl::screenshot::OffscreenSetup::finish` asks `Device::take_error` after the
@@ -1827,8 +1858,10 @@ The seven are three different things:
   `AnimatedColorsCube`, `AnimationPointerUVs`, `CubeVisibility`,
   `LightVisibility` and `PotOfCoalsAnimationPointer`. `gltf_json` makes an
   animation channel's `node` mandatory and `KHR_animation_pointer` replaces it,
-  so `serde` refused the whole `Root` over an animation `gltf_import` skips by
-  design. `parse_without_animations` retries with the array removed. **The rate
+  so `serde` refused the whole `Root` over one animation channel.
+  `parse_without_animations` retries with the array removed. `gltf_import` now
+  reads animations into `GltfScene::clips`, so the array those five documents
+  lose is a real loss — still a smaller one than losing the document. **The rate
   is now 116/118, 98.3%.**
 
   What that leaves is a **decision, not a defect, and it is now at least loud**.
@@ -1868,8 +1901,8 @@ The seven are three different things:
   limit in `USAGE`, which today only states the rule and not that it will refuse
   the file. The middle one looks right and is the most work.
 
-Both halves of that have shipped: `parse_without_animations` stops an animation
-the importer already ignores from killing the parse, and
+Both halves of that have shipped: `parse_without_animations` stops one
+undeserializable animation channel from killing the parse, and
 `warn_unsupported_extensions` names every `extensionsRequired` entry this
 importer cannot honour. What the second exit criterion still lacks is a check
 that those messages are _actionable_ against real documents rather than fixtures
