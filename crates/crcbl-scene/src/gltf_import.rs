@@ -83,14 +83,24 @@
 //! scene, so a level that only the instances knew about would be a level that
 //! vanished. See [`GltfNode::lod_nodes`] and [`crate::lod_resolve`].
 //!
+//! A node that draws nothing never becomes an instance either, and a joint is
+//! exactly that — so the node table is also where the *hierarchy* lives:
+//! [`GltfNode::local_transform`] is a node's own placement and
+//! [`GltfNode::children`] is what hangs off it, both straight from the
+//! document. Composing them down a chain is what the instances already are, and
+//! what a joint palette will be.
+//!
 //! # The rig is read, and nothing here plays it
 //!
 //! [`GltfScene::skins`] and [`GltfScene::clips`] are the document's `skins` and
 //! `animations` arrays, and [`GltfPrimitive::joints`] and
 //! [`GltfPrimitive::weights`] are the per-vertex binding that ties a mesh to
-//! one. That is the whole of what `docs/plan/17-animation.md` calls its source
-//! stage: joint hierarchy, inverse bind matrices, and sampled TRS curves, in
-//! host memory and in the document's own units.
+//! one. The joint *hierarchy* is not repeated in the skin, because a joint is a
+//! node: it is [`GltfNode::children`] and [`GltfNode::local_transform`] over
+//! the nodes [`GltfSkin::joints`] names. That is the whole of what
+//! `docs/plan/17-animation.md` calls its source stage: joint hierarchy, inverse
+//! bind matrices, and sampled TRS curves, in host memory and in the document's
+//! own units.
 //!
 //! **Reading is not playback.** Nothing in this crate poses a skeleton, blends
 //! a clip or skins a vertex — a joint palette is `crcbl-anim`'s, and the
@@ -247,9 +257,9 @@ impl GltfScene {
 /// what each joint's bind pose was.
 ///
 /// The joint *hierarchy* is not repeated here. A joint is a node like any
-/// other, so its parent is its parent in [`GltfScene::nodes`], and a second
-/// copy of the tree would be a second answer to a question the node array
-/// already answers.
+/// other, so where it sits is [`GltfNode::local_transform`] and what hangs off
+/// it is [`GltfNode::children`], and a second copy of the tree would be a
+/// second answer to a question the node array already answers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GltfSkin {
     name: Option<String>,
@@ -442,16 +452,20 @@ pub enum GltfSamples {
 }
 
 /// One entry of the document's `nodes` array: what it is called, what it draws,
-/// and the lower detail levels it declares.
+/// where it sits under its parent, which nodes hang off it, and the lower
+/// detail levels it declares.
 ///
-/// The transform is deliberately absent. A node's own TRS is only half of where
-/// it ends up — the other half is every parent above it — and that composition
-/// is what [`GltfScene::instances`] is. A per-node local transform here would
-/// be a second, unconstructed answer to "where is this".
+/// [`local_transform`](Self::local_transform) is the node's *own* placement and
+/// not where it ends up: the other half is every parent above it, and that
+/// composition is [`GltfScene::instances`]. Both are here because a node that
+/// draws nothing never becomes an instance — a joint is exactly that — so the
+/// composed array cannot answer where a skeleton's bones are.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GltfNode {
     name: Option<String>,
     mesh: Option<usize>,
+    local_transform: Mat4,
+    children: Vec<usize>,
     lod_nodes: Vec<usize>,
 }
 
@@ -472,6 +486,65 @@ impl GltfNode {
     #[must_use]
     pub const fn mesh(&self) -> Option<usize> {
         self.mesh
+    }
+
+    /// This node's own transform, parent excluded — glTF's `matrix`, or its
+    /// `translation`/`rotation`/`scale`, composed as `T * R * S`.
+    ///
+    /// [`Mat4::IDENTITY`] for a node that declares no transform at all, which
+    /// is the specification's own default for every one of those fields and is
+    /// most nodes.
+    ///
+    /// # Why a matrix and not the three components
+    ///
+    /// The document spells one transform two ways and the two conversions are
+    /// not equally honest. `T`, `R` and `S` compose into a matrix exactly;
+    /// a matrix decomposes back only if it *was* one — `gltf`'s own
+    /// decomposition normalises the basis columns, so a document that authored
+    /// a shear or a skew in `matrix` form would arrive here as three components
+    /// that are not what it said. Storing the matrix reports every document
+    /// this importer accepts, and the same expression is what
+    /// [`GltfScene::instances`] composes with, so a node's local transform and
+    /// its instance's world transform cannot come to differ.
+    ///
+    /// A consumer that wants the components back — an animation channel
+    /// replaces one of them, leaving the other two at their rest values — asks
+    /// [`Mat4::to_scale_rotation_translation`] for them. That decomposition is
+    /// the exact one precisely where it is needed: the specification forbids
+    /// the `matrix` spelling on any node an animation targets, so an animated
+    /// node's matrix is a `T * R * S` by construction.
+    #[inline]
+    #[must_use]
+    pub const fn local_transform(&self) -> Mat4 {
+        self.local_transform
+    }
+
+    /// The nodes hanging off this one — the document's `children`, in file
+    /// order.
+    ///
+    /// Every entry is a valid index into [`GltfScene::nodes`] — one that is not
+    /// makes the document malformed rather than making this array shorter.
+    /// Empty for a leaf.
+    ///
+    /// # Why children and not a parent
+    ///
+    /// `children` is what glTF stores, so this is a copy rather than an
+    /// inference, and it is right for **every** node — including one no scene
+    /// reaches, which glTF permits and [`GltfScene::nodes`] keeps. A `parent`
+    /// field would not be: it is well defined only where the hierarchy is a
+    /// forest, and that is proven by the walk behind [`GltfScene::instances`],
+    /// which visits the nodes a scene reaches and no others. A node claimed as
+    /// a child by two unreachable nodes has two parents, and a single-valued
+    /// field would have had to pick one of them silently.
+    ///
+    /// Walking *up* — from a joint to the bones above it — is a consumer that
+    /// wants the inverse of this, and it is one pass over
+    /// [`GltfScene::nodes`] to build: each node's children name it as their
+    /// parent.
+    #[inline]
+    #[must_use]
+    pub fn children(&self) -> &[usize] {
+        &self.children
     }
 
     /// The `MSFT_lod` extension's `ids`: nodes carrying this node's lower
@@ -1044,7 +1117,7 @@ fn build(
     }
 
     Ok(GltfScene {
-        nodes: read_nodes(document.as_json(), key)?,
+        nodes: read_nodes(document, key)?,
         instances: flatten(document, key)?,
         meshes,
         materials,
@@ -1241,19 +1314,38 @@ fn read_images(
     Ok(images)
 }
 
-/// The document's `nodes` array, name and mesh and `MSFT_lod` each.
-fn read_nodes(root: &gltf::json::Root, key: &Path) -> Result<Vec<GltfNode>, StorageError> {
-    root.nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| {
+/// The document's `nodes` array: name, mesh, local transform, children and
+/// `MSFT_lod` each.
+fn read_nodes(document: &gltf::Document, key: &Path) -> Result<Vec<GltfNode>, StorageError> {
+    let nodes = document.nodes().len();
+    document
+        .nodes()
+        .map(|node| {
             Ok(GltfNode {
-                name: node.name.clone(),
-                mesh: node.mesh.map(|mesh| mesh.value()),
-                lod_nodes: read_msft_lod(node, index, root.nodes.len(), key)?,
+                name: node.name().map(str::to_owned),
+                // `check_nodes` put this node's mesh and every one of its
+                // children inside the document, so the typed `mesh()` and
+                // `children()` below cannot reach the `unwrap` each has behind
+                // it.
+                mesh: node.mesh().map(|mesh| mesh.index()),
+                local_transform: local_transform(&node),
+                children: node.children().map(|child| child.index()).collect(),
+                lod_nodes: read_msft_lod(&node, nodes, key)?,
             })
         })
         .collect()
+}
+
+/// One node's own transform, as a matrix.
+///
+/// The single place a node's local placement is read, so
+/// [`GltfNode::local_transform`] and the world transforms [`flatten`] composes
+/// are the same arithmetic rather than two spellings of it. Total on any
+/// document: `gltf` answers the `matrix` form with the file's own matrix and
+/// the `translation`/`rotation`/`scale` form with `T * R * S` over the
+/// specification's defaults for whichever of the three the file left out.
+fn local_transform(node: &gltf::Node<'_>) -> Mat4 {
+    Mat4::from_cols_array_2d(&node.transform().matrix())
 }
 
 /// One node's `MSFT_lod` `ids`, checked against the node array.
@@ -1265,16 +1357,12 @@ fn read_nodes(root: &gltf::json::Root, key: &Path) -> Result<Vec<GltfNode>, Stor
 /// or names something other than an existing node makes the document malformed,
 /// because the alternative is a declared detail level that quietly is not one.
 fn read_msft_lod(
-    node: &gltf::json::Node,
-    index: usize,
+    node: &gltf::Node<'_>,
     nodes: usize,
     key: &Path,
 ) -> Result<Vec<usize>, StorageError> {
-    let Some(extension) = node
-        .extensions
-        .as_ref()
-        .and_then(|extensions| extensions.others.get("MSFT_lod"))
-    else {
+    let index = node.index();
+    let Some(extension) = node.extension_value("MSFT_lod") else {
         return Ok(Vec::new());
     };
     let ids = extension
@@ -1565,7 +1653,7 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
                 ),
             ));
         }
-        let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+        let world = parent * local_transform(&node);
         if let Some(mesh) = node.mesh() {
             instances.push(GltfInstance {
                 node: node.index(),
@@ -2097,11 +2185,15 @@ mod tests {
                 GltfNode {
                     name: Some("root".to_owned()),
                     mesh: None,
+                    local_transform: Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
+                    children: vec![1],
                     lod_nodes: Vec::new(),
                 },
                 GltfNode {
                     name: Some("leaf".to_owned()),
                     mesh: Some(0),
+                    local_transform: Mat4::from_translation(glam::Vec3::new(0.0, 5.0, 0.0)),
+                    children: Vec::new(),
                     lod_nodes: Vec::new(),
                 },
             ]
@@ -2110,6 +2202,156 @@ mod tests {
             scene.instances()[0].node(),
             1,
             "the drawing node, not the root above it"
+        );
+    }
+
+    /// A node's transform is its own, and composing the chain by hand
+    /// reproduces the instance the walk emitted.
+    ///
+    /// The `assert_ne!` is what makes the first claim testable at all: the
+    /// fixture's leaf sits under a translated parent, so a
+    /// `local_transform` that had quietly been the composed one would pass
+    /// every equality below and fail this.
+    #[test]
+    fn a_nodes_local_transform_is_its_own_and_composes_into_its_instance() {
+        let scene = import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        let root = scene.nodes()[0].local_transform();
+        let leaf = scene.nodes()[1].local_transform();
+        assert_eq!(
+            leaf,
+            Mat4::from_translation(glam::Vec3::new(0.0, 5.0, 0.0)),
+            "the leaf's own (0, 5, 0), with nothing of the root in it"
+        );
+
+        let instance = scene.instances()[0];
+        assert_eq!(instance.node(), 1);
+        assert_ne!(
+            leaf.to_cols_array(),
+            instance.transform(),
+            "a local transform that equalled the composed one here would be the composed one"
+        );
+        assert_eq!(
+            (root * leaf).to_cols_array(),
+            instance.transform(),
+            "parent then child is what the walk composed"
+        );
+    }
+
+    /// **The walk composes parent then child, and this is the fixture that can
+    /// tell.**
+    ///
+    /// `a_nodes_local_transform_is_its_own_and_composes_into_its_instance`
+    /// asserts the same product, and cannot catch the order: both transforms in
+    /// that document are translations, and translations commute — reverse the
+    /// multiplication in `flatten` and every assertion there still passes.
+    /// Turning the parent is what makes the two orders different matrices, and
+    /// the order is the arithmetic a joint palette is about to depend on.
+    ///
+    /// A quarter turn about `Z` over a child five metres up its own `Y`: parent
+    /// then child swings the leaf onto `-X`, child then parent leaves it on
+    /// `+Y` and moves the parent's own offset instead.
+    #[test]
+    fn the_walk_composes_the_parent_before_the_child() {
+        let json = replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#"{ "name": "root", "translation": [10.0, 0.0, 0.0], "children": [1] }"#,
+            r#"{ "name": "root", "rotation": [0.0, 0.0, 0.70710678, 0.70710678], "children": [1] }"#,
+        );
+        let scene = import_glb(&json).unwrap();
+
+        let root = scene.nodes()[0].local_transform();
+        let leaf = scene.nodes()[1].local_transform();
+        let composed = Mat4::from_cols_array(&scene.instances()[0].transform());
+
+        // Where the leaf's own origin ends up, which is the whole of what the
+        // order decides: a quarter turn about `Z` carries `+Y` to `-X`.
+        let placed = composed.transform_point3(glam::Vec3::ZERO);
+        assert!(
+            placed.distance(glam::Vec3::new(-5.0, 0.0, 0.0)) < 1e-5,
+            "the parent's turn has to reach the leaf: it sits at {placed:?}",
+        );
+        assert_eq!(composed, root * leaf, "parent then child");
+        assert_ne!(
+            root * leaf,
+            leaf * root,
+            "a fixture where the two orders agree would prove nothing",
+        );
+    }
+
+    /// A node the scene graph never names still carries its transform and its
+    /// children: those are the document's own fields, not something the walk
+    /// discovered.
+    ///
+    /// The scene here names the leaf alone, so the root above it is reachable
+    /// from no scene — which glTF permits, and which is the case a `parent`
+    /// field could not have answered.
+    #[test]
+    fn a_node_no_scene_reaches_still_carries_its_transform_and_children() {
+        let json = replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#""scenes": [{ "nodes": [0] }]"#,
+            r#""scenes": [{ "nodes": [1] }]"#,
+        );
+        let scene = import_glb(&json).unwrap();
+
+        assert_eq!(
+            scene.nodes()[0].children(),
+            [1],
+            "the unreached root still says what hangs off it"
+        );
+        assert_eq!(
+            scene.nodes()[0].local_transform(),
+            Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
+        );
+        assert_eq!(
+            scene.instances()[0].transform(),
+            Mat4::from_translation(glam::Vec3::new(0.0, 5.0, 0.0)).to_cols_array(),
+            "and none of it reached the instance, because the walk started below it"
+        );
+    }
+
+    /// The rigged fixture's two joints arrive as a hierarchy: the tip hangs off
+    /// the root, and carries the translation the root's bind matrix inverts.
+    ///
+    /// Neither joint draws a mesh, so none of this is in
+    /// [`GltfScene::instances`] — the node table is the only place a skeleton
+    /// can be read from.
+    #[test]
+    fn a_joint_node_carries_its_own_transform_and_its_children() {
+        let scene = import_rigged_glb(&rigged_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        assert_eq!(
+            scene.nodes()[1].children(),
+            [2],
+            "the tip joint hangs off the root joint"
+        );
+        assert!(scene.nodes()[0].children().is_empty(), "the skinned mesh");
+        assert!(scene.nodes()[2].children().is_empty(), "the tip is a leaf");
+
+        let tip = Mat4::from_translation(glam::Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(
+            scene.nodes()[2].local_transform(),
+            tip,
+            "the tip's own translation, in the document's units"
+        );
+        assert_eq!(
+            Mat4::from_cols_array(&INVERSE_BIND[1]) * tip,
+            Mat4::IDENTITY,
+            "the fixture's bind matrix is the inverse of where the tip stands"
+        );
+
+        assert_eq!(
+            scene.nodes()[1].local_transform(),
+            Mat4::IDENTITY,
+            "a node the document gives no transform is at the identity"
+        );
+        assert!(
+            scene
+                .instances()
+                .iter()
+                .all(|instance| instance.node() != 2),
+            "a joint draws nothing, so it is in no instance"
         );
     }
 

@@ -39,6 +39,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   heartbeat, which is what makes the import's new skin and clip reading
   something a check can fail on.
 
+- **A `GltfNode` carries its own transform and the nodes under it.**
+  `GltfNode::local_transform` is the node's placement as the document gives it —
+  glTF's `matrix`, or its `translation`/`rotation`/`scale` composed as
+  `T * R * S`, and `Mat4::IDENTITY` for a node that declares none — and
+  `GltfNode::children` is the document's `children` array in file order. Both
+  are on the node table rather than on `GltfScene::instances`, because a joint
+  node draws no mesh and so never becomes an instance: until now a skeleton's
+  bones were the one part of an imported document nothing could read. A matrix
+  rather than three components because the conversion back is the lossy
+  direction, and a `children` list rather than a `parent` because that one is
+  well defined for a node no scene reaches; both accessors say so. The importer
+  composes instance transforms out of the same expression the field stores, so
+  the local and the world answer cannot drift apart.
+
 - **The glTF importer reads skins and animations.** `GltfScene::skins` is the
   document's `skins` array — joint node indices, inverse bind matrices as
   `glam::Mat4`, and the skeleton root — and `GltfScene::clips` is its
