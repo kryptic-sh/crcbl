@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_phys::Frames`** — a hierarchy of reference frames (star → planet →
+  moon → vehicle) with explicit sphere-of-influence crossings. `Frames::convert`
+  reads a `State` given in one frame as it stands in another by walking to their
+  common ancestor, and `Frames::transition` answers which frame a body should be
+  simulated in next. Positions are `WorldPos`, so a conversion is integer sector
+  arithmetic and round-trips a position bit for bit: a millimetre held 10^15 m
+  from the root survives a crossing to within a nanometre, where a plain `f64`
+  metre coordinate cannot represent it at all. `sphere_of_influence` is the
+  Laplace radius of the patched-conic approximation, checked in tests against
+  the published radii for Earth and the Moon.
+
 - **`crcbl_phys::Atmosphere` and `AtmosphericDrag`** — an exponential
   density-vs-altitude profile around a spherical body, and the quadratic drag
   `F = ½ρv²·Cd·A` a body moving through it feels. Terminal velocity is not

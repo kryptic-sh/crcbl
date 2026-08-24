@@ -69,7 +69,7 @@ impl ForceProvider for GravityForce {
 /// Velocity-proportional drag (linear damping).
 ///
 /// Applies `F = -k * v` where `k` is the drag coefficient. For quadratic
-/// drag (atmospheric), see the upcoming `AtmosphericDrag` provider.
+/// drag (atmospheric), see [`crate::AtmosphericDrag`].
 ///
 /// When combined with [`GravityForce`], this causes terminal velocity to
 /// emerge: `v_term = m * g / k`.

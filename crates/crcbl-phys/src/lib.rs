@@ -16,8 +16,9 @@
 //! L1 today is the force pipeline and one integrator: [`GravityForce`],
 //! [`DragForce`], [`DampingForce`] and [`ThrustForce`] feed
 //! [`SemiImplicitEuler`] through [`ForceProvider`]. [`Atmosphere`] and its
-//! quadratic [`AtmosphericDrag`] have landed; Kepler on-rails propagation and
-//! reference-frame hierarchies are still planned.
+//! quadratic [`AtmosphericDrag`] have landed, and so has the [`Frames`]
+//! hierarchy with its sphere-of-influence crossings; Kepler on-rails
+//! propagation is still planned.
 //!
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
 //! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
@@ -29,6 +30,7 @@ pub mod broadphase;
 pub mod collider;
 pub mod components;
 pub mod forces;
+pub mod frames;
 pub mod integrator;
 pub mod query;
 pub mod system;
@@ -39,6 +41,7 @@ pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
 pub use forces::{DampingForce, DragForce, ForceProvider, GravityForce, ThrustForce};
+pub use frames::{FrameId, Frames, State, sphere_of_influence};
 pub use integrator::{Integrator, SemiImplicitEuler};
 pub use query::{
     ShapeHit, ray_vs_aabb, ray_vs_capsule, ray_vs_sphere, sphere_overlaps_aabb,
