@@ -255,17 +255,37 @@ fn samplers_honour_the_seams_defaults_and_its_limits() {
     // Anisotropy past the device's ceiling is an error, not a clamp: silently
     // sampling differently from what was asked for is a golden-image difference
     // nobody can explain.
-    let ceiling = device.caps().limits.max_sampler_anisotropy;
+    //
+    // **Which error depends on why the device will not do it**, and this
+    // fixture does not ask for `SAMPLER_ANISOTROPY`. Without it the ceiling is
+    // 1.0 — the value that turns anisotropy off — so `ceiling + 1.0` is a
+    // request for a capability this device has not got, and the seam spells
+    // that `Unsupported`; a caller branching on that variant to pick a fallback
+    // would miss an `InvalidDescriptor`. The real-ceiling arm, on a device that
+    // *has* the feature, is
+    // `a_sampler_above_the_anisotropy_ceiling_is_refused` in
+    // `crates/crcbl/tests/hal_seam_e2e.rs`, which opens its own device for it.
+    let caps = device.caps();
+    let ceiling = caps.limits.max_sampler_anisotropy;
     let error = device
         .create_sampler(&crcbl_hal::SamplerDesc {
             anisotropy: ceiling + 1.0,
             ..crcbl_hal::SamplerDesc::default()
         })
         .expect_err("anisotropy past the limit must be refused");
-    assert!(
-        matches!(error, crcbl_hal::HalError::InvalidDescriptor(_)),
-        "{error}"
-    );
+    if caps.features.contains(Features::SAMPLER_ANISOTROPY) {
+        assert!(
+            matches!(error, crcbl_hal::HalError::InvalidDescriptor(_)),
+            "this device can filter anisotropically, so a number past its ceiling is a bad \
+             descriptor: {error}"
+        );
+    } else {
+        assert!(
+            matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+            "this device has not got SAMPLER_ANISOTROPY, so any anisotropic request is a \
+             capability it lacks rather than a number to correct: {error}"
+        );
+    }
 
     headless.finish();
 }

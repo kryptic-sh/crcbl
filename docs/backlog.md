@@ -16687,3 +16687,31 @@ its accepting value from `caps().features` rather than trusting `caps().limits`,
 precisely so a backend overstating a limit does not red the macOS and Windows
 runners for a bug that is its own. Closing the two backends' half is what would
 let that test assert the limit directly, which is the stronger rule.
+
+## The Windows clipboard test failed once on a shared runner (2026-08-24)
+
+`crcbl-shell`'s
+`win32::shell::tests::an_empty_offer_empties_the_clipboard_and_an_empty_payload_does_not`
+failed the `build + test (windows-latest)` job on CI run 32685206238 with:
+
+```
+an empty slice releases: Backend("the clipboard could not be opened within 70ms (Refused { attempts: 8, error: 5 }); another process is holding it")
+```
+
+`error: 5` is `ERROR_ACCESS_DENIED`. The Windows clipboard is a single
+machine-wide resource with no fair queue, so any other process on the runner
+holding it starves this one; the test's own retry budget gave up after eight
+attempts inside 70 ms.
+
+**Not investigated, and not mine** — the run also carried an unrelated vk change
+and the failure is in a crate that change does not touch. Recorded because a
+once-off on a shared runner and a real regression look identical from one red
+job, and the next person to see it should know it has happened before rather
+than starting from nothing.
+
+What it would take: decide whether the retry budget is the right shape for a
+resource another process can hold indefinitely. Backing off longer trades CI
+time for flakiness; giving up and skipping when the clipboard is held by another
+process turns a flake into a silent gap, which is worse. Neither is obviously
+right, and the failure rate is one observation, so measuring comes first — grep
+the last N Windows runs for this message before changing anything.

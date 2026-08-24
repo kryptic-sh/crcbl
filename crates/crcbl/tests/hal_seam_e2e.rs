@@ -1995,40 +1995,70 @@ fn a_sampler_below_the_anisotropy_floor_is_refused() {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
 fn a_sampler_above_the_anisotropy_ceiling_is_refused() {
-    let headless = Headless::open();
+    // Its own fixture, asking for the one feature this rule needs. The default
+    // ask is what a renderer wants and does not include it, and on a device
+    // without it every anisotropic request is refused `Unsupported` before the
+    // ceiling is ever consulted — so this test would have been watching the
+    // capability gate while claiming to watch the ceiling.
+    let headless = Headless::open_full(
+        EXTENT,
+        2,
+        Features::SAMPLER_ANISOTROPY.difference(withheld_features()),
+    );
     let device = headless.device.as_ref();
     let limit = device.caps().limits.max_sampler_anisotropy;
 
-    // The last accepting value, taken from the device rather than written here
-    // — but only where the device can filter anisotropically at all. On one
-    // that was not granted `SAMPLER_ANISOTROPY`, anything above 1.0 is refused
-    // for a different reason entirely (`Unsupported`, not a bad descriptor),
-    // and a limit above 1.0 on such a device is a backend reporting a ceiling
-    // it will not honour rather than anything this rule is about.
-    let accepted = if device
+    if !device
         .caps()
         .features
         .contains(Features::SAMPLER_ANISOTROPY)
     {
-        limit
-    } else {
-        1.0
-    };
+        // No ceiling to exceed. That this device refuses anisotropy outright,
+        // and refuses it with the variant a caller branches on, is the
+        // capability contract's rule rather than this one — asserted here only
+        // so the run is not silently vacuous.
+        let error = device
+            .create_sampler(&SamplerDesc {
+                label: Some("anisotropy without the feature"),
+                anisotropy: ANISOTROPY_OFF + 1.0,
+                ..SamplerDesc::default()
+            })
+            .expect_err("a device without SAMPLER_ANISOTROPY cannot filter anisotropically");
+        assert!(
+            matches!(error, HalError::Unsupported { .. }),
+            "a device that has not got the feature answers Unsupported, not a complaint about \
+             the number: {error:?}"
+        );
+        eprintln!(
+            "crcbl hal seam e2e: this adapter has no SAMPLER_ANISOTROPY, so the ceiling rule has \
+             no ceiling to exceed and only the capability refusal was checked"
+        );
+        headless.finish();
+        return;
+    }
+
+    assert!(
+        limit > ANISOTROPY_OFF,
+        "this device grants SAMPLER_ANISOTROPY and reports a ceiling of {limit}, which is the \
+         value that disables it — there is no anisotropy to ask for and nothing below can refuse"
+    );
+
+    // The last accepting value, taken from the device rather than written here.
     let at_the_cap = device
         .create_sampler(&SamplerDesc {
             label: Some("at the anisotropy ceiling"),
-            anisotropy: accepted,
+            anisotropy: limit,
             ..SamplerDesc::default()
         })
-        .expect("the largest value this device can actually be asked for is accepted");
+        .expect("the device's own ceiling is the last value it accepts");
     device.destroy_sampler(at_the_cap);
 
     let over = limit + 1.0;
     assert!(
         over > limit,
-        "this device reports max_sampler_anisotropy {limit}, and adding one to it rounds \
-         back to itself — so there is no over-limit value left to ask for and the refusal \
-         below would pass without refusing anything"
+        "this device reports max_sampler_anisotropy {limit}, and adding one to it rounds back to \
+         itself — so there is no over-limit value left to ask for and the refusal below would \
+         pass without refusing anything"
     );
 
     match device.create_sampler(&SamplerDesc {
@@ -2038,15 +2068,15 @@ fn a_sampler_above_the_anisotropy_ceiling_is_refused() {
     }) {
         Err(error) => assert!(
             matches!(error, HalError::InvalidDescriptor(_)),
-            "anisotropy past the device's ceiling is a bad descriptor rather than a \
-             backend failure: {error:?}"
+            "this device can filter anisotropically, so a number past its ceiling is a bad \
+             descriptor rather than a capability it has not got: {error:?}"
         ),
         Ok(sampler) => {
             device.destroy_sampler(sampler);
             panic!(
-                "this backend built a sampler asking for {over}x anisotropy on a device \
-                 whose limit is {limit}x — the caller gets whatever the driver silently \
-                 clamped to, and never learns the number it asked for was impossible"
+                "this backend built a sampler asking for {over}x anisotropy on a device whose \
+                 ceiling is {limit}x — the caller gets whatever the driver silently clamped to, \
+                 and never learns the number it asked for was impossible"
             );
         }
     }
@@ -3444,6 +3474,14 @@ enum Exercise {
     /// Not drivable from this suite, with the reason stated rather than skipped.
     Unexercised(&'static str),
 }
+
+/// The anisotropy value that means "off", and so the floor every backend takes.
+///
+/// Named because three things read it: the exercise below asks for more than
+/// this when a device's ceiling *is* this, `SamplerDesc::check_anisotropy_floor`
+/// refuses less, and a ceiling reported at this value means the device cannot
+/// filter anisotropically at all.
+const ANISOTROPY_OFF: f32 = 1.0;
 
 /// The byte pattern a fill destination holds before the fill, so that a fill
 /// which did nothing is distinguishable from one that worked.
@@ -8697,9 +8735,22 @@ fn exercise_sampler_anisotropy(headless: &Headless) -> Exercise {
     // descriptor documents itself as capped by that limit, so a constant would be
     // testing this suite's guess about the hardware on any device that reports
     // less.
+    //
+    // **Except where the cap is 1.0, which is the value that turns anisotropy
+    // off.** A device that cannot filter anisotropically reports exactly that,
+    // so asking at its cap asks for no anisotropy at all — the call succeeds
+    // having done nothing, and this reported a silent drop for a backend that
+    // was behaving correctly. The capability under exercise is anisotropic
+    // filtering, so the value asked for has to be one that turns it on, and on
+    // such a device the seam requires that to be refused.
+    let asked = if limit > ANISOTROPY_OFF {
+        limit
+    } else {
+        ANISOTROPY_OFF + 1.0
+    };
     let sampler = match device.create_sampler(&SamplerDesc {
         label: Some("anisotropy exercise"),
-        anisotropy: limit,
+        anisotropy: asked,
         ..SamplerDesc::default()
     }) {
         Ok(sampler) => sampler,
@@ -8708,12 +8759,14 @@ fn exercise_sampler_anisotropy(headless: &Headless) -> Exercise {
     device.destroy_sampler(sampler);
 
     // The cross-check, and it runs only on the accepting path because a backend
-    // that refused has already answered.
-    if limit <= 1.0 {
+    // that refused has already answered. Getting here with a cap of 1.0 means
+    // the backend accepted a value above the ceiling it reported, on a device
+    // it says cannot filter anisotropically — the request went somewhere and
+    // did nothing.
+    if limit <= ANISOTROPY_OFF {
         eprintln!(
-            "crcbl hal seam e2e: the sampler was created, but this device caps anisotropy at \
-             {limit}, and 1.0 is the value that disables it — so nothing above 1.0 was actually \
-             asked for"
+            "crcbl hal seam e2e: this device caps anisotropy at {limit}, which is the value that \
+             disables it, and {asked}x was accepted anyway"
         );
         return Exercise::SilentlyIgnored;
     }

@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` answered the wrong error variant for anisotropy it cannot do.**
+  `create_sampler` checked the ceiling before the feature, so on a device
+  without `SAMPLER_ANISOTROPY` — whose honest ceiling is 1.0, the value that
+  turns anisotropy off — every anisotropic request came back
+  `HalError::InvalidDescriptor`, "your descriptor is wrong". What was wrong was
+  that the device cannot do it at all, which the seam spells
+  `HalError::Unsupported`; a caller matching on that variant to pick a fallback
+  path missed the refusal entirely. The feature check now runs first, so the
+  ceiling check only ever sees a device that has the feature.
+
 - **`crcbl-vk` reported an adapter's limits on a device that was granted less.**
   A device's `caps()` narrowed `features` to what `vkCreateDevice` actually
   granted but carried the adapter's `limits` verbatim, and four of those are

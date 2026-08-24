@@ -798,14 +798,26 @@ impl VkDevice {
         // here let through: `NAN < 1.0` is `false`, as is `NAN > max`, so a NaN
         // anisotropy passed both of these and reached `max_anisotropy` below.
         desc.check_anisotropy_floor()?;
-        desc.check_anisotropy_ceiling(&caps.limits)?;
         let anisotropy_enabled = desc.anisotropy > 1.0;
+        // **Before the ceiling, and the order is the contract.** A device
+        // without the feature reports a ceiling of 1.0 — honestly, since 1.0 is
+        // the only value it accepts — so every anisotropic request is also over
+        // that ceiling, and checking the ceiling first would answer
+        // `InvalidDescriptor`: "your descriptor is wrong", which sends a caller
+        // looking for a number to correct. What is actually wrong is that this
+        // device cannot do it at all, and the seam spells that `Unsupported` —
+        // the variant a caller matches on to pick a fallback path.
+        //
+        // Asked in this order, the ceiling check below only ever sees a device
+        // that *has* the feature, which is exactly when a number above its
+        // ceiling is a bad descriptor and nothing more.
         if anisotropy_enabled && !caps.features.contains(Features::SAMPLER_ANISOTROPY) {
             return Err(HalError::Unsupported {
                 backend: crcbl_hal::BackendKind::Vulkan,
                 what: "anisotropic sampling on a device without SAMPLER_ANISOTROPY",
             });
         }
+        desc.check_anisotropy_ceiling(&caps.limits)?;
 
         let info = vk::SamplerCreateInfo::default()
             .mag_filter(conv::filter(desc.mag_filter))
