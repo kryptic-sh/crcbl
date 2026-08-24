@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A mesh dispatch's indirect arguments are checked like any other draw's.**
+  `draw_mesh_tasks_indirect` recorded whatever offset, stride and count it was
+  handed on `crcbl-vk` and the null backend, so a misaligned offset reached the
+  driver and was read from the wrong bytes. `plan_mesh_indirect` had been on the
+  seam since the argument rules moved there and had no caller; both backends now
+  call it. The structure is three words rather than a draw's four or five and
+  every other rule is the same one, because they are all rules about stepping an
+  array of structures in a buffer. `crcbl-webgpu` still answers `Unsupported`:
+  WebGPU has no mesh stage.
+
 - **A sampler is held to an anisotropy floor, and a NaN no longer reaches a
   driver.** `SamplerDesc::anisotropy` documented its ceiling and never its
   floor, though `1.0` is the value that disables anisotropy and nothing below it

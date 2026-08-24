@@ -16564,17 +16564,6 @@ The offset, stride and bound rules now live in `crcbl_hal::indirect` and
 `crcbl-vk`, the null backend and `crcbl-webgpu` call them. Three things that
 slice deliberately did not do.
 
-- **The mesh indirect path is not wired, and wiring it turns an existing test
-  red for a real reason.** `draw_mesh_tasks_indirect` still records without
-  checking anything, and `plan_mesh_indirect` — the seam entry point for the
-  three-word mesh argument structure — has no caller. Verified: the null
-  backend's `a_mesh_dispatch_is_recorded_like_any_other_draw` records
-  `DrawIndirect { offset: 12, draw_count: 1, stride: 12 }` against a buffer
-  created with `size: 12`, so the single structure starts exactly at the end and
-  reads bytes 12..24. Wiring the mesh path makes that test fail because the draw
-  it records really does run past its buffer. **Fix the test, not the guard** —
-  and note that mesh shading is a `parity_blockers()` row on both deferred
-  backends, so this is Vulkan-and-WebGPU work whichever way it goes.
 - **`crcbl-webgpu` does not enforce the bound, by design.** Its encoder holds a
   channel and a handle pool and cannot reach a buffer's length, so it calls
   `check_layout` (offset and stride) and leaves the bound to the browser, which

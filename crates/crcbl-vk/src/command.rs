@@ -1192,17 +1192,29 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         let state = self.device.state();
-        let Ok(args) = self.device.buffer_raw(&state, draw.args) else {
-            drop(state);
-            self.fail(HalError::invalid_handle("buffer", draw.args));
-            return;
+        let (args, size) = match self.device.buffer_raw_size_and_location(&state, draw.args) {
+            Ok((args, size, _)) => (args, size),
+            Err(error) => {
+                drop(state);
+                self.fail(error);
+                return;
+            }
         };
         drop(state);
+        // The three-word mesh structure, stepped by the same rules a draw's is:
+        // a four-byte offset, a stride at least one structure wide, and the
+        // structures inside the buffer. Unchecked until now, so a misaligned
+        // offset reached the driver and was read from the wrong bytes.
+        if let Err(error) = crcbl_hal::plan_mesh_indirect(draw, size) {
+            self.fail(error);
+            return;
+        }
         self.use_object(args.as_raw());
         // SAFETY: as `indirect` — `self.raw` is recording inside a render pass
         // with a mesh pipeline bound and `args` is a live buffer with
-        // `INDIRECT` usage in `IndirectArgument` state. `mesh` was loaded from
-        // this device, whose extension was enabled at creation.
+        // `INDIRECT` usage in `IndirectArgument` state, whose size the offset,
+        // stride and count have just been checked against. `mesh` was loaded
+        // from this device, whose extension was enabled at creation.
         unsafe {
             mesh.cmd_draw_mesh_tasks_indirect(
                 self.raw,

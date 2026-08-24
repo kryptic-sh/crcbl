@@ -1111,12 +1111,16 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
     let pipeline = device
         .create_mesh_pipeline(&mesh_desc(module, layout, Some(task)))
         .expect("both stages are reported");
-    // Three `u32`s of group counts, which is what the seam documents one
-    // argument structure to be.
+    // Two argument structures of three `u32` group counts each, which is what
+    // the seam documents one structure to be. Two rather than one because the
+    // draw below reads the structure at `MESH_DISPATCH_ARGS_BYTES`, and a
+    // buffer holding only the first one ends exactly where that read begins —
+    // which is what this fixture asked for until `plan_mesh_indirect` gained a
+    // caller and said so.
     let mesh_args = device
         .create_buffer(&BufferDesc {
             label: Some("mesh dispatch args"),
-            size: 12,
+            size: crate::MESH_DISPATCH_ARGS_BYTES * 2,
             usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
             memory: MemoryLocation::DeviceLocal,
         })
@@ -1140,9 +1144,9 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
     encoder.draw_mesh_tasks(3, 2, 1);
     let indirect = DrawIndirect {
         args: mesh_args,
-        offset: 12,
+        offset: crate::MESH_DISPATCH_ARGS_BYTES,
         draw_count: 1,
-        stride: 12,
+        stride: u32::try_from(crate::MESH_DISPATCH_ARGS_BYTES).expect("three words fit a u32"),
     };
     encoder.draw_mesh_tasks_indirect(&indirect);
     encoder.end_render_pass();
@@ -4577,6 +4581,97 @@ fn a_buffer_range_over_the_slots_limit_is_refused() {
         group_of(alignment, crate::BindingResource::WHOLE_BUFFER)
             .expect("one aligned step in, the rest of the buffer is exactly the ceiling");
         group_of(0, ceiling).expect("a range of exactly the ceiling");
+    }
+}
+
+/// **A mesh dispatch's arguments are stepped by the same rules a draw's are.**
+///
+/// `plan_mesh_indirect` had been on the seam with no caller since the argument
+/// rules moved there: `draw_mesh_tasks_indirect` recorded whatever offset,
+/// stride and count it was handed. The structure is three words rather than a
+/// draw's four or five, and every other rule is the same one, because they are
+/// all rules about stepping an array of structures in a buffer.
+///
+/// **What turns it red.** Dropping the call — the first refusal. Measuring the
+/// arguments against a draw structure rather than a mesh one — the third, where
+/// a stride of twelve is one whole mesh structure and less than a draw's
+/// sixteen. The accepting arm is what stops the refusals going vacuous.
+#[test]
+fn a_mesh_dispatch_is_held_to_the_seams_argument_rules() {
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
+    let device = open(instance.as_ref());
+    let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
+    let args = device
+        .create_buffer(&BufferDesc {
+            label: Some("mesh dispatch args"),
+            size: 64,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("buffer");
+    let pass = RenderPassDesc {
+        label: Some("mesh indirect"),
+        color_attachments: &[],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(16, 16),
+        timestamp_writes: None,
+    };
+    let record = |draw: DrawIndirect| {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_render_pass(&pass);
+        encoder.draw_mesh_tasks_indirect(&draw);
+        encoder.end_render_pass();
+        encoder.finish()
+    };
+    let stride = u32::try_from(crate::MESH_DISPATCH_ARGS_BYTES).expect("three words fit a u32");
+
+    recorder.clear();
+    // Two tightly packed structures from an aligned offset: the last byte read
+    // is 4 + 12 + 12 = 28, inside 64.
+    record(DrawIndirect {
+        args,
+        offset: 4,
+        draw_count: 2,
+        stride,
+    })
+    .expect("a mesh dispatch inside its buffer obeys the seam's rules");
+
+    for (draw, what) in [
+        (
+            DrawIndirect {
+                args,
+                offset: 2,
+                draw_count: 1,
+                stride: 0,
+            },
+            "an offset that is not a multiple of four",
+        ),
+        (
+            DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride: stride - 4,
+            },
+            "a stride below one three-word structure",
+        ),
+        (
+            DrawIndirect {
+                args,
+                offset: 56,
+                draw_count: 1,
+                stride: 0,
+            },
+            "one structure that starts eight bytes from the end",
+        ),
+    ] {
+        let error = record(draw).expect_err(&format!(
+            "{what} must fail the finish with an InvalidDescriptor"
+        ));
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{what}: {error:?}"
+        );
     }
 }
 

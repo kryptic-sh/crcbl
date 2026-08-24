@@ -96,7 +96,9 @@ use core::time::Duration;
 
 use crcbl_core::{Handle, SurfaceTarget};
 
-use crate::indirect::{IndirectPlan, plan_count_structures, plan_structures, structure_bytes};
+use crate::indirect::{
+    IndirectPlan, plan_count_structures, plan_mesh_indirect, plan_structures, structure_bytes,
+};
 use crate::{
     AcquiredFrame, AdapterId, AdapterInfo, BackendKind, Barriers, BindGroupDesc, BindGroupEntry,
     BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry, BindGroupLayoutHandle, BindingKind,
@@ -2596,6 +2598,21 @@ impl NullEncoder {
         );
     }
 
+    /// [`need_indirect_arguments`](Self::need_indirect_arguments) for a **mesh**
+    /// dispatch, whose argument structure is three words rather than a draw's
+    /// four or five — [`plan_mesh_indirect`].
+    ///
+    /// Every other rule is the same one, because they are all rules about
+    /// stepping an array of structures in a buffer rather than about what the
+    /// structures say.
+    fn need_mesh_indirect_arguments(&mut self, command: &'static str, draw: &DrawIndirect) {
+        let Some(length) = self.buffer_size(draw.args) else {
+            // A dead or foreign handle, already reported by `need_live`.
+            return;
+        };
+        self.report_indirect(command, plan_mesh_indirect(draw, length));
+    }
+
     /// [`need_indirect_arguments`](Self::need_indirect_arguments) for a
     /// count-limited draw, which is the same argument array plus the count word
     /// in a second buffer — [`plan_count_structures`].
@@ -3027,6 +3044,7 @@ impl CommandEncoder for NullEncoder {
             ObjectKind::Buffer,
             draw.args.to_bits(),
         );
+        self.need_mesh_indirect_arguments("DrawMeshTasksIndirect", draw);
         self.record(Command::DrawMeshTasksIndirect(*draw));
     }
 
