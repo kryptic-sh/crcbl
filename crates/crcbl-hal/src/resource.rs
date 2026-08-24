@@ -578,7 +578,107 @@ pub struct ImageViewDesc<'a> {
     /// sRGB reinterpretation, and must be compatible with it.
     pub format: Format,
     /// Subrange covered.
+    ///
+    /// **Must be in range of the image**, which [`check`](Self::check) is what
+    /// says: a base past the last mip or layer, a count of zero, and a count
+    /// running past the end are each refused there rather than handed to a
+    /// driver that has no answer for them.
     pub range: ImageSubresourceRange,
+}
+
+impl ImageViewDesc<'_> {
+    /// Refuses a view of subresources the image does not have.
+    ///
+    /// The rule [`Device::create_image_view`](crate::Device::create_image_view)
+    /// already promised — "an out-of-range subresource" is
+    /// [`HalError::InvalidDescriptor`] — and which nothing on the seam stated,
+    /// so each backend that wanted it kept its own copy and the three that did
+    /// not kept none. `crcbl-vk` put the range straight into
+    /// `vkCreateImageView`, which is
+    /// `VUID-VkImageViewCreateInfo-subresourceRange-01478`: a driver answers
+    /// `VK_SUCCESS` and the view addresses mips that were never allocated.
+    ///
+    /// The two counts are taken as parameters rather than read off an
+    /// [`ImageDesc`] because the image's descriptor is gone by the time a view
+    /// is made — every backend keeps the shape it needs in its own image
+    /// table, and this is the shape it needs.
+    ///
+    /// **`image_layers` is not [`Extent3d::depth_or_layers`].** That field is
+    /// the depth for an [`ImageType::D3`] image and the array-layer count for
+    /// every other type, so a volume has **one** array layer no matter how deep
+    /// it is. A caller passing a 3D image's depth here would accept views of
+    /// layers that do not exist; passing `1` for an array image would refuse
+    /// every view past the first layer.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming the range and the shape it ran
+    /// past.
+    pub fn check(&self, image_mip_levels: u32, image_layers: u32) -> Result<(), HalError> {
+        let range = self.range;
+        if range.base_mip >= image_mip_levels || range.base_layer >= image_layers {
+            return Err(HalError::InvalidDescriptor(format!(
+                "view starts at mip {} layer {}, and the image has {image_mip_levels} mips and \
+                 {image_layers} layers",
+                range.base_mip, range.base_layer
+            )));
+        }
+        // Resolved before anything compares a count, because
+        // [`ImageSubresourceRange::ALL`] is `u32::MAX` — a sentinel, not a
+        // count. Compared raw it makes the whole-image range that
+        // [`ImageSubresourceRange::all`] mints, which is nearly every view this
+        // engine creates, the widest overrun expressible.
+        let mip_count = resolve_count(range.mip_count, range.base_mip, image_mip_levels);
+        let layer_count = resolve_count(range.layer_count, range.base_layer, image_layers);
+        if mip_count == 0 || layer_count == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "an image view covering no mip levels or no layers is not a view".to_string(),
+            ));
+        }
+        // Checked, not wrapping: a `base_mip` near `u32::MAX` with a count of
+        // three sums to a *small* number, which passes the comparison it was
+        // supposed to fail. The base check above rejects that particular pair,
+        // but a legal base with a near-`u32::MAX` count reaches here.
+        if range
+            .base_mip
+            .checked_add(mip_count)
+            .is_none_or(|end| end > image_mip_levels)
+        {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a view of {mip_count} mips from mip {} runs past the {image_mip_levels} mips \
+                 the image has",
+                range.base_mip
+            )));
+        }
+        if range
+            .base_layer
+            .checked_add(layer_count)
+            .is_none_or(|end| end > image_layers)
+        {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a view of {layer_count} layers from layer {} runs past the {image_layers} \
+                 layers the image has",
+                range.base_layer
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Turns [`ImageSubresourceRange::ALL`] into the count it stands for.
+///
+/// Only the sentinel is rewritten: a count the caller actually named is left
+/// alone so [`ImageViewDesc::check`] can refuse it for running past the end,
+/// rather than quietly serving a narrower view than the one asked for.
+///
+/// `base` is already known to be inside `total` at every call site, so the
+/// subtraction is saturating only to keep the function total.
+const fn resolve_count(requested: u32, base: u32, total: u32) -> u32 {
+    if requested == ImageSubresourceRange::ALL {
+        total.saturating_sub(base)
+    } else {
+        requested
+    }
 }
 
 /// Minification/magnification/mip filter.
@@ -716,6 +816,122 @@ mod tests {
         ] {
             let error = desc
                 .check(&limits)
+                .expect_err(&format!("{what} must be refused"));
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
+    }
+
+    /// **A view may only name subresources the image has.**
+    ///
+    /// [`Device::create_image_view`](crate::Device::create_image_view) has
+    /// always documented an out-of-range subresource as
+    /// [`HalError::InvalidDescriptor`], and the seam provided no check for it.
+    /// `crcbl-mtl` and `crcbl-dx12` each enforced it from their own copies;
+    /// `crcbl-vk`, the null backend and `crcbl-webgpu` enforced nothing, and
+    /// the Vulkan one put the range straight into `vkCreateImageView` — a
+    /// driver returns `VK_SUCCESS` and the view addresses mips that were never
+    /// allocated (`VUID-VkImageViewCreateInfo-subresourceRange-01478`).
+    ///
+    /// **What turns it red.** Dropping the base check — the two message
+    /// assertions, which are what that branch is for; the cases themselves
+    /// would still be refused, by the zero-count rule a resolved `ALL` reaches
+    /// and by the past-the-end rule an explicit count reaches. Dropping the
+    /// zero-count check — its two cases. Dropping either past-the-end check —
+    /// its own case. Reading
+    /// [`ImageSubresourceRange::ALL`] as a literal count instead of resolving
+    /// it — the whole-image `expect`, which is the range nearly every view in
+    /// this engine is built from. And `checked_add` becoming a `+` — the
+    /// overflow case, whose sum wraps to `0` and passes a comparison against
+    /// four mips.
+    ///
+    /// The accepting arms are what stop the refusals going vacuous: a `check`
+    /// that refused every view would satisfy every `expect_err` here and
+    /// nothing else would notice.
+    #[test]
+    fn a_view_may_only_name_subresources_its_image_has() {
+        // Four mips, three array layers — no two of the image's numbers are
+        // equal, and none equals a base or count used below, so a body that
+        // compared mips against layers would not pass by coincidence.
+        const MIPS: u32 = 4;
+        const LAYERS: u32 = 3;
+        let view = |base_mip, mip_count, base_layer, layer_count| ImageViewDesc {
+            label: None,
+            image: Handle::from_bits(1 << 32).expect("a non-zero generation"),
+            view_type: ImageViewType::D2Array,
+            format: Format::Rgba8Unorm,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip,
+                mip_count,
+                base_layer,
+                layer_count,
+            },
+        };
+        let all = ImageSubresourceRange::ALL;
+
+        view(0, all, 0, all)
+            .check(MIPS, LAYERS)
+            .expect("both sentinels resolve to the whole image, which is a view of all of it");
+        view(3, all, 2, all)
+            .check(MIPS, LAYERS)
+            .expect("the sentinel from the last mip and last layer is one of each, not none");
+        view(0, MIPS, 0, LAYERS)
+            .check(MIPS, LAYERS)
+            .expect("the whole image named explicitly is the same view");
+        view(1, 2, 1, 2)
+            .check(MIPS, LAYERS)
+            .expect("a subrange ending exactly at the end is inside the image");
+
+        // A base past the end is asserted on its *message*, because the two
+        // rules below already cover the case: a resolved `ALL` becomes a zero
+        // count and an explicit count runs past the end, so a kind-only
+        // assertion here is one no sabotage of the base check could turn red.
+        // The sentence is what the check is for — `crcbl-mtl` and `crcbl-dx12`
+        // have answered a base past the end in exactly these words from their
+        // own copies since before the seam had any, and a caller must read the
+        // same refusal from all five backends.
+        for (desc, what) in [
+            (view(MIPS, all, 0, all), "a view starting past the last mip"),
+            (
+                view(0, all, LAYERS, all),
+                "a view starting past the last layer",
+            ),
+        ] {
+            let error = desc
+                .check(MIPS, LAYERS)
+                .expect_err(&format!("{what} must be refused"));
+            let HalError::InvalidDescriptor(message) = &error else {
+                panic!("{what} is a bad descriptor, not {error:?}");
+            };
+            assert!(
+                message.starts_with("view starts at mip"),
+                "{what} must be refused for its base rather than for what its \
+                 count resolved to: {message}"
+            );
+        }
+
+        for (desc, what) in [
+            (view(0, 0, 0, all), "a view of no mip levels"),
+            (view(0, all, 0, 0), "a view of no layers"),
+            (view(2, 3, 0, all), "a mip range running past the last mip"),
+            (
+                view(0, all, 1, 3),
+                "a layer range running past the last layer",
+            ),
+            (
+                view(2, u32::MAX - 1, 0, all),
+                "a mip count whose sum with its base overflows a u32",
+            ),
+            (
+                view(0, all, 2, u32::MAX - 1),
+                "a layer count whose sum with its base overflows a u32",
+            ),
+        ] {
+            let error = desc
+                .check(MIPS, LAYERS)
                 .expect_err(&format!("{what} must be refused"));
             assert!(
                 matches!(error, HalError::InvalidDescriptor(_)),

@@ -1907,6 +1907,107 @@ fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
 
 // --- handles, ranges and refusals ------------------------------------------
 
+/// **A view of an acquired frame is checked against the frame's own shape.**
+///
+/// `ImageViewDesc::check` is only as good as the shape each backend records for
+/// an image, and a swapchain image is the row most easily left wrong: nothing
+/// creates it through `create_image`, so a backend fills its mip and layer
+/// counts in by hand at a different call site. `crcbl-vk` has three such sites
+/// — `create_image`, the WSI ring and the offscreen ring — and sabotaging the
+/// two ring rows to zero left the whole vk suite green, because every existing
+/// caller reaches a frame's view through `AcquiredFrame::view` and never asks
+/// this seam call for one. That is the hole this closes.
+///
+/// **Both arms are load-bearing, in opposite directions.** A backend that
+/// recorded no shape at all — zero mips, zero layers — fails the accepting arm,
+/// because the whole of the frame stops being viewable. A backend that recorded
+/// a shape larger than the frame fails the refusing arm, because a second mip
+/// it does not have becomes viewable. Only a truthful row passes both.
+///
+/// A presentable image is one mip of one array layer on every API here: it is a
+/// canvas texture on WebGPU, a `VkImage` the WSI created with `mipLevels: 1`,
+/// and the same on the other two.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_view_of_an_acquired_frame_is_checked_against_the_frame() {
+    let instance = instance();
+    let adapter = select_adapter(instance.as_ref());
+    // SAFETY: `Offscreen` names no platform object.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen");
+    let device = instance
+        .create_device(&DeviceDesc {
+            label: Some("crcbl hal seam e2e"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: Some(surface),
+        })
+        .expect("a device opens");
+    let caps = instance
+        .surface_caps(surface, adapter.id)
+        .expect("an offscreen surface has caps");
+    let format = *caps.formats.first().expect("a presentable format");
+    let swapchain = device
+        .create_swapchain(&SwapchainDesc {
+            label: Some("acquired frame views"),
+            surface,
+            format,
+            extent: EXTENT,
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        })
+        .expect("a swapchain");
+
+    let frame = device
+        .acquire_next_frame(swapchain)
+        .expect("an acquire on a live swapchain");
+
+    let view_of = |base_mip, base_layer| {
+        device.create_image_view(&ImageViewDesc {
+            label: Some("acquired frame view"),
+            image: frame.image,
+            view_type: ImageViewType::D2,
+            format,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip,
+                mip_count: 1,
+                base_layer,
+                layer_count: 1,
+            },
+        })
+    };
+
+    let whole = view_of(0, 0).expect(
+        "the one mip of the one layer a presentable image has is the view every frame takes — \
+         a backend failing this recorded no shape for its swapchain images at all",
+    );
+    device.destroy_image_view(whole);
+
+    for (base_mip, base_layer, what) in [
+        (1, 0, "a second mip of a presentable image"),
+        (0, 1, "a second array layer of a presentable image"),
+    ] {
+        match view_of(base_mip, base_layer) {
+            Err(error) => assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what} is a bad descriptor rather than a backend failure: {error:?}"
+            ),
+            Ok(view) => {
+                device.destroy_image_view(view);
+                panic!(
+                    "{what} was served, so this backend believes its swapchain images are \
+                     bigger than they are and a view now addresses memory the frame does not have"
+                );
+            }
+        }
+    }
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
 /// **An image whose shape no API can build is refused by every backend.**
 ///
 /// Two rules, and both were being answered differently depending on where the

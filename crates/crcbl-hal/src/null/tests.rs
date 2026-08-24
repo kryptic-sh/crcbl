@@ -8,9 +8,9 @@ use super::*;
 
 use crate::{
     BindGroupLayoutEntry, BindingKind, BindingModel, BufferUsage, ClearValue, ColorAttachment,
-    ColorTargetState, DepthStencilState, GeometryPath, ImageSubresourceRange, ImageViewType,
-    LightingPath, LoadOp, MultisampleState, PrimitiveState, PushConstantRange, ResourceState,
-    SampleType, SemaphoreSignal, ShaderEntry, StoreOp, depth,
+    ColorTargetState, DepthStencilState, Extent3d, GeometryPath, ImageAspect,
+    ImageSubresourceRange, ImageViewType, LightingPath, LoadOp, MultisampleState, PrimitiveState,
+    PushConstantRange, ResourceState, SampleType, SemaphoreSignal, ShaderEntry, StoreOp, depth,
 };
 
 /// The SPIR-V magic number, so test modules look like modules.
@@ -688,6 +688,127 @@ fn a_query_set_of_no_queries_is_refused_as_a_bad_descriptor() {
         matches!(error, HalError::InvalidDescriptor(_)),
         "a zero count is a bad descriptor, not an absent capability: {error:?}"
     );
+}
+
+/// A view of mips or layers the image does not have is refused, and a 3D
+/// image's depth is not mistaken for its layer count.
+///
+/// **The reference backend could not state this rule at all.** `create_image`
+/// filed `Detail::None`, so neither the mip count nor the layer count was
+/// recorded anywhere, and `create_image_view` checked only that the handle was
+/// live — `crcbl-mtl` and `crcbl-dx12` refused these from their own copies of
+/// the rules while this backend, `crcbl-vk` and `crcbl-webgpu` served them.
+/// [`ImageViewDesc::check`] is where the rule lives now; `Detail::Image` is the
+/// slot that lets this backend ask it.
+///
+/// The volume case is the one a wrong reading of
+/// [`Extent3d::depth_or_layers`](crate::Extent3d::depth_or_layers) inverts:
+/// filing the raw field would make a 64-deep 3D image look 64 layers deep, so
+/// the second layer of it would be served instead of refused.
+///
+/// The accepted views are what stop the refusals going vacuous: a backend that
+/// refused every view would satisfy every `expect_err` below.
+#[test]
+fn a_view_of_mips_or_layers_the_image_lacks_is_refused() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+    let format = Format::Rgba8Unorm;
+    let image = |image_type, extent, mip_levels| {
+        device
+            .create_image(&ImageDesc {
+                label: Some("view subject"),
+                image_type,
+                extent,
+                format,
+                mip_levels,
+                samples: 1,
+                usage: ImageUsage::SAMPLED,
+            })
+            .expect("the descriptor is one this device serves")
+    };
+    let view = |image, base_mip, mip_count, base_layer, layer_count| {
+        device.create_image_view(&ImageViewDesc {
+            label: Some("subrange"),
+            image,
+            view_type: ImageViewType::D2Array,
+            format,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip,
+                mip_count,
+                base_layer,
+                layer_count,
+            },
+        })
+    };
+    let all = ImageSubresourceRange::ALL;
+
+    // Four mips over three array layers: no two of the image's numbers agree,
+    // so a body comparing mips against layers would not pass by coincidence.
+    let array = image(
+        ImageType::D2,
+        Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_layers: 3,
+        },
+        4,
+    );
+    // A 64-deep volume, which has one array layer.
+    let volume = image(
+        ImageType::D3,
+        Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_layers: 64,
+        },
+        1,
+    );
+
+    for (handle, base_mip, mip_count, base_layer, layer_count, what) in [
+        (
+            array,
+            0,
+            all,
+            0,
+            all,
+            "the whole image through both sentinels",
+        ),
+        (array, 3, all, 2, all, "the last mip of the last layer"),
+        (array, 1, 2, 1, 2, "a subrange ending exactly at the end"),
+        (volume, 0, all, 0, all, "the whole volume"),
+    ] {
+        let handle = view(handle, base_mip, mip_count, base_layer, layer_count)
+            .unwrap_or_else(|error| panic!("{what} is a legal view: {error:?}"));
+        device.destroy_image_view(handle);
+    }
+
+    for (handle, base_mip, mip_count, base_layer, layer_count, what) in [
+        (array, 4, all, 0, all, "a view starting past the last mip"),
+        (array, 0, all, 3, all, "a view starting past the last layer"),
+        (array, 0, 0, 0, all, "a view of no mip levels"),
+        (array, 0, all, 0, 0, "a view of no layers"),
+        (array, 2, 3, 0, all, "a mip range running past the last mip"),
+        (array, 0, all, 1, 3, "a layer range past the last layer"),
+        (
+            volume,
+            0,
+            all,
+            1,
+            all,
+            "the second array layer of a 64-deep volume, which has one",
+        ),
+    ] {
+        let error = view(handle, base_mip, mip_count, base_layer, layer_count)
+            .expect_err(&format!("{what} must be refused"));
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{what}: {error:?}"
+        );
+    }
+
+    device.destroy_image(array);
+    device.destroy_image(volume);
 }
 
 /// A device that does not report [`Features::COMPUTE`] refuses a compute

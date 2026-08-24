@@ -103,6 +103,19 @@ pub(crate) struct ImageEntry {
     /// Null for a swapchain image, which the driver owns.
     memory: vk::DeviceMemory,
     pub(crate) format: Format,
+    /// Mip levels the image was created with, and the **array-layer** count
+    /// — never a 3D image's depth, which is one array layer however deep it is.
+    ///
+    /// Kept because `create_image_view` needs them: the seam's subresource rule
+    /// is stated by `ImageViewDesc::check` and asks for exactly this pair, and
+    /// with nowhere to read it from the range went straight into
+    /// `vkCreateImageView`. That is
+    /// `VUID-VkImageViewCreateInfo-subresourceRange-01478`, which a driver
+    /// answers `VK_SUCCESS` to — the view then addresses mips that were never
+    /// allocated.
+    mip_levels: u32,
+    /// See [`mip_levels`](Self::mip_levels).
+    layers: u32,
     /// Whether a swapchain owns this image. Destroying such a handle drops the
     /// name without touching the `VkImage`.
     swapchain_owned: bool,
@@ -2069,6 +2082,15 @@ impl Device for VkDevice {
                 raw,
                 memory,
                 format: desc.format,
+                mip_levels: desc.mip_levels,
+                // The same reading `vk::ImageCreateInfo::array_layers` above
+                // takes: `depth_or_layers` is a 3D image's *depth*, and such an
+                // image has one array layer however deep it is.
+                layers: if is_3d {
+                    1
+                } else {
+                    desc.extent.depth_or_layers
+                },
                 swapchain_owned: false,
                 // An ordinary image is reused only when the caller reuses it,
                 // and the caller then owns the barrier that says so.
@@ -2100,7 +2122,16 @@ impl Device for VkDevice {
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         let mut state = self.inner.state();
         // Copied out before the pool is borrowed mutably below.
-        let image_raw = lookup(&state.images, "image", desc.image, &self.inner)?.raw;
+        let (image_raw, mip_levels, layers) = {
+            let entry = lookup(&state.images, "image", desc.image, &self.inner)?;
+            (entry.raw, entry.mip_levels, entry.layers)
+        };
+        // The seam's subresource rule, which nothing ran here: the range went
+        // into `vkCreateImageView` as it stood, and a base or count past the
+        // image's own shape is `VUID-VkImageViewCreateInfo-subresourceRange-01478`
+        // — a VU the driver does not report, so the caller got a live-looking
+        // view onto mips that do not exist.
+        desc.check(mip_levels, layers)?;
         let info = vk::ImageViewCreateInfo::default()
             .image(image_raw)
             .view_type(conv::image_view_type(desc.view_type))
@@ -3344,6 +3375,11 @@ impl VkDevice {
                     raw: *image,
                     memory: vk::DeviceMemory::null(),
                     format: desc.format,
+                    // A WSI image is one mip of one layer: `create_swapchain`
+                    // asks `vkCreateSwapchainKHR` for `imageArrayLayers: 1` and
+                    // a swapchain image never has a mip chain.
+                    mip_levels: 1,
+                    layers: 1,
                     swapchain_owned: true,
                     // A WSI image's acquire semaphore already carries it.
                     ring_reuse: false,
@@ -3503,6 +3539,11 @@ impl VkDevice {
                     raw: *image,
                     memory: vk::DeviceMemory::null(),
                     format: desc.format,
+                    // One mip of one layer, exactly as a WSI image is — the
+                    // `vk::ImageCreateInfo` above in `build_offscreen_ring`
+                    // asks for both.
+                    mip_levels: 1,
+                    layers: 1,
                     swapchain_owned: true,
                 }))
             })

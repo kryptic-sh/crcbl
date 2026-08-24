@@ -42,12 +42,12 @@ use crcbl_hal::{
     BufferHandle, Capability, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
     ComputePipelineDesc, ComputePipelineHandle, Device, DeviceCaps, DeviceRequestState,
     DisplayTiming, Features, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc,
-    ImageHandle, ImageViewDesc, ImageViewHandle, MemoryLocation, MeshPipelineDesc, PendingDevice,
-    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle,
-    QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc,
-    SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderSources, SubmitInfo, Support, SurfaceError, SwapchainDesc,
-    SwapchainHandle,
+    ImageHandle, ImageType, ImageViewDesc, ImageViewHandle, MemoryLocation, MeshPipelineDesc,
+    PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QueryKind, QuerySetDesc,
+    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
+    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait,
+    ShaderModuleDesc, ShaderModuleHandle, ShaderSources, SubmitInfo, Support, SurfaceError,
+    SwapchainDesc, SwapchainHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -327,6 +327,17 @@ pub struct WebGpuDevice {
     /// end, a binding range against the slot's ceiling, and a writable storage
     /// binding of host-visible memory.
     buffers: Mutex<HashMap<u64, BufferState>>,
+    /// The mip and array-layer counts of each live image, keyed by handle bits.
+    ///
+    /// [`buffers`](Self::buffers)' reason for exactly one more rule: the
+    /// browser is not needed to know what shape of image this device asked
+    /// for, and the seam's subresource rule —
+    /// [`ImageViewDesc::check`](crcbl_hal::ImageViewDesc::check) — is decidable
+    /// from those two numbers and nothing else. Without them
+    /// `create_image_view` encoded whatever range it was handed, so a view of
+    /// mips the image never had was refused on `crcbl-mtl` and `crcbl-dx12` and
+    /// served here.
+    images: Mutex<HashMap<u64, ImageState>>,
     /// The kind of each binding in each live bind group layout, keyed by the
     /// layout's handle bits.
     ///
@@ -350,6 +361,23 @@ struct BufferState {
     size: u64,
     /// [`BufferDesc::memory`](crcbl_hal::BufferDesc::memory), as asked for.
     memory: MemoryLocation,
+}
+
+/// What this device remembers about an image it created.
+///
+/// Only the pair [`ImageViewDesc::check`](crcbl_hal::ImageViewDesc::check)
+/// asks for. The extent and format are not here because no rule this device can
+/// decide asks about them, and the replayer holds the whole descriptor anyway.
+#[derive(Clone, Copy, Debug)]
+struct ImageState {
+    /// [`ImageDesc::mip_levels`](crcbl_hal::ImageDesc::mip_levels), as asked
+    /// for.
+    mip_levels: u32,
+    /// The **array-layer** count, which is not
+    /// [`Extent3d::depth_or_layers`](crcbl_hal::Extent3d::depth_or_layers):
+    /// that field is a 3D image's *depth*, and such an image has one array
+    /// layer however deep it is. See `create_image`, which resolves it.
+    layers: u32,
 }
 
 /// What a live swapchain leaves in this device between calls.
@@ -402,6 +430,7 @@ impl WebGpuDevice {
             errors: Mutex::new(ErrorQueue::default()),
             swapchains: Mutex::new(HashMap::new()),
             buffers: Mutex::new(HashMap::new()),
+            images: Mutex::new(HashMap::new()),
             layouts: Mutex::new(HashMap::new()),
         }
     }
@@ -1007,15 +1036,51 @@ impl Device for WebGpuDevice {
         let handle: ImageHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_image(handle, desc)));
+        self.images
+            .lock()
+            .expect("the image map was poisoned")
+            .insert(
+                handle.to_bits(),
+                ImageState {
+                    mip_levels: desc.mip_levels,
+                    // `depth_or_layers` is the *depth* of a 3D image and the
+                    // array-layer count of every other type, so a volume has
+                    // one array layer however deep it is. Filing the raw field
+                    // would make a 64-deep volume look 64 layers deep, and
+                    // every view past its first layer would be served.
+                    layers: if desc.image_type == ImageType::D3 {
+                        1
+                    } else {
+                        desc.extent.depth_or_layers
+                    },
+                },
+            );
         Ok(handle)
     }
 
     fn destroy_image(&self, image: ImageHandle) {
         self.channel
             .with(|channel| channel.encode(|stream| stream.destroy_image(image)));
+        self.images
+            .lock()
+            .expect("the image map was poisoned")
+            .remove(&image.to_bits());
     }
 
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
+        // The seam's subresource rule, which this device could not ask before:
+        // it tracked no images at all, so the range was encoded exactly as
+        // handed over. WebGPU does refuse an out-of-range
+        // `createView` — but a frame later, in the browser's words about a
+        // texture, through `take_error`, rather than as this call's answer.
+        let state = self
+            .images
+            .lock()
+            .expect("the image map was poisoned")
+            .get(&desc.image.to_bits())
+            .copied()
+            .ok_or_else(|| HalError::invalid_handle("image", desc.image))?;
+        desc.check(state.mip_levels, state.layers)?;
         let handle: ImageViewHandle = self.pool.alloc();
         self.channel
             .with(|channel| channel.encode(|stream| stream.create_image_view(handle, desc)));
@@ -1567,6 +1632,15 @@ impl Device for WebGpuDevice {
             .expect("the swapchain map was poisoned")
             .remove(&swapchain.to_bits())
             .and_then(|state| state.acquired);
+        if let Some((image, _)) = acquired {
+            // The row `acquire_next_frame` filed for that image. Left behind it
+            // would outlive the swapchain that minted it, and this map would
+            // grow by one entry per swapchain the session ever destroys.
+            self.images
+                .lock()
+                .expect("the image map was poisoned")
+                .remove(&image.to_bits());
+        }
         self.channel.with(|channel| {
             channel.encode(|stream| {
                 // Destroying the swapchain does not retire the frame it last
@@ -1663,6 +1737,26 @@ impl Device for WebGpuDevice {
                 None => ((0, 0), None),
             }
         };
+        {
+            // A canvas texture is one mip of one array layer, so a view of it
+            // is checked against the same shape every other backend checks it
+            // against — `crcbl-vk` files its WSI images in the very pool
+            // `create_image_view` looks in. Filing it here is what keeps a view
+            // of an acquired frame a legal call rather than an unknown handle,
+            // and retiring last frame's keeps this map one entry deep instead
+            // of one per frame the session has drawn.
+            let mut images = self.images.lock().expect("the image map was poisoned");
+            if let Some((stale, _)) = stale {
+                images.remove(&stale.to_bits());
+            }
+            images.insert(
+                image.to_bits(),
+                ImageState {
+                    mip_levels: 1,
+                    layers: 1,
+                },
+            );
+        }
         self.channel.with(|channel| {
             channel.encode(|stream| {
                 // Last frame's pair, retired before this one is filed, so the

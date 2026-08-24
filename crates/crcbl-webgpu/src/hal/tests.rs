@@ -16,10 +16,11 @@ use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc,
     BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, CommandEncoderDesc, CompositeAlpha, ComputePipelineDesc, Device, DeviceCaps,
-    DeviceDesc, DeviceType, Extent3d, Features, Format, HalError, ImageDesc, ImageType, ImageUsage,
-    Instance, Limits, MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc,
-    ReadbackState, ShaderEntry, ShaderModuleDesc, ShaderStages, SubmitInfo, SurfaceCaps,
-    SurfaceHandle, SwapchainDesc,
+    DeviceDesc, DeviceType, Extent3d, Features, Format, HalError, ImageAspect, ImageDesc,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, Instance, Limits,
+    MemoryLocation, PendingDevice, PresentMode, QueueKind, ReadbackDesc, ReadbackState,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, SubmitInfo, SurfaceCaps, SurfaceHandle,
+    SwapchainDesc,
 };
 
 use crate::ReplyWriter;
@@ -549,6 +550,188 @@ fn a_zero_size_buffer_is_refused_without_encoding_anything() {
         "one byte must still reach the replayer, or the check above is refusing \
          every buffer and this test would not know"
     );
+}
+
+/// A view of mips or layers the image does not have is refused, and nothing is
+/// encoded for it.
+///
+/// **The seam's subresource rule, which this backend tracked no state to ask.**
+/// `Device::create_image_view` documents an out-of-range subresource as
+/// [`HalError::InvalidDescriptor`]; `crcbl-mtl` and `crcbl-dx12` refuse one
+/// from their own image tables, and this device kept no image table at all, so
+/// the range was encoded exactly as handed over. The browser does refuse a bad
+/// `createView` — but a frame later, in its own words about a texture, through
+/// `take_error`, rather than as this call's answer.
+///
+/// The volume case is the one a wrong reading of `Extent3d::depth_or_layers`
+/// inverts: it is a 3D image's *depth*, so a 64-deep image has **one** array
+/// layer, and filing the raw field would serve a view of its 64th.
+///
+/// **Both halves are the check.** Each refusal is paired with the encoder
+/// falling silent — a rejected descriptor must not put a command on the wire
+/// for a handle the caller never received — and with a legal view beside it,
+/// which is what stops a `check` that refused everything passing this test.
+#[test]
+fn a_view_of_mips_or_layers_the_image_lacks_is_refused_without_encoding_anything() {
+    let (channel, device) = device_on_fresh_channel();
+    let names = |channel: &SharedChannel| -> Vec<&'static str> {
+        channel
+            .with(|c| c.encode(|stream| decode_stream(stream.bytes())))
+            .expect("the channel is not borrowed")
+            .expect("the writer's own bytes decode")
+            .iter()
+            .map(crate::Command::name)
+            .collect()
+    };
+    let format = Format::Rgba8Unorm;
+    let image = |image_type, depth_or_layers, mip_levels| {
+        device
+            .create_image(&ImageDesc {
+                label: Some("view subject"),
+                image_type,
+                extent: Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth_or_layers,
+                },
+                format,
+                mip_levels,
+                samples: 1,
+                usage: ImageUsage::SAMPLED,
+            })
+            .expect("the descriptor is one this device serves")
+    };
+    let view = |image, base_mip, mip_count, base_layer, layer_count| {
+        device.create_image_view(&ImageViewDesc {
+            label: Some("subrange"),
+            image,
+            view_type: ImageViewType::D2Array,
+            format,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip,
+                mip_count,
+                base_layer,
+                layer_count,
+            },
+        })
+    };
+    let all = ImageSubresourceRange::ALL;
+
+    // Four mips over three array layers — no two of the image's numbers agree
+    // — and a 64-deep volume, which has one array layer.
+    let array = image(ImageType::D2, 3, 4);
+    let volume = image(ImageType::D3, 64, 1);
+    assert_eq!(
+        names(&channel),
+        vec!["CreateImage", "CreateImage"],
+        "both images must reach the replayer before anything below is judged"
+    );
+
+    for (handle, base_mip, mip_count, base_layer, layer_count, what) in [
+        (array, 4, all, 0, all, "a view starting past the last mip"),
+        (array, 0, all, 3, all, "a view starting past the last layer"),
+        (array, 0, 0, 0, all, "a view of no mip levels"),
+        (array, 0, all, 0, 0, "a view of no layers"),
+        (array, 2, 3, 0, all, "a mip range running past the last mip"),
+        (array, 0, all, 1, 3, "a layer range past the last layer"),
+        (
+            volume,
+            0,
+            all,
+            1,
+            all,
+            "the second array layer of a 64-deep volume, which has one",
+        ),
+    ] {
+        let error = view(handle, base_mip, mip_count, base_layer, layer_count)
+            .expect_err(&format!("{what} must be refused"));
+        assert!(
+            matches!(error, HalError::InvalidDescriptor(_)),
+            "{what}: {error:?}"
+        );
+        assert_eq!(
+            names(&channel),
+            vec!["CreateImage", "CreateImage"],
+            "{what}: a refused descriptor must not reach the wire, and got {:?}",
+            names(&channel)
+        );
+    }
+
+    // An image this device never created is a handle error rather than a
+    // descriptor one, and is also not encoded.
+    let stranger = view(
+        Handle::from_bits(1 << 32).expect("a non-zero generation"),
+        0,
+        all,
+        0,
+        all,
+    )
+    .expect_err("an image handle this device never issued is not viewable");
+    assert!(
+        matches!(stranger, HalError::InvalidHandle { .. }),
+        "{stranger:?}"
+    );
+
+    // …and the legal views still go through, or the refusals above are a
+    // device that refuses every view and this test would not know.
+    for (handle, base_mip, mip_count, base_layer, layer_count, what) in [
+        (
+            array,
+            0,
+            all,
+            0,
+            all,
+            "the whole image through both sentinels",
+        ),
+        (array, 3, all, 2, all, "the last mip of the last layer"),
+        (array, 1, 2, 1, 2, "a subrange ending exactly at the end"),
+        (volume, 0, all, 0, all, "the whole volume"),
+    ] {
+        view(handle, base_mip, mip_count, base_layer, layer_count)
+            .unwrap_or_else(|error| panic!("{what} is a legal view: {error:?}"));
+    }
+    assert_eq!(
+        names(&channel),
+        vec![
+            "CreateImage",
+            "CreateImage",
+            "CreateImageView",
+            "CreateImageView",
+            "CreateImageView",
+            "CreateImageView",
+        ],
+        "every legal view must still reach the replayer"
+    );
+
+    // **A frame the swapchain hands out is an image too**, and one
+    // `acquire_next_frame` mints rather than `create_image`. Unrecorded it
+    // would be an unknown handle above, so a view of an acquired frame — which
+    // `crcbl-vk` serves, its WSI images sitting in the very pool
+    // `create_image_view` looks in — would be refused on this backend alone.
+    // A canvas texture is one mip of one array layer, which is the shape a view
+    // of it is held to.
+    let handles = HandlePool::new();
+    let swapchain = device
+        .create_swapchain(&SwapchainDesc {
+            label: Some("canvas"),
+            surface: handles.alloc(),
+            format: Format::Rgba8UnormSrgb,
+            extent: (64, 48),
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        })
+        .expect("a 64x48 swapchain is a size a canvas can have");
+    let frame = device
+        .acquire_next_frame(swapchain)
+        .expect("WebGPU's acquire answers in the call");
+    view(frame.image, 0, all, 0, all)
+        .expect("the whole of an acquired frame is a view a caller may ask for");
+    view(frame.image, 1, all, 0, all)
+        .expect_err("a canvas texture has one mip, so there is no second one to view");
+    view(frame.image, 0, all, 1, all)
+        .expect_err("a canvas texture has one array layer, so there is no second one to view");
 }
 
 /// The seam's checks that this backend used to run nowhere at all.

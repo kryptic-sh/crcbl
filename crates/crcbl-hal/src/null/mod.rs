@@ -1126,7 +1126,24 @@ impl Device for NullDevice {
         // messages are the ones that were here; this backend is the reference
         // the others are compared against, so they had to stay exact.
         desc.check(&self.caps.limits)?;
-        Ok(self.insert(ObjectKind::Image, desc.label, Detail::None))
+        // `depth_or_layers` is the *depth* of a 3D image and the array-layer
+        // count of every other type, so a volume has one array layer however
+        // deep it is. Filing the raw field would make every 3D image look
+        // `depth` layers deep to `ImageViewDesc::check`, which is the one
+        // reading of this field that turns the rule into nonsense.
+        let layers = if desc.image_type == ImageType::D3 {
+            1
+        } else {
+            desc.extent.depth_or_layers
+        };
+        Ok(self.insert(
+            ObjectKind::Image,
+            desc.label,
+            Detail::Image {
+                mip_levels: desc.mip_levels,
+                layers,
+            },
+        ))
     }
 
     fn destroy_image(&self, image: ImageHandle) {
@@ -1135,6 +1152,21 @@ impl Device for NullDevice {
 
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         self.check(ObjectKind::Image, desc.image.to_bits(), "image")?;
+        // The seam's subresource rule, which this backend could not state
+        // before: `create_image` filed `Detail::None`, so neither count was
+        // anywhere to be read and a view of mips the image never had was
+        // served here while `crcbl-mtl` and `crcbl-dx12` refused it.
+        let (mip_levels, layers) = {
+            let state = self.recorder.lock();
+            let Some(object) = state.get(ObjectKind::Image, desc.image.to_bits()) else {
+                return Err(HalError::invalid_handle("image", desc.image));
+            };
+            let Detail::Image { mip_levels, layers } = &object.detail else {
+                unreachable!("an image handle always carries image detail");
+            };
+            (*mip_levels, *layers)
+        };
+        desc.check(mip_levels, layers)?;
         Ok(self.insert(ObjectKind::ImageView, desc.label, Detail::None))
     }
 

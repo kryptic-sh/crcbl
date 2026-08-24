@@ -599,6 +599,19 @@ pub(super) enum Detail {
         memory: MemoryLocation,
         bytes: Vec<u8>,
     },
+    /// An image: the mip and array-layer counts a view of it is checked
+    /// against.
+    ///
+    /// **The shape [`ImageViewDesc::check`](crate::ImageViewDesc::check) needs
+    /// and this backend had nowhere to hold.** `create_image` filed
+    /// [`Detail::None`], so the reference backend could not state the seam's
+    /// own subresource rule at all — the same shape as the acquire slot in
+    /// [`Detail::Swapchain`]'s `acquired`.
+    ///
+    /// `layers` is the **array-layer** count, which is `1` for an
+    /// [`ImageType::D3`](crate::ImageType) image however deep it is — see
+    /// `create_image`, which resolves it.
+    Image { mip_levels: u32, layers: u32 },
     /// An in-flight readback: what it covers and how many more polls report
     /// `Pending` before it completes.
     Readback {

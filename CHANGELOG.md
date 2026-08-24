@@ -16,6 +16,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk`, the null backend and `crcbl-webgpu` refuse an image view of mips
+  or layers its image does not have.** All three passed the subresource straight
+  through; on Vulkan that is
+  `VUID-VkImageViewCreateInfo-subresourceRange-01478`, where drivers return
+  `VK_SUCCESS` and the view addresses mips that do not exist. None of the three
+  could state the rule, because none of them recorded the shape it is about: the
+  null backend filed `Detail::None` for every image, `crcbl-vk`'s `ImageEntry`
+  kept the format and not the counts, and `crcbl-webgpu` tracked no images at
+  all. Each now records the mip and layer counts and calls the seam's new
+  `ImageViewDesc::check`.
+
+  **An explicit count that runs past the end is refused, not clamped.**
+  `ImageSubresourceRange::ALL` is how a caller asks for "the rest", so a literal
+  count larger than the image is a caller's arithmetic being wrong, and Vulkan
+  and WebGPU both treat it as invalid. `crcbl-mtl` and `crcbl-dx12` clamp it
+  instead, which is now a divergence from the seam recorded in `docs/backlog.md`
+  rather than a difference anyone should rely on.
+
 - **`crcbl-vk`, the null backend and `crcbl-webgpu` refuse an image whose shape
   no API can build.** `ImageDesc::check` now states two rules the seam owed: an
   `ImageType::D1` image has a height of 1 — which `Extent3d::height` had
