@@ -148,6 +148,7 @@ DEMOS=(
   "orbit:crcbl_orbit:demos/orbit"
   "bracket:crcbl_bracket:demos/bracket"
   "puppet:crcbl_puppet:demos/puppet"
+  "sparks:crcbl_sparks:demos/sparks"
 )
 
 profile_flag=()

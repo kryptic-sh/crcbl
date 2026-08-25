@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the demo boots. sparks has none: its stage is a slab, an anvil, a vent and two columns generated from crcbl::greybox's primitives, its effects are values in apps/sparks/src/effects.rs, and its geometry, materials, shaders and font atlas are all compiled into the wasm module. The list is the seam, not the content.",
+  "keys": []
+}

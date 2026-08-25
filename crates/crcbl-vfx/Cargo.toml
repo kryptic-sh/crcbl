@@ -1,0 +1,32 @@
+[package]
+name = "crcbl-vfx"
+description = "Crucible particle simulation: pooled effects, stateless per-particle randomness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `glam` and nothing else. The simulation is arithmetic over vectors and the
+# pool is `Vec`s of them; there is no IO, no asset parse and no GPU here, which
+# is what lets a browser demo link it and what will let the same parameters be
+# uploaded to a compute pass later without this crate moving.
+#
+# **`crcbl-rand` is deliberately absent**, and that is the one dependency a
+# reader will expect. Its `Rng` is a ChaCha8 *stream*: reproducible from a seed,
+# but only when every draw happens in the same order, and re-keying it per
+# particle would cost a ChaCha block where the destination needs a handful of
+# integer operations. `src/hash.rs` says the rest — the plan's randomness is a
+# hash of (seed, index), which is the thing a compute shader can evaluate
+# inline and a stream is not.
+[dependencies]
+glam = { workspace = true }
+
+# The pool allocator's churn/clamp/freelist properties, which
+# `docs/plan/20-particles.md`'s Testing section asks for by name. A
+# hand-written table of spans would test the cases someone thought of; the
+# invariants are what actually hold.
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

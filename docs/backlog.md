@@ -3,6 +3,146 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The particle simulation runs on the CPU, and the plan wants it in compute
+
+`docs/plan/20-particles.md`'s design is spawn and update in a compute pass, an
+alive count feeding indirect draw arguments, and no CPU involvement after the
+spawn command. `crcbl-vfx` is the **staging** of that: the same pool layout, the
+same parameters and the same randomness, stepped in `system::update` and
+`system::emit` on the host.
+
+What was arranged so the move is a replacement rather than a redesign:
+
+- `ParticlePool` is a structure of arrays, one `Vec` per attribute, allocated
+  once and never grown — the shape an SSBO wants, so the buffers upload as they
+  stand.
+- `RangeAllocator` gives each effect a **contiguous** range, so a workgroup can
+  cover `[start, start + len)` and needs no per-particle owner lookup.
+- Randomness is `hash::pcg3d`, integer arithmetic a shader evaluates inline. A
+  stream could not have been ported at all, which is the argument in that module
+  for not using `crcbl-rand`'s `Rng`.
+
+What still has to be decided when the pass is written: whether retirement stays
+a swap-with-the-last compaction (`ParticlePool::move_slot`) or becomes the
+plan's freelist compaction with a prefix scan, and where the `Curve`/`Gradient`
+stops become the plan's 1D LUT textures. Neither is prototyped.
+
+### There is no per-instance colour, so particle colour is quantised
+
+`crcbl_shaders::mesh::GpuInstance` carries a transform, a mesh id, a material
+row, a sector, flags and a base vertex, and the mesh shader's albedo is the
+per-**vertex** colour times the per-**material** one. There is nowhere on the
+instance path to put a per-particle colour.
+
+So `apps/sparks` bakes each effect's `Gradient` into `effects::PALETTE_STEPS`
+material rows and draws each particle through `effects::nearest_row` — the row
+nearest the colour the simulation produced. It reads acceptably because the size
+curve does the fading, but a gradient with fine detail would band.
+
+**Not fixed, deliberately.** `docs/plan/sample/10-sparks.md`'s hard cap is that
+the gallery exercises what topic 20 ships rather than requesting engine features
+behind it. Fixing it means widening the instance record: the stride is 96 bytes
+and 16-byte aligned, so a colour word takes it to 112 and then to 128 for
+alignment, and that is a change to the shader contract in `mesh.slang` and
+`mesh_cluster.slang`, to `INSTANCE_STRIDE` and its assertions, and to every
+golden frame. **The billboard pass is probably where this is really answered** —
+a billboard's vertices are generated per particle, so the colour can be a vertex
+attribute and the instance record never has to grow. Decide when that pass is
+written, not before.
+
+Related and smaller: the forward pass draws these instances **opaque**, so a
+gradient's alpha channel changes nothing. Every effect in `apps/sparks` fades by
+shrinking instead. The alpha is still authored, because a billboard pass will
+read it.
+
+### The effect asset format and the workbench are not started
+
+`docs/plan/20-particles.md` describes RON effect assets with hot reload, and
+`docs/plan/sample/10-sparks.md` a workbench page with a param inspector, curve
+and gradient widgets, spawn-on-click and freeze/step controls. None of it
+exists. An effect is a value in `apps/sparks/src/effects.rs`, and the sample's
+page is a gallery that runs itself.
+
+Deliberate for this slice: a schema is worth writing once the parameter set has
+stopped moving, and the parameter set is what the first consumer is for. What it
+would take now: `serde::Deserialize` on `EffectDesc`, `Shape`, `Spawn`,
+`Modifiers` and `Ramp` (all plain data, so this is derives plus a RON reader
+through `crcbl_assets::AssetSource`), then the reload path, then the widgets —
+`docs/plan/07-ui-debug.md` has no curve editor or gradient bar yet, and topic
+20's tooling section says this sample is what would add them to the
+demand-driven list.
+
+### `crcbl-vfx`'s determinism is per machine, not across machines
+
+`tests/determinism.rs` asserts that two runs of one scene leave the pool
+bit-for-bit identical, over every array. That holds on one machine. It does
+**not** hold across platforms, because `particle::direction` goes through
+`f32::sin_cos` for both shapes and libm differs between glibc, Apple and MSVC —
+the same limit `docs/backlog.md` already records for the engine's other float
+output.
+
+Everything else in the step is exactly-rounded: the hash is integer arithmetic,
+the integrator is `+`, `*` and a divide (drag is backward Euler,
+`v / (1 + k dt)`, chosen partly for that), and `hash::unit` is a shift and a
+multiply by a power of two.
+
+Not a problem for what the plan wants — golden frames are per platform here
+anyway, and the destination is a compute shader whose trigonometry agrees with
+no CPU's. Worth knowing before anyone puts a particle count in a tick hash.
+
+### The pool allocator fragments, and nothing compacts it
+
+`RangeAllocator` is first-fit with a coalescing free list, and an effect's range
+is fixed for its whole life. A workload of many differently-sized short-lived
+effects will therefore reach a state where the pool has room but not in one
+piece, and `alloc_clamped` will hand out a range smaller than the effect asked
+for. `PoolStats::free_spans` is the reading that shows it.
+
+`apps/sparks` does not reach that state — it holds at most three effects — so
+the behaviour is **untested beyond the property tests** in
+`crates/crcbl-vfx/tests/pool.rs`, which check the free list stays sound under
+churn rather than that occupancy stays high. `docs/plan/20-particles.md`'s
+answer is freelist compaction in compute, so this is the same entry as the first
+one above and is not worth solving on the CPU first.
+
+### `apps/sparks` covers one milestone of five
+
+Shipped: milestone 1 — a gallery with the effects the first slice can draw, and
+the budget readout. Not shipped, in the plan's own order: every other render
+mode (billboards, velocity stretch, flipbooks, soft particles, ribbons, additive
+versus alpha-sorted, HDR emissive into bloom), the workbench page, the editor's
+inspector, and the towers/horde/orbit retrofit.
+
+Two of the plan's stock effects are on the page (impact sparks, smoke puff) out
+of nine. The rest — fire and embers, muzzle flash, rain, snow, magic swirl,
+explosion with debris, rocket trail — are values in the same shape as the two
+that exist, and several of them need render modes that do not.
+
+Also absent: the `crcbl vfx render` and `crcbl vfx lint` CLI subcommands
+`docs/plan/20-particles.md`'s tooling section names, and therefore the
+golden-frame-per-effect regression surface its exit criteria ask for. The
+determinism those would rest on is tested; the frames are not.
+
+### Not verified in `apps/sparks`
+
+Stated as gaps rather than reasoned away:
+
+- **Never run in a browser on a real GPU.** `web/run-browser-e2e.sh` was run
+  locally on the default `auto` adapter and Chromium chose SwiftShader; 46/46
+  passed. A hardware adapter in a browser is CI's, and has not run for this
+  demo. `tools/run-samples-windowed.sh` _has_ run it windowed on real hardware
+  with Vulkan validation on, and that was silent.
+- **Never run on Metal or D3D12 at all.** `cargo check` type-checks the two
+  backends; nothing has drawn this sample's scene on either.
+- **The instance upload cost is an argument, not a measurement.** The claim that
+  a block's worth of `set_instance` calls coalesces into one buffer write comes
+  from reading `crcbl-render`'s `instance_pool` dirty-range handling, not from a
+  capture. Nothing profiles this demo.
+- **Particle counts are small.** The pool is 2048 and the page holds a few
+  hundred live at a time. `docs/plan/sample/10-sparks.md`'s exit criterion is 1k
+  concurrent effect _instances_ at 60 fps, which is a different order and has
+  not been attempted.
+
 ### The Pages job renders every demo serially, and the total is now the cap
 
 Every browser gate runs inside `pages.yml`'s `build` job, one after another,

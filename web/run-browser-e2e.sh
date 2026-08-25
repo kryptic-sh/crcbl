@@ -573,6 +573,44 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument once more for the budget, which is sparks' whole
+# subject. Every other check in the driver passes against a page whose particles
+# never retire and whose pool budget is not enforced: `moving` reads a count,
+# and a count that only ever climbs still changes. `sparks` alone, because it is
+# the only demo whose claim is a cap.
+#
+# Two names are matched rather than four, and they are the block's two
+# *controls* — the halves worth deleting when a slow machine makes them flake.
+# Each of the two positives is useless without its control:
+#
+#  - 'falls back to nothing' is what says particles retire and an emitter can be
+#    stopped. Without it, "the count climbed while the emitter ran" passes for a
+#    simulation that has never retired anything.
+#  - 'being refused rather than merely idle' is what says a clamp is holding the
+#    greedy effect. Without it, "it holds at its pool share" passes for an
+#    emitter that happens to ask for exactly its share.
+#
+# Renaming either check in the driver is meant to fail here and be renamed here
+# too.
+case "$DEMO" in
+    sparks)
+        DRAINED="$(grep -F 'and falls back to nothing once its emitter stops' "${OUTPUT}.plain" || true)"
+        if [ -z "$DRAINED" ]; then
+            echo "crcbl web e2e: the driver never watched $DEMO's emitter drain;" >&2
+            echo "               'the count climbs while it runs' has no control, and it" >&2
+            echo "               passes for a demo that never retires a particle" >&2
+            exit 1
+        fi
+        CLAMPED="$(grep -F 'and its emitter is being refused rather than merely idle' "${OUTPUT}.plain" || true)"
+        if [ -z "$CLAMPED" ]; then
+            echo "crcbl web e2e: the driver never asked whether $DEMO's greedy effect is" >&2
+            echo "               being refused; 'it holds at its pool share' has no control," >&2
+            echo "               and it passes for an emitter asking for exactly its share" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the strongest form of the same argument, for group H. Three of the driver's
 # checks assert that *nothing* was reported — no uncaught exception, no missing
 # asset, no WebGPU device error — and every one of them passes just as happily

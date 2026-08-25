@@ -14,6 +14,7 @@
 //! crcbl::scene   → crcbl-scene   glTF import and the mesh bakes (feature `scene`)
 //! crcbl::shaders → crcbl-shaders the engine's shaders, as SPIR-V
 //! crcbl::ui      → crcbl-ui      draw lists, the glyph atlas, HUD widgets
+//! crcbl::vfx     → crcbl-vfx     particle effects, pooled and hashed (feature `vfx`)
 //! crcbl::ecs     → crcbl-ecs     the world, components, systems, the schedule
 //! crcbl::anim    → crcbl-anim    skeletons, clips, pose sampling, joint palettes
 //! crcbl::phys    → crcbl-phys    rigid bodies, colliders, forces, queries
@@ -257,6 +258,19 @@ pub use glam as math;
 /// [`crcbl-ui`](crcbl_ui): immediate-mode UI toolkit — draw lists, glyph atlas,
 /// HUD skeleton, and widgets.
 pub use crcbl_ui as ui;
+/// [`crcbl-vfx`](crcbl_vfx): the particle simulation — the pooled effects, the
+/// per-particle hash their randomness comes from, and the fixed modifier menu.
+///
+/// The first slice of `docs/plan/20-particles.md`, and the CPU staging of it:
+/// there is no pass and no shader here, and an effect reaches the screen by
+/// [`render::ForwardRenderer::set_instance`] — the plan's mesh particles,
+/// riding the instance path that already culls and draws. `apps/sparks` is the
+/// consumer that does it.
+///
+/// Behind the non-default `vfx` feature, on [`greybox`]'s terms: a game with no
+/// effects links no pool for them.
+#[cfg(feature = "vfx")]
+pub use crcbl_vfx as vfx;
 
 pub mod adapter;
 

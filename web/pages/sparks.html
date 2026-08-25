@@ -1,0 +1,103 @@
+<!--meta
+{
+  "out": "demos/sparks/index.html",
+  "slug": "sparks",
+  "name": "Sparks",
+  "title": "Sparks — Crucible",
+  "description": "Crucible's particle simulation: pooled effects with stateless per-particle randomness, drawn as instances through the same GPU-driven pipeline as the ground they land on.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/sparks", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/sparks\">apps/sparks</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/sparks/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● post-MVP</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Sparks</span></h1>
+  <p class="tagline">
+    Three effects on a small stage, and the panel that says what each of them is
+    costing. One of them is deliberately greedy, and the interesting thing about
+    it is that you cannot tell.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>There are none. It runs itself.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Nothing to press — the effects run from a fixed seed</span>
+      <span><kbd>—</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>Every particle is an ordinary instance.</h3>
+  <p>
+    There is no particle shader on this page and no pass of its own. A live
+    particle's position, size and rotation are written into the same instance
+    pool the anvil and the columns live in, and from there it goes through the
+    same GPU culling and the same draw generation as everything else in the
+    scene. That is the whole rendering story, and it is deliberate: mesh
+    particles were always meant to ride the pipeline that already existed rather
+    than get a second one built beside it.
+  </p>
+  <p>
+    <strong>No particle remembers a random number.</strong> Each one's lifetime,
+    direction, speed, size and spin are a hash of two things — the effect's seed
+    and the particle's own index — so particle four hundred draws the same
+    numbers whether it was the first spawned this frame or the last, whether the
+    effect beside it ran out early, and whether the loop runs on a processor or
+    in a compute shader. A running generator cannot have that property: share
+    one between two effects and each becomes a function of what the other did.
+    It is what makes a fixed seed and a fixed timestep replay a frame exactly,
+    and it is why this page is the same page for everybody who loads it.
+  </p>
+  <p>
+    The <strong>blue eruption at the back</strong> is asking for a hundred
+    thousand particles a second and is allowed sixty-four. Watch the panel: its
+    count sits on its share and does not move, while the refusal counter beside
+    it climbs by tens of thousands a second. An effect cannot detonate the frame
+    budget here, because the pool it draws from is allocated in ranges and the
+    range is the cap — a greedy effect gets clamped and counted rather than
+    served and paid for.
+  </p>
+  <p>
+    The smoke at the vent stops and starts on a cycle, which is there for the
+    browser test rather than for the look: the check watches its count climb
+    while its emitter runs and come back to zero after it stops, and both halves
+    have to be true. A demo whose particles never retired would pass the first
+    on its own.
+  </p>
+  <p>
+    Colour over lifetime arrives quantised — eight material rows baked from each
+    effect's gradient, with each particle drawn through the nearest one. The
+    instance record carries a mesh, a material and a transform and has nowhere
+    to put a colour, so this is what the path can actually do today rather than
+    what the effects describe. The sizes are continuous, which is why everything
+    fades by shrinking rather than by going transparent.
+  </p>
+  <p>
+    The simulation runs on the processor, on the fixed timestep, and that is the
+    staging rather than the destination: the pool is a structure of arrays with
+    a range per effect because that is the layout the compute buffer wants, and
+    the randomness is a hash rather than a stream because that is the only kind
+    a shader can evaluate. When the update moves onto the GPU, this page should
+    not need to change.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

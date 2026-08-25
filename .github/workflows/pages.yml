@@ -404,6 +404,10 @@ jobs:
         timeout-minutes: 10
         run: CRCBL_WEB_E2E_DEMO=puppet ./web/run-browser-e2e.sh
 
+      - name: Render sparks in a real browser
+        timeout-minutes: 10
+        run: CRCBL_WEB_E2E_DEMO=sparks ./web/run-browser-e2e.sh
+
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
       # from the step log.
@@ -568,6 +572,10 @@ jobs:
       - name: Render puppet in a real browser
         timeout-minutes: 12
         run: CRCBL_WEB_E2E_DEMO=puppet ./web/run-browser-e2e.sh --headless
+
+      - name: Render sparks in a real browser
+        timeout-minutes: 12
+        run: CRCBL_WEB_E2E_DEMO=sparks ./web/run-browser-e2e.sh --headless
 
   probe-windows:
     name: probe the seam on Windows

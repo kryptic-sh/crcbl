@@ -1,0 +1,36 @@
+[package]
+name = "sparks"
+description = "Sparks — the VFX fixture: stock effects, a hostile one, and the budget that holds it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends**, for the reason every other sample's
+# manifest sets out: the same loop has to be reachable from `main.rs` (argv,
+# exit codes) and from a browser's JS shim, and a bin crate has no linkable
+# artifact for the second.
+#
+# The lib is not called `sparks`: a lib and a bin of the same name in one
+# package write the same `sparks.wasm`, and the file a Pages deploy picks up
+# would be whichever target finished last.
+[lib]
+name = "crcbl_sparks"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "sparks"
+path = "src/main.rs"
+
+# One engine dependency, like every other sample, with two features on. `vfx` is
+# the one this sample is the first consumer of — `crcbl-vfx` is the simulation
+# every effect here is stepped by. `greybox` is the stage: a ground slab, an
+# anvil and two columns, every one of them a `crcbl::greybox` primitive, because
+# `docs/plan/sample/10-sparks.md` is about what is in front of the props rather
+# than about the props.
+[dependencies]
+crcbl = { workspace = true, features = ["greybox", "vfx"] }
+
+[lints]
+workspace = true

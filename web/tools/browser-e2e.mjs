@@ -730,6 +730,48 @@ const EXPECTATIONS = {
       deviation: /\bdev: ([\d.]+)/,
     },
   },
+  // **The demo whose subject is a budget.** sparks takes no input at all — the
+  // effects run from a fixed seed, which is the whole point of a per-particle
+  // hash — so `moving` reads a count the simulation moves on its own, and the
+  // `budget` block below reads the two claims that a moving count cannot make.
+  sparks: {
+    // The fourth demo that draws mesh instances, so the fourth whose cull pass
+    // has something to count. Every particle on this page is an instance; see
+    // lantern's row and group D.
+    culls: true,
+    key: null,
+    // Read off the *first* line. What it asks is that the effects are already
+    // running — a pool with particles in it and a share the greedy effect is
+    // being held to — because this demo has no start screen and no waiting
+    // state, and a page that booted its renderer and simulated nothing would
+    // otherwise look identical.
+    waiting: (line) =>
+      line.includes('[HUD] tick:') &&
+      /\blive: [1-9]\d*/.test(line) &&
+      /\bspam-share: \d+/.test(line),
+    moving: /\blive: (\d+)/,
+    movingLabel: 'the effects spawn and retire under their own steam',
+    // **The two pairs the block below reads.** Every pattern here is a field of
+    // the `[HUD]` line `apps/sparks/src/app.rs` logs, and that file argues why
+    // each is on it.
+    budget: {
+      // Whether the switchable emitter is running, and how many particles it
+      // holds. The pair is the rise-and-fall claim: a count that climbed while
+      // the emitter ran proves nothing on its own, because a demo whose
+      // particles never retired would report the same thing for ever.
+      emitting: /\bpuff-emitting: (yes|no)/,
+      held: /\bpuff: (\d+)/,
+      // What the greedy effect holds, and what it is allowed. The one number on
+      // the page that must *not* move.
+      greedy: /\bspam: (\d+)/,
+      share: /\bspam-share: (\d+)/,
+      // How many spawns its budget has refused. The control for the pair above:
+      // a count sitting on its share could be an emitter that happens to ask
+      // for exactly that many, and a refusal counter climbing while the count
+      // holds still cannot be anything but a clamp.
+      refused: /\bclamped: (\d+)/,
+    },
+  },
   orbit: {
     key: null,
     // Read off the *first* line, which is the ship still on the pad — so it
@@ -885,6 +927,18 @@ const BLEND_WALK_MIN = 0.9;
  * approaching it; this is the printed precision and nothing more.
  */
 const BLEND_IDLE_MAX = 0.05;
+
+/**
+ * How many particles sparks' switchable emitter must hold before its count
+ * counts as having climbed.
+ *
+ * `apps/sparks/src/effects.rs`'s smoke puff emits 120 a second with a lifetime
+ * of about a second, so a running emitter settles around a hundred; a stopped
+ * one drains to exactly zero. This sits far above zero and far below the
+ * steady state, so neither half of the pair can be satisfied by the other's
+ * state.
+ */
+const PUFF_RUNNING_MIN = 20;
 
 /**
  * How many consecutive `[POSE]` lines must report the same pose before the
@@ -2372,6 +2426,133 @@ try {
         ? 'the demo never reported how high its feet had been'
         : `the highest its feet reached was ${top} m; the step it climbed is ` +
             `${walk.lowStep} m and the one it must not is ${walk.highStep} m`
+    );
+  }
+
+  // **AND THE BUDGET, WHICH THE CHECK ABOVE CANNOT SEE EITHER.**
+  // Only sparks has one. `moving` above says a particle count is changing, and
+  // it would go on saying so for a page whose effects never retired, whose
+  // emitters could not be stopped, and whose pool budget was not enforced at
+  // all — a number that only ever climbs still changes.
+  //
+  // So this block reads four claims off the demo's own heartbeat, in two pairs:
+  //
+  // * an emitter's count **climbs while it runs** and **comes back to zero
+  //   after it stops**. The second is the control for the first: without it,
+  //   "the count went up" passes for a simulation that never retires anything.
+  //   Nothing here presses a key — the demo switches that emitter on its own
+  //   schedule — so what the pair proves is the simulation rather than the
+  //   input path.
+  // * the greedy effect **holds at its pool share**, and its emitter is
+  //   **being refused** rather than merely idle. The second is the control for
+  //   the first: a count parked on its share could be an emitter that happens
+  //   to ask for exactly that many, and only a refusal counter climbing while
+  //   the count stands still says a clamp is what is holding it.
+  //
+  // Every failure message carries the values, so a red run says which of the
+  // four went wrong and at what reading.
+  if (EXPECTED.budget) {
+    const budget = EXPECTED.budget;
+
+    /** Every HUD line, as the fields this block cares about. */
+    const readings = () =>
+      hud()
+        .map((line) => {
+          const emitting = line.match(budget.emitting);
+          const held = line.match(budget.held);
+          const greedy = line.match(budget.greedy);
+          const share = line.match(budget.share);
+          const refused = line.match(budget.refused);
+          if (!emitting || !held || !greedy || !share || !refused) return null;
+          return {
+            line,
+            emitting: emitting[1] === 'yes',
+            held: Number(held[1]),
+            greedy: Number(greedy[1]),
+            share: Number(share[1]),
+            refused: Number(refused[1]),
+          };
+        })
+        .filter((reading) => reading !== null);
+
+    // ---- the emitter, running -------------------------------------------
+    // `until` treats a falsy value as "not yet", so this hands back an object
+    // rather than the index — the first line is index `0`, and returning that
+    // would poll until the timeout on a demo that passed immediately.
+    const filled = await until(async () => {
+      const seen = readings();
+      const at = seen.findIndex(
+        (reading) => reading.emitting && reading.held >= PUFF_RUNNING_MIN
+      );
+      return at >= 0 ? { at, reading: seen[at] } : null;
+    });
+    const seen = readings();
+    check(
+      'C',
+      "the switchable emitter's particle count climbs while it runs",
+      Boolean(filled),
+      filled
+        ? `it reached ${filled.reading.held} particles`
+        : `no heartbeat reported ${PUFF_RUNNING_MIN} or more particles under a ` +
+            `running emitter in ${seen.length} line(s); the highest was ` +
+            `${Math.max(0, ...seen.map((r) => r.held))}`
+    );
+
+    // ---- and the control: the emitter, stopped ---------------------------
+    // Strictly *after* the line above, so this is the same emitter coming down
+    // rather than the moment before it ever started.
+    const drained = filled
+      ? await until(async () =>
+          readings()
+            .slice(filled.at + 1)
+            .find((reading) => !reading.emitting && reading.held === 0)
+        )
+      : null;
+    const tail = filled ? readings().slice(filled.at + 1) : [];
+    check(
+      'C',
+      'and falls back to nothing once its emitter stops',
+      Boolean(drained),
+      drained
+        ? `it drained to 0 after ${tail.length} further heartbeat(s)`
+        : `the emitter never reported an empty stopped state in ` +
+            `${tail.length} reading(s) after it filled; the lowest it reached ` +
+            `while stopped was ` +
+            `${Math.min(Infinity, ...tail.filter((r) => !r.emitting).map((r) => r.held))}`
+    );
+
+    // ---- the greedy effect, held ------------------------------------------
+    const budgeted = readings();
+    const over = budgeted.find((reading) => reading.greedy > reading.share);
+    const saturated = budgeted.filter(
+      (reading) => reading.greedy === reading.share
+    );
+    check(
+      'C',
+      'the greedy effect holds at its pool share',
+      !over && saturated.length > 0 && budgeted.length > 0,
+      over
+        ? `it reached ${over.greedy} particles against a share of ${over.share}`
+        : saturated.length === 0
+          ? `it never filled its share, so the clamp was never tested: the ` +
+            `highest of ${budgeted.length} reading(s) was ` +
+            `${Math.max(0, ...budgeted.map((r) => r.greedy))} against a share of ` +
+            `${budgeted[0]?.share ?? '?'}`
+          : `held at ${saturated[0].share} across ${budgeted.length} heartbeat(s)`
+    );
+
+    // ---- and the control: it is being refused, not idle --------------------
+    const first = budgeted[0];
+    const last = budgeted[budgeted.length - 1];
+    const climbed = Boolean(first && last && last.refused > first.refused);
+    check(
+      'C',
+      'and its emitter is being refused rather than merely idle',
+      climbed,
+      first && last
+        ? `the refusal counter went ${first.refused} → ${last.refused} over ` +
+            `${budgeted.length} heartbeat(s)`
+        : 'no heartbeat carried a refusal counter at all'
     );
   }
 

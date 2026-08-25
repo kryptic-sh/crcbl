@@ -63,6 +63,13 @@ crcbl-scene = { workspace = true, optional = true }
 # build that only wants primitives. See the `greybox` feature and
 # `src/lib.rs`'s `greybox` re-export.
 crcbl-greybox = { workspace = true, optional = true }
+# The particle simulation: the pool, the per-particle hash and the modifier
+# menu. **Optional**, on `crcbl-greybox`'s terms above: a game that ships no
+# effects should not carry the pool that would hold them. It depends on `glam`
+# and nothing else, so turning it on adds one crate rather than a subtree.
+# `apps/sparks` is the sample that does. See the `vfx` feature and
+# `src/lib.rs`'s `vfx` re-export.
+crcbl-vfx = { workspace = true, optional = true }
 # `load`, not `bake`: this is the half a shipped game links, and it reads the
 # baked pair rather than producing it. A build script wanting the encoder names
 # `crcbl-sprite` itself — see `src/lib.rs`'s `sprite` re-export.
@@ -319,6 +326,14 @@ scene = ["dep:crcbl-scene", "crcbl-scene/render"]
 # 2D half asks that crate for it directly, the same way a build script asks
 # `crcbl-sprite` for its encoder.
 greybox = ["dep:crcbl-greybox"]
+
+# `crcbl::vfx` — `crcbl-vfx`, the particle simulation. **Off by default**, on
+# the `greybox` feature's terms: a game with no effects links no pool for them.
+# `apps/sparks` is the sample that turns it on, and it turns `greybox` on too —
+# the scene the effects play in is blockout primitives, which is rule 1 of
+# `docs/plan/sample/00-samples-overview.md` again: a sample names the engine
+# and nothing else.
+vfx = ["dep:crcbl-vfx"]
 
 # THERE IS NO `webgpu` FEATURE ANY MORE, AND ITS ABSENCE IS THE POINT.
 #

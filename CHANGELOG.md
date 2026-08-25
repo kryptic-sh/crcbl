@@ -16,6 +16,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-vfx`: the first slice of the particle system.** A `ParticleSystem`
+  holds a structure-of-arrays `ParticlePool` and hands each effect a contiguous
+  `SlotRange` out of it, so an effect's live particles are one run of records —
+  the layout the compute pass this is staged towards will upload as it stands.
+  Randomness is a **stateless hash of (effect seed, particle index, stream)**
+  rather than a stream: `hash::pcg3d` is the three-word PCG hash from Jarzynski
+  and Olano's _Hash Functions for GPU Rendering_, so particle _k_ draws the same
+  lifetime, direction and size whatever else ran in the frame, and a fixed seed
+  with a fixed timestep replays a run bit for bit on one machine. The modifier
+  menu is a `Modifiers` struct — gravity, drag, a size `Curve` and a colour
+  `Gradient` over lifetime — deliberately not a list, because
+  `docs/plan/20-particles.md` names modifier creep toward a VM as the risk.
+  Emitters are `Spawn::Burst` and `Spawn::Rate` over `Shape::Point` and
+  `Shape::Cone`. **Budgets are enforced rather than advertised**: an effect's
+  `max_particles` is the size of its range, `RangeAllocator::alloc_clamped`
+  clamps a share the pool cannot fit instead of refusing it, and `EffectStats`
+  and `PoolStats` count every spawn the budget turned down. Reached through the
+  umbrella as `crcbl::vfx`, behind the new non-default `vfx` feature.
+- **`apps/sparks`, the VFX fixture, on the demo site.** A greybox stage with
+  three effects on it: impact sparks off an anvil, a smoke puff that stops and
+  starts at a vent, and a deliberately hostile emitter asking for a hundred
+  thousand particles a second out of a share of sixty-four. Every particle is
+  drawn as an **ordinary instance** through `ForwardRenderer::set_instance`, so
+  it rides the existing GPU culling and draw generation and the sample adds no
+  pass and no shader of its own — `docs/plan/20-particles.md`'s mesh particles.
+  The overlay carries the budget readout `docs/plan/sample/10-sparks.md` asks
+  for: what each effect holds against what it was allowed, and how many spawns
+  were refused. It takes no input and runs from a published seed.
 - **`crcbl-anim` gained a blend layer**: `blend_into` mixes two `Pose`s by
   weight into a caller-owned third, and `BlendSpace1d` places clips along one
   axis and samples the pair around a position at a shared **phase** rather than
