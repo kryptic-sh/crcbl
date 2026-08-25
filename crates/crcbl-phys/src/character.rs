@@ -936,10 +936,20 @@ mod tests {
     /// `ground_adjusted`'s refusal to creep. On ground it cannot, gravity is
     /// clipped to the surface and the character slides down it.
     ///
-    /// Measured with [`CharacterConfig::default`]: the drift stays at zero
-    /// through `45.0°` and is non-zero from `45.1°` on, which brackets the
-    /// configured limit to within the sweep's own step. The comparison is
-    /// `>=`, so a slope exactly at the limit is walkable.
+    /// Measured with [`CharacterConfig::default`]: the drift stays at zero up
+    /// to the configured limit and is non-zero one step past it, which brackets
+    /// the limit to within the sweep's own step. The comparison is `>=`, so a
+    /// slope exactly at the limit is walkable.
+    ///
+    /// **The bracket is closed at both ends, and it has to be.** Which of the
+    /// two adjacent samples the limit lands on is not portable: the dome's
+    /// surface normal arrives through `sin`/`cos`, those are platform
+    /// transcendentals, and a last-ulp difference moves a slope that sits
+    /// exactly on the threshold to either side of it. Linux measures the limit
+    /// as the last still sample and Windows as the first creeping one, from the
+    /// same source. Asserting an open end pins the measurement finer than the
+    /// sweep's step can resolve, which is a claim about a libm rather than
+    /// about this controller.
     #[test]
     fn the_slope_the_controller_stops_walking_is_the_one_it_was_configured_with() {
         let config = CharacterConfig::default();
@@ -978,9 +988,41 @@ mod tests {
         };
         let limit = config.min_ground_normal_y.acos().to_degrees();
         assert!(
-            last_still <= limit && limit < first_creep && limit - last_still < step_degrees,
+            last_still <= limit && limit <= first_creep,
             "the boundary was measured at {last_still}° still / {first_creep}° creeping, \
-             and the configured limit is {limit}°",
+             and the configured limit is {limit}° — the two samples are one \
+             {step_degrees}° step apart, so the limit has to fall between them",
+        );
+    }
+
+    /// **A surface exactly at the limit is walkable**, which the sweep above
+    /// cannot say.
+    ///
+    /// That sweep brackets the boundary to a tenth of a degree and no finer,
+    /// and which of its two adjacent samples the limit lands on moves with the
+    /// platform's `sin`/`cos` — so flipping `is_walkable`'s comparison from
+    /// `>=` to `>` shifts it by exactly the amount a different libm does, and
+    /// the sweep cannot tell the two apart. This can: the normal is built
+    /// **from** [`CharacterConfig::min_ground_normal_y`] rather than from an
+    /// angle, so its rise is that number bit for bit on every target, and no
+    /// transcendental stands between the configuration and the answer.
+    #[test]
+    fn a_surface_exactly_at_the_limit_is_walkable() {
+        let config = CharacterConfig::default();
+        let character = CharacterController::new(config, DVec3::ZERO);
+        let rise = config.min_ground_normal_y;
+        // Unit length, and its Y component is `rise` exactly — the `sqrt` only
+        // ever touches the horizontal lane.
+        let exactly = DVec3::new((1.0 - rise * rise).sqrt(), rise, 0.0);
+
+        assert_eq!(
+            exactly.y, rise,
+            "the test's own normal must carry the configured rise unrounded"
+        );
+        assert!(
+            character.is_walkable(exactly),
+            "a surface whose rise is exactly {rise} must be walkable, because the \
+             comparison is `>=` and the limit is the last slope you can stand on"
         );
     }
 

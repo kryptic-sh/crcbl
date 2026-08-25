@@ -3,6 +3,31 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The character controller's slope sweep is platform-sensitive at its last step
+
+`the_slope_the_controller_stops_walking_is_the_one_it_was_configured_with`
+places the character on a dome at every tenth of a degree, so the surface normal
+it stands on arrives through `sin`/`cos`. Those are platform transcendentals: a
+last-ulp difference moves a slope sitting exactly on the threshold to either
+side of it, and the two adjacent samples swap. From one source tree, Linux
+reports the limit as the last still sample and Windows as the first creeping one
+— it reddened CI on 2026-08-25. The sweep's bracket is closed at both ends for
+that reason: asserting an open end pins the measurement finer than a 0.1° step
+can resolve and turns the test into a claim about a libm.
+
+`a_surface_exactly_at_the_limit_is_walkable` covers the inclusivity the sweep
+therefore cannot. It builds the normal **from**
+`CharacterConfig::min_ground_normal_y`, so the rise is that number bit for bit
+on every target with no transcendental between the configuration and the answer,
+and flipping `is_walkable`'s `>=` to `>` reddens it.
+
+**The general point, for anything else measured by sweeping.** A sweep brackets
+to its own step and no finer, and where a boundary falls inside that step is not
+portable when the geometry is built through trig. Assert the bracket, and cover
+the exact boundary with a construction that avoids the transcendental entirely.
+`docs/plan/05-physics.md`'s libm policy for determinism is still unresolved and
+this is one more input to it.
+
 ### The capsule character controller is camera-agnostic, and unused by any demo
 
 `crcbl_phys::CharacterController` (`crates/crcbl-phys/src/character.rs`) exists,
