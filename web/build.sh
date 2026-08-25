@@ -147,6 +147,7 @@ DEMOS=(
   "viewer:crcbl_viewer:demos/viewer"
   "orbit:crcbl_orbit:demos/orbit"
   "bracket:crcbl_bracket:demos/bracket"
+  "puppet:crcbl_puppet:demos/puppet"
 )
 
 profile_flag=()

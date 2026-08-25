@@ -1,0 +1,32 @@
+[package]
+name = "puppet"
+description = "Puppet — third-person character playground: map, capsule controller and follow camera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# `cdylib` for the browser demo, `rlib` so the binary and the tests share one
+# crate — the same pair every sample uses. See `apps/breakout/Cargo.toml` for
+# why both names are needed.
+[lib]
+name = "crcbl_puppet"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "puppet"
+path = "src/main.rs"
+
+# One engine dependency, like every other sample — with the `greybox` feature
+# on, which is what this sample is the first consumer of. The map is ground,
+# two mounds and two steps, and `crcbl::greybox`'s primitives are where the
+# geometry for each of them comes from; writing a second cuboid generator here
+# would be a copy of the one the engine already ships. The `scene` feature stays
+# off: nothing here imports a glTF document, and milestone 1 has no character
+# asset at all.
+[dependencies]
+crcbl = { workspace = true, features = ["greybox"] }
+
+[lints]
+workspace = true

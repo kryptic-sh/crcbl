@@ -70,7 +70,14 @@ dirs = "6.0"
 crcbl = { path = "crates/crcbl", version = "0.1.0" }
 crcbl-core = { path = "crates/crcbl-core", version = "0.1.0" }
 crcbl-golden = { path = "crates/crcbl-golden", version = "0.1.0" }
-crcbl-greybox = { path = "crates/crcbl-greybox", version = "0.1.0" }
+# `default-features = false`, which is the 3D half of the pack: the primitives,
+# the materials and the grid page, without the `.crpix` sprites and the sheet
+# loader its `bake` feature carries. Neither consumer wants those —
+# `crcbl`'s `tiling_e2e` draws quads and `crcbl`'s optional `greybox` re-export
+# is for blocking a map out — and the switch has to be here rather than on the
+# member, because cargo refuses a member that turns off a default the workspace
+# entry left on.
+crcbl-greybox = { path = "crates/crcbl-greybox", version = "0.1.0", default-features = false }
 crcbl-hal = { path = "crates/crcbl-hal", version = "0.1.0" }
 crcbl-render = { path = "crates/crcbl-render", version = "0.1.0" }
 crcbl-shaders = { path = "crates/crcbl-shaders", version = "0.1.0" }

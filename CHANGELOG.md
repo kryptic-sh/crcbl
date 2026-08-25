@@ -61,6 +61,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/puppet`, a third-person character sample, and it runs in a browser.**
+  A greybox map of steps and mounds, `crcbl_phys::CharacterController` walking a
+  capsule over it with shadows on, and an orbit-follow camera. `W/A/S/D` walk,
+  `Q/E` turn the view and `R/F` tilt it; before any key is pressed a scripted
+  circuit paces the spawn pad so the page is not a still frame. It is in
+  `web/build.sh`'s demo list, on the demo index, and covered by the browser e2e
+  gate, which drives the walk key through CDP and requires the character to
+  advance while it is held, stop when it is released, climb the 0.3 m step and
+  be refused by the 0.9 m one.
+
+  The controller stays camera-agnostic: `puppet::camera::walk_direction` turns
+  the camera's yaw and the two input axes into a world direction and
+  `puppet::game::run_tick` hands `move_and_slide` a displacement, so the
+  conversion lives in the sample and nothing in `crcbl-phys` knows a camera
+  exists. There is no animation — that is the sample's milestone 2.
+
+- **`crcbl`'s `greybox` feature**, which re-exports `crcbl-greybox` as
+  `crcbl::greybox`, the way `scene` does for `crcbl-scene`. A sample that wants
+  metric blockout primitives can now name only the engine.
+
 - **A swept-capsule query, `PhysicsWorld::sweep_capsule` and
   `sweep_capsule_excluding`,** alongside the sphere sweeps and with the same
   semantics: exact shape-level TOI into the same `ShapeHit`, triggers skipped,

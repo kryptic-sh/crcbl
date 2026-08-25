@@ -54,6 +54,15 @@ crcbl-store = { workspace = true }
 # describes no scene of its own should not link a glTF parser. See the `scene`
 # feature and `src/lib.rs`'s `scene` re-export.
 crcbl-scene = { workspace = true, optional = true }
+# The blockout kit: cubes, walls, ramps, stairs and a person-sized capsule,
+# every one of them a `render::scene::Geometry::Flat` with its clusters already
+# built. **Optional**, on `crcbl-scene`'s terms above: a game shipping authored
+# geometry links no prototyping primitives. The workspace entry turns that
+# crate's own default features off, so what this links is its 3D half: the
+# `.crpix` sprites and the sheet loader behind its `bake` feature stay out of a
+# build that only wants primitives. See the `greybox` feature and
+# `src/lib.rs`'s `greybox` re-export.
+crcbl-greybox = { workspace = true, optional = true }
 # `load`, not `bake`: this is the half a shipped game links, and it reads the
 # baked pair rather than producing it. A build script wanting the encoder names
 # `crcbl-sprite` itself — see `src/lib.rs`'s `sprite` re-export.
@@ -294,6 +303,22 @@ windowed-e2e = ["crcbl-shell/x11-e2e"]
 # and leaving out the one thing that renders what it imports would be a switch
 # nobody wants either half of.
 scene = ["dep:crcbl-scene", "crcbl-scene/render"]
+
+# `crcbl::greybox` — `crcbl-greybox`, the blockout kit. **Off by default**, on
+# the `scene` feature's terms: a game that ships authored geometry has no use
+# for prototyping primitives. `apps/puppet` is the sample that turns it on —
+# its map is ground, mounds and steps built out of `primitives`, with the
+# colliders beside them — and it is why this is a feature rather than a fourth
+# workspace path in a sample's manifest: rule 1 of
+# `docs/plan/sample/00-samples-overview.md` is that a sample names the engine
+# and nothing else.
+#
+# It reaches `crcbl-greybox` with that crate's default features off — the
+# workspace entry is where that is set — so the `.crpix` sprites and the sheet
+# loader behind its `bake` feature stay out of a 3D build. A sample wanting the
+# 2D half asks that crate for it directly, the same way a build script asks
+# `crcbl-sprite` for its encoder.
+greybox = ["dep:crcbl-greybox"]
 
 # THERE IS NO `webgpu` FEATURE ANY MORE, AND ITS ABSENCE IS THE POINT.
 #

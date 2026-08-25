@@ -1292,6 +1292,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "puppet"
+version = "0.1.0"
+dependencies = [
+ "crcbl",
+]
+
+[[package]]
 name = "quarry"
 version = "0.1.0"
 dependencies = [

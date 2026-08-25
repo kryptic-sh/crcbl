@@ -121,6 +121,19 @@ pub use crcbl_core::log;
 /// [`crcbl-ecs`](crcbl_ecs): the world, its components, its systems and the
 /// schedule that runs them.
 pub use crcbl_ecs as ecs;
+/// [`crcbl-greybox`](crcbl_greybox): the blockout kit — cubes, walls, ramps,
+/// stairs, columns and a person-sized capsule, every one sized in metres.
+///
+/// Each generator hands back a
+/// [`Geometry::Flat`](crcbl_render::scene::Geometry::Flat) with its meshlet
+/// clusters already built, so a sample blocks a map out without a `.glb` and
+/// without the [`scene`] feature's glTF parser.
+///
+/// Behind the non-default `greybox` feature, and reached with that crate's own
+/// default features **off**: a 3D blockout wants the primitives, not the
+/// `.crpix` sprites its `bake` half carries.
+#[cfg(feature = "greybox")]
+pub use crcbl_greybox as greybox;
 /// [`crcbl-hal`](crcbl_hal): the GPU backend seam, and the recording
 /// [`null`](crcbl_hal::null) backend standing in for one until P1.
 pub use crcbl_hal as hal;

@@ -508,6 +508,41 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument for the character controller, which is the one thing on
+# puppet's page that a visitor's own keys reach. Every other check in the driver
+# passes against a page whose input path is severed: that demo walks a circuit
+# of its own until somebody takes the controls, so `moving` goes on reporting a
+# character that advances and a canvas that changes while nothing a player did
+# ever reached `move_and_slide`. `puppet` alone, because it is the only demo
+# whose subject is a controller.
+#
+# Two names are matched rather than four, because the four are one block in the
+# driver and the block's two *controls* — "it stops when the key is released"
+# and "it is refused by the step above the offset" — are the halves worth
+# deleting when a slow machine makes them flake. Each of the two positives is
+# useless without its control, so a run that reported only the positives is a
+# run this has to fail. Renaming either check in the driver is meant to fail
+# here and be renamed here too.
+case "$DEMO" in
+    puppet)
+        WALKED="$(grep -F 'and stops where it is when the key is released' "${OUTPUT}.plain" || true)"
+        if [ -z "$WALKED" ]; then
+            echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
+            echo "               'the character advances' has no control, and it passes" >&2
+            echo "               for a demo that drifts on its own" >&2
+            exit 1
+        fi
+        REFUSED="$(grep -F 'and is refused by the step above that offset' "${OUTPUT}.plain" || true)"
+        if [ -z "$REFUSED" ]; then
+            echo "crcbl web e2e: the driver never asked whether $DEMO refused the step it" >&2
+            echo "               cannot climb; 'the controller climbs the step' has no" >&2
+            echo "               control, and it passes for a controller that climbs" >&2
+            echo "               anything at all" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the strongest form of the same argument, for group H. Three of the driver's
 # checks assert that *nothing* was reported — no uncaught exception, no missing
 # asset, no WebGPU device error — and every one of them passes just as happily

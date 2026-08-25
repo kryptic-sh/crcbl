@@ -162,6 +162,15 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * the animation inside the file it opened is being sampled. A row without one
  * is a demo that ships no rig, which is every other demo here.
  *
+ * `walk` is the fifth, and only puppet has one: the demo whose subject is a
+ * character *controller*, where "it moved" is not enough on its own. It names
+ * the key to hold, the readings to watch, and the two step heights the map puts
+ * either side of the offset the controller climbs — so the block that reads it
+ * can require the character to advance while the key is held, to stop when it is
+ * released, to climb the step under that offset and to be refused by the one
+ * over it. Every positive in it has its control beside it, because each half
+ * passes on its own for a demo that is broken in the other direction.
+ *
  * `backdrop` is the other optional key, and it is what group G reads. It names
  * the demo's clear colour twice over: `encoded` is the byte an sRGB target holds
  * and `unencoded` is the byte the same clear leaves in a linear one, with
@@ -649,6 +658,58 @@ const EXPECTATIONS = {
     moving: /matches: (\d+)/,
     movingLabel: 'the population plays matches under its own steam',
   },
+  // **The demo whose subject is the controller itself.** puppet takes input,
+  // but a page that has just loaded has had none — and a character standing
+  // still is the same still frame a stopped loop would draw. It paces a slow
+  // circuit on the spawn pad from the first tick, so `px` moves without anyone
+  // touching a key, and the first movement key ends the circuit for good. Group
+  // C reads `moving` before the `walk` block below presses anything.
+  puppet: {
+    // The third demo that draws mesh instances, so the third whose cull pass
+    // has something to count. See lantern's row and group D.
+    culls: true,
+    key: null,
+    // Read off the *first* line, which is the character still on the spawn pad.
+    // What it asks is that the controller has already run and found the map:
+    // `ground: yes` is `MoveOutcome::grounded`, which no page that failed to
+    // sweep a capsule against `apps/puppet/src/map.rs`'s world can report, and
+    // `pilot: circuit` is what says nothing has taken the controls yet — the
+    // waiting state this demo has instead of a start screen.
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') &&
+      line.includes('ground: yes') &&
+      line.includes('pilot: circuit'),
+    moving: /\bpx: (-?[\d.]+)/,
+    movingLabel: 'the character paces its circuit under its own steam',
+    // **The controller, driven and then let go of** — the block below. Every
+    // number here comes from `apps/puppet/src/map.rs`'s constants, and the demo
+    // asserts the same pair natively in `game.rs`'s
+    // `it_gets_onto_the_low_step_and_no_further`, so a failure here is a failure
+    // of the browser path rather than a mystery about the map.
+    walk: {
+      // `code` is what the engine binds to; `text` and the virtual key code are
+      // what a real keyboard sends. `KeyW` walks away from the camera, and the
+      // camera opens at a yaw of zero — looking down `-Z`, which is where the
+      // lane is — so a held `W` is a walk down `pz` and nothing else.
+      code: 'KeyW',
+      text: 'w',
+      virtualKeyCode: 87,
+      // Which reading advances under that key, and which way. `pz` falls.
+      advance: /\bpz: (-?[\d.]+)/,
+      // Where the character's feet are, and the highest they have ever been.
+      feet: /\bpy: (-?[\d.]+)/,
+      highest: /\btop: (-?[\d.]+)/,
+      // `MoveOutcome::stepped_up` and `MoveOutcome::hit_wall`, counted. The
+      // first is the positive — a step actually climbed — and the second is
+      // what says the character was *pushing* against the one it did not climb
+      // rather than standing near it.
+      climbed: /\bclimbed: (\d+)/,
+      blocked: /\bblocked: (\d+)/,
+      // `map::LOW_STEP_TOP` and `map::HIGH_STEP_TOP`, in metres.
+      lowStep: 0.3,
+      highStep: 0.9,
+    },
+  },
   orbit: {
     key: null,
     // Read off the *first* line, which is the ship still on the pad — so it
@@ -755,6 +816,35 @@ const BACKDROP_PLAY_ATTEMPTS = 3;
  * is the failure this check exists to catch rather than the success.
  */
 const CULL_STATS_LINE = /cull stats: frame \d+ kept \d+ instances/;
+
+/**
+ * How far the character must get past where it started, in metres, before the
+ * walk key is credited with having reached the controller.
+ *
+ * `apps/puppet` logs a heartbeat every simulated second and walks at 3.2 m/s, so
+ * one beat under a held key is about three metres — this is comfortably inside
+ * one beat and far outside anything a settling capsule could drift.
+ */
+const WALK_ADVANCE_M = 1.0;
+
+/**
+ * How many consecutive heartbeats must report the *same* position before the
+ * character counts as stopped.
+ *
+ * Two would do it — the demo's readings move several metres a beat — and three
+ * is what makes it a claim about staying stopped rather than about one line.
+ */
+const WALK_STILL_BEATS = 3;
+
+/**
+ * How far a foot height may sit from the step it is standing on, in metres.
+ *
+ * A settled capsule rests one `CharacterConfig::skin_width` above its ground —
+ * a centimetre — and the readings are printed to two decimal places, so this is
+ * five times the gap that is actually expected. It is nowhere near the distance
+ * between the two steps the check tells apart, which is 0.6 m.
+ */
+const WALK_STEP_TOLERANCE_M = 0.05;
 
 /**
  * The **floor** on how long the focus/pause group watches for a HUD heartbeat.
@@ -1960,6 +2050,166 @@ try {
       : `it never changed — ${beats} HUD line(s) since the start, ` +
           `${values().size} value(s): ${[...values()].join(', ') || 'none'}`
   );
+
+  // **AND THE CONTROLLER BEING DRIVEN, WHICH THE CHECK ABOVE CANNOT SEE.**
+  // Only puppet has one. `moving` above says the simulation is advancing, and
+  // it would go on saying so for a demo whose input path is severed: that
+  // sample walks a circuit of its own until somebody takes the controls, and a
+  // page that dropped every key would pace it for ever.
+  //
+  // So this block drives the demo's own walk key through CDP and reads what the
+  // character did, in four claims that are two pairs:
+  //
+  // * it **advances** while the key is held, and **stops** when it is released.
+  //   The second is the control for the first: a demo that drifts passes "a
+  //   number changed" and fails this.
+  // * it **climbs** the step under the controller's step offset, and is
+  //   **refused** by the one over it. The second is the control for the first:
+  //   a controller that stepped over anything at all would pass the climb and
+  //   fail the refusal, and one that climbed nothing would fail the climb while
+  //   passing the refusal for the wrong reason.
+  //
+  // Every number it asserts on comes from `apps/puppet/src/map.rs`, and the
+  // failure messages carry the readings, so a red run here says which of the
+  // four went wrong and at what value.
+  if (EXPECTED.walk) {
+    const walk = EXPECTED.walk;
+
+    /** The most recent value `pattern` captured on a HUD line, as a number. */
+    const latest = (/** @type {RegExp} */ pattern) => {
+      const lines = hud();
+      for (let at = lines.length - 1; at >= 0; at -= 1) {
+        const found = lines[at].match(pattern);
+        if (found) return Number(found[1]);
+      }
+      return null;
+    };
+    /** Every value `pattern` has captured on the HUD lines from `since` on. */
+    const since = (/** @type {RegExp} */ pattern, /** @type {number} */ from) =>
+      hud()
+        .slice(from)
+        .map((line) => line.match(pattern)?.[1])
+        .filter((value) => value !== undefined);
+    /** Presses or releases the walk key, through the browser's own pipeline. */
+    const walkKey = async (/** @type {string} */ type) =>
+      page.send('Input.dispatchKeyEvent', {
+        type,
+        code: walk.code,
+        key: walk.text,
+        windowsVirtualKeyCode: walk.virtualKeyCode,
+        nativeVirtualKeyCode: walk.virtualKeyCode,
+        ...(type === 'keyDown' ? { text: walk.text } : {}),
+      });
+
+    // ---- the pair about input reaching the controller at all ----------------
+    const startedAt = latest(walk.advance);
+    await walkKey('keyDown');
+    const advanced = await until(async () => {
+      const now = latest(walk.advance);
+      return startedAt !== null &&
+        now !== null &&
+        startedAt - now >= WALK_ADVANCE_M
+        ? now
+        : null;
+    });
+    check(
+      'C',
+      'the character advances while the walk key is held',
+      advanced !== null,
+      advanced === null
+        ? `it started at ${startedAt} and never got ${WALK_ADVANCE_M} m past it — ` +
+            `last reading ${latest(walk.advance)} over ${hud().length} HUD line(s)`
+        : `it walked from ${startedAt} to ${advanced}`
+    );
+
+    // **It has to have still been moving when the key came up**, or "it
+    // stopped" is a claim about a character the map had already stopped. The
+    // two lines before the release are both under a held key, so a pair of
+    // equal readings there is the vacuous case and this is what catches it.
+    const atRelease = hud().length;
+    await walkKey('keyUp');
+    const lastHeld = hud()[atRelease - 1]?.match(walk.advance)?.[1];
+    const priorHeld = hud()[atRelease - 2]?.match(walk.advance)?.[1];
+    const stillMoving = Boolean(
+      lastHeld && priorHeld && lastHeld !== priorHeld
+    );
+
+    const settled = await until(async () => {
+      const readings = since(walk.advance, atRelease);
+      if (readings.length < WALK_STILL_BEATS) return null;
+      const tail = readings.slice(-WALK_STILL_BEATS);
+      return tail.every((value) => value === tail[0]) ? tail[0] : null;
+    });
+    check(
+      'C',
+      'and stops where it is when the key is released',
+      Boolean(settled) && stillMoving,
+      !stillMoving
+        ? `it was already standing still before the release (${priorHeld} then ` +
+            `${lastHeld}), so this check would pass on a demo that never moved`
+        : settled
+          ? `it held ${settled} for ${WALK_STILL_BEATS} beats after the release`
+          : `it kept moving with nothing held: ${since(walk.advance, atRelease).join(', ')}`
+    );
+
+    // ---- the pair about what the controller decided -------------------------
+    const climbedBefore = latest(walk.climbed) ?? 0;
+    const blockedBefore = latest(walk.blocked) ?? 0;
+    await walkKey('keyDown');
+    const lane = await until(async () => {
+      const climbed = latest(walk.climbed);
+      const blocked = latest(walk.blocked);
+      const feet = latest(walk.feet);
+      const highest = latest(walk.highest);
+      if (
+        climbed === null ||
+        blocked === null ||
+        feet === null ||
+        highest === null
+      ) {
+        return null;
+      }
+      return climbed > climbedBefore &&
+        blocked > blockedBefore &&
+        Math.abs(feet - walk.lowStep) <= WALK_STEP_TOLERANCE_M
+        ? { climbed, blocked, feet, highest }
+        : null;
+    });
+    await walkKey('keyUp');
+    const reading = lane ?? {
+      climbed: latest(walk.climbed),
+      blocked: latest(walk.blocked),
+      feet: latest(walk.feet),
+      highest: latest(walk.highest),
+    };
+    const readingLine =
+      `climbed ${reading.climbed}, blocked ${reading.blocked}, ` +
+      `feet ${reading.feet} m, highest ${reading.highest} m`;
+    check(
+      'C',
+      'the controller climbs the step inside its own step offset',
+      Boolean(lane),
+      lane
+        ? `it stepped up onto ${walk.lowStep} m and is pushing at the next riser — ${readingLine}`
+        : `it never got onto the ${walk.lowStep} m step while pushing — ${readingLine}`
+    );
+
+    // The control, and it is a claim about the **whole run**: `highest` is a
+    // record rather than a reading, so a character that got onto the taller
+    // step at any point in this session cannot hide it by having come back down.
+    const top = reading.highest;
+    check(
+      'C',
+      'and is refused by the step above that offset',
+      top !== null &&
+        top < walk.highStep - WALK_STEP_TOLERANCE_M &&
+        Math.abs(top - walk.lowStep) <= WALK_STEP_TOLERANCE_M,
+      top === null
+        ? 'the demo never reported how high its feet had been'
+        : `the highest its feet reached was ${top} m; the step it climbed is ` +
+            `${walk.lowStep} m and the one it must not is ${walk.highStep} m`
+    );
+  }
 
   // **AND THE DOCUMENT'S OWN CLIP PLAYING, WHICH THE CHECK ABOVE CANNOT SEE.**
   // Only viewer has one. Every other demo in this file advances because its

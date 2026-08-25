@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the demo boots. puppet has none: its map is ground, mounds and steps generated from crcbl::greybox's primitives, and its geometry, materials, shaders and font atlas are all compiled into the wasm module. The list is the seam, not the content.",
+  "keys": []
+}

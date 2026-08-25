@@ -1,0 +1,113 @@
+<!--meta
+{
+  "out": "demos/puppet/index.html",
+  "slug": "puppet",
+  "name": "Puppet",
+  "title": "Puppet — Crucible",
+  "description": "A capsule character walking a shadowed blockout on Crucible's swept-capsule controller, drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/puppet", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/puppet\">apps/puppet</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/puppet/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● post-MVP</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Puppet</span></h1>
+  <p class="tagline">
+    A character, a controller and a camera on a small shadowed map. Nothing here
+    is animated — that is the next milestone, and this one exists to prove the
+    ground under it first.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>It is already walking. Press anything and it is yours.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Walk, relative to where the camera is looking</span>
+      <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Or the arrows, which do the same thing</span>
+      <span><kbd>↑</kbd> <kbd>←</kbd> <kbd>↓</kbd> <kbd>→</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Swing the camera about the character</span>
+      <span><kbd>Q</kbd> <kbd>E</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Raise and lower it</span>
+      <span><kbd>R</kbd> <kbd>F</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>One capsule, swept against the world, sliding along what it hits.</h3>
+  <p>
+    The character is a capsule the size of a person, and every metre it covers
+    goes through one call: a <strong>world-space displacement</strong> in, and
+    whatever the world left of it out. That call sweeps the capsule rather than
+    moving it and testing afterwards, so it cannot pass through anything at any
+    speed; when it is blocked it collects the planes it hit and slides along
+    them, and where two planes meet it runs the crease between them instead of
+    wedging.
+  </p>
+  <p>
+    Everything on the map is there to make one of that call's own decisions
+    visible. The <strong>green mound</strong> is gentle enough to walk up and
+    the <strong>red one</strong> is not, and the cut between them is a single
+    number — the steepest surface the character will stand on. The
+    <strong>blue step</strong> is inside the height it will climb without
+    leaving the ground and the <strong>orange one</strong> is over it, so
+    walking into the first puts the character on top of it and walking into the
+    second stops them dead. Neither is scripted: the same displacement goes into
+    the same call whichever surface is under the capsule.
+  </p>
+  <p>
+    The slopes are rounded rather than wedges, and that is the physics being
+    honest rather than a style: the engine's colliders are a sphere, an
+    axis-aligned box and an upright capsule, and a sphere cut by the ground is
+    the only real slope that set can make. A flat ramp needs a collider that
+    does not exist yet.
+  </p>
+  <p>
+    <strong>The controller does not know the camera exists.</strong> It takes a
+    direction in the world and holds no view, no yaw and no facing at all — so
+    the demo is what turns "forward" into a direction, using the angle the
+    camera happens to be at, and the demo is what turns the body toward wherever
+    it actually ended up going. That is why the character leans into its turns
+    while the camera stays where you left it, and why the same controller would
+    serve a first-person game without a line of it changing.
+  </p>
+  <p>
+    The sun turns once a minute or so, and that is not decoration either: a
+    shadow that never moves is indistinguishable from a dark patch painted on
+    the ground, and whether the character reads as standing <em>on</em> the map
+    rather than in front of it is the thing this milestone is really for.
+  </p>
+  <p>
+    The walk runs on the authoritative server, over the same in-memory transport
+    every demo here uses: the keys are sealed into a five-byte move command, the
+    client sends it, and the server decodes it and steps the character on a
+    fixed timestep. The camera is the one thing on the other side of that seam,
+    because it is presentation — the only part of it the simulation is ever told
+    is the one angle above.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

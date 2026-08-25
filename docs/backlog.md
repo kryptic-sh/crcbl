@@ -28,7 +28,7 @@ the exact boundary with a construction that avoids the transcendental entirely.
 `docs/plan/05-physics.md`'s libm policy for determinism is still unresolved and
 this is one more input to it.
 
-### The capsule character controller is camera-agnostic, and unused by any demo
+### The capsule character controller is camera-agnostic
 
 `crcbl_phys::CharacterController` (`crates/crcbl-phys/src/character.rs`) exists,
 with the swept-capsule query (`PhysicsWorld::sweep_capsule` /
@@ -58,10 +58,14 @@ orbit-follow) and `breach` (first person) are named by their plan docs as
 consumers, so any later signature that wants a camera basis, a view matrix or a
 single stored yaw is the thing to refuse.
 
-**Not done, and it is the project's own rule that says so: no demo uses it in a
-browser.** The puppet sample's milestone 1 — a capsule on a map with ramps and
-steps, per `docs/plan/sample/09-puppet.md` — is the next slice, and that sample
-has no crate yet.
+**A demo uses it in a browser, so the rule is met.** `apps/puppet` milestone 1
+walks the capsule over a map of steps and mounds, and the conversion that the
+constraint is about lives in the demo: `puppet::camera::walk_direction` turns
+the follow camera's yaw and two axes into a world direction, and
+`puppet::game::run_tick` scales it and hands `move_and_slide` a displacement.
+Nothing in `crcbl-phys` learned about a camera. `puppet::camera::tests` checks
+`walk_direction` against the `Camera` the same yaw builds, so the two cannot
+drift apart silently.
 
 What else is open:
 
@@ -100,6 +104,41 @@ What else is open:
   treatment:** the box is inflated by the radius rather than rounded, so a
   capsule arriving diagonally at a box corner reports the inflated box's corner
   and its face normal. Pre-existing, and shared by both sweep families.
+
+### What puppet milestone 1 leaves for milestone 2
+
+`apps/puppet` ships the map, the controller path and the orbit-follow camera,
+per milestone 1 of `docs/plan/sample/09-puppet.md`. Deliberately out of scope,
+and each of these is milestone 2's brief rather than a defect:
+
+- **No animation at all** — no clips, no blend tree, no skinning, no root
+  motion, no attachment socket. The character is `map::Character`, a greybox
+  capsule with a nose block so its facing is readable, and `game::Stage::facing`
+  turns it toward `MoveOutcome::motion`. The plan's locomotion blend replaces
+  that mesh, not the controller under it.
+- **No jump.** `game::run_tick` integrates a fall speed and nothing ever pushes
+  it upward, so `MoveOutcome::hit_ceiling` is never true in this sample.
+- **Slopes are spheres, because `crcbl-phys` has no oriented box.** Its
+  colliders are `Sphere`, an axis-aligned `BoxCollider` and a Y-aligned
+  `Capsule`, so a ramp at an arbitrary angle cannot be built — `map::world` uses
+  two mounds instead, one whose rim is inside the slope limit and one outside,
+  the same fixture shape `character.rs`'s own `dome_world` test uses.
+  `map::rim_angle` is what states each mound's angle, and the mesh is a
+  tessellation of the same sphere. A wedge or oriented-box collider is what
+  would let the map read as a ramp; it is not needed for the controller path.
+- **The camera does not collide.** `camera::Follow` is a yaw, a pitch and a
+  fixed `DISTANCE`, so it passes through the mounds. A spring arm over
+  `PhysicsWorld::sweep_capsule` is the obvious fix and is client work per
+  `docs/plan/30-player-kit.md`.
+- **No rebind UI, no gamepad, no device-swap handling** — the action map in
+  `puppet::app` is fixed at build time.
+- **No `.crpix` art and no audio.** Everything is greybox geometry from
+  `crcbl::greybox` over a tinted grid page, so the demo carries no asset at all
+  and the web build ships an empty manifest.
+- **No golden-frame check.** The browser gate asserts the controller's behaviour
+  — that the character advances under held input, stops when it is released,
+  climbs the 0.3 m step and is refused by the 0.9 m one — and asserts nothing
+  about what the frame looks like.
 
 ### What the glTF rig path still drops
 
