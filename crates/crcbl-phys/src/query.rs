@@ -146,13 +146,15 @@ fn select_hit(near: f64, far: f64, lo: f64, hi: f64, rule: InsideRule) -> Option
     }
 }
 
-/// The outward unit normal of the box face nearest to `point`.
+/// The outward unit normal of the box face nearest to `point`, and how far
+/// `point` is from that face.
 ///
 /// Doubles as the surface normal for a hit lying on a face (distance zero) and
 /// as the minimum-penetration escape axis for a point inside the box, so
 /// callers never have to fabricate a normal when a query starts overlapping.
+/// The distance is what a caller pushing that point back out has to travel.
 #[must_use]
-fn aabb_face_normal(aabb: &Aabb, point: DVec3) -> DVec3 {
+fn aabb_escape(aabb: &Aabb, point: DVec3) -> (DVec3, f64) {
     let faces = [
         ((point.x - aabb.min.x).abs(), DVec3::NEG_X),
         ((aabb.max.x - point.x).abs(), DVec3::X),
@@ -167,7 +169,7 @@ fn aabb_face_normal(aabb: &Aabb, point: DVec3) -> DVec3 {
             best = face;
         }
     }
-    best.1
+    (best.1, best.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +224,7 @@ pub fn ray_vs_aabb(ray: &Ray, aabb: &Aabb) -> Option<ShapeHit> {
     let (t, started_inside) = select_hit(near, far, ray.t_min, ray.t_max, InsideRule::Exit)?;
 
     let point = ray.origin + ray.dir * t;
-    let normal = aabb_face_normal(aabb, point);
+    let normal = aabb_escape(aabb, point).0;
 
     Some(ShapeHit {
         t,
@@ -451,7 +453,7 @@ pub fn swept_sphere_vs_aabb(
     // that starts overlapping) the nearest face is the minimum-penetration
     // escape axis, which is the normal a caller needs to push the sphere out.
     let point_on_inflated = segment.start + dir * t;
-    let normal = aabb_face_normal(&inflated, point_on_inflated);
+    let normal = aabb_escape(&inflated, point_on_inflated).0;
 
     // Contact point on the original AABB surface.
     let contact_point = DVec3::new(
@@ -524,6 +526,227 @@ pub fn swept_sphere_vs_capsule(
             normal: hit.normal,
             started_inside: hit.started_inside,
         }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Swept capsule
+// ---------------------------------------------------------------------------
+
+// The swept-capsule tests below are the swept-*sphere* tests against a target
+// that has already absorbed the capsule's axis.
+//
+// Sweeping shape `A` against a static `B` asks whether `A`'s origin path enters
+// the Minkowski sum `B ⊕ (−A)`. A capsule is `axis ⊕ ball(r)` with the axis
+// symmetric about the capsule centre, so `−A = A` and the sum is
+// `(B ⊕ axis) ⊕ ball(r)`: a *ball* of the capsule's radius following the capsule
+// centre, against a target grown along Y by the capsule's half-height. Growing
+// along Y is closed over the shapes this crate has — a sphere becomes a capsule,
+// a capsule a taller capsule, an AABB a taller AABB — which is what makes the
+// reduction exact rather than an approximation, and it is exact only because
+// every capsule here is Y-aligned.
+//
+// The time of impact, the contact normal and `started_inside` therefore come
+// straight back from the swept-sphere call. Only [`ShapeHit::point`] has to be
+// undone: the sphere test reports a point on the *grown* target, and each
+// function below maps it back onto the real one.
+
+/// Compute the TOI for a Y-aligned capsule moving along a segment against a
+/// static sphere. `segment` is the path of the capsule's **centre**.
+///
+/// A sphere grown along Y is a capsule, so this is [`swept_sphere_vs_capsule`]
+/// against that proxy — see the note above.
+///
+/// As with the sphere sweeps, a sweep that starts already overlapping reports
+/// `t = 0` and [`ShapeHit::started_inside`].
+#[must_use]
+pub fn swept_capsule_vs_sphere(
+    segment: &crate::broadphase::Segment,
+    swept_radius: f64,
+    swept_half_height: f64,
+    target: &Sphere,
+) -> Option<ShapeHit> {
+    let proxy = Capsule::new(target.centre, target.radius, swept_half_height);
+    let hit = swept_sphere_vs_capsule(segment, swept_radius, &proxy)?;
+    // The proxy's surface is a capsule's and the contact is on the real sphere,
+    // which the normal already points out of.
+    Some(ShapeHit {
+        point: target.centre + hit.normal * target.radius,
+        ..hit
+    })
+}
+
+/// Compute the TOI for a Y-aligned capsule moving along a segment against a
+/// static AABB. `segment` is the path of the capsule's **centre**.
+///
+/// An AABB grown along Y is an AABB, so this is [`swept_sphere_vs_aabb`]
+/// against that proxy — see the note above. It inherits that function's
+/// treatment of edges and corners: the box is inflated by the radius rather
+/// than rounded, so a hit arriving diagonally at a corner reports the corner of
+/// the inflated box and its face normal.
+///
+/// As with the sphere sweeps, a sweep that starts already overlapping reports
+/// `t = 0`, [`ShapeHit::started_inside`] and the minimum-penetration face
+/// normal.
+#[must_use]
+pub fn swept_capsule_vs_aabb(
+    segment: &crate::broadphase::Segment,
+    swept_radius: f64,
+    swept_half_height: f64,
+    target: &Aabb,
+) -> Option<ShapeHit> {
+    // Checked before the growth and not after: a box inverted only on Y reads
+    // as non-empty once Y has been grown, and would then be swept against as
+    // though it were a real box.
+    if target.is_empty() {
+        return None;
+    }
+    let grown = Aabb::new(
+        target.min - DVec3::Y * swept_half_height,
+        target.max + DVec3::Y * swept_half_height,
+    );
+    let hit = swept_sphere_vs_aabb(segment, swept_radius, &grown)?;
+    // The sphere test clamped the contact onto `grown`, so only Y can be off
+    // the real box; clamping again puts it back on the face that was grown.
+    Some(ShapeHit {
+        point: hit.point.clamp(target.min, target.max),
+        ..hit
+    })
+}
+
+/// Compute the TOI for a Y-aligned capsule moving along a segment against a
+/// static Y-aligned capsule. `segment` is the path of the moving capsule's
+/// **centre**.
+///
+/// A capsule grown along Y is a capsule with the half-heights summed, so this
+/// is [`swept_sphere_vs_capsule`] against that proxy — see the note above.
+///
+/// As with the sphere sweeps, a sweep that starts already overlapping reports
+/// `t = 0` and [`ShapeHit::started_inside`].
+#[must_use]
+pub fn swept_capsule_vs_capsule(
+    segment: &crate::broadphase::Segment,
+    swept_radius: f64,
+    swept_half_height: f64,
+    target: &Capsule,
+) -> Option<ShapeHit> {
+    let proxy = Capsule::new(
+        target.centre,
+        target.radius,
+        target.half_height + swept_half_height,
+    );
+    let hit = swept_sphere_vs_capsule(segment, swept_radius, &proxy)?;
+    // The proxy is taller than the target, so the axis point the sphere test
+    // anchored on is not one of the target's. Re-anchor on the real axis, which
+    // the normal points out of.
+    let centre_at_hit = segment.start + (segment.end - segment.start) * hit.t;
+    let axis_point = closest_point_on_capsule_axis(target, centre_at_hit);
+    Some(ShapeHit {
+        point: axis_point + hit.normal * target.radius,
+        ..hit
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Capsule penetration
+// ---------------------------------------------------------------------------
+
+/// How far an overlapping shape has to move, and which way, to stop
+/// overlapping.
+///
+/// This is what a sweep cannot answer. A sweep that starts already overlapping
+/// reports the contact at `t = 0` and stops there, because there is no
+/// *earlier* time to report; the depth is a different measurement, and a
+/// character that woke up inside the world needs it to get out. PhysX exposes
+/// the same pair separately (`PxSweep*` against `PxComputePenetration`), and so
+/// does Unity (`CapsuleCast` against `Physics.ComputePenetration`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Penetration {
+    /// Unit direction to translate the overlapping shape along, pointing out of
+    /// the shape it is inside.
+    pub normal: DVec3,
+    /// How far along `normal` the translation has to go. Always positive — a
+    /// pair that merely touches is not a penetration and is reported as `None`.
+    pub depth: f64,
+}
+
+/// The push-out for a Y-aligned capsule overlapping a sphere, or `None` if they
+/// are clear of each other.
+///
+/// The same Y-growth reduction the swept-capsule tests use: a sphere grown
+/// along Y by the capsule's half-height is a capsule, and the capsule's centre
+/// is inside it exactly when the two shapes overlap.
+#[must_use]
+pub fn capsule_penetration_vs_sphere(capsule: &Capsule, target: &Sphere) -> Option<Penetration> {
+    let grown = Capsule::new(target.centre, target.radius, capsule.half_height);
+    penetration_in_capsule(capsule.centre, capsule.radius, &grown)
+}
+
+/// The push-out for a Y-aligned capsule overlapping a Y-aligned capsule, or
+/// `None` if they are clear of each other.
+#[must_use]
+pub fn capsule_penetration_vs_capsule(capsule: &Capsule, target: &Capsule) -> Option<Penetration> {
+    let grown = Capsule::new(
+        target.centre,
+        target.radius,
+        target.half_height + capsule.half_height,
+    );
+    penetration_in_capsule(capsule.centre, capsule.radius, &grown)
+}
+
+/// The push-out for a Y-aligned capsule overlapping an AABB, or `None` if they
+/// are clear of each other.
+///
+/// A centre *inside* the grown box has no direction to escape along, so the
+/// answer there is the minimum-penetration face — the same choice the swept
+/// forms make, and the reason a character that spawned inside a wall leaves
+/// through the nearest one rather than travelling the length of the room.
+#[must_use]
+pub fn capsule_penetration_vs_aabb(capsule: &Capsule, target: &Aabb) -> Option<Penetration> {
+    // Checked before the growth, for the reason `swept_capsule_vs_aabb` gives.
+    if target.is_empty() {
+        return None;
+    }
+    let grown = Aabb::new(
+        target.min - DVec3::Y * capsule.half_height,
+        target.max + DVec3::Y * capsule.half_height,
+    );
+    let closest = capsule.centre.clamp(grown.min, grown.max);
+    let out = capsule.centre - closest;
+    let dist_sq = out.length_squared();
+    if dist_sq > capsule.radius * capsule.radius {
+        return None;
+    }
+    let (normal, depth) = if dist_sq > 0.0 {
+        let dist = dist_sq.sqrt();
+        (out / dist, capsule.radius - dist)
+    } else {
+        let (normal, to_face) = aabb_escape(&grown, capsule.centre);
+        (normal, capsule.radius + to_face)
+    };
+    (depth > 0.0).then_some(Penetration { normal, depth })
+}
+
+/// The push-out for a point of the given radius sitting inside `grown`, which
+/// is whichever capsule the caller's Y-growth produced.
+///
+/// A point exactly on the axis has no direction to escape along and takes the
+/// same `+Y` fallback the swept forms use for the same degenerate case.
+fn penetration_in_capsule(point: DVec3, radius: f64, grown: &Capsule) -> Option<Penetration> {
+    let combined = radius + grown.radius;
+    let out = point - closest_point_on_capsule_axis(grown, point);
+    let dist_sq = out.length_squared();
+    if dist_sq > combined * combined {
+        return None;
+    }
+    let dist = dist_sq.sqrt();
+    let depth = combined - dist;
+    if depth <= 0.0 {
+        return None;
+    }
+    Some(Penetration {
+        normal: if dist > 0.0 { out / dist } else { DVec3::Y },
+        depth,
     })
 }
 
@@ -986,5 +1209,155 @@ mod tests {
         let hit = swept_sphere_vs_capsule(&seg, 0.5, &capsule).unwrap();
         assert!((hit.t - 0.4).abs() < 0.01); // near t=0.4
         assert!(hit.normal.y > 0.5); // pointing away from capsule (upward)
+    }
+
+    // ── Swept capsule ──────────────────────────────────────────────────
+
+    /// A capsule sweep is the query a character needs and a sphere sweep is
+    /// not: the curb is below the sphere and inside the capsule.
+    #[test]
+    fn a_capsule_sweep_strikes_a_curb_the_sphere_at_its_waist_rides_over() {
+        // Feet on y = 0, so the capsule spans y ∈ [0, 1.8] and the sphere of
+        // the same radius, at the same centre, spans y ∈ [0.5, 1.3].
+        let (radius, half_height) = (0.4, 0.5);
+        let centre_y = radius + half_height;
+        let seg = crate::broadphase::Segment::new(
+            DVec3::new(-3.0, centre_y, 0.0),
+            DVec3::new(3.0, centre_y, 0.0),
+        );
+        let curb = Aabb::new(DVec3::new(1.0, 0.0, -2.0), DVec3::new(3.0, 0.3, 2.0));
+
+        assert!(
+            swept_sphere_vs_aabb(&seg, radius, &curb).is_none(),
+            "the sphere must miss the curb, or the capsule hitting it proves nothing",
+        );
+        let hit = swept_capsule_vs_aabb(&seg, radius, half_height, &curb)
+            .expect("the capsule reaches down to the curb");
+        assert_eq!(hit.normal, DVec3::NEG_X, "struck the curb's -X face");
+    }
+
+    /// The contact is reported on the real box, not on the Y-grown proxy the
+    /// reduction sweeps against — a controller placing a foot from this point
+    /// would otherwise stand `half_height` above the floor.
+    #[test]
+    fn a_capsule_landing_reports_the_contact_on_the_floor_not_the_grown_box() {
+        let (radius, half_height) = (0.4, 0.5);
+        let floor = Aabb::new(DVec3::new(-5.0, -1.0, -5.0), DVec3::new(5.0, 0.0, 5.0));
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(0.0, 3.0, 0.0), DVec3::new(0.0, 0.5, 0.0));
+        let hit = swept_capsule_vs_aabb(&seg, radius, half_height, &floor).expect("lands");
+        assert_eq!(hit.normal, DVec3::Y);
+        // Bottom cap touches y = 0 when the centre is at radius + half_height.
+        let touch_y = radius + half_height;
+        assert!(
+            (hit.t - (3.0 - touch_y) / 2.5).abs() < 1e-12,
+            "expected the TOI where the bottom cap meets the floor, got t = {}",
+            hit.t,
+        );
+        assert!(
+            (hit.point.y - floor.max.y).abs() < 1e-12,
+            "contact reported at y = {}, and the floor's top is y = {}",
+            hit.point.y,
+            floor.max.y,
+        );
+    }
+
+    /// A box inverted only on Y reads as non-empty once Y has been grown, so
+    /// the emptiness check has to happen before the growth.
+    #[test]
+    fn a_capsule_sweep_misses_a_box_that_is_empty_only_on_y() {
+        let inverted = Aabb::new(DVec3::new(-1.0, 1.0, -1.0), DVec3::new(1.0, -1.0, 1.0));
+        assert!(inverted.is_empty());
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0));
+        assert!(swept_capsule_vs_aabb(&seg, 0.5, 2.0, &inverted).is_none());
+    }
+
+    /// The capsule's flank reaches a sphere its centre line passes well below,
+    /// and the contact comes back on the sphere's own surface.
+    #[test]
+    fn a_capsule_flank_hits_a_sphere_above_its_centre_line() {
+        let (radius, half_height) = (0.5, 2.0);
+        let target = Sphere::new(DVec3::ZERO, 1.0);
+        // The path is 1.6 above the target's centre: further than the 1.5 the
+        // two radii cover, so the sphere sweep misses, and well inside the
+        // capsule's 2.0 half-height, so the flank does not.
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(-5.0, 1.6, 0.0), DVec3::new(5.0, 1.6, 0.0));
+        assert!(
+            swept_sphere_vs_sphere(&seg, radius, &target).is_none(),
+            "the sphere must miss, or the capsule hitting it proves nothing",
+        );
+
+        let hit = swept_capsule_vs_sphere(&seg, radius, half_height, &target).expect("flank hit");
+        // Contact at |x| = radius + target.radius along a 10 m path from -5.
+        assert!(
+            (hit.t - (5.0 - 1.5) / 10.0).abs() < 1e-12,
+            "expected the TOI where the flank meets the sphere, got t = {}",
+            hit.t,
+        );
+        assert!(
+            (hit.normal - DVec3::NEG_X).length() < 1e-12,
+            "got {:?}",
+            hit.normal
+        );
+        assert!(
+            (hit.point - DVec3::new(-1.0, 0.0, 0.0)).length() < 1e-12,
+            "the contact belongs on the target sphere's surface, and came back at {:?}",
+            hit.point,
+        );
+    }
+
+    /// Two Y-aligned capsules meet when the horizontal gap closes to the sum of
+    /// their radii, and the contact lands on the static one's surface rather
+    /// than on the taller proxy the reduction sweeps against.
+    #[test]
+    fn a_capsule_sweep_re_anchors_its_contact_on_the_static_capsules_axis() {
+        let (radius, half_height) = (0.5, 3.0);
+        let target = Capsule::new(DVec3::ZERO, 0.5, 1.0);
+        // The mover's centre rides above the target's top cap; only the flanks
+        // can meet, and the overlap of the two axes tops out at y = 1.0.
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(-5.0, 2.0, 0.0), DVec3::new(5.0, 2.0, 0.0));
+        let hit =
+            swept_capsule_vs_capsule(&seg, radius, half_height, &target).expect("flanks meet");
+        assert!(
+            (hit.t - (5.0 - 1.0) / 10.0).abs() < 1e-12,
+            "expected the TOI where the two flanks touch, got t = {}",
+            hit.t,
+        );
+        assert!(
+            (hit.normal - DVec3::NEG_X).length() < 1e-12,
+            "got {:?}",
+            hit.normal
+        );
+        let off_axis = hit.point - closest_point_on_capsule_axis(&target, hit.point);
+        assert!(
+            (off_axis.length() - target.radius).abs() < 1e-12,
+            "the contact is {} from the target's axis and its surface is {} out — \
+             the proxy's axis is taller than the target's, so this is what an \
+             un-re-anchored point fails",
+            off_axis.length(),
+            target.radius,
+        );
+    }
+
+    /// A capsule that starts overlapping is a resting contact at `t = 0`, the
+    /// same answer the sphere sweeps give and the one depenetration reads.
+    #[test]
+    fn a_capsule_sweep_that_starts_overlapping_is_a_contact_at_zero() {
+        let (radius, half_height) = (0.4, 0.9);
+        let wall = Aabb::new(DVec3::new(0.0, -5.0, -5.0), DVec3::new(5.0, 5.0, 5.0));
+        // Centre 0.2 inside the wall's -X face, so the whole flank overlaps.
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(0.2, 0.0, 0.0), DVec3::new(0.2, 0.0, 1.0));
+        let hit = swept_capsule_vs_aabb(&seg, radius, half_height, &wall).expect("resting contact");
+        assert_eq!(hit.t, 0.0);
+        assert!(hit.started_inside);
+        assert_eq!(
+            hit.normal,
+            DVec3::NEG_X,
+            "the shortest way out is back through the face it entered",
+        );
     }
 }

@@ -61,6 +61,59 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A swept-capsule query, `PhysicsWorld::sweep_capsule` and
+  `sweep_capsule_excluding`,** alongside the sphere sweeps and with the same
+  semantics: exact shape-level TOI into the same `ShapeHit`, triggers skipped,
+  the broadphase asked for the swept volume rather than the centre line, and the
+  `_excluding` form for a body that is registered in the world and would
+  otherwise be the closest hit on its own segment. `crcbl_phys::query` gained
+  `swept_capsule_vs_sphere`, `swept_capsule_vs_aabb` and
+  `swept_capsule_vs_capsule` under it, and `OverlapQueries` the shared-borrow
+  twins.
+
+  A character controller cannot be built on a sphere sweep. Given a character's
+  width the sphere is too short and rides over a step its chest should have
+  struck; given its height it is too wide and cannot fit through its own
+  doorway. The two errors are the same sphere, so neither is tunable away.
+
+  Every capsule is Y-aligned, which makes the narrow phase exact rather than
+  approximate: growing a target along Y by the capsule's half-height is closed
+  over the shapes this crate has — a sphere becomes a capsule, a capsule a
+  taller capsule, an AABB a taller AABB — so each test is the _sphere_ sweep
+  against a grown target, with the contact point mapped back onto the real one.
+
+- **A penetration query, `PhysicsWorld::capsule_penetrations_into`,** with
+  `crcbl_phys::Penetration` and the `capsule_penetration_vs_*` trio behind it.
+  It answers what a sweep structurally cannot: a sweep that starts already
+  overlapping reports the contact at `t = 0` because there is no earlier time,
+  and the _depth_ is a different measurement. PhysX and Unity split the same
+  pair the same way. This is what a character that spawned inside the level gets
+  out with.
+
+- **`crcbl_phys::CharacterController`, the L0 capsule character controller**
+  `docs/plan/05-physics.md` specifies: sweep-based movement with ground
+  detection, a slope limit, step offset up and down, sliding along surfaces
+  rather than stopping dead, and depenetration. It runs at whatever fixed
+  timestep the caller steps it at, in `f64` throughout.
+
+  **It knows nothing about any camera**, which is what lets one controller serve
+  a first-person and a third-person game. `move_and_slide` takes a world-space
+  **displacement** — turning a stick vector into a world direction is the
+  caller's job, because that is the only step the two styles genuinely differ in
+  — and there is no orientation on the type at all, so a first-person rig can
+  pin facing to its view while a third-person one turns the body toward
+  `MoveOutcome::motion` over time. No camera collision, no follow logic, no
+  spring arm.
+
+  The move is Quake's `SV_FlyMove` collect-and-slide loop over a plane set,
+  including its crease fallback and its stop-dead rule, with Unreal's `StepUp`
+  and `ComputeGroundMovementDelta` for the two pieces Quake has no equivalent
+  of, and Godot's walkable-floor angle and floor snap. `CharacterConfig` carries
+  the tunables; the slope limit is stored as the **cosine** of the steepest
+  walkable angle, not the angle, so no platform transcendental runs anywhere in
+  the deterministic path. The module's own docs name the failure modes it
+  handles and the ones it does not.
+
 - **`crcbl_scene::GltfNode::skin`, which node a document's skin is worn by.**
   The importer read the `skins` array but never `node.skin`, so nothing
   downstream could tell a skinned instance from scenery — and a mesh's

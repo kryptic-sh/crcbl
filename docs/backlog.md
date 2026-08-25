@@ -3,38 +3,78 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### The capsule character controller must be camera-agnostic
+### The capsule character controller is camera-agnostic, and unused by any demo
 
-Not started. `crcbl-phys` names a character controller only in prose
-(`world.rs`'s note about `ClosestNotMeConvexResultCallback`);
-`docs/plan/05-physics.md` specifies the L0 capsule controller and
-`docs/plan/30-player-kit.md` the kit built over it.
+`crcbl_phys::CharacterController` (`crates/crcbl-phys/src/character.rs`) exists,
+with the swept-capsule query (`PhysicsWorld::sweep_capsule` /
+`sweep_capsule_excluding`) and the penetration query
+(`PhysicsWorld::capsule_penetrations_into`) under it. It does ground detection,
+a slope limit, step offset up and down, Quake-style collect-and-slide over a
+plane set, and depenetration.
 
-**The constraint, from the user on 2026-08-25:** the controller is built so that
-nothing in it knows which camera is watching. First-person and third-person are
-then two presentations over one controller, not two controllers.
+**The constraint, from the user on 2026-08-25, and how it is met.** Nothing in
+the controller knows which camera is watching, so first-person and third-person
+are two presentations over one controller rather than two controllers.
 
-What that rules out in practice, so the shape is decided before the code exists:
+- `move_and_slide` takes a **world-space displacement**. Turning a stick vector
+  into a world direction is the caller's job, because that is the only step that
+  differs between a first-person rig and a third-person one.
+- **There is no orientation on the type at all.** A first-person game pins
+  facing to its view; a third-person one turns the body toward
+  `MoveOutcome::motion` over time. Neither fights the other because the
+  controller stores no yaw for either to fight over.
+- No camera collision, no follow logic, no spring arm. Those stay on the client
+  per `docs/plan/30-player-kit.md`.
+- The displacement is a displacement and not a velocity, so nothing in the
+  controller reads a clock.
 
-- The controller takes a **desired velocity or a move intent in world space**,
-  not a camera basis and not a yaw it derives one from. Turning a stick vector
-  into a world direction is the _caller's_ job, because that is the only step
-  that differs between a first-person rig (intent is relative to the view) and a
-  third-person one (intent is relative to the camera, and the character turns
-  toward it over time).
-- **Facing is separate from movement.** First-person pins facing to the view;
-  third-person turns the body toward the move direction. A controller that
-  stores one yaw and uses it for both cannot do the second without fighting the
-  first, which is where the two styles usually get forked into two controllers.
-- **No camera collision, no follow logic, no spring arm** inside it. Those are
-  the camera's, and `docs/plan/30-player-kit.md` already puts cameras on the
-  client as presentation components while movement runs as a server system.
-- The step offset, slope limit, ground snap and the sweep against the world are
-  where the real work is, and none of them reference a view.
+**This constraint outlives the slice.** Both `puppet` (third person,
+orbit-follow) and `breach` (first person) are named by their plan docs as
+consumers, so any later signature that wants a camera basis, a view matrix or a
+single stored yaw is the thing to refuse.
 
-Both `puppet` (third person, orbit-follow) and `breach` (first person) are named
-by their plan docs as consumers, which is the reason this cannot be settled
-later by whichever one is built first.
+**Not done, and it is the project's own rule that says so: no demo uses it in a
+browser.** The puppet sample's milestone 1 — a capsule on a map with ramps and
+steps, per `docs/plan/sample/09-puppet.md` — is the next slice, and that sample
+has no crate yet.
+
+What else is open:
+
+- **`PhysicsSystem` has no capsule sweep.** The controller drives a
+  `PhysicsWorld` directly, which an ECS game reaches through
+  `PhysicsSystem::world_mut`, so nothing is blocked. An entity-level
+  `sweep_capsule` and a capsule form of `sweep_body` are the obvious additions
+  the moment a caller wants entities back rather than `ColliderId`s.
+- **`OverlapQueries` carries the shared-borrow twins of both new queries and
+  nothing calls them.** Written for consistency with the sphere family, not for
+  a consumer that exists; a parallel character solve is possible and untried.
+- **Failure modes the controller does not handle**, listed in its module docs
+  and repeated here so they are not rediscovered: a step-up may land touching
+  the riser it stepped over (the corner between the advance and the drop is not
+  swept, and the next call's depenetration is what clears it); moving geometry
+  is not read at all, so a character does not ride a platform and a platform
+  closing on a character resolves as a penetration; more than two simultaneous
+  planes stops the character dead, where Quake III tries the remaining pairs
+  first.
+- **The slope limit is stored as a cosine (`min_ground_normal_y`), not an
+  angle**, because `cos` is a platform transcendental and this is a
+  determinism-bearing crate — see the unresolved transcendental policy entry.
+  The default is `FRAC_1_SQRT_2`, so 45° costs no transcendental at all. If the
+  workspace ever takes `libm`, an angle-shaped constructor becomes safe.
+- **The step offset has a slop band one skin width wide.** A settled capsule
+  floats `skin_width` off its floor and the step-up's rise starts from there, so
+  steps up to `step_offset + skin_width` are climbed. Measured, not assumed:
+  `character::tests::the_step_the_controller_stops_climbing_is_the_offset_it_was_configured_with`
+  sweeps it in millimetres.
+- **Coverage gaps.** The controller has only been run against boxes, spheres and
+  capsules, because those are the only colliders that exist — there is no
+  trimesh or heightfield to walk on, which is what a real map is. It has not
+  been profiled, run at scale, or checked for cross-target determinism. Nothing
+  exercises `CharacterConfig` values other than the default.
+- **The swept-capsule narrow phase inherits `swept_sphere_vs_aabb`'s corner
+  treatment:** the box is inflated by the radius rather than rounded, so a
+  capsule arriving diagonally at a box corner reports the inflated box's corner
+  and its face normal. Pre-existing, and shared by both sweep families.
 
 ### What the glTF rig path still drops
 
@@ -10814,9 +10854,10 @@ the transport seam over a third transport shape.
   native surface" and `18-render-features.md` orders the post chain around it.
   `ShellCaps::HW_UPSCALE` exists and nothing can ask for it. This is a locked
   display mode with its renderer half missing.
-- **L0's character controller and static trimesh/heightfield colliders do not
-  exist.** `05-physics.md` puts both in L0 (MVP); the ROADMAP marks "P3 L0" done
-  against a narrower list. towers demands both.
+- **L0's static trimesh/heightfield colliders do not exist.** `05-physics.md`
+  puts them in L0 (MVP); the ROADMAP marks "P3 L0" done against a narrower list.
+  towers demands them, and so does the character controller, which can only walk
+  on boxes, spheres and capsules today.
 - **`crcbl-audio` has no bus graph and no limiter**, though `13-audio.md`
   specifies `master ← sfx/music/ui/voice` with per-bus gain and a soft-knee
   limiter, and its delivery table puts buses in P4A. Mix snapshots and ducking

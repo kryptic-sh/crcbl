@@ -9,7 +9,7 @@ use glam::DVec3;
 
 use crate::broadphase::{Bvh, BvhHit, Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
-use crate::query::{self, ShapeHit};
+use crate::query::{self, Penetration, ShapeHit};
 
 /// Opaque identifier for a registered collider.
 ///
@@ -353,6 +353,65 @@ impl OverlapQueries<'_> {
             scratch,
         )
     }
+
+    /// [`PhysicsWorld::sweep_capsule`] under a shared borrow, working in
+    /// `scratch` instead of the world's own buffers.
+    #[must_use]
+    pub fn sweep_capsule(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        half_height: f64,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        self.sweep_capsule_excluding(segment, radius, half_height, None, scratch)
+    }
+
+    /// [`PhysicsWorld::sweep_capsule_excluding`] under a shared borrow, working
+    /// in `scratch` instead of the world's own buffers.
+    ///
+    /// This is the form a character controller needs, and it excludes in the
+    /// narrow phase for the reason the sphere form gives. The two forms are one
+    /// implementation.
+    #[must_use]
+    pub fn sweep_capsule_excluding(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        half_height: f64,
+        exclude: Option<ColliderId>,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        sweep_capsule_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            &Capsule::new(segment.start, radius, half_height),
+            segment.end,
+            exclude,
+            scratch,
+        )
+    }
+
+    /// [`PhysicsWorld::capsule_penetrations_into`] under a shared borrow,
+    /// working in `scratch` instead of the world's own buffers.
+    pub fn capsule_penetrations_into(
+        &self,
+        capsule: &Capsule,
+        exclude: Option<ColliderId>,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<(ColliderId, Penetration)>,
+    ) {
+        capsule_penetrations_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            capsule,
+            exclude,
+            scratch,
+            out,
+        );
+    }
 }
 
 /// The one implementation of "which colliders overlap this sphere".
@@ -462,19 +521,124 @@ fn sweep_sphere_core(
     scratch: &mut QueryScratch,
 ) -> Option<(ColliderId, ShapeHit)> {
     let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
-    let bounds = Aabb::new(
-        segment.start.min(segment.end),
-        segment.start.max(segment.end),
-    )
-    .inflated(radius);
+    let bounds = swept_bounds(segment, DVec3::splat(radius));
     bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
     closest_swept_core(
         colliders,
         generations,
-        segment,
-        radius,
         &scratch.candidates,
         skip,
+        |entry| match entry {
+            ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
+            ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
+            ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+        },
+    )
+}
+
+/// The one implementation of "what does this swept Y-aligned capsule hit
+/// first": `capsule` sits at the start of the sweep and its centre travels to
+/// `end`.
+///
+/// Both [`PhysicsWorld::sweep_capsule_excluding`] and
+/// [`OverlapQueries::sweep_capsule_excluding`] come through here — and so do
+/// the two `sweep_capsule` forms, which are this with no exclusion. They take a
+/// [`Segment`] and a radius the way the sphere sweeps do; the shape is one
+/// argument here so that the swept capsule's two dimensions travel together.
+///
+/// The broadphase query is the swept *volume*, for the reason
+/// [`PhysicsWorld::sweep_sphere`] gives: the capsule is `radius` wide and
+/// `half_height + radius` tall, so the candidates are everything within that of
+/// the path its centre takes.
+fn sweep_capsule_core(
+    bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    capsule: &Capsule,
+    end: DVec3,
+    exclude: Option<ColliderId>,
+    scratch: &mut QueryScratch,
+) -> Option<(ColliderId, ShapeHit)> {
+    let Capsule {
+        radius,
+        half_height,
+        ..
+    } = *capsule;
+    let segment = &Segment::new(capsule.centre, end);
+    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
+    let bounds = swept_bounds(segment, DVec3::new(radius, radius + half_height, radius));
+    bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+    closest_swept_core(
+        colliders,
+        generations,
+        &scratch.candidates,
+        skip,
+        |entry| match entry {
+            ColliderEntry::Sphere(s) => {
+                query::swept_capsule_vs_sphere(segment, radius, half_height, s)
+            }
+            ColliderEntry::Box(b) => {
+                query::swept_capsule_vs_aabb(segment, radius, half_height, &b.aabb())
+            }
+            ColliderEntry::Capsule(c) => {
+                query::swept_capsule_vs_capsule(segment, radius, half_height, c)
+            }
+        },
+    )
+}
+
+/// The one implementation of "what is this capsule inside, and how far out does
+/// each one need it pushed".
+///
+/// Both [`PhysicsWorld::capsule_penetrations_into`] and
+/// [`OverlapQueries::capsule_penetrations_into`] come through here.
+///
+/// Triggers are non-solid and are skipped, and so is `exclude` — a character
+/// whose own capsule is registered in the world is inside itself by the whole
+/// of its own radius, which is the deepest contact it would ever find.
+fn capsule_penetrations_core(
+    bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    capsule: &Capsule,
+    exclude: Option<ColliderId>,
+    scratch: &mut QueryScratch,
+    out: &mut Vec<(ColliderId, Penetration)>,
+) {
+    out.clear();
+    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
+    bvh.traverse_aabb_into(&capsule.aabb(), &mut scratch.stack, &mut scratch.candidates);
+
+    for &element in scratch.candidates.iter() {
+        let idx = element as usize;
+        if Some(idx) == skip {
+            continue;
+        }
+        let Some(Some(slot)) = colliders.get(idx) else {
+            continue;
+        };
+        if slot.is_trigger {
+            continue;
+        }
+        let penetration = match &slot.entry {
+            ColliderEntry::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
+            ColliderEntry::Box(b) => query::capsule_penetration_vs_aabb(capsule, &b.aabb()),
+            ColliderEntry::Capsule(c) => query::capsule_penetration_vs_capsule(capsule, c),
+        };
+        if let Some(penetration) = penetration {
+            out.push((id_for_slot_in(generations, element), penetration));
+        }
+    }
+}
+
+/// The broadphase bounds of a sweep: the box the segment covers, grown by the
+/// swept shape's half-extents so the traversal offers the narrow phase every
+/// collider the *volume* touches and not only the ones its centre line runs
+/// through.
+fn swept_bounds(segment: &Segment, half_extents: DVec3) -> Aabb {
+    Aabb::new(
+        segment.start.min(segment.end) - half_extents,
+        segment.start.max(segment.end) + half_extents,
     )
 }
 
@@ -509,16 +673,20 @@ fn closest_hit_core(
     best.map(|(_, id, hit)| (id, hit))
 }
 
-/// Given broadphase candidates, find the closest exact swept-sphere hit.
+/// Given broadphase candidates, find the closest exact swept hit, with `narrow`
+/// supplying the shape-level TOI for whichever shape is being swept.
 /// Triggers are non-solid and are skipped, and so is `skip` — the storage slot
 /// of the collider the caller excluded, if any.
+///
+/// The sphere and capsule sweeps share this rather than each carrying a copy:
+/// what a trigger, a dead slot and an excluded collider mean is one rule, and a
+/// second copy of it is where the two would drift.
 fn closest_swept_core(
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
-    segment: &Segment,
-    radius: f64,
     candidates: &[u32],
     skip: Option<usize>,
+    narrow: impl Fn(&ColliderEntry) -> Option<ShapeHit>,
 ) -> Option<(ColliderId, ShapeHit)> {
     let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
     for &element in candidates {
@@ -532,12 +700,7 @@ fn closest_swept_core(
         if slot.is_trigger {
             continue;
         }
-        let hit = match &slot.entry {
-            ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
-            ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
-            ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
-        };
-        if let Some(hit) = hit
+        if let Some(hit) = narrow(&slot.entry)
             && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
         {
             best = Some((hit.t, id_for_slot_in(generations, element), hit));
@@ -635,8 +798,9 @@ impl PhysicsWorld {
 
     /// Mark a collider as a trigger.
     ///
-    /// A trigger is *non-solid*: [`PhysicsWorld::cast_ray`] and
-    /// [`PhysicsWorld::sweep_sphere`] pass straight through it, while
+    /// A trigger is *non-solid*: [`PhysicsWorld::cast_ray`],
+    /// [`PhysicsWorld::sweep_sphere`] and [`PhysicsWorld::sweep_capsule`] pass
+    /// straight through it, while
     /// [`PhysicsWorld::overlap_sphere`] and [`PhysicsWorld::overlap_aabb`]
     /// still report it — that is what makes it an overlap-only volume.
     ///
@@ -863,6 +1027,93 @@ impl PhysicsWorld {
                 .sweep_sphere_excluding(segment, radius, exclude, &mut scratch);
         self.scratch = scratch;
         hit
+    }
+
+    /// Sweep a Y-aligned capsule along a segment, returning the closest hit (if
+    /// any). `segment` is the path of the capsule's **centre**; `radius` and
+    /// `half_height` describe the same capsule [`Capsule`] does.
+    ///
+    /// This is [`sweep_sphere`](Self::sweep_sphere)'s sibling and shares its
+    /// semantics: exact shape-level TOI, triggers skipped, and a broadphase
+    /// query over the swept volume rather than the centre line.
+    ///
+    /// # Why a character wants this and not the sphere sweep
+    ///
+    /// A sphere is the wrong probe for anything that stands up. Given a
+    /// character's width it is too short, so it rides over a step or a railing
+    /// the character's chest should have struck; given the character's height it
+    /// is too wide, so it collides with walls the character is clear of and
+    /// cannot fit through its own doorway. Neither is tunable away — the two
+    /// errors are the same sphere. The capsule is the shape every engine's
+    /// character controller uses for exactly that reason.
+    #[must_use]
+    pub fn sweep_capsule(
+        &mut self,
+        segment: &Segment,
+        radius: f64,
+        half_height: f64,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        self.sweep_capsule_excluding(segment, radius, half_height, None)
+    }
+
+    /// [`sweep_capsule`](Self::sweep_capsule) with one collider left out of the
+    /// answer.
+    ///
+    /// The same query, and the same reason, as
+    /// [`sweep_sphere_excluding`](Self::sweep_sphere_excluding): a character
+    /// whose own capsule is registered in the world is sitting on the start of
+    /// every segment it sweeps, so it is reported as the closest hit at
+    /// `t = 0`. Dropping it in the narrow phase is what keeps the *next*
+    /// closest hit — the wall behind it — which a caller discarding a self-hit
+    /// afterwards has already thrown away.
+    ///
+    /// A stale or invalid `exclude` excludes nothing, which is the same answer
+    /// as `None`.
+    #[must_use]
+    pub fn sweep_capsule_excluding(
+        &mut self,
+        segment: &Segment,
+        radius: f64,
+        half_height: f64,
+        exclude: Option<ColliderId>,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        let mut scratch = core::mem::take(&mut self.scratch);
+        let hit = self.overlap_queries().sweep_capsule_excluding(
+            segment,
+            radius,
+            half_height,
+            exclude,
+            &mut scratch,
+        );
+        self.scratch = scratch;
+        hit
+    }
+
+    /// Every solid collider a Y-aligned capsule is *inside*, with the push-out
+    /// each one needs, written into `out` (which is cleared first).
+    ///
+    /// # A sweep cannot answer this, which is why it is its own query
+    ///
+    /// [`sweep_capsule`](Self::sweep_capsule) reports a capsule that starts
+    /// overlapping as a contact at `t = 0` and stops there: there is no earlier
+    /// time to report, and the *depth* is a measurement the time of impact does
+    /// not contain. A character that spawned inside the level, or that a moving
+    /// platform closed on, has to know how far out to go — see [`Penetration`].
+    ///
+    /// Triggers are non-solid and are skipped, and so is `exclude`. Nothing
+    /// here allocates beyond growing `out`: the broadphase's descent stack and
+    /// candidate list are the world's own, so a character resolving its
+    /// overlaps every tick costs no allocation.
+    pub fn capsule_penetrations_into(
+        &mut self,
+        capsule: &Capsule,
+        exclude: Option<ColliderId>,
+        out: &mut Vec<(ColliderId, Penetration)>,
+    ) {
+        let mut scratch = core::mem::take(&mut self.scratch);
+        self.overlap_queries()
+            .capsule_penetrations_into(capsule, exclude, &mut scratch, out);
+        self.scratch = scratch;
     }
 
     /// Get the AABB of a collider by id.
@@ -2333,5 +2584,92 @@ mod tests {
         let (id, hit) = world.cast_ray(&ray).expect("the solid sphere is behind it");
         assert_eq!(id, solid);
         assert!((hit.t - 19.0).abs() < 1e-9, "t = {}", hit.t);
+    }
+
+    // ── Swept capsule ──────────────────────────────────────────────────
+
+    /// **The broadphase bounds of a capsule sweep reach as high as the
+    /// capsule.** A ledge above the sphere's bounds and below the capsule's is
+    /// never offered to the narrow phase if the traversal box is only inflated
+    /// by the radius — the exact test that would have caught it never runs.
+    #[test]
+    fn a_capsule_sweeps_broadphase_reaches_a_ledge_the_sphere_sweeps_does_not() {
+        let (radius, half_height) = (0.4, 1.5);
+        let mut world = PhysicsWorld::new();
+        // Sits above the radius the sphere sweep inflates by, and well inside
+        // the `radius + half_height` the capsule sweep needs.
+        let ledge = world.add_box(BoxCollider::new(
+            DVec3::new(2.0, 1.1, 0.0),
+            DVec3::new(1.0, 0.1, 1.0),
+        ));
+        let segment = Segment::new(DVec3::new(-3.0, 0.0, 0.0), DVec3::new(3.0, 0.0, 0.0));
+
+        assert!(
+            world.sweep_sphere(&segment, radius).is_none(),
+            "the sphere passes under the ledge, or the capsule reaching it proves nothing",
+        );
+        let (id, hit) = world
+            .sweep_capsule(&segment, radius, half_height)
+            .expect("the capsule's shoulder is level with the ledge");
+        assert_eq!(id, ledge);
+        assert_eq!(hit.normal, DVec3::NEG_X);
+    }
+
+    /// A character registered in the world sits on the start of every segment
+    /// it sweeps. Excluding it in the narrow phase keeps the *next* hit — the
+    /// wall it was walking into — which a caller discarding a self-hit
+    /// afterwards has already lost.
+    #[test]
+    fn a_capsule_sweep_excluding_its_own_collider_keeps_the_wall_behind_it() {
+        let (radius, half_height) = (0.4, 0.9);
+        let mut world = PhysicsWorld::new();
+        let character = world.add_capsule(Capsule::new(DVec3::ZERO, radius, half_height));
+        let wall = world.add_box(BoxCollider::new(
+            DVec3::new(3.0, 0.0, 0.0),
+            DVec3::new(0.5, 5.0, 5.0),
+        ));
+        let segment = Segment::new(DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0));
+
+        let (self_id, self_hit) = world
+            .sweep_capsule(&segment, radius, half_height)
+            .expect("without the exclusion the character finds itself");
+        assert_eq!(self_id, character);
+        assert_eq!(self_hit.t, 0.0);
+
+        let (id, hit) = world
+            .sweep_capsule_excluding(&segment, radius, half_height, Some(character))
+            .expect("the wall survives the exclusion");
+        assert_eq!(id, wall);
+        // Wall's -X face at x = 2.5, the flank meets it at x = 2.1 along a 4 m path.
+        assert!((hit.t - 0.525).abs() < 1e-12, "t = {}", hit.t);
+    }
+
+    /// A trigger is non-solid for the capsule sweep exactly as it is for the
+    /// sphere sweep — the two share one candidate loop, and this is what says
+    /// the capsule path goes through it.
+    #[test]
+    fn a_capsule_sweep_passes_through_a_trigger_to_the_solid_behind_it() {
+        let (radius, half_height) = (0.4, 0.9);
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_box(BoxCollider::new(
+            DVec3::new(2.0, 0.0, 0.0),
+            DVec3::new(0.5, 5.0, 5.0),
+        ));
+        assert!(world.set_trigger(trigger, true));
+        let solid = world.add_box(BoxCollider::new(
+            DVec3::new(6.0, 0.0, 0.0),
+            DVec3::new(0.5, 5.0, 5.0),
+        ));
+        let segment = Segment::new(DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0));
+
+        let (id, hit) = world
+            .sweep_capsule(&segment, radius, half_height)
+            .expect("the solid slab is behind the trigger");
+        assert_eq!(
+            id, solid,
+            "the trigger is in the way and must be passed through"
+        );
+        // Solid's -X face at x = 5.5, flank meets it at x = 5.1 along a 10 m path.
+        assert!((hit.t - 0.51).abs() < 1e-12, "t = {}", hit.t);
     }
 }
