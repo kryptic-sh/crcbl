@@ -3,6 +3,40 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The Pages job renders every demo serially, and the total is now the cap
+
+Every browser gate runs inside `pages.yml`'s `build` job, one after another,
+because they all drive the site that job just built. So the job's budget has to
+hold the **sum** of them, and that sum grows with every demo the site ships.
+
+It ran out on 2026-08-25. Eleven demos rendered for 29 minutes against a
+30-minute cap; puppet was the one still running when the cap hit. The failure
+mode is the quiet one: the deploy step is gated on the build job, so it
+**skipped** rather than failed — CI green, workflow green-looking, and the site
+left a commit behind. The cap is raised to 60 minutes, which buys room and fixes
+nothing structural.
+
+**The structural answer is a matrix job that downloads the `site` artifact.**
+`probe-macos` and `probe-windows` already do exactly that — they take the
+artifact `build` uploaded rather than rebuilding, precisely so all platforms
+drive identical bytes. A `render` job over the demo list would do the same and
+run them in parallel, turning a ~29-minute sum into roughly the slowest single
+demo. The comment in `pages.yml` arguing against a matrix is about matrixing
+`build` itself, which would rebuild the site per cell and collide on the
+artifact name; it is not an argument against matrixing a _consumer_ of the
+artifact.
+
+Not attempted, because a mistake here leaves the site undeployed and none of it
+can be run locally. Two things to get right when it is: the demo list must come
+from `web/build.sh`'s `DEMOS` array so `tools/check-browser-gate-demos.sh` keeps
+its grip, and the deploy step's `needs:` has to name the new job or the gate
+stops gating.
+
+**The two heavy 3D frames are why the total is what it is.** On the Pages runner
+quarry and lantern each take over seven minutes against well under one for a 2D
+demo — each behind by the factor its own heartbeat reports, on a software
+rasteriser. Puppet is a third heavy frame and it landed on the end of the queue.
+
 ### The character controller's slope sweep is platform-sensitive at its last step
 
 `the_slope_the_controller_stops_walking_is_the_one_it_was_configured_with`

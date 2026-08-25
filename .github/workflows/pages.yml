@@ -50,7 +50,24 @@ jobs:
   build:
     name: build the demo site
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # **The whole budget, not one demo's.** Every browser gate runs in this one
+    # job, serially, because they all drive the site this job just built — so
+    # what has to fit here is their sum, and that sum grows with every demo the
+    # site ships. The per-step `timeout-minutes: 10` below bound a single
+    # hanging demo; they cannot bound the total, and when the job cap is the
+    # smaller of the two it is the cap that fires. It did on 2026-08-25: eleven
+    # demos rendered for 29 minutes, puppet was the one still running when the
+    # 30-minute cap hit, and the deploy step was skipped rather than failed —
+    # green-looking workflow, site a commit behind.
+    #
+    # The two heavy 3D frames dominate and are the reason the total is what it
+    # is: on this runner quarry and lantern each take over seven minutes against
+    # well under one for a 2D demo, each behind by the factor its own heartbeat
+    # reports. `docs/backlog.md` carries the structural answer — render the
+    # demos in a matrix job that downloads the `site` artifact, the way the
+    # probe jobs already do, so they run in parallel and the total stops being a
+    # sum at all.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
