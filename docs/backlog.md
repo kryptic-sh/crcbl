@@ -17323,6 +17323,52 @@ handful of lines or none. Until a failure carries that number, the
 `requestAnimationFrame`-throttling reading above is a hypothesis and not a
 finding.
 
+**And the next occurrence answered it, against that hypothesis** (2026-08-25,
+`Pages` run 32803694106 on `1e115ec`, same macOS job). Four verdicts in one run:
+
+```
+FAIL the turntable carries the camera under its own steam — it never changed
+     — 90 HUD line(s) since the start, 1 value(s): 20.6
+ok   a drag takes the turntable out of the picture — turn held at 20.6
+ok   the document is deformed by its own clip, with the camera held still
+     — 64 distinct frame(s) in 68 sample(s) over 3 beat(s), with turn held at
+       20.6 and pose taking 3 values: 0.09, 0.55, 0.23
+ok   the canvas changes between frames while the simulation runs
+     — 16 distinct frame(s) across 16 samples
+```
+
+**Frames were being produced the whole time.** Ninety heartbeats, sixty-four
+distinct canvases out of sixty-eight samples, and then sixteen out of sixteen:
+the page was drawing, so `requestAnimationFrame` was not throttled. It is also
+the same run refuting the earlier occurrences' reading, where both checks failed
+together — here only the turntable froze. It also rules out the other candidate
+the entry named — a `render_dt` collapsed to zero would have stopped the clip
+too, and `apps/viewer/src/app.rs` steps `crate::anim::Player::advance` on that
+same `render_dt`, so a moving mesh is a `render_dt` that is not zero.
+
+**The angle also froze at `20.6`, not at `0.0`**, so the turntable ran for about
+a second and then stopped. What can stop it and leave everything else running is
+`handed_over` — the one flag its step is guarded by, set in `pointer_event` when
+`Controls::is_dragging`, and set unconditionally in `wheel_event`. That is now
+the reading to confirm rather than a third guess: a stray wheel or pointer event
+arriving on that runner would produce exactly these three verdicts.
+
+**The run says so out loud now, on both checks.** `viewer` prints a `held` row
+and heartbeat field (`the_panel_says_whether_the_camera_was_taken_hold_of`
+asserts the row against the turntable it reports on), and `heldNote` in
+`web/tools/browser-e2e.mjs` appends the distinct readings to the motion check's
+failure and to the drag check's vacuity failure — measured here by holding the
+turntable off and running the gate, which reads
+`1 value(s): 0.0, with held: off`. A recurrence saying `held: on` is a gesture
+nobody made; one saying `held: off` refutes this reading too and puts the loop
+itself back in question.
+
+**The drag check no longer passes on the frozen reading.** It read
+`turn held at 20.6` above and called that a pass, which is the vacuous form of
+its own question: a turntable that never ran satisfies "two consecutive lines
+report the same angle" without the drag doing anything. It now fails first, with
+the angles it saw before the drag.
+
 ## sandbox is not in the windowed gate (2026-08-24)
 
 `tools/run-samples-windowed.sh` is the only check that a sample brings up a real

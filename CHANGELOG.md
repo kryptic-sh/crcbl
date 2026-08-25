@@ -61,6 +61,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `[POSE]`, on the client's own clock. `map::Character` is no longer `Copy` and
   `map::place` now returns `map::PlaceError`; `map::BODY_MESH` is replaced by
   `map::CHARACTER_MESH_BASE`.
+- **`apps/viewer`'s panel says whether the camera has been taken hold of.** A
+  `held` row and heartbeat field, reading `on` once a drag or the wheel has
+  stopped the idle turntable for good. It exists to tell two failures apart that
+  look identical from outside — a page whose loop died, and a camera something
+  handed over — which is a distinction the browser gate could not make on the
+  macOS runner.
 
 ### Breaking
 

@@ -1293,7 +1293,7 @@ impl Viewer {
         }
         crcbl::log::info!(
             "[HUD] tick: {}  instances: {}  skipped: {}  joints: {}  pose: {:.2}  dist: {:.2}  \
-             turn: {:.1}  wireframe: {}  normals: {}",
+             turn: {:.1}  held: {}  wireframe: {}  normals: {}",
             self.ticks,
             self.instances,
             self.skipped,
@@ -1301,6 +1301,7 @@ impl Viewer {
             self.pose(),
             self.orbit.distance(),
             self.turned.to_degrees() % 360.0,
+            if self.handed_over { "on" } else { "off" },
             if self.wireframe { "on" } else { "off" },
             if self.normals { "world" } else { "off" },
         );
@@ -1320,6 +1321,15 @@ impl DebugModule for Viewer {
         out.row(
             "turn",
             format_args!("{:.1}", self.turned.to_degrees() % 360.0),
+        );
+        // **The only thing that stops the turntable**, and the reading that tells
+        // a camera someone took hold of from a page whose loop died — see the
+        // viewer's intermittent macOS stall in `docs/backlog.md`, where the
+        // angle sat frozen while the picture went on changing and nothing said
+        // which of the two it was.
+        out.row(
+            "held",
+            format_args!("{}", if self.handed_over { "on" } else { "off" }),
         );
         out.row("reloads", format_args!("{}", self.reloads));
         out.row(
@@ -1630,6 +1640,53 @@ mod tests {
             "the turntable kept running after {took_hold} — a tool that drifts out from \
              under the pose someone aimed it at"
         );
+    }
+
+    /// **The panel says whether someone took hold of the camera.**
+    ///
+    /// The row exists for a failure that has already happened and could not be
+    /// read: the browser gate's macOS run reported the turntable's angle frozen
+    /// while the picture went on changing, and nothing in the run said whether
+    /// the camera had been handed over or the loop had died. Those want
+    /// opposite investigations — see `docs/backlog.md`.
+    ///
+    /// So the row is asserted against the thing it claims to report, in one
+    /// run: it reads `off` while the turntable is carrying the camera, and `on`
+    /// once a gesture has stopped it for good.
+    #[test]
+    fn the_panel_says_whether_the_camera_was_taken_hold_of() {
+        let (_dir, mut options) = model_at(&fixture::quad_glb(Vec3::ZERO), 24);
+        options.common.debug_overlay = Some(true);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        let idle = engine.game().camera();
+        engine.frame().expect("a frame");
+        assert_ne!(
+            engine.game().camera().eye,
+            idle.eye,
+            "the turntable was not running, so `off` below would be the right \
+             reading for the wrong reason",
+        );
+        assert_eq!(
+            row_value(&ui_text(&engine), "held"),
+            "off",
+            "the panel said the camera was held while the turntable was moving it",
+        );
+
+        engine
+            .shell_mut()
+            .scroll(window, ScrollDelta::Lines { x: 0.0, y: -1.0 }, None)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            row_value(&ui_text(&engine), "held"),
+            "on",
+            "a gesture stopped the turntable and the panel went on saying nobody \
+             had touched it",
+        );
+        assert_still(&mut engine, "a wheel");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// Every `Text` command the frame handed to the UI pass.

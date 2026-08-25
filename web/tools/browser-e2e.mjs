@@ -2144,6 +2144,20 @@ try {
   // the lines as well as the values — see `apps/viewer`'s intermittent macOS
   // stall in `docs/backlog.md`, which was diagnosed off exactly this number.
   const beats = hud().length - beforeLaunch;
+  // **And, where the demo reports one, whether its camera was taken hold of.**
+  // A stuck number with the loop still running has two causes that want
+  // opposite investigations — the loop stopped feeding the camera, or something
+  // stopped the camera on purpose — and only the demo knows which. `viewer`
+  // prints a `held` row for exactly this; a demo that prints none adds nothing
+  // to the message, which is why this is a suffix and not a field.
+  const heldNote = () => {
+    const seen = new Set(
+      hud()
+        .map((line) => line.match(/\bheld: (\w+)/)?.[1])
+        .filter(Boolean)
+    );
+    return seen.size === 0 ? '' : `, with held: ${[...seen].join(', ')}`;
+  };
   check(
     'C',
     EXPECTED.movingLabel,
@@ -2151,7 +2165,8 @@ try {
     positions
       ? `it took ${positions.size} values: ${[...positions].join(', ')}`
       : `it never changed — ${beats} HUD line(s) since the start, ` +
-          `${values().size} value(s): ${[...values()].join(', ') || 'none'}`
+          `${values().size} value(s): ${[...values()].join(', ') || 'none'}` +
+          heldNote()
   );
 
   // **AND THE CONTROLLER BEING DRIVEN, WHICH THE CHECK ABOVE CANNOT SEE.**
@@ -2606,6 +2621,21 @@ try {
     // swings the orbit somewhere the crate may not be on screen at all, and the
     // failure that produces is a canvas that stops changing for a reason that
     // has nothing to do with skinning.
+    //
+    // **What the angle was doing before the drag, because a turntable that was
+    // never running makes this check pass for free.** The check below asserts
+    // that two consecutive lines report the same angle, and a stalled turntable
+    // satisfies that without the drag doing anything at all — which is what
+    // happened on the macOS runner, where the turntable check above failed and
+    // this one passed on the same frozen reading. Recorded here rather than
+    // inferred from that check's verdict: the driver keeps going after a
+    // failure, so its result is not in hand.
+    const turningBefore = new Set(
+      hud()
+        .map((line) => line.match(EXPECTED.moving)?.[1])
+        .filter(Boolean)
+    );
+
     const grip = { x: rect.x, y: rect.y };
     await page.send('Input.dispatchMouseEvent', {
       type: 'mousePressed',
@@ -2647,10 +2677,15 @@ try {
     check(
       'C',
       'a drag takes the turntable out of the picture',
-      Boolean(held),
-      held
-        ? `turn held at ${held}`
-        : `no two consecutive HUD lines reported the same angle after the drag, so the ` +
+      Boolean(held) && turningBefore.size > 1,
+      turningBefore.size <= 1
+        ? `the turntable was already still before the drag — it reported ` +
+            `${turningBefore.size} angle(s) (${[...turningBefore].join(', ') || 'none'}) ` +
+            `across ${hud().length} HUD line(s)${heldNote()} — so stopping it proves ` +
+            `nothing and the check below is measuring a camera that was never moving`
+        : held
+          ? `turn held at ${held}, having taken ${turningBefore.size} angle(s) before the drag`
+          : `no two consecutive HUD lines reported the same angle after the drag, so the ` +
             `turntable never stopped and the check below cannot tell a deformed mesh ` +
             `from a moving camera`
     );
