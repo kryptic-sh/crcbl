@@ -41,6 +41,7 @@ use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 
+use crate::anim::Animator;
 use crate::camera::Follow;
 use crate::game::{Controls, Game, RenderState, Stats};
 use crate::gpu::Gpu;
@@ -193,6 +194,64 @@ pub struct Puppet {
     stats: Stats,
     /// What the last overlay drew, from the same frame.
     page: PageStats,
+    /// The character's rig, posed from the simulation's measured speed.
+    ///
+    /// **Presentation, like the camera**: it runs on the frame's clock, nothing
+    /// in it crosses the wire, and the tick would draw the same picture without
+    /// it. `docs/plan/17-animation.md` puts pose evaluation on the client, and
+    /// this is where puppet's client is.
+    anim: Animator,
+    /// Seconds of frame time since the last `[POSE]` line.
+    pose_report: f32,
+}
+
+/// How often the `[POSE]` line is logged, in seconds of frame time.
+///
+/// The same cadence [`crate::game::HEARTBEAT_TICKS`] spaces the `[HUD]` line
+/// at, measured on the other clock — this line is the client's and that one is
+/// the simulation's.
+const POSE_REPORT_S: f32 = 1.0;
+
+impl Puppet {
+    /// The `[POSE]` line: what the locomotion blend did with the speed the
+    /// controller measured.
+    ///
+    /// **A second line rather than four more terms on the `[HUD]` one**, and
+    /// the reason is which clock each is on. The `[HUD]` line is logged from
+    /// [`Game::tick`](crate::game::Game::tick) on the fixed timestep and is the
+    /// simulation's report; everything here is composed on the frame, after the
+    /// tick has already gone. Folding them together would mean either posting
+    /// the pose back to the stage or logging the simulation off the frame, and
+    /// both put a number on a line whose cadence is not the one that produced
+    /// it.
+    ///
+    /// `web/tools/browser-e2e.mjs` reads three claims out of it, and each is a
+    /// number nothing but the blend can move:
+    ///
+    /// * `blend` — where the character sits across the locomotion set, 0 at the
+    ///   idle stop and 1 at [`crate::anim::WALK_STOP_MPS`]. It follows `speed`,
+    ///   which is measured from the controller's own displacement.
+    /// * `mid` — how many frames the blend has spent **strictly between** the
+    ///   two stops. The heartbeat is a second apart and a crossing takes less
+    ///   than that, so the counter is what says the weight swept rather than
+    ///   snapped.
+    /// * `dev` — how far the pose has carried a joint from the rest pose, in
+    ///   metres. It sweeps while the character walks and holds still while it
+    ///   stands, because [`crate::rig::idle`] is a stance.
+    fn report_pose(&mut self, render_dt: f32, speed: f32) {
+        self.pose_report += render_dt;
+        if self.pose_report < POSE_REPORT_S {
+            return;
+        }
+        self.pose_report = 0.0;
+        crcbl::log::info!(
+            "[POSE] speed: {:.2}  blend: {:.2}  mid: {}  dev: {:.3}",
+            speed,
+            self.anim.blend(),
+            self.anim.partial(),
+            self.anim.deviation(),
+        );
+    }
 }
 
 /// The loop puppet runs in.
@@ -300,6 +359,8 @@ fn assemble<S: Shell + ?Sized>(
             render_state: RenderState::default(),
             stats: Stats::default(),
             page: PageStats::default(),
+            anim: Animator::new(),
+            pose_report: 0.0,
         },
         options.common.loop_config(),
     ))
@@ -410,6 +471,17 @@ impl HostedGame for Puppet {
         self.render_state = self.game.render_state();
         self.stats = self.game.stats();
 
+        // The pose runs on the **frame** clock and off the simulation's
+        // *measured* speed — see [`crate::anim`] for why measured and not
+        // commanded. `render_dt` and not `dt`, so a paused loop holds the pose
+        // where the simulation left it rather than walking on the spot.
+        #[allow(clippy::cast_possible_truncation)]
+        let speed = self.render_state.speed as f32;
+        let render_dt = frame.render_dt.as_secs_f32();
+        self.anim.advance(render_dt, speed);
+        gpu.set_palette(self.anim.palette());
+        self.report_pose(render_dt, speed);
+
         gpu.place_character(self.render_state.position, self.render_state.facing);
         // The simulation is `f64` and the renderer's camera is `f32`; this is
         // the one place the two meet.
@@ -424,7 +496,13 @@ impl HostedGame for Puppet {
         // stop where they are while the loop is paused — see [`crate::map::sun`].
         gpu.set_sun(crate::map::sun(self.render_state.elapsed));
 
-        self.page = crate::page::draw(draw_list, gpu.atlas(), gpu.extent(), &self.render_state);
+        self.page = crate::page::draw(
+            draw_list,
+            gpu.atlas(),
+            gpu.extent(),
+            &self.render_state,
+            self.anim.blend(),
+        );
     }
 
     /// **Puppet's one module, and no second.**

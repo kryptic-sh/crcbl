@@ -106,6 +106,28 @@ pub const TURN_RATE: f64 = 9.0;
 /// would spin.
 const FACING_EPSILON: f64 = 1e-4;
 
+/// How long the measured ground speed takes to catch up with the character's
+/// real one, in seconds.
+///
+/// **The locomotion blend is what this is for.** `move_and_slide` reports the
+/// displacement of one tick, and the commanded speed goes from nothing to
+/// [`WALK_SPEED`] on the tick a key goes down — so an unsmoothed reading is a
+/// square wave, and a blend driven by it snaps between idle and walk instead of
+/// passing through. A third of a second is long enough that the crossing is
+/// visible and short enough that the legs are moving before the character has
+/// gone anywhere.
+const SPEED_SMOOTHING_S: f64 = 0.35;
+
+/// Below this measured speed, in metres a second, the character is standing.
+///
+/// A first-order filter approaches zero and never reaches it, and a character
+/// whose blend weight is for ever a hair off idle is one whose pose never
+/// settles — which is a claim `web/tools/browser-e2e.mjs` makes about this
+/// demo, and which would be false by an amount too small to see. Well under the
+/// slowest walk the controller can produce, so nothing this cuts off was
+/// motion.
+const STANDING_SPEED: f64 = 0.05;
+
 /// How often the `[HUD]` heartbeat is logged, in ticks: a second of simulated
 /// time at [`DEFAULT_TICK_HZ`], the cadence every sample's heartbeat is spaced
 /// at.
@@ -318,6 +340,16 @@ struct Stage {
     /// question about the whole run, and a reading taken at the wrong instant
     /// answers neither half.
     highest: f64,
+    /// How fast the character is actually travelling over the ground, in metres
+    /// a second, smoothed over [`SPEED_SMOOTHING_S`].
+    ///
+    /// **What the world allowed, not what was asked for.** It is measured from
+    /// [`MoveOutcome::motion`] rather than from [`WALK_SPEED`] and the input
+    /// flags, so a character pushing against the riser it cannot climb reads as
+    /// standing still — which is what it is doing. [`crate::anim`] blends the
+    /// locomotion set on this number, and that is the difference between a pose
+    /// that tracks the body and one that tracks the keyboard.
+    speed: f64,
 }
 
 /// Where the character's feet are, given where its capsule's centre is.
@@ -344,6 +376,7 @@ impl Stage {
             climbed: 0,
             blocked: 0,
             highest: map::SPAWN.y,
+            speed: 0.0,
         }
     }
 }
@@ -415,6 +448,16 @@ fn run_tick(stage: &mut Stage, player: Intent, dt: f64) {
         && let Some(want) = facing_of(walked)
     {
         stage.facing = turn_toward(stage.facing, want, TURN_RATE * dt);
+    }
+
+    // The same displacement the facing is taken from, as a speed. One
+    // first-order step toward it, then a deadband so standing still is exactly
+    // zero rather than asymptotically near it — see `STANDING_SPEED`.
+    let measured = walked.length() / dt;
+    let catch_up = (dt / SPEED_SMOOTHING_S).min(1.0);
+    stage.speed += (measured - stage.speed) * catch_up;
+    if stage.speed < STANDING_SPEED {
+        stage.speed = 0.0;
     }
 
     stage.climbed += u64::from(outcome.stepped_up);
@@ -491,6 +534,9 @@ pub struct RenderState {
     pub blocked: bool,
     /// Whether the circuit is still walking it.
     pub patrolling: bool,
+    /// How fast it is travelling over the ground, in metres a second — the
+    /// smoothed, *measured* speed [`crate::anim`] blends the locomotion set on.
+    pub speed: f64,
     /// Seconds of simulated time — what [`crate::map::sun`] takes.
     pub elapsed: f64,
 }
@@ -507,6 +553,7 @@ pub struct Stats {
     pub highest: f64,
     pub slides: u32,
     pub patrolling: bool,
+    pub speed: f64,
 }
 
 impl crcbl::ui::DebugModule for Stats {
@@ -528,6 +575,7 @@ impl crcbl::ui::DebugModule for Stats {
         section.row("blocked", format_args!("{}", self.blocked));
         section.row("top", format_args!("{:.2} m", self.highest));
         section.row("slides", format_args!("{}", self.slides));
+        section.row("speed", format_args!("{:.2} m/s", self.speed));
         section.row(
             "pilot",
             format_args!("{}", if self.patrolling { "circuit" } else { "player" }),
@@ -736,6 +784,7 @@ impl Game {
             blocked: stage.outcome.hit_wall,
             patrolling: stage.patrolling,
             elapsed: stage.elapsed,
+            speed: stage.speed,
         }
     }
 
@@ -753,6 +802,7 @@ impl Game {
             highest: stage.highest,
             slides: stage.outcome.slides,
             patrolling: stage.patrolling,
+            speed: stage.speed,
         }
     }
 }
@@ -809,6 +859,76 @@ mod tests {
             (stopped - walked).length() < 1e-6,
             "it drifted {:.6} m with nothing held",
             (stopped - walked).length(),
+        );
+    }
+
+    /// **The measured speed rises to the walk and comes back to a standstill**,
+    /// and it does both *gradually* — which is what [`crate::anim`] blends the
+    /// locomotion set on, and the same pair the browser gate asserts through
+    /// the blend weight.
+    ///
+    /// The gradual half is the point. The commanded speed is a square wave, and
+    /// a blend driven by one snaps; a reading that passes through the middle is
+    /// what makes an accelerating character pass through the middle of the set.
+    #[test]
+    fn the_measured_speed_rises_and_falls_rather_than_snapping() {
+        let mut stage = standing();
+        let forward = Intent {
+            forward: true,
+            ..Intent::default()
+        };
+        assert_eq!(stage.speed, 0.0, "a standing character reports no speed");
+
+        let mut rising = Vec::new();
+        for _ in 0..(1.0 / DT).round() as u64 {
+            run_tick(&mut stage, forward, DT);
+            rising.push(stage.speed);
+        }
+        assert!(
+            stage.speed > 0.9 * WALK_SPEED,
+            "a second of walking reached {:.2} m/s of {WALK_SPEED}",
+            stage.speed,
+        );
+        let midway = rising
+            .iter()
+            .filter(|&&speed| speed > 0.1 * WALK_SPEED && speed < 0.9 * WALK_SPEED)
+            .count();
+        assert!(
+            midway > 10,
+            "the speed should climb through the middle rather than jump; it was between a \
+             tenth and nine tenths of {WALK_SPEED} m/s on {midway} tick(s)",
+        );
+
+        // And back down, all the way to a standstill rather than to a hair
+        // above one — see `STANDING_SPEED`.
+        walk(&mut stage, Intent::default(), 2.0);
+        assert_eq!(
+            stage.speed, 0.0,
+            "it never settled: {:.4} m/s with nothing held",
+            stage.speed,
+        );
+    }
+
+    /// **Measured, not commanded.** A character pushing against the riser it
+    /// cannot climb is asking to walk and is not walking, and the reading has to
+    /// say so — that is the whole reason [`crate::anim`] is driven off
+    /// [`MoveOutcome::motion`] rather than off the input.
+    #[test]
+    fn a_character_that_is_blocked_reports_a_standstill() {
+        let mut stage = standing();
+        let forward = Intent {
+            forward: true,
+            ..Intent::default()
+        };
+        // Down the lane, onto the low step, and into the riser it cannot climb.
+        walk(&mut stage, forward, 12.0);
+        assert!(stage.blocked > 0, "the walk never reached the high riser");
+        // Still asking to walk, and going nowhere.
+        walk(&mut stage, forward, 2.0);
+        assert_eq!(
+            stage.speed, 0.0,
+            "a blocked character reported {:.4} m/s while it was asking to walk",
+            stage.speed,
         );
     }
 

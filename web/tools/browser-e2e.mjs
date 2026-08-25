@@ -708,6 +708,26 @@ const EXPECTATIONS = {
       // `map::LOW_STEP_TOP` and `map::HIGH_STEP_TOP`, in metres.
       lowStep: 0.3,
       highStep: 0.9,
+      // **And the locomotion blend, which is milestone 2.** These three come
+      // off a `[POSE]` line rather than the `[HUD]` one, because
+      // `apps/puppet/src/app.rs` logs them on the frame's clock and the
+      // heartbeat above is logged on the simulation's — that file argues it.
+      //
+      // * `blend` — where the character sits across `apps/puppet/src/anim.rs`'s
+      //   locomotion set, 0 at the idle stance and 1 at the walk. It is a
+      //   function of the *measured* speed, so a demo whose pose followed the
+      //   keyboard instead would report it while standing against a wall.
+      // * `mid` — how many frames the weight has spent strictly between the two
+      //   stops. The counter is the whole anti-snap claim: these lines are a
+      //   second apart and a crossing takes about a second and a half, so
+      //   sampling the weight cannot tell a sweep from a jump and counting the
+      //   frames can. It stops rising the moment the weight reaches an end.
+      // * `dev` — how far the pose has carried a joint from the rest pose, in
+      //   metres. It sweeps while the character walks and holds still while it
+      //   stands, because `apps/puppet/src/rig.rs`'s idle is a stance.
+      blend: /\bblend: ([\d.]+)/,
+      crossings: /\bmid: (\d+)/,
+      deviation: /\bdev: ([\d.]+)/,
     },
   },
   orbit: {
@@ -845,6 +865,35 @@ const WALK_STILL_BEATS = 3;
  * between the two steps the check tells apart, which is 0.6 m.
  */
 const WALK_STEP_TOLERANCE_M = 0.05;
+
+/**
+ * How near the walk end of puppet's locomotion set the blend weight must get
+ * while the character is walking.
+ *
+ * `apps/puppet/src/anim.rs` puts the walk stop at the speed the clip is
+ * authored for, which is under the speed the controller commands — so a walking
+ * character saturates the set at exactly 1. This leaves room for the beat the
+ * reading was taken on to have landed during a turn.
+ */
+const BLEND_WALK_MIN = 0.9;
+
+/**
+ * And how near the idle end it must come back to once the key is released.
+ *
+ * `apps/puppet/src/game.rs`'s `STANDING_SPEED` deadband makes a stopped
+ * character report exactly zero, so the weight lands on 0.00 rather than
+ * approaching it; this is the printed precision and nothing more.
+ */
+const BLEND_IDLE_MAX = 0.05;
+
+/**
+ * How many consecutive `[POSE]` lines must report the same pose before the
+ * character counts as having settled into its idle stance.
+ *
+ * The same argument as `WALK_STILL_BEATS`, on the other heartbeat: two lines
+ * would do it and three makes it a claim about staying still.
+ */
+const POSE_STILL_BEATS = 3;
 
 /**
  * The **floor** on how long the focus/pause group watches for a HUD heartbeat.
@@ -2090,6 +2139,32 @@ try {
         .slice(from)
         .map((line) => line.match(pattern)?.[1])
         .filter((value) => value !== undefined);
+    /**
+     * The `[POSE]` lines — the client's heartbeat, which carries what the
+     * locomotion blend did. A second stream rather than more terms on the
+     * `[HUD]` line, because the two are logged off different clocks; see the
+     * `puppet` row above and `apps/puppet/src/lib.rs`.
+     */
+    const pose = () => consoleLines.filter((line) => line.includes('[POSE]'));
+    /** The most recent value `pattern` captured on a `[POSE]` line. */
+    const lastPose = (/** @type {RegExp} */ pattern) => {
+      const lines = pose();
+      for (let at = lines.length - 1; at >= 0; at -= 1) {
+        const found = lines[at].match(pattern);
+        if (found) return Number(found[1]);
+      }
+      return null;
+    };
+    /** Every value `pattern` has captured on the `[POSE]` lines from `from` on. */
+    const posesSince = (
+      /** @type {RegExp} */ pattern,
+      /** @type {number} */ from
+    ) =>
+      pose()
+        .slice(from)
+        .map((line) => line.match(pattern)?.[1])
+        .filter((value) => value !== undefined);
+
     /** Presses or releases the walk key, through the browser's own pipeline. */
     const walkKey = async (/** @type {string} */ type) =>
       page.send('Input.dispatchKeyEvent', {
@@ -2127,6 +2202,9 @@ try {
     // two lines before the release are both under a held key, so a pair of
     // equal readings there is the vacuous case and this is what catches it.
     const atRelease = hud().length;
+    const poseAtRelease = pose().length;
+    const blendHeld = lastPose(walk.blend);
+    const crossingsHeld = lastPose(walk.crossings);
     await walkKey('keyUp');
     const lastHeld = hud()[atRelease - 1]?.match(walk.advance)?.[1];
     const priorHeld = hud()[atRelease - 2]?.match(walk.advance)?.[1];
@@ -2150,6 +2228,92 @@ try {
         : settled
           ? `it held ${settled} for ${WALK_STILL_BEATS} beats after the release`
           : `it kept moving with nothing held: ${since(walk.advance, atRelease).join(', ')}`
+    );
+
+    // ---- the pair about the blend the measured speed selects ----------------
+    // **The one thing on this page that only a blend can produce.** Every check
+    // above passes against a demo drawing a rigid capsule: they are about where
+    // the character is, and none of them can see what it is posed as. These two
+    // are about the weight between the idle stance and the walk, and they are a
+    // pair for the usual reason — "it reached the walk" passes for a demo that
+    // is *always* at the walk, and the control is what says it came back.
+    //
+    // The control carries the anti-snap claim as well, through `mid`: the
+    // counter has to have risen across the release, which is the demo reporting
+    // that the weight spent frames strictly between the two stops on its way
+    // down. A blend that jumped would arrive at the same 0.00 with the counter
+    // where it was.
+    check(
+      'C',
+      'the blend weight follows the measured speed to the walk end',
+      blendHeld !== null && blendHeld >= BLEND_WALK_MIN,
+      blendHeld === null
+        ? `the demo never reported a blend weight — ${pose().length} [POSE] line(s)`
+        : `it was at ${blendHeld} while the key was held, of a walk end at 1 ` +
+            `(over ${pose().length} [POSE] line(s))`
+    );
+
+    const idled = await until(async () => {
+      const weight = lastPose(walk.blend);
+      const crossings = lastPose(walk.crossings);
+      return weight !== null && crossings !== null && weight <= BLEND_IDLE_MAX
+        ? { weight, crossings }
+        : null;
+    });
+    const swept =
+      idled !== null &&
+      crossingsHeld !== null &&
+      idled.crossings > crossingsHeld;
+    check(
+      'C',
+      'and sweeps back to the idle end rather than snapping to it',
+      Boolean(idled) && swept,
+      idled === null
+        ? `it never came back under ${BLEND_IDLE_MAX}; last weight ` +
+            `${lastPose(walk.blend)} over ${pose().length} [POSE] line(s)`
+        : swept
+          ? `it fell to ${idled.weight}, spending ` +
+            `${idled.crossings - crossingsHeld} frame(s) between the two stops`
+          : `it reached ${idled.weight} with the between-the-stops counter still at ` +
+            `${idled.crossings}, so the weight jumped rather than swept`
+    );
+
+    // ---- and the pair about the pose that weight selects --------------------
+    // `blend` is a number the demo computes; `dev` is what the rig actually did
+    // with it, so this is the half that fails for a palette nothing composed.
+    const walkedPoses = new Set(
+      posesSince(walk.deviation, 0).slice(0, poseAtRelease)
+    );
+    check(
+      'C',
+      'the character is posed by its own clip while it walks',
+      walkedPoses.size > 1,
+      walkedPoses.size > 1
+        ? `it took ${walkedPoses.size} poses: ${[...walkedPoses].join(', ')}`
+        : `it never changed pose across ${poseAtRelease} [POSE] line(s): ` +
+            `${[...walkedPoses].join(', ') || 'none'}`
+    );
+
+    const stance = await until(async () => {
+      const readings = posesSince(walk.deviation, poseAtRelease);
+      if (readings.length < POSE_STILL_BEATS) return null;
+      const tail = readings.slice(-POSE_STILL_BEATS);
+      return tail.every((value) => value === tail[0]) ? tail[0] : null;
+    });
+    // Non-zero as well as still: `apps/puppet/src/rig.rs`'s idle is a *stance*
+    // and not the rest pose, so a demo that composed no palette at all would
+    // hold 0.000 for ever and pass a check that only asked for stillness.
+    const posedStance = stance !== null && Number(stance) > 0;
+    check(
+      'C',
+      'and settles into its idle stance when it stands',
+      posedStance,
+      stance === null
+        ? `it kept moving with nothing held: ` +
+            `${posesSince(walk.deviation, poseAtRelease).join(', ')}`
+        : posedStance
+          ? `it held ${stance} m off the rest pose for ${POSE_STILL_BEATS} beats`
+          : `it settled on ${stance}, which is the rest pose — nothing posed the rig`
     );
 
     // ---- the pair about what the controller decided -------------------------

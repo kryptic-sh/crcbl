@@ -139,17 +139,50 @@ What else is open:
   capsule arriving diagonally at a box corner reports the inflated box's corner
   and its face normal. Pre-existing, and shared by both sweep families.
 
-### What puppet milestone 1 leaves for milestone 2
+### What puppet's locomotion blend leaves for the rest of milestone 2
 
-`apps/puppet` ships the map, the controller path and the orbit-follow camera,
-per milestone 1 of `docs/plan/sample/09-puppet.md`. Deliberately out of scope,
-and each of these is milestone 2's brief rather than a defect:
+`apps/puppet` ships the map, the controller path, the orbit-follow camera and —
+as of the blend layer — a skinned character blended between an idle stance and a
+walk by its own measured speed. What milestone 2 of
+`docs/plan/sample/09-puppet.md` still wants:
 
-- **No animation at all** — no clips, no blend tree, no skinning, no root
-  motion, no attachment socket. The character is `map::Character`, a greybox
-  capsule with a nose block so its facing is readable, and `game::Stage::facing`
-  turns it toward `MoveOutcome::motion`. The plan's locomotion blend replaces
-  that mesh, not the controller under it.
+- **No state machine, and no crossfade to feed it.** The locomotion set is
+  continuous in speed, so nothing in the sample ever _switches_ states. A
+  `Crossfade` — the timed weight a switch fades over — was written and tested
+  during the blend slice and then **removed before it landed**, because it had
+  no in-tree caller and machinery kept for a use that has not arrived is
+  indirection to read through. It comes back with the idle/walk/run/jump/fall
+  machine the plan names, which is the caller that makes the fade something a
+  demo can be checked on. It is a dozen lines plus its tests; the shape is
+  described in `crcbl-anim/src/blend.rs`'s module docs.
+- **No run, so the set has two stops and not three.** `game::WALK_SPEED` is the
+  only gait the controller has, so `anim::Animator` places idle at 0 and walk at
+  `anim::WALK_STOP_MPS`. `BlendSpace1d` takes any number of stops and is tested
+  with three; adding a run means a second commanded speed in `game`, a run clip
+  in `rig`, and a third stop.
+- **The skin weights are all 1.** `rig::box_part` binds each vertex wholly to
+  the nearer of its limb's two joints, because a cuboid has vertices only at its
+  two ends. The limb still shears between the joints — which is why the parts
+  span two — but no vertex is ever a weighted blend of several, so the shader's
+  four-slot blend is exercised only at one slot. Rings up each limb would fix it
+  and need a mesh builder greybox does not expose (`crcbl-greybox`'s
+  `MeshBuilder` is private).
+- **Nothing asserts the palette reaches the pixels.** The browser gate's four
+  new puppet checks read `[POSE]`, which `apps/puppet/src/app.rs` computes on
+  the CPU — so a page that composed the palette and handed the GPU nothing to
+  skin with would report the identical sweep while drawing the bind pose, and
+  every check would pass. `apps/viewer`'s "the document is deformed by its own
+  clip, with the camera held still" is the shape that closes it, and it works
+  there because the turntable can be dragged to a stop; puppet's character is
+  moving through the world whenever it is posed, so a canvas hash cannot isolate
+  the deformation. The two candidates are a golden frame (see below) and a check
+  on the render-graph dump naming the `skinning` pass — the dump is logged once,
+  at the first frame, before the harness can raise the log level, so that one
+  needs the dump re-emitted or the level set at boot.
+- **No jump.** `game::run_tick` integrates a fall speed and nothing ever pushes
+  it upward, so `MoveOutcome::hit_ceiling` is never true in this sample.
+- **No root motion, no animation events and no attachment socket** — milestone
+  2's remaining items and milestone 3's.
 - **No jump.** `game::run_tick` integrates a fall speed and nothing ever pushes
   it upward, so `MoveOutcome::hit_ceiling` is never true in this sample.
 - **Slopes are spheres, because `crcbl-phys` has no oriented box.** Its
@@ -171,8 +204,10 @@ and each of these is milestone 2's brief rather than a defect:
   and the web build ships an empty manifest.
 - **No golden-frame check.** The browser gate asserts the controller's behaviour
   — that the character advances under held input, stops when it is released,
-  climbs the 0.3 m step and is refused by the 0.9 m one — and asserts nothing
-  about what the frame looks like.
+  climbs the 0.3 m step and is refused by the 0.9 m one — and the blend's
+  behaviour, off the `[POSE]` line. It asserts nothing about what the frame
+  looks like, which is what the entry above about the palette reaching the
+  pixels turns on.
 
 ### What the glTF rig path still drops
 
@@ -181,10 +216,11 @@ and each of these is milestone 2's brief rather than a defect:
 `apps/viewer` draws a document deformed by its own clip in a browser. What is
 still missing or silently lost:
 
-- **No blend layer.** `crcbl-anim` samples a clip and builds a palette; there is
-  no blend tree, no crossfade and no state machine, which is what
-  `docs/plan/sample/09-puppet.md`'s locomotion set needs. The puppet sample
-  itself has no crate yet.
+- **No state machine.** `crcbl-anim` samples a clip, blends two poses and
+  interpolates a 1D set; what is still missing above that is the state machine
+  `docs/plan/sample/09-puppet.md` names — and the crossfade it switches with,
+  which is deliberately absent until that caller exists — plus the retargeting
+  that would let one rig's clips drive another's.
 - **`JOINTS_1`/`WEIGHTS_1` are not read** and are not warned about either, so a
   document binding a vertex to more than four joints loses the rest silently.
   Deliberate for now — every plausible palette here is four-wide — but it is a

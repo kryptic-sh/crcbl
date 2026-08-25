@@ -540,6 +540,36 @@ case "$DEMO" in
             echo "               anything at all" >&2
             exit 1
         fi
+        # And the same argument a third time for the locomotion blend, which is
+        # milestone 2's half of this demo. Every check above passes against a
+        # page drawing a rigid capsule: they are about where the character is,
+        # and none of them can see what it is posed as. The two matched here are
+        # again the *controls*, and both would be the ones to delete when a slow
+        # machine made them flake:
+        #
+        #  - 'sweeps back to the idle end' is what says the weight came down
+        #    with the measured speed, and it carries the anti-snap claim through
+        #    the demo's between-the-stops frame counter. Without it, 'follows the
+        #    measured speed to the walk end' passes for a demo pinned at the walk
+        #    for ever — which is what this one looks like while it paces its
+        #    circuit.
+        #  - 'settles into its idle stance' is what says the pose is being
+        #    composed rather than merely varying. Without it, 'the character is
+        #    posed by its own clip' passes for a rig that jitters.
+        SWEPT="$(grep -F 'and sweeps back to the idle end rather than snapping to it' "${OUTPUT}.plain" || true)"
+        if [ -z "$SWEPT" ]; then
+            echo "crcbl web e2e: the driver never watched $DEMO's blend weight come back to" >&2
+            echo "               idle; 'the blend weight follows the measured speed' has no" >&2
+            echo "               control, and it passes for a demo pinned at the walk" >&2
+            exit 1
+        fi
+        SETTLED="$(grep -F 'and settles into its idle stance when it stands' "${OUTPUT}.plain" || true)"
+        if [ -z "$SETTLED" ]; then
+            echo "crcbl web e2e: the driver never asked whether $DEMO's pose settles;" >&2
+            echo "               'the character is posed by its own clip' has no control," >&2
+            echo "               and it passes for a rig that jitters" >&2
+            exit 1
+        fi
         ;;
 esac
 

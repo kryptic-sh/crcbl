@@ -14,6 +14,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl-anim` gained a blend layer**: `blend_into` mixes two `Pose`s by
+  weight into a caller-owned third, and `BlendSpace1d` places clips along one
+  axis and samples the pair around a position at a shared **phase** rather than
+  a shared time, so clips of different lengths stay in step. Rotations take the
+  shorter arc, and both ends of a blend are copied through exactly rather than
+  interpolated toward, so a blend space sitting on a stop plays that clip
+  untouched.
+- **`apps/puppet` walks a skinned character.** `puppet::rig` authors a greybox
+  humanoid in code — nine joints, five boxes each bound across two of them, an
+  idle stance and a one-second stride — with no asset on disk and no glTF parse;
+  `puppet::anim` blends the set on the character's **measured** ground speed and
+  composes the palette, and `puppet::gpu` draws it through the engine's skinning
+  dispatch. `game::RenderState` and `game::Stats` gained `speed`, the overlay
+  gained `SPEED` and `BLEND` rows, and the demo logs a second heartbeat,
+  `[POSE]`, on the client's own clock. `map::Character` is no longer `Copy` and
+  `map::place` now returns `map::PlaceError`; `map::BODY_MESH` is replaced by
+  `map::CHARACTER_MESH_BASE`.
+
 ### Breaking
 
 - **`GpuInstance` gained `base_vertex` and `INSTANCE_STRIDE` is 96 bytes**,

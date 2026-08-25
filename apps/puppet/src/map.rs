@@ -60,12 +60,18 @@
 
 use std::borrow::Cow;
 
-use crcbl::greybox::{GREYBOX_TILE_M, capsule, cube, grid_material, grid_page, platform, sphere};
+use crcbl::greybox::{GREYBOX_TILE_M, cube, grid_material, grid_page, platform, sphere};
 use crcbl::math::{DVec3, Mat4, Vec3};
 use crcbl::phys::{BoxCollider, PhysicsWorld, Sphere};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
-use crcbl::render::{DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError};
+use crcbl::render::{
+    DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError, MeshPoolError, SkinRange,
+    SkinnedInstanceDesc, SkinnedMesh,
+};
 use crcbl::shaders::mesh::GpuMaterial;
+use crcbl::shaders::skinning::SkinBinding;
+
+use crate::rig;
 
 // ---------------------------------------------------------------------------
 // The ground
@@ -224,10 +230,16 @@ pub const HIGH_STEP_MESH: usize = 2;
 pub const GENTLE_MOUND_MESH: usize = 3;
 /// The mound it cannot.
 pub const STEEP_MOUND_MESH: usize = 4;
-/// The character's body.
-pub const BODY_MESH: usize = 5;
-/// The block on the front of that body, which is how its facing is read.
-pub const NOSE_MESH: usize = 6;
+/// The first of the character's own meshes — [`crate::rig::parts`] in order,
+/// one slot each.
+///
+/// The rig replaced a single capsule at this slot when
+/// `docs/plan/sample/09-puppet.md`'s milestone 2 arrived. It is a base rather
+/// than a constant per limb because the parts are a `rig` list and this file
+/// should not be a second copy of it.
+pub const CHARACTER_MESH_BASE: usize = 5;
+/// The block on the front of the body, which is how its facing is read.
+pub const NOSE_MESH: usize = CHARACTER_MESH_BASE + rig::PARTS;
 
 /// The ground's material row — [`SceneDesc::materials`] slot 0, and therefore
 /// what an instance placed without a named material would shade through.
@@ -251,6 +263,12 @@ pub const BODY_MATERIAL: usize = 5;
 /// number is a word per instance per draw generator. Filling any of these is a
 /// mistake in this file, and the numbers being close to what it uses is what
 /// makes that true.
+// A skinned part costs **three** runs of its own vertex count in the pool: the
+// resident bind pose, and the two halves of the ping-pong the dispatch writes
+// into. The character's boxes are a few dozen vertices each beside the mounds'
+// thousands, so the headroom below covers them without moving; `place` returns
+// the pool's refusal rather than this file guessing, and
+// `the_map_fits_the_pools_it_reserves` is what asserts it fits.
 const CAPACITIES: Capacities = Capacities {
     vertices: 32 * 1024,
     indices: 128 * 1024,
@@ -329,12 +347,15 @@ pub fn scene() -> SceneDesc<'static> {
                 "steep mound",
                 sphere(steep_radius as f32, MOUND_RINGS, MOUND_SEGMENTS),
             ),
-            mesh(
-                "body",
-                capsule(CHARACTER_RADIUS as f32, CHARACTER_HEIGHT as f32, 12, 24),
-            ),
-            mesh("nose", cube(NOSE_EDGE as f32)),
-        ],
+        ]
+        .into_iter()
+        .chain(
+            rig::parts()
+                .into_iter()
+                .map(|part| mesh(part.label, part.geometry)),
+        )
+        .chain([mesh("nose", cube(NOSE_EDGE as f32))])
+        .collect(),
         materials: vec![
             painted([0.30, 0.31, 0.33]),
             painted([0.16, 0.38, 0.70]),
@@ -349,15 +370,29 @@ pub fn scene() -> SceneDesc<'static> {
     }
 }
 
-/// The two instances that move: the character's body and its nose.
+/// The character, as the renderer holds it: one skinned instance per limb and
+/// the block that says which way it is facing.
 ///
 /// Handed back by [`place`] because everything else on this map is written once
-/// and never again, and these two are rewritten every frame from wherever the
-/// simulation put the character.
-#[derive(Clone, Copy, Debug)]
+/// and never again, and these are rewritten every frame from wherever the
+/// simulation put the character and whatever pose [`crate::anim`] put it in.
+///
+/// Not `Copy`, which the capsule it replaced was: a [`SkinnedMesh`] owns two
+/// runs of the vertex pool, and a second copy of one would be a second thing
+/// trying to give them back.
+#[derive(Debug)]
 pub struct Character {
-    body: InstanceHandle,
+    parts: Vec<Limb>,
     nose: InstanceHandle,
+}
+
+/// One drawn limb: its reserved region of the vertex pool, the instance that
+/// draws it, and the skin the dispatch reads.
+#[derive(Debug)]
+struct Limb {
+    mesh: SkinnedMesh,
+    instance: InstanceHandle,
+    bindings: Vec<SkinBinding>,
 }
 
 impl Character {
@@ -366,33 +401,40 @@ impl Character {
     ///
     /// `facing` is measured the way [`crate::camera`] measures a yaw: zero looks
     /// down `-Z`, which is where the engine's default camera looks.
-    pub fn place_at(self, renderer: &mut ForwardRenderer, position: DVec3, facing: f64) {
-        // The capsule's centre is what the controller holds; the *mesh* rests
-        // its base on `y = 0`, as everything standing in the greybox pack does.
-        // So the body is drawn from the feet, which is a half-height and a
-        // radius below the centre.
+    ///
+    /// Every limb takes the *same* transform. The joints are not in it —
+    /// §3.7.4.2 of glTF's own wording, which
+    /// [`Palette`](crcbl::anim::Palette) restates: only the joint transforms
+    /// deform a skinned mesh, and where the character stands is an ordinary
+    /// instance placement on top of that.
+    pub fn place_at(&self, renderer: &mut ForwardRenderer, position: DVec3, facing: f64) {
+        // The capsule's centre is what the controller holds; the *rig* rests its
+        // feet on `y = 0`, as everything standing in the greybox pack does. So
+        // the body is drawn from the feet, which is a half-height and a radius
+        // below the centre.
         let feet = Vec3::new(
             position.x as f32,
             (position.y - (CHARACTER_RADIUS + CHARACTER_HALF_HEIGHT)) as f32,
             position.z as f32,
         );
         let body = Mat4::from_translation(feet) * Mat4::from_rotation_y(facing as f32);
-        renderer.set_instance(
-            self.body,
-            &InstanceDesc {
-                mesh: BODY_MESH,
-                material: BODY_MATERIAL,
-                transform: body,
-            },
-        );
+        for limb in &self.parts {
+            renderer.set_skinned_instance(
+                limb.instance,
+                &SkinnedInstanceDesc {
+                    mesh: &limb.mesh,
+                    material: BODY_MATERIAL,
+                    transform: body,
+                },
+            );
+        }
         renderer.set_instance(
             self.nose,
             &InstanceDesc {
                 mesh: NOSE_MESH,
                 material: BODY_MATERIAL,
-                // Just clear of the capsule's shoulder, on the body's own
-                // forward axis — so this is where the rotation above becomes
-                // visible.
+                // Just clear of the torso, on the body's own forward axis — so
+                // this is where the rotation above becomes visible.
                 transform: body
                     * Mat4::from_translation(Vec3::new(
                         0.0,
@@ -402,17 +444,97 @@ impl Character {
             },
         );
     }
+
+    /// What the skinning dispatch is asked to write this frame: one range per
+    /// limb, every one of them reading the same `palette`.
+    ///
+    /// One palette for every range because there is one skeleton — the limbs
+    /// are separate meshes of one character, not separate characters.
+    #[must_use]
+    pub fn ranges<'a>(&'a self, palette: &'a [Mat4]) -> Vec<SkinRange<'a>> {
+        self.parts
+            .iter()
+            .map(|limb| limb.mesh.skin_range(palette, &limb.bindings))
+            .collect()
+    }
+
+    /// How many skinned ranges, palette matrices and skin bindings a
+    /// [`Skinning`](crcbl::render::Skinning) has to hold for this character.
+    ///
+    /// Counted off what was actually reserved rather than restated from
+    /// [`crate::rig`], so a limb added there cannot be one the pass has no room
+    /// for.
+    #[must_use]
+    pub fn skinning_capacities(&self) -> (u32, u32, u32) {
+        let ranges = u32::try_from(self.parts.len()).expect("a handful of limbs");
+        let bindings = self
+            .parts
+            .iter()
+            .map(|limb| limb.mesh.vertex_count())
+            .sum::<u32>();
+        // Every range carries the whole palette, so the joint budget is the
+        // skeleton's length once per range and not once altogether.
+        let joints = ranges * u32::try_from(rig::JOINTS).expect("a nine-joint rig");
+        (ranges, joints, bindings)
+    }
+
+    /// Gives the vertex-pool runs back, which has to happen before the renderer
+    /// that owns the pool is destroyed.
+    pub fn release(self, renderer: &mut ForwardRenderer) {
+        for limb in self.parts {
+            renderer.release_skinned(limb.mesh);
+        }
+    }
 }
 
-/// Places every object on the map and hands back the two that move.
+/// Why the map could not be placed.
+///
+/// Two pools can refuse it and they refuse differently: the instance pool holds
+/// what is drawn, and the vertex pool holds the runs a skinned limb is written
+/// into. Both are this file's numbers being wrong rather than a condition a run
+/// can be in, but it is the caller that has to report one.
+#[derive(Debug)]
+pub enum PlaceError {
+    /// `CAPACITIES`'s instance count does not cover the map.
+    Instances(InstancePoolError),
+    /// `CAPACITIES`'s vertex count does not cover the character's skinned
+    /// regions, which are two runs per limb on top of the resident bind pose.
+    Regions(MeshPoolError),
+}
+
+impl std::fmt::Display for PlaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Instances(error) => write!(f, "the instance pool refused the map: {error}"),
+            Self::Regions(error) => {
+                write!(f, "the vertex pool refused the character's limbs: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlaceError {}
+
+impl From<InstancePoolError> for PlaceError {
+    fn from(error: InstancePoolError) -> Self {
+        Self::Instances(error)
+    }
+}
+
+impl From<MeshPoolError> for PlaceError {
+    fn from(error: MeshPoolError) -> Self {
+        Self::Regions(error)
+    }
+}
+
+/// Places every object on the map and hands back the character.
 ///
 /// # Errors
 ///
-/// [`InstancePoolError::PoolFull`] if `CAPACITIES`'s instance count does not
-/// cover the map, which is a mistake in this file rather than a condition a run
-/// can be in — but it is the caller that would have to report it, so it is
-/// returned rather than unwrapped.
-pub fn place(renderer: &mut ForwardRenderer) -> Result<Character, InstancePoolError> {
+/// [`PlaceError`] if either pool is smaller than this map — see that type.
+/// Anything reserved before the refusal is given back, so a caller that reports
+/// the error and tears the renderer down leaks nothing.
+pub fn place(renderer: &mut ForwardRenderer) -> Result<Character, PlaceError> {
     let at =
         |x: f64, y: f64, z: f64| Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32));
     let (gentle_x, gentle_z, gentle_radius, gentle_summit) = GENTLE_MOUND;
@@ -456,20 +578,58 @@ pub fn place(renderer: &mut ForwardRenderer) -> Result<Character, InstancePoolEr
         })?;
     }
 
-    // The character last, and at the identity: `Character::place_at` writes both
-    // of these before the first frame is drawn, from the simulation's own
-    // position rather than from a copy of the spawn kept here.
-    let body = renderer.add_instance(&InstanceDesc {
-        mesh: BODY_MESH,
-        material: BODY_MATERIAL,
-        transform: Mat4::IDENTITY,
-    })?;
+    // The character last, and at the identity: `Character::place_at` writes it
+    // all before the first frame is drawn, from the simulation's own position
+    // rather than from a copy of the spawn kept here.
+    //
+    // A limb is *not* also added as an ordinary instance. It would be drawn
+    // twice — once deformed and once at the bind pose, in the same place — and
+    // the second copy is the one that would still be there if the dispatch
+    // stopped running.
+    let mut parts = Vec::with_capacity(rig::PARTS);
+    for (index, part) in rig::parts().into_iter().enumerate() {
+        let placed = reserve_limb(renderer, CHARACTER_MESH_BASE + index, part.bindings);
+        match placed {
+            Ok(limb) => parts.push(limb),
+            Err(error) => {
+                for limb in parts {
+                    renderer.release_skinned(limb.mesh);
+                }
+                return Err(error);
+            }
+        }
+    }
     let nose = renderer.add_instance(&InstanceDesc {
         mesh: NOSE_MESH,
         material: BODY_MATERIAL,
         transform: Mat4::IDENTITY,
     })?;
-    Ok(Character { body, nose })
+    Ok(Character { parts, nose })
+}
+
+/// Reserves one limb's two vertex-pool runs and the instance that draws them.
+fn reserve_limb(
+    renderer: &mut ForwardRenderer,
+    mesh: usize,
+    bindings: Vec<SkinBinding>,
+) -> Result<Limb, PlaceError> {
+    let skinned = renderer.reserve_skinned(mesh)?;
+    let instance = renderer.add_skinned_instance(&SkinnedInstanceDesc {
+        mesh: &skinned,
+        material: BODY_MATERIAL,
+        transform: Mat4::IDENTITY,
+    });
+    match instance {
+        Ok(instance) => Ok(Limb {
+            mesh: skinned,
+            instance,
+            bindings,
+        }),
+        Err(error) => {
+            renderer.release_skinned(skinned);
+            Err(PlaceError::Instances(error))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +778,6 @@ mod tests {
                 HIGH_STEP_MESH,
                 GENTLE_MOUND_MESH,
                 STEEP_MOUND_MESH,
-                BODY_MESH,
                 NOSE_MESH,
             ]
             .map(|mesh| labels[mesh]),
@@ -628,10 +787,17 @@ mod tests {
                 "high step",
                 "gentle mound",
                 "steep mound",
-                "body",
                 "nose",
             ],
         );
+        // And the character's own slots are `crate::rig`'s parts, in its order:
+        // `CHARACTER_MESH_BASE` is a base rather than a constant per limb, so
+        // this is what says the two lists have not drifted apart.
+        assert_eq!(
+            labels[CHARACTER_MESH_BASE..CHARACTER_MESH_BASE + rig::PARTS],
+            rig::parts().map(|part| part.label)[..],
+        );
+        assert_eq!(scene.meshes.len(), NOSE_MESH + 1);
         assert_eq!(
             scene.materials.len(),
             6,
@@ -728,6 +894,10 @@ mod tests {
         let config = crcbl::phys::CharacterConfig::default();
         assert_eq!(CHARACTER_RADIUS, config.radius);
         assert_eq!(CHARACTER_HALF_HEIGHT, config.half_height);
+        // The rig is built to these, and `rig::the_rig_fits_the_capsule_that_
+        // moves_it` is what holds its boxes inside them.
+        assert_eq!(rig::HEIGHT, CHARACTER_HEIGHT as f32);
+        assert_eq!(rig::REACH, CHARACTER_RADIUS as f32);
     }
 
     /// **The sun turns and does not rise**, which is what makes a shadow read as

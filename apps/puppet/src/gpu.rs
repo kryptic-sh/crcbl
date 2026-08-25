@@ -27,11 +27,11 @@
 //! of the words it exists to frame.
 
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions};
-use crcbl::hal::CommandEncoderDesc;
-use crcbl::math::DVec3;
+use crcbl::hal::{CommandEncoderDesc, HalError};
+use crcbl::math::{DVec3, Mat4};
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers,
-    RenderGraph, TransientPool, UiRenderer,
+    RenderGraph, Skinning, SkinningDesc, SkinningError, TransientPool, UiRenderer,
 };
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::{Menu, MenuLayout};
@@ -47,8 +47,20 @@ pub struct Gpu {
     ctx: GpuContext,
     /// The map, made resident once and drawn every frame.
     renderer: ForwardRenderer,
-    /// The two instances in it that are rewritten every frame.
+    /// The instances in it that are rewritten every frame: the character's
+    /// limbs and the block that says which way it faces.
     character: map::Character,
+    /// The compute pass that deforms those limbs, and the buffers it reads.
+    ///
+    /// Built against `renderer`'s **own** vertex pool and no other, so it is
+    /// released with the renderer rather than outliving it.
+    skinning: Skinning,
+    /// This frame's skinning matrices, one per joint of [`crate::rig`].
+    ///
+    /// Copied in rather than borrowed, for `apps/viewer`'s reason: the palette
+    /// is composed on the frame's own clock in [`crate::anim`] and consumed
+    /// when the frame is recorded, and the two are not the same call.
+    palette: Vec<Mat4>,
     pool: TransientPool,
     /// `None` on a device without timestamp queries — the report degrades, the
     /// frame does not.
@@ -112,9 +124,31 @@ impl Gpu {
             Ok(character) => character,
             Err(error) => {
                 renderer.destroy(ctx.device());
-                return Err(GpuError::Hal(crcbl::hal::HalError::InvalidDescriptor(
-                    format!("puppet's map does not fit its own instance pool: {error}"),
-                )));
+                return Err(GpuError::Hal(HalError::InvalidDescriptor(format!(
+                    "puppet's map does not fit its own pools: {error}"
+                ))));
+            }
+        };
+        let (ranges, joints, bindings) = character.skinning_capacities();
+        let skinning = match Skinning::new(
+            ctx.device(),
+            &SkinningDesc {
+                label: Some("puppet skinning"),
+                frames: FRAMES_IN_FLIGHT,
+                ranges,
+                joints,
+                bindings,
+                // **This pool and no other.** A pass built against a different
+                // buffer writes vertices no draw of this renderer can reach,
+                // and the picture is the bind pose for ever.
+                vertices: renderer.vertex_buffer(),
+            },
+        ) {
+            Ok(skinning) => skinning,
+            Err(error) => {
+                character.release(&mut renderer);
+                renderer.destroy(ctx.device());
+                return Err(GpuError::Hal(skinning_error(error)));
             }
         };
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
@@ -124,6 +158,8 @@ impl Gpu {
         let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), format) {
             Ok(menu) => menu,
             Err(error) => {
+                character.release(&mut renderer);
+                skinning.destroy(ctx.device());
                 renderer.destroy(ctx.device());
                 return Err(GpuError::Hal(error));
             }
@@ -132,6 +168,8 @@ impl Gpu {
             Ok(ui) => ui,
             Err(error) => {
                 menu.destroy(ctx.device());
+                character.release(&mut renderer);
+                skinning.destroy(ctx.device());
                 renderer.destroy(ctx.device());
                 return Err(GpuError::Hal(error));
             }
@@ -141,6 +179,10 @@ impl Gpu {
             ctx,
             renderer,
             character,
+            skinning,
+            // Sized for the palette every frame brings, so the refill in
+            // `set_palette` never grows it.
+            palette: Vec::with_capacity(crate::rig::JOINTS),
             pool: TransientPool::new(),
             timers,
             // Replaced before the first frame is recorded — `crate::app::draw`
@@ -190,6 +232,17 @@ impl Gpu {
     pub fn place_character(&mut self, position: DVec3, facing: f64) {
         self.character
             .place_at(&mut self.renderer, position, facing);
+    }
+
+    /// Hands over the pose the next frame deforms the character with.
+    ///
+    /// [`crate::anim`] composes it; this is only where the frame reads it. A
+    /// frame that is handed none draws whatever the last one was given, which
+    /// is why [`crate::app`] writes it on every draw rather than only when it
+    /// changes.
+    pub fn set_palette(&mut self, palette: &[Mat4]) {
+        self.palette.clear();
+        self.palette.extend_from_slice(palette);
     }
 
     /// Takes this frame's draw list, handing the previous frame's allocation
@@ -255,8 +308,23 @@ impl Gpu {
         };
         let extent = acquired.extent;
 
+        // **The skinned entry point, not `begin_frame` with a flag.** It rotates
+        // the instance ring, uploads the palette and the skins, moves the
+        // ping-pong and then re-points every skinned instance at the half this
+        // frame's dispatch fills. A frame that went through `begin_frame`
+        // instead would leave the character pointing at last frame's vertices,
+        // for ever, with nothing reporting it.
+        let ranges = self.character.ranges(&self.palette);
         self.renderer
-            .begin_frame(self.ctx.device(), &self.camera, &self.sun, extent)?;
+            .begin_skinned_frame(
+                self.ctx.device(),
+                &mut self.skinning,
+                &ranges,
+                &self.camera,
+                &self.sun,
+                extent,
+            )
+            .map_err(|error| GpuError::Hal(skinning_error(error)))?;
         self.menu
             .begin_frame(self.ctx.device(), extent)
             .map_err(GpuError::Hal)?;
@@ -271,9 +339,17 @@ impl Gpu {
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
-            let _hdr = self
-                .renderer
-                .add_passes(&mut graph, &self.pool, target, extent);
+            // The dispatch is added by the renderer rather than beside it: the
+            // three passes that pull vertices have to declare a read of the
+            // pool node the compute pass writes, and only the renderer knows
+            // which those are.
+            let _hdr = self.renderer.add_skinned_passes(
+                &mut graph,
+                &self.pool,
+                target,
+                extent,
+                &self.skinning,
+            );
             // Between the scene and the text: the menu's scrim dims what is
             // already in the target and the overlay has to stay readable over
             // both.
@@ -337,12 +413,31 @@ impl Gpu {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
         self.menu.destroy(self.ctx.device());
+        // The limbs give their pool runs back before the pool goes, and the
+        // pass that writes into them goes before the renderer that owns it.
+        self.character.release(&mut self.renderer);
+        self.skinning.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());
         }
         self.renderer.destroy(self.ctx.device());
         self.ctx.destroy()
+    }
+}
+
+/// A skinning refusal, as the error this bundle reports.
+///
+/// [`SkinningError::Hal`] is passed through unchanged; everything else is a
+/// description this sample got wrong — a palette too small for the joints it
+/// named, a binding count that disagrees with a mesh — and reaches the caller
+/// as the sentence it is, because there is no [`HalError`] that means it.
+fn skinning_error(error: SkinningError) -> HalError {
+    match error {
+        SkinningError::Hal(hal) => hal,
+        other => {
+            HalError::InvalidDescriptor(format!("puppet's character cannot be skinned: {other}"))
+        }
     }
 }
 

@@ -1,18 +1,22 @@
 //! Skeletal animation: clip sampling and joint palettes.
 //!
-//! The third slice of `docs/plan/17-animation.md` — its "Clip sampling" step
-//! and the palette the evaluation stack ends at, and **nothing above them**.
-//! There is no blending, no state machine, no root motion and no GPU skinning
-//! here; each is a later slice with its own consumer, and building them now
-//! against no caller is the failure this project guards against. What is here
-//! is what `docs/plan/sample/09-puppet.md` needs first: a character posed from
-//! a clip.
+//! The third and fourth slices of `docs/plan/17-animation.md` — its "Clip
+//! sampling" step, the palette the evaluation stack ends at, and the blending
+//! above them, and **nothing above that**. There is no state machine, no root
+//! motion and no GPU skinning here; each is a later slice with its own
+//! consumer, and building them now against no caller is the failure this
+//! project guards against. What is here is what
+//! `docs/plan/sample/09-puppet.md` needs through its milestone 2: a character
+//! posed from a clip, and a locomotion set mixed by speed.
 //!
 //! ```text
 //! Skeleton   joints in palette order — parent index, inverse bind, rest pose
 //! Clip       channels of keyframes over that skeleton
 //! Pose       one local Trs per joint, the result of sampling a clip
 //! Palette    those composed down the hierarchy and folded against the binds
+//!
+//! blend_into      two poses mixed by weight, rotations along the shorter arc
+//! BlendSpace1d    clips on one axis — idle, walk, run — picked by speed
 //! ```
 //!
 //! # A frame
@@ -71,12 +75,14 @@
 //! crate is `f32` throughout, with a slerp that goes through a transcendental.
 //! Nothing here belongs in a tick hash.
 
+pub mod blend;
 pub mod clip;
 pub mod palette;
 pub mod sample;
 pub mod skeleton;
 pub mod trs;
 
+pub use blend::{Blend, BlendSpace1d, BlendSpaceError, blend_into};
 pub use clip::{Channel, Clip, ClipError, Interpolation, Track};
 pub use palette::Palette;
 pub use sample::Pose;

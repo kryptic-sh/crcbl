@@ -1,16 +1,15 @@
 //! Puppet — a character, a controller and a camera on a small shadowed map.
 //!
-//! `docs/plan/sample/09-puppet.md`, **milestone 1**: "static character +
-//! controller + camera on the map (pre-anim: proves map + controller path with
-//! shadows already on)". A capsule walks a blockout; nothing is animated, and
-//! that is the point of building this before the animation is there to hide
-//! behind.
+//! `docs/plan/sample/09-puppet.md`, **milestone 1 and the first half of
+//! milestone 2**: a character walks a blockout under a controller, and a rig is
+//! posed by a locomotion blend the controller's own measured speed drives.
 //!
 //! # What it proves
 //!
-//! One thing, and it is a path rather than a feature: a **key press becomes a
+//! Two things, and both are paths rather than features. A **key press becomes a
 //! world-space displacement and a swept capsule move**, on a server, with the
-//! picture drawn from the result.
+//! picture drawn from the result — and the **speed that move actually achieved
+//! selects the pose**, blended between clips rather than switched between them.
 //!
 //! ```text
 //!   shell key ──▶ ActionMap ──▶ Controls ──wire──▶ Intent
@@ -19,8 +18,22 @@
 //!                                                    ▼
 //!                                    CharacterController::move_and_slide
 //!                                                    │
-//!                                    MoveOutcome ────┴──▶ facing, camera, overlay
+//!                                    MoveOutcome ────┼──▶ facing, camera, overlay
+//!                                                    │
+//!                                     measured speed ┴──▶ BlendSpace1d
+//!                                                            │
+//!                                            Pose ─▶ Palette ┴─▶ skinning
 //! ```
+//!
+//! # The rig is code, and the blend is the engine's
+//!
+//! [`rig`] authors a greybox humanoid — nine joints, five boxes, an idle stance
+//! and a walk cycle — with no asset on disk and no glTF parse; it says there why.
+//! [`anim`] drives it, and the blending itself is
+//! [`crcbl::anim::blend`]'s rather than this sample's. The character is drawn
+//! through the engine's **skinning dispatch**, one range per limb, so the demo
+//! is the acceptance test that path is meant to be rather than a picture that
+//! happens to move.
 //!
 //! The sun turns while it happens, which is [`map::sun`] and the only thing on
 //! the map that moves without a key being held: a shadow that never moves is
@@ -52,6 +65,14 @@
 //! wire from it is the yaw the player was looking along when they asked to walk
 //! forward.
 //!
+//! # Two heartbeats, on two clocks
+//!
+//! `[HUD]` is the simulation's, logged from the tick — where the character is
+//! and what the controller decided. `[POSE]` is the client's, logged from the
+//! frame — what the blend did with the speed. They are separate because their
+//! clocks are, and `Puppet::report_pose` in [`app`] argues it where the second one
+//! is written.
+//!
 //! # It walks itself until somebody takes the controls
 //!
 //! A page that has just loaded has had no input, and a character standing still
@@ -59,15 +80,16 @@
 //! circuit on the spawn pad from the first tick, and the first movement key ends
 //! it for good — the arrangement `apps/orbit` and `apps/viewer` both use.
 //!
-//! # What is not here at milestone 1
+//! # What is not here yet
 //!
-//! No clip, no blend tree, no skinning, no jump, no root motion, no socket and
-//! no device swapping: those are milestones 2 to 4 and `docs/backlog.md` carries
-//! the list. Two things are visible in the picture rather than merely absent
-//! from it, and both are named where they are: the slopes are **rounded**,
-//! because `crcbl-phys` has no oriented box to make a wedge out of
-//! ([`map`] says so), and the character is a capsule with a block on the front
-//! of it, because there is no rig to draw yet.
+//! No state machine, no jump, no run, no root motion, no animation events, no
+//! socket and no device swapping: those are the rest of milestone 2 and
+//! milestones 3 and 4, and `docs/backlog.md` carries the list. Two things are
+//! visible in the picture rather than merely absent from it, and both are named
+//! where they are: the slopes are **rounded**, because `crcbl-phys` has no
+//! oriented box to make a wedge out of ([`map`] says so), and the character is
+//! five boxes, because [`rig`] authors a blockout humanoid rather than importing
+//! one.
 //!
 //! # Rule 11 does not apply
 //!
@@ -82,6 +104,7 @@
 //! linked on a host build — and it is what the demo site's shim drives once per
 //! `requestAnimationFrame`.
 
+pub mod anim;
 pub mod app;
 mod args;
 pub mod camera;
@@ -90,6 +113,7 @@ mod gpu;
 pub mod map;
 pub mod menu;
 pub mod page;
+pub mod rig;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;

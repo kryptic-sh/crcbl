@@ -75,16 +75,21 @@ pub struct PageStats {
 /// font rather than against a guess. Its measurements take a scale relative to
 /// the baked glyph size, not a pixel size, so everything here is drawn at
 /// [`NATURAL_FONT_SIZE`] and measured at the natural scale of `1.0`.
+/// `blend` is where the character sits across the locomotion set —
+/// [`crate::anim::Animator::blend`]. It arrives as an argument rather than on
+/// `state` because it is not something the simulation knows: the speed is, and
+/// the pose the speed selects is the client's.
 pub fn draw(
     list: &mut DrawList,
     atlas: &FontAtlas,
     extent: (u32, u32),
     state: &RenderState,
+    blend: f32,
 ) -> PageStats {
     let width = extent.0 as f32;
     let height = extent.1 as f32;
 
-    let rows: [(&str, String, [f32; 4]); 5] = [
+    let rows: [(&str, String, [f32; 4]); 7] = [
         ("X", format!("{:.2} m", state.position.x), VALUE),
         ("Y", format!("{:.2} m", state.feet), VALUE),
         ("Z", format!("{:.2} m", state.position.z), VALUE),
@@ -103,6 +108,11 @@ pub fn draw(
             .to_string(),
             if state.blocked { REFUSED } else { VALUE },
         ),
+        // The two numbers milestone 2 is about, side by side: what the world
+        // let the character do, and which pose that selected. Reading them
+        // together is the eyeball check that the blend tracks the body.
+        ("SPEED", format!("{:.2} m/s", state.speed), VALUE),
+        ("BLEND", format!("{blend:.2}"), VALUE),
     ];
 
     let panel_height = 2.0f32.mul_add(PANEL_PAD, rows.len() as f32 * ROW_HEIGHT);
@@ -160,9 +170,10 @@ mod tests {
             position: DVec3::new(1.25, 0.9, -2.5),
             feet: 0.3,
             grounded: true,
+            speed: 2.5,
             ..RenderState::default()
         };
-        let stats = draw(&mut list, &atlas, (960, 720), &state);
+        let stats = draw(&mut list, &atlas, (960, 720), &state, 0.78);
         assert!(stats.commands > 0, "the page drew nothing at all");
 
         let text: Vec<&str> = list
@@ -193,6 +204,16 @@ mod tests {
             text.contains(&HINT),
             "the control hint is missing: {text:?}"
         );
+        // The two milestone-2 readings: the speed the world allowed, and the
+        // blend weight it selected.
+        assert!(
+            text.contains(&"2.50 m/s"),
+            "the speed reading is missing: {text:?}"
+        );
+        assert!(
+            text.contains(&"0.78"),
+            "the blend reading is missing: {text:?}"
+        );
     }
 
     /// **A reading that is measured wrong is drawn off the surface, and the
@@ -211,7 +232,7 @@ mod tests {
             ..RenderState::default()
         };
         let extent = (960u32, 720u32);
-        draw(&mut list, &atlas, extent, &state);
+        draw(&mut list, &atlas, extent, &state, 0.5);
 
         let drawn: Vec<(Vec2, &str)> = list
             .commands()
