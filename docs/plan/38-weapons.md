@@ -9,6 +9,17 @@ So it ships as a **kit**: `crcbl-weapons`, optional and privilege-free like the
 player kit (30) and inventory kit (34) — a TD never registers it; breach starts
 from it.
 
+**None of it is built.** There is no `crcbl-weapons` crate, no weapon asset
+schema and no resolved stat block; ballistics (28) has no material model to
+compose against and the inventory kit (34) has no items to make a magazine out
+of. `apps/breach` ships today at its own milestone 0 and does not anticipate
+this kit: its pistol is one `crcbl_phys::PhysicsWorld::cast_ray` per shot with
+no round, no penetration, no spread pattern and no state machine. Its rate limit
+is the trigger arriving as an input **edge** — one press, one shot — with no
+server-owned next-allowed-shot tick and no RPM at all. So the "three classic
+exploits, closed" section describes work not started rather than a property
+breach holds.
+
 ## A weapon is data over systems that already exist
 
 A weapon definition is a RON asset composing references, not a new subsystem:

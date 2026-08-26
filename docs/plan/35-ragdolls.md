@@ -9,6 +9,13 @@ must land in the _same place_ for everyone.
 **Depends on** the contact solver (36, L2) for bodies-vs-world and L3 joints for
 the articulation — ragdolls are the flagship consumer of both.
 
+**Nothing here is built, and neither is anything it depends on**: no ragdoll
+type anywhere in the workspace, no contact solver (36), no joints, and no
+rotational dynamics at all in `crcbl-phys` — a `RigidBody` has no angular
+velocity and no inertia tensor, so a body cannot yet tumble, let alone
+articulate. `KineticContact` (28), which the death handoff reads the killing
+impulse from, has no type either.
+
 ## The split: server settles, client performs
 
 The naive choices are both wrong for this engine. Client-only ragdolls desync

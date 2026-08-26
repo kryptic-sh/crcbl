@@ -7,6 +7,14 @@ simulation (AI movement is gameplay), deterministic like everything else.
 Post-MVP wave 2; **arena's bots are the forcing function** (they're already
 planned as headless load-test clients — this is how they walk).
 
+**Nothing here is built**: there is no `crcbl-nav` crate, no bake step, no query
+API and no arena sample. One dependency is worth stating before the work is
+scheduled, because it is not obvious from this document: step 1 below voxelizes
+**physics colliders**, and `crcbl-phys` has only `Sphere`, `BoxCollider` and
+`Capsule` — the static trimesh/heightfield that a walkable world is actually
+made of is itself outstanding in `05-physics.md`. Nav cannot start before that
+lands.
+
 ## Pipeline: colliders → navmesh (Recast-lineage, ours)
 
 The generation algorithm is well-published (Recast is the de-facto industry

@@ -185,51 +185,48 @@ by the determinism rule.
 
 ## Delivery
 
-| Slice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Phase                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Seams reserved**: mailbox between sim/client (exists as interpolation buffer), audio ring (exists), `tick(dt)` runner shape                                                                                                                                                                                                                                                                                                                                                                                 | P2 — done, **except the ECS access declarations**, which this row claimed until 2026-08-23 and which were never written. `SystemTrait` declares no access and `crcbl-ecs` asserts no conflict; see `docs/backlog.md`, which also records why a DAG derived from the trait as it stands would say every system is independent. |
-| **Tick-id protocol** — built. **Client tick alignment is not**, checked 2026-08-23: no lead, no EWMA server-time estimate, no rate correction anywhere in `crcbl-client`, `crcbl-server` or `crcbl-net`; `crcbl-client` advances playback at a constant rate, which is an interpolation buffer and what its own header calls it. Nor is there a jitter buffer to key, because **the server discards client input** — it decodes to validate and drops, under a comment blaming a phase the roadmap marks done | P2 (with the replication protocol)                                                                                                                                                                                                                                                                                            |
-| Input thread + stacked `InputTickState` (accumulate-then-swap, last-N ring) — **none of the three**, checked 2026-08-23: `InputTickState` is a flat `Vec<(String, ActionValue)>` with no stacking, swap or ring, and nothing on any platform spawns an input thread.                                                                                                                                                                                                                                          | P2 (with the action layer; single-thread runner inlines it on wasm)                                                                                                                                                                                                                                                           |
-| `crcbl-jobs`: pool, `par_for` (both modes), mailbox/ring primitives + property tests                                                                                                                                                                                                                                                                                                                                                                                                                          | **Built** at P5B — `spawn`, `pool`, `deque`, `mailbox`, `ring`; adopted by `apps/horde`                                                                                                                                                                                                                                       |
-| ECS parallel schedule (startup DAG, debug access asserts)                                                                                                                                                                                                                                                                                                                                                                                                                                                     | P8                                                                                                                                                                                                                                                                                                                            |
-| Pipeline-thread formalization (named threads, timeline profiler view)                                                                                                                                                                                                                                                                                                                                                                                                                                         | P8                                                                                                                                                                                                                                                                                                                            |
-| Physics/anim/VFX `par_for` adoption                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P8 → wave 1 as each system scales                                                                                                                                                                                                                                                                                             |
-| wasm-threads pool re-enable (SharedArrayBuffer)                                                                                                                                                                                                                                                                                                                                                                                                                                                               | post-MVP                                                                                                                                                                                                                                                                                                                      |
+| Slice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Phase                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Seams reserved**: mailbox between sim/client (exists as interpolation buffer), audio ring (exists), `tick(dt)` runner shape                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | P2 — done, **except the ECS access declarations**, which this row claimed until 2026-08-23 and which were never written. `SystemTrait` declares no access and `crcbl-ecs` asserts no conflict; see `docs/backlog.md`, which also records why a DAG derived from the trait as it stands would say every system is independent. |
+| **Tick-id protocol** — built. **Client tick alignment is not**: no lead, no EWMA server-time estimate, no rate correction anywhere in `crcbl-client`, `crcbl-server` or `crcbl-net`; `crcbl-client` advances playback at a constant rate, which is an interpolation buffer and what its own header calls it. The **server no longer discards client input** — that half of this row is closed: it queues the frames that arrived since the tick began and hands them to the module as `crcbl_ecs::ClientInputs`, capped by `MAX_CLIENT_INPUTS_PER_TICK` with a `dropped_input_count` saying what the cap refused. What is still absent is a **jitter buffer keyed by target tick**: the queue is in arrival order, not tick order, and nothing holds an early input back or places a late one | P2 (with the replication protocol)                                                                                                                                                                                                                                                                                            |
+| Input thread + stacked `InputTickState` (accumulate-then-swap, last-N ring) — **none of the three**, checked 2026-08-23: `InputTickState` is a flat `Vec<(String, ActionValue)>` with no stacking, swap or ring, and nothing on any platform spawns an input thread.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | P2 (with the action layer; single-thread runner inlines it on wasm)                                                                                                                                                                                                                                                           |
+| `crcbl-jobs`: pool, `par_for` (both modes), mailbox/ring primitives + property tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **Built** at P5B — `spawn`, `pool`, `deque`, `mailbox`, `ring`; adopted by `apps/horde`                                                                                                                                                                                                                                       |
+| ECS parallel schedule (startup DAG, debug access asserts)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | P8                                                                                                                                                                                                                                                                                                                            |
+| Pipeline-thread formalization (named threads, timeline profiler view)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | P8                                                                                                                                                                                                                                                                                                                            |
+| Physics/anim/VFX `par_for` adoption — **not inside any of the three crates**: neither `crcbl-phys`, `crcbl-anim` nor `crcbl-vfx` depends on `crcbl-jobs`. What exists is adoption **by a caller**: `apps/horde` holds the `Pool` and runs its steering `par_for` over results a batch query filled, and `crcbl-phys`'s allocation-free `*_into` query forms exist so that it can. That is what a crate-side adoption would build on, and it is not the same thing                                                                                                                                                                                                                                                                                                                             | P8 → wave 1 as each system scales                                                                                                                                                                                                                                                                                             |
+| wasm-threads pool re-enable (SharedArrayBuffer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | post-MVP                                                                                                                                                                                                                                                                                                                      |
 
 The P2 line matters most: it costs almost nothing and prevents the classic
 retrofit disaster. P5B, not P8, is where threads actually switched on — the
 2026-08-03 correction moved it and the crate shipped there — with horde's
 numbers as before/after proof.
 
-~~The Web Worker spawner is the one piece of this that is genuinely still
-missing.~~ **Landed 2026-08-23.** `crcbl_jobs::spawn` is still `#[cfg]`-split —
-native gets `Threads` — but `wasm32` now gets `crcbl_jobs::workers::Workers`
-rather than `Inline`. It cannot start a thread itself, because no wasm module
-can; it **queues** each request and a page drains the queue through the
-`__crcbl_web_jobs_*` exports, which keeps the engine's exports-plus-polling ABI
-intact rather than adding the first import to a browser artifact.
+**The Web Worker spawner is built.** `crcbl_jobs::spawn` is `#[cfg]`-split —
+native gets `Threads`, `wasm32` gets `crcbl_jobs::workers::Workers`. It cannot
+start a thread itself, because no wasm module can; it **queues** each request
+and a page drains the queue through the `__crcbl_web_jobs_*` exports, which
+keeps the engine's exports-plus-polling ABI intact rather than adding the first
+import to a browser artifact.
 
 Two things about it decide how the rest of this document reads. `Workers`
 answers `Spawn::threaded` **false** until a page announces itself, so an
-artifact loaded by a page with no shim degrades exactly as `Inline` did. Since
-2026-08-23 one page does implement it — `web/jobs/`, driven by
-`web/run-jobs-e2e.sh`, which brings workers up in a real browser and asserts
-Rust ran on a stack and a thread-local of its own. No **demo** page does, so
-every published artifact still degrades.
+artifact loaded by a page with no shim degrades exactly as `Inline` did. One
+page implements the shim — `web/jobs/`, driven by `web/run-jobs-e2e.sh`, which
+brings workers up in a real browser and asserts Rust ran on a stack and a
+thread-local of its own. **No demo page does**: nothing under `web/demos/`
+references `web/engine/jobs.js` or the `__crcbl_web_jobs_*` ABI, so every
+published artifact still degrades to single-threaded.
 
-**A claim that stood here has been withdrawn.** This paragraph said `Pool`
-cannot be driven from the browser's main thread at all, because `par_for` and
-`pool::work` take a `std::sync::Mutex` and wait on a `Condvar`, which lower to
-`Atomics.wait` and throw there. That was traced through std's sources and never
-observed, and writing it as a fact was the mistake — measured on 2026-08-23,
-**3000 `par_for` calls ran from a page's main thread with eight workers up and
-parking between calls, nine threads took chunks, and nothing trapped.** The
-reconciliation is that only a _losing_ `Mutex::lock` reaches `futex_wait`: an
-uncontended lock is a `compare_exchange` and never touches the instruction that
-throws. So the hazard is real and the certainty was not. The topology this
-document settled — the game worker owns the pool, the main thread forwards and
-presents — remains the right shape, because it does not depend on winning a race
-for a lock every frame; it is no longer the _only_ arrangement that can run.
+**`Pool` can be driven from the browser's main thread**, and the opposite was
+asserted here for a while on a reading of std's sources rather than a
+measurement. Measured on 2026-08-23: 3000 `par_for` calls ran from a page's main
+thread with eight workers up and parking between calls, nine threads took
+chunks, and nothing trapped. Only a _losing_ `Mutex::lock` reaches `futex_wait`;
+an uncontended lock is a `compare_exchange` and never touches the instruction
+`Atomics.wait` throws on. So the hazard is real and its certainty was not — and
+the topology this document settles below, the game worker owning the pool while
+main forwards and presents, is the right shape for reasons that do not depend on
+it: it never has to win a race for a lock every frame.
 
 ## Risks
 
@@ -364,12 +361,23 @@ is the constraint that already forbids a `crcbl::run(game)`.
 
 ### Order
 
-1. The spawn seam in `crcbl-jobs`, with the native backend and a single-thread
-   fallback. Everything else depends on its shape.
+1. ~~The spawn seam in `crcbl-jobs`, with the native backend and a single-thread
+   fallback.~~ Shipped as `crcbl_jobs::spawn` with `Threads`, `Inline` and
+   `Workers`.
 2. Cross-origin isolation on the Pages deploy, proved by the browser gate
    asserting `crossOriginIsolated === true` before anything relies on it.
-3. The wasm worker backend behind the seam, and the pinned nightly for it.
-4. Subsystem threads, in the order topic 21 already lists.
+   **Still open, and still the gate.** `web/tools/serve.mjs` sends COOP/COEP
+   locally and `web/jobs/` asserts the flag against it; nothing sends those
+   headers on Pages, so no published demo is isolated.
+3. ~~The wasm worker backend behind the seam, and the pinned nightly for it.~~
+   Shipped — `crcbl_jobs::workers::Workers` plus `web/engine/jobs.js` and
+   `web/engine/jobs-worker.js`, gated locally by `web/run-jobs-e2e.sh`.
+4. Subsystem threads, in the order topic 21 already lists. **Only the pool's
+   workers actually start through the seam.** `crcbl-audio` spawns its DSP
+   thread with a bare `std::thread::spawn` in `crates/crcbl-audio/src/lib.rs`,
+   which is a lane that predates the seam and does not use it; and nothing on
+   any platform spawns an input, sim, net or io thread at all. The topology at
+   the top of this file is still a design.
 
 Step 2 is a gate rather than a step: if isolation cannot be had on Pages, the
 demos stay single-threaded through the fallback and native keeps the topology —
@@ -434,10 +442,6 @@ gate is a gate.
   consumer ever genuinely needs drop-oldest, the honest options are a
   consumer-side drain-and-discard or an MPSC design, not a flag on this one.
   **The table is wrong as written.**
-- **The delivery table still says P8.** `crcbl-jobs` moved to **P5B** by the
-  2026-08-03 correction at the top of this file, and the samples adopt it there.
-  The table below that correction was never updated. _(Fixed 2026-08-15; the
-  crate is built and the row says so.)_
 - **loom and TSAN are specified; Miri is what runs.** The testing section asks
   for loom-style exhaustive tests on the primitives and a TSAN job in scheduled
   CI. Neither exists. What exists is a **weekly**
@@ -460,12 +464,9 @@ gate is a gate.
   wanted for real the instrument is a targeted stress harness — many short runs
   under interleaving pressure, with a failure counter — not another runner.
 
-- ~~Finding 1's threaded-wasm measurement is not currently reproducible.~~
-  **Reproducible since 2026-08-22**, when `rust-src` was added to
-  `nightly-2026-07-02`, and reproduced on 2026-08-23. It is now a command anyone
-  can run rather than a measurement someone once took:
-  `./web/build.sh --threads` builds every demo crate that way and gates each
-  artifact's worker-capable surface with
-  `web/tools/check-exports.mjs --threads`. No CI job runs it — no runner has the
-  nightly — so it is a local gate, in the same position as
-  `web/run-browser-e2e.sh`.
+- **Finding 1's threaded-wasm measurement is a command anyone can run**, not a
+  measurement someone once took: `./web/build.sh --threads` builds every demo
+  crate that way and gates each artifact's worker-capable surface with
+  `web/tools/check-exports.mjs --threads`. It needs `rust-src` on
+  `nightly-2026-07-02`. No CI job runs it — no runner has the nightly — so it is
+  a local gate, in the same position as `web/run-browser-e2e.sh`.

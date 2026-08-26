@@ -10,6 +10,15 @@ completely (towers/hud never register it; puppet and any future shooter start
 from it). It holds no engine privileges — the dogfood rule (same as the editor)
 is what guarantees the roll-your-own path stays viable.
 
+**`crcbl-player` does not exist**, and nothing in this document is built. What
+is built is the seam under it: `crcbl_phys::CharacterController` takes a
+world-space displacement and holds no camera, and three samples now drive that
+one controller from three rigs that share no code — `apps/puppet` from a
+third-person orbit, `apps/breach` from inside the head, `apps/shard` from a
+fixed isometric bearing. That is the evidence the kit could be built on public
+seams, and it is also why delivery step 1 below is now bigger than it reads:
+there are three hand-rolled controllers to replace, not one.
+
 ## Structural position
 
 `crcbl-player` = a shipped **module/kit**, not engine core: movement runs as an

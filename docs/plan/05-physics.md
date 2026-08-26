@@ -44,16 +44,18 @@ anywhere):
 | Box/sphere colliders, swept-sphere TOI, contact normal response | breakout    | L0+CCD |
 | Dynamic BVH churn, sphere overlap, segment CCD, thrust+damping  | asteroids   | L0+L1  |
 
-**Slice 2 (P6) has landed.** `Bvh::insert` / `Bvh::remove` churn the tree in
-place (surface area heuristic for placement, AVL rotation on the way back up, so
-depth stays logarithmic even when every element sits in the same spot);
-`PhysicsWorld::overlap_sphere` was already the sphere-overlap-against-broadphase
-entry point and now has the property test proving it agrees with a brute-force
-scan under churn; `ThrustForce` and `DampingForce` are the first two L1 force
-providers, and `PhysicsSystem::apply_force` is how a single entity feels one.
-Segment CCD rides on the existing `sweep_sphere`. What is still owed —
-rotational dynamics, a teleport-aware re-insert for screen wrap, and a real
-`ShapeHit` from `PhysicsSystem::overlap_sphere` — is in `docs/backlog.md`.
+**Slice 2 (P6) has landed**; `crates/crcbl-phys/src/lib.rs` is the inventory and
+`git log` the history. Three things it did _not_ close are still owed, and
+`docs/backlog.md` carries them:
+
+- **Rotational dynamics.** `Transform` carries a `DQuat` and `ThrustForce` reads
+  it, but `RigidBody` holds only mass, velocity and a force accumulator: no
+  angular velocity, no torque, no inertia tensor anywhere in the crate. A body's
+  orientation is set and never integrated, so the "full inertia tensor, torque,
+  quaternion integration with renormalization" line below is unbuilt.
+- A **teleport-aware re-insert** for screen wrap.
+- A real `ShapeHit` from `PhysicsSystem::overlap_sphere`, which still returns a
+  bare `Vec<Entity>`.
 
 | Slice                                                        | Demanded by | Layer    |
 | ------------------------------------------------------------ | ----------- | -------- |
@@ -61,6 +63,16 @@ rotational dynamics, a teleport-aware re-insert for screen wrap, and a real
 | Sector frames, gravity/drag/atmosphere, Kepler on-rails, SOI | orbit       | L1       |
 | TOI vs moving targets, triggers, character controller        | towers      | L0+CCD   |
 | Lag-compensated rewind queries                               | arena       | post-MVP |
+
+**The orbit row has landed too**, and it is the largest of them: `Frames` with
+`sphere_of_influence` crossings, `Atmosphere`/`AtmosphericDrag`,
+`PointGravity`/`GravityForce`/`DragForce`, and `orbit::propagate` — a
+universal-variable Kepler solve, so one path covers ellipse, parabola and
+hyperbola. `apps/orbit` flies on it. **Bubbles and sleeping did not**: no type
+in `crcbl-phys` names either, the broadphase is one BVH rather than one per
+sector (`crcbl-phys`'s world has no sector partition at all), and what
+`apps/orbit` calls "the bubble" is the sample's own on-rails/live switch rather
+than an engine feature.
 
 Stage 5 "exit" therefore overlaps stages 6–8 in wall-clock: the stage is done
 when the full L0/L1/CCD surface exists and the orbit sample passes, not when a
@@ -146,15 +158,30 @@ early.
 
 ## Tasks
 
-1. `WorldPos`/sector types + rebase in `crcbl-core` (stage 1 backfill if not
-   already landed), camera-relative upload note executed in `crcbl-render`.
-2. `crcbl-phys` crate: SoA body storage, integrator, force-provider seam.
-3. L0 queries: BVH, ray/segment/sweep/overlap, triggers, character controller.
-4. L1 forces: gravity/drag/thrust/buoyancy, atmosphere model, Kepler on-rails
-   propagation, frame hierarchy + SOI transitions.
-5. CCD: TOI sweeps, motion-inflated broadphase integration.
+1. ~~`WorldPos`/sector types + rebase in `crcbl-core`~~ — shipped, with
+   `WorldPos::relative_to` as the sanctioned conversion to render space. **The
+   camera-relative upload was not executed in `crcbl-render`**: `relative_to`
+   has no caller outside `crcbl-core`'s own tests, and
+   `crates/crcbl-render/src/camera.rs` only documents that its `Vec3` is _meant_
+   to be camera-relative. Nothing converts, so nothing has yet been far enough
+   from the origin to jitter.
+2. ~~`crcbl-phys` crate: SoA body storage, integrator, force-provider seam.~~
+   Shipped: `RigidBody`, `SemiImplicitEuler`, `ForceProvider`.
+3. ~~L0 queries: BVH, ray/segment/sweep/overlap, triggers, character
+   controller.~~ Shipped, `CharacterController` included. **Static
+   trimesh/heightfield is the one L0 shape still missing** — `crcbl-phys` has
+   `Sphere`, `BoxCollider` and `Capsule` and nothing else.
+4. ~~L1 forces: gravity/drag/thrust, atmosphere model, Kepler on-rails
+   propagation, frame hierarchy + SOI transitions~~ — all shipped. **`buoyancy`
+   was not**, and neither was the wind this document's dynamics section also
+   names; they are the two force providers with no type.
+5. ~~CCD: TOI sweeps, motion-inflated broadphase integration.~~ Shipped for
+   sphere and capsule against sphere/box/capsule.
 6. Bubbles + sleeping + sector streaming hooks.
-7. Debug suite (draw, hash, scrub, query viz).
+7. Debug suite (draw, hash, scrub, query viz). **The hash is the only part
+   built** — `PhysicsSystem::hash_state` feeds the tick hash;
+   `PhysicsSystem::debug_draw` is an empty body with a "future" comment, and
+   there is no scrub and no query visualiser anywhere.
 8. (Stretch, non-gating) L2 sequential-impulse contact solver + islands.
 
 ## Exit criteria
@@ -163,12 +190,26 @@ early.
   planet surface, atmosphere exit (drag + terminal velocity measurably correct),
   stable orbit achieved with symplectic integrator (energy drift bounded over
   10k orbits on-rails handoff), deorbit + land, across at least one sector
-  boundary with no visible seam.
+  boundary with no visible seam. **`apps/orbit` is built and published, and it
+  is not yet this criterion**: it carries `06-orbit.md`'s milestones 1 and 2 —
+  ascent, orbit and timewarp — and its own header says the moon transfer is not
+  flown and the bodies are drawn as a map rather than in 3D.
 - Bullet-through-paper test: projectile at 10 km/s vs 1 cm wall, 100% hit rate
   via segment CCD; swept capsule vehicle at 500 m/s never tunnels terrain.
-- Character controller walks the towers map (slopes, steps, plot edges).
-- 1000-tick replay: state hash identical across 10 runs; scrub UI works.
-- All physics visible in debug draw; no query without a visualizer.
+  Unbuilt: nothing in `crates/crcbl-phys/tests/` moves a body at anything like
+  that speed (`dynamics.rs` is terminal velocity, thrust and damping;
+  `broadphase_churn.rs` is tree churn), and the "vs terrain" half additionally
+  needs the trimesh statics above.
+- Character controller walks the towers map (slopes, steps, plot edges). towers
+  does not exist. The controller does walk greybox courses instead —
+  `apps/puppet`'s lane has steps and a pair of slopes deliberately straddling
+  the walkable angle, and `apps/breach`'s firing line is a kerb the controller
+  refuses — so slopes and steps are covered and editor-authored geometry is not.
+- 1000-tick replay: state hash identical across 10 runs; scrub UI works. Half
+  met — `crcbl sim` runs 1000 ticks and prints the hash, and `PhysicsSystem`
+  contributes to it; there is no scrub UI.
+- All physics visible in debug draw; no query without a visualizer. Unbuilt —
+  `PhysicsSystem::debug_draw` is empty.
 
 ## Risks
 
@@ -216,16 +257,23 @@ determinism-bearing math through **the `libm` crate**, while topic 13's
 correction requires **own polynomial approximations and LUTs** plus a CI deny on
 std transcendentals inside `crcbl-audio`.
 
-Neither is built: there is no `libm` dependency in the workspace and no deny
-anywhere. Recorded rather than silently resolved because the two are not
-interchangeable — `libm` is a new dependency and therefore the user's call, and
-hand-rolled approximations are a maintenance surface with their own correctness
-burden. Both would need golden values from the specification, per the
-verification rules in `12-testing.md`.
+Neither is built. No workspace crate names `libm` — it reaches `Cargo.lock` only
+through `naga` and `num-traits` and nothing in the sim path calls it — and there
+is no deny anywhere. Recorded rather than silently resolved because the two are
+not interchangeable: `libm` is a new dependency and therefore the user's call,
+and hand-rolled approximations are a maintenance surface with their own
+correctness burden. Both would need golden values from the specification, per
+the verification rules in `12-testing.md`.
 
-**Also unowned by any sample:** L0 as this document defines it includes a
-**character controller** (capsule vs world, slopes, steps) and, per the
-2026-07-27 correction, **static trimesh/heightfield colliders with a BVH
-midphase**. The ROADMAP marks "P3 L0" done against a narrower list — colliders,
-BVH, ray/segment, swept-sphere TOI — so both are outstanding and neither was in
-`docs/backlog.md` until now. towers is the sample that demands both.
+**The cost of leaving it open is now visible in the tree rather than
+hypothetical.** `crates/crcbl-phys/src/character.rs` and
+`crates/crcbl-phys/src/orbit.rs` each carry tolerances sized so a _different_
+platform `libm` still passes — the orbit drift bound says so by name. Those
+constants are the workaround this decision would remove; they are also what
+would have to be re-derived once it is taken.
+
+**Still unowned by any sample:** **static trimesh/heightfield colliders with a
+BVH midphase**, per the 2026-07-27 correction. towers is the sample that demands
+them. The **character controller** that stood beside them in this paragraph is
+no longer outstanding — `CharacterController` ships, and `apps/puppet`,
+`apps/breach` and `apps/shard` each drive it from a different camera rig.

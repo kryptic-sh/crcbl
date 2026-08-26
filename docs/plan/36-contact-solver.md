@@ -6,6 +6,17 @@ as L2 (contacts) and L3 (constraints) and left it as a paragraph because nothing
 in the MVP demanded it. Ragdolls (35), grenades, dropped loot, and vehicles do,
 so it gets a real design here.
 
+**None of it is built.** `crcbl-phys` names no manifold, no contact, no island,
+no sleeping and no joint; its only mention of a sequential-impulse solver is the
+layer table in `crates/crcbl-phys/src/lib.rs` marking L2 "Stretch". Two
+prerequisites this design assumes are missing as well and would have to land
+first or alongside: **rotational dynamics** (`RigidBody` carries mass, velocity
+and a force accumulator only — no angular velocity, no torque, no inertia
+tensor, so "mass properties … inertia tensor" below has nothing to write into),
+and the **collider property block** carrying friction and restitution, which
+`37-materials.md` owns and which does not exist — `crcbl-phys`'s colliders have
+no material field of any kind.
+
 ## Algorithm: substepped sequential impulses
 
 The Catto/Box2D lineage, in its modern (soft-constraint, substepped) form — the
