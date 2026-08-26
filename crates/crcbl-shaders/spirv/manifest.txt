@@ -113,6 +113,20 @@ msl-sha256 = 7df4b3a6fe7ff5e54391dafbb08779504d4e6fe6ae0ef6038dc60072db736a20
 dxil = computeMain:dxil/draw_gen.computeMain.dxil:785619f4fcdd3948e9542200a42137b05788188241b56a0917e7c3ca3c74390d
 entry-points = computeMain:glcompute
 
+[fxaa]
+source = shaders/fxaa.slang
+source-sha256 = 94dd6ef681f1be8f4f1f6786063315981c0bd95356ded5762a547cf493f18c42
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/fxaa.spv
+spirv-sha256 = f57966b6f99198817bd1cbd937d35d13a6616b65bfd50fe67e07732a24f32a5b
+wgsl = wgsl/fxaa.wgsl
+wgsl-sha256 = 6d85018095f5fc851e93328803c5a3d2311a28d5a495db3c033903e9ec936ff4
+msl = msl/fxaa.metal
+msl-sha256 = c7bb85c764642860068905f74ef8cb97364af2a3e30b8f9bb61ec696bec8de97
+dxil = vertexMain:dxil/fxaa.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/fxaa.fragmentMain.dxil:72e562c2515257567307ea6f0a32d9a9789f69405238ed14916659f7c7470165
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [grid]
 source = shaders/grid.slang
 source-sha256 = d5049517c497424b52e17caf19fe905188db84f71727f155ccecbbf4c3e3664f

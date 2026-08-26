@@ -78,6 +78,7 @@ use crcbl::backend::{BACKEND_ENV_VAR, GpuBackend};
 use crcbl::hal::{Features, Format, GeometryPath};
 use crcbl::screenshot::{OffscreenSetup, Scene};
 use crcbl_golden::{ChannelOrder, Golden, Image};
+use crcbl_render::RenderEffects;
 
 /// What this binary calls itself in the lines [`Offscreen`] prints.
 ///
@@ -1541,6 +1542,215 @@ fn the_halo_is_beside_the_emitter_and_not_beside_its_mirror(image: &Image) {
              there is nothing bright in this frame for the halo to have come from"
         );
     }
+}
+
+/// The anti-vacuity floor for [`Scene::Aa`].
+///
+/// The frame is two flat levels and the edge between them, so most of this count
+/// is the resolve's own output — the blended pixels along the silhouette, of
+/// which there are hundreds. Well below what the frame this was blessed from
+/// measures, which the harness prints, so a differently-tuned filter does not
+/// walk into it; well above the handful a frame of two flat levels and a hard
+/// edge would show.
+const MIN_COLORS_AA: usize = 48;
+
+/// The level at or below which a pixel of [`Scene::Aa`] is background.
+///
+/// The frame's dark level is the cleared background lifted by [`aa_sun`]'s trace
+/// of ambient, which measures a little over thirty-four of two hundred and
+/// fifty-five on every adapter this was checked on. A few counts above that, so
+/// a rasteriser that lands a count either side of it is still counted as
+/// background.
+const AA_DARK_CEILING: f32 = 42.0;
+
+/// The level at or above which a pixel of [`Scene::Aa`] is the slab's face.
+///
+/// The face is one flat value under a light square on to it — see [`aa_sun`] —
+/// and measures from about two hundred and five at its corners to two hundred and
+/// twenty-eight at its middle, the spread being the tonemap's response to the
+/// distance falloff across the face. A few counts below the lower end.
+const AA_BRIGHT_FLOOR: f32 = 197.0;
+
+/// How many pixels of [`Scene::Aa`] must lie strictly between its two levels.
+///
+/// **Measured, not chosen.** The fixture drawn at [`EXTENT`] puts 532 pixels
+/// between [`AA_DARK_CEILING`] and [`AA_BRIGHT_FLOOR`] on three adapters —
+/// discrete radv, integrated radv and llvmpipe — and puts **zero** there with
+/// the resolve switched off, which is what
+/// [`the_resolve_is_what_puts_the_soft_pixels_there`] asserts rather than
+/// assumes. This is a little under half of the measured count, which leaves room
+/// for a filter tuned differently without leaving room for one that does nothing.
+///
+/// It is a count and not a ratio because the silhouette's length in pixels is a
+/// function of [`EXTENT`], and both golden tests below draw at that extent.
+const AA_MIN_SOFT_PIXELS: usize = 256;
+
+/// How much [`Scene::Aa`]'s mean level may move when the resolve is added, out of
+/// 255.
+///
+/// **The other half of the claim, and the half that says the filter is a filter.**
+/// A pass that lightened or darkened the whole frame would put plenty of pixels
+/// between the two levels and pass the count above; so would one that blurred the
+/// entire image rather than its edges. A redistribution along an edge moves the
+/// mean by almost nothing — the measured pair differ by 0.24 — where either of
+/// those moves it by a great deal.
+const AA_MEAN_TOLERANCE: f32 = 2.0;
+
+/// How many pixels of [`Scene::Aa`] lie strictly between its two levels.
+///
+/// Luma rather than a single channel because the frame is grey: the slab is
+/// untinted and the sun is the demo scene's, so a channel taken alone measures
+/// the same edge through a colour term that has nothing to do with it.
+fn soft_pixels(image: &Image) -> usize {
+    let mut soft = 0;
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            let luma = 0.299 * f32::from(pixel[0])
+                + 0.587 * f32::from(pixel[1])
+                + 0.114 * f32::from(pixel[2]);
+            if luma > AA_DARK_CEILING && luma < AA_BRIGHT_FLOOR {
+                soft += 1;
+            }
+        }
+    }
+    soft
+}
+
+/// The mean luma of a frame, out of 255.
+fn mean_luma(image: &Image) -> f32 {
+    let mut total = 0.0f32;
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            total += 0.299 * f32::from(pixel[0])
+                + 0.587 * f32::from(pixel[1])
+                + 0.114 * f32::from(pixel[2]);
+        }
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a frame of a few tens of thousands of pixels"
+    )]
+    let count = (image.width() * image.height()) as f32;
+    total / count
+}
+
+/// [`Scene::Aa`]'s claim, as far as one frame can carry it: **the silhouette is
+/// not a staircase.**
+///
+/// The frame is one slab, lit square on, against the cleared background — two
+/// flat levels and one diagonal edge between them. A rasterised edge with no
+/// resolve over it is a hard boundary: every pixel is one level or the other, and
+/// this count is zero. Every pixel this finds is one the resolve wrote.
+///
+/// **The golden alone could not make even this much of the claim.** A resolve
+/// that returned its input untouched draws a slab with a clean edge, which is
+/// what a slab looks like, and it would be blessed without comment.
+/// [`the_resolve_is_what_puts_the_soft_pixels_there`] is the other half: it draws
+/// this same scene without the pass and shows the count going to nothing.
+fn the_silhouette_is_not_a_staircase(image: &Image) {
+    let soft = soft_pixels(image);
+    let mean = mean_luma(image);
+    eprintln!("crcbl render e2e: aa — {soft} soft pixel(s), mean luma {mean:.2}");
+    assert!(
+        soft >= AA_MIN_SOFT_PIXELS,
+        "{soft} pixel(s) of this frame lie between {AA_DARK_CEILING} and \
+         {AA_BRIGHT_FLOOR}, which is under the {AA_MIN_SOFT_PIXELS} an edge this long \
+         is resolved into — the pass ran and changed nothing, or it did not run"
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_aa_scene_resolves_its_silhouette_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Aa,
+        "aa",
+        EXTENT,
+        MIN_COLORS_AA,
+        the_silhouette_is_not_a_staircase,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_aa_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Aa,
+        "aa",
+        MIN_COLORS_AA,
+        the_silhouette_is_not_a_staircase,
+    );
+}
+
+/// **The soft pixels along the silhouette are the resolve's, and nothing else in
+/// the frame put them there.**
+///
+/// The claim no golden can make and no single frame can make either. Every other
+/// fixture here is about a *value* somewhere in the picture, and a value is a
+/// thing one frame can be asked about. An antialiased edge is not: a frame whose
+/// filter did nothing has a clean hard silhouette in it, and a clean hard
+/// silhouette is what a slab looks like. So this draws
+/// [`Scene::Aa`]'s scene twice through
+/// [`aa_forward`](crcbl::screenshot::aa_forward) — once with the effect and once
+/// with the default stack, the same geometry, camera, sun and extent — and
+/// compares the two.
+///
+/// Two assertions, and they fail on opposite mistakes:
+///
+/// * The count of pixels between the two levels must **rise**, and the control's
+///   must be a small fraction of it. A pass that copied its input leaves the two
+///   equal.
+/// * The mean level must **not move** by more than [`AA_MEAN_TOLERANCE`]. A pass
+///   that brightened, darkened or blurred the whole frame would satisfy the
+///   first assertion handsomely and fail this one, which is the difference
+///   between an edge filter and a filter.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_resolve_is_what_puts_the_soft_pixels_there() {
+    crcbl_core::log::init_logging();
+
+    let frame = |effects| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::aa_forward(device, queue, format, effects)
+            })
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the aa scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    let resolved = frame(RenderEffects::DEFAULT_STACK.union(RenderEffects::ANTIALIASING));
+    let control = frame(RenderEffects::DEFAULT_STACK);
+
+    let (soft, plain) = (soft_pixels(&resolved), soft_pixels(&control));
+    let (mean, plain_mean) = (mean_luma(&resolved), mean_luma(&control));
+    eprintln!(
+        "crcbl render e2e: aa — {soft} soft pixel(s) resolved against {plain} plain, \
+         mean {mean:.2} against {plain_mean:.2}"
+    );
+    assert!(
+        soft >= AA_MIN_SOFT_PIXELS,
+        "the resolved frame has {soft} pixel(s) between the two levels, under the \
+         {AA_MIN_SOFT_PIXELS} an edge this long is resolved into"
+    );
+    assert!(
+        plain * 4 < soft,
+        "the frame drawn without the resolve has {plain} pixel(s) between the two levels \
+         against the resolved frame's {soft} — the effect's off-switch is not switching \
+         anything off, so neither frame is evidence about the other"
+    );
+    assert!(
+        (mean - plain_mean).abs() <= AA_MEAN_TOLERANCE,
+        "the resolve moved the frame's mean level from {plain_mean:.2} to {mean:.2}, past \
+         the {AA_MEAN_TOLERANCE} an edge filter may move it — this pass is doing something \
+         to the whole image rather than to its edges"
+    );
 }
 
 /// The anti-vacuity floor for [`Scene::Probes`].

@@ -289,6 +289,29 @@ pub enum Scene {
     /// See `bloom_camera` for the framing and `BLOOM_BAND_AT` for where the
     /// bands sit.
     Bloom,
+    /// `docs/plan/18-render-features.md`'s **antialiasing resolve**: one flat
+    /// slab turned about the view axis, so its silhouette runs diagonally across
+    /// a dark frame.
+    ///
+    /// **The only frame in the tree whose subject is an edge.** Every other
+    /// fixture here is about a value — a cone's brightness, a corner's occlusion,
+    /// a halo's reach — and a filter that runs over the whole image changes those
+    /// by almost nothing. What it changes is the handful of pixels along a
+    /// silhouette, so this scene is arranged to have one long silhouette, at a
+    /// slope no axis and no diagonal special case covers, between two flat levels
+    /// — see [`AA_SLAB_TILT`] and [`aa_sun`].
+    ///
+    /// **Its golden cannot make the claim**, which is why `tests/render_e2e.rs`
+    /// builds this scene twice through [`aa_forward`] instead. A resolve pass
+    /// that copied its input would draw a frame with a clean hard edge in it, and
+    /// a clean hard edge is what a golden of a slab looks like; only the same
+    /// scene without the pass says which one this is.
+    ///
+    /// It asks for [`crcbl_render::RenderEffects::ANTIALIASING`] through the
+    /// camera stack, as [`Scene::Bloom`] asks for the lens: both are held out of
+    /// `RenderEffects::DEFAULT_STACK`, so a fixture that wants one has to say so,
+    /// and every other golden in the tree stays where it is.
+    Aa,
     /// `docs/plan/18-render-features.md`'s **irradiance probes**: the inside of
     /// a room, looked straight down into, lit by the probe grid and by nothing
     /// else at all.
@@ -909,6 +932,148 @@ fn bloom_sun() -> crcbl_render::DirectionalLight {
         direction: glam::Vec3::Y,
         ..dimmed_sun(0.2, 1.0)
     }
+}
+
+/// How far back from the slab [`Scene::Aa`]'s camera stands, in world units.
+///
+/// Sets the scale of the picture on [`BLOOM_CAMERA_UP`]'s terms: with the 60°
+/// vertical field of view [`aa_camera`] uses, the frame's short half-axis at the
+/// slab's face is `AA_CAMERA_BACK * tan(30°)`. Chosen so that a slab of
+/// [`AA_SLAB_SIZE`] crosses most of the frame without its corners leaving it —
+/// a silhouette that runs off the edge is a silhouette whose length depends on
+/// the framing rather than on the shape.
+const AA_CAMERA_BACK: f32 = 2.6;
+
+/// How wide and tall [`Scene::Aa`]'s slab is, in world units.
+const AA_SLAB_SIZE: f32 = 1.6;
+
+/// How deep [`Scene::Aa`]'s slab is, in world units.
+///
+/// Thin, so the frame contains the front face and nothing else: a slab with
+/// visible sides has a second edge inside its own silhouette, shaded differently,
+/// and the count [`Scene::Aa`]'s claim makes would be over two edges of which
+/// only one is the subject.
+const AA_SLAB_DEPTH: f32 = 0.05;
+
+/// How far [`Scene::Aa`] turns its slab about the view axis, in radians.
+///
+/// **Not an eighth of a turn, and not a sixteenth.** A silhouette at exactly 45°
+/// is the one case where the staircase has a step every pixel and its rise is
+/// exactly its run, which is the easiest slope there is to filter and the least
+/// representative of anything. This is a little over 20°, where the steps are
+/// several pixels long and unevenly spaced — the case a filter has to estimate a
+/// direction for rather than read off the two neighbours.
+///
+/// Nor is it near an axis: a silhouette within a degree or two of vertical is one
+/// long straight run of pixels, which has no staircase to remove.
+const AA_SLAB_TILT: f32 = 0.36;
+
+/// [`Scene::Aa`]'s slab: the cube flattened and turned about the view axis.
+fn aa_slab() -> glam::Mat4 {
+    glam::Mat4::from_rotation_z(AA_SLAB_TILT)
+        * glam::Mat4::from_scale(glam::Vec3::new(AA_SLAB_SIZE, AA_SLAB_SIZE, AA_SLAB_DEPTH))
+}
+
+/// How far below the slab [`Scene::Aa`] parks the pyramid, in world units.
+const AA_PARK_DOWN: f32 = 12.0;
+
+/// Where [`Scene::Aa`] parks the pyramid.
+///
+/// The demo scene's other resident has no place in a frame whose whole content is
+/// one silhouette against the background — a second shape would put its own edges
+/// in the count. Parked out of frame on [`ao_parked_cube`]'s terms: out rather
+/// than absent, so the instance pool holds the slot it holds in every other
+/// fixture.
+///
+/// **Straight down, and not behind the camera.** Behind the camera is out of
+/// frame and still in the light: [`aa_sun`] shines along `-Z`, so a pyramid
+/// parked at `+Z` stands between the sun and the slab and lays its shadow across
+/// the middle of the face — which is what this arrangement did on its first
+/// render, a dark blob where the flat level was supposed to be. Straight down is
+/// out of the frustum and out of the sun's path to the slab both.
+fn aa_parked_pyramid() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, -AA_PARK_DOWN, 0.0))
+}
+
+/// The camera [`Scene::Aa`] is drawn with: square on to the slab, down `-Z`.
+///
+/// Head-on and not at an angle, because the tilt that makes the silhouette
+/// diagonal is the slab's own — see [`AA_SLAB_TILT`]. Turning the camera instead
+/// would foreshorten the face and give the silhouette a perspective slope that
+/// changes along its length, so the two halves of one edge would be different
+/// slopes and the frame would stop being about one of them.
+fn aa_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, 0.0, AA_CAMERA_BACK),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::Aa`] runs under: **straight at the slab's face**, with no
+/// ambient worth the name.
+///
+/// Both halves exist to make the face one flat value.
+///
+/// * **Along the view axis** — `DirectionalLight::direction` is the direction
+///   *towards* the light, so `+Z` puts it behind the eye and every point of a
+///   face whose normal is `+Z` takes the same `N·L`. A tilted sun would shade the
+///   face across its width, and the silhouette's contrast would then differ along
+///   its own length.
+/// * **Almost no ambient** — the background this frame is measured against is
+///   whatever the pass clears to, and the claim is a count of values *between*
+///   the two levels. A large ambient term lifts the face and the frame both, and
+///   narrows the gap the count is taken across.
+fn aa_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::Z,
+        ..dimmed_sun(1.0, 0.02)
+    }
+}
+
+/// [`Scene::Aa`]'s renderer, built with `effects` as its camera stack.
+///
+/// **Public, and the effect set is a parameter, because the claim this fixture
+/// supports is a comparison against itself.** An antialiased edge is not
+/// recognisable in isolation: a frame whose filter did nothing is a frame with a
+/// clean hard silhouette in it, which is exactly what a golden of this scene
+/// would be blessed as. So `tests/render_e2e.rs` builds this scene twice —
+/// [`Scene::Aa`]'s own set and the default stack — and compares the two, and
+/// that needs the build to be reachable with a set the [`Scene`] enum does not
+/// name.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built.
+pub fn aa_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    effects: crcbl_render::RenderEffects,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut renderer = ForwardRenderer::new(device, queue, format)?;
+    renderer.set_effect_request(EffectRequest {
+        camera: effects,
+        ..EffectRequest::default()
+    });
+    // The cube as the slab — still the first insertion, so it still holds the
+    // pool slot every other scene gives it — and the pyramid out of frame.
+    place(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, aa_slab());
+    place(
+        &mut renderer,
+        DEMO_PYRAMID,
+        DEMO_UNTINTED,
+        aa_parked_pyramid(),
+    );
+    Ok(ForwardScene {
+        camera: aa_camera(),
+        sun: aa_sun(),
+        renderer: Box::new(renderer),
+    })
 }
 
 /// How much [`Scene::Ssr`] scales the pyramid by.
@@ -1977,8 +2142,16 @@ impl SceneState {
                 // the camera-stack layer being exercised as topic 18 describes
                 // it, and it is what keeps every other golden in the tree
                 // untouched by this slice.
+                //
+                // **The default stack plus the lens, not `all()`.** They were
+                // the same set until the antialiasing resolve joined the effects
+                // outside the default — see `RenderEffects::DEFAULT_STACK` — and
+                // `all()` here would have quietly added that resolve to this
+                // fixture, which is a halo measured through an edge filter. Each
+                // effect held out of the default gets the fixture it is about;
+                // this one is about the chain.
                 renderer.set_effect_request(EffectRequest {
-                    camera: RenderEffects::all(),
+                    camera: RenderEffects::DEFAULT_STACK.union(RenderEffects::BLOOM),
                     ..EffectRequest::default()
                 });
                 place(&mut renderer, DEMO_CUBE, DEMO_UNTINTED, spot_floor());
@@ -1988,6 +2161,19 @@ impl SceneState {
                     light: bloom_sun(),
                     renderer: Box::new(renderer),
                 }
+            }
+            Scene::Aa => {
+                // The whole of it is in `aa_forward`, because
+                // `tests/render_e2e.rs` builds the same scene through that
+                // function with a different effect set — see its doc for why the
+                // comparison cannot be made against a golden.
+                aa_forward(
+                    device,
+                    queue,
+                    format,
+                    RenderEffects::DEFAULT_STACK.union(RenderEffects::ANTIALIASING),
+                )?
+                .into()
             }
             Scene::Probes => {
                 // **The only scene here built from a description of its own**,

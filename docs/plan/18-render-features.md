@@ -1111,18 +1111,54 @@ dispatches them cannot disagree.
 
 ## Antialiasing
 
-The stack's AA slot, and the ladder that runs through it. **Nothing in this
-engine resolves an edge today** — no `fxaa.slang`, no resolve pass in the graph,
-no `RenderEffects` bit, and `crcbl_hal::MultisampleState`'s default is one
-sample — so that row is a contract for a pass that does not exist rather than a
-description of a frame.
+The stack's AA slot, and the ladder that runs through it. The first rung of it
+is in the tree; the rest of this section is what the rungs above it are.
 
-### FXAA 3.11 first
+### FXAA 3.11 first — landed 2026-08-27
 
-One fullscreen pass over the tonemapped image: a luma edge detect, a subpixel
+`crates/crcbl-shaders/shaders/fxaa.slang` and `crates/crcbl-render/src/fxaa.rs`:
+one fullscreen pass over the tonemapped image — a luma edge detect, a subpixel
 blend along the edge it found, no history, no new attachment and no change to
-any pass in front of it. It is the cheapest thing that removes the staircase,
-and it is the tier that stays after the rung above it lands.
+any pass in front of it. The cheapest thing that removes the staircase, and the
+tier that stays after the rung above it lands.
+
+**It is `RenderEffects::ANTIALIASING`, and it is not in `DEFAULT_STACK`.** The
+last item of the cost list below is why: a resolve moves every edge in every
+frame it runs on, so switching it on by default re-blesses the whole suite, and
+that is its own change rather than a side effect of this one. The bit belongs in
+the default stack on the merits and is held out until that re-bless is taken
+deliberately.
+
+**Switching it on changes the shape of the frame rather than adding a pass to
+it**, which is the one structural thing here worth knowing. Every other
+fullscreen pass reads a transient and writes a transient; this one reads what
+the tonemap wrote and writes what the UI is composited onto. So with the bit off
+the tonemap writes the caller's target directly, and with it on the tonemap
+writes a `display-color` transient at the target's own format and the resolve
+writes the target. The ground grid moves with the tonemap and not with the
+resolve — it is a field of thin high-contrast lines, which is what an edge
+filter exists for — and the UI stays behind the resolve, so glyphs are never
+filtered.
+
+**Two things the native gates could not see, and one of them was a defect.**
+`fxaa.slang` samples with `SampleLevel` and not `Sample` everywhere, because
+WGSL refuses an implicit-LOD sample reached from non-uniform control flow and
+every tap in the filter is reached from some — the early-out returns before them
+and the edge search runs its steps under a flag. All four targets compiled the
+implicit form without complaint; what caught it was
+`web/run-render-harness-e2e.sh`, where a WGSL module that will not parse is a
+device that refuses the pipeline and a scene that draws nothing. The other is
+the linear luma correction the source's header describes: the tonemap writes
+linear values into an sRGB-format target and lets the hardware encode, so a pass
+sampling that target sees linear, and FXAA's thresholds were fitted to gamma
+space.
+
+Its fixture is `Scene::Aa` — one slab turned about the view axis, so its
+silhouette runs diagonally between two flat levels — and the claim its golden
+cannot make is in `the_resolve_is_what_puts_the_soft_pixels_there`, which draws
+that same scene twice through `crcbl::screenshot::aa_forward` and compares. The
+measured pair: **532 pixels between the two levels with the resolve, zero
+without it, and a mean level that moves by 0.24 out of 255.**
 
 **Its template is `crates/crcbl-shaders/shaders/bloom_composite.slang` and not
 `crates/crcbl-shaders/shaders/tonemap.slang`**, which is worth saying because
@@ -1134,7 +1170,7 @@ gathered around a UV through an `inv_source` texel-size uniform its Rust mirror
 writes once per frame. An `fxaa.slang` is that file with the tent replaced by
 the edge detect.
 
-What it costs here, item by item, because none of it is hypothetical:
+What it cost, item by item, because none of it was hypothetical:
 
 - One `.slang` source and **four committed artifact sets** — SPIR-V, WGSL, MSL
   and DXIL — each hashed into the manifest `crates/crcbl-shaders/tools/` writes
@@ -1158,7 +1194,9 @@ What it costs here, item by item, because none of it is hypothetical:
   every frame it runs on, so there is no additive-zero property to land it
   behind — the probe and bloom slices had one and this does not. The switch
   therefore decides how much of the suite moves, and the honest default is the
-  one that moves it exactly once.
+  one that moves it exactly once. This is the item that kept the bit out of
+  `DEFAULT_STACK`: as shipped, the only golden it is on for is `aa.png`, which
+  was blessed with it.
 
 ### SMAA 1x second, and it is the real industry standard step
 

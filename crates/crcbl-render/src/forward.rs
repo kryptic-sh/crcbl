@@ -164,6 +164,7 @@ use crate::graph::{
 // bare name here and means the froxel grid — the collision [`crate::grid`]'s
 // header predicted.
 use crate::bloom::Bloom;
+use crate::fxaa::Fxaa;
 use crate::grid::{Grid as GroundGrid, GridStyle};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError};
 use crate::light::{Light, sun_row};
@@ -589,7 +590,7 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// and this constant is read before any extent is known. The frame that lands on
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
-const RENDER_PASSES: u32 = 6 + Ssao::PASSES + Ssr::PASSES + Bloom::MAX_PASSES;
+const RENDER_PASSES: u32 = 6 + Ssao::PASSES + Ssr::PASSES + Bloom::MAX_PASSES + Fxaa::PASSES;
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
@@ -622,6 +623,9 @@ fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32)) -> u64 {
     }
     if effects.contains(RenderEffects::BLOOM) {
         passes += u64::from(Bloom::passes_for(extent));
+    }
+    if effects.contains(RenderEffects::ANTIALIASING) {
+        passes += Fxaa::PASSES as u64;
     }
     passes
 }
@@ -1197,6 +1201,9 @@ pub struct ForwardRenderer {
     ssr: Ssr,
     /// `docs/plan/18-render-features.md`'s bloom chain — see [`crate::bloom`].
     bloom: Bloom,
+    /// `docs/plan/18-render-features.md`'s antialiasing resolve — see
+    /// [`crate::fxaa`].
+    fxaa: Fxaa,
 
     /// The three layers a caller supplies — see [`crate::effects`].
     effect_request: EffectRequest,
@@ -1291,6 +1298,9 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
     /// pipelines, two layouts, a sampler and a ring of blocks.
     bloom: Option<Bloom>,
+    /// `docs/plan/18-render-features.md`'s antialiasing resolve, which owns one
+    /// pipeline, one layout, a sampler and a ring of blocks.
+    fxaa: Option<Fxaa>,
 }
 
 impl Rollback {
@@ -1332,6 +1342,9 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
+        }
+        if let Some(fxaa) = self.fxaa {
+            fxaa.destroy(device);
         }
         if let Some(bloom) = self.bloom {
             bloom.destroy(device);
@@ -3672,6 +3685,21 @@ impl ForwardRenderer {
             Self::build_fullscreen,
         )?);
 
+        // --- the antialiasing resolve ---
+        //
+        // Stored whole for the three above's reason, and after them because
+        // `Rollback::run` releases in the reverse order of construction. It is
+        // the one of the four that needs `target_format`: it writes the caller's
+        // target where the others write `Rgba16Float` transients of their own
+        // choosing — see [`crate::fxaa`]. Its sampler is **linear** for the
+        // chain's reason and not the tonemap's.
+        rollback.fxaa = Some(Fxaa::new(
+            device,
+            instance_buffers.len(),
+            target_format,
+            Self::build_fullscreen,
+        )?);
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -3825,6 +3853,10 @@ impl ForwardRenderer {
                 .bloom
                 .take()
                 .unwrap_or_else(|| unreachable!("the chain was placed in the rollback above")),
+            fxaa: rollback
+                .fxaa
+                .take()
+                .unwrap_or_else(|| unreachable!("the resolve was placed in the rollback above")),
             // The default stack the view wants, no quality clamp and no
             // override, which resolves to every effect this device permits but
             // the lens one — the frame every caller of this type drew before
@@ -4421,6 +4453,12 @@ impl ForwardRenderer {
         // extent alone. Written whether or not the chain is in this frame, on
         // the two blocks above's terms — a row nobody reads costs sixteen bytes.
         self.bloom.begin_frame(device, self.frame, extent)?;
+        // The resolve's block: the reciprocal of the extent and three constants.
+        // Written on the chain's terms above — a frame that adds no resolve pays
+        // for twenty bytes nobody reads, and a block written only on the frames
+        // that use it is a block that is stale on the frame a caller switches
+        // the effect on.
+        self.fxaa.begin_frame(device, self.frame, extent)?;
 
         // Every element the pool has ever handed out, not its live count: a
         // removed instance leaves a hole and the live ones above it still have
@@ -5435,6 +5473,25 @@ impl ForwardRenderer {
                     graph.create_image("bloom-color", TransientImageDesc::scene_color(extent)),
                 )
             });
+        // Where the tonemap writes, and it is the caller's `target` on every
+        // frame that adds no resolve.
+        //
+        // **This is the one effect that changes the shape of the frame rather
+        // than adding a pass to it** — see [`crate::fxaa`]. The resolve reads
+        // what the tonemap wrote, so the tonemap has to write something the
+        // resolve can sample, and a swapchain image is not that. So with the bit
+        // on the tonemap writes a transient of the target's own description and
+        // the resolve writes the target; with it off the tonemap writes the
+        // target and there is no second image at all, which is what makes this
+        // effect's off-switch bit-identical on the three above's terms.
+        let display = if effects.contains(RenderEffects::ANTIALIASING) {
+            graph.create_image(
+                "display-color",
+                TransientImageDesc::display_color(extent, self.target_format),
+            )
+        } else {
+            target
+        };
 
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
@@ -5802,7 +5859,7 @@ impl ForwardRenderer {
             // `DontCare`, not `Clear`: the full-screen triangle writes every
             // pixel of the target, so loading or clearing it is pure bandwidth.
             .color(
-                target,
+                display,
                 LoadOp::DontCare,
                 StoreOp::Store,
                 crcbl_hal::ClearValue::default(),
@@ -5878,7 +5935,7 @@ impl ForwardRenderer {
             grid.add_pass(
                 graph,
                 frame,
-                target,
+                display,
                 scene_depth,
                 view_proj,
                 // The one inversion in the frame, and it is here rather than in
@@ -5886,6 +5943,23 @@ impl ForwardRenderer {
                 // that is usually off.
                 view_proj.inverse(),
             );
+        }
+
+        // --- the antialiasing resolve ---
+        //
+        // **After the grid, and that is the same decision the grid's placement
+        // was.** The grid is a field of thin high-contrast lines, which is the
+        // thing an edge filter exists for; drawing it into the target *after*
+        // the resolve would leave it the one aliased element in an antialiased
+        // frame. The UI goes the other way and is composited onto `target` by
+        // the caller after this, so its glyphs are never filtered — topic 18
+        // refuses to antialias text in as many words.
+        //
+        // `display` is `target` when the bit is off, and this is the branch that
+        // makes that true: no pass, no second image, and the frame the tonemap
+        // wrote is already in the caller's target.
+        if display != target {
+            self.fxaa.add_pass(graph, frame, display, target);
         }
 
         // **Last, and that is the point.** Three passes add to the statistics
@@ -7026,6 +7100,7 @@ impl ForwardRenderer {
         if let Some(grid) = self.ground_grid {
             grid.destroy(device);
         }
+        self.fxaa.destroy(device);
         self.bloom.destroy(device);
         self.ssr.destroy(device);
         self.ssao.destroy(device);
@@ -10671,10 +10746,13 @@ mod tests {
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
-        // The lens effect is not in the default camera stack, and the widest
-        // frame is the one that has it — the ground grid's argument exactly.
+        // **Both post effects forced on.** Neither is in the default camera
+        // stack — see [`RenderEffects::DEFAULT_STACK`], which leaves the lens out
+        // for one reason and the resolve out for another — and the widest frame
+        // is the one that has every effect in it, the ground grid's argument
+        // exactly.
         renderer.set_effect_request(EffectRequest {
-            programmatic: EffectOverride::none().force(RenderEffects::BLOOM, Some(true)),
+            programmatic: EffectOverride::none().force(POST_EFFECTS, Some(true)),
             ..EffectRequest::default()
         });
         let imported = swapchain_image_at(device, WIDEST_EXTENT);
@@ -10764,18 +10842,18 @@ mod tests {
         let imported = swapchain_image(device);
         let mut pool = crate::TransientPool::new();
 
-        // `BLOOM` forced on and then `off` forced off, on
+        // [`POST_EFFECTS`] forced on and then `off` forced off, on
         // [`frame_switching_off`]'s terms exactly: the default camera stack
-        // leaves the lens effect out — see [`RenderEffects::DEFAULT_STACK`] — so
-        // a control built on the default alone would have nothing for the bloom
-        // arm to remove. `force` clears the other side, so the arm whose `off`
-        // *is* `BLOOM` still resolves to off.
+        // leaves both of them out — see [`RenderEffects::DEFAULT_STACK`] — so a
+        // control built on the default alone would have nothing for their arms
+        // to remove. `force` clears the other side, so an arm whose `off` is one
+        // of them still resolves to off.
         //
         // [`frame_switching_off`]: fn@frame_switching_off
         let without = |renderer: &mut ForwardRenderer, off: RenderEffects| {
             renderer.set_effect_request(EffectRequest {
                 programmatic: EffectOverride::none()
-                    .force(RenderEffects::BLOOM, Some(true))
+                    .force(POST_EFFECTS, Some(true))
                     .force(off, Some(false)),
                 ..EffectRequest::default()
             });
@@ -10821,6 +10899,7 @@ mod tests {
                 ]
                 .as_slice(),
             ),
+            (RenderEffects::ANTIALIASING, ["fxaa"].as_slice()),
         ] {
             let labels = without(&mut renderer, off);
             assert_eq!(
@@ -10828,6 +10907,20 @@ mod tests {
                 RenderEffects::all().difference(off),
                 "{off:?}: the frame must have resolved to the set the request asked for"
             );
+            // **The control frame has to contain what this arm removes**, and
+            // that is not a restatement of the comparison below: the comparison
+            // builds `expected` by filtering `gone` out of `all_on`, so an arm
+            // naming a pass the control never recorded filters nothing, matches,
+            // and passes whether the effect draws anything or not. Removing the
+            // resolve pass entirely left this loop green until this assertion
+            // existed.
+            for label in gone {
+                assert!(
+                    all_on.iter().any(|recorded| recorded == label),
+                    "{off:?}: the every-effect frame does not record `{label}`, so removing it \
+                     below proves nothing: {all_on:#?}"
+                );
+            }
             let expected: Vec<String> = all_on
                 .iter()
                 .filter(|label| !gone.contains(&label.as_str()))
@@ -11181,16 +11274,16 @@ mod tests {
         // A shadowed light beside the cascades, so the atlas pass has draws to
         // lose rather than being empty either way.
         renderer.set_lights(&[shadowable_spot(-1.0)]);
-        // **`BLOOM` forced on, then `off` forced off.** The default camera
-        // stack leaves the lens effect out — see
+        // **[`POST_EFFECTS`] forced on, then `off` forced off.** The default
+        // camera stack leaves both of them out — see
         // [`RenderEffects::DEFAULT_STACK`] — so a control frame built on the
-        // default alone would be measuring three effects and calling it four,
-        // and the bloom arm below would be switching off something already off.
-        // `force` clears the other side, so an arm whose `off` *is* `BLOOM`
+        // default alone would be measuring three effects and calling it five,
+        // and their arms below would be switching off something already off.
+        // `force` clears the other side, so an arm whose `off` is one of them
         // still resolves to off.
         renderer.set_effect_request(EffectRequest {
             programmatic: EffectOverride::none()
-                .force(RenderEffects::BLOOM, Some(true))
+                .force(POST_EFFECTS, Some(true))
                 .force(off, Some(false)),
             ..EffectRequest::default()
         });
@@ -11943,6 +12036,36 @@ mod tests {
     ///
     /// [`the_pass_bound_is_the_widest_frame_the_renderer_records`]: fn@the_pass_bound_is_the_widest_frame_the_renderer_records
     const TEST_EXTENT: (u32, u32) = (64, 48);
+
+    /// The effects a caller has to ask for, because the default stack leaves
+    /// them out — see [`RenderEffects::DEFAULT_STACK`].
+    ///
+    /// Named rather than written out at each of the three sites that force them
+    /// on, because the point of those sites is "every effect there is" and the
+    /// bug they exist to catch is a new effect joining the set and one site
+    /// still measuring the old one while calling it the whole stack. The two are
+    /// held out of the default for different reasons — [`crate::effects`] gives
+    /// both — and share only that a test wanting the widest frame must ask.
+    const POST_EFFECTS: RenderEffects = RenderEffects::BLOOM.union(RenderEffects::ANTIALIASING);
+
+    /// Every effect this renderer draws is either in the default stack or in
+    /// [`POST_EFFECTS`].
+    ///
+    /// The guard on the three sites above: they force [`POST_EFFECTS`] on and
+    /// call the result "every effect", which is only true while nothing else is
+    /// held out. A sixth effect added outside the default stack and not added
+    /// here makes this red before it makes a pass-list assertion red — which is
+    /// the useful order, since a pass list going red says a label moved and this
+    /// says what actually happened.
+    #[test]
+    fn forcing_the_post_effects_on_reaches_every_effect_there_is() {
+        assert_eq!(
+            RenderEffects::DEFAULT_STACK.union(POST_EFFECTS),
+            RenderEffects::all(),
+            "an effect outside the default stack that no test forces on is an effect \
+             the every-effect frames below have never drawn"
+        );
+    }
 
     fn frame(device: &dyn Device, renderer: &mut ForwardRenderer, queue: QueueHandle) -> Frame {
         renderer

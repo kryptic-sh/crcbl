@@ -13,7 +13,7 @@
 #
 # That is what the native vk-against-wgpu gate did for vk against wgpu, and it
 # was the last thing `crcbl-wgpu` was kept for before that crate was deleted.
-# This is its replacement, and a wider one: eleven scenes rather than three, and
+# This is its replacement, and a wider one: every golden scene rather than three, and
 # against a
 # backend that is a genuinely separate implementation instead of a second
 # abstraction over the same Vulkan driver.
@@ -79,14 +79,14 @@ if [ ! -d "$READBACK" ]; then
   exit 2
 fi
 # A directory that exists and is empty is the shape that would otherwise render
-# eleven reference frames, compare nothing, and report success.
+# a reference frame per scene, compare nothing, and report success.
 if [ -z "$(ls -A "$READBACK" 2>/dev/null)" ]; then
   echo "run-cross-backend-e2e.sh: $READBACK is empty, so there is nothing to compare." >&2
   exit 2
 fi
 
 # Checked here rather than beside its use, so a site that cannot produce a
-# verdict costs a message instead of eleven reference renders first.
+# verdict costs a message instead of a reference render per scene first.
 DRIVER_JSON="$SITE/driver-result.json"
 if [ ! -f "$DRIVER_JSON" ]; then
   echo "run-cross-backend-e2e.sh: $DRIVER_JSON is missing, so the browser half of" >&2

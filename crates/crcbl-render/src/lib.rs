@@ -133,6 +133,7 @@ pub mod draw_gen;
 pub mod effects;
 pub mod fly;
 pub mod forward;
+mod fxaa;
 pub mod graph;
 pub mod grid;
 pub mod instance_pool;

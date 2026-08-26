@@ -895,6 +895,15 @@ mod tests {
                 &[Cbv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Uav],
             ),
             (
+                "fxaa",
+                &crcbl_shaders::FXAA,
+                &["vertexMain", "fragmentMain"],
+                // The tonemapped frame, the linear sampler that reads it, and
+                // the edge-threshold block — the same three in the same order as
+                // `tonemap` above, so `t0`, `s0` and `b0`.
+                &[Srv, Sampler, Cbv],
+            ),
+            (
                 "mesh",
                 &crcbl_shaders::MESH,
                 &["vertexMain", "fragmentMain"],

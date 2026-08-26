@@ -289,6 +289,9 @@ pub mod ssao;
 /// `ssao.slang`.
 pub mod ssr;
 
+/// The uniform block `fxaa.slang` reads, in the layout that shader declares.
+pub mod fxaa;
+
 /// The uniform block `tonemap.slang` reads, in the layout that shader declares.
 pub mod tonemap;
 
@@ -982,7 +985,7 @@ mod tests {
     /// This is the concrete shape `crcbl-render`'s passes hand the seam.
     #[test]
     fn the_graphics_shaders_offer_a_container_for_both_stages() {
-        for shader in [&MESH, &TONEMAP, &SPRITE, &UI] {
+        for shader in [&MESH, &TONEMAP, &FXAA, &SPRITE, &UI] {
             let containers = shader.dxil_containers();
             for stage in [Stage::Vertex, Stage::Fragment] {
                 let entry_point = shader

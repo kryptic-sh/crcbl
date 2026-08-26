@@ -9,8 +9,29 @@ Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
 techniques in `docs/plan/18-render-features.md`, and four sample plans were
 written to compare the rungs — `docs/plan/sample/17-mirrors.md`,
 `docs/plan/sample/18-sundial.md`, `docs/plan/sample/19-alcove.md` and
-`docs/plan/sample/20-options.md`. The ladders and the samples are planned, not
-built. What follows is what the plans could not settle.
+`docs/plan/sample/20-options.md`. The antialiasing ladder's first rung is built
+— see that topic's `FXAA 3.11 first` — and the rest of the ladders and all four
+samples are planned, not built. What follows is what the plans could not settle.
+
+### Antialiasing is opt-in and nothing turns it on (2026-08-27)
+
+`RenderEffects::ANTIALIASING` ships outside `RenderEffects::DEFAULT_STACK`, so
+the only frame in the tree that resolves an edge is `Scene::Aa`'s. Every sample,
+every other golden and every demo draws the staircase. That is deliberate — a
+resolve moves every edge in every frame it runs on, so the default flip is a
+re-bless of the whole suite — but it means the pass is exercised by two gates
+and nothing else.
+
+What flipping it needs: bless every golden the samples and `render_e2e` compare,
+on both the native and the browser paths, in one change; and decide first
+whether the `cube` failure below is fixed by it, since that frame's noise is
+along edges. Measuring that is cheap and has not been done: draw `Scene::Cube`
+through `aa_forward`'s trick — force the bit on for one run — and compare.
+
+Also unbuilt: nothing lets a **running** sample toggle it. `crcbl`'s
+`VIDEO_KEYS` carries an `antialiasing` row, so a settings file can ask for it,
+but no sample has a key bound and `apps/lantern` has no flag. The lantern is the
+natural place, on its bloom flag's terms.
 
 ### The `cube` browser golden fails and nothing has decided what to do (2026-08-27)
 

@@ -204,7 +204,7 @@ function parseArgs(argv) {
  * will look, returning the path or throwing.
  *
  * The base64 is fetched per scene rather than with the rest of the result: the
- * DevTools protocol is JSON, and eleven frames of it in one reply is several
+ * DevTools protocol is JSON, and every frame of it in one reply is several
  * megabytes on one message.
  */
 async function writeReadback(page, dir, scene) {
@@ -289,7 +289,7 @@ async function main() {
     // Pulled out of the page BEFORE the table is printed, so a scene whose
     // pixels could not be fetched or written shows in the table as what it is:
     // a scene that produced nothing to compare. Reported as a crack rather than
-    // skipped — a gate that quietly compares ten of eleven scenes is a gate
+    // skipped — a gate that quietly compares all but one of the scenes is a gate
     // that can go green while one is broken.
     for (const scene of scenes) {
       if (!scene.rendered) continue;
@@ -384,7 +384,7 @@ async function main() {
     // while a connection is open, so awaiting it first leaves `browser.stop()`
     // unreachable and the process alive. `error-scope-bench.mjs` has always had
     // this order; this file had it reversed, and that is what hung the Windows
-    // leg of this gate for three hours a run after all eleven scenes had
+    // leg of this gate for three hours a run after every scene had
     // already rendered. `serve.mjs`'s `close` now ends the sockets itself as
     // well, so neither half depends on the other being right.
     if (page) page.close();

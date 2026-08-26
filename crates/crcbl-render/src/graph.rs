@@ -2989,6 +2989,33 @@ impl TransientImageDesc {
         }
     }
 
+    /// The display-space image the tonemap writes when a resolve follows it:
+    /// the caller's own target format, rendered into and then sampled.
+    ///
+    /// **The format is a parameter where every other description here fixes
+    /// one**, and it has to be: this image stands in for the caller's target
+    /// between the tonemap and the resolve, so a format of this module's
+    /// choosing would resolve one encoding into another. The antialiasing
+    /// resolve is the only pass that reads it.
+    ///
+    /// `TRANSFER_SRC` for [`scene_color`]'s reason — a headless render can read
+    /// the display-space frame back before the resolve filters it, which is what
+    /// makes "the antialiasing pass changed the picture" checkable.
+    ///
+    /// [`scene_color`]: Self::scene_color
+    #[must_use]
+    pub const fn display_color(extent: (u32, u32), format: Format) -> Self {
+        Self {
+            extent,
+            format,
+            usage: ImageUsage::COLOR_ATTACHMENT
+                .union(ImageUsage::SAMPLED)
+                .union(ImageUsage::TRANSFER_SRC),
+            samples: 1,
+            mip_levels: 1,
+        }
+    }
+
     /// One level of `docs/plan/18-render-features.md`'s bloom chain:
     /// `Rgba16Float`, rendered into and then sampled.
     ///

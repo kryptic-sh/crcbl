@@ -16,6 +16,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Antialiasing: FXAA 3.11 over the tonemapped frame.**
+  `docs/plan/18-render-features.md`'s AA slot had been a contract for a pass
+  that did not exist; `crates/crcbl-shaders/shaders/fxaa.slang` and
+  `crates/crcbl-render/src/fxaa.rs` are that pass. One fullscreen resolve — a
+  luma edge detect and a subpixel blend along the edge it finds — with no
+  history, no motion vectors and no change to any pass in front of it.
+
+  **It is `RenderEffects::ANTIALIASING`, and a view has to ask.** Like the bloom
+  chain it is held out of `RenderEffects::DEFAULT_STACK`, so no existing frame
+  and no existing golden moves: a resolve changes every edge it runs over, and
+  switching it on by default is a re-bless of the whole suite that belongs in
+  its own change. A caller asks through the camera stack, through
+  `EffectRequest`'s override, or through the `[engine.video] antialiasing` key
+  `crcbl`'s settings stack already reads. `crcbl screenshot --scene aa` draws
+  it.
+
+  **Switching it on changes the shape of the frame**, which is worth knowing if
+  you read the graph: with the bit off the tonemap writes the caller's target,
+  and with it on the tonemap writes a `display-color` transient at the target's
+  own format and the resolve writes the target. The ground grid moves with the
+  tonemap so its thin lines are filtered; the UI composites onto the resolved
+  target afterwards, so glyphs are not.
+
+  **A new golden fixture, `Scene::Aa`** — one slab turned about the view axis so
+  its silhouette runs diagonally between two flat levels — and, because no
+  golden can tell an antialiased edge from a clean one, a test that draws that
+  scene twice and compares: 532 pixels between the two levels with the resolve,
+  zero without it, and a mean level that moves by 0.24 out of 255. It is in the
+  browser parity gate too, where it matches its golden within a channel delta
+  of 2.
+
 - **`apps/shard`, the first slice of the action-RPG sample, on the site.**
   `docs/plan/sample/15-shard.md`'s milestone 1 exists to put _content_ through
   the render paths a browser is stuck with, and this is that content: one

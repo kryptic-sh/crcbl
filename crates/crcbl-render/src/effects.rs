@@ -101,20 +101,38 @@ bitflags::bitflags! {
         /// `crate::bloom`. It is also the first bit here that is **not** in
         /// [`RenderEffects::DEFAULT_STACK`]; that constant says why.
         const BLOOM = 1 << 3;
+        /// FXAA — the fullscreen edge filter that resolves the tonemapped
+        /// frame into the target.
+        ///
+        /// The second bit **not** in [`RenderEffects::DEFAULT_STACK`], and for a
+        /// different reason from [`BLOOM`](Self::BLOOM)'s: this one is not a
+        /// lens, it is a resolve, and it belongs in the default stack on the
+        /// merits. What keeps it out for now is that turning it on moves every
+        /// golden in the suite at once — an edge filter has no additive-zero
+        /// form to land behind, the way the probe and bloom slices had — so the
+        /// flip is its own change with its own re-bless rather than a side
+        /// effect of the pass arriving. `docs/plan/18-render-features.md`'s
+        /// antialiasing section is where that ladder is written down.
+        const ANTIALIASING = 1 << 4;
     }
 }
 
 impl RenderEffects {
     /// What a view that has declared no render stack asks for.
     ///
-    /// Every effect but [`BLOOM`](Self::BLOOM), and the line between them is not
-    /// arbitrary: shadows, ambient occlusion and reflections each approximate
-    /// light transport that is **physically present in the scene**, so a view
-    /// that says nothing about them is a view asking for the most correct
-    /// picture the device can draw. Bloom is a property of a **lens** — topic 18
-    /// files it under the post stack, whose contents that document says are
-    /// "data-driven per camera (RON: which passes, parameters)" — and a camera
-    /// that has been given no stack has been given no lens.
+    /// The three light-transport effects, and neither of the two post passes.
+    /// The line is not arbitrary: shadows, ambient occlusion and reflections
+    /// each approximate light transport that is **physically present in the
+    /// scene**, so a view that says nothing about them is a view asking for the
+    /// most correct picture the device can draw. Bloom is a property of a
+    /// **lens** — topic 18 files it under the post stack, whose contents that
+    /// document says are "data-driven per camera (RON: which passes,
+    /// parameters)" — and a camera that has been given no stack has been given
+    /// no lens.
+    ///
+    /// [`ANTIALIASING`](Self::ANTIALIASING) is out for a different reason,
+    /// written on the bit itself: it belongs here on the merits and is held out
+    /// only until the re-bless it forces is taken deliberately.
     ///
     /// So the default is the most correct picture and no lens, and a view that
     /// wants the lens asks for it: through its own stack, or through
@@ -122,8 +140,11 @@ impl RenderEffects {
     ///
     /// This is what [`EffectRequest::default`]'s
     /// [`camera`](EffectRequest::camera) holds, and it is why adding the bloom
-    /// bit did not change a single frame the engine already drew.
-    pub const DEFAULT_STACK: Self = Self::all().difference(Self::BLOOM);
+    /// bit — and then the antialiasing bit — did not change a single frame the
+    /// engine already drew.
+    pub const DEFAULT_STACK: Self = Self::all()
+        .difference(Self::BLOOM)
+        .difference(Self::ANTIALIASING);
 
     /// Every effect and the one word a report spells it with, in bit order.
     ///
@@ -142,6 +163,7 @@ impl RenderEffects {
         (Self::AMBIENT_OCCLUSION, "ao"),
         (Self::REFLECTIONS, "ssr"),
         (Self::BLOOM, "bloom"),
+        (Self::ANTIALIASING, "aa"),
     ];
 
     /// This set as a debug panel row and a headless summary line spell it:
@@ -423,26 +445,28 @@ mod tests {
     /// consumer that does exactly that.
     ///
     /// What it guards is the claim [`RenderEffects::DEFAULT_STACK`]'s docs make:
-    /// adding the bloom bit changed no frame this workspace already drew. A
-    /// default that quietly included it would have re-blessed every golden image
-    /// in the tree, and each of them would still have been a plausible picture.
+    /// adding the bloom bit, and then the antialiasing bit, changed no frame
+    /// this workspace already drew. A default that quietly included either would
+    /// have re-blessed every golden image in the tree, and each of them would
+    /// still have been a plausible picture — which is the whole difficulty: a
+    /// wrongly-defaulted post pass does not look like a bug.
     #[test]
-    fn the_default_stack_is_every_effect_but_the_lens_and_a_view_can_still_ask() {
+    fn the_default_stack_is_the_light_transport_effects_and_a_view_can_still_ask() {
         assert_eq!(
             RenderEffects::DEFAULT_STACK,
-            RenderEffects::all().difference(RenderEffects::BLOOM),
+            RenderEffects::all()
+                .difference(RenderEffects::BLOOM)
+                .difference(RenderEffects::ANTIALIASING),
         );
-        assert!(
-            !EffectRequest::default()
-                .camera
-                .contains(RenderEffects::BLOOM)
-        );
-        assert!(
-            !EffectRequest::default()
-                .resolve(RenderEffects::all())
-                .contains(RenderEffects::BLOOM),
-            "a view that said nothing must not get a lens effect"
-        );
+        for post in [RenderEffects::BLOOM, RenderEffects::ANTIALIASING] {
+            assert!(!EffectRequest::default().camera.contains(post));
+            assert!(
+                !EffectRequest::default()
+                    .resolve(RenderEffects::all())
+                    .contains(post),
+                "a view that said nothing must not get a post pass"
+            );
+        }
 
         // The camera's own stack, which is the layer topic 18 puts the post
         // stack in.
@@ -454,7 +478,9 @@ mod tests {
 
         // And the override, for a caller with no stack of its own.
         let forced = EffectRequest {
-            programmatic: EffectOverride::none().force(RenderEffects::BLOOM, Some(true)),
+            programmatic: EffectOverride::none()
+                .force(RenderEffects::BLOOM, Some(true))
+                .force(RenderEffects::ANTIALIASING, Some(true)),
             ..EffectRequest::default()
         };
         assert_eq!(forced.resolve(RenderEffects::all()), RenderEffects::all());

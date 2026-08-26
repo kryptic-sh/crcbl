@@ -168,6 +168,8 @@ OPTIONS:
                                                floor
                            bloom               one very bright patch and its
                                                halo
+                           aa                  a slab whose silhouette runs
+                                               diagonally, resolved
                            probes              a room lit by irradiance probes
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
@@ -1198,6 +1200,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::Ao,
         Scene::Ssr,
         Scene::Bloom,
+        Scene::Aa,
         Scene::Probes,
         Scene::Sprite,
         Scene::Ui,
@@ -1221,6 +1224,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::Ao => "ao",
         Scene::Ssr => "ssr",
         Scene::Bloom => "bloom",
+        Scene::Aa => "aa",
         Scene::Probes => "probes",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",

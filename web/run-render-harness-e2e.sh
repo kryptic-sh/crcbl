@@ -40,7 +40,7 @@
 # `Tolerance::RASTERISER` exactly as the native suites do; an excused scene is a
 # scene whose *whole* comparison is set aside on this platform, named in the log
 # every run, and failing the moment it starts passing. Widening the tolerance
-# instead would quietly weaken all eleven.
+# instead would quietly weaken every one of them.
 #
 # ENVIRONMENT
 #   SITE_DIR                          Where the harness site is assembled.

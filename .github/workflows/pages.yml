@@ -753,7 +753,7 @@ jobs:
   # the goldens only ever covered the offscreen native path and the browser gate
   # only ever read text.
   #
-  # `web/run-render-harness-e2e.sh` closes it: it drives the same eleven
+  # `web/run-render-harness-e2e.sh` closes it: it drives the same
   # backend-agnostic `Scene`s through `crcbl-webgpu` in a real browser, reads
   # each frame back, and hands the bytes to `crcbl-golden` at
   # `Tolerance::RASTERISER` — the same comparator and the same numbers
@@ -775,7 +775,7 @@ jobs:
   # need applies. Headless Chromium plus SwiftShader is the whole environment.
   #
   # **`--expect-fail ssr,ui` IS A MEASUREMENT, NOT A TOLERANCE.** Nine of the
-  # eleven scenes match SwiftShader's output exactly within
+  # scenes match SwiftShader's output exactly within
   # `Tolerance::RASTERISER`. Two do not, and reproduce to the digit across runs:
   # `ssr` at 58 grossly-wrong pixels and ssim 0.988822, `ui` at 506 and ssim
   # 0.983257. They are rasteriser differences rather than backend defects — the
@@ -787,7 +787,7 @@ jobs:
   # render, still compare, still print their numbers every run, and
   # `web/tools/render-harness-verdict.mjs` fails this job the moment either one
   # starts matching, or the moment anything else stops. Widening the tolerance
-  # instead would have quietly weakened all eleven.
+  # instead would have quietly weakened every one of them.
   #
   # LINUX ONLY, DELIBERATELY. The expected-fail list is exact in both
   # directions, so it can only be written for a platform whose per-scene outcome
@@ -797,7 +797,7 @@ jobs:
   #   macOS    would drive a real Apple adapter, where the two SwiftShader
   #            differences plausibly do not arise at all — which is exactly the
   #            guess this mechanism refuses to encode. It needs one run to
-  #            record what the eleven scenes actually do there.
+  #            record what the scenes actually do there.
   #   Windows  forces SwiftShader (`probe-windows` measured that a GPU-less
   #            `windows-latest` exposes no WebGPU through D3D), so it would
   #            likely fail the same two — still a guess. Note that
@@ -828,7 +828,7 @@ jobs:
             adapter: swiftshader
             excuse: --expect-fail ssr,ui
             timeout: 45
-          # **macOS runs on the machine's own GPU, and gates all eleven.** Not a
+          # **macOS runs on the machine's own GPU, and gates every one.** Not a
           # preference — Chrome's Dawn has no Vulkan backend on macOS and so has
           # no software adapter at all, which is why `web/tools/probe-e2e.mjs`'s
           # table says `auto` resolves to hardware there. Measured on 2026-08-20
@@ -844,7 +844,7 @@ jobs:
             adapter: hardware
             excuse: ''
             # Ten more than Linux: this leg also builds `crcbl-cli` natively and
-            # renders eleven reference screenshots through Metal for the
+            # renders a reference screenshot per scene through Metal for the
             # cross-backend step.
             timeout: 55
           # Windows takes SwiftShader like Linux, so it asks the same rasteriser
@@ -907,7 +907,7 @@ jobs:
       #
       # The ALSA headers first: the comparator is a native build and the
       # workspace reaches `cpal` through `crcbl-audio`, so it links ALSA. This
-      # job's first CI run failed there rather than on any golden — all eleven
+      # job's first CI run failed there rather than on any golden — every one of them
       # scenes rendered, and then `alsa-sys` could not find its headers.
       # `libasound2-dev` because `alsa-sys` links against it and this job's first
       # CI run failed there rather than on any golden. `mesa-vulkan-drivers` and
@@ -998,7 +998,7 @@ jobs:
       #
       # That is what the native vk-against-wgpu gate did, and it was the one
       # thing `crcbl-wgpu` was kept for — so this is its replacement, and a wider
-      # one: eleven scenes rather than three, against a genuinely separate
+      # one: every golden scene rather than three, against a genuinely separate
       # implementation rather than a second abstraction over one Vulkan driver.
       # Both the crate and that gate went on 2026-08-21.
       #
@@ -1027,7 +1027,7 @@ jobs:
       # and the reference on lavapipe: two software rasterisers, so `ssr` and
       # `ui` have to be excused there. Here both halves are **the same Metal
       # device** — the harness above ran at `adapter hardware`, and this renders
-      # the same eleven scenes natively through `CRCBL_GPU=mtl` on the machine
+      # the same scenes natively through `CRCBL_GPU=mtl` on the machine
       # that just drew them. Same GPU, same driver, no committed reference
       # between them that could have drifted with both.
       #
@@ -1039,11 +1039,11 @@ jobs:
       # not to add a name here.
       #
       # This is also the heir to `cross-backend image compare (vk vs wgpu)` on a
-      # second platform: eleven scenes rather than three, and a browser against a
+      # second platform: every golden scene rather than three, and a browser against a
       # genuinely separate implementation rather than a second abstraction over
       # one driver. It reuses the readbacks the step above produced, so neither
       # the wasm build nor the browser run is repeated — what it adds is a native
-      # `crcbl-cli` build and eleven screenshots.
+      # `crcbl-cli` build and one screenshot per scene.
       - name: Hold the browser's pixels against Metal's
         if: runner.os == 'macOS'
         run: ./web/run-cross-backend-e2e.sh --reference mtl
