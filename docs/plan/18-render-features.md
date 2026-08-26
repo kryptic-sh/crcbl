@@ -397,6 +397,74 @@ Two consequences worth stating before somebody meets them:
   tail the device selected; nothing in the shadow path depends on the binding
   model.
 
+### The quality ladder, taken 2026-08-27
+
+What ships, first, because the ladder is only readable against it: **stable
+sphere-fitted cascades snapped to texels** — `crates/crcbl-render/src/shadow.rs`
+fits a sphere around the eye rather than a box around the frustum, so rotating
+the camera cannot change a cascade's extent, and quantises the light-space
+origin to whole texels — **3×3 hardware PCF through a comparison sampler**,
+which is `mesh.slang`'s `tile_pcf` taking nine `SampleCmpLevelZero` taps one
+atlas texel apart and dividing by nine, the texel-denominated bias of the fifth
+decision, the geometric-normal slope of the sixth, and the **2026-08-26
+re-tiling** that bought a second point light by shrinking `SHADOW_TILE` rather
+than growing the image.
+
+**The re-tiling has a measured cost, and it is not hypothetical.** Since that
+change the `cube` browser-path golden fails on linux and windows: **64 grossly
+wrong pixels** against the budget of 49 that
+`crcbl_golden::Tolerance::RASTERISER`'s `max_gross_ratio` of one in a thousand
+allows a 256×192 frame, at a **max channel delta of 216**, with an SSIM of
+**0.998945** — which clears that tolerance's floor of 0.99, so the picture is
+structurally the same picture and the failure is localised rather than a frame
+that stopped drawing. The diff is scattered noise along shadow edges: the cube's
+face gradients, and the pyramid's edges. macOS passes. **This is unresolved**,
+and it is recorded here as evidence that the tile is now the binding constraint
+on shadow quality — every map is 768 texels a side where it was 1024 — not as a
+defect with a fix attached.
+
+The ladder, in the order it should be climbed:
+
+- **Normal-offset bias.** The fifth decision's own closing line named it and it
+  is still the cheapest real win: offsetting the receiver **along its normal**
+  before projecting moves the sample sideways across the map rather than moving
+  the surface towards the light, so it removes acne without buying the
+  peter-panning a depth bias buys. What it earns back is the constant term the
+  sixth decision's table prices in centimetres of lantern's lit strip.
+- **Cascade cross-fade.** The switch between cascades is hard today, so wherever
+  two cascades meet there is a seam — and the fifth decision made it _more_
+  visible, not less, by biasing a near cascade proportionally less than a far
+  one. A band of overlap blended by the split distance is the standard answer,
+  and it costs a second `tile_pcf` inside the band and nothing outside it.
+- **A rotated Poisson-disc PCF kernel.** A wider penumbra at the same tap count,
+  which a 3×3 box cannot trade for at any price. **The rotation must be an
+  integer-indexed constant table**, for the reason the AO section gives at
+  length: a per-pixel float hash amplifies by construction exactly the driver
+  differences a golden cannot absorb, and a shadow comparison is every bit as
+  binary as an AO sample.
+- **PCSS, or contact hardening.** A blocker search over the map, then a filter
+  whose width comes from how far the blockers it found are — the industry
+  standard soft shadow, and the first rung here that costs a **second sampling
+  loop** rather than a different kernel in the one loop that exists. It is also
+  the first that makes the tile resolution above bind harder, since a blocker
+  search reads a neighbourhood the re-tiling already made coarser.
+
+Refused, with the reasons:
+
+- **VSM and EVSM.** Storing moments makes a shadow map filterable, so it can be
+  blurred, mipped and sampled cheaply — and it **light-leaks through thin
+  geometry**, because two depths summarised into one distribution admit a
+  receiver between them. A leak is a **correctness** artefact rather than a
+  quality one: it puts light where the scene has none, which reads as a hole in
+  a wall and not as a soft edge. Every rung above trades quality for cost; this
+  one trades the thing the pass exists to compute.
+- **Virtual shadow maps.** The modern answer, and far too large to sit inside a
+  quality pass: it is a page table, a feedback buffer saying which pages a frame
+  actually sampled, and a cache keeping the pages a static scene did not
+  invalidate. That is a topic, not a rung — it would **replace** the fixed tile
+  grid this module is built on rather than improve it — so if it is ever wanted
+  it gets its own document.
+
 ## Screen-space AO: what the one-line row was missing (decided 2026-08-13)
 
 > **Built 2026-08-14; what follows is the survey that preceded it.** Two of the
@@ -587,6 +655,58 @@ is what the first slice said it would be.
   silhouette measures about a thirteenth over the band two rows in with a box
   kernel and about a fortieth with this one, on both of the rasterisers it was
   run on.
+
+### GTAO, taken 2026-08-27: the ground the refusal stood on has moved
+
+The decision above says "Not GTAO yet" and
+`crates/crcbl-shaders/shaders/ssao.slang`'s header says the same in its own
+words — the horizon integral is several times the work for quality nobody can
+resolve at the goldens' 256×192, and CI's rasterisers are software. **That is a
+cost argument, and it never weighed the thing this section spends its longest
+paragraph on.**
+
+What ships sums **binary** depth comparisons. This section's own determinism
+rule is that one such comparison landing on the threshold resolves differently
+on two drivers and swings that pixel by an eighth, which is why the rotation is
+a table and why the blur is not optional. GTAO's horizon-visibility integral is
+**continuous**: a driver disagreeing in the last bit moves a horizon angle by a
+hair and the occlusion with it, where a binary sum cliffs. **So GTAO degrades
+gracefully exactly where the shipped pass cliffs, which makes it better for the
+goldens rather than worse** — and that, rather than a quality opinion, is what
+reopens it.
+
+**The upgrade is contained where the shader's header already says it is.**
+`occlusion_at` becomes the integral, and `ROTATIONS` becomes a slice-offset
+table indexed the same way, because the rule that a rotation is an
+integer-indexed constant and never a float hash survives the technique change
+untouched. The pass, the `R8Unorm` resource, the binding, `ssao_blur.slang` and
+the structural-ratio test do not move.
+
+**Bent normals are the second half, and they are what make this worth more than
+a quality bump.** A scalar occlusion can only _scale_ the ambient term; a bent
+normal is a direction the ambient term can be sampled _along_, which is exactly
+the hook the irradiance-probe section left open — `probe_irradiance` already
+takes a normal and would take that one. It is also the honest route to specular
+occlusion, which the SSR section refuses outright and refuses **correctly**: a
+scalar AO is the wrong term for a reflection, and a bent normal with a cone
+angle is the right one. That refusal stands until this pair exists.
+
+**SSAO stays as the cheap tier** rather than being deleted, on the antialiasing
+ladder's own FXAA-under-SMAA pattern: eight taps and a comparison is a real
+budget on a software rasteriser and on a small device, and the two techniques
+share the pass, the resource, the blur and the test.
+
+Refused, with the reasons:
+
+- **HBAO and HBAO+.** They read the same depth and are superseded by GTAO on it,
+  so building one is a step onto a rung that is already obsolete. Nothing is
+  learned on the way up that the destination does not already contain.
+- **Any AO that needs a normal attachment before the SSR section's escalation
+  clause actually fires.** That clause names its own trigger — a fringe of
+  unrelated colour one pixel deep at silhouettes — and the attachment is its
+  remedy, not AO's wish. For AO a wrong reconstructed normal costs a pixel an
+  eighth of its occlusion, which is the budget this section already declined to
+  spend a colour target on.
 
 ## Screen-space reflections (decided 2026-08-14)
 
@@ -845,6 +965,48 @@ attachment would overwrite the opaque `F0` behind it while the scene colour at
 that pixel is a blend. Every SSR has this; writing it down is what stops the
 transparency row rediscovering it as a bug.
 
+### Taken 2026-08-27: Hi-Z marching, and a colour pyramid that may already exist
+
+The row above names "No Hi-Z traversal", and the roughness section concedes that
+cone tracing is the better technique. This is the quality-and-performance pass
+that collects both, and it is one slice because they share the march.
+
+- **Hi-Z marching replaces the fixed-stride DDA.** A min-max depth pyramid lets
+  a ray climb to whichever level its current cell is empty at and step across
+  the whole of it, so a march crosses a frame in `O(log n)` steps where a fixed
+  stride spends a constant number of taps at a constant spacing. That buys both
+  ends of the trade the current march makes: the cost falls, and the reach stops
+  being a fixed share of the frame, so a reflection can find something the far
+  side of a room. **The determinism cost is real and is stated rather than waved
+  at**: a pyramid is a reduction, so its levels are float arithmetic four
+  rasterisers perform independently and the goldens have to absorb the
+  difference. The mitigation is the one the current march already uses — no
+  jitter of any kind, and a loop bound that is a constant — under this section's
+  standing rule that every real check is a structural ratio between two blocks
+  of one frame.
+- **Cone tracing over a colour mip chain, for roughness.** `ssr.slang`'s header
+  refuses it on two costs: building a colour pyramid, and a `SampleLevel` at a
+  computed LOD. Half of that has changed under it — **the bloom downsample chain
+  is already a colour pyramid of the scene**, built every frame a view asks for
+  bloom, so the pass that would have had to build one may be able to borrow it.
+  That is flagged as a thing to **verify**, not as a saving already banked: the
+  chain's format, its extents, the mip it stops at and its lifetime inside the
+  graph all have to agree with what a cone trace wants, and it is drawn only
+  when the bloom bit is on — which no view in this workspace but the
+  `Scene::Bloom` fixture sets. The computed-LOD read is untouched by any of that
+  and remains the harder half of the refusal.
+- **Temporal accumulation is still blocked, and blocked on the antialiasing
+  section's blocker exactly**: motion vectors, and a prev-transform slot in
+  `GpuInstance` that does not exist. **One blocker, two features.** Whoever pays
+  for TAA's instance widening pays for temporal SSR in the same change, which is
+  the strongest argument for taking that slot once rather than twice.
+- **Planar reflections stay refused for this row**, and stay the right answer
+  for the render-to-texture mirror this document already names. Nothing above
+  weakens that paragraph: a planar pass is per-plane, is a second geometry pass
+  per mirror, and is useless on anything curved.
+- **Ray-traced reflections stay at P7C**, unchanged. This slice improves the
+  raster twin; it does not move the row the twin exists beside.
+
 ## Post-processing stack
 
 Pipeline order (all at internal render resolution, before the topic 15
@@ -877,12 +1039,11 @@ interactions below unchanged.
   so what is owed here is the operator, not the pass, the transient or the
   `TonemapParams` block. Fixed exposure is a runtime uniform now; auto-exposure
   (histogram, GPU reduce) is still later.
-- **AA (MVP)**: **FXAA** — cheap, single pass, no history. **Unbuilt**: there is
-  no `fxaa.slang`, no resolve pass in the graph and no `RenderEffects` bit for
-  one, so every frame this engine draws is unresolved. **TAA post-MVP** (needs
-  motion vectors in the G-pass + history management + the ghosting fight; motion
-  vectors slot into the instance path when TAA lands). MSAA rejected (fights
-  deferred-ish/HDR pipelines and the browser; FXAA→TAA is the path).
+- **AA (MVP)**: **FXAA**, then SMAA 1x, with TAA post-MVP and MSAA priced rather
+  than rejected — the whole ladder, what each rung costs in this tree and what
+  is refused are the **Antialiasing** section below. **Unbuilt**: there is no
+  `fxaa.slang`, no resolve pass in the graph and no `RenderEffects` bit for one,
+  so every frame this engine draws is unresolved.
 
   **The prev-transform slot is not reserved**, whatever this row claimed until
   2026-08-27. `crcbl_shaders::mesh::GpuInstance` carries `transform`, `mesh`,
@@ -948,6 +1109,156 @@ dispatches them cannot disagree.
   context. `crcbl::settings`' `VIDEO_KEYS` is the one place a key is spelled,
   and a key that is absent clamps nothing, because this layer may only remove.
 
+## Antialiasing
+
+The stack's AA slot, and the ladder that runs through it. **Nothing in this
+engine resolves an edge today** — no `fxaa.slang`, no resolve pass in the graph,
+no `RenderEffects` bit, and `crcbl_hal::MultisampleState`'s default is one
+sample — so that row is a contract for a pass that does not exist rather than a
+description of a frame.
+
+### FXAA 3.11 first
+
+One fullscreen pass over the tonemapped image: a luma edge detect, a subpixel
+blend along the edge it found, no history, no new attachment and no change to
+any pass in front of it. It is the cheapest thing that removes the staircase,
+and it is the tier that stays after the rung above it lands.
+
+**Its template is `crates/crcbl-shaders/shaders/bloom_composite.slang` and not
+`crates/crcbl-shaders/shaders/tonemap.slang`**, which is worth saying because
+the obvious answer is the wrong one. The tonemap is a 1:1 `Load` at an integer
+pixel and deliberately samples no neighbour — that is the whole of its
+determinism argument. The bloom composite already carries both halves FXAA
+needs: the same fullscreen triangle out of `SV_VertexID`, and a neighbourhood
+gathered around a UV through an `inv_source` texel-size uniform its Rust mirror
+writes once per frame. An `fxaa.slang` is that file with the tent replaced by
+the edge detect.
+
+What it costs here, item by item, because none of it is hypothetical:
+
+- One `.slang` source and **four committed artifact sets** — SPIR-V, WGSL, MSL
+  and DXIL — each hashed into the manifest `crates/crcbl-shaders/tools/` writes
+  and `--check` gates.
+- A params mirror under `crates/crcbl-shaders/src/`, on
+  `crcbl_shaders::bloom::BloomParams`'s terms: one block, declared once,
+  agreeing with the source member for member.
+- **A fifth `RenderEffects` bit, which is not free.**
+  `crates/crcbl-render/src/effects.rs`'s `NAMES` table is as long as the type
+  has flags, so an unnamed fifth effect does not compile, and
+  `every_effect_is_named_exactly_once_and_the_row_prints_them` pins the exact
+  string `DEFAULT_STACK.row()` produces — the row every sample's summary line
+  and debug panel print. Putting the bit in the default stack changes that
+  string, so the assertion moves deliberately rather than by surprise.
+- A pass in `crates/crcbl-render/src/forward.rs` shaped like the tonemap block
+  it follows: a pipeline, a layout, a params buffer per frame in flight and a
+  bind-group ring keyed on the views it reads. `RENDER_PASSES` grows a term and
+  `fullscreen_passes` grows a branch, which is what keeps the frame's timer
+  count matching the frame.
+- **A re-bless of every golden the bit is on for.** FXAA moves every edge in
+  every frame it runs on, so there is no additive-zero property to land it
+  behind — the probe and bloom slices had one and this does not. The switch
+  therefore decides how much of the suite moves, and the honest default is the
+  one that moves it exactly once.
+
+### SMAA 1x second, and it is the real industry standard step
+
+**When FXAA's over-blur of text and thin geometry starts showing, the engine
+reaches for SMAA 1x** — not for TAA, and not for a wider FXAA preset. Three
+passes: an edge detection, a blend-weight calculation that looks the detected
+pattern up in a precomputed **area** table and a **search** table, and a
+neighbourhood blend that applies the weights. Each is the fullscreen shape the
+tier below establishes, so the pass machinery is the same machinery a third
+time.
+
+Two things about it are specific to this tree:
+
+- **The lookup tables are a data cost, not a computation.** They are on the
+  order of 160 KB and have to arrive as **committed bytes** with a generator and
+  a `--check` mode behind them, on `cook-clusters`' precedent and hashed the way
+  `spirv/manifest.txt` hashes an artifact. Deriving them at start-up instead
+  would put a table four rasterisers computed independently underneath every
+  golden in the suite, which is the read this file's determinism arguments spend
+  their whole length avoiding.
+- **It is historyless, so it is deterministic by construction**, and that is
+  what makes it golden-safe where TAA is not. Its inputs are one frame's pixels
+  and two constant tables; no frame it draws is a function of how many frames
+  preceded it.
+
+FXAA does not leave when SMAA arrives. **It stays as the cheap tier**, on the
+terms `RenderEffects` already gives the other pairs: a tier that is off is a
+frame with fewer passes, not a shader branch.
+
+### TAA is specified, still post-MVP, and the blocker is named exactly
+
+TAA needs four things this tree does not have:
+
+- **A per-frame subpixel jitter on the projection**, which changes the camera
+  matrix every golden in the suite is drawn through.
+- **Motion vectors**, which is a second colour target on the forward pass and a
+  velocity per fragment. The SSR section's escalation clause is the shape — one
+  target state, one transient, the fragment stage's return struct — but a
+  velocity is not reconstructible from depth the way a normal is, so it is a
+  real widening rather than a contained one.
+- **A history target with neighbourhood clamping**, which makes a frame a
+  function of how many frames were drawn before it. That is the property this
+  document already refuses in writing for SSR history and again for DDGI.
+- **A prev-transform slot in `GpuInstance`, which does not exist.** The AA row
+  in the stack above carries that correction and the arithmetic behind it, and
+  nothing here repeats it.
+
+`crcbl_render::skinning`'s `SkinnedRegion::previous_base` is the half of the
+reservation that **was** taken: topic 17's 2026-07-27 correction double-buffers
+the skinned-output pool region from day one and a frame alternates which run it
+writes. It has no reader outside that module's tests, because there is no pass
+to read it. So the animation side of TAA is paid for and the instance side is
+not, which is the honest state of the row.
+
+### A seventh, taken 2026-08-27: MSAA is reopened, priced, and still not the default
+
+The AA row rejected MSAA for fighting "deferred-ish/HDR pipelines", and **that
+is deferred-renderer reasoning applied to a renderer that is not deferred**.
+This engine is clustered forward, and the "Clustered forward" section above
+rejected deferred partly _because_ deferred fights MSAA. A rejection cannot be
+inherited from the argument it was the counterweight to.
+
+The seam already carries it. `crates/crcbl-hal/src/pipeline.rs`'s
+`MultisampleState` has `samples` and `alpha_to_coverage`, every pipeline in the
+tree takes one, and its `Default` says in as many words that MSAA is available
+and never the default. So the honest position is not "rejected" but **viable and
+priced**, and the price is specific:
+
+- **The depth prepass has to be multisampled too.** The forward pass attaches
+  the depth the prepass wrote, and a single-sample depth image cannot be
+  attached beside a multisampled colour target.
+- **Both screen-space passes read that depth, and each wants one sample of it.**
+  `ssao.slang` reconstructs a normal from four neighbouring depths and
+  `ssr.slang` marches it tap by tap. So MSAA buys either a depth **resolve**
+  before those passes — a pass and an image the frame does not have — or
+  per-sample versions of both, which is the occlusion pair and the reflection
+  pair rewritten.
+
+That is why it is not the default, and it is a reason rather than a refusal.
+**MSAA is the right answer for a forward renderer doing little screen-space
+work**; FXAA and then SMAA are the right answer for this one for exactly as long
+as SSAO and SSR are in the stack. A view that drops both — which the per-camera
+effect layer above already allows — is a view where the arithmetic flips, and
+the reader holding that view is the one who should make the call.
+
+### What is refused
+
+- **DLSS.** Single-vendor and closed: it runs on one hardware line behind an
+  SDK, where every other path in this engine is held to being the same code on
+  all four backends. A quality tier that exists on one adapter is a second
+  renderer wearing a capability flag.
+- **FSR 2 and FSR 3.** Temporal, so they inherit **every** TAA blocker above —
+  the jitter, the motion vectors, the instance slot — and add a history of their
+  own on top. Being vendor-neutral answers the objection to DLSS and touches
+  none of the reasons TAA is post-MVP.
+- **Any AA that resolves after the UI pass.** The UI composites at native
+  resolution after the upscale seam, deliberately, so its text is rasterised
+  sharp. Running an edge filter over it afterwards blurs glyphs that were never
+  aliased, which is a regression with a quality setting's name on it.
+
 ## Interactions (kept honest)
 
 - Render-scale upscale (topic 15) happens **after** tonemap+AA: post chain costs
@@ -965,17 +1276,21 @@ dispatches them cannot disagree.
 
 ## Delivery
 
-| Slice                                                                 | Phase                                                                                   |
-| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| HDR target + exposure/tonemap pass                                    | P7 — built at P1. The **filmic curve** and **FXAA** are still owed; see the post stack  |
-| Sun CSM (culling-integrated, PCF)                                     | P7 — built. The **cascade debug overlay** is not                                        |
-| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`        |
-| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C                                                                                     |
-| Ray-traced shadows + AO                                               | P7C                                                                                     |
-| Ray-traced reflections                                                | P7C                                                                                     |
-| Ray-traced global illumination                                        | P7C                                                                                     |
-| Bloom chain                                                           | **Built 2026-08-23** (P10) — off unless a view asks; see `RenderEffects::DEFAULT_STACK` |
-| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP                                                                                |
+| Slice                                                                                                                                         | Phase                                                                                                                                                                                     |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HDR target + exposure/tonemap pass                                                                                                            | P7 — built at P1. The **filmic curve** is still owed; see the post stack                                                                                                                  |
+| Antialiasing rung 1: **FXAA 3.11**                                                                                                            | P7 — unbuilt, and it is the whole of the stack's AA row today                                                                                                                             |
+| Sun CSM (culling-integrated, 3×3 PCF)                                                                                                         | P7 — built. The **cascade debug overlay** is not                                                                                                                                          |
+| Shadow ladder rung 1: **normal-offset bias**                                                                                                  | P7 — the fifth decision named it and the sixth's constants are what it buys back                                                                                                          |
+| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes                                                                           | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`                                                                                                          |
+| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats`                                                                         | P7C                                                                                                                                                                                       |
+| Ray-traced shadows + AO                                                                                                                       | P7C                                                                                                                                                                                       |
+| Ray-traced reflections                                                                                                                        | P7C                                                                                                                                                                                       |
+| Ray-traced global illumination                                                                                                                | P7C                                                                                                                                                                                       |
+| Bloom chain                                                                                                                                   | **Built 2026-08-23** (P10) — off unless a view asks; see `RenderEffects::DEFAULT_STACK`                                                                                                   |
+| The render quality pass: **SMAA 1x**, **GTAO + bent normals**, **Hi-Z + cone-traced SSR**, shadow cross-fade → rotated Poisson PCF → **PCSS** | P10, with the bloom chain, for the reason that row gives: the profiler HUD is what shows a quality rung's cost honestly. Each rung's section above says what it costs and what it refuses |
+| MSAA                                                                                                                                          | **No phase, and not a rejection** — viable and priced by the seventh decision, and not the default for exactly as long as SSAO and SSR read a single-sample depth                         |
+| Auto-exposure; TAA (jitter, motion vectors, the `GpuInstance` slot); temporal SSR; shadow atlases                                             | post-MVP. The instance slot is **one blocker for two features** — see the antialiasing and reflection sections                                                                            |
 
 **P7B and P7C are new phases** carrying the raster twin and the ray-traced path
 respectively; the roadmap's phase table is authoritative for their ordering. The
@@ -995,12 +1310,30 @@ under both paths side by side. Exit criteria of the other samples inherit
   arrived, and the fifth and sixth decisions above are the record of fighting it
   — bias denominated in tile texels, slope read off the geometric normal rather
   than the shading one. Stable snapping and the golden frames did the work; the
-  debug overlay that was supposed to help is still unbuilt.
+  debug overlay that was supposed to help is still unbuilt. **It has not
+  finished arriving**: the shadow ladder's own decision records a `cube` golden
+  that has failed on linux and windows since the 2026-08-26 re-tiling and is
+  unresolved, which is why normal-offset bias is a P7 row above rather than part
+  of the P10 quality pass.
 - **Post-stack perf in a browser**: each pass is simple, but measure — the horde
-  web demo budget (S3) includes the stack.
+  web demo budget (S3) includes the stack. The quality pass adds passes to it:
+  SMAA 1x is three where FXAA is one, and a Hi-Z march builds a pyramid before
+  it walks one.
+- **An AA rung re-blesses the suite, and there is no additive-zero form of it.**
+  The probe and bloom slices could land switched off and move nothing; FXAA
+  moves every edge in every frame the bit is on for. So the risk is not the
+  filter, it is deciding once which goldens carry it and re-blessing them once
+  rather than a scene at a time.
+- **A Hi-Z pyramid puts a reduction underneath the reflection goldens.** Every
+  level is float arithmetic four rasterisers perform independently, where the
+  fixed-stride march reads the prepass directly. The SSR section's standing rule
+  — structural ratios rather than tolerances, and never a per-driver re-bless —
+  is what has to absorb it, and it was written before this rung was scheduled.
 - **TAA later ≠ never**: reserving the prev-transform slot now was the cheap
-  insurance and it was not taken — see the AA row above. Everything else about
-  TAA stays post-MVP.
+  insurance and it was not taken — see the AA row above. What has changed is the
+  price of not taking it: **temporal SSR is blocked on the same slot**, so the
+  widening is owed to two features rather than one, and `SkinnedRegion`'s
+  double-buffered half of the reservation goes on costing memory nothing reads.
 
 ## Irradiance probes: the design (2026-08-14)
 
