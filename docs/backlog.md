@@ -3,6 +3,54 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### A browser that declines `unadjustedMovement` gives adjusted deltas (2026-08-26)
+
+`crcbl-shell`'s web backend sets `ShellCaps::RAW_POINTER_MOTION`, and the thing
+behind it is `requestPointerLock({ unadjustedMovement: true })` in `takeLock` in
+`web/engine/shell.js`. That option is the OS acceleration bypass the capability
+names, and where it is unavailable the shim retries the plain
+`requestPointerLock()` and the `movementX`/`movementY` the engine reads are the
+**OS-adjusted** ones — the same acceleration curve as the desktop cursor, so aim
+speed changes with how fast the hand moves.
+
+Who is affected, from MDN's compatibility data — not measured here, because the
+deltas are indistinguishable from script, which is why this is a note and not a
+test: the option landed in Chrome and Edge 88, Chrome for Android 151, Firefox
+152 and Safari 18.4. **Safari on iOS and Firefox for Android do not implement
+it**; Firefox for Android is the case that rejects with `NotSupportedError`,
+which is the branch `takeLock` retries on, and the others ignore the key.
+Anything older than those versions is in the same position.
+
+What it costs: a competitive shooter cannot trust aim on those browsers, which
+is one of the reasons `docs/plan/sample/11-breach.md` gives for breach being
+native-first. What would close it is nothing on our side — it is a browser
+feature — so the honest options are to leave the caveat stated, where it is now
+(`ShellCaps::RAW_POINTER_MOTION`'s docs and the `web` backend's module docs), or
+to add a _third_ capability bit separating "relative motion" from "unaccelerated
+relative motion". The bit was not added: nothing in the engine would branch on
+it today, and `ShellCaps::has_mouselook` would still be the check a camera runs.
+
+### The web shim's pointer-lock path has no automated gate (2026-08-26)
+
+`web/tools/browser-e2e.mjs` never takes a pointer lock, so `syncPointerLock`,
+`takeLock` and `onPointerLockChange` in `web/engine/shell.js` — and the
+`__crcbl_web_pointer_lock` and `__crcbl_web_pointer_lock_wanted` pair they drive
+— are covered on the Rust side by `crcbl-shell`'s `web::tests` and in a real
+browser only by the fact that the poll runs. That much _is_ verified:
+misspelling the export in the shim's copy under `target/site` failed the
+breakout gate with
+`TypeError: exports.__crcbl_web_pointer_lock_wanted_TYPO is not a function`
+raised from `syncPointerLock`, so the per-frame poll demonstrably executes. What
+is unverified is everything after a click: that the lock is granted, that
+`movementX` arrives, and that the engine turns a camera with it.
+
+Closing it looks feasible and was not attempted. CDP's
+`Input.dispatchMouseEvent` produces trusted events, which is what
+`requestPointerLock` needs, so a group could click the canvas, poll
+`document.pointerLockElement`, dispatch moves and assert a demo's own yaw
+readout moved. The unknowns are whether headless Chromium grants the lock at all
+and whether a CDP mouse move carries a `movementX` — neither was tested.
+
 ### `apps/shard` covers two verbs of milestone 1's six (2026-08-26)
 
 `docs/plan/sample/15-shard.md`'s milestone 1 loop is explore, fight, loot,
@@ -416,33 +464,34 @@ groups A, B, D, E, F, H and I against the same wasm — which is far more CI
 minutes than the two navigations cost. Worth revisiting only if breach grows a
 third map.
 
-### `apps/breach`'s trigger is a key, because a click means two things
+### A game cannot ask whether the lock it requested was granted
 
-`ACTION_FIRE` in `apps/breach/src/app.rs` is bound to `Space` alone. Binding it
-to the primary pointer button as well is the obvious thing and was not done, for
-a reason that outlives slice 1: under the pointer lock a native run gets, a
-click is a trigger pull at the crosshair; in a browser the lock is declined —
-the web shell reports no `RAW_POINTER_MOTION`, so `ShellCaps::has_mouselook` is
-false and the loop refuses the request — and a click is then a click at a
-visible cursor's position, which is not an aim.
+`HostedGame` gives a game no way to ask. `PointerUpdate` discriminates for
+_motion_ — a locked frame carries a motion and no `at` — but a press-only frame
+carries neither either way, so the same test does not work for the button. What
+would close it is either a `HostedGame` hook reporting the mode actually in
+force, or the game tracking "the last motion arrived with no `at`" itself, which
+is state that goes stale the moment the pointer stops moving.
 
-`HostedGame` gives a game no way to ask whether the lock it requested was
-granted. `PointerUpdate` discriminates for _motion_ — a locked frame carries a
-motion and no `at` — but a press-only frame carries neither either way, so the
-same test does not work for the button. What would close it is either a
-`HostedGame` hook reporting the mode actually in force, or the game tracking
-"the last motion arrived with no `at`" itself, which is state that goes stale
-the moment the pointer stops moving.
+`apps/breach` works around it: both halves of the mouse are gated on
+`at.is_none()` in `Breach::pointer_event`, so the click that asks a browser for
+the lock does not also fire. The question got more pressing rather than less
+when the web backend started granting the lock, because the browser is where a
+request waits on a gesture and the gap between asking and being granted is
+several frames long.
 
 Worth revisiting when milestone 1 brings ADS, because that binding has the same
 question.
 
-### `apps/breach`'s browser gate cannot check the mouse look at all
+### `apps/breach`'s browser gate does not check the mouse look
 
-`web/tools/browser-e2e.mjs`'s `range` block drives the arrow keys, because that
-is the whole of what the demo answers to in a browser. So the mouse path —
-`Breach::pointer_event`, `Eye::look`, and the `at.is_none()` condition it is
-bound under — is covered by `apps/breach/src/camera.rs`'s unit tests and by
+`web/tools/browser-e2e.mjs`'s `range` block drives the arrow keys. It was
+written when that was the whole of what the demo answered to in a browser; the
+web backend grants the pointer lock now, so the mouse path is reachable there
+and the gate simply does not reach for it — see "The web shim's pointer-lock
+path has no automated gate" above for what taking it would involve. So the mouse
+path — `Breach::pointer_event`, `Eye::look`, and the `at.is_none()` condition it
+is bound under — is covered by `apps/breach/src/camera.rs`'s unit tests and by
 nothing that runs against a real window. `tools/run-samples-windowed.sh` opens a
 real window but sends no input.
 

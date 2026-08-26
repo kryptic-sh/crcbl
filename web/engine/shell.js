@@ -17,6 +17,14 @@
 // STRINGS. `__crcbl_web_key` takes pointers, and a browser cannot invent an
 // address inside wasm memory. `__crcbl_web_key_scratch_ptr` hands one out; the
 // two strings a key event carries are written into it back to back.
+//
+// POINTER LOCK. The engine asks for it and this shim takes it, because a
+// browser grants `requestPointerLock` only from inside a user gesture and wasm
+// never is — the same split `requestFullscreen` has below. The request is
+// *polled*, not pushed: a browser artifact imports nothing (the engine ABI is
+// exports-plus-polling, and `web/tools/check-exports.mjs` fails the build over
+// one import), so `__crcbl_web_pointer_lock_wanted` is read once a frame and
+// the answer comes back through `__crcbl_web_pointer_lock`.
 
 import { writeUtf8 } from './wasm.js';
 
@@ -180,6 +188,28 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     ];
   }
 
+  /**
+   * How far the pointer moved, in the same device pixels `position` reports.
+   *
+   * `movementX`/`movementY` are CSS pixels like `clientX`/`clientY`, so they
+   * take the same `devicePixelRatio` factor — a delta left unscaled would turn
+   * the camera at half speed on a HiDPI display, which reads as a sensitivity
+   * setting nobody set. Only meaningful under the lock, and the backend is what
+   * decides that: it drops the delta while the pointer is free, where
+   * `movementX` is a difference of accelerated positions rather than the raw
+   * device motion `unadjustedMovement` asks for.
+   *
+   * `|| 0` because a synthesized event — a test double, a `dispatchEvent` from
+   * the page — may carry no movement at all, and `undefined` crossing into wasm
+   * as a delta is `NaN` in the camera.
+   *
+   * @param {PointerEvent} event
+   */
+  function movement(event) {
+    const scale = window.devicePixelRatio || 1;
+    return [(event.movementX || 0) * scale, (event.movementY || 0) * scale];
+  }
+
   /** @param {KeyboardEvent} event */
   function onKey(event) {
     const down = event.type === 'keydown';
@@ -248,6 +278,102 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   }
 
   /**
+   * Whether the canvas currently holds the pointer lock.
+   *
+   * Asked of the document every time rather than remembered: the browser
+   * releases the lock on its own — Escape, a tab switch, the element leaving
+   * the DOM — and a cached flag would go on saying "locked" through all of it.
+   */
+  function isLocked() {
+    return document.pointerLockElement === canvas;
+  }
+
+  /** Whether the one-shot gesture listener below is installed. */
+  let lockArmed = false;
+
+  /**
+   * Takes the lock, from inside the gesture that armed this.
+   *
+   * `unadjustedMovement: true` is the whole reason the engine sets
+   * `RAW_POINTER_MOTION` for this backend: it asks the OS for raw device motion
+   * instead of the accelerated pointer, which is what a first-person camera
+   * needs and what differencing cursor positions can never give.
+   *
+   * **Two return shapes, and both are handled.** The promise-returning form is
+   * the newer one: it rejects with `NotSupportedError` where the option is
+   * unavailable — Firefox for Android reports it exactly that way — and the
+   * retry without the option is a lock with OS-adjusted deltas, which is worth
+   * having and is what `ShellCaps::RAW_POINTER_MOTION` says may happen. A
+   * browser that predates it returns `undefined` having already started the
+   * request, so there is nothing to chain onto and nothing to retry. Every
+   * rejection is caught either way: an unhandled one is a console error on a
+   * page whose gate reads the console, and the outcome that matters arrives at
+   * `onPointerLockChange` regardless. A request made with no gesture left
+   * rejects `NotAllowedError` and is left alone here for that reason.
+   */
+  function takeLock() {
+    lockArmed = false;
+    const asked = canvas.requestPointerLock?.({ unadjustedMovement: true });
+    if (!asked || typeof asked.then !== 'function') return;
+    asked.catch((/** @type {unknown} */ error) => {
+      const name =
+        error && typeof error === 'object' && 'name' in error
+          ? error.name
+          : undefined;
+      // Anything else — no gesture left, a `pointer-lock` permission policy —
+      // is refused for a reason a second identical call cannot fix, and
+      // `pointerlockerror` has already told the engine.
+      if (name !== 'NotSupportedError') return;
+      const plain = canvas.requestPointerLock?.();
+      if (plain && typeof plain.then === 'function') plain.catch(() => {});
+    });
+  }
+
+  /**
+   * Brings the browser's pointer lock in line with what the engine asked for.
+   *
+   * Polled once a frame rather than driven by a call from wasm, because a
+   * browser artifact imports nothing — see the note at the top of this file.
+   * Polled from `requestAnimationFrame` rather than from the input handlers
+   * because a *release* must not wait for input: a game that frees the pointer
+   * during a cutscene would otherwise leave the cursor hidden until the player
+   * moved the mouse to find out it was.
+   *
+   * Taking the lock is the half that cannot be done here — a rAF callback is
+   * not a user gesture — so this only arms the click that can. Disarming on
+   * release is what stops a stale request being granted by a click the player
+   * meant for something else, minutes later.
+   */
+  function syncPointerLock() {
+    const wanted = exports.__crcbl_web_pointer_lock_wanted(canvasId) !== 0;
+    if (wanted) {
+      if (lockArmed || isLocked()) return;
+      lockArmed = true;
+      canvas.addEventListener('pointerdown', takeLock, { once: true });
+      return;
+    }
+    if (lockArmed) {
+      lockArmed = false;
+      canvas.removeEventListener('pointerdown', takeLock);
+    }
+    if (isLocked()) document.exitPointerLock?.();
+  }
+
+  /**
+   * Tells the engine whether the pointer is actually pinned to the canvas.
+   *
+   * The engine's only source of truth about it, for the reason
+   * `onFullscreenChange` is about the mode: the browser lets go of the lock on
+   * its own — Escape does it, and delivers no key anywhere — and a request that
+   * was refused arrives here as `pointerlockerror` and nowhere else. While this
+   * says locked the backend reports relative motion and no position; the moment
+   * it says otherwise, positions come back.
+   */
+  function onPointerLockChange() {
+    exports.__crcbl_web_pointer_lock(canvasId, isLocked() ? STATE_EDGE : 0);
+  }
+
+  /**
    * Whether this pointer is the one the browser emulates a mouse for.
    *
    * `isPrimary` is the first contact of a gesture and is always true for a mouse
@@ -308,7 +434,11 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     forwardContact(event, TOUCH_MOVED);
     if (!isPrimary(event)) return;
     const [x, y] = position(event);
-    exports.__crcbl_web_pointer_motion(canvasId, event.timeStamp, x, y);
+    const [dx, dy] = movement(event);
+    // Both pairs, every time. Which one becomes the event is the backend's
+    // call, because a click and a wheel have to drop their positions under the
+    // same lock and only it sees all three.
+    exports.__crcbl_web_pointer_motion(canvasId, event.timeStamp, x, y, dx, dy);
   }
 
   /**
@@ -466,6 +596,12 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     // element in the standard and at the document in WebKit's prefixed history,
     // and the document form is the one every engine ships.
     [document, 'fullscreenchange', onFullscreenChange, undefined],
+    // Pointer Lock fires both of these at the document by specification, and
+    // the error one is not optional: a refused request changes nothing about
+    // `pointerLockElement`, so without it a lock that never happened would look
+    // to the engine exactly like one it is still waiting for.
+    [document, 'pointerlockchange', onPointerLockChange, undefined],
+    [document, 'pointerlockerror', onPointerLockChange, undefined],
     // A tab switch does not always blur the focused element — the element stays
     // `document.activeElement` while the document loses focus — so `blur` alone
     // leaves a game running with keys it will never see released. rAF stops in a
@@ -498,6 +634,15 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   const onDprChange = () => syncSize();
   dprQuery.addEventListener('change', onDprChange);
 
+  // A loop of this shim's own, and the smallest one there is: a single integer
+  // call into wasm per frame. It is separate from the demo's frame loop because
+  // the demo's is the *engine's* — it runs `api.frame` and stops when the
+  // engine does — and the pointer has to be given back when it stops.
+  let lockPoll = requestAnimationFrame(function poll() {
+    syncPointerLock();
+    lockPoll = requestAnimationFrame(poll);
+  });
+
   // Sizes the backing store now. The engine does not hear about it yet — it has
   // no window — which is why `syncSize(true)` after boot is not optional.
   syncSize();
@@ -511,6 +656,14 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       for (const [target, type, handler, options] of listeners) {
         target.removeEventListener(type, handler, options);
       }
+      cancelAnimationFrame(lockPoll);
+      // The armed click is not in `listeners` — it is added and removed as the
+      // engine changes its mind — so it is taken down by name, and a lock this
+      // shim is no longer watching is released rather than left on a canvas
+      // nothing is driving.
+      canvas.removeEventListener('pointerdown', takeLock);
+      lockArmed = false;
+      if (isLocked()) document.exitPointerLock?.();
       observer.disconnect();
       dprQuery.removeEventListener('change', onDprChange);
     },

@@ -32,22 +32,66 @@
 //! | [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) | a CSS-sized canvas is scaled by the compositor for free |
 //! | [`FRACTIONAL_SCALE`](ShellCaps::FRACTIONAL_SCALE) | `devicePixelRatio` is fractional and is reported verbatim |
 //! | [`TOUCH`](ShellCaps::TOUCH) | the shim forwards every contact through [`__crcbl_web_touch`](shim::__crcbl_web_touch) |
+//! | [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) | the shim calls `requestPointerLock` from a gesture and answers with [`__crcbl_web_pointer_lock`](shim::__crcbl_web_pointer_lock) |
+//! | [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION) | under that lock `movementX`/`movementY` are the whole event, asked for with `unadjustedMovement: true` |
 //!
 //! Everything else is clear, and each one is a *behaviour* that is missing
-//! rather than a platform that lacks it.
-//! [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION) is the one to
-//! understand: the DOM does deliver `movementX`/`movementY` under Pointer Lock,
-//! but they are accelerated and clamped by the same OS layer the bit exists to
-//! bypass, so a first-person camera must not be told it has trustworthy aim
-//! input here. [`TEXT_IME`](ShellCaps::TEXT_IME) is clear because nothing emits
-//! [`TextCommit`](ShellEvent::TextCommit);
-//! [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) and
-//! [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) because no entry point calls
-//! `requestPointerLock`; [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) and
+//! rather than a platform that lacks it. [`TEXT_IME`](ShellCaps::TEXT_IME) is
+//! clear because nothing emits [`TextCommit`](ShellEvent::TextCommit);
+//! [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) because the Pointer Lock API
+//! is the only pointer constraint a browser has and it pins rather than
+//! confines; [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) and
 //! [`SERVER_DECORATIONS`](ShellCaps::SERVER_DECORATIONS) because a canvas is
 //! placed and framed by the document, not by a window system;
 //! [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) because there is no
 //! interactive resize for the browser to constrain.
+//!
+//! # Mouselook, and exactly what `RAW_POINTER_MOTION` promises here
+//!
+//! This backend used to clear both halves of
+//! [`has_mouselook`](ShellCaps::has_mouselook) and say so at length: the DOM
+//! delivers `movementX`/`movementY` under Pointer Lock, and those are
+//! accelerated by the same OS layer
+//! [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION) exists to bypass. That
+//! argument was answered by the platform. `requestPointerLock` takes an options
+//! dictionary, and `unadjustedMovement: true` **is** the bypass — the browser
+//! asks the OS for raw device motion instead of the pointer's — so the shim
+//! asks for it and a first-person camera in a browser gets what it gets
+//! natively.
+//!
+//! The caveat is stated rather than buried, because the bit is a claim about
+//! aim: where a browser declines the option the shim retries without it and the
+//! deltas are then the OS-adjusted ones. Per MDN's compatibility data the
+//! option is implemented by Chrome and Edge from 88, Chrome for Android from
+//! 151, Firefox from 152 and Safari from 18.4 — and not by Safari on iOS or by
+//! Firefox for Android, which is the one that reports it by rejecting with
+//! `NotSupportedError` rather than ignoring the key. So the bit says *this
+//! backend reads a relative-motion stream and asked for it unadjusted*, which
+//! is the decision a camera needs — differencing absolute positions is wrong
+//! here either way — and not *every browser granted it*.
+//!
+//! # The lock is taken from a gesture, so it is a request the shim completes
+//!
+//! [`set_pointer_mode`](Shell::set_pointer_mode) records
+//! [`Locked`](PointerMode::Locked) and cannot do more, for the reason
+//! [`__crcbl_web_fullscreen`](shim::__crcbl_web_fullscreen) gives about
+//! fullscreen: a browser grants Pointer Lock only to code running inside a user
+//! gesture, and wasm never is. Nor can the Rust side *call* the shim — the
+//! whole ABI is exports-plus-polling, and `web/tools/check-exports.mjs` fails
+//! the build over a single import — so the request is published rather than
+//! pushed. [`__crcbl_web_pointer_lock_wanted`](shim::__crcbl_web_pointer_lock_wanted)
+//! is what the shim polls; it arms a one-shot `pointerdown` on the canvas and
+//! the player's next click is the gesture that takes the lock.
+//!
+//! What comes back is [`__crcbl_web_pointer_lock`](shim::__crcbl_web_pointer_lock),
+//! and it is the one source of truth about whether the pointer is actually
+//! pinned — like fullscreen, the answer may be one nobody asked for, since
+//! Escape releases the lock without delivering a key anywhere. While it says
+//! locked, [`PointerMotion`](ShellEvent::PointerMotion) carries the delta and
+//! no `abs`, and [`Button`](ShellEvent::Button) and [`Wheel`](ShellEvent::Wheel)
+//! carry no position: there is no meaningful absolute position under a lock,
+//! and the frozen one would make anything reading it appear to work until the
+//! day it does not.
 //!
 //! # Touch, and the pointer events that come with it
 //!
@@ -155,6 +199,23 @@ struct Bridge {
     /// queue, so the two orders the browser can produce — `fullscreenchange`
     /// before the resize, or after it — settle on the same configuration.
     fullscreen: bool,
+    /// Whether [`set_pointer_mode`](Shell::set_pointer_mode) last asked for
+    /// [`Locked`](PointerMode::Locked).
+    ///
+    /// Published for the shim to poll through
+    /// [`__crcbl_web_pointer_lock_wanted`](shim::__crcbl_web_pointer_lock_wanted)
+    /// rather than pushed at it, because a browser artifact imports nothing:
+    /// see the module docs.
+    pointer_lock_wanted: bool,
+    /// Whether the canvas is the document's `pointerLockElement`, as the shim
+    /// last reported through
+    /// [`__crcbl_web_pointer_lock`](shim::__crcbl_web_pointer_lock).
+    ///
+    /// The *effective* half, and the one the pointer entry points read: a
+    /// request that no gesture has completed yet, or one the browser released
+    /// on its own, must not make an event claim a relative delta it does not
+    /// have.
+    pointer_locked: bool,
 }
 
 type Shared = Rc<RefCell<Bridge>>;
@@ -539,26 +600,88 @@ pub(crate) mod shim {
 
     /// A `pointermove`.
     ///
-    /// No relative delta: `movementX`/`movementY` are accelerated and clamped by
-    /// the OS, which is what
-    /// [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) exists to
-    /// rule out — so the bit is clear and the field is `None`, and the two agree.
+    /// `x`/`y` are the position in device pixels and `dx`/`dy` are
+    /// `movementX`/`movementY` scaled the same way. **Which of the two pairs
+    /// survives is not the shim's call**: it passes both and the bridge's
+    /// `pointer_locked` decides, because [`__crcbl_web_pointer_button`] and
+    /// [`__crcbl_web_pointer_wheel`] have to suppress their positions under the
+    /// same lock and only the bridge sees all three. A locked event carries the
+    /// delta and no `abs`; an unlocked one carries the position and no delta,
+    /// since `movementX` off the lock is a difference of adjusted positions and
+    /// [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) means more
+    /// than "a number arrived".
     ///
-    /// No `state` word either: [`ShellEvent::PointerMotion`] carries no
-    /// modifiers, and a parameter that exists only to be discarded invites
-    /// someone to use it for something it is not.
+    /// No `state` word: [`ShellEvent::PointerMotion`] carries no modifiers, and
+    /// a parameter that exists only to be discarded invites someone to use it
+    /// for something it is not.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
-    pub unsafe extern "C" fn __crcbl_web_pointer_motion(canvas: u32, time_ms: f64, x: f64, y: f64) {
-        queue_for(canvas, |window, bridge| ShellEvent::PointerMotion {
-            window,
-            device: DeviceId::UNKNOWN,
-            time: event_time(bridge, time_ms),
-            abs: Some(PhysicalPoint::new(x, y)),
-            raw_delta: None,
+    pub unsafe extern "C" fn __crcbl_web_pointer_motion(
+        canvas: u32,
+        time_ms: f64,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) {
+        queue_for(canvas, |window, bridge| {
+            let locked = bridge.pointer_locked;
+            ShellEvent::PointerMotion {
+                window,
+                device: DeviceId::UNKNOWN,
+                time: event_time(bridge, time_ms),
+                abs: (!locked).then(|| PhysicalPoint::new(x, y)),
+                raw_delta: locked.then_some((dx, dy)),
+            }
+        });
+    }
+
+    /// Whether the engine wants the pointer locked, for the shim to poll.
+    ///
+    /// The *request* — what [`set_pointer_mode`](crate::Shell::set_pointer_mode)
+    /// was last given — and not whether the browser granted it. The shim polls
+    /// this once per frame and arms the gesture that can complete it; see the
+    /// module docs for why the request is published rather than pushed.
+    ///
+    /// `0` for a canvas this shell does not own, and `0` when there is no shell
+    /// on this thread at all: the same "an event with nowhere to go" case every
+    /// other entry point has, answered with the only value that cannot make a
+    /// page act.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_pointer_lock_wanted(canvas: u32) -> u32 {
+        let mut wanted = 0;
+        with_bridge(|bridge| {
+            if bridge.canvas == canvas && bridge.pointer_lock_wanted {
+                wanted = 1;
+            }
+        });
+        wanted
+    }
+
+    /// The canvas became, or stopped being, the document's `pointerLockElement`.
+    ///
+    /// `state & STATE_EDGE` means the pointer *is* locked to this canvas. As
+    /// with [`__crcbl_web_fullscreen`], the answer may be one nobody asked for
+    /// — Escape releases the lock, and a `pointerlockerror` ends a request that
+    /// no key or click will ever report — so this is the engine's only source
+    /// of truth about it. Not an event: there is no `ShellEvent` for "the
+    /// pointer mode changed", and what a consumer actually reads is the shape
+    /// of the [`PointerMotion`](ShellEvent::PointerMotion) that follows.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __crcbl_web_pointer_lock(canvas: u32, state: u32) {
+        let locked = state & STATE_EDGE != 0;
+        with_bridge(|bridge| {
+            if bridge.canvas == canvas {
+                bridge.pointer_locked = locked;
+            }
         });
     }
 
     /// A `pointerdown` or `pointerup`. `button` is `MouseEvent.button`.
+    ///
+    /// The position is dropped while the pointer is locked, for the reason
+    /// [`__crcbl_web_pointer_motion`] drops its `abs`: `clientX`/`clientY` are
+    /// frozen at wherever the lock was taken, so a click reported there is a
+    /// click somewhere the player is not looking.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub unsafe extern "C" fn __crcbl_web_pointer_button(
         canvas: u32,
@@ -575,12 +698,13 @@ pub(crate) mod shim {
             time: event_time(bridge, time_ms),
             button,
             state: edge(state),
-            position: Some(PhysicalPoint::new(x, y)),
+            position: (!bridge.pointer_locked).then(|| PhysicalPoint::new(x, y)),
             modifiers: modifiers(state),
         });
     }
 
-    /// A `wheel`, in pixels.
+    /// A `wheel`, in pixels. No position while the pointer is locked, for the
+    /// reason [`__crcbl_web_pointer_button`] has none.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub unsafe extern "C" fn __crcbl_web_pointer_wheel(
         canvas: u32,
@@ -599,7 +723,7 @@ pub(crate) mod shim {
                 x: delta_x,
                 y: delta_y,
             },
-            position: Some(PhysicalPoint::new(x, y)),
+            position: (!bridge.pointer_locked).then(|| PhysicalPoint::new(x, y)),
             modifiers: modifiers(state),
         });
     }
@@ -845,7 +969,11 @@ impl Shell for WebShell {
         // `ShellCaps` must be opted into here by someone who implemented it,
         // not inherited by a backend that has never heard of it. See the module
         // docs for why each of the others is clear.
-        ShellCaps::HW_UPSCALE | ShellCaps::FRACTIONAL_SCALE | ShellCaps::TOUCH
+        ShellCaps::HW_UPSCALE
+            | ShellCaps::FRACTIONAL_SCALE
+            | ShellCaps::TOUCH
+            | ShellCaps::POINTER_LOCK
+            | ShellCaps::RAW_POINTER_MOTION
     }
 
     /// Creates the canvas window.
@@ -888,6 +1016,9 @@ impl Shell for WebShell {
         self.close_pending = false;
         self.pointer_mode = PointerMode::Free;
         self.cursor = Some(CursorIcon::Default);
+        // The lock request the bridge publishes is already clear: a second
+        // window is refused above until the first is destroyed, and that is
+        // where it is withdrawn.
         self.shared.borrow_mut().window = Some(window);
         Ok(window)
     }
@@ -898,9 +1029,15 @@ impl Shell for WebShell {
         self.configured = None;
         self.focused = false;
         self.close_pending = false;
+        self.pointer_mode = PointerMode::Free;
         {
             let mut bridge = self.shared.borrow_mut();
             bridge.window = None;
+            // The shim's next poll releases the lock, and this is the only
+            // place that withdraws the request: a canvas with no window behind
+            // it must not keep the pointer pinned, and the frames between a
+            // destroy and the next create are frames the shim is polling.
+            bridge.pointer_lock_wanted = false;
             // Anything the shim queued for this window before it went away
             // would be delivered naming a handle the consumer has just been
             // told is dead.
@@ -1043,12 +1180,36 @@ impl Shell for WebShell {
         })
     }
 
+    /// Frees or locks the pointer.
+    ///
+    /// **A request the shim completes**, like [`set_mode`](Shell::set_mode)
+    /// above and for the same reason: `requestPointerLock` is granted only
+    /// inside a user gesture. `Ok` here means the mode was recorded and
+    /// published for the shim to poll through
+    /// [`__crcbl_web_pointer_lock_wanted`](shim::__crcbl_web_pointer_lock_wanted),
+    /// not that the pointer is pinned — the player's next click on the canvas
+    /// is what does that, and a page with no shim never does it at all.
+    /// [`window_state`](Shell::window_state) reports the request, exactly as
+    /// [`WindowState::requested_mode`] does; what a consumer can observe of the
+    /// *effective* lock is a [`PointerMotion`](ShellEvent::PointerMotion) with
+    /// a `raw_delta` and no `abs`.
+    ///
+    /// Releasing is not gated on anything: `Free` reaches the shim by the same
+    /// poll and `exitPointerLock` needs no gesture.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] for [`Confined`](PointerMode::Confined): the
+    /// Pointer Lock API pins the pointer or leaves it alone, and there is no
+    /// third answer for [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) to
+    /// name.
     fn set_pointer_mode(&mut self, window: WindowId, mode: PointerMode) -> Result<(), ShellError> {
         self.check(window)?;
         if !self.caps().contains(mode.required_cap()) {
             return Err(Self::unsupported(mode.as_str()));
         }
         self.pointer_mode = mode;
+        self.shared.borrow_mut().pointer_lock_wanted = mode == PointerMode::Locked;
         Ok(())
     }
 
@@ -1142,6 +1303,36 @@ mod tests {
         let mut events = Vec::new();
         shell.pump(&mut |event| events.push(event));
         events
+    }
+
+    /// Where each event says the pointer is — motion, button and wheel alike.
+    ///
+    /// One reader for all three because the lock's rule is one rule: under it
+    /// none of them has a position, and a test that only looked at motion would
+    /// pass on a backend that still reported the frozen point on every click.
+    fn positions(events: &[ShellEvent]) -> Vec<Option<PhysicalPoint>> {
+        events
+            .iter()
+            .map(|event| match event {
+                ShellEvent::PointerMotion { abs, .. } => *abs,
+                ShellEvent::Button { position, .. } | ShellEvent::Wheel { position, .. } => {
+                    *position
+                }
+                other => panic!("not a pointer event: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The relative motion of every [`PointerMotion`](ShellEvent::PointerMotion),
+    /// and nothing else — the other two carry none.
+    fn raw_deltas(events: &[ShellEvent]) -> Vec<Option<(f64, f64)>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::PointerMotion { raw_delta, .. } => Some(*raw_delta),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -1476,19 +1667,132 @@ mod tests {
 
     #[test]
     fn caps_and_behaviour_agree() {
-        let shell = WebShell::new(0);
+        let (mut shell, window) = shell_with_window(0);
         let caps = shell.caps();
         assert_eq!(
             caps,
-            ShellCaps::HW_UPSCALE | ShellCaps::FRACTIONAL_SCALE | ShellCaps::TOUCH,
+            ShellCaps::HW_UPSCALE
+                | ShellCaps::FRACTIONAL_SCALE
+                | ShellCaps::TOUCH
+                | ShellCaps::POINTER_LOCK
+                | ShellCaps::RAW_POINTER_MOTION,
             "every other bit names something this backend does not do"
         );
-        // The four that used to be advertised with nothing behind them.
-        assert!(!caps.contains(ShellCaps::RAW_POINTER_MOTION));
+        // The three that used to be advertised with nothing behind them.
         assert!(!caps.contains(ShellCaps::TEXT_IME));
         assert!(!caps.contains(ShellCaps::WINDOW_POSITION));
         assert!(!caps.contains(ShellCaps::SERVER_DECORATIONS));
-        assert!(!caps.has_mouselook());
+
+        // And the two that are set are set because there is something behind
+        // them, which is the whole point of this test: the lock is asked for
+        // through an entry point the shim polls, and while the shim reports it
+        // granted a motion carries the delta the camera reads and no position.
+        assert!(caps.has_mouselook());
+        assert_eq!(shim::__crcbl_web_pointer_lock_wanted(0), 0);
+        shell
+            .set_pointer_mode(window, PointerMode::Locked)
+            .expect("the lock is asked for, not refused");
+        assert_eq!(
+            shim::__crcbl_web_pointer_lock_wanted(0),
+            1,
+            "the request has to reach the shim, or no gesture can complete it"
+        );
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_lock(0, STATE_EDGE) };
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_motion(0, 1.0, 640.0, 360.0, 3.0, -4.0) };
+        let events = drain(&mut shell);
+        let [ShellEvent::PointerMotion { abs, raw_delta, .. }] = events.as_slice() else {
+            panic!("expected one PointerMotion, got {events:?}");
+        };
+        assert_eq!(*raw_delta, Some((3.0, -4.0)));
+        assert_eq!(*abs, None, "there is no position under a lock");
+
+        // Confine is the one pointer mode a browser has no answer for, and it
+        // still says so.
+        assert!(!caps.contains(ShellCaps::POINTER_CONFINE));
+        assert!(matches!(
+            shell.set_pointer_mode(window, PointerMode::Confined),
+            Err(ShellError::Unsupported { .. })
+        ));
+    }
+
+    /// The lock's two halves are separate, and only the *effective* one shapes
+    /// an event.
+    ///
+    /// A request nobody has clicked on yet is exactly the state a page is in
+    /// between `set_pointer_mode` and the player's next gesture, and reporting a
+    /// delta there would be a camera turning while the cursor is still visible.
+    /// Releasing has to put the position back, or a menu opened after a
+    /// firefight has nothing to hit-test.
+    #[test]
+    fn a_lock_nobody_granted_is_not_a_lock() {
+        let (mut shell, window) = shell_with_window(0);
+        shell
+            .set_pointer_mode(window, PointerMode::Locked)
+            .expect("recorded");
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_motion(0, 1.0, 10.0, 20.0, 5.0, 5.0) };
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_button(0, 2.0, 10.0, 20.0, 0, STATE_EDGE) };
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_wheel(0, 3.0, 10.0, 20.0, 0.0, -1.0, 0) };
+        let events = drain(&mut shell);
+        let expected = Some(PhysicalPoint::new(10.0, 20.0));
+        assert_eq!(
+            positions(&events),
+            vec![expected, expected, expected],
+            "the browser has not locked anything yet"
+        );
+        assert_eq!(raw_deltas(&events), vec![None]);
+
+        // Granted, and every one of the three loses its position.
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_lock(0, STATE_EDGE) };
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_motion(0, 4.0, 10.0, 20.0, 5.0, 5.0) };
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_button(0, 5.0, 10.0, 20.0, 0, STATE_EDGE) };
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_wheel(0, 6.0, 10.0, 20.0, 0.0, -1.0, 0) };
+        let events = drain(&mut shell);
+        assert_eq!(positions(&events), vec![None, None, None]);
+        assert_eq!(raw_deltas(&events), vec![Some((5.0, 5.0))]);
+
+        // And released — by Escape, which reaches nothing else — it all comes
+        // back.
+        shell
+            .set_pointer_mode(window, PointerMode::Free)
+            .expect("recorded");
+        assert_eq!(shim::__crcbl_web_pointer_lock_wanted(0), 0);
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_lock(0, 0) };
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_pointer_motion(0, 7.0, 11.0, 21.0, 5.0, 5.0) };
+        let events = drain(&mut shell);
+        assert_eq!(
+            positions(&events),
+            vec![Some(PhysicalPoint::new(11.0, 21.0))]
+        );
+        assert_eq!(raw_deltas(&events), vec![None]);
+    }
+
+    /// A canvas with no window behind it must not keep the pointer pinned.
+    #[test]
+    fn destroying_the_window_withdraws_the_lock_request() {
+        let (mut shell, window) = shell_with_window(0);
+        shell
+            .set_pointer_mode(window, PointerMode::Locked)
+            .expect("recorded");
+        assert_eq!(shim::__crcbl_web_pointer_lock_wanted(0), 1);
+        shell.destroy_window(window).expect("destroy");
+        assert_eq!(shim::__crcbl_web_pointer_lock_wanted(0), 0);
+        // And a shim talking about some other canvas is answered about that
+        // one, not about this shell's request.
+        shell
+            .create_window(&WindowDesc::default())
+            .expect("the canvas is still there");
+        assert_eq!(shim::__crcbl_web_pointer_lock_wanted(9), 0);
     }
 
     #[test]
@@ -1548,9 +1852,9 @@ mod tests {
         // SAFETY: the shim ABI.
         unsafe { shim::__crcbl_web_frame(0.0) };
         // SAFETY: the shim ABI.
-        unsafe { shim::__crcbl_web_pointer_motion(0, 4.0, 10.0, 20.0) };
+        unsafe { shim::__crcbl_web_pointer_motion(0, 4.0, 10.0, 20.0, 1.0, 0.0) };
         // SAFETY: the shim ABI.
-        unsafe { shim::__crcbl_web_pointer_motion(0, 12.0, 11.0, 21.0) };
+        unsafe { shim::__crcbl_web_pointer_motion(0, 12.0, 11.0, 21.0, 1.0, 1.0) };
         let events = drain(&mut shell);
         let times: Vec<Option<EventTime>> = events.iter().map(ShellEvent::time).collect();
         assert_eq!(
@@ -1718,7 +2022,11 @@ mod tests {
                 .warp_pointer(window, PhysicalPoint::new(100.0, 200.0))
                 .is_err()
         );
-        assert!(shell.set_pointer_mode(window, PointerMode::Locked).is_err());
+        assert!(
+            shell
+                .set_pointer_mode(window, PointerMode::Confined)
+                .is_err()
+        );
         assert!(shell.clipboard_offer(window, &[]).is_err());
         assert!(
             shell
@@ -1726,10 +2034,13 @@ mod tests {
                 .is_err()
         );
         assert!(!shell.clipboard_readable(window));
-        // Free needs no capability and is the only mode this backend has.
+        // Free needs no capability, and the lock is the one this backend grew.
         shell
             .set_pointer_mode(window, PointerMode::Free)
             .expect("free is always available");
+        shell
+            .set_pointer_mode(window, PointerMode::Locked)
+            .expect("the Pointer Lock API is what POINTER_LOCK names");
     }
 
     #[test]

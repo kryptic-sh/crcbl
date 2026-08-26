@@ -76,10 +76,16 @@ bitflags::bitflags! {
         /// flowing.
         ///
         /// Wayland `pointer-constraints` + `relative-pointer`, X11 pointer
-        /// grab, Win32 clip-and-recentre, the browser's Pointer Lock API
-        /// (which additionally requires a user gesture — the backend surfaces
-        /// the failure through
-        /// [`set_pointer_mode`](crate::Shell::set_pointer_mode)).
+        /// grab, Win32 clip-and-recentre, the browser's Pointer Lock API.
+        ///
+        /// The browser is the one that cannot take the lock when asked: it
+        /// grants `requestPointerLock` only inside a user gesture, so
+        /// [`set_pointer_mode`](crate::Shell::set_pointer_mode) there records
+        /// the request and the player's next click completes it. The bit still
+        /// means what it says — the mode is available — and a consumer that
+        /// needs to know whether the pointer is pinned *now* reads the shape of
+        /// the motion events, as
+        /// [`PointerMode::Locked`](crate::PointerMode::Locked) describes.
         const POINTER_LOCK = 1 << 3;
 
         /// [`PointerMode::Confined`](crate::PointerMode) is available: the
@@ -101,6 +107,20 @@ bitflags::bitflags! {
         /// carries `raw_delta: None` and the camera has to difference absolute
         /// positions — which is wrong at the screen edge and wrong under
         /// pointer acceleration.
+        ///
+        /// # The one platform that can decline the bypass
+        ///
+        /// On the desktop backends the unaccelerated stream is a separate
+        /// device interface and either exists or does not. In a browser it is
+        /// an *option* on the lock — `requestPointerLock({ unadjustedMovement:
+        /// true })` — and a browser that does not implement it hands back the
+        /// OS-adjusted deltas instead, either by ignoring the key or by
+        /// rejecting with `NotSupportedError` and being asked again without it.
+        /// The web backend sets this bit because it reads a relative stream and
+        /// asks for it unadjusted, which is the decision a camera branches on:
+        /// differencing absolute positions is wrong there whatever the browser
+        /// answered. It is not a promise that every browser granted the bypass;
+        /// the `web` backend's module docs name which browsers do.
         const RAW_POINTER_MOTION = 1 << 5;
 
         /// Composed text arrives as

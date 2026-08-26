@@ -208,6 +208,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   keyboard trigger and the arrow-key look stay, and are what the sample plays
   with wherever the lock is declined.
 
+- **Mouse look in a browser.** `crcbl-shell`'s web backend reports
+  `ShellCaps::POINTER_LOCK | RAW_POINTER_MOTION`, so `ShellCaps::has_mouselook`
+  is true there and the engine stops downgrading a requested
+  `PointerMode::Locked` to `Free` on every browser build.
+  `WebShell::set_pointer_mode` publishes the request through the new
+  `__crcbl_web_pointer_lock_wanted` export; `web/engine/shell.js` polls it once
+  a frame, arms a one-shot `pointerdown` on the canvas — a browser grants
+  `requestPointerLock` only from a user gesture, and wasm never is one — and
+  reports the outcome back through the new `__crcbl_web_pointer_lock` entry
+  point. While that says locked, `ShellEvent::PointerMotion` carries `raw_delta`
+  and no `abs`, and `Button` and `Wheel` carry no position, exactly as the
+  Wayland and X11 backends do.
+
+  `__crcbl_web_pointer_motion` takes two more arguments, the `movementX` /
+  `movementY` delta scaled to device pixels; a page with its own copy of the
+  shim must pass them.
+
+  The lock is asked for with `unadjustedMovement: true`, which is the OS
+  acceleration bypass `RAW_POINTER_MOTION` names — implemented by Chrome and
+  Edge from 88, Chrome for Android from 151, Firefox from 152 and Safari from
+  18.4. Where a browser declines it the shim retries without it and the deltas
+  are the OS-adjusted ones; the capability's docs and `docs/backlog.md` both say
+  so rather than claiming more than the code delivers.
+
 ### Breaking
 
 - **`GpuInstance` gained `base_vertex` and `INSTANCE_STRIDE` is 96 bytes**,
