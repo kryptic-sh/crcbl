@@ -305,7 +305,18 @@ trap cleanup EXIT INT TERM
 # desktop must not have a browser window appear on their screen, and a stale
 # `WAYLAND_DISPLAY` would send Chromium looking for a compositor that is not
 # the one this script started.
+#
+# **`XDG_SESSION_TYPE` and `XDG_BACKEND` are part of that and were missed.**
+# Chromium's ozone platform is chosen by auto-detection, and clearing the
+# socket is not enough to change its mind: on a Wayland desktop those two are
+# still exported, it selects the Wayland backend, finds no compositor and exits
+# before it ever listens on the debugging port — `Failed to initialize Wayland
+# platform`, then `The platform failed to initialize`, then a gate that reports
+# no checks. CI runs X11-only and never saw it; the first Wayland session that
+# ran the gate did, immediately.
 unset WAYLAND_DISPLAY
+unset XDG_SESSION_TYPE
+unset XDG_BACKEND
 unset DISPLAY
 unset XAUTHORITY
 
