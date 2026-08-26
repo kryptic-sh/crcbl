@@ -8,6 +8,33 @@ grids, equipment slots, weapon attachments. Kit rules follow the player kit
 (30): first-class, optional, zero engine privileges. Drag-drop lands wave 1 (the
 editor asset browser wants it); the kit is FPS-era with breach.
 
+> **Status, 2026-08-27.** Neither half is built, and the two have different
+> distances to go.
+>
+> **Part 1, drag-drop:** `crcbl-ui` has a drag, but only the one a slider has —
+> `menu.rs` tracks a `dragging: Option<usize>` for the row the pointer is
+> pulling, and `widget.rs` handles press-A / drag-onto-B / release. There is no
+> drag source, no drop target, no typed payload and no `can_accept`. **The
+> styling half has a harder dependency than the mechanism does**: this section
+> hangs feedback on `:drop-ok` / `:drop-bad` pseudo-classes "like everything
+> else (topic 7)", and there is no stylesheet system in `crcbl-ui` at all — no
+> CSS parser, no selectors, no pseudo-classes, and the only `.css` file in the
+> repo is `web/style.css`, which belongs to the Pages site. Whoever builds the
+> drag capability either builds it against the styling that exists or waits for
+> topic 7's, and should say which.
+>
+> Also unbuilt: the first consumer named below. There is no editor asset browser
+> because there is no editor.
+>
+> **Part 2, the grid kit:** there is no `crcbl-inventory` crate, and no
+> inventory of any kind in the workspace — `apps/shard` and `apps/breach` both
+> mention one only to say they do not have it.
+>
+> **Icon bake:** `crcbl icon bake` is not a verb. `crcbl-cli`'s parser accepts
+> `new`, `run`, `build`, `screenshot`, `replay`, `crpix`, `lod`, `import`,
+> `bench`, `sim` and `settings`; neither `icon` nor `bake` parses, so the "part
+> of `crcbl bake`" mitigation under Risks has nothing to be part of yet.
+
 ## Part 1 — Drag-drop as a UI capability (topic 7 extension)
 
 - **Drag sources / drop targets** are node properties; the payload is typed data
@@ -259,6 +286,37 @@ UI just doesn't wait to look responsive.
   incremental aggregate updates; property tests cover the pathological shapes.
 - **Icon bake pipeline** adds a content step; mitigated by it being automatic
   (part of `crcbl bake`) rather than an artist chore.
+
+## Open decision: which sample forces this kit (2026-08-27)
+
+Sample rule 13 — a topic that can name no adopting sample is not ready to be
+built — is the thing to settle before any of the above is written, and the tree
+now has two candidates that have both **deliberately declined to answer it**:
+
+- `apps/shard`'s save module says in as many words that there is no inventory
+  field in its payload and that its absence is _a decision not yet taken rather
+  than an oversight_: `docs/plan/sample/15-shard.md`'s milestone 1 wants loot,
+  rarity and a grid inventory through this kit, and reserving a field would
+  answer the question by accident. Its container is versioned, so adding one
+  later costs a version bump and nothing else — the cost of waiting is genuinely
+  low.
+- `apps/breach` lists the grid inventory's item icons and the buy menu among the
+  things it does not have.
+
+The bind is that **this document is written for breach and `sample/15-shard.md`
+is explicit that shard is meant to be the kit's _second_ consumer** — "a kit
+with one consumer is that consumer's shape wearing a kit's name". Breach's
+inventory sits in its milestone 1 and later, which are native-only by that
+sample's own reasoning, so nothing has forced the kit yet and shard would be
+forcing it alone: exactly the case both plans say to avoid. Shard has already
+taken the one deferral available to it — its fight slice shipped with no item,
+no currency and no equipped weapon — so the next verb in its milestone 1 is
+loot, and loot is where the kit is forced.
+
+**`docs/backlog.md` carries this as a decision needed, with three options and
+their real costs.** Read it there rather than re-deriving them; what belongs
+here is only that the kit's design is finished and its first consumer is not
+chosen.
 
 ## Correction (design review, 2026-07-27)
 

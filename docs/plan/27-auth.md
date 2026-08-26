@@ -21,6 +21,18 @@ the transport never branches on tier — it sees "authenticated: yes/no, plus
 PlayerId claims" and games gate features on that (ranked requires tier 3; the
 topic 23 "no competitive claims" caveat resolves here).
 
+> **None of the three tiers exists, and tier 1's row overstates even the
+> baseline** (2026-08-27). `crcbl_net::handshake::Hello` carries a protocol
+> version, an engine build id and a schema hash; there is no tier field, no
+> `PlayerId`, and no notion of "authenticated" anywhere above the transport. And
+> tier 1's guarantee column reads "encrypted vs passive snooping", which is
+> stronger than the tree in two directions at once: nothing encrypts at all, and
+> the one thing that _is_ built — `crcbl_net::auth`'s per-session HMAC — is
+> keyed on a resume token that travels in the clear inside `Accept`, so a
+> passive observer of the handshake can forge as well as read. The honest tier-0
+> row today is "no confidentiality, and integrity only against an attacker who
+> did not see the handshake".
+
 ## Tier 3: connect tokens (netcode.io model, hardened)
 
 The flow that keeps game servers backend-independent at connect time:
@@ -174,16 +186,42 @@ which parts have a consumer.
 
 - **Tier 0/1 (open and pre-shared key) are the game tiers.** A LAN host is the
   authority, a password is a PSK, and the handshake, schema-hash gate and
-  per-packet AEAD from topic 23 do everything they already did. breach and shard
-  both run here.
+  per-packet AEAD from topic 23 do everything they already did.
+
+  ~~breach and shard both run here.~~ **Both shipped, and neither runs here**
+  (2026-08-27). `apps/breach` is single player — one hitscan pistol, a firing
+  range and a bot arena, `crcbl` with the `greybox` feature and a **loopback**
+  session over `InMemoryTransport` (its `game.rs` runs the real handshake and
+  waits for `SessionState::Connected`, against a server in its own process) —
+  and `apps/shard` says in its own app module that it has no network section for
+  the same reason. So the tier that both actually exercise is the one this
+  document does not list: **the in-process one, where there is no wire and the
+  question does not arise.** The sentence is kept struck rather than deleted
+  because it names the intent — when either sample grows a real session, tier
+  0/1 is where it lands.
+
 - **Player identity stays**, scoped to a host rather than to a service: who you
   are on the machine you joined. shard's characters belong to the shard they
-  were made on, and there is no cross-server transfer to design.
+  were made on, and there is no cross-server transfer to design. Unbuilt at
+  engine level: no crate under `crates/` defines a `PlayerId`, and shard's
+  character is a local save file with no identity attached to it. The one
+  `PlayerId` in the tree is `apps/bracket`'s own `queue::PlayerId`, a `u32`
+  index into its simulated population — a sample type, not the engine one this
+  section means.
 - **Signed results survive, at the tier a local host can back.** bracket
-  ([sample/16-bracket.md](sample/16-bracket.md)) is the consumer: the host signs
-  a match result so a client cannot forge one, and a forged or unsigned result
-  must be rejected by a test that fails when the check is removed. That is the
-  useful half of the ranked chain and it needs no service.
+  ([sample/16-bracket.md](sample/16-bracket.md)) is the named consumer: the host
+  signs a match result so a client cannot forge one, and a forged or unsigned
+  result must be rejected by a test that fails when the check is removed. That
+  is the useful half of the ranked chain and it needs no service.
+
+  **`apps/bracket` shipped without it** (2026-08-27), and the reason is worth
+  recording rather than filing as a miss: bracket is matchmaking, rating and
+  ladder over a **population**, with each match resolved by a stub so a
+  population of any size runs deterministically from a seed. It has no host, no
+  client and no transport — nothing in it imports `crcbl-net` — so there is no
+  result crossing a trust boundary to sign. Signed results still need a
+  consumer, and bracket will only become one if it grows a real match on the
+  other end of a real session.
 
 ### What is deferred for want of a consumer
 

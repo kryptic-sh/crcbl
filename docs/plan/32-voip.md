@@ -6,6 +6,33 @@ cue grammar). World voice obeys the `competitive_integrity` gate exactly like
 footsteps: when the gate is on, **no positional data reaches the wire**.
 FPS-era, with breach; the capture seam is useful earlier.
 
+> **Status, 2026-08-27: nothing in this document is built, and three of the
+> things it builds on are not built either.** Stated plainly because the
+> delivery table below reads like a schedule rather than a to-do list:
+>
+> - **No capture.** There is no `AudioCapture` anywhere; `crcbl-audio` opens
+>   output only (`AudioStream::open` takes an `AudioSource`), and nothing in the
+>   workspace asks `cpal` for an input device or calls `getUserMedia`.
+> - **No codec seam and no Opus.** No manifest depends on an Opus crate; the
+>   only mention of Opus in the tree is a line in `crcbl-audio`'s QOA module
+>   saying Vorbis and Opus will sit behind a decoder seam one day.
+> - **The mixer voice bus does not exist.** "Team/direct routing + PTT/VAD
+>   actions + mixer voice bus/ducking" needs the bus graph
+>   [13-audio.md](13-audio.md) specifies and has not built — `crcbl-audio` has a
+>   `Mixer` of voices with nothing above them, no bus type and no limiter.
+> - **The `competitive_integrity` gate does not exist** either, so every "under
+>   the gate" behaviour below has no flag to hang on. Topic 31 is where that
+>   lands.
+> - **breach shipped, and it is single player.** `apps/breach` is one hitscan
+>   pistol on two maps, running in-process; the forcing sample this document
+>   names therefore has no session for voice to ride, and will not have one
+>   until it grows a real transport.
+>
+> None of that argues against the design below, which is why it is kept whole.
+> It does mean the first slice is further from the front of the queue than the
+> table suggests: the capture seam is genuinely standalone, and everything after
+> it waits on the bus graph, the gate and a transport.
+
 ## Modes
 
 | Mode                  | Routing                                                               | Presentation                                                                                | Leak profile                                                                                         |
@@ -24,15 +51,21 @@ FPS-era, with breach; the capture seam is useful earlier.
 
 ## Capture (the seam topic 13 doesn't have yet)
 
-- **`AudioCapture` seam** beside `AudioDevice`: enumerate inputs, select device,
-  open at 48 kHz mono (engine-internal rate — no resampling), 20 ms frames.
-  `cpal` native; `getUserMedia` + AudioWorklet on wasm (permission is a
-  user-gesture flow — surfaced through `ShellCaps`-style capability reporting so
-  UI degrades honestly).
+- **`AudioCapture` seam** beside the output seam — which is `AudioStream`, not
+  the `AudioDevice` [13-audio.md](13-audio.md) used to name: enumerate inputs,
+  select device, open at 48 kHz mono (engine-internal rate — no resampling), 20
+  ms frames. Match the shipped output seam's shape rather than this document's
+  older wording; `crcbl_audio::INTERNAL_SAMPLE_RATE` is the constant
+  "engine-internal rate" means. `cpal` native; `getUserMedia` + AudioWorklet on
+  wasm (permission is a user-gesture flow — surfaced through `ShellCaps`-style
+  capability reporting so UI degrades honestly).
 - Pre-encode chain: DC block → noise gate → VAD (hangover-smoothed) → optional
   AGC. Kept deliberately minimal.
 - Settings UI (topic 14, P10 screen): device pick, input level meter, mic test
-  with **loopback self-monitor**, PTT/VAD toggle, VAD threshold.
+  with **loopback self-monitor**, PTT/VAD toggle, VAD threshold. The settings
+  _store_ under it is built — `crcbl-store`'s `settings.rs` is a dotted-key TOML
+  stack in which `engine.audio.*` is a namespace like any other, with no audio
+  keys defined yet — and the screen is not.
 
 ## Codec + quality
 

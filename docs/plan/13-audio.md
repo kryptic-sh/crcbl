@@ -38,9 +38,12 @@ Grammar invariants (what makes it a learnable skill):
 
 - **Pure-DSP core, platform seam at the device edge** (same shape as shell/HAL):
   `crcbl-audio` DSP is pure `f32` block processing — runs identically on native
-  and wasm, and is unit-testable as plain functions. Device output behind an
-  `AudioDevice` seam: `cpal` native (ALSA/PipeWine/ WASAPI/CoreAudio),
-  **AudioWorklet** on wasm.
+  and wasm, and is unit-testable as plain functions. Device output behind a
+  device seam: `cpal` native (ALSA/PipeWire/WASAPI/CoreAudio), **AudioWorklet**
+  on wasm. **Built, and the seam's name is `AudioStream`, not `AudioDevice`** —
+  `AudioStream::open` takes an `AudioSource` and, on `wasm32`, installs it as
+  the pull target `crcbl_audio::web`'s worklet drives; a null backend keeps the
+  headless CI path device-free. Grep for `AudioDevice` and you find nothing.
 - **Audio thread + lock-free command queue**: game/render side posts commands
   (play, move emitter, set bus gain) into an SPSC ring; the audio callback owns
   all DSP state, never locks, never allocates. Emitter positions stream in as
@@ -50,7 +53,15 @@ Grammar invariants (what makes it a learnable skill):
   them).
 - **Voices**: pooled, priority + distance-based stealing, per-voice state =
   {source cursor, resampler, spatial state (ITD delay lines L/R, gains, pitch
-  ratio), bus route}.
+  ratio), bus route}. **The per-voice state is built and the pool is not**
+  (2026-08-27): a `Voice` carries its cursor, varispeed pitch, per-channel gains
+  and its L/R fractional delay lines, but `Mixer` holds voices in a plain
+  growable `Vec` behind a `Mutex` — no capacity, no priority, no stealing, and
+  therefore nothing that bounds what a game can start playing. There is a
+  release list, so a stopped voice fades over one block rather than clicking.
+  Whoever adds the pool inherits the invariant the release list already keeps:
+  ids are monotonic and never reused, so a stale `VoiceId` can never name a
+  later voice, and a stealing scheme that recycles slots must not break that.
 - **Pitch shift** = resampling ratio (varispeed) — cheap, artifact-free at the
   small cents ranges rules 3/4 use; duration change is irrelevant for cue SFX.
 - **Mixer**: bus graph (master ← sfx/music/ui/voice), per-bus gain + soft-knee
@@ -70,7 +81,13 @@ Grammar invariants (what makes it a learnable skill):
   positions in audio messages; the DSP core is identical either way (it consumes
   parameters, never caring who computed them).
 - **Listener** = one entity (client's view); grammar math happens in listener
-  space each block.
+  space each block. **Built**: `crcbl_audio::spatial::Listener`, with
+  `Listener::ORIGIN` as the value a mixer starts at; the `Mixer` owns one and
+  `Mixer::set_listener` is where a frame says where the ears are, so a cue is
+  placed against the mixer's listener rather than against a position each caller
+  passes in. (`spatial::compute_cue` still takes a listener position as an
+  argument, and that is the layer below — call it directly and you are back to
+  four samples spelling the entry point four ways.)
 - **Occlusion (rule 5) rides physics**: per active voice, a client-side
   `crcbl-phys` L0 raycast (listener → emitter, throttled + cached, not per audio
   block) collects hits; colliders carry an **acoustic material**
@@ -92,7 +109,15 @@ Grammar invariants (what makes it a learnable skill):
   orbit around the listener (players + devs calibrate ears).
 - `crcbl audio render <scene|script> -o out.wav` (CLI, topic 11): offline render
   of an event script through the full DSP chain — the audio equivalent of
-  `screenshot`.
+  `screenshot`. **Not built** (2026-08-27): `crcbl-cli`'s parser accepts `new`,
+  `run`, `build`, `screenshot`, `replay`, `crpix`, `lod`, `import`, `bench`,
+  `sim` and `settings`, and `audio` is not among them — an `audio` invocation
+  exits 2 as an unrecognized command. It is the missing half of the e2e below,
+  which is written as "sim script → `crcbl audio render` → golden buffer", and
+  its input is the part to think about first: a scene is the `.scn/` RON
+  directory `crcbl-scene` has not built, and `docs/backlog.md` records
+  `crcbl sim --input script.ron` refused for the same reason — nothing in the
+  workspace reads RON.
 
 ## Testing (topic 12 integration)
 
@@ -106,16 +131,27 @@ Grammar invariants (what makes it a learnable skill):
 - e2e: sim script emits events → `crcbl audio render` → golden buffer. Runs
   headless everywhere (no audio device needed — device seam!).
 
+**What of this list actually runs** (2026-08-27), because the section reads as
+description and is a plan: `crates/crcbl-audio/tests/spatial_chain.rs` covers
+the chain end to end — centre is symmetric, right pans right, an event stream
+hashes the same twice and differently reversed — and `synth`'s in-crate tests
+cover the one golden buffer. **Not written**: the sphere sweep against
+closed-form values, the resampler SNR bound, the limiter assertion (there is no
+limiter), the continuity property, the voice-steal delay-line property (there is
+no stealing either), and the e2e (there is no `crcbl audio render`). The
+headless claim is the one thing this list can already prove — the null output
+backend makes every test above run with no device.
+
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                                              | Roadmap phase                                            |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Device seam + audio thread + mixer/buses + WAV/QOA + voices + **full cue grammar** | P4A (before first sample — breakout bounces pan audibly) |
-| Event replication wiring (spatial sounds from server events)                       | P4A (rides P2 machinery)                                 |
-| Music streaming + ducking snapshots + cue inspector overlay                        | P10                                                      |
-| AudioWorklet wasm output                                                           | P5                                                       |
-| **Occlusion (rule 5)**: acoustic materials on colliders, raycast → lowpass chain   | P10 (needs phys BVH + scene materials)                   |
-| Reverb zones, portal/room-graph propagation, doppler, surround                     | post-MVP                                                 |
+| Slice                                                                                                                                                                                                                                                                                                                                                                                             | Roadmap phase                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Device seam + audio thread + mixer/buses + WAV/QOA + voices + **full cue grammar** — **built except the buses**: `AudioStream`, `Mixer`, `wav.rs`, `qoa.rs`, `spatial.rs`. The buses are the one hole and they have their own correction below.                                                                                                                                                   | P4A (before first sample — breakout bounces pan audibly) |
+| Event replication wiring (spatial sounds from server events)                                                                                                                                                                                                                                                                                                                                      | P4A (rides P2 machinery)                                 |
+| Music streaming + ducking snapshots + cue inspector overlay                                                                                                                                                                                                                                                                                                                                       | P10                                                      |
+| AudioWorklet wasm output — **built**: `crates/crcbl-audio/src/web.rs`. Read its header first: the worklet and the wasm instance are the same thread, so the SAB ring an AudioWorklet feed would normally use is not what this does.                                                                                                                                                               | P5                                                       |
+| **Occlusion (rule 5)**: acoustic materials on colliders, raycast → lowpass chain — **unbuilt, and its dependency is now half met**: `crcbl-phys` has the ray query (`cast_ray`), so what is owed is the acoustic-material presets on colliders and a per-voice filter. There is no biquad or one-pole in the voice path at all — the only lowpass in `crcbl-audio` is inside the noise generator. | P10 (needs phys ray queries + scene materials)           |
+| Reverb zones, portal/room-graph propagation, doppler, surround                                                                                                                                                                                                                                                                                                                                    | post-MVP                                                 |
 
 ## Exit criteria (MVP)
 
@@ -125,7 +161,10 @@ Grammar invariants (what makes it a learnable skill):
 - Grammar continuity property suite green (no seams/clicks on orbiting
   emitters).
 - towers plays creep/tower audio spatially in co-op (browser + native, same
-  grammar — wasm AudioWorklet path verified).
+  grammar — wasm AudioWorklet path verified). **There is no towers app** — the
+  `apps/` tree has fourteen samples and towers is not one of them, so this
+  criterion has no way to be met and no date; the AudioWorklet half of it is
+  separately provable and built.
 - Occlusion audible and material-distinct: the same cue behind a thin wall vs
   heavy wall vs open air is identifiable in the grammar trainer; walking into a
   closed room audibly muffles the outside world.
@@ -141,6 +180,19 @@ Grammar invariants (what makes it a learnable skill):
   smoothing, and **crossfaded dual delay lines** for large jumps and left↔right
   ear swaps. New property: an orbiting emitter produces no unintended pitch
   glide beyond a stated cents bound.
+
+  **One of the three is built, and the omission is the one this bullet is
+  about** (2026-08-27). `crcbl-audio`'s `mixer` has a per-channel `DelayLine`
+  answering a linearly interpolated fractional delay, capacity one past the
+  longest ITD it will serve so both taps stay in-buffer. What it does **not**
+  have is any smoothing or crossfade: `Mixer::set_mix` — documented as "re-aim a
+  playing voice", the moving-emitter case exactly — reaches `Voice::apply_mix`,
+  which assigns `itd_samples` straight into the voice with a clamp and nothing
+  else. So a re-aimed voice steps its delay length in one block, which is the
+  click and the glide described above. Neither the cents-bound property nor a
+  continuity property exists; the spatial tests assert symmetry, panning
+  direction and determinism, not smoothness.
+
 - **"Identical across platforms because pure f32" is only true without libm.**
   Biquad coefficients (`cos`, `exp`), resampler windows (`sin`) and cents→ratio
   (`powf`) all hit platform libm, which differs across glibc/musl/macOS/wasm —
@@ -165,25 +217,37 @@ Grammar invariants (what makes it a learnable skill):
   ROADMAP marks done. `crates/crcbl-audio` has no bus type and no limiter —
   `Mixer` is voices and nothing above them. Mix snapshots and ducking are
   scheduled at P10 and depend on the buses that were never built, so P10
-  inherits both.
+  inherits both. **Still true on 2026-08-27** — no `Bus`, no `Limiter`, nothing
+  named either, anywhere under `crates/crcbl-audio/src`. It has a third debtor
+  now: [32-voip.md](32-voip.md) schedules "mixer voice bus/ducking" with team
+  voice, and that bus is this bus.
 - **The transcendental policy conflicts with [05-physics.md](05-physics.md).**
   This document requires own polynomial approximations plus a CI deny; topic 5's
   correction requires the `libm` crate. Neither exists. See topic 5's correction
   for the full note; the decision is one decision and belongs in one place.
-- **Golden buffers are an exit criterion with no instances.** "Golden-buffer
-  audio e2e in CI for every sample that emits sound" is stated above; asteroids
-  and horde both synthesise their cues deterministically from fixed seeds — so a
-  golden is possible — and neither has one. `docs/backlog.md` carries it as a
-  coverage gap.
-- **There is still no listener.** `spatial::compute_cue` takes the listener
-  position on every call, so four samples spell their audio entry point three
-  different ways. This document's architecture already decided the answer —
-  "**Listener** = one entity (client's view); grammar math happens in listener
-  space each block" — so the gap is unbuilt work rather than an open design
-  question, and the backlog entry that frames it as a design question is wrong.
+- **Golden buffers exist now, but not at the level the exit criterion names**
+  (revised 2026-08-27; this bullet said "no instances"). There is exactly one:
+  `crates/crcbl-audio/tests/burst-reference.wav`, asteroids' explosion, written
+  and read by this crate's own WAV codec and compared frame by frame against the
+  generator in `crcbl-audio`'s `synth` tests. What is still missing is the
+  criterion as written — "for every sample that emits sound". `apps/asteroids`
+  and `apps/horde` synthesise their cues deterministically from fixed seeds, so
+  a golden is possible for each, and neither has one; only `apps/breakout` even
+  mentions audio in its test target. `docs/backlog.md` carries the gap.
 
-  **Closed, 2026-08-15.** `crcbl_audio::spatial` has a `Listener`, with
-  `Listener::ORIGIN` as the value a mixer starts at, and the `Mixer` owns one:
-  `Mixer::set_listener` is where a frame says where the ears are, and cues are
-  placed against it rather than against a position each caller passes in. Built
-  as this bullet argued — the architecture's answer, not a new one.
+  **Read that golden's own doc comment before writing the next one.** It started
+  as a digest of every sample's `f32::to_bits` and CI failed it on macOS _and_
+  on Windows the first time it ran — Windows being `x86_64` like the Linux
+  runner is what rules out an architecture cause and pins it on libm, exactly as
+  the transcendental correction above predicts. It now pins the **waveform** at
+  a tolerance, plus total energy separately, because a per-sample bound is blind
+  to a small coherent drift spread over a whole buffer. A sample-level golden
+  that pins bytes will fail the same way.
+
+- ~~**There is still no listener.**~~ **Closed 2026-08-15, verified again
+  2026-08-27** — `Listener`, `Listener::ORIGIN` and `Mixer::set_listener` all
+  ship; see the architecture bullet above. Kept as a line rather than deleted
+  because of _how_ it closed: the answer was already written in this document's
+  architecture section, so the work was unbuilt work and not an open design
+  question, and the backlog entry that framed it as a design question was wrong.
+  That is the failure mode to watch for in the bullets around it.

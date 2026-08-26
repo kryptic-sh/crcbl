@@ -34,6 +34,14 @@ document's encryption, is written against a baseline that has not been built.
 The key agreement and the AEAD arrive with the UDP layer, and that is where
 taking on crypto dependencies becomes a real question.
 
+**Re-read on 2026-08-27: still exactly true, and there is one more thing the MAC
+does not do.** The 32-byte resume token it keys on travels in the clear inside
+the handshake's `Accept`, so an observer who watched the handshake has the
+session key. `auth.rs` names the threat it is for and it is a narrow one: a
+spoofer who can send packets but did not see the handshake. Against anyone
+on-path it is worth nothing, which is a second reason the tier table in
+[27-auth.md](27-auth.md) cannot yet claim what it claims for tier 1.
+
 Rejected: **TCP** (head-of-line blocking poisons the snapshot channel); **QUIC
 from scratch** (TLS 1.3 from scratch = the wrong own-all-bugs; if a native QUIC
 need ever materializes, `quinn` behind the seam is the sanctioned exception,
@@ -47,6 +55,29 @@ transport carries them:
 | unreliable-sequenced | latest-wins, drops fine, no resend | snapshots (old snapshot = worthless)     |
 | reliable-ordered     | delivered, in order                | commands, events, chat, console          |
 | reliable-fragmented  | delivered, reassembled             | bulk: join-in-progress snapshot, replays |
+
+**The seam in the tree has two channels, not three** (2026-08-27), and knowing
+which of these rows is real matters before anything is built on them.
+`crcbl_net::transport::MessageKind` is `Reliable | Unreliable`, and `Transport`
+offers `send_reliable` / `send_unreliable` with a `recv_reliable` a backend may
+override so control traffic is not starved by lossy state. So:
+
+- **reliable-ordered** is real, and the `kind` field is a truthful label on a
+  received message rather than a routing instruction — every implementation
+  overwrites it to match the call, so a mismatched field cannot silently reroute
+  anything.
+- **unreliable-sequenced** is _not_ sequenced. `Unreliable` promises only "may
+  be dropped or reordered". What actually stops a stale snapshot beating a fresh
+  one is a layer up: `crcbl_net::delta` refuses a delta whose tick is not newer
+  than the baseline's, so lateness is rejected at apply time instead of being
+  prevented at the channel. Anyone adding sequencing to the channel needs to
+  keep that check, not replace it.
+- **reliable-fragmented** does not exist. `MAX_IN_MEMORY_MESSAGE_BYTES` (64 KiB)
+  is a limit that _refuses_ an oversized message; nothing reassembles anything.
+  A join-in-progress snapshot larger than that has no path today.
+- **unreliable-event**, added by the 2026-07-27 correction below, has no
+  representation at all — a transient cue riding `send_reliable` will
+  head-of-line block exactly as that correction warns.
 
 ## Own UDP reliability layer (the classic, built properly)
 
@@ -112,10 +143,16 @@ Designed against InMemory first; every later transport inherits them:
 
 ## Bandwidth management (design now, tighten on demand)
 
-- **Per-client budget**: bytes/tick cap; the snapshot writer already takes a
-  client id — it gains a budget and a **priority model**: entities scored by
-  (relevance × staleness), important ones update every tick, others rotate.
-  Eventual consistency for the long tail, full consistency for what matters.
+- **Per-client budget**: bytes/tick cap, plus a **priority model**: entities
+  scored by (relevance × staleness), important ones update every tick, others
+  rotate. Eventual consistency for the long tail, full consistency for what
+  matters. _This bullet said "the snapshot writer already takes a client id"; it
+  does not, and never has._ `SnapshotWriter::new_with_sector` takes a `SectorId`
+  and a `TickId` and nothing else — the per-client state lives in
+  `SessionManager`, which owns one client's `last_acked_ticks` and
+  `baseline_stores`, both keyed by sector. That is where a budget belongs, and
+  it means the budget is per (client, sector) rather than per client, which is
+  what the galaxy model below wants anyway.
 - **Quantization**: wire-format compression per component type — positions as
   sector-local fixed-point (a `WorldPos` structural win: sectors bound the
   range, so 16–24 bits/axis suffices), quaternions smallest-three, velocities
@@ -123,10 +160,16 @@ Designed against InMemory first; every later transport inherits them:
   uses unquantized server state (quantization is a wire concern, not a sim
   concern).
 - **Ack-baseline deltas (the design of record — supersedes "dirty-sets per
-  tick")**: the server tracks each client's last-acked snapshot (free from the
-  ack bitfield) and encodes every snapshot as a **delta vs that client's acked
-  baseline**. This makes sparse sync automatic and loss-safe with zero game-code
-  involvement:
+  tick")** — **built**, in `crates/crcbl-net/src/delta.rs` and `session.rs`: the
+  server tracks each client's last-acked snapshot and encodes every snapshot as
+  a **delta vs that client's acked baseline**. `Baseline` / `BaselineStore` is
+  the bounded ring, `DeltaCodec` computes and applies, `encode_delta` /
+  `decode_delta` are the wire format, and the whole of it is bounded by explicit
+  caps (`MAX_BASELINE_ENTITIES`, `MAX_BASELINE_SYSTEMS`, `MAX_DELTA_BYTES`)
+  rather than by hope. Note `MAX_DELTA_BYTES` is the transport limit _minus_
+  `auth::AUTH_OVERHEAD`, because a delta that encodes fine and is then refused
+  by the transport is a client that desyncs for good. This makes sparse sync
+  automatic and loss-safe with zero game-code involvement:
   - unchanged since baseline → zero bytes;
   - lost packet, value changed again → old update never resent, current value
     ships in the next delta;
@@ -208,14 +251,14 @@ core; the token mint is the interface those services will use. LAN discovery
 
 ## Delivery
 
-| Slice                                                                                                                                                                                                                  | Phase                                             |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus, **sector-scoped envelope + (client,sector) ack-baselines** (galaxy wire model, degenerate 1-sector) | P2 (on InMemory)                                  |
-| Netgraph HUD                                                                                                                                                                                                           | P10                                               |
-| UDP reliability layer (acks, resend, fragmentation, tokens, **X25519+XChaCha20-Poly1305 AEAD**) + WebTransport + WebSocket(wss)                                                                                        | P13                                               |
-| Quantization + priority/budget encoder                                                                                                                                                                                 | P13, tightened by towers co-op numbers            |
-| Authenticated key roots (backend token mint / PSK), interest management, LAN discovery                                                                                                                                 | post-MVP                                          |
-| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                                                                                                                                 | out of engine core — separate project when needed |
+| Slice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Phase                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus, **sector-scoped envelope + (client,sector) ack-baselines** (galaxy wire model, degenerate 1-sector) — **built, bar the channel table**: `handshake.rs` (`HandshakeGate` rejecting on protocol version, engine build id and schema hash), `session.rs` (`SessionManager`, per-sector baselines, reconnect grace), `condition.rs`, `rate_limit.rs`, `delta.rs`, and a fuzz target tree at `crates/crcbl-net/fuzz`. The channel semantics are the exception — see the note under the channel table | P2 (on InMemory)                                  |
+| Netgraph HUD                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | P10                                               |
+| UDP reliability layer (acks, resend, fragmentation, tokens, **X25519+XChaCha20-Poly1305 AEAD**) — ~~+ WebTransport + WebSocket(wss)~~, both removed 2026-08-09. Unbuilt; no socket of any kind exists in the workspace.                                                                                                                                                                                                                                                                                                                                                                                            | P13                                               |
+| Quantization + priority/budget encoder                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | P13, tightened by towers co-op numbers            |
+| Authenticated key roots (backend token mint / PSK), interest management, LAN discovery                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | post-MVP                                          |
+| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | out of engine core — separate project when needed |
 
 ## Testing (topic 12)
 
@@ -246,15 +289,19 @@ core; the token mint is the interface those services will use. LAN discovery
 The ack-baseline model is the **Quake 3 delta-compressed snapshot** design —
 named now, along with the two answers it supplies that were missing:
 
-- **Entity lifecycle**: a delta is computed against the baseline's _entity set_,
-  so **removals are expressed as part of the delta** (entities present in the
-  baseline and absent now are encoded as destroys). "Unchanged → zero bytes"
-  applies to surviving entities only. Asteroids' churn exercises this in P2's
-  first week.
-- **Baseline too old**: if a client's last ack has fallen off the bounded
-  snapshot ring, the server sends a **full (keyframe) snapshot** and resets the
-  baseline — the standard `delta-base-too-old` path, and the same encoder
-  replays/join-in-progress already use.
+- **Entity lifecycle** — **built**: a delta is computed against the baseline's
+  _entity set_, so **removals are expressed as part of the delta**
+  (`SystemDelta` carries a `removed: Vec<EntityBits>`, written on the wire as
+  bare ids between the added and modified entries because a removal has no
+  payload). "Unchanged → zero bytes" applies to surviving entities only.
+- **Baseline too old** — **built**: if a client's last ack has fallen off the
+  bounded snapshot ring the server sends a **full (keyframe) snapshot** and
+  resets the baseline. `crcbl-server` adds a second trigger for the same
+  recovery — `KEYFRAME_RECOVERY_TICKS`, a keyframe once a client's acks have
+  stopped advancing for that many ticks, so a client whose acks are lost rather
+  than late is rescued too. The decoder refuses a keyframe that contains removed
+  or modified entities, which is the invariant that keeps "keyframe" from
+  quietly becoming "delta with a flag".
 - **Priority model**: the relevance×staleness rotation is the **Tribes 2
   priority-accumulator** design (Frohnmayer & Gift) — named so its
   starvation-avoidance rules are adopted rather than reinvented. Predicted
@@ -269,9 +316,13 @@ named now, along with the two answers it supplies that were missing:
   reliable-ordered, where one lost packet head-of-line-blocks them into a stale
   burst. Channel table gains `unreliable-event`: tick-stamped, fire-and-forget,
   late = dropped.
-- **WebSocket fallback**: TCP will head-of-line queue stale snapshots under
-  loss; the sender applies **latest-only coalescing** (drop queued unsent
-  snapshots on backpressure) rather than letting the queue snowball latency.
+- ~~**WebSocket fallback**: latest-only coalescing under TCP backpressure.~~
+  **Moot: WebSocket left the plan on 2026-08-09** (the LAN correction below).
+  The reasoning is kept because it transfers — _any_ ordered stream under a
+  snapshot channel needs the sender to drop queued unsent snapshots on
+  backpressure rather than let the queue snowball latency, and the in-memory
+  transport's bounded channel returns `TransportError::Backpressure` today with
+  no coalescing behind it.
 - **Encoded-space change detection**: "changed vs baseline" means _the encoded
   representation differs_, from P2 onward (identity codec until quantization
   lands at P13). Otherwise the P2 encoder is rewritten at P13 — and prediction
