@@ -104,8 +104,9 @@ pub trait Shell {
   the P2 input pipeline).
 - **`SurfaceTarget`**: the _single_ sanctioned platform leak — an opaque handle
   only HAL backends destructure (wayland display+surface ptrs, xcb conn+window,
-  HWND, NSView, canvas id). Shell consumers can't open it;
-  `crcbl-vk`/`crcbl-wgpu` can. Mirrors raw-window-handle's role, but ours.
+  HWND, NSView, canvas id). Shell consumers can't open it; the HAL backends —
+  `crcbl-vk`, `crcbl-mtl`, `crcbl-dx12`, `crcbl-webgpu` — can. Mirrors
+  raw-window-handle's role, but ours.
 - **`ShellCaps`**: capability flags instead of platform sniffing — `hw_upscale`
   (Wayland viewport path), `aspect_hint_honored` (native aspect lock vs
   letterbox-only), `pointer_warp`, `text_ime`. The renderer picks
@@ -187,18 +188,17 @@ Notes on the from-scratch protocol work:
   XKB for keymaps. Request/event layer is ours; scope stays at what the shell
   actually uses.
 - **Windows/macOS**: FFI declarations are code we write and own — dozens of
-  functions, not thousands; audited by use. **Moved to P5C** (see ROADMAP's
-  2026-08-04 correction). They were scheduled with Metal/DX12 because "before
-  that they'd be compile-verified-only anyway (gpur lesson: that's not
-  support)", and that reasoning turned out to be the HAL's rather than the
-  shell's: P0.6 tested a whole X11 backend against a real server with no
-  renderer in existence, and both CI runners are desktops. What genuinely does
-  wait for P14 is the sample-level pass — driving a running game and pressing
-  F11 at it needs something to draw with.
+  functions, not thousands; audited by use. They were originally scheduled with
+  Metal/DX12 because "before that they'd be compile-verified-only anyway (gpur
+  lesson: that's not support)", and that reasoning turned out to be the HAL's
+  rather than the shell's: P0.6 tested a whole X11 backend against a real server
+  with no renderer in existence, and both CI runners are desktops. A shell
+  backend does not need a GPU backend to be tested against a real desktop, which
+  is why these landed at P5C instead.
 - **Web**: `wasm-bindgen` is avoided in the shell; a small hand-rolled JS glue
-  file exports canvas/event/rAF hooks as plain wasm imports. (Whether the rest
-  of the wasm build keeps wasm-bindgen is a stage 10 decision — the shell
-  doesn't require it.)
+  file exports canvas/event/rAF hooks as plain wasm imports. Nothing else in a
+  browser build uses it either — see [10-wasm-webgpu.md](10-wasm-webgpu.md)'s
+  deviations.
 
 ## Testing (topic 12)
 

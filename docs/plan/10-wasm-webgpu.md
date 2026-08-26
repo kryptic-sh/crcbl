@@ -10,13 +10,6 @@
 > native set. Read "Correction (scope and browser boundary, 2026-08-09)" before
 > relying on anything below.
 
-> **Scheduling note (ROADMAP wins):** this doc's _backend/platform_ half
-> (crcbl-wgpu, canvas/rAF, Slang→WGSL, FetchSource, AudioWorklet) lands
-> **early**, at roadmap phase P5 — right after the first sample — so every
-> sample publishes to the GitHub Pages demo site from then on. The _networking_
-> half (WebTransport/WebSocket + dedicated-server listener) lands at P13 for
-> towers co-op.
-
 Run games (and eventually the editor) in the browser. The browser has no Vulkan
 — WebGPU is the graphics API, wasm32 is the target, and several platform
 assumptions (threads, blocking IO, UDP) change. This stage exists as its own
@@ -61,19 +54,20 @@ The original reasoning — implement the HAL on the **`wgpu` crate**, not raw
 - Cost: dependency weight and wgpu's own abstraction overhead — acceptable for
   the portability tier; the performance tier remains `crcbl-vk`/mtl/dx12.
 
-Tier B refresher (from stage 3): no descriptor-indexing bindless → texture array
-pages + batching; no `draw_indirect_count` → compacted instance list + per-batch
-`draw_indirect`; no BDA → indexed SSBO lookups. Culling still runs in compute on
-the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
+The data-layout consequences that argument leaned on are unchanged and are
+stated canonically in "The browser boundary" below. Culling still runs in
+compute on the GPU — the GPU-bound principle holds, only the draw-emission tail
+differs.
 
 ## Platform work
 
-- **Build**: `wasm32-unknown-unknown` + `wasm-bindgen`; a small `crcbl-web`
-  crate for canvas setup, rAF loop driving `tick(dt)`, resize/DPI from the
-  browser. crcbl-shell's canvas backend (topic 15, own JS shim) provides this —
-  if its canvas/rAF handling is solid, `crcbl-web` shrinks to glue. It did: what
-  shipped is `crcbl::web`, a module rather than a crate, plus the shim in
-  `web/`. See the deviation note below.
+- **Build**: `wasm32-unknown-unknown`, and a small `crcbl-web` crate for canvas
+  setup, rAF loop driving `tick(dt)`, resize/DPI from the browser. crcbl-shell's
+  canvas backend (topic 15, own JS shim) provides this — if its canvas/rAF
+  handling is solid, `crcbl-web` shrinks to glue. It did: what shipped is
+  `crcbl::web`, a module rather than a crate, plus the shim in `web/`. The
+  `wasm-bindgen` this bullet used to name is gone with it; see the deviation
+  note below.
 - **Shaders**: Slang → WGSL (via SPIR-V → naga if Slang's WGSL target isn't
   clean at the time). Same shader-hash pipeline, third artifact format.
 - **Assets**: `FetchSource` (HTTP fetch → async decode). Asset packs matter more
@@ -94,8 +88,11 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
    renderer path validated on native wgpu against the stage 3 scene.~~ Overtaken
    by the reversal above: the HAL implementation that shipped is
    `crcbl-webgpu`'s command stream, and it has no native leg to validate first.
-2. wasm build of sandbox: canvas, rAF, FetchSource, single-thread loop.
-3. Slang→WGSL artifact pipeline.
+2. ~~wasm build of sandbox: canvas, rAF, FetchSource, single-thread loop.~~
+   Built, for the samples rather than the sandbox — `web/build.sh` and the demos
+   it publishes.
+3. ~~Slang→WGSL artifact pipeline.~~ Built — `crates/crcbl-shaders/wgsl` is
+   committed and hashed alongside the SPIR-V.
 4. WebTransport/WebSocket transport + server listener; sandbox client-in-browser
    connecting to native server — **the multiplayer first-class story,
    demonstrated**.
@@ -113,111 +110,71 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
 - Same debug overlay works in-browser (UI is engine-rendered — free by
   construction; profiler shows WebGPU timestamps where available, degrades
   gracefully where not).
-- CI: wasm build + headless WebGPU (via wgpu) graph tests.
+- CI: a wasm build and a headless browser run. `web/run-browser-e2e.sh` is what
+  that became — a real Chromium over the DevTools protocol, not graph tests.
 
 ## Risks
 
 - **WebGPU timestamp/feature availability varies by browser.** Debug tooling
   degrades feature-by-feature, never breaks the build.
-- **wgpu version churn.** Pin and upgrade deliberately (same policy as other
-  pinned deps).
 - **Tier B perf disappointment.** Set the budget expectation in this doc's perf
   task — Tier B is the reach-everyone tier, not the showcase tier.
 
-## Status after P5.8 (the shim, the entry point, the deploy)
+## Deliberate deviations from this document
 
-> **Superseded by "Status after P5.13" above.** The blocker named here — `naga`
-> and `DrawParameters` — was closed by P5.9, and task 1 is done. The section is
-> kept because the rest of it still holds and because the sequencing lesson at
-> its end is the one worth keeping.
+**The sequencing lesson first, because it is the transferable part.** The tasks
+above are written native-backend-first — "faster iteration, same code" — and
+that order was right; what actually happened is that the browser work reached
+the end of the platform half (page, shim, deploy, export checks) while the
+graphics half still had no shader a browser would accept. A platform track can
+be finished and demonstrate nothing.
 
-The page, the shim and the deploy exist; **the demo does not render yet.**
-Recorded here rather than discovered by whoever opens the URL.
-
-**What is built and checkable without a browser.** `apps/breakout` is a `cdylib`
-with an `extern "C"` entry point (`src/web.rs`); `web/` is the shim, in plain ES
-modules with no bundler and no npm; `.github/workflows/pages.yml` builds on PRs
-and deploys on main. The artifact builds and exports every `__crcbl_*` symbol
-the shim looks up, each one the shim calls exists, and the module imports
-nothing outside the `wasm-bindgen` glue. `web/tools/check-exports.mjs` asserts
-all three of those on every PR, and both of its failure directions were verified
-by deliberately breaking them.
-
-**What blocks it.** `naga` refuses every one of the engine's SPIR-V modules
-(`UnsupportedCapability(DrawParameters)`), so `crcbl-wgpu` cannot create a
-shader module on **any** target — the native `--backend wgpu` run fails the same
-way. The WGSL artifacts this document's task 3 asks for already exist and are
-complete; the HAL seam has no field to carry them. See ROADMAP's "Known gaps"
-for the full diagnosis and the next slice.
-
-**Task 1 of this stage is therefore not done.** The Tier B renderer path has not
-been validated on native wgpu against any scene, and the exit criterion "sandbox
-scene runs in Chrome/Firefox-with-WebGPU" cannot be attempted until it has been.
-The order the tasks are written in — native wgpu first, "faster iteration, same
-code" — was right, and the browser work reached the end of the platform half
-before the graphics half had a working shader.
-
-**Deliberate deviations from this document, both forced:**
-
-- **`wasm-bindgen` is a build tool, not a binding strategy.** The plan's build
-  bullet names it, and `docs/plan/15-windowing.md` rejects it for the shell.
-  Both hold: no crate depends on `wasm-bindgen`, `#[wasm_bindgen]` appears
-  nowhere, and every `__crcbl_*` symbol is hand-written `extern "C"`. The CLI is
-  mandatory anyway, because `wgpu` reaches WebGPU through `web-sys` and leaves
-  ~320 `__wbindgen_placeholder__` imports that nothing else can resolve —
-  `WebAssembly.instantiateStreaming` on a raw artifact is a `LinkError`. Its
-  version is read from `Cargo.lock` in one place (`web/build.sh`) so a
-  mismatched CLI fails the build rather than a visitor's browser.
+- **`wasm-bindgen` is a build tool, not a binding strategy** — and it is now not
+  even that. `docs/plan/15-windowing.md` rejects it for the shell and the same
+  rule held everywhere: no crate depends on it, `#[wasm_bindgen]` appears
+  nowhere, and every `__crcbl_*` symbol is hand-written `extern "C"`. The CLI
+  was mandatory only for as long as something reached WebGPU through `web-sys`
+  and left `__wbindgen_placeholder__` imports nothing else could resolve; with
+  that gone `web/build.sh` runs no `wasm-bindgen` at all, and
+  `web/tools/check-exports.mjs` asserts per demo that the single-threaded
+  artifact imports **nothing** — the threaded one importing only a shared
+  `env.memory`, which a module cannot own and be attached to from a worker.
 - **The audio feed is shape B** (render on the main thread, `postMessage`
-  transferred blocks) rather than the shape A `crcbl-audio` prefers. Two
-  independent reasons, either sufficient: `AudioWorkletGlobalScope` cannot
-  satisfy the `wasm-bindgen` imports, and a second wasm instance in the worklet
-  would have its own linear memory and none of the voices the game queued. The
-  cost is ~21–43 ms of buffered lead, stated in `web/engine/audio-worklet.js`.
+  transferred blocks) rather than the shape A `crcbl-audio` prefers. The reason
+  that survives is the one about memory: a second wasm instance in the worklet
+  would have its own linear memory and none of the voices the game queued, and
+  there is no `play(id)` in the audio ABI for it to be told about them. The cost
+  is the buffered lead stated in `web/engine/audio-worklet.js`.
 - **There is no `crcbl-web` crate.** The build bullet allowed for one "if
-  crcbl-shell's canvas/rAF handling is solid". It is, and the glue that was left
-  fitted in `apps/breakout/src/web.rs` and `web/engine/*.js`. A second sample is
-  what will show which parts of that are engine and which are sample.
+  crcbl-shell's canvas/rAF handling is solid". It is, and the split a second
+  sample forced is `crcbl::web` — a module in `crcbl` itself rather than a
+  crate. It owns the protocol: the status codes the page polls, the log queue
+  the page drains, the asset base, and a `web_exports!` macro that writes a
+  sample's exports for it. What stays in the sample is its `WebPending` impl,
+  because the options a game boots with and the error it fails with are the
+  game's own. The _symbols_ still have to be per-demo — two demos can be open in
+  one browser and the shim looks each up by name — but nothing behind them is.
 
-  **The second sample came, and the split it forced is `crcbl::web`.** Still no
-  separate crate — the module lives in `crcbl` itself. It owns the protocol: the
-  status codes the page polls, the log queue the page drains, the asset base,
-  and a `web_exports!` macro that writes a sample's exports for it. What stays
-  in the sample is its `WebPending` impl, because the options a game boots with
-  and the error it fails with are the game's own. The _symbols_ still have to be
-  per-demo — two demos can be open in one browser and the shim looks each up by
-  name — but nothing behind them is, and every sample with a browser build now
-  goes through the macro.
-
-## Status after P5.13 — exit criteria met
+## The gate, and what it found
 
 `web/run-browser-e2e.sh` serves the built site, drives it in a real Chromium
 over the DevTools protocol, and reads the canvas back. It is the gate this
 document's exit criteria are measured by, and it needs no GPU — the default
-configuration is Xvfb plus Chromium's bundled SwiftShader.
-
-**It reports 18/18.** breakout boots, `crcbl-wgpu` opens a WebGPU device, a
-960x511 `Rgba8Unorm` Fifo swapchain is configured on the canvas, the rAF loop
-runs, a real click focuses the canvas, a real `Space` keydown reaches
-`__crcbl_web_key` and launches the ball, a brick breaks (score 10, 39 bricks
-left, the audio cue fires), and the canvas holds 13 distinct colours across 16
-distinct frames with no WebGPU device errors behind them. Task 2 of this
-document — "wasm build of sandbox: canvas, rAF, FetchSource, single-thread loop"
-— holds for breakout.
-
-**Task 1 is discharged too.** "Tier B renderer path validated on native wgpu"
-was skipped when the browser work ran ahead of it, and P5.11 went back for it:
-`crcbl-wgpu` now presents windowed frames and renders offscreen with readback,
-and the offscreen frame is byte-identical to Vulkan's on the same driver.
+configuration is Xvfb plus Chromium's bundled SwiftShader. ROADMAP's status
+section carries what it currently checks; this section is about why it is shaped
+the way it is.
 
 **The two things the browser found that nothing else could.** Dawn enforces
 WGSL's uniformity rule where naga does not, and rejected the UI shader for
 sampling the glyph atlas under a branch on a varying — which invalidated the
 frame's whole command buffer and left the canvas black while the simulation ran
-normally. And `crcbl-wgpu` cannot observe a pipeline it failed to create,
-because WebGPU reports creation failures to the device error callback; the run
-submitted 384 invalid command buffers while reporting a healthy status. The
-first is fixed; the second is recorded in ROADMAP's known gaps.
+normally. And a WebGPU backend cannot observe a pipeline it failed to create,
+because WebGPU reports creation failures to the device error callback — a run
+submitted invalid command buffers by the hundred while reporting a healthy
+status. Both are fixed, the second by `Device::take_error`, which `Gpu::acquire`
+drains before it records anything; see
+[41-webgpu-stream.md](41-webgpu-stream.md)'s error-attribution section for the
+shape that gives it.
 
 **A readback trap worth keeping.** Three of the four obvious ways to read a
 WebGPU canvas back return transparent black regardless of what was drawn,
@@ -290,11 +247,8 @@ dual-source blending and the BC/ETC2/ASTC families **are** available, so the
 profiler, GPU culling and the post stack all work. The gap is narrower than
 "Tier B" implied — see [39-capabilities.md](39-capabilities.md).
 
-### Two smaller items
+### The editor is a native target
 
-- **The editor is a native target.** Task 6's "editor-in-browser smoke — should
-  mostly work by construction" was never examined; the asset browser, OS
-  drag-drop and the notify-based file watcher are all native-shaped. See
-  [08-editor.md](08-editor.md).
-- **The P5.13 status section reports 18/18.** The browser gate has grown since;
-  the ROADMAP status section carries the current count and is authoritative.
+Task 6's "editor-in-browser smoke — should mostly work by construction" was
+never examined; the asset browser, OS drag-drop and the notify-based file
+watcher are all native-shaped. See [08-editor.md](08-editor.md).

@@ -11,13 +11,9 @@ Nothing draws yet; everything after this stage has a place to live.
   9 (Metal/DX12) implement the same contract.
 - Window + event loop + swapchain-ready surface handle on Linux.
 - CI: fmt, clippy `-D warnings`, tests on Linux from day one. It did not stay
-  that small — `.github/workflows/ci.yml` now also runs rustdoc, `cargo-deny`,
-  `cargo-machete`, coverage with a floor, a wasm32 build, a Windows and a macOS
-  build, a shader-artifact check, a decoder fuzz job, and a per-backend and
-  per-window-system e2e job apiece (`vk`, `mtl`, `dx12`, Wayland, X11, Win32 and
-  the CLI). The `wgpu` job and the cross-backend image compare this list used to
-  name went with `crcbl-wgpu` in `6b5e17a`. `cron.yml` and `pages.yml` are the
-  other two workflows.
+  that small — `.github/workflows/ci.yml` is the list, and `cron.yml` and
+  `pages.yml` are the other two workflows. Naming its jobs here only produced a
+  second copy that fell behind the first.
 
 ## Platform matrix (canonical — settled 2026-08-05)
 
@@ -66,6 +62,8 @@ crcbl/
 │   ├── crcbl-greybox/      # untextured stand-in meshes for samples
 │   ├── crcbl-rand/         # deterministic pseudo-random source
 │   ├── crcbl-sprite/       # sprite sheets: frames, clips, nine-slice
+│   ├── crcbl-anim/         # topic 17: skeletons, clips, blending
+│   ├── crcbl-vfx/          # topic 20: particle simulation
 │   ├── crcbl-ecs/          # stage 4: system-owned arrays
 │   ├── crcbl-net/          # stage 4: transport seam, replication
 │   ├── crcbl-server/       # stage 4: authoritative fixed-tick simulation
@@ -83,15 +81,8 @@ crcbl/
 ├── apps/
 │   ├── bare/               # the engine as a library, with its own loop
 │   ├── sandbox/            # dev playground, first window lives here
-│   ├── sim/                # headless determinism harness
-│   ├── breakout/           # the samples, each a native front end and a wasm one
-│   ├── flappy/
-│   ├── asteroids/
-│   ├── horde/
-│   ├── hud/
-│   ├── lantern/
-│   ├── quarry/
-│   ├── viewer/
+│   ├── breakout/ …         # the samples, each a native front end and a wasm
+│   │                       # one; the set grows, so `ls apps/` is the list
 │   └── render-harness/     # draws every Scene for the cross-backend compare
 └── docs/plan/
 ```
@@ -99,7 +90,9 @@ crcbl/
 **There is no `apps/editor` and no `sdk/`.** The editor is stage 8 and
 unstarted, so its directory does not exist rather than sitting empty; topic 16's
 guest SDKs are the same. Both are still planned — this block is what the tree
-holds today, not a retraction of either.
+holds today, not a retraction of either. No `sim` app either: the headless
+determinism harness is the `crcbl` binary's `sim` subcommand
+([11-cli-headless.md](11-cli-headless.md)), which is where its tests live.
 
 Empty crates are created in this stage with only their public seam types where
 those are already known (`crcbl-hal` especially). Don't stub speculative APIs
@@ -185,11 +178,13 @@ seam compiles as a trait object / generic and nothing leaks backend types.
   Metal/DX12 docs — no obviously vk-only concept in the trait names.
 - `NullBackend` test passes.
 
-## Risks
+## Seam freeze
 
-- **Over-designing the HAL before the Vulkan impl exists.** Mitigation: the seam
-  is allowed to change during stage 2; it freezes at stage 2 exit, not stage 1
-  exit.
-- **Windowing edge-case iceberg** (the reason winit exists — DPI, focus, WM
-  quirks). Contained per topic 15: Linux-first with daily driving + CI under
-  nested compositors; Win32/AppKit deferred to P14; letterbox-always-works.
+Neither seam freezes at this stage's exit. The HAL is allowed to change through
+stage 2 and is **provisional at stage-2 exit, frozen at P5 exit** — see
+[02-vulkan-backend.md](02-vulkan-backend.md)'s corrections, which are canonical
+on the freeze point. The shell seam is not frozen here either.
+
+The windowing edge-case iceberg (the reason winit exists — DPI, focus, WM
+quirks) is contained per topic 15 rather than here; see
+[15-windowing.md](15-windowing.md)'s risk list.

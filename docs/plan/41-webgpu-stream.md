@@ -41,11 +41,12 @@ Three things on the HAL seam look like they must cross and do not:
 
   `Offscreen` is the second reachable variant and it is deliberately **not**
   `CreateSurface`: it has no canvas key, and a reserved id standing in for one
-  would be a magic number both decoders had to agree on. It gets its own command
-  when the parity gate needs frames read back, because the replayer's two jobs
-  differ — one resolves a canvas out of the shim's registry and takes its
-  `webgpu` context, the other has no canvas to resolve and must allocate a ring
-  of textures nothing presents.
+  would be a magic number both decoders had to agree on. It has its own command,
+  because the replayer's two jobs differ — one resolves a canvas out of the
+  shim's registry and takes its `webgpu` context, the other has no canvas to
+  resolve and must allocate a ring of textures nothing presents. The handle is
+  its whole body: an offscreen target's extent and format belong to the
+  swapchain, not the surface.
 
   Neither of them **configures** anything. `GPUCanvasContext.configure` takes a
   `GPUDevice`, and `create_surface` is an `Instance` method the seam lets a
@@ -114,11 +115,12 @@ reply to a sequence already answered. A replayer answering the wrong command is
 precisely the bug this channel could otherwise hide, and it looks exactly like
 an answer.
 
-The reply set built so far is **partial and deliberately so**: one reply per
-encoding shape — a handle alone, a handle plus an unbounded payload, a scalar
-plus a string, a counted array of fixed-size elements. The device-request poll,
-the rest of `AdapterInfo` and `DeviceCaps` are not encoded yet; each is one of
-those four shapes or a composition of them.
+The reply set is **one reply per encoding shape, not one per HAL method** — a
+handle alone, a handle plus an unbounded payload, a scalar plus a string, a
+counted array of fixed-size elements, a flat record of scalars and strings and
+codes. A method that needs an answer is added by composing those, and the set in
+`crcbl-webgpu`'s `reply` module is the list. A new shape is the thing worth
+noticing, because it is where a decoder gains a way to be wrong.
 
 **Surface capabilities was not**, and that sentence used to claim it was.
 `SurfaceCaps` needed two shapes the list above does not hold: a counted array of
@@ -416,7 +418,9 @@ not want it, at the cost of the attribution.
 The granularity of `pushErrorScope`/`popErrorScope` around replay is an
 implementation choice this document deliberately leaves open — per flush is the
 cheap default, per command is the precise one, and which is affordable is a
-measurement nobody has taken.
+measurement. `web/tools/error-scope-bench.mjs` is the instrument for it: it
+patches `Replayer.prototype.replay` from a served page rather than editing the
+replayer, so measuring the thing does not require shipping it first.
 
 ## The cases that are easy to get wrong
 

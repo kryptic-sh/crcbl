@@ -124,19 +124,18 @@ GPU-based validation) integration into the same log path as Vulkan validation.
 
 ## Tasks
 
+What is left of this list is what the deferral parks. The shader, windowing and
+CI tasks it also carried are built — `crates/crcbl-shaders` commits its `msl/`
+and `dxil/` artifacts under the same manifest as the SPIR-V, `crcbl-shell` has
+Win32 and AppKit backends with `F11` bound in every sample, and the CI bullet
+above describes the jobs that replaced "CI matrix + on-hardware smoke runs".
+
 1. ~~MoltenVK spike + decision gate.~~ Cancelled; see the 2026-08-05 correction.
-2. Slang → MSL/DXIL build outputs + shader hash plumbing.
-3. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then the
+2. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then the
    features the device reports and the renderer selects on — there are no tiers,
    per the correction at the top — then perf pass vs Vulkan baseline.
-4. `crcbl-dx12`: same ladder.
-5. ~~Windowing: crcbl-shell Win32 + AppKit backends land here (topic 15).~~
-   **Moved to P5C** (ROADMAP's 2026-08-04 correction) and shipped. What still
-   waits for this phase is the sample-level pass — pressing F11 at a running
-   game needs something to draw with.
-6. ~~CI matrix + on-hardware smoke runs.~~ **Built** — the `mtl e2e` and
-   `dx12 e2e` jobs in `.github/workflows/ci.yml`; see the CI bullet above.
-7. Perf validation: stage 3 exit-criteria scene within ~15% of the Vulkan
+3. `crcbl-dx12`: same ladder.
+4. Perf validation: stage 3 exit-criteria scene within ~15% of the Vulkan
    numbers on comparable hardware (flag, investigate, document if not).
 
 ## Exit criteria
@@ -165,10 +164,10 @@ GPU-based validation) integration into the same log path as Vulkan validation.
   OS/driver requires by ABI and are fine; winit/SDL-class frameworks are not.
   See 15's revised dependency-line section.
 - **DX12's justification is corrected**: it is _not_ old-Intel-iGPU coverage —
-  this backend is specced Tier A with SM6.6 dynamic resources, which those GPUs
-  don't support (they're what `crcbl-wgpu` exists for). DX12 is here for (a) the
-  Xbox door and (b) first-class Windows GPU debugging/vendor tooling. No Tier B
-  DX12 path is planned.
+  this backend is built around SM6.6 dynamic resources, which those GPUs do not
+  support, and nothing in the workspace covers them since `crcbl-wgpu` was
+  deleted. DX12 is here for (a) the Xbox door and (b) first-class Windows GPU
+  debugging/vendor tooling. No lesser DX12 path is planned.
 
 ## Correction (platform decision, 2026-08-05)
 
@@ -199,37 +198,17 @@ there is no Vulkan loader or ICD story there at all, MoltenVK is linked directly
 into the application — so choosing Metal for macOS as well makes the whole Apple
 side a single backend.
 
-The cost is that **`crcbl-mtl` is load-bearing rather than an optimisation**.
-Until it can present a frame, macOS has no native GPU path at all: `crcbl-wgpu`
-is the only thing that runs there, at Tier B. Nothing about this phase's ladder
-changes, but its first two rungs — clear, then swapchain — are now the ones
-holding up the platform.
-
-> **Those two rungs are behind us, 2026-08-15.** `crcbl-mtl` presents:
-> `swapchain.rs` owns both surface targets — a `CAMetalLayer` whose images are
-> `CAMetalDrawable`s borrowed one at a time, and an offscreen ring with no
-> window — and `present.rs` answers a present wait from `addPresentedHandler:`,
-> which is the shape `Features::PRESENT_FEEDBACK` already named. macOS therefore
-> has a native GPU path, and `ci.yml`'s `mtl e2e` job draws a frame through
-> `ForwardRenderer` on it every run.
+The cost is that **`crcbl-mtl` is load-bearing rather than an optimisation**:
+whatever it cannot do, macOS cannot do. Its first two rungs — clear, then
+swapchain — are behind it, so the platform has a native GPU path and `mtl e2e`
+draws a frame through `ForwardRenderer` on it every run. Every rung above them
+is what the deferral at the top of this file parks.
 
 ### The technical question the spike would have answered
 
-Worth keeping, because native Metal has to answer the same one. `crcbl-vk`
-requires `Features::TIER_A` outright rather than degrading, that set includes
-`DRAW_INDIRECT_COUNT`, and `crates/crcbl-vk/src/adapter.rs` reads it straight
-off `VkPhysicalDeviceVulkan12Features`. Metal has no native indirect-count draw
-— which is exactly why `crcbl-mtl` reports Tier B today, and why the
-indirect-command-buffer work in this phase's tier-A step is what moves it.
-MoltenVK would have met the same wall from the other side; the mapping table
-above already names ICBs as the closest fit.
-
-> **The vocabulary this paragraph uses is gone, 2026-08-15.** `TIER_A`, `TIER_B`
-> and `RendererTier` name nothing in the workspace — the only occurrence of the
-> string is a doc comment in `crcbl-shaders` recording the decision that retired
-> it. `crcbl-vk` no longer requires a bundle: its `adapter.rs` reports each flag
-> it finds, `DRAW_INDIRECT_COUNT` and `DESCRIPTOR_INDEXING` among them, and
-> `DeviceDesc::for_adapter` requires only compute and a timeline semaphore. The
-> wall itself is unchanged and is the part worth keeping: Metal still has no
-> indirect-count draw, so the flag is reported clear and a selector picks
-> another path. See [39-capabilities.md](39-capabilities.md).
+Worth keeping, because native Metal has to answer the same one. **Metal has no
+indirect-count draw**, and MoltenVK would have met that wall from the other
+side; the mapping table above already names ICBs as the closest fit. What has
+changed since is only how the engine reacts to it — the flag is reported clear
+and a selector picks another path, rather than a composite tier being refused
+whole. See [39-capabilities.md](39-capabilities.md).

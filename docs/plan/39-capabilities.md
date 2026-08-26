@@ -284,9 +284,12 @@ contributing the target upstream is a legitimate option if it stalls.
 - **Every selector value must be executed by something.** A path that no device
   in CI selects is a path that compiles and is never run; name it in
   `docs/backlog.md` as a coverage gap rather than letting a green suite imply
-  otherwise. The Tier B arms of the indirect-draw tests are the existing
-  instance of this — lavapipe reports the higher capability, so the fallback is
-  compiled and unrun.
+  otherwise. **Subtraction is the mechanism when no adapter here selects the
+  lesser path**: `crates/crcbl-vk/tests/vk_e2e/draw_gen.rs` opens a device
+  without `DRAW_INDIRECT_COUNT` to reach `IndirectPerBatch` and without
+  `MESH_SHADER` to reach `IndirectCount`, and asserts the arm is on the path it
+  is about before comparing frames — an arm that silently ran the same code
+  twice would otherwise pass.
 - **The downgrade log line is an assertion target**, not decoration: an e2e that
   forces a feature off must see the engine say so.
 - **`required` must be shown to fail.** A device request naming a feature the
@@ -297,19 +300,12 @@ contributing the target upstream is a legitimate option if it stalls.
 
 ## Delivery
 
-| Slice                                                                     | Phase                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Remove `Features::TIER_A` and `RendererTier`; fix `DeviceDesc::default()` | **Built** — `crcbl_hal::caps`, `DeviceDesc`                                                                                                                                                                                                                           |
-| Derived path selectors + the resolution point + downgrade logging         | **Built** — `crcbl_hal::caps`, `crcbl_hal::downgrades`                                                                                                                                                                                                                |
-| `MESH_SHADER` / `RAY_QUERY` / `ACCELERATION_STRUCTURE` flags reported     | **Built** — `crcbl_hal::caps`, `crcbl-vk`'s `adapter.rs`                                                                                                                                                                                                              |
-| Toggle layering (settings ← camera stack ← programmatic)                  | **Built, less the settings layer** — `crcbl_render::effects` resolves the order, and its own table marks the `[engine.video]` row unwired: `crcbl_store::settings` reads that namespace and nothing builds a stack at startup, so the field has no source but a test. |
-| Settings-screen exposure of the video toggles                             | P10                                                                                                                                                                                                                                                                   |
-
-**The timing was deliberate and it was then.** `RendererTier` was consumed by
-log lines, `Debug` impls, tests and one device request; nothing in the renderer
-branched on it, because P7 had not landed. Changing it before P7 was nearly free
-and changing it afterwards would not have been — which is why it was done first,
-and why no renderer code had to move with it.
+The model itself is built — the flags, the selectors, the resolution point and
+the downgrade log, in `crcbl_hal::caps`, `crcbl_hal::downgrades` and
+`crcbl_render::effects`. **What is not built is the settings layer**:
+`crcbl_store::settings` reads the `[engine.video]` namespace and nothing builds
+a stack at startup, so that field has no source but a test, and exposing the
+video toggles on a settings screen is P10 work.
 
 ## Risks
 

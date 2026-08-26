@@ -178,65 +178,43 @@ workaround. Recorded in `docs/backlog.md` rather than argued again here.
    Without them the only way to differ per target is to fork the file, which is
    what `ui_tier_b.slang` was, before it was deleted: a twin whose sole
    substantive difference was `[[vk::push_constant]]` versus a bound binding,
-   held in step by a comment. **Delete that fork** once either mechanism lands —
-   the uniform-buffer form `sprite.slang` already uses is preferred where it is
-   free.
+   held in step by a comment. **A forked shader is never the answer** — the
+   uniform-buffer form `sprite.slang` uses is preferred where it is free, and
+   the defines are what cover the rest.
 3. **Declaration order must equal binding order**, enforced by a test that
    parses the sources. Slang's Metal target **ignores `[[vk::binding]]`** and
    assigns indices in declaration order, while `crcbl-mtl` binds by ascending
    `(set, binding)`. When `ui.slang` disagreed with itself, its MSL put the
    constants where the vertex buffer should have been and the UI pass drew
-   nothing on macOS. Today a comment is the only thing preventing a recurrence.
-4. **Validate all four artifacts, not one.** `spirv-val` runs on the SPIR-V;
-   WGSL, MSL and DXIL are checked by nothing. Add naga for WGSL (a
-   `crcbl-shaders` dev-dependency, which it stays after `crcbl-wgpu` goes — with
-   the caveat that naga accepting something is not Dawn accepting it, which is
-   exactly how the uniformity bug shipped), `xcrun metal` on the macOS CI leg,
-   and pipeline creation on WARP for DXIL.
+   nothing on macOS.
+4. **Validate all four artifacts, not one.** A validator per target, because an
+   artifact nothing reads is an artifact nothing checks — with the caveat that
+   naga accepting a WGSL module is not Dawn accepting it, which is exactly how
+   the uniformity bug shipped.
 5. **Semantic divergence is caught by rendering, not by reading.**
    `SV_InstanceID` lowers to `InstanceIndex - BaseInstance` on SPIR-V and to a
    bare `@builtin(instance_index)` on WGSL; the source compiles cleanly to both
    and draws different pictures, which is why every batch after the first
    rendered the first batch's instances. No lint can find this class. The only
-   thing that can is `web/run-cross-backend-e2e.sh`, and it currently covers two
-   backends and one scene — **extend it to every engine shader and every
-   backend**, which is also what sample rule 12 asks of the samples.
+   thing that can is `web/run-cross-backend-e2e.sh` — **extend it to every
+   engine shader and every backend**, which is also what sample rule 12 asks of
+   the samples.
 
-> **Where the five rules stand, 2026-08-15.** The first four have landed; the
-> fifth is half done. Recorded here rather than by editing the rules, which are
-> the record of what was owed.
+> **Where the five rules stand.** The first four are built and gated:
+> `crates/crcbl-shaders/tools/compile-shaders.sh` enforces the single
+> `// crcbl-targets:` declaration and passes the per-target `CRCBL_TARGET_*`
+> defines, `crcbl-shaders`'s `declaration_order` module parses every source for
+> rule 3, and rule 4's validators are `spirv-val`, `crcbl-shaders`'s
+> `wgsl_validation` test, `xcrun metal -c` over every committed `.metal` in
+> `ci.yml`'s `mtl e2e` job, and a signed-container assertion on every DXIL
+> artifact — an unsigned one compiles, hashes and commits happily and is then
+> refused by every real driver, WARP included.
 >
-> 1. **Built.** Each `.slang` carries exactly one `// crcbl-targets:` line, and
->    `crates/crcbl-shaders/tools/compile-shaders.sh` refuses a source with none
->    or with more than one, refuses a target name it does not know, requires
->    `spirv`, and records the declaration in the manifest as a `targets` key.
-> 2. **Built.** The script passes `CRCBL_TARGET_SPIRV`, `CRCBL_TARGET_WGSL`,
->    `CRCBL_TARGET_MSL` and `CRCBL_TARGET_HLSL` on the respective invocations.
-> 3. **Built** as `crates/crcbl-shaders/src/declaration_order.rs`, which parses
->    every `shaders/*.slang` and checks the order. Its header is worth reading
->    for the reason it exists: nothing below the seam can catch this, because
->    reflection names the shader's parameter names and a `BindGroupLayoutEntry`
->    has none to compare them with — so up to that module a comment really was
->    the only thing preventing a recurrence.
-> 4. **Built, by four different mechanisms.** `spirv-val` over the SPIR-V and
->    naga over the WGSL (`crates/crcbl-shaders/tests/wgsl_validation.rs`, whose
->    header records the `var<uniform>` with no binding decoration that shipped
->    for months); `xcrun metal -c` over every committed `.metal` in `ci.yml`'s
->    `mtl e2e` job, which counts what it compiled so an empty glob fails rather
->    than passing; and for DXIL, a pinned `dxc` whose version is checked plus a
->    per-artifact assertion that the container is **signed** — an unsigned one
->    compiles, hashes and commits happily and is then refused by every real
->    driver, WARP included. WARP does draw a frame, in `dx12 e2e`, so the
->    "create a pipeline on WARP" half is covered by that job rather than by the
->    script.
-> 5. **Half done.** The cross-backend script now defaults to the cube, sprite
->    and UI scenes at every size in its list, each with its own colour floor. It
->    is still `vk` against `wgpu`; Metal and D3D12 compare against a golden
->    instead, so the divergence class stays undetected between _those_ two
->    targets. **Superseded 2026-08-23**: that described the script deleted with
->    `crcbl-wgpu`. The gate now holds every scene the browser draws against a
->    live native render, `--reference vk` and `--reference mtl`, so Metal is
->    inside the compare and D3D12 is the one left against a golden alone.
+> **Rule 5 is half done.** `web/run-cross-backend-e2e.sh` holds every scene the
+> browser draws against a live native render, `--reference vk` and
+> `--reference mtl`, so Metal is inside the compare. D3D12 is the one target
+> still held against a golden alone, and the divergence class stays undetected
+> for it.
 
 ### Considered, and reopenable: SPIR-V as the single native IR
 
