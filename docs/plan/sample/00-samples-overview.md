@@ -50,6 +50,10 @@ GitHub Pages site.
 | 14  | [quarry](14-quarry.md)       | S4C (P7)                     | Geometry acceptance: meshlet clusters, QEM cluster LOD, and all three `GeometryPath` values on one scene           |
 | 15  | [shard](15-shard.md)         | S6B → wave 2                 | **MMO flagship**: web slice first, then a native persistent world — sector streaming, interest management at scale |
 | 16  | [bracket](16-bracket.md)     | P13                          | Matchmaking + rating + ranked auth as a service, with no game attached; the only genuinely networked web client    |
+| 17  | [mirrors](17-mirrors.md)     | S4D (P7B–P7C)                | Reflection ladder: every reflection technique the engine ships, compared side by side from one frame               |
+| 18  | [sundial](18-sundial.md)     | S4D (P7B–P7C)                | Shadow ladder: every filter, a moving sun, and somewhere for each named shadow artefact to appear                  |
+| 19  | [alcove](19-alcove.md)       | S4D (P7B–P7C)                | AO ladder: every occlusion technique, an AO-only view, and flat surfaces that hide nothing                         |
+| 20  | [options](20-options.md)     | S4E (P10)                    | Settings acceptance: the whole catalogue on a screen, saved and reloaded, on desktop and in a browser tab          |
 
 01–06 stay tiny (days, not weeks, each; hud is continuous — a P4 skeleton that
 grows until P10). 07 is the MVP-era flagship and long-lived dogfood. 08 exists
@@ -59,19 +63,34 @@ as one game; it starts only after arena has proven prediction/lag comp.
 
 13 and 14 are **acceptance fixtures** rather than games, in the shape hud
 already established: lantern owns lighting and quarry owns geometry, each
-proving that every path renders correctly before a game depends on it. 15 is the
-**second flagship** and the one the demo site leads with, since breach's
-competitive game never ships to a browser. 16 is a **tech demo with no game in
-it at all** — matchmaking, rating and ranked auth in isolation, which is the
-only way a matchmaker can be evaluated without a real playerbase.
+proving that every path renders correctly before a game depends on it.
 
-**Where the ladder stands.** Every sample on it except towers (07) and arena
-(08) has an `apps/` crate that builds for `wasm32` and ships on the demo site;
-`web/build.sh`'s `DEMOS` array is the list, and it is the authority — a sample
-missing from it is a sample nobody visits. What each of those crates has and has
-not built is in its own doc's status section and, fresher than either, in the
-module header of its `src/lib.rs`. **towers and arena have no `apps/` directory
-at all**, and each doc says what it is waiting on.
+17, 18 and 19 are a **second wave of fixtures, and they ask a different question
+from lantern's**. Lantern asks whether an effect is on and whether both lighting
+paths agree; these three ask which of several algorithms for one effect is
+better, and at what cost. That is a comparison rather than a toggle, so it needs
+what lantern does not have: two techniques resolved from the same frame, a split
+screen, and a per-technique timer. They exist because
+[../18-render-features.md](../18-render-features.md) grew a ladder of rungs per
+effect — reflections, shadows and ambient occlusion each have more than one
+answer now — and rule 13 says a technique with no sample is a technique nobody
+has used. 20 is the **settings fixture**, and its subject is a round trip
+nothing in the workspace closes today: an application writing a player's choice
+to disk and reading it back. 15 is the **second flagship** and the one the demo
+site leads with, since breach's competitive game never ships to a browser. 16 is
+a **tech demo with no game in it at all** — matchmaking, rating and ranked auth
+in isolation, which is the only way a matchmaker can be evaluated without a real
+playerbase.
+
+**Where the ladder stands.** Every sample on it except towers (07), arena (08)
+and the 17–20 wave has an `apps/` crate that builds for `wasm32` and ships on
+the demo site; `web/build.sh`'s `DEMOS` array is the list, and it is the
+authority — a sample missing from it is a sample nobody visits. What each of
+those crates has and has not built is in its own doc's status section and,
+fresher than either, in the module header of its `src/lib.rs`. **towers, arena
+and the whole 17–20 wave have no `apps/` directory at all**, and each doc says
+what it is waiting on — for 17 through 19 that is the ladder itself, since a
+comparison fixture holding one technique is not a comparison.
 
 **Where multiplayer lives — and where it does not.** Native sessions are LAN:
 direct connect by IP, or a lobby browser over local-network host discovery.

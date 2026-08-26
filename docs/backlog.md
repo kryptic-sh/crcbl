@@ -3,6 +3,101 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## The render-quality programme (opened 2026-08-27)
+
+Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
+techniques in `docs/plan/18-render-features.md`, and four sample plans were
+written to compare the rungs — `docs/plan/sample/17-mirrors.md`,
+`docs/plan/sample/18-sundial.md`, `docs/plan/sample/19-alcove.md` and
+`docs/plan/sample/20-options.md`. The ladders and the samples are planned, not
+built. What follows is what the plans could not settle.
+
+### The `cube` browser golden fails and nothing has decided what to do (2026-08-27)
+
+**Unresolved, and it is the reason the Pages workflow is red.** The `cube` scene
+fails the browser-path golden identically on the linux and windows runners —
+both are SwiftShader, so they produce byte-identical numbers — while macOS
+passes. Measured off the `render-harness-golden-diff-linux` artifact: 64
+grossly-wrong pixels against a budget of 49 (the rasteriser profile's gross
+ratio of 0.001 over 49152 pixels), a maximum channel delta of 216, and an ssim
+of 0.998945.
+
+The diff was viewed, all three images. Actual and expected are visually
+identical; the difference is scattered noise along shadow edges on the face
+gradients and the pyramid edges. `Scene::Cube` has one directional light and no
+point lights, so what moved is the sun cascades' origins: the 2026-08-26
+re-tiling widened the atlas grid and shrank every tile to keep the image extent
+constant, and the whole cost of that trade was per-tile resolution.
+
+Three options, none taken:
+
+1. **Add `cube` to the browser expected-to-fail list.** Cheapest, and it is what
+   `ssr` and `ui` already do on that path. It also spends the one signal that
+   would catch a real regression in that frame.
+2. **Widen the browser gross-pixel budget**, after sweeping to find where the
+   real margin is rather than picking a number that clears today's 64.
+3. **Treat the tile as too small** and reverse or re-tune the trade — which is
+   the option that says the shadow implementation is not good enough, and is the
+   one `docs/plan/sample/18-sundial.md` exists to answer with evidence.
+
+**Re-blessing `cube.png` is wrong** and is recorded here so it is not
+re-proposed: the native golden jobs are green against that exact file, so a
+re-bless would break them to fix the browser.
+
+**Evidence:** the artifact was downloaded and the three PNGs viewed by hand. The
+attribution to `e2c3584` is by elimination over the commit range in which the
+failure begins — the linux golden passed on `87d35d5`, `88a23cc` and `9a729ea`,
+the failure begins at `8eebaee`, and `e2c3584` is the only pixel-moving commit
+between them. That is an argument, not a bisect.
+
+### MSAA was reopened rather than reversed (2026-08-27)
+
+The AA row rejected MSAA on the grounds that it "fights deferred-ish/HDR
+pipelines". That is deferred-renderer reasoning and this engine is clustered
+forward — topic 18's own architecture section rejects deferred **partly because
+deferred fights MSAA**. `MultisampleState` has been in
+`crates/crcbl-hal/src/pipeline.rs` the whole time, carrying `samples` and
+`alpha_to_coverage`.
+
+So the honest position is that MSAA is viable and priced, not refused: the depth
+prepass would have to be multisampled too, and both screen-space passes read
+that depth, so MSAA buys a depth resolve before SSAO and SSR or per-sample
+versions of them. **Nobody has measured that resolve**, and until somebody does,
+"FXAA and SMAA are the right answer for this renderer" is a judgement rather
+than a result.
+
+### The technique-comparison samples have no harness and no crate
+
+Samples 17, 18 and 19 all need the same three things — two techniques resolved
+from one frame, a split screen, and a per-technique timer — and none of them
+exists. The plans put that harness in sample 17's first milestone deliberately,
+so it is built once and proven before the other two adopt it. **Whether it
+should instead be a shared crate the three depend on is undecided**, and the
+reason it is undecided is that this workspace has no precedent for one sample
+crate depending on another.
+
+### The settings catalogue is mostly keys with no reader
+
+`crates/crcbl/src/settings.rs` reads four boolean keys and maps each to a
+`RenderEffects` bit. Everything else the catalogue names — display mode,
+resolution, render scale, present mode, frame cap, the quality tiers, every
+audio bus — has a defined home in the TOML convention and nothing that reads it.
+The storage half is not the gap: `crates/crcbl-store/src/settings.rs` ships the
+layered stack, `set`, `save`, and a per-platform backend that is the config
+directory natively and OPFS on wasm. **The gap is that no application in the
+workspace has ever written a setting** — the only writer is
+`crates/crcbl-cli/src/settings_cmd.rs`.
+
+Related and unowned: `crates/crcbl-store/src/lib.rs` records that an IndexedDB
+fallback for the browser is still to come, so OPFS is the only web backend and
+the no-store case silently does not persist.
+
+### `crcbl-audio` has no bus concept at all
+
+`crates/crcbl-audio/src/mixer.rs` has a per-voice gain and one overall gain. A
+player cannot turn music down without turning gunfire down. The plan for a small
+fixed bus set is in `docs/plan/13-audio.md`; nothing is built.
+
 ## Recovered from the plan docs during the 2026-08-27 pruning pass
 
 `docs/plan/ROADMAP.md` and the seven backend-and-platform plans were pruned of
@@ -2043,7 +2138,7 @@ Stated plainly. "Not reviewed" is the honest line.
   confirming that `SectorId` reaches `messages.rs` and `session.rs`. Those are
   design, and design was in scope to keep, not to verify.
 
-## The sample plans — what the seventeen still owe
+## The sample plans — what they still owe
 
 Every file under `docs/plan/sample/` was audited against its app and against the
 engine crates on 2026-08-27. Nothing here is a closed plan waiting to be
