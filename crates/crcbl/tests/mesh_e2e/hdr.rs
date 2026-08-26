@@ -16,7 +16,9 @@
 
 use crate::harness::Headless;
 use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh};
-use crcbl::render::{ForwardRenderer, Projection, TransientPool};
+use crcbl::render::{
+    EffectOverride, EffectRequest, ForwardRenderer, Projection, RenderEffects, TransientPool,
+};
 
 /// The frame's `Rgba16Float` scene target, as the bytes the copy produced.
 struct HdrTarget(Vec<u8>);
@@ -88,12 +90,23 @@ fn half_to_f32(bits: u16) -> f32 {
 
 /// One frame of the cube scene, with the scene target read back beside the
 /// tonemapped image, and the fixture torn down before either is measured.
+///
+/// **The antialiasing resolve is refused here**, and it is the one effect that
+/// would change what these tests measure: they read a single swapchain texel —
+/// the one under the HDR target's peak — and compare it against what the
+/// tonemap should have written there. A resolve blends that texel with its
+/// neighbours, so the value read back would be a filtered one and the
+/// assertion would be about the filter rather than about the tonemap.
 fn cube_frame() -> (crcbl_golden::Image, HdrTarget) {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
         ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
             .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none().force(RenderEffects::ANTIALIASING, Some(false)),
+        ..EffectRequest::default()
+    });
     place_cube(&mut renderer);
     let mut hdr = Vec::new();
     let image = render_mesh(

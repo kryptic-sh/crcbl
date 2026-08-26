@@ -383,7 +383,12 @@ mod tests {
         // run in and a reviewer reaches with two presses.
         let shadows = toggled_effect(EffectRequest::default(), device, RenderEffects::SHADOWS);
         let and_ao = toggled_effect(shadows, device, RenderEffects::AMBIENT_OCCLUSION);
-        assert_eq!(and_ao.resolve(device), RenderEffects::REFLECTIONS);
+        assert_eq!(
+            and_ao.resolve(device),
+            RenderEffects::DEFAULT_STACK
+                .difference(RenderEffects::SHADOWS)
+                .difference(RenderEffects::AMBIENT_OCCLUSION)
+        );
     }
 
     /// **A row writes the programmatic layer and no other**, and the override it
@@ -405,8 +410,10 @@ mod tests {
         };
         assert_eq!(
             request.resolve(device),
-            RenderEffects::SHADOWS,
-            "the two clamps leave shadows and nothing else",
+            RenderEffects::DEFAULT_STACK
+                .difference(RenderEffects::REFLECTIONS)
+                .difference(RenderEffects::AMBIENT_OCCLUSION),
+            "the two clamps leave the shadows and the resolve and nothing else",
         );
         assert!(
             panel(request).contains(&"AO: OFF".to_string()),
@@ -419,7 +426,7 @@ mod tests {
         assert_eq!(after.video, request.video, "the row rewrote [engine.video]");
         assert_eq!(
             after.resolve(device),
-            RenderEffects::SHADOWS.union(RenderEffects::AMBIENT_OCCLUSION),
+            RenderEffects::DEFAULT_STACK.difference(RenderEffects::REFLECTIONS),
             "the override must escape the quality clamp, which is what it is for",
         );
     }
@@ -450,7 +457,9 @@ mod tests {
         );
         assert_eq!(
             pressed.resolve(device),
-            RenderEffects::AMBIENT_OCCLUSION,
+            RenderEffects::DEFAULT_STACK
+                .difference(RenderEffects::SHADOWS)
+                .difference(RenderEffects::REFLECTIONS),
             "and it must not have moved the frame either",
         );
     }

@@ -299,7 +299,7 @@ pub enum Scene {
     /// by almost nothing. What it changes is the handful of pixels along a
     /// silhouette, so this scene is arranged to have one long silhouette, at a
     /// slope no axis and no diagonal special case covers, between two flat levels
-    /// — see [`AA_SLAB_TILT`] and [`aa_sun`].
+    /// — see this module's `AA_SLAB_TILT` and `aa_sun`.
     ///
     /// **Its golden cannot make the claim**, which is why `tests/render_e2e.rs`
     /// builds this scene twice through [`aa_forward`] instead. A resolve pass
@@ -307,10 +307,10 @@ pub enum Scene {
     /// a clean hard edge is what a golden of a slab looks like; only the same
     /// scene without the pass says which one this is.
     ///
-    /// It asks for [`crcbl_render::RenderEffects::ANTIALIASING`] through the
-    /// camera stack, as [`Scene::Bloom`] asks for the lens: both are held out of
-    /// `RenderEffects::DEFAULT_STACK`, so a fixture that wants one has to say so,
-    /// and every other golden in the tree stays where it is.
+    /// It draws with `RenderEffects::DEFAULT_STACK`, which carries
+    /// [`crcbl_render::RenderEffects::ANTIALIASING`]: every frame in the tree is
+    /// resolved. [`Scene::Bloom`] is the contrast — the lens is *not* in the
+    /// default stack, so a fixture that wants it has to add it.
     Aa,
     /// `docs/plan/18-render-features.md`'s **irradiance probes**: the inside of
     /// a room, looked straight down into, lit by the probe grid and by nothing
@@ -2167,13 +2167,7 @@ impl SceneState {
                 // `tests/render_e2e.rs` builds the same scene through that
                 // function with a different effect set — see its doc for why the
                 // comparison cannot be made against a golden.
-                aa_forward(
-                    device,
-                    queue,
-                    format,
-                    RenderEffects::DEFAULT_STACK.union(RenderEffects::ANTIALIASING),
-                )?
-                .into()
+                aa_forward(device, queue, format, RenderEffects::DEFAULT_STACK)?.into()
             }
             Scene::Probes => {
                 // **The only scene here built from a description of its own**,
@@ -3875,6 +3869,12 @@ mod tests {
                 ("render", "ssr"),
                 ("render", "ssr-blur"),
                 ("render", "tonemap"),
+                // **After the tonemap, and that is where the resolve belongs**:
+                // it reads the display-space image the tonemap wrote and writes
+                // the target. A resolve scheduled before it would filter the
+                // scene's high-dynamic-range values, where the thresholds it
+                // tests were fitted to a displayable image.
+                ("render", "fxaa"),
             ]);
             passes
         };
@@ -3913,8 +3913,14 @@ mod tests {
             before_tonemap..before_tonemap,
             [("render", "bloom-down-1"), ("render", "bloom-composite")],
         );
-        let expected: [(Scene, &[(&str, &str)]); 11] = [
+        let expected: [(Scene, &[(&str, &str)]); 12] = [
             (Scene::Cube, &cube_passes),
+            // The cube scene's list again, and that is the whole of what
+            // `Scene::Aa` costs a frame now: the resolve is in
+            // `RenderEffects::DEFAULT_STACK`, so every forward row here carries
+            // it and this fixture's own request adds nothing. What makes the
+            // scene a fixture is its content — see that variant.
+            (Scene::Aa, &cube_passes),
             // Not the cube scene's passes: `Scene::Lights` is the cube scene
             // with a longer light list, the clustering dispatch is one per
             // camera however many lights it assigns — and two of those lights

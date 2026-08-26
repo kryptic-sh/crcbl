@@ -23,14 +23,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   luma edge detect and a subpixel blend along the edge it finds — with no
   history, no motion vectors and no change to any pass in front of it.
 
-  **It is `RenderEffects::ANTIALIASING`, and a view has to ask.** Like the bloom
-  chain it is held out of `RenderEffects::DEFAULT_STACK`, so no existing frame
-  and no existing golden moves: a resolve changes every edge it runs over, and
-  switching it on by default is a re-bless of the whole suite that belongs in
-  its own change. A caller asks through the camera stack, through
-  `EffectRequest`'s override, or through the `[engine.video] antialiasing` key
-  `crcbl`'s settings stack already reads. `crcbl screenshot --scene aa` draws
-  it.
+  **It is `RenderEffects::ANTIALIASING`, it is in
+  `RenderEffects::DEFAULT_STACK`, and every frame the engine draws is
+  resolved.** That cost a re-bless of the whole suite — twenty-five golden
+  images across `crates/crcbl`, `apps/quarry` and `apps/lantern` — which is what
+  a resolve does: it changes every edge it runs over. Bloom is now the only
+  effect a view has to ask for by name. A caller turns the resolve off through
+  the camera stack, through `EffectRequest`'s override, or through the
+  `[engine.video] antialiasing` key `crcbl`'s settings stack already reads.
+  `crcbl screenshot --scene aa` draws the fixture.
+
+  **A debug view takes it off by itself.** `DebugView::Heatmap`, `LodTint` and
+  `Normals` are readouts rather than pictures — a pixel's colour is a cluster's
+  projected error or its DAG level, read against a legend — so
+  `ForwardRenderer::resolved_effects` drops the bit whenever one of them is on,
+  and a blended shade cannot invent a ramp position no cluster occupies.
 
   **Switching it on changes the shape of the frame**, which is worth knowing if
   you read the graph: with the bit off the tonemap writes the caller's target,

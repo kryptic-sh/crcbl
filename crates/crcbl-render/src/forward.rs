@@ -6850,9 +6850,21 @@ impl ForwardRenderer {
     /// caller reporting its own configuration wants — a debug panel built at
     /// startup has no frame behind it yet, and printing what the last one drew
     /// would print a default.
+    ///
+    /// **A debug view takes the antialiasing resolve off**, whatever the four
+    /// layers said. Those views are readouts rather than pictures — a pixel's
+    /// colour *is* the cluster's projected error or its DAG level, read back
+    /// against a legend — and a filter that blends two clusters' shades invents
+    /// a ramp position no cluster occupies. `apps/quarry`'s heatmap and LOD
+    /// tests are the consumers that count a frame's distinct colours.
     #[must_use]
     pub fn resolved_effects(&self) -> RenderEffects {
-        self.effect_request.resolve(self.device_effects)
+        let resolved = self.effect_request.resolve(self.device_effects);
+        if matches!(self.debug_view(), DebugView::Shaded) {
+            resolved
+        } else {
+            resolved.difference(RenderEffects::ANTIALIASING)
+        }
     }
 
     /// Which effects this **device** permits, which is the fourth layer and
@@ -7783,6 +7795,14 @@ mod tests {
                         &sentinel.to_le_bytes(),
                         "heatmap={heatmap} lod={lod} normals={normals} resolved to {expected:?}, \
                          and the lane says otherwise"
+                    );
+                    // And the resolve comes off for all three of them: these
+                    // frames are read back as data, so their colours have to
+                    // stay the ones the shader wrote — see `resolved_effects`.
+                    assert_eq!(
+                        renderer.effects().contains(RenderEffects::ANTIALIASING),
+                        expected == DebugView::Shaded,
+                        "heatmap={heatmap} lod={lod} normals={normals}"
                     );
                 }
             }
@@ -10182,6 +10202,7 @@ mod tests {
                 "ssr",
                 "ssr-blur",
                 "tonemap",
+                "fxaa",
                 "cull-stats-readback",
             ]
             .into_iter()

@@ -1726,7 +1726,11 @@ fn the_resolve_is_what_puts_the_soft_pixels_there() {
     };
 
     let resolved = frame(RenderEffects::DEFAULT_STACK.union(RenderEffects::ANTIALIASING));
-    let control = frame(RenderEffects::DEFAULT_STACK);
+    // **`difference` and not the bare default.** The resolve is in
+    // `DEFAULT_STACK` now, so a control built on that alone is the resolved
+    // frame again under another name — and this test would compare a frame with
+    // itself and pass on any pair of numbers at all.
+    let control = frame(RenderEffects::DEFAULT_STACK.difference(RenderEffects::ANTIALIASING));
 
     let (soft, plain) = (soft_pixels(&resolved), soft_pixels(&control));
     let (mean, plain_mean) = (mean_luma(&resolved), mean_luma(&control));

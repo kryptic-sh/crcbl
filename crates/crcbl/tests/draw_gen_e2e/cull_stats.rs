@@ -53,13 +53,13 @@ const REPORT_FLOOR: u64 = 2;
 const REPORT_BOUND: u64 = 32;
 
 /// The full-screen triangles a forward frame draws: `ssao`'s, `ssao-blur`'s,
-/// `ssr`'s, `ssr-blur`'s and the tonemap's.
+/// `ssr`'s, `ssr-blur`'s, the tonemap's and the antialiasing resolve's.
 ///
 /// One instance each, submitted and drawn, and the only draws in a forward frame
 /// the CPU knows the count of. They are on both sides of the submitted/drawn
 /// pair, which is what makes the two comparable — see
 /// `crcbl::render::ForwardRenderer::counters`.
-const FULLSCREEN_INSTANCES: u64 = 5;
+const FULLSCREEN_INSTANCES: u64 = 6;
 
 /// **The culling counters come back off the GPU, and they are the cull's own
 /// answer.**

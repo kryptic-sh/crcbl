@@ -13,35 +13,31 @@ written to compare the rungs — `docs/plan/sample/17-mirrors.md`,
 — see that topic's `FXAA 3.11 first` — and the rest of the ladders and all four
 samples are planned, not built. What follows is what the plans could not settle.
 
-### Antialiasing is opt-in and nothing turns it on (2026-08-27)
+### Nothing lets a running sample toggle antialiasing (2026-08-27)
 
-`RenderEffects::ANTIALIASING` ships outside `RenderEffects::DEFAULT_STACK`, so
-the only frame in the tree that resolves an edge is `Scene::Aa`'s. Every sample,
-every other golden and every demo draws the staircase. That is deliberate — a
-resolve moves every edge in every frame it runs on, so the default flip is a
-re-bless of the whole suite — but it means the pass is exercised by two gates
-and nothing else.
-
-What flipping it needs: bless every golden the samples and `render_e2e` compare,
-on both the native and the browser paths, in one change; and decide first
-whether the `cube` failure below is fixed by it, since that frame's noise is
-along edges. Measuring that is cheap and has not been done: draw `Scene::Cube`
-through `aa_forward`'s trick — force the bit on for one run — and compare.
-
-Also unbuilt: nothing lets a **running** sample toggle it. `crcbl`'s
-`VIDEO_KEYS` carries an `antialiasing` row, so a settings file can ask for it,
-but no sample has a key bound and `apps/lantern` has no flag. The lantern is the
-natural place, on its bloom flag's terms.
+`RenderEffects::ANTIALIASING` is in `RenderEffects::DEFAULT_STACK` now, so every
+frame resolves and the suite was re-blessed for it. What is still missing is a
+**runtime** switch: `crcbl`'s `VIDEO_KEYS` carries an `antialiasing` row, so a
+settings file can ask for it, but no sample has a key bound and `apps/lantern`
+has no flag. The lantern is the natural place, on its bloom flag's terms.
 
 ### The `cube` browser golden fails and nothing has decided what to do (2026-08-27)
 
-**Unresolved, and it is the reason the Pages workflow is red.** The `cube` scene
-fails the browser-path golden identically on the linux and windows runners —
-both are SwiftShader, so they produce byte-identical numbers — while macOS
-passes. Measured off the `render-harness-golden-diff-linux` artifact: 64
-grossly-wrong pixels against a budget of 49 (the rasteriser profile's gross
-ratio of 0.001 over 49152 pixels), a maximum channel delta of 216, and an ssim
-of 0.998945.
+**Unresolved on CI, and it is the reason the Pages workflow is red — but the
+antialiasing flip may have taken it.** With the resolve in the default stack the
+whole golden suite was re-blessed, and `web/run-render-harness-e2e.sh` then
+passed `cube` **locally**, where before it failed: 11 of 13 scenes matched, with
+only the two excused ones left. That is not the CI answer. The local browser
+gate runs on this machine's adapter and the runners are SwiftShader, so only a
+Pages run decides whether the noise below survives the filter. If it does, the
+three options are still the options.
+
+The failure as it was measured: the `cube` scene fails the browser-path golden
+identically on the linux and windows runners — both are SwiftShader, so they
+produce byte-identical numbers — while macOS passes. Measured off the
+`render-harness-golden-diff-linux` artifact: 64 grossly-wrong pixels against a
+budget of 49 (the rasteriser profile's gross ratio of 0.001 over 49152 pixels),
+a maximum channel delta of 216, and an ssim of 0.998945.
 
 The diff was viewed, all three images. Actual and expected are visually
 identical; the difference is scattered noise along shadow edges on the face
@@ -70,6 +66,26 @@ attribution to `e2c3584` is by elimination over the commit range in which the
 failure begins — the linux golden passed on `87d35d5`, `88a23cc` and `9a729ea`,
 the failure begins at `8eebaee`, and `e2c3584` is the only pixel-moving commit
 between them. That is an argument, not a bisect.
+
+### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
+
+`crcbl::adapter::pin` is read by `crcbl::screenshot`'s `OffscreenSetup` and by
+nothing else, so a suite built on `crcbl::engine`'s `GpuContext` — which is
+`apps/quarry/tests/device/harness.rs` — opens whatever the backend enumerated
+first however the variable is set. The harness even prints the mismatch: its
+fixture line reports the adapter it opened beside `CRCBL_ADAPTER=cpu`, and on
+this machine that reads
+`"AMD Radeon RX 7900 XTX (RADV NAVI31)" (CRCBL_ADAPTER=cpu)`.
+
+**What it costs:** quarry's six goldens cannot be verified against the software
+path locally at all, which is the path CI compares them on. They were blessed on
+the discrete adapter — which is what their module docs ask for — and verified
+there only.
+
+**The fix** is to have `GpuContext` select through `crcbl::adapter::select` the
+way `OffscreenSetup` does, rather than to teach the harness a second mechanism.
+Not taken here because it is a change to the engine's device opening and this
+was a rendering change.
 
 ### MSAA was reopened rather than reversed (2026-08-27)
 

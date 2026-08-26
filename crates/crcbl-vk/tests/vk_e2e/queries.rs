@@ -246,6 +246,9 @@ fn per_pass_gpu_timers_report_real_numbers() {
         "ssr",
         "ssr-blur",
         "tonemap",
+        // The antialiasing resolve, which every frame draws — see
+        // `RenderEffects::DEFAULT_STACK`.
+        "fxaa",
     ]);
     assert_eq!(
         timings

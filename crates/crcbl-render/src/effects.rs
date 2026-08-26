@@ -142,9 +142,7 @@ impl RenderEffects {
     /// [`camera`](EffectRequest::camera) holds, and it is why adding the bloom
     /// bit — and then the antialiasing bit — did not change a single frame the
     /// engine already drew.
-    pub const DEFAULT_STACK: Self = Self::all()
-        .difference(Self::BLOOM)
-        .difference(Self::ANTIALIASING);
+    pub const DEFAULT_STACK: Self = Self::all().difference(Self::BLOOM);
 
     /// Every effect and the one word a report spells it with, in bit order.
     ///
@@ -445,28 +443,29 @@ mod tests {
     /// consumer that does exactly that.
     ///
     /// What it guards is the claim [`RenderEffects::DEFAULT_STACK`]'s docs make:
-    /// adding the bloom bit, and then the antialiasing bit, changed no frame
-    /// this workspace already drew. A default that quietly included either would
-    /// have re-blessed every golden image in the tree, and each of them would
-    /// still have been a plausible picture — which is the whole difficulty: a
-    /// wrongly-defaulted post pass does not look like a bug.
+    /// the lens is the effect a view has to ask for, and it is the **only** one.
+    /// A default that quietly included it would have re-blessed every golden
+    /// image in the tree, and each of them would still have been a plausible
+    /// picture — which is the whole difficulty: a wrongly-defaulted post pass
+    /// does not look like a bug.
+    ///
+    /// The antialiasing resolve was held out on the same terms for exactly one
+    /// change, which is what re-blessed the suite; it is in the default now, and
+    /// this asserts that the lens did not follow it in.
     #[test]
     fn the_default_stack_is_the_light_transport_effects_and_a_view_can_still_ask() {
         assert_eq!(
             RenderEffects::DEFAULT_STACK,
-            RenderEffects::all()
-                .difference(RenderEffects::BLOOM)
-                .difference(RenderEffects::ANTIALIASING),
+            RenderEffects::all().difference(RenderEffects::BLOOM),
         );
-        for post in [RenderEffects::BLOOM, RenderEffects::ANTIALIASING] {
-            assert!(!EffectRequest::default().camera.contains(post));
-            assert!(
-                !EffectRequest::default()
-                    .resolve(RenderEffects::all())
-                    .contains(post),
-                "a view that said nothing must not get a post pass"
-            );
-        }
+        let post = RenderEffects::BLOOM;
+        assert!(!EffectRequest::default().camera.contains(post));
+        assert!(
+            !EffectRequest::default()
+                .resolve(RenderEffects::all())
+                .contains(post),
+            "a view that said nothing must not get a post pass"
+        );
 
         // The camera's own stack, which is the layer topic 18 puts the post
         // stack in.
@@ -560,7 +559,7 @@ mod tests {
 
         // The spelling every sample's summary line and debug panel already
         // print, which this must not have moved.
-        assert_eq!(RenderEffects::DEFAULT_STACK.row(), "shadows ao ssr");
+        assert_eq!(RenderEffects::DEFAULT_STACK.row(), "shadows ao ssr aa");
         assert_eq!(RenderEffects::empty().row(), "none");
         assert_eq!(RenderEffects::BLOOM.row(), "bloom");
     }

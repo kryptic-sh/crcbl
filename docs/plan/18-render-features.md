@@ -1122,12 +1122,29 @@ blend along the edge it found, no history, no new attachment and no change to
 any pass in front of it. The cheapest thing that removes the staircase, and the
 tier that stays after the rung above it lands.
 
-**It is `RenderEffects::ANTIALIASING`, and it is not in `DEFAULT_STACK`.** The
-last item of the cost list below is why: a resolve moves every edge in every
-frame it runs on, so switching it on by default re-blesses the whole suite, and
-that is its own change rather than a side effect of this one. The bit belongs in
-the default stack on the merits and is held out until that re-bless is taken
-deliberately.
+**It is `RenderEffects::ANTIALIASING`, and it is in `DEFAULT_STACK`** — flipped
+in a second change, whose whole content is the re-bless the last item of the
+cost list below describes. Every frame the engine draws is resolved; the lens is
+now the only effect a view has to ask for by name.
+
+**A debug view takes the resolve off again**, and
+`ForwardRenderer::resolved_effects` is where that happens rather than in any
+caller. `DebugView::Heatmap`, `LodTint` and `Normals` are readouts: a pixel's
+colour _is_ a cluster's projected error or its DAG level, read against a legend,
+and a filter that blends two clusters' shades invents a ramp position no cluster
+occupies. `apps/quarry`'s heatmap and LOD tests count a frame's distinct colours
+and are what found this — under the flip they went from 2 colours to 64.
+
+**Three tests measured a pixel the resolve had moved**, and each is a different
+answer to the same question. `crcbl`'s
+`the_resolve_is_what_puts_the_soft_pixels_there` compares the same scene with
+and against the bit, so it names the bit itself as its control. The HDR fixture
+in `crates/crcbl/tests/mesh_e2e/hdr.rs` refuses the bit, because it reads back
+the single swapchain texel under the HDR peak and asks whether the _tonemap_
+clamped it — a filtered texel would make that assertion about the filter. And
+`crcbl-vk`'s per-pass timer report and `draw_gen_e2e`'s `FULLSCREEN_INSTANCES`
+both simply grew by one, which is the shape of the frame changing and not a
+measurement moving.
 
 **Switching it on changes the shape of the frame rather than adding a pass to
 it**, which is the one structural thing here worth knowing. Every other
@@ -1194,9 +1211,12 @@ What it cost, item by item, because none of it was hypothetical:
   every frame it runs on, so there is no additive-zero property to land it
   behind — the probe and bloom slices had one and this does not. The switch
   therefore decides how much of the suite moves, and the honest default is the
-  one that moves it exactly once. This is the item that kept the bit out of
-  `DEFAULT_STACK`: as shipped, the only golden it is on for is `aa.png`, which
-  was blessed with it.
+  one that moves it exactly once. That is what the flip spent: seventeen images
+  under `crates/crcbl/tests/golden/`, six under `apps/quarry/tests/golden/` and
+  two under `apps/lantern/tests/golden/`. The `crcbl` and `lantern` sets are
+  blessed on the software path (`CRCBL_ADAPTER=cpu`) and quarry's on the
+  discrete adapter, which is where each was blessed before; every one of them
+  was then verified against **both** adapters.
 
 ### SMAA 1x second, and it is the real industry standard step
 
@@ -1317,7 +1337,7 @@ the reader holding that view is the one who should make the call.
 | Slice                                                                                                                                         | Phase                                                                                                                                                                                     |
 | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | HDR target + exposure/tonemap pass                                                                                                            | P7 — built at P1. The **filmic curve** is still owed; see the post stack                                                                                                                  |
-| Antialiasing rung 1: **FXAA 3.11**                                                                                                            | P7 — unbuilt, and it is the whole of the stack's AA row today                                                                                                                             |
+| Antialiasing rung 1: **FXAA 3.11**                                                                                                            | P7 — built, in `DEFAULT_STACK`, and the whole of the stack's AA row today                                                                                                                 |
 | Sun CSM (culling-integrated, 3×3 PCF)                                                                                                         | P7 — built. The **cascade debug overlay** is not                                                                                                                                          |
 | Shadow ladder rung 1: **normal-offset bias**                                                                                                  | P7 — the fifth decision named it and the sixth's constants are what it buys back                                                                                                          |
 | Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes                                                                           | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`                                                                                                          |

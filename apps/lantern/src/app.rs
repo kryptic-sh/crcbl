@@ -777,9 +777,9 @@ mod tests {
         );
 
         for (off, row) in [
-            (RenderEffects::SHADOWS, "ao ssr"),
-            (RenderEffects::AMBIENT_OCCLUSION, "shadows ssr"),
-            (RenderEffects::REFLECTIONS, "shadows ao"),
+            (RenderEffects::SHADOWS, "ao ssr aa"),
+            (RenderEffects::AMBIENT_OCCLUSION, "shadows ssr aa"),
+            (RenderEffects::REFLECTIONS, "shadows ao aa"),
         ] {
             let mut options = headless(4);
             options.effects.remove(off);
@@ -965,7 +965,7 @@ mod tests {
             RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
             "the row did not reach the renderer, or took more than shadows",
         );
-        assert_eq!(engine.gpu().paths().effects_row(), "ao ssr");
+        assert_eq!(engine.gpu().paths().effects_row(), "ao ssr aa");
         assert!(
             ui_text(&engine).iter().any(|text| text == "SHADOWS: OFF"),
             "the row's label must show what the frame now draws: {:?}",

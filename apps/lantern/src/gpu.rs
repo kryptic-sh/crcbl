@@ -1168,8 +1168,8 @@ mod tests {
                 .value
                 .to_string()
         };
-        assert_eq!(row("effects"), "shadows ao ssr");
-        assert_eq!(row("monitor"), "shadows ao");
+        assert_eq!(row("effects"), "shadows ao ssr aa");
+        assert_eq!(row("monitor"), "shadows ao aa");
     }
 
     /// **The player's `[engine.video]` clamp reaches both views, and the run's
@@ -1192,12 +1192,14 @@ mod tests {
         let monitor = request_for(room::View::Monitor, video, all).resolve(device);
         assert_eq!(
             main,
-            RenderEffects::AMBIENT_OCCLUSION | RenderEffects::REFLECTIONS,
+            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
             "the settings file's clamp has to reach the room"
         );
         assert_eq!(
             monitor,
-            RenderEffects::AMBIENT_OCCLUSION,
+            RenderEffects::DEFAULT_STACK
+                .difference(RenderEffects::SHADOWS)
+                .difference(RenderEffects::REFLECTIONS),
             "and the monitor, whose camera stack drops the reflections anyway"
         );
     }
@@ -1328,9 +1330,14 @@ mod tests {
         let monitor = request_for(room::View::Monitor, all, without_shadows).resolve(device);
         assert_eq!(
             main,
-            RenderEffects::AMBIENT_OCCLUSION | RenderEffects::REFLECTIONS
+            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS)
         );
-        assert_eq!(monitor, RenderEffects::AMBIENT_OCCLUSION);
+        assert_eq!(
+            monitor,
+            RenderEffects::DEFAULT_STACK
+                .difference(RenderEffects::SHADOWS)
+                .difference(RenderEffects::REFLECTIONS)
+        );
 
         // And the override can move a decision *up* past the quality clamp
         // without reaching the camera's stack, which is the one direction the
