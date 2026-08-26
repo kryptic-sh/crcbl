@@ -21,11 +21,12 @@
 // forever. L is listed after them and named for what it does rather than for the
 // key, because dousing the torches is the one control that changes the *picture*
 // rather than the position — it is what the browser gate presses to prove the
-// lighting is being computed rather than declared. `savedLabel` is "Nothing" and
-// that is literal: the status bar says "Nothing saved." when the demo stops,
-// which is the truth about a slice with no persistence —
-// `docs/plan/sample/15-shard.md` puts saves in a later slice, and
-// `docs/backlog.md` carries what they need.
+// lighting is being computed rather than declared. `savedLabel` is "Character":
+// the status bar says "Character saved." when the demo stops, and what it names
+// is `apps/shard/src/save.rs`'s payload — where the character was standing, what
+// they had left, how many times they were put down, and which foes are felled —
+// written into the Origin Private File System through the shared shim's OPFS
+// backend.
 
 import init from './crcbl_shard.js';
 import { bootDemo } from '../../engine/demo.js';
@@ -33,7 +34,7 @@ import { bootDemo } from '../../engine/demo.js';
 bootDemo({
   init,
   hint: 'W/A/S/D walk, relative to where the camera is looking · Q/E swing it a quarter turn · SPACE strikes everything in reach · L douses the torches and lights them again · ESC opens the panel · F3 shows the stats · F11 fullscreen',
-  savedLabel: 'Nothing',
+  savedLabel: 'Character',
   bind: (ex) => ({
     prepare: () => ex.__crcbl_shard_prepare(),
     boot: () => ex.__crcbl_shard_boot(),

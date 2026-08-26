@@ -51,21 +51,17 @@ Closing it looks feasible and was not attempted. CDP's
 readout moved. The unknowns are whether headless Chromium grants the lock at all
 and whether a CDP mouse move carries a `movementX` — neither was tested.
 
-### `apps/shard` covers two verbs of milestone 1's six (2026-08-26)
+### `apps/shard` covers four verbs of milestone 1's six (2026-08-26)
 
 `docs/plan/sample/15-shard.md`'s milestone 1 loop is explore, fight, loot,
-level, save, resume. Slices 1 and 2 are **explore** and **fight**, deliberately,
-and nothing else is started. What each of the others needs, so the next slice
-does not have to re-derive it:
+level, save, resume. Slices 1 to 3 are **explore**, **fight**, and **save and
+resume**, deliberately, and nothing else is started. What each of the others
+needs, so the next slice does not have to re-derive it:
 
 - **Loot and rarity.** Nothing exists. It is a table and a roll, and the roll
   has to be a hash of a seed and an index rather than a draw from a stream, for
   `apps/sparks`' reason.
 - **Level.** Nothing exists.
-- **Save and resume.** Nothing exists, and it is the one with a platform seam:
-  the plan puts saves in OPFS in the browser. `web/engine/storage.js` is the
-  shim other demos use for their own persistence; shard's `savedLabel` in
-  `web/demos/shard/main.js` says "Nothing" and that is currently true.
 - **Sector streaming.** The zone is one fixed `zone::LAYOUT`. The plan wants
   modular pieces "assembled per seed", and the pieces are the part slice 1 built
   — a seeded assembler over them, and the border locking `docs/plan/25-lod.md`
@@ -73,6 +69,70 @@ does not have to re-derive it:
 - **The inventory kit.** Topic 34's grid is not used anywhere in this sample.
   Milestone 1's exit criteria ask for it to be used **with no engine change**,
   which is the claim nobody has tested.
+
+### What `apps/shard`'s save slice left out, and why (2026-08-26)
+
+`apps/shard/src/save.rs` writes the character through `crcbl-store`'s existing
+`SaveWriter`/`SaveReader` container — one sector at `SectorId::ZERO`, holding a
+position, a health, a down count and a health per foe. What was considered and
+left out:
+
+- **No inventory field, and no field reserved for one.** Deliberate, and it is
+  the decision recorded below: reserving one would answer "who forces the
+  grid-inventory kit" by accident. The payload carries its own
+  `PAYLOAD_VERSION`, so adding a field later is a version bump and a `decode`
+  arm, not a format change.
+- **No engine change on this sample's behalf.** In particular `crcbl-store`'s
+  `record::Backing::platform` was **not** extended: it answers with the _config_
+  directory, which is where a high score belongs, and it hands out a path rather
+  than the `StorageSource` a `SaveWriter` writes through. `save::Vault` is the
+  data-directory twin of that rule and lives in the sample. **A second consumer
+  of the data-directory rule is the moment to hoist it into `crcbl-store`**, and
+  the shape to hoist is `Vault::open` plus `Vault::source`.
+- **No migration seam.** `docs/plan/14-persistence.md` owes `crcbl-store` a
+  `fn migrate(old_ver, bytes)` and that is still unbuilt; shard's own payload
+  version is refused rather than migrated, so a bump orphans every save written
+  before it. Acceptable for a sample with no players; not acceptable for the
+  engine, and that entry is the topic-14 one rather than this one.
+- **No save on teardown.** `crcbl::engine::HostedGame` has no hook that runs on
+  the way out and takes `&mut self` — `summary` takes `&self` and is a getter —
+  so the autosave cadence is the whole of when a save happens. A tab or a window
+  closed between two writes loses up to `save::SAVE_PERIOD_S` of play. Adding
+  the hook is an engine change with one consumer, so it was not made.
+- **The clock is not restored.** `SaveHeader::playtime_secs` accumulates across
+  sessions and is read back, but `Stage::ticks` and `Stage::elapsed` start again
+  at zero. That is what keeps the torches opening at the start of their flicker
+  and the `[HUD]` heartbeat opening at `tick: 15` — which several browser checks
+  read — and it means the demo cannot say "you have played for X" from the
+  heartbeat, only from the debug panel's `playtime` row.
+- **Autosave only, no manual save.** `apps/shard/src/menu.rs`'s pause panel has
+  no SAVE row and there is no key bound to one. `docs/plan/14-persistence.md`
+  wants console, CLI, UI button and autosave timer to be one path; the path
+  exists (`Shard::autosave` → `Vault::store`) but only the timer calls it.
+
+### `apps/breach`'s browser gate fails its touch check at `87d35d5` (2026-08-26)
+
+Found while running the other demos' gates beside shard's save slice, and **not
+caused by it** — `apps/shard`'s own gate passes the same check on the same
+build, and breach fails identically when driven by `HEAD`'s copy of
+`web/tools/browser-e2e.mjs` rather than the working tree's.
+
+`CRCBL_WEB_E2E_DEMO=breach web/run-browser-e2e.sh` reports 54 of 55, with group
+F's `a second contact arrives as its own contact and moves only itself` red:
+
+```
+contacts [[2,"Ended",336],[3,"Began",240],[4,"Began",-25],[4,"Moved",-25],
+          [3,"Ended",-25],[4,"Ended",-25]] — held 3, moved null
+```
+
+Every coordinate after the first two contacts reads `-25`, which is above the
+canvas rather than inside it, so the harness's `near` comparison finds no moved
+contact. Reproduced twice with identical numbers, so it is deterministic rather
+than flaky. The suspect is `feat(web): look around with the mouse in a browser`
+(`87d35d5`), which rewrote the pointer path in
+`crates/crcbl-shell/src/web/mod.rs` and `web/engine/shell.js`; shard's page
+passing the same check points at something page-layout dependent, since breach's
+page is the longer document of the two. Not investigated further.
 
 ### What `apps/shard`'s fight slice left out, and why (2026-08-26)
 
@@ -129,9 +189,10 @@ of them has been made:
   reference frame or compares one. `apps/quarry` is the sample that already does
   this and is the shape to copy.
 - **A recorded browser budget.** What _is_ measured, on this machine, is the
-  browser gate's wall clock: 82 s before the fight slice and 91–94 s after it,
-  on the `auto` adapter, which resolves to SwiftShader here. That is a gate
-  timing, not the sample's frame budget, and the two should not be confused.
+  browser gate's wall clock: 82 s before the fight slice, 91–94 s after it, and
+  111 s after the save slice, on the `auto` adapter, which resolves to
+  SwiftShader here. That is a gate timing, not the sample's frame budget, and
+  the two should not be confused.
 - **Peak wasm memory.** Not measured at all. `web/engine/wasm-memory.js` exists
   and other demos' pages read it; nothing here reads it or records a number.
 
@@ -202,6 +263,30 @@ Stated as gaps rather than explained away:
   stopped by a foe.** All three follow from the bodies being in the same
   `PhysicsWorld` and none is asserted. The asymmetry is deliberate and recorded
   under breach's "player has no body" entry.
+- **The native save path is not driven end to end by a test.**
+  `save::Vault::open` answers `Vault::None` for a headless run, which is what
+  keeps CI out of a real data directory — and it is also why no test can drive
+  the loop's autosave against a real one: a windowed run is the only
+  configuration with a vault, and the tests are all headless. What _is_ covered
+  natively is every piece either side of that seam:
+  `a_character_written_to_a_directory_is_there_on_the_next_open` writes and
+  reads a real directory through the real container (including a tampered file
+  being refused by the checksum),
+  `a_resumed_session_opens_where_the_last_one_stopped_and_a_fresh_one_does_not`
+  covers `Stage::restore`/`Stage::snapshot`, and
+  `a_headless_run_neither_resumes_nor_writes_a_save` pins the headless rule. The
+  cadence itself — `Shard::autosave` firing every `save::save_ticks` — is
+  covered only by the browser gate. **A `--save-dir` flag would close it** and
+  is what topic 14 already asks for under "server deployments: configurable data
+  dir"; it was left out as scope.
+- **Only OPFS was exercised in a browser, and only where OPFS exists.**
+  `docs/plan/14-persistence.md` names IndexedDB as the fallback and
+  `crates/crcbl-store/src/web/mod.rs` records that no shim implements one. A
+  browser without OPFS — or a page on `file://` — gets `Vault::None` and a
+  warning, and nothing tests that path.
+- **A quota refusal was not exercised.** `OpfsStorage::write` answers
+  `LimitExceeded` when its queue is full, and `Vault::store` logs it and returns
+  `false` so `saves` does not rise. Nothing has ever made that happen.
 
 ### Decision needed: who forces the grid-inventory kit (2026-08-26)
 
@@ -211,7 +296,7 @@ Every demo in `docs/plan/sample/` that can run in a browser now does —
 declined with an override condition. So the next work is depth against the
 plans' exit criteria rather than another sample, and `shard` milestone 1 is the
 clearest: its criterion is a complete session — explore, fight, loot, level,
-save, resume — and only the first verb is built.
+save, resume — and loot and level are not built.
 
 **Loot is where it stops being a sample question.** `docs/plan/34-inventory.md`
 is the grid-inventory kit, and `15-shard.md` is explicit that shard is meant to
@@ -307,6 +392,20 @@ than with its wall clock, which is exactly the multiplier this entry is about.
 shard's `pages.yml` step already carries a 20-minute timeout. No CI figure for
 shard exists at either size, so how much of the twenty minutes this leaves is
 not known.
+
+**And then its save block, which costs more than either.** Same machine, same
+adapter: 90 s and 51 checks before, 111 s and 54 checks after. None of the three
+new checks reaches the "slowest 5" line, so each is under ~5 s; the cost is two
+page reloads (a navigation, a boot to `STATUS_RUNNING` and a first heartbeat
+each) plus one autosave period of _simulated_ time spent waiting for a write
+that postdates the fight. **The reloads are wall-clock and the wait is not**, so
+on a runner at 27× the wait alone is half a minute — the reason
+`save::SAVE_PERIOD_S` is one second rather than the thirty a real game would
+use. Two figures from the same session are worth keeping: a missing focus click
+before the pause left the status wait to spend its whole 90-second timeout and
+took the run to 197 s, and this machine's own measured slowdown moved between
+4.1× and 5.0× across three runs of the same build, so a 20 % difference in these
+numbers is noise rather than a regression.
 
 ### The rand 0.10 migration is written and blocked upstream (2026-08-26)
 

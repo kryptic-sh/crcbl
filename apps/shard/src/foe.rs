@@ -610,6 +610,32 @@ impl Foe {
         world.set_trigger(self.body, true);
     }
 
+    /// Puts it back into the state a save recorded: `health` left, or down.
+    ///
+    /// **`health` is a value [`crate::save`] has already validated** against
+    /// this archetype's own [`Kind::health`], so nothing is clamped here — a
+    /// payload claiming a husk has a warden's health reads as no save at all
+    /// rather than as a husk this function quietly corrected.
+    ///
+    /// Zero is felled, and it goes down through [`Foe::fell`] rather than by
+    /// setting the flag: the body has to become a trigger, or a restored zone
+    /// would have a corpse still stopping rays and sweeps.
+    pub fn restore(&mut self, world: &mut PhysicsWorld, health: u32) {
+        debug_assert!(
+            health <= self.kind.health(),
+            "a {} cannot hold {health} health",
+            self.kind.label(),
+        );
+        self.health = health;
+        if health == 0 {
+            if self.alive {
+                self.fell(world);
+            }
+            return;
+        }
+        self.alive = true;
+    }
+
     /// One tick of noticing and moving.
     ///
     /// `target` is the character's capsule centre. Every metre goes through
@@ -938,6 +964,59 @@ mod tests {
         // oversight.
         assert_eq!(Kind::Adept.stand_off(), None);
         const { assert!(ADEPT_NEAR > STRIKE_REACH_M) };
+    }
+
+    /// How far above a foe's capsule centre the restore check casts from, in
+    /// metres. Well clear of the tallest archetype's own capsule.
+    const RAY_FROM_ABOVE_M: f64 = 2.0;
+
+    /// **A foe restored as felled is a body a ray goes through**, and one
+    /// restored with health left is still a body a ray stops at.
+    ///
+    /// The pair is the whole of why [`Foe::restore`] goes through [`Foe::fell`]
+    /// rather than setting the flag: `alive` alone would make a resumed zone
+    /// look right and behave wrong — the character's cleave and every other
+    /// foe's sighting line would still be stopped by a corpse. The standing foe
+    /// is the control, so "the ray missed" cannot pass for a ray that was
+    /// pointed at nothing.
+    #[test]
+    fn a_foe_restored_as_felled_stops_no_ray_and_a_wounded_one_still_does() {
+        let mut world = zone::world();
+        let mut foes = stand_all(&mut world);
+
+        for (index, health) in [(0usize, 0u32), (1, 10)] {
+            let target = foes[index].centre();
+            foes[index].restore(&mut world, health);
+            // **Straight down onto the body**, from above the walls and ending
+            // at the capsule's own centre. The zone's stonework is what makes
+            // a horizontal ray a test of the layout rather than of the body —
+            // the adept's post has a doorpost between it and the spawn, which
+            // `a_foe_behind_the_doorway_cannot_see_the_spawn` is about — and
+            // this sample has no roof, so nothing but the foe is on this line.
+            let from = target + DVec3::Y * RAY_FROM_ABOVE_M;
+            let ray = Ray::new(from, target - from).with_bounds(0.0, 1.0);
+            let hit = world.cast_ray(&ray).map(|(collider, _)| collider);
+            let body = foes[index].body();
+            if health == 0 {
+                assert_ne!(
+                    hit,
+                    Some(body),
+                    "a felled {} still stopped a ray",
+                    foes[index].label(),
+                );
+                assert!(!foes[index].is_alive());
+            } else {
+                assert_eq!(
+                    hit,
+                    Some(body),
+                    "a wounded {} stopped nothing, so the check above is about \
+                     an empty line rather than about a corpse",
+                    foes[index].label(),
+                );
+                assert!(foes[index].is_alive());
+                assert_eq!(foes[index].health(), health);
+            }
+        }
     }
 
     /// **A foe holds its post until it notices, and then it comes.** The first

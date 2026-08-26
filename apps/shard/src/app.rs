@@ -70,6 +70,7 @@ use crate::game::{Controls, Game, RenderState, Stats};
 use crate::gpu::{Gpu, Paths};
 use crate::menu::{MenuKind, Menus};
 use crate::page::PageStats;
+use crate::save::{SaveStats, Vault};
 
 pub use crate::args::Options;
 
@@ -206,6 +207,10 @@ pub struct Summary {
     pub taken: u64,
     /// Whether the torches were still lit when the run ended.
     pub torches_lit: bool,
+    /// Whether this run opened from a save a previous one left.
+    pub resumed: bool,
+    /// How many times the character was written out.
+    pub saves: u64,
     /// Which selectors and effects the frames were drawn through — rule 12's
     /// "says which it took", in the summary line as well as in the panel.
     pub paths: Paths,
@@ -243,6 +248,20 @@ pub struct Shard {
     /// Whether the zone's torches are burning. Presentation too — see the module
     /// docs for why this is not a thing the server owns.
     torches_lit: bool,
+    /// Where this run's saves go. [`Vault::None`] for a headless run, which is
+    /// what keeps the test suite and CI out of a real data directory.
+    vault: Vault,
+    /// Whether this run opened from a save.
+    ///
+    /// Fixed at start-up and never changed after it: a session either resumed or
+    /// it did not, and a reading that could move is one the browser gate could
+    /// not read off a heartbeat it polled late.
+    resumed: bool,
+    /// How many times the character has been written out.
+    saves: u64,
+    /// How many ticks apart the autosaves are — [`crate::save::save_ticks`] at
+    /// this run's rate.
+    save_ticks: u64,
     /// Refilled from the simulation every frame.
     render_state: RenderState,
     /// The simulation's numbers, snapshotted in [`Shard::tick`].
@@ -297,6 +316,14 @@ impl Shard {
     ///   `taken` is monotone and sits at zero for the whole of the run before
     ///   anything engaged, which is what tells damage from a number that only
     ///   ever counts up.
+    /// * `resumed` and `saves` — whether this session opened from a save, and
+    ///   how many times the character has been written out since. **The pair
+    ///   the save block turns on**, and each answers a question the other
+    ///   cannot: `resumed` is fixed for the whole session, so a reader that
+    ///   polls late reads the same answer a reader that polled early would;
+    ///   `saves` is monotone and rises on the *simulated* clock, so a machine
+    ///   drawing at a fifth of real time writes just as often per second of
+    ///   play. See [`crate::save`].
     /// * `target` — what the cleave would answer, which is what makes a blow
     ///   deliberate rather than lucky. The same reading the trigger resolves
     ///   with, so the line cannot disagree with the swing.
@@ -320,6 +347,7 @@ impl Shard {
              ground: {}  blocked: {}  climbed: {}  foes: {}  engaged: {}  \
              hp: {}  downs: {}  swings: {}  hits: {}  dealt: {}  taken: {}  \
              target: {}  torches: {}  flame: {:.3}  \
+             resumed: {}  saves: {}  \
              geometry: {:?}  binding: {:?}  lighting: {:?}  effects: {}",
             stats.ticks,
             stats.position.x,
@@ -340,6 +368,8 @@ impl Shard {
             stats.target_label(),
             if self.torches_lit { "lit" } else { "out" },
             self.flame(),
+            if self.resumed { "yes" } else { "no" },
+            self.saves,
             self.paths.geometry,
             self.paths.binding,
             self.paths.lighting,
@@ -358,6 +388,42 @@ impl Shard {
         }
     }
 
+    /// Writes the character out every [`crate::save::save_ticks`] ticks.
+    ///
+    /// Driven off the **tick counter** rather than off a wall clock or a frame
+    /// count, and that is what makes the cadence the same on every machine: a
+    /// browser drawing this zone at a fifth of real time saves once per second
+    /// *of play*, exactly as a native run at full rate does, so nothing that
+    /// waits for a save is waiting on a frame rate.
+    ///
+    /// Called from [`HostedGame::tick`] immediately before [`Self::log_heartbeat`]
+    /// and off the same [`Stats`], so at the default rate — where the period is a
+    /// whole number of [`crate::game::HEARTBEAT_TICKS`] — the beat that reports a
+    /// raised `saves` is the beat whose readings were written.
+    ///
+    /// A refused write costs the session nothing — the state is still in the
+    /// stage and the next period tries again — so this counts writes that were
+    /// accepted rather than attempts. [`crate::save::Vault::store`] is what logs
+    /// the reason for a refusal.
+    fn autosave(&mut self) {
+        if self.stats.ticks == 0 || !self.stats.ticks.is_multiple_of(self.save_ticks) {
+            return;
+        }
+        if self.vault.store(&self.game.snapshot()) {
+            self.saves += 1;
+        }
+    }
+
+    /// What the debug panel says about this run's persistence.
+    fn save_stats(&self) -> SaveStats {
+        SaveStats {
+            resumed: self.resumed,
+            writes: self.saves,
+            playtime: self.stats.playtime,
+            vault: self.vault.where_it_goes(),
+        }
+    }
+
     /// The simulation, for scripted tests and for an embedder that drives it.
     pub const fn game(&self) -> &Game {
         &self.game
@@ -371,6 +437,17 @@ impl Shard {
     /// Whether the torches are burning, for this crate's own tests.
     pub const fn torches_lit(&self) -> bool {
         self.torches_lit
+    }
+
+    /// Whether this run opened from a save, for this crate's own tests.
+    pub const fn resumed(&self) -> bool {
+        self.resumed
+    }
+
+    /// How many times the character has been written out, for this crate's own
+    /// tests.
+    pub const fn saves(&self) -> u64 {
+        self.saves
     }
 
     /// What the last frame's overlay drew.
@@ -474,7 +551,27 @@ fn assemble<S: Shell + ?Sized>(
         booted
     };
     let paths = booted.gpu.paths();
-    let game = Game::new(options.common.tick_hz).map_err(ShardError::Game)?;
+    // **The save is read before the simulation exists**, so a resumed character
+    // is the state the stage is *built* in rather than one written over a zone
+    // that had already started. A headless run opens `Vault::None` and finds
+    // nothing, which is what keeps the test suite and CI out of a real data
+    // directory — `crate::save` carries the platform table.
+    let vault = Vault::open(options.common.headless);
+    let restored = vault.load();
+    let resumed = restored.is_some();
+    if let Some(character) = &restored {
+        crcbl::log::info!(
+            "save: resuming at {:.2} {:.2} with {} health, {} down(s) and {} \
+             foe(s) standing, after {:.1} s of play",
+            character.centre.x,
+            character.centre.z,
+            character.health,
+            character.downs,
+            character.foes.iter().filter(|health| **health > 0).count(),
+            character.playtime_secs,
+        );
+    }
+    let game = Game::new(options.common.tick_hz, restored).map_err(ShardError::Game)?;
     Ok(Loop::new(
         booted,
         Shard {
@@ -485,6 +582,10 @@ fn assemble<S: Shell + ?Sized>(
             // A zone whose torches were out on arrival is a zone a visitor reads
             // as broken, and the whole subject here is what they light.
             torches_lit: true,
+            vault,
+            resumed,
+            saves: 0,
+            save_ticks: crate::save::save_ticks(options.common.tick_hz),
             render_state: RenderState::default(),
             stats: Stats::default(),
             page: PageStats::default(),
@@ -557,6 +658,9 @@ impl HostedGame for Shard {
         // actually has.
         self.paths = gpu.paths();
         self.stats = self.game.stats();
+        // Before the heartbeat, so the `saves` the line reports is the count
+        // that includes this tick's write rather than one line behind it.
+        self.autosave();
         self.log_heartbeat();
     }
 
@@ -639,6 +743,7 @@ impl HostedGame for Shard {
     /// is a number [`crcbl::phys`] produced, and the paths, which is rule 12.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
+        panel.add(&self.save_stats());
         panel.add(&self.paths);
     }
 
@@ -666,6 +771,8 @@ impl HostedGame for Shard {
             dealt: self.stats.dealt,
             taken: self.stats.taken,
             torches_lit: self.torches_lit,
+            resumed: self.resumed,
+            saves: self.saves,
             paths: self.paths,
             commands: self.page.commands,
         }
@@ -676,6 +783,7 @@ impl HostedGame for Shard {
             "shard: {} frames, {} ticks, feet at {:.2} {:.2} {:.2}, \
              {} blocked and {} climbed, {}/{} foes standing, {} health left, \
              {}/{} blows landed for {} against {} taken, torches {}, \
+             {} save(s) written to the {}, \
              {} overlay commands, \
              geometry {:?}, binding {:?}, lighting {:?}, effects {} ({:?})",
             summary.frames,
@@ -693,6 +801,12 @@ impl HostedGame for Shard {
             summary.dealt,
             summary.taken,
             if summary.torches_lit { "lit" } else { "out" },
+            summary.saves,
+            if summary.resumed {
+                "vault it resumed from"
+            } else {
+                "vault, none to resume from"
+            },
             summary.commands,
             summary.paths.geometry,
             summary.paths.binding,
@@ -830,6 +944,27 @@ mod tests {
             summary.feet[1],
         );
         assert!(summary.torches_lit, "the zone opened with its torches out");
+    }
+
+    /// **A headless run neither resumes nor writes a save.** The rule that lets
+    /// the test suite and CI run this sample without touching whoever's data
+    /// directory — `crate::save::Vault::open` is where it lives.
+    ///
+    /// The tick count is the control. Without it "no saves were written" passes
+    /// for a run too short to have reached the first autosave, which is the one
+    /// way this could be green while the cadence was broken.
+    #[test]
+    fn a_headless_run_neither_resumes_nor_writes_a_save() {
+        let summary = run(&headless(180)).expect("the null backend always runs");
+        let period_ticks = crate::save::save_ticks(crate::game::DEFAULT_TICK_HZ);
+        assert!(
+            summary.ticks > period_ticks,
+            "{} ticks is short of the {period_ticks} one autosave period costs, \
+             so this run could not have written one anyway",
+            summary.ticks,
+        );
+        assert!(!summary.resumed, "a headless run found a save to resume");
+        assert_eq!(summary.saves, 0, "a headless run wrote one");
     }
 
     /// **Two identical runs agree exactly**, which is what a fixed timestep with
@@ -1053,16 +1188,16 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu", "counters", "shard", "paths"]
+            &["frame", "gpu", "counters", "shard", "save", "paths"]
         } else {
-            &["frame", "counters", "shard", "paths"]
+            &["frame", "counters", "shard", "save", "paths"]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 
         let drawn = ui_text(&engine);
         for row in [
-            "tick", "climbed", "health", "foes", "engaged", "target", "geometry", "lighting",
-            "effects",
+            "tick", "climbed", "health", "foes", "engaged", "target", "state", "writes", "where",
+            "geometry", "lighting", "effects",
         ] {
             assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
         }

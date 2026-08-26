@@ -71,13 +71,24 @@
 //! carry real content", and a browser's frame goes through `IndirectPerBatch`,
 //! `ArrayPages` and `LightingPath::Rasterised` by construction.
 //!
+//! # What the character keeps
+//!
+//! [`save`] is where they are, what they have left, how many times they have
+//! been put down and which foes are felled, written through
+//! [`crcbl::store::save::SaveWriter`]'s container — the platform data directory
+//! natively, the Origin Private File System in a browser. Nothing in
+//! `crcbl-store` gained a line for it; what is this sample's is the payload
+//! inside the one sector and which directory it goes in.
+//!
 //! # What is not here yet
 //!
-//! **Slice 1 is one verb, and the verb is explore.** Milestone 1's loop is
-//! "explore, fight, loot, level, save, resume"; there is no enemy, no ability, no
-//! item, no rarity, no experience, no inventory grid, no save and no OPFS. There
-//! is no sector streaming and no networking of any kind — the plan says milestone
-//! 1 ships none, and the loopback here is sample rule 2 rather than a network. The
+//! **Four of milestone 1's six verbs are here: explore, fight, save, resume.**
+//! There is no item, no rarity, no experience and no inventory grid — and the
+//! save format has no field reserved for one, deliberately, because who forces
+//! `docs/plan/34-inventory.md`'s kit is an open question in `docs/backlog.md`
+//! and a reserved field would answer it by accident. There is no sector
+//! streaming and no networking of any kind — the plan says milestone 1 ships
+//! none, and the loopback here is sample rule 2 rather than a network. The
 //! golden frames per `GeometryPath` that milestone 1's exit criteria ask for are
 //! not here either, and neither is the recorded browser budget or the peak wasm
 //! memory figure. `docs/backlog.md` carries all of it, with what each would take.
@@ -111,6 +122,7 @@ mod gpu;
 pub mod light;
 pub mod menu;
 pub mod page;
+pub mod save;
 pub mod zone;
 
 #[cfg(target_arch = "wasm32")]
@@ -124,4 +136,5 @@ pub use game::{Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Stats};
 pub use gpu::{Gpu, Paths};
 pub use menu::{MenuKind, Menus};
 pub use page::PageStats;
+pub use save::{Character, SaveStats, Vault};
 pub use zone::Cell;

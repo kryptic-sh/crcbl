@@ -38,8 +38,14 @@
 //!
 //! The subject of this sample is what the torches do to the stone, and anything
 //! drawn over that is in the way of it. `docs/plan/sample/15-shard.md`'s
-//! milestone 1 eventually wants a grid inventory in front of this frame; slice 1
-//! has no item to put in one, and topic 34's kit is a later slice's job.
+//! milestone 1 eventually wants a grid inventory in front of this frame; there
+//! is no item to put in one yet, and topic 34's kit is a later slice's job.
+//!
+//! **Nothing about the save is drawn here either, and that is the same rule.**
+//! An autosave counter would change every `crate::save::SAVE_PERIOD_S` of
+//! simulated time and make the still-frame control above impossible to pass on a
+//! working build. Whether the session resumed, how many writes it has made and
+//! where they go are on the debug panel (`F3`) and the `[HUD]` heartbeat.
 //!
 //! # Laid out against the surface
 //!

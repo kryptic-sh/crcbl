@@ -790,6 +790,49 @@ case "$DEMO" in
             echo "               and every other fight check would still be green" >&2
             exit 1
         fi
+        # And once more for the save, which is slice 3 and the last two of that
+        # plan's six verbs. Everything above happens inside one session, and all
+        # of it passes on a page that keeps nothing: a document that is never
+        # reloaded never has to answer for what it wrote.
+        #
+        # Three names, and the two below the first are each other's control:
+        #
+        #  - "a reloaded page resumes the character the last one saved" is the
+        #    claim. On its own it passes for a build that saves nothing and
+        #    always starts in the same place.
+        #  - "and the same page with the store cleared comes up fresh" is what
+        #    rules that out: the same page, the same reload, an emptied store,
+        #    and a character back on the spawn with the zone intact.
+        #  - "the character is on the browser's own file system, not in the
+        #    page" is what says the bytes left wasm at all. Without it both
+        #    checks above would pass for a page that held the save in memory
+        #    for the life of the document — which is exactly what a reload is
+        #    supposed to destroy, and which nothing else here would notice.
+        #
+        # Renaming any of them in the driver is meant to fail here and be
+        # renamed here too.
+        ON_DISK="$(grep -F "the character is on the browser's own file system" "${OUTPUT}.plain" || true)"
+        if [ -z "$ON_DISK" ]; then
+            echo "crcbl web e2e: the driver never looked in $DEMO's OPFS directory;" >&2
+            echo "               'a reloaded page resumes' passes for a save held in" >&2
+            echo "               memory for the life of the document, and nothing else" >&2
+            echo "               on this site reads a byte back off browser storage" >&2
+            exit 1
+        fi
+        RESUMED="$(grep -F 'a reloaded page resumes the character the last one saved' "${OUTPUT}.plain" || true)"
+        if [ -z "$RESUMED" ]; then
+            echo "crcbl web e2e: the driver never reloaded $DEMO's page; the save half" >&2
+            echo "               of milestone 1 is ungated in a browser, and a build" >&2
+            echo "               that wrote a file nobody reads would be green" >&2
+            exit 1
+        fi
+        FRESH="$(grep -F 'and the same page with the store cleared comes up fresh' "${OUTPUT}.plain" || true)"
+        if [ -z "$FRESH" ]; then
+            echo "crcbl web e2e: the driver never cleared $DEMO's store; 'a reloaded" >&2
+            echo "               page resumes the character' has no control, and it" >&2
+            echo "               passes for a demo that always opens in the same place" >&2
+            exit 1
+        fi
         ;;
 esac
 

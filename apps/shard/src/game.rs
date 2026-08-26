@@ -12,10 +12,16 @@
 //!
 //! `docs/plan/sample/15-shard.md`'s milestone 1 is "explore, fight, loot, level,
 //! save, resume". This file is the first two of those and nothing else: there is
-//! no item, no rarity, no experience, no inventory and no save. What there is is
-//! a character, a zone with stone in it, gravity, three archetypes of foe with
-//! one ability each, and a blow that answers them. `docs/backlog.md` carries the
+//! no item, no rarity, no experience and no inventory. What there is is a
+//! character, a zone with stone in it, gravity, three archetypes of foe with one
+//! ability each, and a blow that answers them. `docs/backlog.md` carries the
 //! rest with what each would take.
+//!
+//! Save and resume are the other two verbs this sample now has, and neither is
+//! in here: [`crate::save`] owns the format and the platform, and what this file
+//! contributes is `Stage::restore` and `Stage::snapshot` — the two functions
+//! that turn the stage into a save's payload and back, under the same lock every
+//! other reader of the stage takes.
 //!
 //! # Nothing here does collision, and that is rule 9
 //!
@@ -321,6 +327,15 @@ struct Stage {
     /// [`crate::light::flame`] is a function of, so a paused zone's flames hold
     /// still.
     elapsed: f64,
+    /// Seconds of simulated time across **every** session, including the ones a
+    /// save was resumed from.
+    ///
+    /// Separate from [`Stage::elapsed`] on purpose: elapsed is this session's
+    /// clock and the torches are a function of it, so seeding it from a save
+    /// would have a resumed zone open mid-flicker and the `[HUD]` heartbeat
+    /// open at a tick nothing on the page expects. This is the number
+    /// [`SaveHeader::playtime_secs`](crcbl::store::save::SaveHeader) means.
+    playtime: f64,
     /// The bearing the last tick actually walked along.
     yaw: f32,
     /// What the last move came back with, kept so the frame and the heartbeat
@@ -366,6 +381,7 @@ impl Stage {
             fall_speed: 0.0,
             ticks: 0,
             elapsed: 0.0,
+            playtime: 0.0,
             yaw: 0.0,
             outcome: MoveOutcome::default(),
             blocked: 0,
@@ -376,6 +392,45 @@ impl Stage {
     /// How many foes are still on their feet.
     fn alive(&self) -> usize {
         self.foes.iter().filter(|foe| foe.is_alive()).count()
+    }
+
+    /// Puts the stage into the state a previous session left.
+    ///
+    /// **Every field here is one [`crate::save`]'s own decoder has already
+    /// validated**, so nothing is clamped or second-guessed on the way in: a
+    /// position that was not a finite number inside the zone, or a health above
+    /// an archetype's own ceiling, never reaches this function — it reads as no
+    /// save at all and the zone opens fresh.
+    ///
+    /// The fall speed is zeroed rather than saved. A restored character is
+    /// standing wherever the save left them and the next
+    /// [`CharacterController::move_and_slide`] is what finds the floor under
+    /// them, exactly as the first tick of a fresh zone does.
+    fn restore(&mut self, character: &crate::save::Character) {
+        self.player.set_position(character.centre);
+        self.fall_speed = 0.0;
+        self.health = character.health;
+        self.downs = character.downs;
+        self.playtime = character.playtime_secs;
+        for (foe, health) in self.foes.iter_mut().zip(character.foes) {
+            foe.restore(&mut self.world, health);
+        }
+    }
+
+    /// What this session would leave for the next.
+    fn snapshot(&self) -> crate::save::Character {
+        let mut foes = [0; foe::FOES];
+        for (slot, foe) in foes.iter_mut().zip(&self.foes) {
+            *slot = if foe.is_alive() { foe.health() } else { 0 };
+        }
+        crate::save::Character {
+            centre: self.player.position(),
+            health: self.health,
+            downs: self.downs,
+            foes,
+            playtime_secs: self.playtime,
+            tick: self.ticks,
+        }
     }
 }
 
@@ -515,6 +570,7 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
 
     stage.ticks += 1;
     stage.elapsed += dt;
+    stage.playtime += dt;
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +660,10 @@ pub struct Stats {
     pub climbed: u64,
     /// Seconds of simulated time.
     pub elapsed: f64,
+    /// Seconds of simulated time across every session, including the ones this
+    /// one resumed from. What `crate::save::SaveStats` reports and what the
+    /// save's header carries.
+    pub playtime: f64,
     /// The bearing the last tick walked along, in radians.
     pub yaw: f32,
     /// How many foes are still on their feet.
@@ -721,6 +781,12 @@ impl std::fmt::Debug for Game {
 impl Game {
     /// Builds the server, its client and the stage between them.
     ///
+    /// `restore` is what a previous session left, or `None` for a zone that
+    /// opens fresh. It is applied to the stage **before** the server is built
+    /// and therefore before any tick has run, so the first tick a resumed
+    /// session takes is one from the state that was saved rather than one from
+    /// the spawn — see `Stage::restore`.
+    ///
     /// # Errors
     ///
     /// [`GameError::Server`] if the operating system would not give the server
@@ -730,9 +796,13 @@ impl Game {
     /// # Panics
     ///
     /// If `tick_hz` is zero.
-    pub fn new(tick_hz: u32) -> Result<Self, GameError> {
+    pub fn new(tick_hz: u32, restore: Option<crate::save::Character>) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
-        let shared = Arc::new(Mutex::new(Stage::new()));
+        let mut stage = Stage::new();
+        if let Some(character) = &restore {
+            stage.restore(character);
+        }
+        let shared = Arc::new(Mutex::new(stage));
 
         // An empty world, and that is the honest shape: this sample has no entity
         // and no ECS system. What the server hosts is the module, and what the
@@ -843,6 +913,18 @@ impl Game {
         }
     }
 
+    /// What this session would leave for the next, read off the stage the
+    /// server owns.
+    ///
+    /// Under the same lock every other reader takes, so a snapshot is one
+    /// tick's state rather than a mixture of two — which for a save is the
+    /// difference between a character standing where their health says they
+    /// were and one who is not.
+    #[must_use]
+    pub fn snapshot(&self) -> crate::save::Character {
+        lock(&self.shared).snapshot()
+    }
+
     /// The stage's numbers for the debug panel and the `[HUD]` line.
     #[must_use]
     pub fn stats(&self) -> Stats {
@@ -855,6 +937,7 @@ impl Game {
             blocked: stage.blocked,
             climbed: stage.climbed,
             elapsed: stage.elapsed,
+            playtime: stage.playtime,
             yaw: stage.yaw,
             alive: stage.alive(),
             engaged: stage.engaged,
@@ -1150,12 +1233,97 @@ mod tests {
         );
     }
 
+    /// **A session that resumes a snapshot opens where the last one stopped**,
+    /// and a session handed nothing opens on the spawn with the zone intact.
+    ///
+    /// The second half is the control, and it is the one that matters: every
+    /// reading the first half asserts — the position, the health, the downs, the
+    /// standing count — is one a *fresh* zone also has a value for, so without
+    /// the pair "it resumed" would pass for a build that ignored the argument
+    /// entirely and always opened the same way.
+    ///
+    /// The snapshot is taken from a stage that was actually played rather than
+    /// written by hand, so what is asserted is a round trip through the two
+    /// functions a save goes through and not a struct this test filled in.
+    #[test]
+    fn a_resumed_session_opens_where_the_last_one_stopped_and_a_fresh_one_does_not() {
+        // A stage walked away from the spawn, wounded, with its husk felled and
+        // its warden hurt — a state nothing about opening a zone can produce.
+        let mut played = ready();
+        hold(&mut played, AHEAD, 1.0);
+        played.health = 37;
+        played.downs = 4;
+        played.foes[0].wounded(&mut played.world, foe::HEALTH_MAX);
+        played.foes[2].wounded(&mut played.world, 40);
+        let saved = played.snapshot();
+        assert_eq!(saved.foes[0], 0, "the husk was not felled");
+        assert!(saved.centre.z < zone::spawn().z - 1.0, "it never walked");
+
+        // ---- the stage, where the comparison can be exact --------------------
+        let mut restored = Stage::new();
+        restored.restore(&saved);
+        assert_eq!(
+            restored.snapshot(),
+            crate::save::Character {
+                // The one field that is provenance rather than state: it says
+                // which tick wrote the save, and a session that resumes one
+                // counts its own ticks from zero.
+                tick: 0,
+                ..saved
+            },
+            "a field did not survive the round trip",
+        );
+        // …and this session's own clock starts again, which is what keeps the
+        // torches opening at the start of their cycle and the heartbeat at the
+        // tick every reader expects. `playtime` is the one that carries over.
+        assert!(saved.tick > 0, "the played stage never ticked");
+        assert_eq!(restored.ticks, 0);
+        assert_eq!(restored.elapsed, 0.0);
+        assert_eq!(restored.playtime, saved.playtime_secs);
+
+        // ---- and through the facade, which spends one tick on the handshake --
+        let resumed = Game::new(DEFAULT_TICK_HZ, Some(saved)).expect("the loopback comes up");
+        let stats = resumed.stats();
+        assert!(
+            (stats.position.x - saved.centre.x).abs() < 1e-9
+                && (stats.position.z - saved.centre.z).abs() < 1e-9,
+            "it opened at {:?} rather than at {:?}",
+            stats.position,
+            saved.centre,
+        );
+        assert_eq!(stats.health, saved.health);
+        assert_eq!(stats.downs, saved.downs);
+        assert_eq!(stats.alive, foe::FOES - 1, "the felled foe was back up");
+
+        let fresh = Game::new(DEFAULT_TICK_HZ, None).expect("the loopback comes up");
+        let opened = fresh.stats();
+        assert_eq!(
+            opened.alive,
+            foe::FOES,
+            "a fresh zone opened already cleared"
+        );
+        assert_eq!(opened.health, foe::HEALTH_MAX);
+        assert_eq!(opened.downs, 0);
+        assert!(
+            (opened.position.z - zone::spawn().z).abs() < 1e-9,
+            "a fresh zone opened at {:?} rather than on the spawn",
+            opened.position,
+        );
+        assert!(
+            opened.playtime < stats.playtime,
+            "a fresh zone opened with {:.2} s of play behind it, against the \
+             resumed session's {:.2} s",
+            opened.playtime,
+            stats.playtime,
+        );
+    }
+
     /// **A run of the whole game walks the character and reports it**, which is
     /// the one check that says the server, the client, the transport and the
     /// stage are all joined up.
     #[test]
     fn the_loopback_carries_a_held_key_to_the_controller() {
-        let mut game = Game::new(DEFAULT_TICK_HZ).expect("the loopback always comes up");
+        let mut game = Game::new(DEFAULT_TICK_HZ, None).expect("the loopback always comes up");
         for _ in 0..30 {
             game.tick();
         }

@@ -14,10 +14,12 @@
 //! `MenuAction` type is [`core::convert::Infallible`] because there is genuinely
 //! no value it could ever be handed.
 //!
-//! Slice 1 has nothing else to put on it. There is one zone, one character and
-//! one verb: walking, turning the camera and putting the torches out are three
-//! keys rather than three rows, and every row this sample will eventually want —
-//! an inventory, a character sheet, a save — belongs to a later slice of
+//! There is nothing else to put on it yet. Walking, turning the camera,
+//! striking and putting the torches out are keys rather than rows, and the save
+//! is not a row either — [`crate::save`] writes on a cadence the simulation
+//! owns, so there is no button to press and nothing for a player to remember.
+//! An inventory and a character sheet are the rows this menu will eventually
+//! want, and both belong to a later slice of
 //! `docs/plan/sample/15-shard.md`'s milestone 1.
 
 use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};

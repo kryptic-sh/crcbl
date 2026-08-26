@@ -73,10 +73,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   against one swung with nothing in reach, and an ability that costs health
   against a character who had taken nothing.
 
-  **Two verbs of six.** Milestone 1's loop is explore, fight, loot, level, save,
-  resume; exploring and fighting are here. No item, no rarity, no experience, no
-  inventory grid, no save, no OPFS, no sector streaming and no networking.
-  `docs/backlog.md` carries what each of those needs.
+  **A character that persists between sessions** (`shard::save`). Where they are
+  standing, what they have left, how many times they have been put down and how
+  much health each foe has — which is what says who is felled — written through
+  `crcbl-store`'s existing save container: a header, one sector at
+  `SectorId::ZERO`, and a SHA-256 over everything before it. Natively that goes
+  to the platform **data** directory (`~/.local/share/shard/character.crb` on
+  Linux); in a browser it goes to the Origin Private File System through the
+  same shim `web/engine/storage.js` already drove for high scores. Nothing in
+  `crcbl-store` changed on the sample's behalf, and a `--headless` run opens no
+  vault at all, so the test suite and CI leave nothing behind.
+
+  It autosaves once per second of **simulated** time, so a machine drawing this
+  zone at a fifth of real time saves exactly as often per second of play; the
+  next session resumes from it, and the `[HUD]` heartbeat, the debug panel and
+  the summary line all say whether this one did (`resumed:`) and how many writes
+  it has made (`saves:`). A save this build will not stand behind — wrong
+  length, foreign magic, an unknown payload version, a roster that is not this
+  zone's, a health above an archetype's own ceiling, a position that is not a
+  finite number — reads as _no save_ and the zone opens fresh rather than being
+  clamped into something plausible. `web/tools/browser-e2e.mjs` reads the bytes
+  back out of OPFS in a real browser, reloads the page and requires the
+  character to come back where the save's own heartbeat reported them, then
+  clears the store and requires the same page to come up on the spawn with the
+  zone intact.
+
+  **Four verbs of six.** Milestone 1's loop is explore, fight, loot, level,
+  save, resume; exploring, fighting, saving and resuming are here. No item, no
+  rarity, no experience, no inventory grid — and **no reserved field for one**
+  in the save, deliberately: who forces `docs/plan/34-inventory.md`'s kit is an
+  open question in `docs/backlog.md`, and a reserved field would answer it by
+  accident. No sector streaming and no networking. `docs/backlog.md` carries
+  what each of those needs.
 
 - **`apps/breach`'s bot practice map, and a `--map` flag to choose it.**
   `docs/plan/sample/11-breach.md`'s milestone 0 is a firing range **and** a bot

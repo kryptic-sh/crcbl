@@ -25,6 +25,7 @@ fn main() -> ExitCode {
                 "shard: {} frames, {} ticks on the {} shell at {}x{}, {} \
                  (feet at {:.2} {:.2} {:.2}, {} blocked, {} climbed, \
                  {} foes standing, {} health, {}/{} blows landed, torches {}, \
+                 {} save(s) and {}, \
                  {:?}/{:?}/{:?}, effects {}, {:?})",
                 summary.frames,
                 summary.ticks,
@@ -44,6 +45,12 @@ fn main() -> ExitCode {
                 summary.hits,
                 summary.swings,
                 if summary.torches_lit { "lit" } else { "out" },
+                summary.saves,
+                if summary.resumed {
+                    "resumed from one"
+                } else {
+                    "nothing to resume"
+                },
                 // Rule 12 in the summary line, which is where a headless CI run
                 // reads it.
                 summary.paths.geometry,

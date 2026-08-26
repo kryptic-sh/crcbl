@@ -18,14 +18,16 @@
 //! demos can be open in one browser and the exports must not collide, so the macro
 //! takes each name as an argument rather than building it from a prefix.
 //!
-//! # This page is `docs/plan/sample/15-shard.md`'s milestone 1, slice 1
+//! # This page is `docs/plan/sample/15-shard.md`'s milestone 1, four verbs in
 //!
 //! That doc's milestone 1 is "a complete play session — explore, fight, loot,
 //! level, save, resume — in a browser, from the same build that runs natively".
-//! **This is the first of those verbs and nothing else.** A visitor walks a
-//! torch-lit zone and can put its torches out; there is no enemy, no item, no
-//! level and no save, and `docs/backlog.md` carries the rest with what each would
-//! take.
+//! **Four of those six are here.** A visitor walks a torch-lit zone, puts its
+//! torches out, fights what is standing in it, and comes back to a character
+//! where they left them: the save goes into the Origin Private File System
+//! through [`crate::save`], on the same build that writes it to the platform
+//! data directory natively. There is no item and no level, and
+//! `docs/backlog.md` carries the rest with what each would take.
 //!
 //! # And it is the sample the fallback paths were built for
 //!
@@ -42,12 +44,14 @@
 //!
 //! **What this sample does not add to the macro.** There is no `asset_source`
 //! accessor here, because shard has nothing to read out of one: the zone is built
-//! in code, slice 1 keeps no save, and every byte it draws with (the geometry, the
-//! shaders, the glyph atlas, the probe volume) is compiled into the module. The
-//! OPFS half of milestone 1 — a character that persists between sessions — is a
-//! later slice, and that is when a source will be needed. The two backends are
-//! still installed by the macro's `prepare`, because the shared shim's boot
-//! sequence drives both ABIs before it boots the demo and both must answer.
+//! in code and every byte it draws with (the geometry, the shaders, the glyph
+//! atlas, the probe volume) is compiled into the module. The **OPFS** half is a
+//! different matter and needs no accessor either — [`crate::save`] reaches the
+//! store the macro's `prepare` installed through
+//! [`crcbl::store::web::opfs::installed`], which is the same handle
+//! [`crcbl::store::record::Backing::platform`] uses for a high score. Both
+//! backends are installed by `prepare` because the shared shim's boot sequence
+//! drives both ABIs before it boots the demo and both must answer.
 //!
 //! # The ABIs a page has to drive
 //!

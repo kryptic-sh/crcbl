@@ -1078,6 +1078,83 @@ const EXPECTATIONS = {
       // this.
       full: 100,
     },
+    // **AND THE CHARACTER COMING BACK**, which is slice 3 and the last two of
+    // `docs/plan/sample/15-shard.md`'s six verbs. Every pattern here is a field
+    // of the `[HUD]` line `apps/shard/src/app.rs` logs.
+    //
+    // The two fields this block turns on are the ones `apps/shard/src/save.rs`
+    // put on that line, and each is unmoved by how fast frames arrive:
+    //
+    // * `resumed` is decided once, in `assemble`, before the first tick — a
+    //   session either opened from a save or it did not — so a reader that
+    //   polls late reads what a reader that polled early would.
+    // * `saves` is monotone and rises on the **simulated** clock:
+    //   `save::SAVE_PERIOD_S` is a second of simulated time, so a machine
+    //   drawing this zone at a fifth of real time writes exactly as often per
+    //   second *of play*. Waiting for it to move is therefore a wait in beats
+    //   rather than a wait in milliseconds.
+    //
+    // And the pair is what makes the reference reading exact rather than
+    // approximate. `save::save_ticks` counts the autosave period in **ticks**
+    // and at the default rate it is a whole number of `game::HEARTBEAT_TICKS`,
+    // so a write and the line reporting it happen on the *same* tick —
+    // `Shard::tick` autosaves and then logs, off one `Stats`.
+    // `a_save_lands_on_a_heartbeat_at_the_default_rate` in
+    // `apps/shard/src/save.rs` is what holds that, and it is why the tolerance
+    // below is a rounding window rather than a guess: the heartbeat carrying a
+    // raised `saves` carries the very state that was written, so this block
+    // compares the resumed session against that line rather than against
+    // whatever the page happened to be showing when it was asked.
+    save: {
+      // Whether this session opened from a save. Read off the *first* heartbeat
+      // after a boot, which is a fixed simulated tick and so the same line on
+      // every machine.
+      resumed: /\bresumed: (yes|no)\b/,
+      // How many times the character has been written out.
+      writes: /\bsaves: (\d+)/,
+      // The rest of the reading, shared with the blocks above: where they are,
+      // what they have left, how many times they were put down, and how many
+      // foes are still standing.
+      along: /\bpz: (-?[\d.]+)/,
+      health: /\bhp: (\d+)/,
+      downs: /\bdowns: (\d+)/,
+      alive: /\bfoes: (\d+)/,
+      // What a *fresh* zone reads on all four, from `zone::LAYOUT`'s spawn and
+      // `foe::HEALTH_MAX`/`foe::FOES`. These are the control's expectations, and
+      // they are the reason the resume check has anything to say: a build that
+      // always started in the same place reports exactly this after a reload
+      // too.
+      spawnAlong: 6.0,
+      full: 100,
+      count: 3,
+      // How far off the spawn a restored position has to be before it is a
+      // reading a fresh boot could not have produced, in metres. The zone block
+      // above walks the character at least `WALK_ADVANCE_M` and the fight block
+      // walks them the length of the corridor, so this is a wide margin on what
+      // has actually happened by the time this block runs.
+      awayFromSpawn: 1.0,
+      // How far the restored position may sit from the one the save's own
+      // heartbeat reported, in metres. A rounding window and nothing more —
+      // that line is printed to two decimal places and, per the note above, it
+      // is the same tick's reading as the bytes on the disk. Observed
+      // difference on this machine: zero, twice.
+      tolerance: 0.05,
+      // What `crcbl-store`'s OPFS backend calls the file on the disk:
+      // `save::SAVE_FILE` with the generation suffix `crates/crcbl-store/src/web/opfs.rs`
+      // appends. Both slots are legal — the ping-pong writes to whichever the
+      // last generation is not in.
+      files: ['character.crb~0', 'character.crb~1'],
+      // The two magics a real file on the disk carries, read out of its bytes.
+      // `CRWB` at offset 0 is the OPFS record frame
+      // (`crates/crcbl-store/src/web/opfs.rs`), and `CRCBLSVE` at the end of
+      // that 52-byte header is the save container
+      // (`crates/crcbl-store/src/save.rs`). Both, because either alone would
+      // pass for half a write: a frame with nothing in it, or a container the
+      // shim never framed.
+      recordMagic: 'CRWB',
+      frameHeader: 52,
+      magic: 'CRCBLSVE',
+    },
   },
   orbit: {
     key: null,
@@ -3982,6 +4059,300 @@ try {
     // a key of, exactly as the walk block above hands one back.
     await zoneKey(fight.strike, 'keyUp');
     await zoneKey(fight.walk, 'keyUp');
+  }
+
+  // **AND THE CHARACTER COMING BACK, WHICH NOTHING ABOVE CAN SEE.**
+  // Only shard has one. Everything above is one session: a character walks, a
+  // light goes out, a foe goes down — and every bit of it passes on a build
+  // that keeps nothing at all, because a page that is never reloaded never has
+  // to answer for what it wrote.
+  //
+  // **This block runs last of shard's three, and it reloads the page twice.**
+  // The blocks above are entitled to the session they have always been handed,
+  // and the second reload is what hands the groups below a demo booted from an
+  // empty store — which is the state every other demo's page is in.
+  //
+  // Three claims, and each carries the control that stops it passing for the
+  // wrong reason:
+  //
+  // * the save **is on the browser's own disk** — the OPFS directory holds the
+  //   file, framed and containing the save container's magic, with nothing left
+  //   queued inside wasm. The control is the wipe below: clearing that
+  //   directory leaves it empty, which is what says the file found here was
+  //   this demo's rather than something else in the origin.
+  // * a reloaded page **comes back where it left off**, and it is checked
+  //   against the heartbeat that reported the write rather than against a
+  //   guess. The state asserted is state a fresh boot cannot have: a foe that
+  //   is felled — `foes` is monotone and nothing in this zone respawns — and a
+  //   position metres off the spawn.
+  // * and the control for that: **a page booted with the store cleared comes up
+  //   fresh**, at the spawn, at full health, with the whole zone standing.
+  //   Without it, "it resumed" passes for a build that never saved anything and
+  //   simply always starts in the same place.
+  //
+  // **Nothing here waits on a wall clock for the simulation.** The reference
+  // reading is the heartbeat carrying a raised `saves`, which is a fixed
+  // simulated tick; every reading after a reload is taken from the *first*
+  // heartbeat that boot logged, which is another one. A machine drawing this
+  // zone five times slower reaches both at the same simulated moment.
+  if (EXPECTED.save) {
+    const save = EXPECTED.save;
+
+    /** One heartbeat, as the fields this block reads. */
+    const reading = (/** @type {string} */ line) => {
+      const fields = {
+        resumed: line.match(save.resumed)?.[1],
+        writes: Number(line.match(save.writes)?.[1]),
+        along: Number(line.match(save.along)?.[1]),
+        health: Number(line.match(save.health)?.[1]),
+        downs: Number(line.match(save.downs)?.[1]),
+        alive: Number(line.match(save.alive)?.[1]),
+      };
+      const numbers = [
+        fields.writes,
+        fields.along,
+        fields.health,
+        fields.downs,
+        fields.alive,
+      ];
+      if (
+        fields.resumed === undefined ||
+        numbers.some((n) => !Number.isFinite(n))
+      )
+        return null;
+      return { ...fields, line };
+    };
+
+    /** What the OPFS directory holds, and what wasm still has queued for it. */
+    const storage = async () =>
+      evaluate(
+        page,
+        `(async () => {
+           const queue = crcbl.saves();
+           let files = [];
+           try {
+             const root = await navigator.storage.getDirectory();
+             for await (const [name, handle] of root.entries()) {
+               if (handle.kind !== 'file') continue;
+               const blob = await handle.getFile();
+               const head = new Uint8Array(
+                 await blob.slice(0, ${save.frameHeader} + ${save.magic.length}).arrayBuffer()
+               );
+               const text = (from, to) =>
+                 String.fromCharCode(...head.slice(from, to));
+               files.push({
+                 name,
+                 bytes: blob.size,
+                 record: text(0, ${save.recordMagic.length}),
+                 container: text(
+                   ${save.frameHeader},
+                   ${save.frameHeader} + ${save.magic.length}
+                 ),
+               });
+             }
+           } catch (error) {
+             return { queue, files: null, error: String(error) };
+           }
+           return { queue, files };
+         })()`
+      );
+
+    // ---- the write this block is about ---------------------------------------
+    // A save that *postdates* the fight, so the state it holds is the state the
+    // blocks above produced rather than one from before the first blow. The
+    // wait is one autosave period of simulated time and no more.
+    // The highest count any beat has reported, not the last line's: a line the
+    // console truncated would read as zero and let a beat from before the fight
+    // answer for one after it.
+    const beats = () =>
+      hud()
+        .map(reading)
+        .filter((r) => r !== null);
+    const writesBefore = Math.max(0, ...beats().map((r) => r.writes));
+    const written = await until(async () => {
+      const beat = beats().find((r) => r.writes > writesBefore);
+      return beat ?? null;
+    });
+
+    // ---- and the claim that it reached the disk ------------------------------
+    // `pending + inFlight === 0` is `crcbl-store`'s own answer to "is it on the
+    // disk yet" — the record has been taken by the shim and acknowledged — and
+    // the file is then read back out of OPFS to see that the bytes are there
+    // and are the ones this engine writes.
+    const landed = written
+      ? await until(async () => {
+          const seen = await storage();
+          if (seen.files === null) return null;
+          const file = seen.files.find((f) => save.files.includes(f.name));
+          return file &&
+            seen.queue.pending === 0 &&
+            seen.queue.inFlight === 0 &&
+            file.record === save.recordMagic &&
+            file.container === save.magic
+            ? { ...seen, file }
+            : null;
+        })
+      : null;
+    const beforeReload = hud().length;
+    check(
+      'C',
+      "the character is on the browser's own file system, not in the page",
+      landed !== null,
+      landed
+        ? `${landed.file.name} holds ${landed.file.bytes} bytes framed ` +
+            `"${landed.file.record}" around a "${landed.file.container}" container, ` +
+            `with nothing queued in wasm — written on the beat that reported ` +
+            `saves: ${written.writes}`
+        : written === null
+          ? `no heartbeat in ${TIMEOUT_MS} ms reported a save past the ` +
+            `${writesBefore} this page had already made`
+          : `after ${written.writes} save(s) the OPFS root held ` +
+            `${JSON.stringify((await storage()).files)}, queued ` +
+            `${JSON.stringify((await storage()).queue)}`
+    );
+
+    // ---- the page comes back where it left off -------------------------------
+    await page.send('Page.navigate', { url });
+    await until(async () =>
+      evaluate(page, `document.readyState === 'complete'`)
+    );
+    await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 3 ? status : null;
+    });
+    const resumedBeat = await until(async () => {
+      const beat = hud()
+        .slice(beforeReload)
+        .map(reading)
+        .find((r) => r !== null);
+      return beat ?? null;
+    });
+    const restored =
+      written !== null &&
+      resumedBeat !== null &&
+      resumedBeat.resumed === 'yes' &&
+      resumedBeat.alive === written.alive &&
+      resumedBeat.alive < save.count &&
+      (resumedBeat.health < save.full || resumedBeat.downs > 0) &&
+      Math.abs(resumedBeat.along - written.along) < save.tolerance &&
+      Math.abs(resumedBeat.along - save.spawnAlong) > save.awayFromSpawn;
+    check(
+      'C',
+      'a reloaded page resumes the character the last one saved',
+      restored,
+      resumedBeat === null
+        ? `no heartbeat in ${TIMEOUT_MS} ms after the reload`
+        : `it came up "resumed: ${resumedBeat.resumed}" at pz ${resumedBeat.along} ` +
+            `with ${resumedBeat.alive} of ${save.count} foes standing, ` +
+            `${resumedBeat.health} health and ${resumedBeat.downs} down(s); ` +
+            `the save's own beat read pz ${written?.along} with ${written?.alive} ` +
+            `standing, ${written?.health} health and ${written?.downs} down(s), ` +
+            `against a spawn at pz ${save.spawnAlong}`
+    );
+
+    // ---- and the control: the same page with the store cleared ---------------
+    // **Paused first, and that is not tidiness.** This demo autosaves once per
+    // simulated second, so a directory emptied while it is still ticking is one
+    // the next write refills — and the control would then be reading a save
+    // this block created after wiping the one it meant to remove. A blurred
+    // canvas runs no ticks at all, which group E asserts for every demo on this
+    // site, so nothing can be written between the wipe and the navigation.
+    //
+    // **The click comes first, and it is what makes the blur mean anything.**
+    // The navigation above replaced the document, so this canvas has never held
+    // the keyboard — and focusing the stop button blurs nothing, leaves the
+    // demo running, and leaves the wait below to spend the whole timeout
+    // discovering it. Measured: 92 s of a 197 s run, every second of it this
+    // one missing click.
+    await clickAt(await focusPoint());
+    await until(async () =>
+      (await evaluate(page, `document.activeElement?.id ?? ''`)) === 'canvas'
+        ? true
+        : null
+    );
+    await evaluate(page, `document.getElementById('stop').focus()`);
+    await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 6 ? status : null;
+    });
+    // …and with the queue drained as well, so nothing the page had already
+    // handed the shim can be written back after the directory is emptied. The
+    // `pagehide` teardown flushes whatever is left, which on this path is the
+    // last chance a record would get to reappear.
+    const settled = await until(async () => {
+      const queue = await evaluate(page, `crcbl.saves()`);
+      return queue.pending === 0 && queue.inFlight === 0 ? queue : null;
+    });
+    const wiped = settled
+      ? await evaluate(
+          page,
+          `(async () => {
+             const root = await navigator.storage.getDirectory();
+             const names = [];
+             for await (const [name] of root.entries()) names.push(name);
+             for (const name of names) await root.removeEntry(name);
+             const left = [];
+             for await (const [name] of root.entries()) left.push(name);
+             return { removed: names, left };
+           })()`
+        )
+      : null;
+    const cleared =
+      wiped !== null && wiped.left.length === 0 && wiped.removed.length > 0;
+
+    const afterWipe = hud().length;
+    await page.send('Page.navigate', { url });
+    await until(async () =>
+      evaluate(page, `document.readyState === 'complete'`)
+    );
+    await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 3 ? status : null;
+    });
+    const freshBeat = await until(async () => {
+      const beat = hud()
+        .slice(afterWipe)
+        .map(reading)
+        .find((r) => r !== null);
+      return beat ?? null;
+    });
+    const opened =
+      cleared &&
+      freshBeat !== null &&
+      freshBeat.resumed === 'no' &&
+      freshBeat.alive === save.count &&
+      freshBeat.health === save.full &&
+      freshBeat.downs === 0 &&
+      Math.abs(freshBeat.along - save.spawnAlong) < save.tolerance;
+    check(
+      'C',
+      'and the same page with the store cleared comes up fresh',
+      opened,
+      !cleared
+        ? `the OPFS root would not empty: removed ` +
+            `${JSON.stringify(wiped?.removed ?? null)}, left ` +
+            `${JSON.stringify(wiped?.left ?? null)}, queued ` +
+            `${JSON.stringify(settled)}`
+        : freshBeat === null
+          ? `no heartbeat in ${TIMEOUT_MS} ms after the reload`
+          : `with ${wiped.removed.join(', ')} removed it came up ` +
+            `"resumed: ${freshBeat.resumed}" at pz ${freshBeat.along} with ` +
+            `${freshBeat.alive} of ${save.count} foes standing, ` +
+            `${freshBeat.health} health and ${freshBeat.downs} down(s)`
+    );
+
+    // **And the canvas gets its keyboard back.** Two navigations replaced the
+    // document, so the click group C made was on an element that no longer
+    // exists — and group E's first claim is that *blurring* the canvas pauses
+    // the demo, which a canvas that never had focus cannot do.
+    const handedBack = hud().length;
+    await clickAt(await focusPoint());
+    await until(async () =>
+      (await evaluate(page, `document.activeElement?.id ?? ''`)) === 'canvas'
+        ? true
+        : null
+    );
+    await until(async () => (hud().length > handedBack ? hud().length : null));
   }
 
   // **AND THE BUDGET, WHICH THE CHECK ABOVE CANNOT SEE EITHER.**
