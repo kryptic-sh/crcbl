@@ -1286,33 +1286,35 @@ const WALK_ADVANCE_M = 1.0;
 const WALK_STILL_BEATS = 3;
 
 /**
- * How long a look key is held for the first nudge of the view, in milliseconds,
- * and how many times that is doubled before the nudge is given up on.
+ * How many of the demo's own heartbeats a look key is held for at most.
  *
- * **Nudged rather than held until the heartbeat notices.** `apps/breach` turns
- * at over a radian a second and logs one heartbeat a second, so a key held
- * until a new angle is reported has already spun the player most of the way
- * round — and a demo left facing a blank ceiling fails group D's "the canvas
- * changes between frames" for a reason that is the driver's doing rather than
- * the demo's.
+ * **The key is held until the view moves rather than for a fixed time**, and
+ * this is only the bound on that. A press reaches the demo on its *tick* —
+ * `apps/breach/src/app.rs` queues one in `Breach::pending_keys` and drains the
+ * queue there — while the turn it asks for is integrated on the *frame*, in
+ * `Breach::draw`. So a hold that fits between one tick batch and the next is a
+ * press and a release the demo sees in the same breath, and it turns nothing at
+ * all.
  *
- * **And doubled rather than fixed**, because a look key is read on the frame
- * and a software rasteriser under load draws frames a second apart: a hold
- * shorter than one frame is a press and a release the demo sees in the same
- * breath, which is nothing held at all. Doubling makes the shortest hold that
- * works the one that gets used, on a fast machine and a slow one.
+ * How long that is belongs to the machine, which is what a hold measured in
+ * milliseconds has to be calibrated against and cannot be. The ladder this
+ * replaced held for half a second and doubled it twice: on the Pages run of
+ * 2026-08-26 12:37Z it cleared `LOOK_NUDGE_RAD` by two thousandths of a radian,
+ * and on the run at 16:36Z — a runner slower again, reporting its heartbeats
+ * 16.7 s apart where that one managed 6.3 s — every rung of it fell between two
+ * tick batches and the check failed with `the yaw never moved: 0.000`.
  *
- * **The ladder starts where it used to reach, and is three rungs rather than
- * five.** Every rung that fails costs its own hold *and* a heartbeat to find
- * out, and the rungs under half a second are the ones that were always going to
- * fail on the machine the ladder exists for — a frame there is longer than they
- * are. Starting at 500 ms lands in one round on every machine measured, and
- * caps the worst case at 3.5 s of holds instead of 6.2 s and three heartbeats
- * instead of five. This is the constant the Pages step that hit a ten-minute cap
- * spent its minutes in.
+ * Holding until the heartbeat reports a new angle carries no such calibration:
+ * the rate the view turns at and the rate the heartbeats arrive at are slowed
+ * by the same factor, so the key comes up after the same *swing* on a fast
+ * machine and a slow one rather than after the same number of milliseconds.
+ *
+ * The bound is what makes a swing that is never going to arrive cheap to find
+ * out about — the pitch clamp, which the miss below is aimed by walking into.
+ * Three, for `WALK_STILL_BEATS`'s reason: two would do it, and the third is
+ * what makes it a claim about the key rather than about one line.
  */
-const LOOK_NUDGE_MS = 500;
-const LOOK_NUDGE_ROUNDS = 3;
+const LOOK_NUDGE_BEATS = 3;
 
 /**
  * How far the view must have swung, in radians, for a nudge to count as having
@@ -1336,6 +1338,16 @@ const LOOK_NUDGE_RAD = 0.1;
  */
 const LOOK_SQUARE_RAD = 0.5;
 const LOOK_SQUARE_ROUNDS = 4;
+
+/**
+ * The longest a single hold spends putting the view back, in milliseconds.
+ *
+ * Only the square-back is capped and only per hold — `LOOK_SQUARE_ROUNDS`
+ * rounds of it run, so a view that needs longer gets there over several. What
+ * the cap is for is a look rate measured badly enough to ask for a key held for
+ * minutes, which is a driver that has stopped driving.
+ */
+const LOOK_SWING_CAP_MS = 4_000;
 
 /**
  * How far a foot height may sit from the step it is standing on, in metres.
@@ -3092,35 +3104,47 @@ try {
     const beat = async (/** @type {number} */ mark) =>
       until(async () => (hud().length > mark ? hud().length : null));
     /**
-     * Holds a look key until the angle `pattern` reports has moved, doubling
-     * the hold until it does.
+     * Holds a look key until the angle `pattern` reports has moved, and lets go
+     * of it the moment it has.
      *
      * Both angles are read from heartbeats logged with nothing held — one
      * before the press and one after the release — so the swing and the time
      * it took cover the same interval and their ratio is the rate the view
      * turns at, which is what puts it back afterwards.
+     *
+     * Null when `LOOK_NUDGE_BEATS` heartbeats went by under the key with the
+     * angle still where it started. For a tilt that is the pitch clamp, which
+     * the miss below is aimed by walking into deliberately; for a turn it is
+     * the check failing, and the reading it failed on is what gets printed.
      */
     const swingBy = async (
       /** @type {{code: string, key: string, text?: string, virtualKeyCode: number}} */ binding,
       /** @type {RegExp} */ pattern
     ) => {
-      let ms = LOOK_NUDGE_MS;
-      for (let round = 0; round < LOOK_NUDGE_ROUNDS; round += 1) {
-        const from = latest(pattern);
-        await nudge(binding, ms);
-        const mark = hud().length;
-        await beat(mark);
-        const to = latest(pattern);
+      const from = latest(pattern);
+      const mark = hud().length;
+      const pressedAt = Date.now();
+      await key('keyDown', binding);
+      // A truthy word either way: `until` polls until its probe answers
+      // something, so a plain `false` for "give up" would keep it polling to
+      // the deadline.
+      const outcome = await until(async () => {
+        const now = latest(pattern);
         if (
           from !== null &&
-          to !== null &&
-          Math.abs(to - from) >= LOOK_NUDGE_RAD
+          now !== null &&
+          Math.abs(now - from) >= LOOK_NUDGE_RAD
         ) {
-          return { from, to, ms };
+          return 'swung';
         }
-        ms *= 2;
-      }
-      return null;
+        return hud().length - mark >= LOOK_NUDGE_BEATS ? 'stuck' : null;
+      });
+      const ms = Date.now() - pressedAt;
+      await key('keyUp', binding);
+      await beat(hud().length);
+      const to = latest(pattern);
+      if (outcome !== 'swung' || from === null || to === null) return null;
+      return { from, to, ms };
     };
     /**
      * The first HUD line since `from` that reports more shots than `before`,
@@ -3304,9 +3328,11 @@ try {
     ) => {
       if (!lookRate) return;
       // Floored at the hold that was measured to work here: a shorter one is a
-      // press and a release inside a single frame, which turns nothing.
-      const ms = Math.max(turned.ms, (1000 * radians) / lookRate);
-      await nudge(binding, Math.min(4000, ms));
+      // press and a release inside a single frame, which turns nothing. The
+      // floor is applied *after* the cap, so a cap shorter than the shortest
+      // hold that works cannot silently turn every round of this into nothing.
+      const ms = Math.min(LOOK_SWING_CAP_MS, (1000 * radians) / lookRate);
+      await nudge(binding, Math.max(turned.ms, ms));
     };
 
     // ---- and the control for the shot ---------------------------------------
