@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // Drives `crcbl-webgpu`'s HAL seam directly, in a real browser, against a real
-// `GPUDevice` — groups G through AE, which live in `web/tools/probe-groups.mjs`.
+// `GPUDevice` — the seam groups, which live in `web/tools/probe-groups.mjs`, and
+// one of this file's own: group AM, the platform's answer about an unadjusted
+// pointer lock, which is here because this is the only browser gate that runs
+// on every operating system.
 //
 //   node web/tools/probe-e2e.mjs [--site target/site] [--timeout 90000]
 //                                [--adapter auto] [--expect-fail X,Y,Z,AA]
@@ -154,6 +157,29 @@ const MODE =
       ? 'swiftshader'
       : 'hardware'
     : ADAPTER;
+
+/**
+ * Whether this platform implements `unadjustedMovement` on a pointer lock.
+ *
+ * The option is the OS acceleration bypass `ShellCaps::RAW_POINTER_MOTION`
+ * names, and `takeLock` in `web/engine/shell.js` asks for it on every lock the
+ * engine takes. Where it is unimplemented the request rejects with
+ * `NotSupportedError` and the shim retries without it, which is a lock whose
+ * deltas carry the desktop cursor's acceleration curve — worth having, and not
+ * the same capability. Group AM asserts which of the two happened, and this is
+ * the half it compares against.
+ *
+ * Chromium implements it on Windows and macOS and not on Linux or Android, and
+ * the Linux refusal is measured rather than read: Chromium 151 on Arch rejects
+ * it in every configuration tried, headless and headed, over a `data:` URL and
+ * over an http origin. Anything else is asserted against the Linux answer,
+ * loudly and by name, rather than excused — a platform nobody here has run on
+ * is a thing to find out about, not a branch to skip.
+ */
+const UNADJUSTED_MOVEMENT_PLATFORMS = ['win32', 'darwin'];
+const UNADJUSTED_MOVEMENT = UNADJUSTED_MOVEMENT_PLATFORMS.includes(
+  process.platform
+);
 
 /**
  * Groups whose failure here is a known property of the platform, not a bug.
@@ -345,6 +371,158 @@ try {
   console.log(`probe e2e: ${url} is pumping, with no engine on it`);
 
   await runProbeGroups({ page, evaluate, until, check, group, TIMEOUT_MS });
+
+  // -------------------------------------------------------------------------
+  // AM — the pointer lock a first-person camera stands on
+  // -------------------------------------------------------------------------
+  // **Here rather than in `web/tools/browser-e2e.mjs`, and that is the whole
+  // reason it is in this file.** This gate is the only one of the three that
+  // `.github/workflows/pages.yml` runs on every platform; the demo gate runs on
+  // Linux and macOS and the Windows job never invokes it at all. So a check
+  // placed there would assert the raw path on one of the two operating systems
+  // that actually implement it, while reading as though it covered three.
+  //
+  // What is asserted is the *platform's* answer, which is what
+  // `ShellCaps::RAW_POINTER_MOTION` is a claim about:
+  // `requestPointerLock({ unadjustedMovement: true })` asks the OS for raw
+  // device motion instead of the accelerated cursor, and a first-person camera
+  // differencing an accelerated pointer is the thing that capability exists to
+  // rule out. Where the option is unimplemented the request rejects with
+  // `NotSupportedError` and `takeLock` in `web/engine/shell.js` retries the
+  // plain one — a lock with the desktop's acceleration curve on it, which
+  // `docs/backlog.md` records as a browser property nothing on our side can
+  // close.
+  //
+  // **Both branches assert, and neither is a skip.** "Not supported here,
+  // therefore pass" is a check wired to nothing: on the platforms where raw
+  // motion is the point, a silent regression to the fallback would cost aim
+  // fidelity with nothing to report it; on the platforms where the fallback is
+  // the answer, a request that started resolving would mean the backlog entry
+  // has expired and should be deleted. So one side asserts the grant and the
+  // other asserts the refusal *and* the fallback that recovers from it.
+  //
+  // This is the platform's half. `web/tools/browser-e2e.mjs` has the engine's:
+  // there, a click on breach's canvas takes the lock through the shim's own
+  // `takeLock` and the demo's yaw readout moves under a dispatched sweep.
+  group('AM — unadjusted pointer motion, as this platform answers it');
+
+  const lockPoint = await evaluate(
+    page,
+    `(() => { const c = document.getElementById('canvas');
+              c.scrollIntoView({ block: 'center', behavior: 'instant' });
+              const r = c.getBoundingClientRect();
+              return { x: Math.round(r.x + r.width / 2),
+                       y: Math.round(r.y + r.height / 2) }; })()`
+  );
+  // The request is made from inside a `pointerdown`, exactly as `takeLock`
+  // makes it: a browser grants Pointer Lock only inside a user gesture, and a
+  // request from an `evaluate` would be refused `NotAllowedError` for a reason
+  // that has nothing to do with the option this group is about.
+  await evaluate(
+    page,
+    `(() => {
+       const canvas = document.getElementById('canvas');
+       const answer = {
+         asked: false, unadjusted: null, error: null,
+         fallback: null, fallbackError: null,
+       };
+       globalThis.__crcblLockAnswer = answer;
+       const named = (error) =>
+         error && typeof error === 'object' && 'name' in error
+           ? String(error.name)
+           : String(error);
+       canvas.addEventListener('pointerdown', () => {
+         answer.asked = true;
+         const asked = canvas.requestPointerLock?.({ unadjustedMovement: true });
+         if (!asked || typeof asked.then !== 'function') {
+           answer.unadjusted = 'no promise';
+           return;
+         }
+         asked.then(
+           () => { answer.unadjusted = 'granted'; },
+           (error) => {
+             answer.unadjusted = 'refused';
+             answer.error = named(error);
+             const plain = canvas.requestPointerLock?.();
+             if (!plain || typeof plain.then !== 'function') {
+               answer.fallback = 'no promise';
+               return;
+             }
+             plain.then(
+               () => { answer.fallback = 'granted'; },
+               (again) => {
+                 answer.fallback = 'refused';
+                 answer.fallbackError = named(again);
+               }
+             );
+           }
+         );
+       }, { once: true });
+       return true;
+     })()`
+  );
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await page.send('Input.dispatchMouseEvent', {
+      type,
+      x: lockPoint.x,
+      y: lockPoint.y,
+      button: 'left',
+      clickCount: 1,
+      buttons: type === 'mousePressed' ? 1 : 0,
+    });
+  }
+  // Waits for the *settled* answer: a refusal is only half of it until the
+  // fallback it triggers has answered too, and reading early would report a
+  // fallback that is still in flight as one that never happened.
+  const lock = (await until(async () =>
+    evaluate(
+      page,
+      `(() => { const answer = globalThis.__crcblLockAnswer;
+                if (!answer || answer.unadjusted === null) return null;
+                if (answer.unadjusted === 'refused' && answer.fallback === null) return null;
+                return { ...answer,
+                         held: document.pointerLockElement === document.getElementById('canvas') }; })()`
+    )
+  )) ?? {
+    asked: false,
+    unadjusted: 'no answer',
+    error: null,
+    fallback: 'no answer',
+    fallbackError: null,
+    held: false,
+  };
+  const expected = UNADJUSTED_MOVEMENT
+    ? 'granted, because this platform implements it'
+    : 'refused with NotSupportedError, because this platform does not implement it';
+  check(
+    'AM',
+    'unadjusted pointer motion is answered the way this platform answers it',
+    UNADJUSTED_MOVEMENT
+      ? lock.unadjusted === 'granted'
+      : lock.unadjusted === 'refused' && lock.error === 'NotSupportedError',
+    `on ${process.platform}, requestPointerLock({ unadjustedMovement: true }) was ` +
+      `${lock.unadjusted}${lock.error ? ` with ${lock.error}` : ''} — expected ${expected}`
+  );
+  check(
+    'AM',
+    'and the request that was meant to take the lock is holding it',
+    lock.held === true &&
+      (UNADJUSTED_MOVEMENT
+        ? lock.unadjusted === 'granted'
+        : lock.fallback === 'granted'),
+    UNADJUSTED_MOVEMENT
+      ? `the unadjusted request was ${lock.unadjusted} and the canvas ` +
+          `${lock.held ? 'is' : 'is not'} document.pointerLockElement`
+      : `the plain request the shim falls back to was ${lock.fallback}` +
+          `${lock.fallbackError ? ` with ${lock.fallbackError}` : ''} and the canvas ` +
+          `${lock.held ? 'is' : 'is not'} document.pointerLockElement`
+  );
+  // Given back before the page is closed, so nothing after this — a rerun
+  // against the same profile included — inherits a canvas holding the pointer.
+  await evaluate(
+    page,
+    `(() => { document.exitPointerLock?.(); return true; })()`
+  );
 
   page.close();
   exitCode = 0;

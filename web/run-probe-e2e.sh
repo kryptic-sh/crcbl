@@ -351,14 +351,14 @@ if [ -z "$LETTERS" ]; then
     exit 1
 fi
 MISSING=""
-for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI AJ AK AL; do
+for letter in G H I J K L M N O P Q R S T U V W X Y Z AA AB AC AD AE AF AG AH AI AJ AK AL AM; do
     case " ${LETTERS#probe e2e: groups } " in
         *" $letter "*) ;;
         *) MISSING="$MISSING $letter" ;;
     esac
 done
 if [ -n "$MISSING" ]; then
-    echo "crcbl probe e2e: these seam groups ran no checks at all:$MISSING" >&2
+    echo "crcbl probe e2e: these groups ran no checks at all:$MISSING" >&2
     echo "                 ${LETTERS}" >&2
     exit 1
 fi
@@ -667,6 +667,42 @@ TIMESTAMP_ANSWER_TRIP="$(grep -F "the browser's own answer about a 'timestamp' q
 if [ -z "$TIMESTAMP_ANSWER_TRIP" ]; then
     echo "crcbl probe e2e: the driver never asked the browser whether it takes a timestamp query set;" >&2
     echo "                 crcbl-webgpu reports Features::TIMESTAMP_QUERY and nothing tried it" >&2
+    exit 1
+fi
+
+# Group AM, which is not about the seam at all and is here because this is the
+# only one of the three browser gates `.github/workflows/pages.yml` runs on all
+# three operating systems. `web/tools/browser-e2e.mjs` never runs on Windows —
+# that job invokes this script and nothing else — and Windows is one of the two
+# platforms that implement `unadjustedMovement`, which is the whole subject.
+#
+# Both names are matched, because the two halves fail for opposite reasons and
+# either alone would leave the other unstated:
+#
+#  - the answer check is the per-platform one. On Windows and macOS it asserts
+#    the unadjusted request was GRANTED, which is what
+#    `ShellCaps::RAW_POINTER_MOTION` promises there; on Linux it asserts it was
+#    REFUSED with NotSupportedError, which is what `docs/backlog.md` records and
+#    what `takeLock` in `web/engine/shell.js` is built to recover from. Neither
+#    side is a skip: a platform that quietly changed its mind fails here rather
+#    than passing by having nothing asserted about it.
+#  - the held check is what says the recovery works. Without it, a Linux run
+#    could assert the refusal and never notice that the fallback stopped taking
+#    the lock — which is a browser with no mouselook at all, reported as a pass.
+UNADJUSTED_ANSWER="$(grep -F 'unadjusted pointer motion is answered the way this platform answers it' "${OUTPUT}.plain" || true)"
+if [ -z "$UNADJUSTED_ANSWER" ]; then
+    echo "crcbl probe e2e: the driver never asked this platform for an unadjusted" >&2
+    echo "                 pointer lock; ShellCaps::RAW_POINTER_MOTION is a claim" >&2
+    echo "                 about the option nothing here tried, and this is the only" >&2
+    echo "                 gate that runs on Windows at all" >&2
+    exit 1
+fi
+LOCK_HELD="$(grep -F 'and the request that was meant to take the lock is holding it' "${OUTPUT}.plain" || true)"
+if [ -z "$LOCK_HELD" ]; then
+    echo "crcbl probe e2e: the driver never checked that the pointer lock was taken;" >&2
+    echo "                 'unadjusted pointer motion is answered the way this platform" >&2
+    echo "                 answers it' has no control, and on a platform that refuses" >&2
+    echo "                 the option it passes for a browser with no lock at all" >&2
     exit 1
 fi
 

@@ -781,12 +781,13 @@ const EXPECTATIONS = {
     // The fifth demo that draws mesh instances, so the fifth whose cull pass
     // has something to count. See lantern's row and group D.
     culls: true,
-    // **No start key, and no click either.** breach binds its trigger to a key
-    // alone — `apps/breach/src/app.rs`'s `ACTION_FIRE` argues why — and it has
-    // no waiting state to leave: the range runs its own demonstration from the
-    // first tick and the first thing the player does ends it. So there is
-    // nothing for group C's `Space` to start, and the `range` block below
-    // presses everything this demo answers to.
+    // **No start key, and no start click.** This demo has no waiting state to
+    // leave: the range runs its own demonstration from the first tick and the
+    // first thing the player does ends it, so there is nothing for group C's
+    // `Space` to start. The `range` block below presses everything this demo
+    // answers to, on the keyboard and on the mouse both —
+    // `apps/breach/src/app.rs`'s `ACTION_FIRE` says why the trigger's mouse
+    // half is not in the action map at all.
     key: null,
     // **This demo's heartbeat is twice as fast as everyone else's**, at half a
     // simulated second — `apps/breach/src/game.rs`'s `HEARTBEAT_TICKS` says why,
@@ -837,13 +838,20 @@ const EXPECTATIONS = {
       // down the near lane the moment they take the controls — so a held `W` is
       // a walk down `pz` and nothing else.
       //
-      // `ArrowRight` and `ArrowUp` are the look. **A browser has no mouselook
-      // at all**: the web shell reports no `RAW_POINTER_MOTION`, because
-      // `movementX`/`movementY` under Pointer Lock are accelerated by the same
-      // OS layer the capability exists to bypass, so the engine declines the
-      // lock — which `docs/plan/sample/11-breach.md` names as one of the four
-      // reasons the competitive game is native only. The arrows are what this
-      // page is aimed with, and therefore what this gate drives.
+      // `ArrowRight` and `ArrowUp` are the look, and they are no longer the
+      // only one. **A browser has mouselook**: the web backend sets
+      // `ShellCaps::RAW_POINTER_MOTION`, `web/engine/shell.js` takes the
+      // pointer lock from a click, and under it a frame carries a motion and no
+      // position — which is the `PointerUpdate::at` being `None` that
+      // `Breach::pointer_event` binds both halves of the mouse to. What a
+      // browser cannot promise is that those deltas are *unaccelerated*:
+      // `requestPointerLock({ unadjustedMovement: true })` is unavailable on
+      // some platforms and the shim falls back to the plain request there,
+      // which is one of the reasons `docs/plan/sample/11-breach.md` gives for
+      // the competitive game being native only. That fallback is asserted per
+      // platform by `web/tools/probe-e2e.mjs`, which is the only one of these
+      // gates that runs on all three. The arrows are what a page with no mouse
+      // is aimed with; the block below drives them and the mouse.
       walk: { code: 'KeyW', key: 'w', text: 'w', virtualKeyCode: 87 },
       turn: { code: 'ArrowRight', key: 'ArrowRight', virtualKeyCode: 39 },
       turnBack: { code: 'ArrowLeft', key: 'ArrowLeft', virtualKeyCode: 37 },
@@ -1348,6 +1356,41 @@ const LOOK_SQUARE_ROUNDS = 4;
  * minutes, which is a driver that has stopped driving.
  */
 const LOOK_SWING_CAP_MS = 4_000;
+
+/**
+ * How far the mouse is swept for the look checks, as a share of the canvas's
+ * width, and in how many moves it is delivered.
+ *
+ * **Not laddered like a look key's hold, and it does not need to be.** A held
+ * key is a *rate* the demo integrates on whatever frames it manages to draw,
+ * which is what `LOOK_NUDGE_BEATS` exists for; a movement is a *distance*, and
+ * `Pending::motion` sums every event that arrived before the frame reads it. So
+ * the whole sweep lands however slow the machine is, and one sweep is enough on
+ * every machine.
+ *
+ * Measured against the canvas rather than fixed in pixels, so a smaller window
+ * sweeps a smaller distance instead of a share of a window that is not there. A
+ * quarter of the view is a movement a hand makes without thinking about it, and
+ * any sensitivity for which that turns the camera less than `LOOK_NUDGE_RAD` is
+ * not a mouselook.
+ *
+ * Delivered in several moves rather than one jump because a hand makes several,
+ * and because the sum of them is what has to reach the frame.
+ */
+const MOUSE_LOOK_SHARE = 0.25;
+const MOUSE_LOOK_STEPS = 8;
+
+/**
+ * How many heartbeats a mouse sweep or a mouse click is judged over.
+ *
+ * Fewer than `WALK_STILL_BEATS`, and for a reason rather than to save time:
+ * that one counts a character *staying* stopped, where the third beat is what
+ * makes it a claim about more than one line. A sweep is a single impulse and a
+ * click is a single edge, so the first heartbeat logged after either already
+ * carries the whole of it — two is that one, and the one that may have
+ * straddled the gesture.
+ */
+const MOUSE_SWEEP_BEATS = 2;
 
 /**
  * How far a foot height may sit from the step it is standing on, in metres.
@@ -3390,6 +3433,220 @@ try {
         : missed === null
           ? `no heartbeat after the shot reported more than ${shotsBeforeMiss} shot(s)`
           : `${missed.line.trim()} — hits went ${hitsBeforeMiss} → ${missed.hits}`
+    );
+
+    // ---- and the same two claims, made with the mouse -----------------------
+    // The other half of this demo's input, and the half no browser gate could
+    // make until `web/engine/shell.js` learned to take the pointer lock.
+    // `Breach::pointer_event` binds the look and the trigger under one
+    // condition — it acts only when `PointerUpdate::at` is `None`, which is
+    // what says the pointer is really captured — so they are one claim asked
+    // twice, and the control for either is the same gesture made with a visible
+    // cursor.
+    //
+    // **The lock is released first rather than assumed absent.** Group C's
+    // focusing click already took it: every demo whose `pointer_mode` answers
+    // `PointerMode::Locked` has been locked since that click, this one
+    // included. Without the release the control below would be measured under
+    // the very lock it is the control for, and "the view did not turn" would be
+    // a claim about a page that was never free.
+    //
+    // Five checks, in the order they are driven:
+    //
+    // * with the pointer free, the sweep **turns nothing**. The control — and
+    //   the *browser* is asked whether it delivered the movement at all, so a
+    //   sweep the page never saw cannot pass for one the engine dropped.
+    // * a click **takes the lock**. The load-bearing one: without it everything
+    //   under it is being asked of a page with a visible cursor, where the demo
+    //   is supposed to ignore the mouse, and it would pass by agreeing with the
+    //   wrong reason. So the two checks below name it in their own condition
+    //   rather than trusting the order they run in.
+    // * and that click **was not a shot**. The trigger's control, and it is the
+    //   click a player really makes: the one that grabs the pointer.
+    // * under the lock the same sweep **turns the view**, and a click **pulls
+    //   the trigger**.
+    //
+    // What is left behind is what was found: the sweep is undone by its own
+    // mirror image and the lock is still held, so the square-back under this
+    // has no more to do than it would have had, and every group after it sees
+    // the page group C handed over.
+    const box = await evaluate(
+      page,
+      `(() => { const r = document.getElementById('canvas').getBoundingClientRect();
+                return { width: r.width, height: r.height }; })()`
+    );
+    // The same corner group C focuses and group E clicks, so the lock is taken
+    // back at the point it was taken at first and nothing downstream is handed
+    // a pointer frozen somewhere new.
+    const grab = await focusPoint();
+    const sweepPx = Math.round(box.width * MOUSE_LOOK_SHARE);
+    /**
+     * Sweeps the mouse across `sweepPx` of the canvas and back, one direction
+     * per call: `1` runs out from `grab`, `-1` returns to it.
+     *
+     * Every sweep begins and ends at the point the lock is taken from, so no
+     * move ever jumps back to a corner — under the lock that jump is a swing of
+     * its own, in the other direction, and it would cancel the sweep it was
+     * tidying up after.
+     */
+    const sweep = async (/** @type {number} */ direction) => {
+      for (let step = 1; step <= MOUSE_LOOK_STEPS; step += 1) {
+        const along = direction > 0 ? step : MOUSE_LOOK_STEPS - step;
+        await page.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: Math.round(grab.x + (sweepPx * along) / MOUSE_LOOK_STEPS),
+          y: grab.y,
+          button: 'none',
+          buttons: 0,
+        });
+      }
+    };
+    // Counted on the canvas, which is the element the shim listens on and the
+    // element the lock is taken on. Capturing, so it sees the event whatever
+    // the shim's own listener does with it.
+    await evaluate(
+      page,
+      `(() => { globalThis.__crcblSweep = { moves: 0, dx: 0 };
+                document.getElementById('canvas').addEventListener('pointermove', (event) => {
+                  globalThis.__crcblSweep.moves += 1;
+                  globalThis.__crcblSweep.dx += event.movementX;
+                }, true);
+                return true; })()`
+    );
+    /** What the canvas has been sent since the last call, which this resets. */
+    const delivered = async () =>
+      evaluate(
+        page,
+        `(() => { const seen = globalThis.__crcblSweep;
+                  globalThis.__crcblSweep = { moves: 0, dx: 0 };
+                  return seen; })()`
+      );
+    /** Whether the canvas is the document's `pointerLockElement` right now. */
+    const captured = async () =>
+      evaluate(
+        page,
+        `document.pointerLockElement === document.getElementById('canvas')`
+      );
+    /** Waits for `MOUSE_SWEEP_BEATS` heartbeats logged since `mark`. */
+    const settle = async (/** @type {number} */ mark) =>
+      until(async () =>
+        hud().length - mark >= MOUSE_SWEEP_BEATS ? hud().length : null
+      );
+
+    await evaluate(
+      page,
+      `(() => { document.exitPointerLock?.(); return true; })()`
+    );
+    const freed = await until(async () =>
+      (await evaluate(page, `document.pointerLockElement === null`))
+        ? true
+        : null
+    );
+    const freeMark = hud().length;
+    await delivered();
+    await sweep(1);
+    const freeMoves = await delivered();
+    await settle(freeMark);
+    const freeYaw = since(range.yaw, freeMark);
+    const freeStill =
+      freeYaw.length > 1 && freeYaw.every((value) => value === freeYaw[0]);
+    check(
+      'C',
+      'mouse movement with a visible cursor turns nothing',
+      freed === true && freeMoves.moves >= MOUSE_LOOK_STEPS && freeStill,
+      freed !== true
+        ? 'the canvas would not give the pointer lock up, so this control would ' +
+            'have been measured under the very lock it is the control for'
+        : freeMoves.moves < MOUSE_LOOK_STEPS
+          ? `the canvas saw ${freeMoves.moves} of the ${MOUSE_LOOK_STEPS} move(s) ` +
+            `dispatched, so a view that stood still says nothing about the demo`
+          : freeStill
+            ? `${freeMoves.moves} move(s) carrying ${freeMoves.dx} px of movementX ` +
+              `reached the canvas and the yaw held ${freeYaw[0]}`
+            : `the yaw took ${[...new Set(freeYaw)].join(', ')} with the cursor ` +
+              `visible — the view is turning on a pointer the page does not hold`
+    );
+
+    const shotsBeforeGrab = latest(range.shots) ?? 0;
+    const grabMark = hud().length;
+    await clickAt(grab);
+    const took = await until(async () => ((await captured()) ? true : null));
+    check(
+      'C',
+      'a mouse click takes the browser pointer lock',
+      took === true,
+      took === true
+        ? 'the canvas is the document.pointerLockElement again'
+        : 'document.pointerLockElement stayed null after a click on the canvas — ' +
+            'nothing below this is being asked of a captured pointer'
+    );
+
+    await settle(grabMark);
+    const grabShots = since(range.shots, grabMark);
+    const grabFired = grabShots.some(
+      (value) => Number(value) > shotsBeforeGrab
+    );
+    check(
+      'C',
+      'and the click that took it was not a shot',
+      took === true && !grabFired,
+      took !== true
+        ? 'that click never took the lock, so it was a click with a visible ' +
+            'cursor from beginning to end and this control has nothing to say'
+        : grabFired
+          ? `shots went ${shotsBeforeGrab} → ${grabShots.join(', ')} on the click ` +
+            `that grabbed the pointer — the frame that takes the lock fired too`
+          : `shots held at ${shotsBeforeGrab} across ${grabShots.length} beat(s)`
+    );
+
+    const lookFrom = latest(range.yaw);
+    await delivered();
+    await sweep(1);
+    const lookMoves = await delivered();
+    const lookTo = await until(async () => {
+      const now = latest(range.yaw);
+      return lookFrom !== null &&
+        now !== null &&
+        Math.abs(now - lookFrom) >= LOOK_NUDGE_RAD
+        ? now
+        : null;
+    });
+    check(
+      'C',
+      'the mouse turns the view once the pointer is captured',
+      took === true && lookTo !== null,
+      took !== true
+        ? 'the pointer was never captured, so this is the same claim the control ' +
+            'above already made and not the one it is written for'
+        : lookTo !== null
+          ? `${lookMoves.moves} move(s) carrying ${lookMoves.dx} px of movementX ` +
+            `swung the yaw from ${lookFrom} to ${lookTo}`
+          : `${lookMoves.moves} move(s) carrying ${lookMoves.dx} px of movementX ` +
+            `reached the canvas and the yaw stayed at ${latest(range.yaw)}`
+    );
+
+    // Not a check: the sweep undone, so what follows is handed the view this
+    // block found. Cheaper than leaving it to the square-back below, which
+    // drives a look key and pays a heartbeat for it.
+    const backMark = hud().length;
+    await sweep(-1);
+    await beat(backMark);
+
+    const shotsBeforeFire = latest(range.shots) ?? 0;
+    const fireMark = hud().length;
+    await clickAt(grab);
+    const fired = await shotAfter(fireMark, shotsBeforeFire);
+    check(
+      'C',
+      'and a click pulls the trigger while it is captured',
+      took === true && fired !== null,
+      took !== true
+        ? 'the pointer was never captured, so a click that did nothing is what ' +
+            'the control above already asserted'
+        : fired !== null
+          ? fired.line.trim()
+          : `no heartbeat after the click reported more than ${shotsBeforeFire} ` +
+            `shot(s) — the mouse trigger never reached the simulation`
     );
 
     // ---- and the view goes back where the range is --------------------------

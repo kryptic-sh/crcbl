@@ -592,9 +592,9 @@ esac
 # `breach` alone, because it is the only demo shot from inside the shooter's
 # head.
 #
-# Three names are matched for the range block, and they are its *controls* —
-# the halves worth deleting when a slow machine makes them flake. Each is what
-# stops a positive passing for the wrong reason:
+# Six names are matched for the range block. Each is either a *control* — the
+# half worth deleting when a slow machine makes it flake — or the one check
+# without which the rest of a pair is asked of the wrong page:
 #
 #  - 'and stops where they are when the key is released' is what says the walk
 #    key is what moved the player. Without it, "the player advances" passes for
@@ -604,7 +604,28 @@ esac
 #    shot scores a hit" passes for a build that scored on everything.
 #  - 'a look key turns the view' carries its own control inside it — the view
 #    has to have been standing still before the key went down — and without the
-#    whole check nothing on this page asks whether the view can be aimed at all.
+#    whole check nothing on this page asks whether the view can be aimed from a
+#    keyboard at all.
+#
+# And three for the mouse, which is the other half of the same demo's input and
+# the half nothing gated at all until `web/engine/shell.js` learned to take the
+# pointer lock:
+#
+#  - 'a mouse click takes the browser pointer lock' is the one the other two
+#    stand on. `Breach::pointer_event` acts only on a frame with no absolute
+#    position, which is what a captured pointer produces — so on a page whose
+#    lock was never granted the demo is *supposed* to ignore the mouse, and both
+#    mouse checks below would pass by agreeing with the wrong reason. Without
+#    this line nothing says the lock was ever held.
+#  - 'mouse movement with a visible cursor turns nothing' is the look's control.
+#    Without it, "the mouse turns the view" passes for a build that turns on
+#    every mouse movement, cursor or no cursor — which is the defect the
+#    `at.is_none()` gate exists to prevent, and it is invisible from a locked
+#    page.
+#  - 'and the click that took it was not a shot' is the trigger's control, and
+#    it is the click a player really makes: the one that grabs the pointer.
+#    Without it, "a click pulls the trigger" passes for a build that fires on
+#    the button press that was reaching for the lock.
 #
 # Renaming any of them in the driver is meant to fail here and be renamed here
 # too.
@@ -628,9 +649,32 @@ case "$DEMO" in
         LOOKED="$(grep -F 'a look key turns the view' "${OUTPUT}.plain" || true)"
         if [ -z "$LOOKED" ]; then
             echo "crcbl web e2e: the driver never asked whether $DEMO's view can be" >&2
-            echo "               turned; nothing else on that page reads the angle the" >&2
-            echo "               shot is aimed along, and a browser has no mouselook to" >&2
-            echo "               fall back on" >&2
+            echo "               turned from the keyboard; nothing else on that page" >&2
+            echo "               reads the angle the shot is aimed along" >&2
+            exit 1
+        fi
+        CAPTURED="$(grep -F 'a mouse click takes the browser pointer lock' "${OUTPUT}.plain" || true)"
+        if [ -z "$CAPTURED" ]; then
+            echo "crcbl web e2e: the driver never checked that $DEMO's page holds the" >&2
+            echo "               pointer lock; with a visible cursor the demo is meant" >&2
+            echo "               to ignore the mouse, so both mouse checks below pass" >&2
+            echo "               for the wrong reason on a page that never took it" >&2
+            exit 1
+        fi
+        FREE_LOOK="$(grep -F 'mouse movement with a visible cursor turns nothing' "${OUTPUT}.plain" || true)"
+        if [ -z "$FREE_LOOK" ]; then
+            echo "crcbl web e2e: the driver never moved $DEMO's mouse with the cursor" >&2
+            echo "               visible; 'the mouse turns the view' has no control, and" >&2
+            echo "               it passes for a build that turns on every movement" >&2
+            echo "               whether the pointer is captured or not" >&2
+            exit 1
+        fi
+        FREE_CLICK="$(grep -F 'and the click that took it was not a shot' "${OUTPUT}.plain" || true)"
+        if [ -z "$FREE_CLICK" ]; then
+            echo "crcbl web e2e: the driver never asked what $DEMO did with the click" >&2
+            echo "               that grabbed the pointer; 'a click pulls the trigger'" >&2
+            echo "               has no control, and it passes for a build that fires on" >&2
+            echo "               the press that was reaching for the lock" >&2
             exit 1
         fi
         # And the same argument once more for the *other map*, which is
