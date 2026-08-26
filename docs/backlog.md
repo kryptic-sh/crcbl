@@ -622,6 +622,518 @@ the shim. Out of scope for the docs task; `web/` was not in its write set.
 allow-lists on purpose. Nothing new found. Stated here so the pruning pass is
 not read as having closed it.
 
+## Simulation and gameplay — what the eleven plans still owe
+
+`docs/plan/`'s eleven simulation and gameplay documents were audited against the
+tree on 2026-08-27. Most of what follows is not shipped work waiting to be
+deleted from a plan — it is work those plans still describe and the crates do
+not have.
+
+## Physics (`05-physics.md`)
+
+### Bubbles, sleeping and sector streaming hooks (2026-08-27)
+
+**Not built.** Task 6 of `05-physics.md`. No type in `crcbl-phys` names a
+bubble, a sleep state or a sector: `crcbl-phys`'s world holds one BVH for the
+whole world rather than one per sector, and `grep` for `sleep`/`Bubble` across
+`crates/crcbl-phys/src/` returns nothing outside a passing mention in
+`atmosphere.rs`'s doc prose. What `apps/orbit`'s header calls "the bubble that
+hands a ship from one frame to the other" is the sample's own on-rails/live
+switch, not an engine feature.
+
+**What it would take:** a per-sector broadphase partition (which the streaming
+unit, the interest key and the broadphase cell are all meant to be — one
+structure, three consumers), an observer-anchored live/on-rails predicate, and
+per-island sleep thresholds. Sleeping is coupled to the contact solver (36),
+which does not exist, so the sleeping half probably lands with it.
+
+**What it blocks:** the horde slice's "sleeping" column; galaxy-scale cost
+claims generally.
+
+### Static trimesh / heightfield colliders with a BVH midphase (2026-08-27)
+
+**Not built, and the single highest-leverage gap in this slice.** `crcbl-phys`'s
+collider inventory is `Sphere`, `BoxCollider` and `Capsule` and nothing else —
+`crates/crcbl-phys/src/collider.rs` defines exactly those three plus `Aabb`, and
+`grep -i trimesh|heightfield|triangle` over `crates/crcbl-phys/src/` returns
+nothing. The 2026-07-27 correction in `05-physics.md` decided **trimesh for
+statics, convex decomposition only for dynamics that need it**; that decision
+stands and is unimplemented.
+
+**What it would take:** a trimesh collider type, a BVH midphase over its
+triangles, ray/segment-vs-triangle and swept-capsule-vs-triangle, plus a
+heightfield form or a decision to fold heightfields into trimesh.
+
+**What it blocks, all of it verified rather than inferred:**
+
+- `24-navigation.md` step 1 voxelizes "physics colliders" into a heightfield.
+  With only analytic primitives there is no walkable world to voxelize, so nav
+  cannot start.
+- `28-ballistics.md`'s entry/exit traversal needs closed or convex-decomposed
+  static meshes; its `assumed_thickness` fallback exists precisely for the cases
+  this would cover.
+- `05-physics.md`'s bullet-through-paper exit criterion ("vs 1 cm wall", "never
+  tunnels terrain").
+- `apps/orbit`'s landing on terrain, and the towers sample generally.
+
+### Rotational dynamics in `crcbl-phys` (2026-08-27)
+
+**Not built.** `RigidBody` in `crates/crcbl-phys/src/components.rs` carries
+`mass`, `inverse_mass`, `velocity` and `force_accum` — and nothing else. There
+is no angular velocity, no torque and no inertia tensor anywhere in the crate
+(`grep -i angular|torque|inertia` over `crates/crcbl-phys/src/` hits only prose
+about orbital angular momentum in `orbit.rs`). `Transform` does carry a `DQuat`
+and `ThrustForce::world_force` reads it, so a body has an orientation that is
+**set and never integrated**.
+
+`05-physics.md`'s dynamics section promises "full inertia tensor, torque,
+quaternion integration with renormalization". That sentence has no
+implementation.
+
+**What it blocks:** the contact solver (36) — its "mass properties … inertia
+tensor" line has nothing to write into; ragdolls (35), which cannot articulate a
+body that cannot tumble; and anything that wants a spinning asteroid to spin in
+the engine rather than in a sample.
+
+### Buoyancy and wind force providers (2026-08-27)
+
+**Not built.** `crcbl-phys`'s force providers are `GravityForce`,
+`PointGravity`, `DragForce`, `DampingForce`, `ThrustForce` and
+`AtmosphericDrag`. `grep -i buoyan|wind` over `crates/` returns nothing. Both
+are named in `05-physics.md`'s task 4 and its dynamics section. Small work; no
+sample demands either yet, which is why they were skipped.
+
+### Physics debug suite: draw, scrub, query visualiser (2026-08-27)
+
+**Only the hash exists.** `PhysicsSystem`'s `hash_state` feeds transform and
+rigid-body state into the determinism hash; its `debug_draw` is an empty body
+carrying the comment "Future: draw collider AABBs, contacts, swept paths." There
+is no time scrub and no query visualiser anywhere in the workspace
+(`grep -rn scrub crates/ apps/ --include=*.rs` hits one unrelated line in
+`apps/puppet/src/menu.rs`).
+
+`05-physics.md` states the rule "no query without a visualizer" as an exit
+criterion. Nothing enforces it and nothing satisfies it.
+
+### Camera-relative upload is not executed (2026-08-27)
+
+**`WorldPos::relative_to` has no caller outside `crcbl-core`'s own tests.**
+`grep -rn relative_to crates/ apps/ --include=*.rs` returns only
+`crates/crcbl-core/src/lib.rs` (a doc reference),
+`crates/crcbl-core/src/world.rs` (the definition and its tests).
+`crates/crcbl-render/src/camera.rs` documents that its `Vec3` positions are
+"only ever camera-relative render space" — a convention nothing performs the
+conversion for. `apps/orbit`, the one sample with large coordinates, uses
+`WorldPos::delta(WorldPos::ORIGIN)` instead, which is a plain `DVec3` difference
+from the origin.
+
+**Consequence:** the f32 jitter this design exists to prevent has never been
+exercised, because nothing has yet been far enough from the origin. Task 1 of
+`05-physics.md` reads as done and its second half is not.
+
+### Cross-target determinism: the `libm` decision is still the user's (2026-08-27)
+
+**Open, and it is a decision rather than a task.** `05-physics.md`'s 2026-07-27
+correction routes determinism-bearing math through the **`libm` crate**;
+`13-audio.md`'s correction requires **own polynomial approximations plus a CI
+deny** on std transcendentals. They are not interchangeable and neither is
+built. No workspace crate names `libm` — it reaches `Cargo.lock` only through
+`naga` and `num-traits`, neither of which is in a sim path — and there is no
+deny anywhere.
+
+**New evidence since that correction was written:** the cost is now visible in
+the tree. `crates/crcbl-phys/src/character.rs` and
+`crates/crcbl-phys/src/orbit.rs` each carry tolerance constants sized so a
+_different_ platform `libm` still passes — the orbit drift bound's doc comment
+says so by name, and `character.rs` describes a step threshold that "shifts by
+exactly the amount a different libm does". Those constants are the workaround
+this decision would remove, and they are what would have to be re-derived once
+it is taken.
+
+**The question to answer:** take the new dependency (`libm`, the user's call per
+the dependency rule), or hand-roll approximations with golden values from the
+specification. Either way `12-testing.md`'s verification rules apply.
+
+### Client-side read-only query world (2026-08-27)
+
+**Not built, and still unowned.** `05-physics.md`'s 2026-07-27 correction made
+this a P10 deliverable: the client hosts a read-only `PhysicsWorld` (statics
+from scene load, dynamic colliders reconstructed from snapshots) for camera boom
+sweeps (30) and audio occlusion rays (13). `crcbl-client` imports
+`crcbl_phys::Transform` and nothing else from the physics crate — no
+`PhysicsWorld`, no query surface.
+
+Today each sample that needs a client-side query builds its own; `apps/breach`
+casts its pistol ray on the **server** side instead, which sidesteps the problem
+rather than solving it.
+
+## ECS, server and client (`04-ecs-server-client.md`)
+
+### Jitter-adaptive interpolation buffer (2026-08-27)
+
+**Not built.** `04-ecs-server-client.md`'s 2026-07-27 correction requires a
+buffer of roughly two snapshot intervals plus a jitter margin, growing under
+measured jitter and shrinking when calm. `crcbl-client` holds exactly two frames
+per sector — `prev_frames` and `current_frames`, both `HashMap<SectorId, Frame>`
+— and `grep -n "jitter|adaptive|buffer_depth"` over
+`crates/crcbl-client/src/lib.rs` returns nothing. The alpha spans the two
+buffered snapshots' server ticks, which is correct arithmetic over a buffer that
+is one tick deep.
+
+**What it blocks:** anything played over a real network. `26-prediction.md`
+already assumes the ~100 ms figure.
+
+### `SystemTrait::replicate` takes no client id (2026-08-27)
+
+**A reservation the plan claimed and never made.** `04-ecs-server-client.md`
+said interest management could be added post-MVP "without resurfacing every
+system" because the snapshot writer API takes a client id. It does not:
+`crcbl_ecs::SystemTrait::replicate` takes `&mut Vec<u8>` and returns `bool`.
+
+What replication _is_ scoped by is the **sector**: `SectorId` envelopes, a
+per-sector `BaselineStore` and ack cursor on the server, `subscribed_sectors` on
+the client. Narrowing below the sector — per-client visibility — would therefore
+change the signature of every system that replicates.
+
+**Decide before P13:** whether per-client visibility is wanted at all, given
+sector scoping may be enough for the samples on the ladder.
+
+### No headless `server` binary, and no `cargo tree` guard (2026-08-27)
+
+`crcbl-server` is a library with no `[[bin]]`. Its manifest names `crcbl-core`,
+`crcbl-ecs`, `crcbl-net` and `crcbl-rand` and no renderer, so the "no render
+dependency" property holds — but nothing enforces it. There is no `cargo tree`
+check in `.github/workflows/ci.yml`; the only `cargo tree` in the workflows is a
+comment in `cron.yml` about an unrelated install.
+
+**What it would take:** one CI step asserting the dependency closure of
+`crcbl-server` excludes `crcbl-render`/`crcbl-vk`, shown to fail before it is
+trusted.
+
+### The determinism smoke test has no input script (2026-08-27)
+
+`crcbl sim` runs 1000 ticks by default and prints
+`crcbl_server::sim_hash::hash_world`'s output, so the tick loop is shown
+deterministic. But its world comes from `--seed` and there is no input script:
+`crates/crcbl-cli/src/sim_cmd.rs` says outright that neither the scene argument
+nor the input script is built, because a scene file format and a RON reader are
+both open questions. `04-ecs-server-client.md`'s exit criterion asks for "same
+input script → same state hash", which is the half not covered.
+
+**Blocks:** replay-driven regression testing, and the rollback-idempotence
+property `26-prediction.md` wants.
+
+## Animation (`17-animation.md`)
+
+### The glTF rig has no arrow into `crcbl-anim` (2026-08-27)
+
+**Import landed; the conversion did not.**
+`crates/crcbl-scene/src/gltf_import.rs` now reads the document's `skins` and
+`animations` arrays (`read_skins`, `read_clips`) into `GltfSkin`, `GltfClip` and
+`GltfChannel`, and `GltfPrimitive::joints`/`weights` carry the per-vertex
+binding. Nothing converts those into `crcbl_anim::Skeleton` and
+`crcbl_anim::Clip`. `crcbl-anim` depends on `glam` and nothing else, by design —
+it must not drag a glTF parser into a browser build.
+
+**Consequence:** the only rig any sample plays is `apps/puppet/src/rig.rs`, a
+humanoid authored in Rust with no asset on disk. `09-puppet.md` milestone 5 — a
+stock glTF character imported with zero manual fixup — is blocked on this.
+
+**What it would take:** index bookkeeping in whichever crate holds both (a
+`crcbl-scene` feature, or the `crcbl` façade). A second consumer needing the
+same conversion is what would justify extracting it.
+
+### No cook, no cooked clip format (2026-08-27)
+
+`17-animation.md` specifies per-clip compressed curve tracks, a flat joint
+array, `crcbl import --skeletons/--clips`, and versioned cooked output. **None
+of it exists.** `crcbl import` has neither flag (`crates/crcbl-cli/src/args.rs`
+— the only `--clip` in the CLI belongs to `crcbl crpix`, the sprite baker), and
+`Skeleton`/`Clip` are runtime types a caller constructs directly.
+
+**What it blocks, each verified separately:**
+
+- Golden-pose tests against the glTF sample-model suite (Fox, CesiumMan,
+  RiggedFigure) — nothing turns a `.glb` rig into a `Skeleton`.
+- Conservative animated AABBs, which `17-animation.md` says are computed at cook
+  time; a skinned instance is currently culled against its undeformed box.
+- Per-clip **hitbox transform tracks**, which `26-prediction.md`'s lag
+  compensation depends on for server-side posed hitboxes with no pose math.
+- The **server strip** (root track + event track + duration) that
+  `17-animation.md`'s 2026-07-27 correction introduced so the server can do root
+  motion and events without sampling pose curves.
+
+### State machine, root motion, events, post ops (2026-08-27)
+
+**Not built.** `crcbl-anim`'s own module header says so: no state machine, no
+root motion, no GPU skinning _in that crate_. Confirmed against its module list
+— `blend`, `clip`, `palette`, `sample`, `skeleton`, `trs`.
+
+Specifically absent: the RON state-machine asset and its runtime; animation
+events (the footstep-at-t=0.3 timing proof); root-motion extraction feeding the
+character controller; sockets/attachments; per-bone masks; additive layers; a 2D
+directional blend space; two-bone IK and look-at; `crcbl anim dump`; the editor
+state-machine panel.
+
+Present and working: `Clip::sample_into`, `blend_into`, `BlendSpace1d`, `Pose`,
+`Palette::compute` — `apps/puppet` mixes idle↔walk↔run by measured speed through
+them.
+
+### GPU skinning is built — three follow-ons are not (2026-08-27)
+
+Recorded because `17-animation.md` read as though the whole section were future
+work and it is not. `crates/crcbl-render/src/skinning.rs` over
+`crates/crcbl-shaders/shaders/skinning.slang` is the compute prepass; the
+skinned region is a range of the mesh pool, so cull, draw generation and the
+shadow passes gained no skinning branch (the one branch is
+`GpuInstance::BASE_VERTEX_OVERRIDE` in the raster stages). `apps/puppet`
+consumes it natively and in the browser, with shadows.
+
+Three things it deliberately left:
+
+1. **One dispatch per animated range**, not one over a range table. The
+   GPU-driven form needs a range table the shader can index — a second layout to
+   pin against `slangc`.
+2. **The prev half of the double-buffered region has no reader.**
+   `SkinnedRegion` reserves two runs and `Skinning::begin_frame` alternates, per
+   `17-animation.md`'s 2026-07-27 TAA correction, but there is no TAA pass and
+   `SkinnedRegion::previous_base` has no caller outside its module's tests. That
+   is the correction being followed on purpose; note it so nobody "cleans it
+   up".
+3. **Bad joint indices are contained, not diagnosed.** `Skinning::begin_frame`
+   refuses them by name and the shader clamps, but `crcbl-scene` cannot do
+   better at import because a glTF primitive does not know its skin.
+
+## Jobs and threading (`21-jobs.md`)
+
+### The pipeline thread topology does not exist (2026-08-27)
+
+**Only the pool's workers start through the spawn seam.** `crcbl_jobs::spawn`
+ships with `Threads`, `Inline` and `Workers`. But nothing on any platform spawns
+an input, sim, net or io thread, and `crcbl-audio` spawns its DSP thread with a
+bare `std::thread::spawn` in `crates/crcbl-audio/src/lib.rs` — a lane that
+predates the seam and does not use it.
+
+Also unbuilt from the same document: named pipeline threads, the thread timeline
+profiler view, the convergence report (main-thread wait breakdown), and
+ring-overflow / mailbox-staleness counters in the inspector.
+
+### Input thread, stacked `InputTickState`, last-N ring (2026-08-27)
+
+**None of the three.** `crcbl_input::InputTickState` is a flat
+`Vec<(String, ActionValue)>` filled by `InputTickState::capture(&ActionMap)` —
+no accumulate-then-swap, no edge list, no ring. Nothing spawns an input thread.
+
+**What it blocks:** sub-tick input fidelity (a 3 ms tap surviving a 16 ms tick),
+and `26-prediction.md`'s rollback, which replays exact per-tick inputs from this
+ring.
+
+### Client tick alignment and the jitter buffer (2026-08-27)
+
+**Not built.** No lead, no EWMA server-time estimate and no rate correction in
+`crcbl-client`, `crcbl-server` or `crcbl-net`; the client advances playback at a
+constant rate. `21-jobs.md`'s 2026-07-27 correction already settled the policy
+(slew below ~50 ms, step above it, with a defined sim-side policy for the
+stepped interval) — the policy is decided and unimplemented.
+
+**Half of this row is now closed and should not be re-derived:** the server no
+longer discards client input. It queues the frames that arrived since the tick
+began and hands them to the module as `crcbl_ecs::ClientInputs`, capped by
+`MAX_CLIENT_INPUTS_PER_TICK`, with `Server::dropped_input_count` reporting what
+the cap refused. What is still missing is a **jitter buffer keyed by target
+tick** — the queue is in arrival order, and nothing holds an early input back or
+places a late one.
+
+### ECS access declarations and the parallel schedule (2026-08-27)
+
+**Not built.** `crcbl_ecs::SystemTrait` declares `name`, `tick`, `entity_count`,
+`sweep`, `debug_draw`, `hash_state` and `replicate` — no access declaration of
+any kind — and `crcbl-ecs` asserts no conflict. A conflict DAG derived from the
+trait as it stands would say every system is independent, which is the failure
+mode worth naming: it would be a green light wired to nothing.
+
+**What it would take:** an access declaration at registration, a startup DAG,
+and a debug assert on undeclared access — designed together, because the DAG
+without the assert is the vacuous version.
+
+### `par_for` adoption inside the engine crates (2026-08-27)
+
+**Not inside any of them.** Neither `crcbl-phys`, `crcbl-anim` nor `crcbl-vfx`
+depends on `crcbl-jobs` (checked each `Cargo.toml`). What exists is adoption
+**by a caller**: `apps/horde` owns the `Pool` and runs its steering `par_for`
+over results a batch query filled, and `crcbl-phys`'s allocation-free `*_into`
+query forms (`overlap_sphere_into` and friends) exist so that it can. That is
+the shape a crate-side adoption would build on, and it is not the same thing.
+
+### The killer test is not runnable (2026-08-27)
+
+`21-jobs.md`'s determinism killer test is "same input script at `--threads 1`,
+`2`, `N` → identical state hash per tick". `crcbl sim` takes `--ticks`,
+`--tick-rate` and `--seed` and **no worker count**
+(`crates/crcbl-cli/src/args.rs`). So the one CI gate this whole topic leans on
+cannot be run at all today.
+
+**What it would take:** a `--threads` flag on `crcbl sim` that actually drives
+the pool, and a harness world with parallel work in it. Cheap, and it is the
+precondition for trusting any parallel change.
+
+### Cross-origin isolation on Pages, and no demo page runs workers (2026-08-27)
+
+Two separate gaps, both still open:
+
+1. **Isolation.** `web/tools/serve.mjs` sends the COOP/COEP pair locally and
+   `web/jobs/` asserts `crossOriginIsolated === true` against it. Nothing sends
+   those headers on GitHub Pages, so no published demo is isolated. Step 2 of
+   `21-jobs.md`'s 2026-08-03 order is a **gate**, not a step: if isolation
+   cannot be had, demos stay single-threaded through the fallback.
+2. **No demo page implements the worker shim.**
+   `grep -rln "jobs.js|__crcbl_web_jobs"` over `web/demos/`, `web/templates/`
+   and `web/pages/` returns nothing. Only `web/jobs/`, driven by
+   `web/run-jobs-e2e.sh`, does. `Workers` answers `Spawn::threaded` false until
+   a page announces itself, so **every published artifact still degrades to
+   single-threaded**, correctly and silently.
+
+### loom and TSAN are specified; only Miri runs (2026-08-27)
+
+Carried forward unchanged from `21-jobs.md`'s 2026-08-09 correction and re-read,
+not re-verified by running anything: `cargo miri test -p crcbl-jobs` runs
+**weekly** in `cron.yml`, so an ordering regression can sit on `main` for up to
+a week. The aarch64-runner idea was tested on 2026-08-23 and rejected with
+evidence (weakened orderings went green on macOS). If that coverage is wanted,
+the instrument is a targeted stress harness with a failure counter.
+
+## Wholly unbuilt topics
+
+Each of these has no crate, no type and no consumer. They were left almost
+untouched; what follows is the dependency chain that would have to move first,
+which is the part not obvious from the documents.
+
+### Navigation — `24-navigation.md` (2026-08-27)
+
+No `crcbl-nav` crate. No bake, no query API, no crowd, no `crcbl nav` CLI, and
+no arena sample to force it. **Blocked upstream on static trimesh/heightfield
+colliders** (above): step 1 voxelizes physics colliders, and the collider set is
+three analytic primitives.
+
+### Client prediction and lag compensation — `26-prediction.md` (2026-08-27)
+
+Nothing built. More importantly, **three of the five things this document says
+were staged for it are not built either**:
+
+- **tick sync (21)** — no lead, no server-time estimate, no rate correction.
+- **input tick rings (21)** — `InputTickState` is flat.
+- **module equivalence (16 / P6A)** — no wasm host; `wasmtime` is at zero
+  occurrences in `Cargo.lock`.
+
+Present: snapshot rings (`crcbl_net::BaselineStore`, a per-sector `VecDeque`
+with eviction) and determinism hashing (`crcbl_server::sim_hash::hash_world`).
+
+Also depends on the cooked hitbox tracks that `17-animation.md`'s missing cook
+would produce.
+
+### Ballistics and kinetic impact — `28-ballistics.md` (2026-08-27)
+
+Nothing built. No `Round`, no `BallisticMaterial`, no penetrating sweep, no
+`KineticContact` — `grep -rn KineticContact crates/ apps/` returns nothing.
+**Blocked on two things:** the collider property block carrying surface material
+(owned by `37-materials.md`; `crcbl-phys`'s `Collider` and its components have
+no material field of any kind), and static trimesh statics for entry/exit
+traversal.
+
+`apps/breach` ships a hitscan pistol that is one
+`crcbl_phys::PhysicsWorld::cast_ray` per shot. That is not a down payment on
+this topic; it shares no vocabulary with it.
+
+### Contact solver L2/L3 — `36-contact-solver.md` (2026-08-27)
+
+Nothing built. `crcbl-phys` names no manifold, contact, island, sleeping or
+joint; its only mention of a sequential-impulse solver is the layer table in
+`crates/crcbl-phys/src/lib.rs` marking L2 "Stretch". **Blocked on rotational
+dynamics** (above) and on the material block for friction/restitution.
+
+### Ragdolls — `35-ragdolls.md` (2026-08-27)
+
+Nothing built, and every dependency is also missing: the contact solver (36), L3
+joints, rotational dynamics, and `KineticContact` (28) which the death handoff
+reads the killing impulse from. This is the deepest item in the slice.
+
+### Player kit — `30-player-kit.md` (2026-08-27)
+
+No `crcbl-player` crate. **The seam under it is proven, though, and that is
+worth recording:** `crcbl_phys::CharacterController` takes a world-space
+displacement and holds no camera, and three samples drive that one controller
+from three rigs that share no code — `apps/puppet` (third-person orbit),
+`apps/breach` (first-person, measuring yaw the other way round), `apps/shard`
+(fixed isometric bearing, quarter-turn yaw).
+
+**Consequence for delivery step 1:** there are now **three** hand-rolled
+controllers to replace when the kit lands, not one. The 3P GTA rig (spring-arm
+boom resolved by a phys capsule sweep, damped follow, auto-recenter, zoom tiers,
+aim mode, player fade) is entirely unwritten; `apps/puppet`'s camera is an
+`OrbitCamera` with no boom sweep at all.
+
+### Weapon kit — `38-weapons.md` (2026-08-27)
+
+No `crcbl-weapons` crate, no weapon asset schema, no resolved stat block, no
+attachment algebra, no recoil pattern, no state machine, no
+`crcbl weapon stats`/`ttk`. Blocked on ballistics (28) for rounds and on the
+inventory kit (34) for magazines-as-containers — neither exists.
+
+`apps/breach`'s pistol has no round, no penetration, no spread, no RPM: its rate
+limit is the trigger arriving as an input **edge** (one press, one shot,
+documented in `apps/breach/src/game.rs`'s `Controls::fire`). The "three classic
+exploits, closed" section describes work not started.
+
+## Samples touched in passing
+
+### `apps/orbit` is a demo, not yet the acceptance test (2026-08-27)
+
+`apps/orbit` is built and published and carries `06-orbit.md`'s milestones 1 and
+2 — ascent through the atmosphere, stable orbit, timewarp with auto-drop — drawn
+as a map view over flight instruments. Its own header says the moon's frame
+exists and a ship reaching it would be handed over, **but nothing flies there
+yet**, and the bodies are drawn as a map rather than in 3D. So `05-physics.md`'s
+exit criterion ("deorbit + land, across at least one sector boundary with no
+visible seam") is not met by it.
+
+## Coverage gaps in the simulation audit
+
+Stated plainly, so the next session does not mistake silence for coverage.
+
+- **No Rust was changed and no Rust gate was run.** No `cargo clippy`, no
+  `cargo test`, no `cargo fmt`. This was a documentation audit; the three gates
+  that were run are `prettier --check`, `tools/check-doc-citations.sh` and
+  `tools/check-wrapped-strings.sh`.
+- **`docs/plan/sample/*.md` was not audited at all.** Claims here about sample
+  milestones (`06-orbit.md` 1–2, `09-puppet.md` 2, `11-breach.md` 0) come from
+  the **apps'** own module headers, not from re-reading the sample plans. If a
+  sample plan disagrees with an app header, that disagreement is unreviewed.
+- **`crcbl-net` was read only where `04` and `21` touch it** — `SectorId`,
+  `BaselineStore`, `ClientInputs` handling, and the absence of RTT/EWMA. The
+  delta codec, handshake, auth, session and condition-simulator internals were
+  not reviewed against `23-*.md`, which is outside this slice.
+- **`crcbl-vfx` was checked for exactly one thing**: whether it depends on
+  `crcbl-jobs`. It does not. Nothing else about it was read.
+- **`37-materials.md` was not opened.** It is in the sibling agent's slice.
+  Claims here about the collider property block are from the absence of any
+  material field in `crates/crcbl-phys/src/collider.rs` and
+  `crates/crcbl-phys/src/components.rs`, not from that document.
+- **The `21-jobs.md` browser topology sections were read but not verified
+  against the web tree beyond four facts**: `web/jobs/` exists,
+  `web/run-jobs-e2e.sh` exists, `web/build.sh --threads` exists, and no
+  `web/demos/` page references the jobs ABI. The threaded-wasm findings (link
+  args, `__wasm_init_tls`, `__stack_pointer`) were left as written and **not
+  re-measured**.
+- **Determinism claims were not executed.** That `crcbl sim` produces a stable
+  hash is taken from `crates/crcbl-cli/src/sim_cmd.rs` and
+  `crates/crcbl-server/src/sim_hash.rs` reading correctly, not from running it.
+- **Test coverage was sampled, not enumerated.** `crcbl-phys/tests/`,
+  `crcbl-anim/tests/`, `crcbl-ecs/tests/` and `crcbl-server/tests/` were listed
+  and their headers read; individual test bodies mostly were not.
+- **No claim here rests on `git log`.** Where a doc's history mattered (`05`'s
+  slice-2 paragraph, `21`'s corrections) the current tree was read instead, on
+  the grounds that the tree is what binds future work.
+
 ## Coverage gaps in this audit
 
 - **Only seven docs were read against the tree**: `01-foundations.md`,
