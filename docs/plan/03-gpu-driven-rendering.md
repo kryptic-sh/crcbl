@@ -54,6 +54,11 @@ only the emit tail and the material lookup differ.
 - Upload path: staging ring buffer + transfer submits with timeline semaphore
   tracking; renderer consumes meshes only after the timeline value passes.
 
+**Built** — `crcbl_render::mesh_pool` is all three: the two suballocated
+device-local pools, the `{base_vertex, base_index, count}` handle, and the
+timeline an upload's submit signals, which is what makes residency a query
+rather than a wait.
+
 ### 3.2 Instance + material data
 
 - `GpuInstance` array (SSBO): transform, mesh id, material id, flags. Written by
@@ -153,6 +158,13 @@ An animated material is what makes it a ring.
   compute pass structured so it can be inserted (visibility buffer slot in the
   pass inputs).
 
+**Built, less the occlusion row.** `crcbl_render::cull` is the CPU reference
+`cull.slang` is checked against, `crcbl_render::draw_gen` runs that dispatch and
+turns its survivors into indirect arguments, and `crcbl_render::cluster_pool`
+with `mesh_cluster.slang` is the `MeshShader` tail. There is no depth pyramid
+and no two-phase pass anywhere in the tree, so the visibility slot the third
+bullet asks for is still the thing a later slice has to insert.
+
 ### 3.4 Sorting + passes
 
 - Opaque pass sorted by pipeline/material via GPU-side binning (or CPU sort of
@@ -161,6 +173,17 @@ An animated material is what makes it a ring.
 - 2D/ortho content flows through the same instance path — a sprite/quad is a
   mesh range with an ortho camera; z is z-index (locked decision from overview).
   No separate 2D renderer.
+
+**2026-08 — "a mesh range with an ortho camera" is not what was built, and the
+rule it was serving survived anyway.** `crcbl_render::sprite_pass` generates its
+quad from `SV_VertexID` and reads per-sprite data out of a storage buffer
+indexed by `SV_InstanceID`, so a sprite is an instance but not a mesh range and
+it does not go through `draw_gen`'s buckets. What the locked decision was
+protecting still holds — it is one pass in the same graph, on the same device,
+with the same computed barriers, and there is no second renderer. The
+**transparent pass this section also names is unbuilt**: the only alpha blending
+in the renderer is that pass's and `crcbl_render::ui_pass`'s, and the opaque
+binning is `draw_gen`'s fixed bucket table rather than a sort.
 
 ### 3.5 Meshlet geometry — the primary path (MVP)
 
@@ -204,7 +227,12 @@ above are what a device without them falls back to.
   permitted readback, N frames latent, debug builds only.
 - Debug draw layer: line/AABB/sphere immediate primitives accumulated into an
   instance buffer, drawn in one pass. Systems from stage 4 onward use this to
-  visualize themselves.
+  visualize themselves. **Unbuilt**, alone in this section — the timestamps are
+  `crcbl_render::timing` and the readback ring is `crcbl_render::cull_stats`,
+  and this row has no module, no shader and no caller.
+  `ForwardRenderer::set_wireframe` and `crcbl_render::grid` are the nearest
+  things in the tree and neither is an immediate-primitive API, so every system
+  that wanted to draw itself still has nowhere to do it.
 
 ## Exit criteria
 
@@ -218,6 +246,16 @@ above are what a device without them falls back to.
   than left to imply coverage — see [39-capabilities.md](39-capabilities.md).
 - Capability flags and the derived selectors exist in the HAL; the lesser paths'
   data-layout constraints are documented in `crcbl-render`.
+
+**Where these stand.** `apps/quarry` is the `GeometryPath` half of the third
+criterion: one dense scene, a `Forced` selector per path so a device that would
+never take a fallback executes it anyway, and a golden per path. The
+`BindingModel` half is open by §3.2's own record — `Bindless` has no
+implementation, so there is no combination to render — and it stays open until
+the page's one-extent bound is what someone needs lifted. The last criterion is
+met. The first two are unverified here: nothing in the tree holds ten thousand
+instances (`apps/horde` is the scale sample and holds a thousand), and no
+RenderDoc capture is recorded anywhere.
 
 ## Risks
 
@@ -240,22 +278,37 @@ above are what a device without them falls back to.
   offset table in f64** (one entry per resident sector) and uploads only that;
   the vertex/cull shaders add the offset. This also defines the space cull AABBs
   live in. Must exist before P7.
+
+  **Half built, and the half that is missing is the camera-relative half.**
+  `GpuInstance::transform` is sector-local `f32` and `GpuInstance::sector` names
+  the sector, so delta upload has the shape this correction gave it. The f64
+  offset table does not exist, nothing indexes `sector`, every instance is in
+  sector 0 and `transform` is a plain model → world matrix — that field's own
+  docs say so. Large-world precision is therefore still owed, and the field is
+  reserved rather than consumed.
+
 - **Draw binning is a fixed bucket table**, not "GPU binning or CPU sort": at
   load, enumerate reachable `(material template, permutation, pass)` combos
   (37's declared permutations make this finite) into a bucket table; the cull
   shader scatters compacted instances into per-bucket indirect draws with
   per-bucket count buffers. Per-bucket capacity is sized from scene stats with
   an overflow counter. `IndirectPerBatch` emits the same buckets as per-batch
-  indirect draws.
+  indirect draws. **Built** — `crcbl_render::draw_gen`, whose bucket is one
+  resident mesh today because an argument structure's index range is per draw;
+  the `(material template, permutation, pass)` key is the same table with a
+  longer one.
 - **Transparent sorting**: GPU **radix sort over packed depth keys** (bitonic is
   the fallback for small counts) — named so it isn't rediscovered at P7.
+  Unbuilt, and nothing needs it yet: §3.4 has no transparent pass.
 - **Per-path shader authoring is one source**: Slang with per-path
   specialization; **each path selector is a permutation axis** with its own line
   in 37's permutation budget. Decided before any shader is written, because P1's
   shaders become P5's inputs. The mechanism is per-target `-D` defines from
   `crates/crcbl-shaders/tools/compile-shaders.sh` plus a declared target list
   per shader — a ray-tracing or mesh shader has no WGSL form at all and must say
-  so rather than emitting a broken artifact.
+  so rather than emitting a broken artifact. **Built** — the declared target
+  list is the `// crcbl-targets:` line every `.slang` opens with, and
+  `crates/crcbl-shaders/tools/compile-shaders.sh` is what reads it.
 
 ## Correction (capability model, 2026-08-09)
 

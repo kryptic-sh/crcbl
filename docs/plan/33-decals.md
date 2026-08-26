@@ -77,7 +77,11 @@ deliberately not here.
 - **Clustered forward decals**: decal + carve volumes are binned into the view
   froxel grid (SSBO lists); host materials loop only their froxel's entries. No
   G-buffer requirement — works identically on every path selector (topic 3),
-  consistent with the forward HDR pipeline (18).
+  consistent with the forward HDR pipeline (18). That grid is no longer
+  hypothetical: `crcbl_render::light_grid` runs the compute pass that assigns
+  lights to froxels and `mesh.slang`'s fragment stage indexes it, so this row
+  inherits a binning pass and an overflow counter rather than having to invent
+  them. Nothing decal-shaped exists in the tree.
 - Projection sanity: surface-normal-vs-decal-axis rejection threshold (the
   classic fix for decals smearing across perpendicular faces), plus per-decal
   angle fade.

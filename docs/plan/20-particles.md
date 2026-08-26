@@ -110,6 +110,24 @@ RON (engine-data rule), hot-reloadable, schema'd like everything else:
 
 ## Delivery (post-MVP wave 1)
 
+**`crcbl-vfx` is slice 1's CPU staging, and the endpoint above is unbuilt.** The
+crate's own module docs say it in as many words: `ParticlePool` is the SSBO's
+structure-of-arrays layout, `RangeAllocator` the per-effect ranges, `pcg3d` the
+stateless per-particle randomness and `EffectDesc` the fixed modifier menu — but
+the step is a loop in that crate's `system` module rather than a compute
+dispatch, there is no alive count feeding indirect draw arguments, and there is
+no particle shader or pass of any kind. An effect reaches the screen as ordinary
+instances through §3's path, which is this document's mesh-particle row used for
+everything. Determinism, the property that makes golden frames of an effect
+possible, is asserted by that crate's `determinism` test already.
+
+So slice 1 still owes the compute passes, the billboards, the curves and the RON
+assets. Slice 3's **mesh particles** are the one row that does work, because
+they are the path everything currently takes; flipbooks, soft particles, ribbons
+and depth collision are not, and slices 4 and 5 are untouched. `apps/sparks` is
+slice 2's gallery half — stock effects on a stage with the budget readout — and
+it is what the param surface will be tuned against.
+
 1. Pool + spawn/update compute + billboards + curves/gradients + RON assets
    - hot reload.
 2. sparks workbench (sample 10) — drives the param surface.

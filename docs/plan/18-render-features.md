@@ -365,21 +365,30 @@ Two consequences worth stating before somebody meets them:
 ## Shadows (MVP — lands with P7)
 
 - **Sun: cascaded shadow maps** (CSM), 2–3 cascades, stable (texel-snapped)
-  projections, PCF filtering (3×3 MVP). One directional light with shadows is
-  the MVP contract — it's what makes 3D scenes read as 3D.
+  projections, PCF filtering (3×3 MVP). One directional light with shadows was
+  the MVP contract — it's what makes 3D scenes read as 3D — and the light list
+  above has since taken the engine past it: `crcbl_render::shadow` budgets the
+  sun's cascades, a spot's cone and a point's faces out of one atlas.
 - **GPU-driven all the way**: shadow pass reuses the stage 3 compute culling
   (one cull dispatch per cascade against the same instance/geometry pools,
   indirect draws into depth-only pipelines). No CPU re-traversal per cascade —
   the shadow cost scales like the main pass, by design.
 - Render graph: cascades = depth targets owned by the graph; barriers/layout
-  automatic like every pass. Debug: cascade-split visualization overlay +
-  shadow-map inspector panel (topic 7 debug tools).
+  automatic like every pass. **The debug half of this row is unbuilt**: there is
+  no cascade-split overlay and no shadow-map inspector panel.
+  `ForwardRenderer::debug_view` offers three views — the LOD screen-error
+  heatmap, the DAG-level tint and world-space normals — and none of them is
+  about shadows.
 - Skinned casters (topic 17) come free via the skinned-output pool region.
-- **Spot-light shadows** (single map) when towers wants them (tower projectiles
-  at night — optional polish); **point-light** (cube maps) are MVP now, because
-  the raster twin has to cover every light type ray-traced shadows cover;
-  static-geometry caching (cached cascades / shadow atlases) post-MVP when a
-  sample's perf numbers demand it.
+- **Spot and point shadows are built, and not as this line first described
+  them.** The 2026-08-13 decision above replaced the cube map with six atlas
+  tiles, so a point light is `crcbl_render::shadow`'s `POINT_FACES` tiles of the
+  grid the cascades already sit in rather than a second image type and a second
+  sampling path. What a frame budgets is therefore tiles and cull slots —
+  `LIGHT_TILES` and `LIGHT_SLOTS` in that module, which the 2026-08-26 re-tiling
+  of the atlas widened to two point cubes and two spot cones by shrinking the
+  tile rather than growing the image. Static-geometry caching (cached cascades)
+  stays post-MVP, for when a sample's perf numbers demand it.
 - **Under `LightingPath::RayTraced` this whole section is bypassed**, not
   augmented: shadows come from ray queries against the TLAS, for every light
   type, with no cascades and no shadow atlas. The two are alternatives, which is
@@ -845,18 +854,44 @@ render-scale upscale; UI composites after, at native resolution):
 scene (HDR RGBA16F) → bloom (down/upsample chain) → exposure + tonemap → FXAA → [upscale] → UI
 ```
 
+**`[upscale]` has no implementation on either side of the seam, verified
+2026-08-27.** [15-windowing.md](15-windowing.md) defines borderless as an
+internal render target upscale-blitted to the native surface, and
+`ShellCaps::HW_UPSCALE` reports what a window system will do for free — but
+`crcbl-render` has no upscale pass, no render-scale knob and no internal target
+whose extent differs from the swapchain's. So every stage of this chain runs at
+native resolution today, and the ordering is a contract for a pass that does not
+exist rather than a description of a frame. Whoever builds it inherits the two
+interactions below unchanged.
+
 - **HDR (MVP, lands with P7)**: scene renders to RGBA16F; lighting in linear HDR
   from the start (retrofitting HDR is repainting every material — do it the
   moment real lighting exists). Fixed exposure MVP; auto-exposure (histogram,
   GPU reduce) later.
 - **Tonemap (MVP)**: filmic/ACES-fitted curve + sRGB encode. One combined
-  fullscreen pass with exposure.
-- **AA (MVP)**: **FXAA** — cheap, single pass, no history. **TAA post-MVP**
-  (needs motion vectors in the G-pass + history management + the ghosting fight;
-  motion vectors slot into the instance path when TAA lands — the instance
-  format reserves the prev-transform slot **now** so TAA is additive later).
-  MSAA rejected (fights deferred-ish/HDR pipelines and the browser; FXAA→TAA is
-  the path).
+  fullscreen pass with exposure. **The pass is built and the curve is not**:
+  `tonemap.slang` is exposure-and-clamp, chosen at P1 so display-referred
+  content reached the swapchain unchanged and no golden would be re-blessed
+  twice — once when the pass landed and again when this row does. That file says
+  in as many words that topic 18's stack "replaces exactly one function" in it,
+  so what is owed here is the operator, not the pass, the transient or the
+  `TonemapParams` block. Fixed exposure is a runtime uniform now; auto-exposure
+  (histogram, GPU reduce) is still later.
+- **AA (MVP)**: **FXAA** — cheap, single pass, no history. **Unbuilt**: there is
+  no `fxaa.slang`, no resolve pass in the graph and no `RenderEffects` bit for
+  one, so every frame this engine draws is unresolved. **TAA post-MVP** (needs
+  motion vectors in the G-pass + history management + the ghosting fight; motion
+  vectors slot into the instance path when TAA lands). MSAA rejected (fights
+  deferred-ish/HDR pipelines and the browser; FXAA→TAA is the path).
+
+  **The prev-transform slot is not reserved**, whatever this row claimed until
+  2026-08-27. `crcbl_shaders::mesh::GpuInstance` carries `transform`, `mesh`,
+  `material`, `sector`, `flags` and `base_vertex` and nothing else, so the
+  instance format is a widening TAA still has to pay for. The cheap insurance
+  was never taken; the reason to take it — that `INSTANCE_STRIDE` is cheap to
+  extend now and expensive once §3.3's shaders index past it — is the one
+  `GpuInstance::sector` is already in the record on.
+
 - **Bloom (P10)**: physically-plausible threshold-free downsample chain (Karis
   average), 5–6 mips, tent upsample, additive with scalar. Cheap, huge
   perceived-quality win — timed with the UI/debug polish phase so the profiler
@@ -916,11 +951,14 @@ dispatches them cannot disagree.
 ## Interactions (kept honest)
 
 - Render-scale upscale (topic 15) happens **after** tonemap+AA: post chain costs
-  scale with internal res (the whole point of render scale).
+  scale with internal res (the whole point of render scale). Both of these first
+  two bullets are ordering rules for an upscale that does not exist — see the
+  note under the pipeline order above.
 - UI renders after upscale at native res (crisp text regardless of 3D scale) —
   this ordering is the reason the UI pass was kept separate in stage 7.
 - Debug overlays (debug draw, gizmos) render pre-tonemap in HDR (they're in the
-  world) except UI-space panels.
+  world) except UI-space panels. §3.6's debug draw layer is itself unbuilt, so
+  this rule binds whoever builds it.
 - Golden-image tests (topic 12): shadows and each post pass get dedicated golden
   frames; tonemap changes are the classic "everything shifted" diff — the
   `--bless` flow exists for exactly this.
@@ -929,8 +967,8 @@ dispatches them cannot disagree.
 
 | Slice                                                                 | Phase                                                                                   |
 | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| HDR target + exposure/tonemap pass + FXAA                             | P7                                                                                      |
-| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7                                                                                      |
+| HDR target + exposure/tonemap pass                                    | P7 — built at P1. The **filmic curve** and **FXAA** are still owed; see the post stack  |
+| Sun CSM (culling-integrated, PCF)                                     | P7 — built. The **cascade debug overlay** is not                                        |
 | Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`        |
 | Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C                                                                                     |
 | Ray-traced shadows + AO                                               | P7C                                                                                     |
@@ -953,13 +991,16 @@ under both paths side by side. Exit criteria of the other samples inherit
 
 ## Risks
 
-- **CSM artifact whack-a-mole** (peter-panning, acne, cascade seams): budget it;
-  stable snapping + slope-scaled bias + debug overlay from day one; artifacts
-  are visible in golden frames.
+- **CSM artifact whack-a-mole** (peter-panning, acne, cascade seams): this risk
+  arrived, and the fifth and sixth decisions above are the record of fighting it
+  — bias denominated in tile texels, slope read off the geometric normal rather
+  than the shading one. Stable snapping and the golden frames did the work; the
+  debug overlay that was supposed to help is still unbuilt.
 - **Post-stack perf in a browser**: each pass is simple, but measure — the horde
   web demo budget (S3) includes the stack.
-- **TAA later ≠ never**: prev-transform slot reserved now is the cheap
-  insurance; everything else about TAA stays post-MVP.
+- **TAA later ≠ never**: reserving the prev-transform slot now was the cheap
+  insurance and it was not taken — see the AA row above. Everything else about
+  TAA stays post-MVP.
 
 ## Irradiance probes: the design (2026-08-14)
 
