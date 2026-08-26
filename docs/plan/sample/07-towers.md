@@ -62,7 +62,14 @@ without needing prediction.
 ## Non-goals (until engine post-MVP)
 
 Maze-building/dynamic pathing, PvP, campaign/meta-progression, difficulty modes,
-cosmetics, matchmaking (direct connect only), audio (engine gap).
+cosmetics, matchmaking (direct connect only), ~~audio (engine gap)~~.
+
+**The audio non-goal is withdrawn: there is no engine gap.** `crcbl-audio` ships
+— a device seam with a real-time streaming thread natively and an `AudioWorklet`
+in the browser, a mixer, a spatial module and a synth — and every 2D sample on
+the ladder already emits spatial cues through it. Sample rule 8 therefore
+applies to towers with no exemption, and the "audio grammar in anger" bullet
+above is a requirement rather than an aspiration.
 
 ## Milestones
 
@@ -73,6 +80,40 @@ cosmetics, matchmaking (direct connect only), audio (engine gap).
 3. Co-op over real transport + browser client (stage 10 exit demo: wasm client
    into native dedicated server).
 4. Polish pass: world-space health bars, minimap, game-feel cheap wins.
+
+## Where this stands
+
+**There is no towers crate under `apps/`**, and towers is not a row in
+`web/build.sh`'s `DEMOS` array — so nothing here has been built, and no claim in
+this document has been tested against code.
+
+**What it is waiting on, and it is not one thing.**
+
+- **Milestone 2 waits on the editor, which does not exist.** There is no
+  `apps/editor` and there is no `.scn/` directory anywhere in this tree. The
+  workspace `Cargo.toml` records the absence as deliberate — the editor is a
+  later phase — and `docs/plan/08-editor.md` is its design. Every "editor-built"
+  and "authored in the editor" line in this doc inherits that.
+- **Milestone 3 waits on a wire.** `crcbl-net` ships `InMemoryTransport` and
+  nothing else: no UDP transport, no LAN host discovery, no lobby browser. So
+  "co-op over real transport" and the 4-player LAN exit criterion have no
+  implementation to sit on, and the netgraph's network module has no connection
+  to report on in this sample any more than it does in breakout's.
+- **Milestone 1 waits on neither, and that is worth stating.** A solo loop on a
+  hardcoded map needs a spline follower, tower acquisition by sphere overlap, a
+  swept projectile against moving creeps, and a trigger volume for
+  creep-reaches-exit. `crcbl-phys` has all four ingredients today —
+  `PhysicsWorld` carries a per-collider trigger flag whose colliders are
+  non-solid and skipped by the sweeps, `sweep_sphere` and `overlap_sphere` are
+  what breakout, asteroids and horde already run on, and `CharacterController`
+  is what `apps/puppet`, `apps/breach` and `apps/shard` drive from three
+  different cameras. What is genuinely absent is a **spline type**: nothing in
+  `crcbl-phys` or `crcbl-scene` offers one (the only splines in the workspace
+  are `crcbl-anim`'s clip interpolation and the glTF importer's), so a path
+  follower would be sample code over kinematic bodies.
+
+**So this doc's flagship status is aspirational in full.** Nothing in it has
+been contradicted by a build, because there has been no build.
 
 ## Exit criteria
 

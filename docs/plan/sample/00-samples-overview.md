@@ -4,9 +4,13 @@ Small, complete, playable projects built on the engine. Each sample is the proof
 artifact for one or more stage exits — a stage isn't "done" when its sandbox
 demo runs; it's done when the sample that depends on it ships.
 
-Samples live in `apps/` alongside `sandbox` and `editor`. They are kept in the
-repo, kept building in CI, and kept small — a sample that grows features beyond
-its charter gets its scope cut, not the engine bent around it.
+Samples live in `apps/` alongside the infrastructure crates that are not samples
+and are not on this ladder: `apps/bare`, `apps/sandbox` and
+`apps/render-harness`. `apps/editor` is deliberately absent until the editor
+phase, and the workspace `Cargo.toml` says so where someone looking for it would
+go. Samples are kept in the repo, kept building in CI, and kept small — a sample
+that grows features beyond its charter gets its scope cut, not the engine bent
+around it.
 
 ## Why multiple small samples instead of one big one
 
@@ -61,6 +65,14 @@ competitive game never ships to a browser. 16 is a **tech demo with no game in
 it at all** — matchmaking, rating and ranked auth in isolation, which is the
 only way a matchmaker can be evaluated without a real playerbase.
 
+**Where the ladder stands.** Every sample on it except towers (07) and arena
+(08) has an `apps/` crate that builds for `wasm32` and ships on the demo site;
+`web/build.sh`'s `DEMOS` array is the list, and it is the authority — a sample
+missing from it is a sample nobody visits. What each of those crates has and has
+not built is in its own doc's status section and, fresher than either, in the
+module header of its `src/lib.rs`. **towers and arena have no `apps/` directory
+at all**, and each doc says what it is waiting on.
+
 **Where multiplayer lives — and where it does not.** Native sessions are LAN:
 direct connect by IP, or a lobby browser over local-network host discovery.
 **Every web build is single player, without exception.**
@@ -110,9 +122,14 @@ without re-deriving it. It is not in the plan today.
 6. **Scope charters are hard caps.** Each sample doc lists non-goals; feature
    ideas beyond them go to the flagship (07) or die.
 7. **Web demo on the ladder.** Every game sample builds for wasm and deploys to
-   the GitHub Pages demo site as part of its exit criteria (viewer exempt as a
-   native tool; web build stretch). A sample that breaks the wasm build breaks
-   CI.
+   the GitHub Pages demo site as part of its exit criteria. A sample that breaks
+   the wasm build breaks CI.
+
+   **Viewer's exemption was taken and then given back.** It was exempt as a
+   native tool with a web build as a stretch; `apps/viewer/src/web.rs` and
+   `web/demos/viewer/` exist, viewer is in `web/build.sh`'s `DEMOS`, and the
+   page opens a document the module carries plus any `.glb` dropped onto the
+   canvas. So the ladder has no exemption left standing.
 
    **The two flagships are built web slice first, native full version after.**
    breach (11) and shard (15) each ship a reduced single-player cut to the

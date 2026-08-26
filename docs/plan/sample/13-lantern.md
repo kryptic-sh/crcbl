@@ -200,12 +200,25 @@ which is the configuration a general solve would change most.
 ### Still owed at this milestone, and where
 
 Recorded in `docs/backlog.md` rather than here: ray tracing and the acceleration
-structures, the `[engine.video]` layer of the toggle resolution order (the
+structures, and the `[engine.video]` layer of the toggle resolution order (the
 programmatic one is built and is what both the `--no-*` flags and the pause
-menu's rows drive, and the camera one is the in-scene monitor's), the Pages web
-demo, and a CI leg that runs the golden suite. The monitor itself left four
-findings in `crcbl-render` — duplicate imports, an undeclared page read, one
-view per renderer and one view per offscreen run — all of them in the backlog.
+menu's rows drive, and the camera one is the in-scene monitor's). The monitor
+itself left findings in `crcbl-render` — duplicate imports, an undeclared page
+read, one view per renderer and one view per offscreen run — all of them in the
+backlog.
+
+**Two things this list used to carry are built, and saying they are not was the
+worse error.** The **Pages web demo** exists: `apps/lantern/src/web.rs` is the
+`wasm32` front end, `web/demos/lantern/` is its page, and `lantern` is a row in
+`web/build.sh`'s `DEMOS` array — which is the charter's own reason for wanting
+it, since a browser has no ray query and the page is therefore the one place
+`LightingPath::Rasterised` can be looked at without building anything. And the
+**CI leg runs**: `.github/workflows/ci.yml` has a
+`Draw lantern's room on lavapipe` step running
+`apps/lantern/tests/run-lantern-golden.sh` under the validation layers. Its own
+comment records why it was added — the golden existed and nothing ran it, so it
+passed on three configurations on the author's machine and on none in CI, which
+is a check that cannot fail where it matters.
 
 ## Milestones
 

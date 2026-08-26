@@ -56,6 +56,35 @@ with it.)
 3. (After stage 6) tuning constants from a data file — first use of data-driven
    balance outside scenes.
 
+## Where this stands
+
+**Milestones 1 and 2 are built.** `apps/asteroids` has the ship that turns,
+thrusts and wraps, bullets that sweep, rocks in three sizes that split twice,
+waves that grow, and score / lives / game over / restart — with `.crpix` art
+baked by `build.rs` and drawn through `SpriteRenderer` with `SampleMode::Pixel`,
+start / pause / game-over menus, rule 4's debug panel, three spatial cues (the
+engine, the gun, a rock coming apart) with the listener at the camera, and a
+best score in the platform config directory or the browser's OPFS.
+`web/demos/asteroids/` is its page and `asteroids` is a row in `web/build.sh`'s
+`DEMOS`.
+
+**This was the first sample where a drawn thing turns**, and answering that took
+a decision the earlier samples never had to make: an angle integrated per tick
+and drawn per frame stutters, and an angle wraps, so the renderer interpolates
+it the short way round. `lerp_angle` in `apps/asteroids/src/game.rs` carries the
+argument.
+
+**Milestone 3 — tuning constants from a data file — is not built.** The
+constants are still in `apps/asteroids/src/game.rs`. That milestone is written
+as "(After stage 6)" and there is no `.scn/` directory anywhere in this tree, so
+it is waiting on the asset stage rather than on this sample.
+
+The soak's half of the exit criteria has a home in the suite:
+`hundreds_of_spawns_and_deaths_leak_nothing` asserts entity and pool counts
+return to baseline. What has not been run is the **10-minute** scripted soak the
+criterion actually names, and the inspector-open stale-handle session has no
+inspector to open — that is a debug-tools gap, not this sample's.
+
 ## Exit criteria
 
 - 10-minute soak with input script: entity/pool counts return to baseline

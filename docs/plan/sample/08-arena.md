@@ -16,8 +16,16 @@ MVP netcode _cannot_ serve well — it exists to force the post-MVP netcode work
   buffer.
 - **Interest management / delta compression**: 8 players + projectile spam
   produces the bandwidth numbers horde only simulated.
-- **Network condition tooling**: simulated latency/jitter/loss as a first-class
-  engine debug feature (transport-seam shim), driven by needing it daily here.
+- ~~**Network condition tooling**: simulated latency/jitter/loss as a
+  first-class engine debug feature (transport-seam shim), driven by needing it
+  daily here.~~ **Already built, and not by this sample.**
+  `crates/crcbl-net/src/condition.rs` wraps any `Transport` and introduces
+  configurable packet loss, latency, jitter, duplication and reordering from a
+  deterministic seed, so the same seed always produces the same impairment
+  pattern — with the impairments applying to the unreliable send, since the
+  reliable one promises ordered lossless delivery over a lossy wire underneath.
+  It arrived without arena to drive it, so this bullet is a dependency this
+  sample can **use** rather than one it pulls in.
 - **Prediction-aware game code ergonomics**: what does a system author write to
   opt into prediction? Arena answers with real code; the answer becomes engine
   docs.
@@ -60,6 +68,31 @@ voice/chat beyond a minimal text line, ranked anything.
 internet. That is better for regression testing, because it is reproducible and
 runs in CI; it also means **no number produced here describes real internet
 conditions**, and none should be quoted as if it did.
+
+## Where this stands
+
+**There is no arena crate under `apps/`**, and arena is not a row in
+`web/build.sh`'s `DEMOS` array. "Not started before MVP ends" is still the
+standing decision, so this is the plan holding rather than a slip.
+
+**The dependency chain, from the outside in.** Milestone 1 — the
+interpolation-only version that is the recorded "before" — needs a real wire
+between two machines, and `crcbl-net` ships `InMemoryTransport` and nothing
+else: no UDP transport, no LAN host discovery. Milestones 2 and 3 need
+prediction, reconciliation and server-side rewind, which
+`docs/plan/26-prediction.md` designs and nothing implements. Milestone 4's
+eight-client soak needs both, plus a `Server` that holds more than one transport
+and one session manager, which it does not.
+
+**One ingredient is already in hand**, and it is the one this doc expected arena
+to force: the condition simulator above. The other half arena would have driven,
+bots, has a partial precedent — `apps/breach`'s practice map walks three of them
+on authored waypoint routes through `CharacterController`, deliberately with no
+navmesh, because `docs/plan/24-navigation.md` names **arena's** bots as
+navigation's forcing function rather than breach's. That ordering is unchanged.
+
+Nothing in this document has been contradicted by a build, because there has
+been no build.
 
 ## Exit criteria
 

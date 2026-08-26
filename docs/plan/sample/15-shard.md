@@ -104,6 +104,59 @@ subject is a lit 3D world. Rules 4 and 12 apply in full — path reporting matte
 here more than anywhere, because this is the sample where the fallback paths
 carry real content.
 
+## Where this stands
+
+**Milestone 1's first slice is built.** `apps/shard` is a torch-lit interior
+zone walked in an isometric-ish third person, running natively and in a browser
+from one build; `web/demos/shard/` is the page and `shard` is a row in
+`web/build.sh`'s `DEMOS` array. It is what this doc's milestone 1 exists to be:
+the **load** on the fallback paths rather than a fixture for them —
+`apps/lantern` and `apps/quarry` are the acceptance fixtures, and this is a zone
+of modular tiles with a torch over every brazier and a spot over the shrine,
+more lights than there are shadow slots to give them, screen-space occlusion and
+reflections, and a baked irradiance volume, all in a dark interior where a
+mistake in any of them shows. It also gives the Pages site the 3D flagship this
+doc asks for; every browser figure recorded before it came from a 2D sample.
+
+**Every renderer feature it leans on already existed** — shadows, effects and
+probes in `crates/crcbl-render/` — and none of them gained a line on shard's
+behalf. Nor did `crcbl-store`: the save is `crcbl::store::save::SaveWriter`'s
+container, the platform data directory natively and OPFS in a browser, and what
+is this sample's is the payload inside the one sector and which directory it
+goes in. Nor did `crcbl-phys`: `apps/shard/src/camera.rs` is a **third** rig on
+the one `CharacterController`, after `apps/puppet`'s orbit and `apps/breach`'s
+first person, and it is the one whose camera the player barely controls — fixed
+elevation, fixed distance, a yaw that moves in quarter turns.
+
+**The zone is one authored table and everything else is read off it**: a floor
+slab per open tile, a solid block per wall tile, pillars, a dais, braziers, and
+doorways with holes through them. The meshes and the colliders walk the _same_
+grid, so what looks solid is solid. There is no roof, because the camera is
+above one. This is the modular kit this doc asks for deliberately — the pieces
+`docs/plan/25-lod.md`'s border locking has to hold together — at its first size.
+
+**Four of milestone 1's six verbs are here: explore, fight, save, resume.**
+There is no item, no rarity, no experience and no inventory grid — and the save
+format has **no field reserved for one, deliberately**, because who forces
+`docs/plan/34-inventory.md`'s kit is an open question in `docs/backlog.md` and a
+reserved field would answer it by accident. So milestone 1's "grid-inventory kit
+gets a second consumer" claim is entirely unstarted, and the exit criterion that
+depends on it with it. There is no sector streaming and no networking of any
+kind — the plan says milestone 1 ships none, and the loopback here is sample
+rule 2 rather than a network. The golden frames per `GeometryPath`, the recorded
+browser budget and the peak wasm memory figure are all not taken.
+
+**One absence is in the picture rather than in the feature list: the character
+is a capsule.** It is the _same_ capsule `crcbl::phys::CharacterConfig` sweeps,
+so the figure on screen is the shape the physics moved; an authored rig would be
+a second character system with no animation to drive it, and `apps/puppet` is
+the sample that owns that seam.
+
+**Milestone 2 is entirely unstarted**, and its dependency is outside this
+sample: `crcbl-net` ships `InMemoryTransport` and nothing else, so there is no
+wire for a dedicated server, interest management or sector-scoped replication to
+run over.
+
 ## Exit criteria
 
 **Milestone 1**

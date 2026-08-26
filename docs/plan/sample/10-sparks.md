@@ -45,6 +45,15 @@ hand-drawn — the format is a PNG baker and does not care who samples the resul
 — but that is an authoring convenience here, not the rule. Rule 4's debug panel
 applies, and a particle workbench without live frame timing is not a workbench.
 
+**Exempt from sample rule 2** (client/server authority), on topic 20's own
+grounds rather than on this sample's convenience. `docs/plan/20-particles.md`
+opens by saying visual-only VFX are "client + GPU … zero gameplay reads, zero
+readbacks", and that "gameplay-relevant particles are not particles — they're
+entities". So `apps/sparks` opens no `World` and stands up no
+`InMemoryTransport`: an effect here is fire-and-forget presentation, and putting
+one behind a wire would be demonstrating the wrong thing.
+`apps/sparks/src/show.rs` makes the same argument where the schedule is written.
+
 ## Milestones
 
 1. Gallery with billboards + curves (topic 20 slice 1 proof).
@@ -52,6 +61,45 @@ applies, and a particle workbench without live frame timing is not a workbench.
 3. Workbench param UI + curve/gradient widgets (feeds back into topic 7 widget
    set).
 4. Stock library polish + Pages demo.
+
+## Where this stands
+
+**Milestone 1 is built, and the two claims it exists for are met.** A simulated
+particle becomes an instance and rides the stage 3 GPU-driven pipeline that was
+already there — there is no particle shader in this sample and no pass of its
+own, which is `docs/plan/20-particles.md`'s "inject transforms into the stage 3
+instance path" taken literally. And the **hostile effect is held at its share**:
+`apps/sparks/src/effects.rs`'s `spam` is on the page with its refusal counter
+beside it, never a frame-rate cliff. The show runs itself — nothing reads a key,
+which the browser gate depends on, because a count it watches rise and fall has
+to do so without anything reaching the page or the check would be testing the
+input path instead of the simulation.
+
+**Colour is quantised, and that is a finding rather than a shortcut.** The
+instance path carries a mesh, a material row and a transform, and no
+per-instance tint — so colour over lifetime reaches the screen as
+`effects::PALETTE_STEPS` baked material rows per effect, each particle drawn
+through the row nearest the colour the simulation gave it.
+`apps/sparks/src/effects.rs` argues it and `docs/backlog.md` carries what
+changing it would cost. It is deliberately not fixed here, because the hard cap
+above is that the gallery exercises what topic 20 ships rather than smuggling
+engine features in behind it.
+
+**The gallery is two stock effects, not the nine the Scope names** — impact
+sparks and a smoke puff, plus the hostile one. Every render mode past plain mesh
+particles is unbuilt: no billboards, flipbooks, soft particles, ribbons or
+trails, no depth collision, no sorting. So is the whole authoring loop — no RON
+effect assets and therefore no hot reload, no workbench, no sliders and no curve
+or gradient widgets. And the step **runs on the CPU**, which is the staging
+`docs/plan/20-particles.md` asks for and not its destination. `docs/backlog.md`
+carries each with what it would take.
+
+**One exit criterion names a tool that does not exist.** There is no `vfx`
+subcommand on the `crcbl` CLI — `crates/crcbl-cli/src/args.rs` dispatches `new`,
+`run`, `build`, `screenshot`, `replay`, `crpix`, `lod`, `import`, `bench`, `sim`
+and `settings`, and nothing else. `apps/sparks` also has no `tests/` directory,
+so there are no golden frames per effect either. Both are owed together: the
+golden frames are what the subcommand would exist to produce.
 
 ## Exit criteria
 

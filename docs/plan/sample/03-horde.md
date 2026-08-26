@@ -86,7 +86,14 @@ died, health potions that a brute leaves behind now and then, and a "pick 1 of
 over the shared `crcbl_render::menu` art, with the debug panel on; a tiled grass
 ground under all of it with trees and bushes scattered over it; six spatial
 cues, the longest run kept between sessions, and the browser demo at
-`https://crcbl.kryptic.sh/demos/horde/`. 161 tests.
+`https://crcbl.kryptic.sh/demos/horde/`.
+
+**The shipped default enemy cap is `DEFAULT_MAX_ENEMIES`, not the ten thousand
+this doc's exit criteria name**, and `--max-enemies` is why raising it needs no
+rebuild. That constant's own doc in `apps/horde/src/game.rs` argues the decision
+and is the place to change it; the measurements below are all taken with
+`--prefill`, which stages a field directly rather than waiting on a spawner that
+would take ten minutes to reach ten thousand.
 
 **The potion is a second `PickupKind`, not a second population.** Both pickups
 share one `Vec`, one entity index, one `MAX_PICKUPS` ceiling and one trigger

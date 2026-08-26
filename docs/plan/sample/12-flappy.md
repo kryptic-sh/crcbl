@@ -92,11 +92,17 @@ same hand, deterministically, so both "a new run is a new course" and "a
 recorded script replays exactly" hold at once.
 
 **Retrofitted at P4B**, along with breakout: the art non-goal was withdrawn and
-the game is drawn as sprites. Still owed, and shared with breakout: the debug
-panel (sample rule 4) once its frame-timing core lands. Flappy is one of the two
-samples that will show it with no network module, because it runs over
-`InMemoryTransport` — which is the check that the panel is modular rather than
-assembled around a connection.
+the game is drawn as sprites.
+
+**And the debug panel landed, which this section used to record as owed.** Rule
+4's panel is on, `F3` toggles it, and `HostedGame::debug_sections` in
+`apps/flappy/src/app.rs` contributes two modules and no third: the course, which
+is the treadmill's entity churn, and the audio, whose emission counter existed
+before the section that reads it. There is deliberately **no network module** —
+flappy runs over `InMemoryTransport` and has no connection to report on — and
+that absence is the point rather than a gap: it is the check that the panel is
+modular rather than assembled around a connection. Breakout is the other half of
+that check.
 
 ## Exit criteria
 

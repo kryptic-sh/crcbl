@@ -66,9 +66,17 @@ interpolation, no tick — which the protocol has never been driven by.
   skill of the participants. It is deliberately not a game, and it is
   deliberately not fair — an outcome that always favours the higher rating would
   make convergence trivial and prove nothing.
-- **Synthetic population driver**:
-  `crcbl bracket sim --seed N --players M --matches K`, headless, deterministic,
-  reporting convergence and queue-time distributions.
+- **Synthetic population driver**: headless, deterministic, reporting
+  convergence and queue-time distributions. **Built, and it is a subcommand of
+  the sample rather than of the engine CLI** —
+  `bracket sim [--seed N] [--players N] [--ticks N]`, routed in
+  `apps/bracket/src/main.rs` before the ordinary argument parser is reached, so
+  a word that parser does not recognise is genuinely unknown rather than a
+  command it forgot about. An earlier draft of this line wrote it as
+  `crcbl bracket sim … --matches K`; there is no `bracket` subcommand on the
+  engine CLI and the run length is in **ticks**, not matches, because a tick is
+  what the matchmaker advances and the match count is an output of the run
+  rather than an input to it.
 - Web demo on the Pages site, single player like every other web build: client
   and matchmaking server in one wasm module over `InMemoryTransport`, queueing
   against the synthetic population. The matchmaker and the rating curve are
@@ -96,6 +104,61 @@ nothing else produces.
 3. Signed results: identity, result signing, rejection paths shown to fail.
 4. Synthetic population driver + convergence assertions in CI.
 5. Ladder persistence, restart survival, and the single-player web demo.
+
+## Where this stands
+
+**Milestone 1's model, milestone 4's driver and milestone 5's web demo are
+built.** `apps/bracket` has the queue with its widening tolerance, the Elo
+ratings and the match stub, a UI-only client built on the draw list's
+primitives, and `bracket sim` for the headless population soak;
+`web/demos/bracket/` is the page and `bracket` is a row in `web/build.sh`'s
+`DEMOS` array. Like `apps/sparks`, the demo takes **no input at all** — what a
+visitor sees is a ladder sorting itself out and nothing they did — and every
+decision, who queues this tick and who wins, comes from a hash over the seed and
+a counter, so a run is reproducible from its seed on any platform.
+
+**Two design points worth not re-deriving.** Pairing adjacent players on a
+rating-sorted queue is the cheap form of the assignment problem and not an
+approximation of it: the total gap over pairs drawn from a line is minimised by
+pairing adjacent points, so no amount of searching finds a materially better
+set, and it is `O(n log n)` for the sort — which is what lets thousands run in
+CI. And `Rating` has **no constructor taking arbitrary points**: one starts
+provisional and moves only through a step bounded by the K-factor, so a
+non-finite rating has nowhere to enter from. That is the contract enforced
+rather than documented; an `f64` parameter would have let a NaN in and it would
+have spread through every later match.
+
+**The convergence plot is on the page and it is the sample's actual argument** —
+a rating system nobody can falsify is a number generator, so the distance
+between what the ladder believes and what the players are really worth is drawn,
+falling, on screen.
+
+**Milestone 2 is blocked, and the blocker is narrower than "there is no UDP".**
+There is no UDP transport and no LAN discovery — `crcbl-net` ships
+`InMemoryTransport` and nothing else — but that is not what stands between this
+sample and the thing it exists to prove. The demo runs its `Sim` directly rather
+than over a transport at all, and routing it through a loopback **as things
+stand would be worse than not doing it**: it would put the matchmaker behind a
+tick-shaped input channel and look like the claim while not being it. Queueing,
+leaving the queue and reporting a result are **commands** — each a request that
+must be answered once and stay answered — and `crcbl-server`'s receive loop has
+an arm for `ClientToServer::Command` whose body is empty, with a comment saying
+so in as many words. So the missing piece is a way for a `GameModule` to receive
+a command and reply to it, and it is engine work rather than sample work.
+
+The multi-client half is absent for a second, independent reason: `Server` holds
+one transport and one session manager, so "many connections, low bandwidth" has
+no implementation to demonstrate. A browser demo could not show it either way,
+since both ends live in one wasm module — it belongs with a native milestone.
+
+**Rule 2 is therefore owed here rather than exempted.** This doc grants no
+exemption from it and should not be read as taking one: `apps/bracket` opens no
+`World` and implements no `GameModule` today, and the exit criteria below assume
+it eventually will.
+
+**Milestone 3 — identity, result signing and the rejection paths — is
+unstarted.** `crcbl-net`'s `auth` module carries the per-session MAC every
+post-handshake message takes, which is the ingredient; nothing signs a _result_.
 
 ## Exit criteria
 

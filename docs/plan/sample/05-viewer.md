@@ -31,9 +31,18 @@ usable tool, and the asset pipeline's acceptance test.
 
 ## Non-goals (hard cap)
 
-Animation playback (post-MVP engine feature), material _editing_, export, scene
-composition (that's the editor), PBR environment lighting/IBL beyond the single
-light + exposure.
+~~Animation playback (post-MVP engine feature)~~ — **withdrawn**: that engine
+feature landed, so the cap was protecting nothing. `crcbl-anim` and
+`crcbl_render::skinning` ship, and `apps/viewer/src/anim.rs` converts a
+document's first skin and first clip into what `crcbl::anim` poses and samples
+it every frame, looping; `B` draws the posed skeleton over the model. The
+conversion is the **application's**, deliberately, because `crcbl-anim` does not
+depend on the glTF importer. What the cap was actually protecting — that the
+viewer does not become an animation _tool_ — still holds: there is no timeline,
+no clip selection and no retargeting.
+
+Still capped: material _editing_, export, scene composition (that's the editor),
+PBR environment lighting/IBL beyond the single light + exposure.
 
 **Exempt from sample rule 11** (`.crpix` art through the sprite pass): the whole
 point is that the viewer shows _the user's_ asset, unadorned. Authored art in
@@ -46,6 +55,29 @@ the inspector, and the panel is the same surface.
 1. Load + orbit + grid (stage 6 exit demo).
 2. Panels + debug views (stage 7 exit ladder).
 3. Hot-reload-on-reexport demo recorded (doubles as engine marketing).
+
+### Where this stands
+
+**Milestones 1 and 2 are built**, and milestone 3's mechanism is built while its
+recording is not. `apps/viewer` takes a path, reads it through the asset seam,
+converts it, frames the camera on it, turns it under the mouse and draws it
+under a single directional light over a grid floor; `I` shows what the document
+holds and what the conversion could not bring in, `W` draws it in wireframe, `N`
+in world-space normals, and `-`/`=` and the `ESC` panel's slider step the
+exposure. `apps/viewer/src/watch.rs` is the re-export loop: a `stat` four times
+a second rather than a filesystem-notification dependency, with a settle delay,
+because an exporter writes a `.glb` progressively and every platform API reports
+a re-export as a burst that has to be debounced back into one anyway. What
+milestone 3 still owes is the **recorded** demo.
+
+**And it runs in a browser**, which the ladder's rule 7 filed as a stretch.
+`apps/viewer/src/web.rs` is the `wasm32` front end and `web/demos/viewer/` is
+its page. A tab has no path to type and no directory to root an asset source at,
+so it opens a document the module generates and compiles into itself — and it
+takes one the visitor chooses: a `.glb` or `.gltf` dropped on the canvas is
+opened over a `MemorySource`, the same call the built-in document takes. A file
+that will not parse keeps the frame that is on screen and puts the loader's own
+sentence on the status bar, because a page has no exit code to fail with.
 
 ## Exit criteria
 

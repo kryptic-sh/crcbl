@@ -52,6 +52,40 @@ This is a physics acceptance test wearing a rocket costume.
 3. Moon transfer: SOI transition + sector crossing (frame hierarchy).
 4. Land + return; polish readouts.
 
+## Where this stands
+
+**Milestones 1 and 2 are built**, and none of the physics is this sample's own.
+`apps/orbit` flies the ascent, reaches a stable orbit and timewarps along it
+with the auto-drop, over an `InMemoryTransport` with the flight as a
+`GameModule` the authoritative server owns — rule 2 has no exemption for a
+physics demo and this sample takes none, so timewarp is a command the client
+sends rather than a rendering trick. The pieces underneath are all
+`crcbl-phys`'s: `PointGravity`, `Atmosphere` and `AtmosphericDrag` under
+`SemiImplicitEuler` for live integration, `Frames` and `sphere_of_influence` for
+the reference-frame hierarchy, and `propagate` for the on-rails arc. What is
+this sample's is the vehicle, the controls and the flight plan.
+
+**The planet is sized for a game rather than for Earth**, on Kerbal Space
+Program's own reasoning — orbital velocity at Earth is 7.8 km/s and a real
+ascent is eight minutes of burn, which is a fixture nobody would fly twice.
+`apps/orbit/src/game.rs` argues it where the constants are.
+
+**And it flies itself until the player takes the controls.** A page that has
+just loaded takes no input, and a rocket standing on a pad is indistinguishable
+from a stopped loop, so a script flies the gravity turn and the circularisation
+burn and the first thing the player asks for ends it for good — the same
+arrangement `apps/viewer` and `apps/puppet` use.
+
+Not built: **milestones 3 and 4.** The moon's frame exists and a ship that
+reached it would be handed over, but nothing flies there yet. The bodies are
+drawn as a **map view** over the flight instruments rather than in 3D, so the
+Scope's "no visible seam or jitter" claim has not been looked at in a 3D frame.
+And the `.crpix` art rule 11 asks for is not there — `apps/orbit` has no
+`build.rs` and no `assets/`, and the navball-lite, the prograde/retrograde
+markers and the apo/peri glyphs are drawn as rectangles, polylines and text.
+That is rule 11 owed rather than exempted; this doc claims no exemption and
+should not be read as taking one.
+
 ## Exit criteria
 
 - Full mission (surface → orbit → moon landing → return) completable by a

@@ -25,6 +25,23 @@ mesh can still be visibly wrong at a seam.
   material boundaries preserved, border locking on a tiling mesh, skinned
   weights carried through collapses. Golden meshes for determinism, and a human
   looking at the seams for the part determinism cannot catch.
+
+  **One of those four is implemented and the other three are not**, and this
+  bullet used to read as though all four were the thing being proven.
+  `crcbl_scene::simplify`'s own header is the account: **position borders are
+  locked** — every vertex on an edge used by any number of faces other than two
+  is refused as a collapse endpoint, so a tiling mesh keeps its boundary loop
+  exactly, and not optionally. **UV and normal seams are not constrained**: a
+  seam is a discontinuity in an attribute the function is never handed, so a
+  seam split into coincident position vertices is locked only as a side effect
+  of the index topology and a seam that shares positions drifts. **Material
+  boundaries are not constrained** either, for the same reason — material
+  assignment is per primitive and never reaches the function. **Skinning weights
+  are not carried through a collapse.** So what this sample can prove today is
+  border locking and determinism; the rest is what it would prove once
+  `docs/plan/25-lod.md`'s attribute slice lands, and until then it is a
+  requirement rather than a result.
+
 - **Hysteresis kills flicker.** A slow dolly past the switch distance shows no
   boundary popping, on every path.
 - **Amplification-stage culling is doing work**: per-cluster frustum and
@@ -70,6 +87,40 @@ charter's answer rather than an oversight.
 3. `IndirectCount` and `IndirectPerBatch` paths on the same content, forced-path
    comparison.
 4. Skinned and tiling cases; Pages demo with recorded browser budget.
+
+## Where this stands
+
+**Milestones 1 to 4 are built**, including the three overlays milestone 2 asks
+for. `apps/quarry` generates the face, describes it both as one flat mesh and as
+a cluster hierarchy, and `apps/quarry/tests/device/` draws both through the real
+renderer on an offscreen context — so `MeshShader` rendering the scene is
+asserted rather than looked at. Per-cluster selection over that hierarchy is
+asserted too (the face draws from more than one level at once and no level
+dominates the cut), the fixed dolly runs on one renderer so hysteresis is in
+play, and all three `GeometryPath` values draw the face by subtracting features
+from one adapter, with six committed goldens — three paths at each end of the
+dolly. Milestone 2's overlays are `--lod-view` (tint per DAG level), `--heatmap`
+(shade by the projected error selection judged the cluster on) and the freeze
+key that pins the eye the cut was chosen from; the first two are mesh-path only,
+because a per-cluster number exists only where selection is per cluster.
+Milestone 4's tiling piece is there — two tiles decimated apart still meet, bit
+for bit — and so is the window, with three cameras on the pause menu,
+`--lod-budget`, rule 12's path forcing and rule 4's panel.
+`apps/quarry/src/web.rs` and `web/demos/quarry/` are the browser page; it opens
+on the animated dolly, because a page showing one held frame proves nothing
+about a cut that follows the camera.
+
+**Still owed from milestone 4: the skinned prop, and the blocker is narrower
+than "the engine cannot skin".** It can: `crcbl_render::skinning`, `crcbl-anim`
+and `apps/puppet` all ship, and a golden holds the pose a palette asks for. The
+blocker is that **skin weights do not survive a decimation collapse** —
+`crcbl_scene::simplify`'s quadric is over positions, and a collapse has no rule
+for the weights of the vertex it removes. Nothing about this sample unblocks it;
+`docs/plan/25-lod.md` puts it in the same slice as the rest of the attribute
+work.
+
+**Still owed from the exit criteria**: the recorded browser budget, and the two
+judgements the section below names as owed rather than met.
 
 ## Measured
 

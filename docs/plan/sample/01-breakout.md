@@ -65,11 +65,22 @@ Art is **not** a non-goal and was never meant to be one — see sample rule 11.
 The earlier "untextured quads" reading of this cap is what put forty bricks
 through the UI draw list, which became S1B finding 1.
 
-## Still owed
+## Where this stands
 
-The debug panel (sample rule 4), once its frame-timing core lands. Breakout is
-the other sample with no network module to show, for the same reason flappy is:
-it runs client and server over `InMemoryTransport`.
+**The debug panel landed, and this section used to say it had not.** Rule 4's
+panel is on, `F3` toggles it and `--debug-overlay` / `--no-debug-overlay` set
+its starting state; `HostedGame::debug_sections` in `apps/breakout/src/app.rs`
+contributes exactly one module, the board. There is no network module — breakout
+runs client and server over `InMemoryTransport`, which is the half of the
+panel's modularity claim this sample and flappy are the check on — and no audio
+module either, because `apps/breakout/src/audio.rs` banks two cues and plays
+them and keeps no counter a row could read. State invented to fill the panel
+would be the panel bending the game rather than reporting on it.
+
+Still owed from the milestones below: **milestone 3, the layout from a file.**
+The brick grid is still in code. There is no `.scn/` directory anywhere in this
+tree and no `apps/editor`, so both halves of that milestone are waiting on
+things outside this sample.
 
 ## Milestones
 

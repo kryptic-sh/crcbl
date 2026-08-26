@@ -95,8 +95,17 @@ here it is the dogfood case: the panel is built out of these widgets.
 
 Not built, and each waiting on the styling system rather than on this sample:
 the CSS subset and its stylesheets, the theme switcher, the gallery page, the UI
-inspector, hot reload, and per-theme golden frames. The wasm front end and the
-Pages demo are deferred with them — see `docs/backlog.md`.
+inspector, hot reload, and per-theme golden frames — see `docs/backlog.md`.
+
+**The wasm front end and the Pages demo are not among them, and this section
+used to say they were.** `apps/hud/src/web.rs` is the browser entry point,
+`web/demos/hud/` is its page, and `hud` is a row in `web/build.sh`'s `DEMOS`
+array. The demo takes **no input at all**, which is what makes it worth
+publishing: what a visitor watches is the ticker and the widget system and
+nothing they did. `apps/hud/tests/golden/panels.png` is a golden frame, and
+`.github/workflows/ci.yml` runs `apps/hud/tests/run-hud-golden.sh` against
+lavapipe — so there is a visual regression surface already; what is missing is
+the **per-theme** part of it, because there are no themes yet.
 
 ## Exit criteria
 

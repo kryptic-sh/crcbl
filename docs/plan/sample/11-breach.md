@@ -154,6 +154,73 @@ monetization anything.
 6. **Spectator + casting**: observer POV switching, kill review with rewind viz;
    match replays archived.
 
+## Where this stands
+
+**Milestone 0 is built and shipped.** `apps/breach` is the firing range **and**
+the bot practice map, single player, running natively and in a browser from one
+build; `web/demos/breach/` is the page and `breach` is a row in `web/build.sh`'s
+`DEMOS` array. `MapChoice` picks between the two maps, `--map` sets it on a
+command line and a page sets it through `__crcbl_breach_map`, so
+`/demos/breach/` is the range and `?map=practice` asks for the other one.
+
+**What it proves, and it is narrower than milestone 0's line above suggests.**
+One thing above all: `crcbl::phys::CharacterController` is **camera-agnostic**.
+`apps/puppet` drives it from a third-person orbit camera and this sample drives
+the same controller from a first-person camera; neither the controller nor
+`crcbl-phys` gained a line on breach's behalf. One demo saying "the controller
+does not know which camera is watching" is a comment; two demos driving it from
+cameras that share no code is evidence, and `apps/shard` is now a third. Beside
+it: **a hitscan weapon is a ray into the same world the capsule sweeps against**
+— `crcbl::phys::PhysicsWorld::cast_ray` is the whole of the pistol, and nothing
+in this sample intersects anything itself.
+
+**The firing line is not a rule in the game code.** It is a kerb over the
+controller's own `step_offset`, so the controller refuses it; nothing in the
+game module checks where the player is standing. Every surface of both rooms is
+a `crcbl::greybox` primitive over a constant the colliders are written from too,
+so what looks shootable is shootable.
+
+Rule 2 is taken without exemption — the walk and the shot are a `GameModule` the
+authoritative server owns over an `InMemoryTransport`, with the camera the one
+thing off that side because it is presentation. Rule 12 reports the three
+selectors on the panel, the heartbeat and the summary line; a browser has no
+mesh stage and no ray query, so a visitor's frame goes through
+`IndirectPerBatch` and `LightingPath::Rasterised` **by construction**, which is
+the whole reason milestone 0 is built before the native game rather than after
+it. And it shoots itself until somebody steps up to the line: the range swings
+onto each lane in turn and fires from the first tick, and the first movement key
+or trigger pull ends that for good and resets the range.
+
+**The practice map's bots have no navmesh and no pathfinding**, deliberately.
+They walk authored waypoint lists through the same `CharacterController`, notice
+the player with the same `cast_ray` the pistol is, and shoot back on a fixed
+cadence with that same pistol. `docs/plan/24-navigation.md` is a post-MVP
+subsystem whose own text names `arena`'s bots as its forcing function rather
+than breach's, so borrowing it here would be starting a subsystem out of order.
+
+**Milestone 0 is two maps and nothing else.** The bullets in that milestone
+naming first-person rendering (29) and the weapon kit (38) are **not** met:
+there is one hitscan pistol and no ballistics, penetration, armour, ADS, recoil,
+reload or viewmodel — so there is no viewmodel pass, no magnified optic and no
+1P/3P sync to speak of. No inventory, no rounds, no economy, and no networking
+past the in-memory loopback every sample has. The recorded browser budget and
+the golden frames per `GeometryPath` that milestone 0's exit criteria ask for
+are not taken either. Milestones 1 onward are all of that, and `docs/backlog.md`
+carries the list with what each would take.
+
+Two absences are visible in the picture rather than merely missing from the
+feature list, and both are deliberate. **The player is invisible**, because a
+first-person slice with no viewmodel has nothing to draw of them and a borrowed
+rig would be a second character system to maintain — on the practice map that
+goes past cosmetics, since a player with no body is a player the bots walk
+through. And **the rooms are lit by lamps rather than by a sun**, because they
+have ceilings.
+
+**Rule 11 is owed, not exempted.** The Scope above asks for `.crpix` art and
+names what for — the grid inventory's item icons, the buy menu, the killfeed and
+the scoreboard. Milestone 0 has none of those things to draw, so it has no
+`build.rs` and no `assets/`; the obligation arrives with the UI that needs it.
+
 ## Exit criteria
 
 **Milestone 0 (web slice)**
