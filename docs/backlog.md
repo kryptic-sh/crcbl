@@ -94,9 +94,12 @@ the no-store case silently does not persist.
 
 ### `crcbl-audio` has no bus concept at all
 
-`crates/crcbl-audio/src/mixer.rs` has a per-voice gain and one overall gain. A
-player cannot turn music down without turning gunfire down. The plan for a small
-fixed bus set is in `docs/plan/13-audio.md`; nothing is built.
+`crates/crcbl-audio/src/mixer.rs` has a per-voice gain and **nothing above it**
+— `Mixer` holds `voices`, `releasing`, `listener` and `next_id`, and
+`AudioSource::fill` sums the voices and clamps, applying no gain of its own. So
+a player cannot turn music down without turning gunfire down, and cannot turn
+the whole thing down either. The plan for a small fixed bus set is in
+`docs/plan/13-audio.md`; nothing is built.
 
 ## Recovered from the plan docs during the 2026-08-27 pruning pass
 

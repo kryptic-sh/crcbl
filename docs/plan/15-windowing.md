@@ -75,6 +75,146 @@ hint — pick nearest aspect-correct size in the `configure` round. **Letterboxi
 in-renderer is the universal fallback** (tiling WMs and compositors can force
 any size) and must always work.
 
+## The display settings catalogue (LOCKED 2026-08-27)
+
+The two modes above are one row of a much larger surface. Every game ships a
+display menu, and a menu whose key names are invented while it is being built is
+a `settings.toml` the next version cannot read — so the **whole** player-facing
+display surface is named here before it is built: one key each, its value
+domain, what it clamps, and what implements it today.
+
+Three documents share this surface and the split is deliberate:
+
+- **This one** owns the rows that are properties of a window, a surface or a
+  monitor.
+- [39-capabilities.md](39-capabilities.md) owns the graphics-quality rows and
+  the rule that decides how a level-valued key clamps, because the four-layer
+  resolution order those rows feed already lives there.
+- [14-persistence.md](14-persistence.md) owns the file — the `[engine.video]`
+  section, the spelling convention, and what happens when there is nowhere to
+  write it.
+
+The keys are `[engine.video]` keys and the spelling convention is **adopted, not
+invented**: `crcbl_store::settings`' own module example already writes `vsync`
+and `resolution = [1920, 1080]` in that section, so this catalogue follows it
+rather than competing with it. Bare snake_case nouns, no negated keys — the
+argument is on `crcbl::settings::VIDEO_KEYS`, which is the one place a key is
+spelled today.
+
+**Almost none of this is implemented, and the "Today" column says so per row**
+rather than once at the end. The name and the domain are fixed now anyway, which
+is [14-persistence.md](14-persistence.md)'s second catalogue rule: a key named
+late is a file every existing player has already written.
+
+| Key            | Domain                                                          | Today                                                                                                                                                                                                                            |
+| -------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_mode` | `"windowed"` \| `"borderless"`                                  | **The switch is built and the persistence is not.** `DisplayMode` and `Shell::set_mode` ship on every backend, and `crcbl::engine::ModeRequest::toggle` drives them from the engine's own pause menu. No key reads or writes it. |
+| `monitor`      | monitor **name**; absent means "wherever the window already is" | `Shell::monitors` and `DisplayMode::Borderless { monitor }` exist. No key reads it.                                                                                                                                              |
+| `resolution`   | `[width, height]` in device pixels — the **surface** extent     | The shell creates a window at a requested size and `SwapchainDesc::extent` is that size. No key reads it, and nothing resizes a window from a setting.                                                                           |
+| `present_mode` | `"auto"` \| `"vsync"` \| `"adaptive"` \| `"off"`                | `crcbl::engine::Pacing` implements all four and `GpuContext::set_pacing` applies them to a live swapchain. No key reads it.                                                                                                      |
+| `frame_limit`  | frames a second; `0` is unlimited                               | `crcbl::engine::FrameLimit` implements it. No key reads it.                                                                                                                                                                      |
+| `render_scale` | fraction of the surface extent — the **internal** extent        | **Nothing.** No upscale pass, no render-scale knob, and no internal target whose extent differs from the swapchain's. See the 2026-08-09 correction below.                                                                       |
+| `brightness`   | scalar multiplier applied in the tonemap pass                   | **Nothing.** `crcbl_shaders::tonemap::TonemapParams` carries `exposure` and no second field; brightness would be that field.                                                                                                     |
+| `hdr_output`   | `true` \| `false`                                               | **Nothing, and further from built than the rest** — see the HDR note below.                                                                                                                                                      |
+| `ui_scale`     | multiplier over the window's own scale factor, UI only          | **Nothing global.** `crcbl_ui::MenuStyle::pixel_art` takes a whole-number scale per menu; no crate applies a player-chosen factor to UI layout.                                                                                  |
+| `fov`          | vertical field of view in degrees                               | `crcbl_render::Camera::Perspective`'s `fov_y` is the value a game sets in code. No key reads it.                                                                                                                                 |
+
+### `resolution` and `render_scale` are two different resolutions
+
+This is the row a settings menu gets wrong, and getting it wrong is not a
+cosmetic bug: a player who asked for cheaper pixels gets a resized window
+instead, on a machine that was already struggling.
+
+- **`resolution` is the surface extent.** It sizes the OS window and therefore
+  the swapchain, and the whole frame — including the UI — is drawn at it. In
+  **borderless** it is not settable at all: borderless covers the monitor, which
+  is the display-mode table's own definition, so a `resolution` key present
+  alongside `display_mode = "borderless"` is ignored rather than obeyed.
+- **`render_scale` is the internal extent.** It sizes an offscreen target that
+  the scene and the post chain are drawn into, and the result is upscaled to the
+  surface. Nothing about the window changes. This is what makes the frame
+  cheaper: [18-render-features.md](18-render-features.md) orders the post stack
+  before the upscale precisely so its cost scales with the internal extent, and
+  composites the UI after it at native resolution.
+
+Both numbers can move independently and a menu must show them as two rows. The
+one thing they share is that **`render_scale` has no implementation on either
+side of the seam** — the 2026-08-09 correction below and topic 18's post-stack
+note both say so, and neither has moved.
+
+### Refresh rate is read, never written
+
+There is no `refresh_rate` key, and the reason is the locked two-mode decision
+above: **the engine never modesets.** A borderless window leaves the desktop's
+video mode untouched by definition, and a windowed one has never had a say. So
+refresh rate is an _observation_ — `MonitorInfo::refresh_millihertz`, with
+`refresh_hz` for display — belonging to the same family as
+`crcbl_hal::DisplayTiming`, which reports what the presentation engine is
+actually doing rather than what was asked for. A settings screen shows it; it
+does not offer it.
+
+Writing one would mean acquiring the display, which is exclusive fullscreen
+under another name, which is the thing this document dropped.
+
+### HDR output is a swapchain negotiation, not a brightness slider
+
+`hdr_output` gets its own key rather than being folded into `brightness`,
+because the two are not the same mechanism and never become the same mechanism.
+
+Note also that topic 18's "HDR" is **not** this: that is the internal working
+space — an `Rgba16Float` offscreen target that a tonemap pass resolves into an
+sRGB swapchain, and `SwapchainDesc::format`'s own doc comment says the swapchain
+format is "a display format, never a shading one". HDR _output_ means presenting
+in a wide colour space and letting the display do the mapping, which needs a
+colour space beside the format on both `SwapchainDesc` and `SurfaceCaps` —
+neither of which has one. That seam change is the first thing this key costs,
+and it is a HAL change, not a shell one.
+
+### The two rules this catalogue lives under
+
+Stated once each, in the document that owns them, and binding on every row here:
+
+1. **The `[engine.video]` layer may only clamp downward, and an absent key
+   clamps nothing.** [39-capabilities.md](39-capabilities.md) carries the rule
+   and what "downward" means for a key whose value is a level rather than a
+   boolean.
+2. **A key with no implementation still gets its name and its domain now.**
+   [14-persistence.md](14-persistence.md) carries the rule and the list of which
+   keys those are.
+
+The display rows are where rule 1 is least intuitive, so it is worth saying what
+it means here: `display_mode = "borderless"` does **not** force a game into
+borderless. It is a ceiling like every other key in the section — a game that
+opened windowed stays windowed, and a player who wants the switch uses the
+control that already exists for it. The key that has a genuine downward reading
+is `render_scale`, whose lower values are cheaper, and `resolution`, whose
+smaller extents are cheaper. `monitor`, `fov` and `ui_scale` have no ordering at
+all, which is discussed under rule 1 rather than here.
+
+### Considered and declined
+
+- **A per-monitor or per-adapter settings profile.** The idea is that unplugging
+  a laptop from a 4K display should restore the settings that machine last used
+  at 1080p. It is declined because it makes settings **two-dimensional** — every
+  key gains an implicit "under which hardware" axis, the file stops being the
+  diff-against-defaults that keeps it small, and the resolution order in
+  [39-capabilities.md](39-capabilities.md) grows a fifth layer whose input is a
+  monitor name that `MonitorInfo::name`'s own doc comment says is neither unique
+  nor stable across drivers. Nothing in this workspace has asked for it. Revisit
+  only with a concrete report of a player losing settings to a hardware change,
+  and revisit it as a _profile_ mechanism in
+  [14-persistence.md](14-persistence.md), not as a second axis bolted onto the
+  key space.
+- **`monitor` as an index rather than a name.** An index is stable until a
+  monitor is hotplugged, at which point every stored index means a different
+  screen. The name is not unique either — `MonitorInfo::name` says so — which is
+  why the key is a **hint**: resolve by name, fall back to the primary monitor,
+  and never fail a start-up over it.
+- **A `refresh_rate` key.** See above; it would be modesetting.
+- **Exclusive fullscreen** stays dropped. The Display modes section above has
+  the reason and the 2026-08-09 correction below records that `crcbl-dx12`
+  enforces it from beneath the seam.
+
 ## The seam: platform-agnostic by construction
 
 Same discipline as the HAL: **no platform type ever crosses the trait
@@ -248,7 +388,9 @@ Notes on the from-scratch protocol work:
   mechanism nothing can ask for — which is also why `HW_UPSCALE` is clear on
   macOS despite `CAMetalLayer` supporting exactly this. The seam addition it
   needs is a render-scale request on `Shell`, and that is a decision above this
-  crate.
+  crate. The settings catalogue above names the key it would be driven by —
+  `render_scale`, the internal extent, distinct from `resolution` — so the name
+  is settled even though nothing implements it.
 - **Exclusive fullscreen stays dropped, and one backend actively defends it.**
   `crcbl-dx12` calls `MakeWindowAssociation(DXGI_MWA_NO_ALT_ENTER)` per
   swapchain so DXGI's own message hook cannot take Alt+Enter into a fullscreen

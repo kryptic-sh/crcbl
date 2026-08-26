@@ -76,9 +76,10 @@ against the tree:
 - **`crates/crcbl/src/settings.rs` reads four boolean keys** and maps each to a
   `RenderEffects` bit. Every other key in the catalogue has a home in the TOML
   convention and no reader.
-- **`crates/crcbl-audio/src/mixer.rs` has a per-voice gain and one overall gain,
-  and no bus concept at all** — so a player cannot turn music down without
-  turning everything down.
+- **`crates/crcbl-audio/src/mixer.rs` has a per-voice gain and nothing above
+  it.** `Mixer` carries no gain field and `AudioSource::fill` applies none, so
+  there is neither a bus nor a master — a player cannot turn music down
+  separately, and cannot turn the mix down as a whole either.
 - **There is no settings UI anywhere in the workspace.**
 - **OPFS is the only browser storage backend**; `crates/crcbl-store/src/lib.rs`
   records that an IndexedDB fallback is still to come. Where no store is

@@ -152,17 +152,172 @@ carries the three requested layers, and `EffectRequest::resolve` is the one
 place the order is applied. `ForwardRenderer` holds one request and resolves it
 once per `begin_frame`.
 
-Two of the four layers are shaped and have no source in the tree — the camera
-stack (there is no render-stack RON, and nothing in the workspace reads RON) and
-`[engine.video]` (`crcbl_store::settings` reads the namespace; nothing builds a
-stack at startup). They are fields nothing but a test writes, and they are
-present because the _order_ is the thing being built: a resolution point missing
-two of its inputs cannot be shown to apply them in the right order.
+**One of the four layers still has no source in the tree, and it is not
+`[engine.video]`** — corrected 2026-08-27, this paragraph having claimed two.
+The camera stack is the one: there is no render-stack RON and nothing in the
+workspace reads RON, so `EffectRequest::camera` is written by a renderer per
+view and by nothing else. `[engine.video]` **is** wired — `GpuContext::open`
+reads the player's file through `SettingsSource`, `crcbl::settings::VIDEO_KEYS`
+is the one place a key is spelled, and `GpuContext::effect_request` hands the
+layer to a renderer built on that context, so every sample and every `crcbl new`
+scaffold gets it without asking.
+[18-render-features.md](18-render-features.md)'s "Where the toggles live"
+already said so; this document had not caught up.
 
 The device layer is wired to `DeviceCaps` and currently **removes nothing**, and
 that is a statement about the three effects rather than a stub — see topic 18's
 "Where the toggles live", which argues it per effect. The first rule that fires
 arrives with the ray-traced variants, which `LightingPath` already selects.
+
+## The graphics settings catalogue (LOCKED 2026-08-27)
+
+**Why this is here and not in topic 15 or topic 18.** The graphics-quality keys
+are not properties of a window, so topic 15 is the wrong home; and topic 18 owns
+what each effect _is_, not what a player is allowed to do to it. What decides a
+quality key's behaviour is the four-layer resolution order, and that order lives
+here. So [15-windowing.md](15-windowing.md) keeps the display half of the
+catalogue — mode, monitor, surface extent, present mode, render scale — this
+document keeps the quality half, and [14-persistence.md](14-persistence.md)
+keeps the file both are written to.
+
+**What is missing from the seam is not its shape, it is its width.** The
+layering is built and already documented in
+[18-render-features.md](18-render-features.md): camera stack → `[engine.video]`
+→ programmatic override → device capability, resolved in one place by
+`EffectRequest::resolve`. Nothing below proposes a second layering. What the
+seam carries today is four **boolean** effect bits, and a quality menu needs
+rungs.
+
+### Rule 1: the clamp survives the widening, and "downward" is an explicit order
+
+**The `[engine.video]` layer may only ever remove quality, and an absent key
+removes nothing.** That is the load-bearing property of the whole seam, and it
+is the property a level-valued key is most likely to break. It is stated once,
+here; the catalogue's second rule — that a key is named before it is implemented
+— is stated once in [14-persistence.md](14-persistence.md).
+
+For a boolean it is obvious: `crcbl::settings::video_effects` starts from
+`RenderEffects::all` and clears a bit only for a key that is present and
+`false`, so `true` and absent read identically and a settings file can never
+switch an effect _on_. Its tests are named for that — an absent key clamps
+nothing, and a key set to `true` reads the same as no key at all.
+
+For a level it needs saying, because "less" is not something a value type knows:
+
+- **Every enumerated key declares an explicit total order, lowest quality first,
+  and that order is data — never the declaration order of a Rust enum.** A
+  variant reordered or inserted in the middle of a `#[derive]`d enum would
+  silently redefine every player's clamp, and nothing would fail. The order is
+  therefore a table beside the key, in the same place the key is spelled, and it
+  is what a test asserts against — the same discipline
+  `crcbl::settings::VIDEO_KEYS`' tests already apply by writing the key/effect
+  pairs out longhand rather than looping over the table that is their own
+  oracle.
+- **Clamping is `min` under that order.** The camera asked for GTAO, the
+  player's file says SSAO, the frame gets SSAO. The camera asked for SSAO, the
+  file says GTAO, the frame still gets SSAO — the file cannot promote.
+- **An absent key is not the lowest rung.** It is "the player has not asked",
+  which under `min` means the identity: no clamp. A key holding a value this
+  layer cannot read is the same answer, and warns naming the key, which is what
+  `video_effects` already does for a non-boolean.
+- **`off` is a rung, not a separate mechanism.** It is simply the lowest one, so
+  a boolean key is the two-rung case of the general rule rather than a different
+  kind of key. That is what lets `VIDEO_KEYS` widen from `(&str, RenderEffects)`
+  pairs to something carrying a level without the four existing keys changing
+  meaning.
+
+This is a widening of the one table in `crates/crcbl/src/settings.rs` and of
+`RenderEffects` itself, since a bitflag cannot hold a rung. Both are the same
+slice; neither is started here.
+
+### The preset is the key players actually use, and it is not a fifth layer
+
+`quality` — `"low"` | `"medium"` | `"high"` | `"ultra"` | `"custom"`.
+
+**A preset is a writer, not a reader.** Selecting one writes every individual
+key it covers into the user file; the resolution order never sees the preset at
+all. That is what keeps it from becoming a fifth layer with its own precedence
+question, and it is why **touching any individual key sets
+`quality = "custom"`** — the preset value is then a label describing what was
+last written, which is exactly true and cannot drift, because nothing reads it
+back.
+
+The alternative — a preset that is consulted at resolve time for keys the file
+does not mention — was considered and declined: it makes an absent key mean
+something, which is the one thing rule 1 forbids.
+
+### The catalogue
+
+Rungs are written lowest-first, which is the clamp order for that key. **The
+"Today" column is per row on purpose**; of the whole table, four rows are
+implemented as booleans and the rest have no reader and no renderer half.
+
+| Key                     | Domain (lowest rung first)                         | Today                                                                                                                                                                                                                                                                                                                     |
+| ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quality`               | `low` \| `medium` \| `high` \| `ultra` \| `custom` | **Nothing.** No preset, and no settings screen to select one from.                                                                                                                                                                                                                                                        |
+| `anti_aliasing`         | `off` \| `fxaa` \| `smaa`                          | **The shader exists and nothing above it does**, checked 2026-08-27: an `fxaa.slang` and a matching Rust params module sit in `crcbl-shaders`, that crate's module list names neither, `crcbl-render` has no resolve pass, and `RenderEffects` still carries four bits and no AA one. The `smaa` rung has nothing at all. |
+| `ambient_occlusion`     | `off` \| `ssao` \| `gtao`                          | **Built as a boolean.** `RenderEffects::AMBIENT_OCCLUSION` and the `ambient_occlusion` key are the `off`/`ssao` rungs; topic 18 declines GTAO for now and says why.                                                                                                                                                       |
+| `shadow_quality`        | `off` \| `low` \| `medium` \| `high`               | **Built as a boolean.** `RenderEffects::SHADOWS` and the `shadows` key are `off` versus everything else; the atlas has no quality rungs.                                                                                                                                                                                  |
+| `shadow_distance`       | metres, a scalar                                   | **Nothing.** Distinct from `shadow_quality` because it trades range for resolution rather than buying either.                                                                                                                                                                                                             |
+| `reflections`           | `off` \| `ssr`                                     | **Built as a boolean**, and the domain is honestly two rungs — a ray-traced rung arrives with `LightingPath::RayTraced`, not before.                                                                                                                                                                                      |
+| `texture_quality`       | `low` \| `medium` \| `high`                        | **Nothing.** It is a streaming and residency decision, and topic 25 owns the mechanism it would drive.                                                                                                                                                                                                                    |
+| `anisotropic_filtering` | `1` \| `2` \| `4` \| `8` \| `16`                   | **Nothing.** A sampler parameter with no key and no per-material plumbing.                                                                                                                                                                                                                                                |
+| `draw_distance`         | metres, a scalar                                   | **Nothing.**                                                                                                                                                                                                                                                                                                              |
+| `lod_bias`              | signed scalar; negative is more detail             | **Nothing.** Note that a _negative_ bias buys quality, so this key's clamp order runs the opposite way to its numeric order — the explicit-order rule above is why that is expressible at all.                                                                                                                            |
+| `particle_quality`      | `low` \| `medium` \| `high`                        | **Nothing.** Topic 20 owns the system.                                                                                                                                                                                                                                                                                    |
+| `decal_density`         | `low` \| `medium` \| `high`                        | **Nothing.** Topic 33 owns the system.                                                                                                                                                                                                                                                                                    |
+| `bloom`                 | `off` \| `on`                                      | **Built as a boolean.** `RenderEffects::BLOOM`, and it is the one effect not in `RenderEffects::DEFAULT_STACK` — a view given no stack has been given no lens.                                                                                                                                                            |
+| `motion_blur`           | `off` \| `on`                                      | **Nothing.** No pass, and no motion vectors to build one from.                                                                                                                                                                                                                                                            |
+| `film_grain`            | `off` \| `on`                                      | **Nothing.**                                                                                                                                                                                                                                                                                                              |
+| `chromatic_aberration`  | `off` \| `on`                                      | **Nothing.**                                                                                                                                                                                                                                                                                                              |
+| `depth_of_field`        | `off` \| `on`                                      | **Nothing.**                                                                                                                                                                                                                                                                                                              |
+
+**The last five rows exist as keys for a reason worth stating.** Motion blur,
+film grain, chromatic aberration, depth of field and bloom are _lens_ effects —
+properties of a camera rather than of the scene's light transport, which is the
+line `RenderEffects::DEFAULT_STACK` is already drawn along. They are also the
+effects players most reliably want off, and a game that ships them without
+switches is one players patch around. Naming the keys now costs nothing and
+means the switch exists on the day the pass does.
+
+### Audio bus gains are not capability-clamped
+
+[13-audio.md](13-audio.md) adds an `[engine.audio]` section whose keys are
+per-bus linear gains, and they do **not** join the order above. The reason is
+not that audio matters less: it is that the fourth layer has nothing to say. A
+device removes a _render_ feature — there are adapters with no ray query and no
+mesh shader, and `DeviceCaps` reports them — but there is no audio device that
+takes away the ability to multiply a sample by 0.5. The DSP core is pure `f32`
+block processing that runs identically on native and wasm, by design.
+
+So an audio volume resolves through a shorter chain, stated in topic 13, and
+this document's job is only to say that the chain is genuinely shorter rather
+than merely unimplemented — a distinction worth keeping, because "no clamp yet"
+and "no clamp ever" are read the same way by anyone skimming.
+
+### Considered and declined
+
+- **A per-monitor or per-adapter quality profile.** Declined for the reason
+  [15-windowing.md](15-windowing.md) gives at length: it adds a second axis to
+  the key space before anyone has asked for one, and its index is a monitor or
+  adapter name that is neither unique nor stable. The `quality` preset covers
+  the actual use — "make this machine's settings sensible in one click" —
+  without persisting a matrix.
+- **A user-defined post-chain order.** The post stack's order is fixed by
+  [18-render-features.md](18-render-features.md) — bloom, then exposure and
+  tonemap, then AA, then upscale, then UI — and each step of it is a correctness
+  argument, not a preference: AA on tonemapped output, upscale after the passes
+  whose cost is meant to scale with the internal extent, UI at native
+  resolution. Letting a settings file reorder that produces frames nobody can
+  reason about and goldens nobody can bless. Per-camera stack authoring (topic
+  18's RON) remains the sanctioned way to change what a _view_ runs, and it is a
+  developer-facing mechanism, not a player-facing one.
+- **A settings-file migration format of the catalogue's own.** Declined:
+  [14-persistence.md](14-persistence.md) already defines what happens to a key
+  that is unknown, unreadable or absent, and the answer — warn, clamp nothing,
+  keep going — is the whole migration story a clamp-only layer needs. A key that
+  is renamed is a key that stops clamping, which is the safe direction, and that
+  is precisely why renaming one is still a compatibility break worth avoiding.
 
 ## Feature matrix
 
@@ -302,10 +457,16 @@ contributing the target upstream is a legitimate option if it stalls.
 
 The model itself is built — the flags, the selectors, the resolution point and
 the downgrade log, in `crcbl_hal::caps`, `crcbl_hal::downgrades` and
-`crcbl_render::effects`. **What is not built is the settings layer**:
-`crcbl_store::settings` reads the `[engine.video]` namespace and nothing builds
-a stack at startup, so that field has no source but a test, and exposing the
-video toggles on a settings screen is P10 work.
+`crcbl_render::effects`. **The settings layer is built too**, corrected
+2026-08-27: `crcbl::settings::video_effects` maps four `[engine.video]` keys to
+`RenderEffects` bits and `GpuContext::open` reads the player's file while it
+opens, so the layer has a real source in every sample rather than only in a
+test.
+
+What is not built is the **width** of that layer and the screen in front of it.
+Four boolean keys is the entire settings surface today; the catalogue above
+names the rest and marks each one unimplemented, and exposing any of them on a
+settings screen is still P10 work.
 
 ## Risks
 

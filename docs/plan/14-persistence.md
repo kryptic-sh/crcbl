@@ -97,20 +97,167 @@ on the hot path.
 
 - **Layered resolution**: engine defaults → game defaults → user settings file →
   CLI/env overrides. First-write wins upward; `settings.toml` stores only
-  user-changed values (diff vs defaults — small files, upgrade-friendly). **Two
-  of the four layers exist**: `crcbl-store`'s `settings.rs` has a
-  `SettingsLayer` stack with `EngineDefaults` and `UserFile` variants, appended
-  in order so a later layer wins, and a write always lands in the user file.
-  There is no game-defaults layer and no CLI/env override layer — a game's
-  compiled-in defaults live in the game's own binary, which is what the
-  `crcbl settings` CLI's one-layer stack is honest about.
+  user-changed values (diff vs defaults — small files, upgrade-friendly). **All
+  four layer kinds exist and only one is ever populated** (corrected 2026-08-27;
+  this bullet said two existed). `SettingsLayer` in
+  `crates/crcbl-store/src/settings.rs` has `EngineDefaults`, `GameDefaults`,
+  `UserFile` and `CliOverrides` variants, `SettingsStack::add` appends any of
+  them so a later layer wins, and a write always lands in the user file. What is
+  missing is producers, not mechanism: `GameDefaults` and `CliOverrides` are
+  constructed nowhere in the workspace but that module's own tests, and
+  `SettingsStack::platform` returns a stack holding the player's file and
+  nothing under it — which is what the `crcbl settings` CLI's one-layer stack is
+  honest about.
 - Namespaced: `[engine.video]`, `[engine.audio]`, `[engine.input]`, `[game.*]`
   free for the game. Typed access API with serde structs + defaults; unknown
-  keys warn, never crash.
+  keys warn, never crash. **Every key in the first two namespaces is now
+  enumerated** — see the settings catalogue below and the two topics it points
+  at.
 - Hot-apply where possible (volume, mouse sensitivity — immediate; vsync,
-  resolution — apply-on-confirm pattern provided by the engine).
+  resolution — apply-on-confirm pattern provided by the engine). **Neither half
+  is built** (2026-08-27): there is no settings screen, so nothing has yet
+  needed either, and "provided by the engine" describes a helper that does not
+  exist. The live mechanisms both patterns would drive do exist —
+  `GpuContext::set_pacing` reconfigures a running swapchain and
+  `crcbl::engine::ModeRequest::toggle` switches display mode — so what is owed
+  is the confirm-and-revert flow around them, not the applying.
 - Key binds live in profile (RON) not settings TOML — they're per-player
   structured data (action → chord maps), and games extend the action set.
+
+### The settings catalogue: keys are named before they are implemented (LOCKED 2026-08-27)
+
+Two other topics enumerate the engine's player-facing settings in full —
+[15-windowing.md](15-windowing.md) for display,
+[39-capabilities.md](39-capabilities.md) for graphics quality, and
+[13-audio.md](13-audio.md) for audio buses and output. This document owns the
+part all three share: the file, the spelling, and the rule that lets them name a
+key years before anything reads it.
+
+**Rule 2 of the catalogue: a key with no implementation still gets its name and
+its value domain now.** (Rule 1 is the clamp rule, and it lives in
+[39-capabilities.md](39-capabilities.md).) A key is a compatibility surface the
+moment one player's file contains it, and the two things that churn if it is
+named late are the two things that must not — the settings screen's row identity
+and the file on disk. Naming costs nothing: an unread key is exactly an absent
+key, which `crcbl::settings::video_effects` already treats as "the player has
+not asked" and which `SettingsStack::get` already answers `None` for. So the
+catalogues are written whole and each row states its own implementation status,
+rather than being grown a key at a time as passes land.
+
+**The spelling convention is adopted, not invented.**
+`crates/crcbl-store/src/settings.rs`' own module documentation already shows an
+`[engine.video]` section carrying `vsync` and `resolution = [1920, 1080]` and an
+`[engine.audio]` section carrying `master_volume`. Every catalogue key follows
+it: bare snake_case nouns, no negated keys, one section per namespace. The
+argument against negation is on `crcbl::settings::VIDEO_KEYS` — a settings file
+describes what the player wants on, and a negated key would make
+`shadows = false` and `no_shadows = false` both writable and opposite.
+
+### What is actually missing, in three parts
+
+The machinery under these catalogues is further along than "settings are not
+built" suggests, and stating the gap loosely is how a plan comes to owe work the
+tree already ships. Verified 2026-08-27:
+
+**Built.** The layered TOML stack and its four layer kinds; `SettingsStack`'s
+`get`, `get_section`, `set`, `save`, `dump` and `contains`;
+`StorageSettingsFile::load` / `save`; `SettingsStack::platform(app_name)`, which
+picks the backend by target — the platform config directory through
+`NativeStorage::config_root` natively, and **on `wasm32` the Origin Private File
+System** through the installed OPFS store. Four `StorageSource` implementations
+exist: `NativeStorage`, `MemoryStorage`, `FetchSource` and `OpfsStorage`. The
+user-file layer stores only changed values, which is what keeps the files small.
+None of that is owed.
+
+The gap is three specific things:
+
+1. **Nothing but the CLI ever writes settings.**
+   `crates/crcbl-cli/src/settings_cmd.rs` calls `set` and `save`; no app, sample
+   or demo in the workspace does, outside its own tests. So the round trip is
+   exercised only from a command line, and the "hot-apply versus apply-on-
+   confirm" bullet above describes a pattern nothing has yet had to implement.
+2. **`crates/crcbl/src/settings.rs` reads four boolean keys and nothing else.**
+   `VIDEO_KEYS` maps `shadows`, `ambient_occlusion`, `reflections` and `bloom`
+   to `RenderEffects` bits, and `GpuContext::open` reads them. That is the whole
+   settings **surface** of the engine. Every other key in the three catalogues
+   has a defined home in the TOML and no reader.
+3. **There is no settings UI anywhere.** The engine's pause menu offers
+   `MenuAction::Fullscreen` and `MenuAction::DebugOverlay` and neither touches a
+   file — the fullscreen toggle is a live `Shell::set_mode` call whose result is
+   forgotten at exit. A menu is what turns this from a file a player edits by
+   hand into a setting, and it is the P10 row in the delivery table below.
+
+### When there is nowhere to write
+
+**Browsers are the case worth deciding in advance, because it is not a failure
+and must not be reported as one.** `crates/crcbl-store/src/lib.rs` records that
+an IndexedDB fallback is still to come, so **OPFS is the only browser backend**.
+`SettingsStack::platform` on `wasm32` asks `crate::web::opfs::installed()`, and
+when no store is installed it logs at info level and returns an **empty user
+layer** — every key reads as absent, which the clamp rule turns into "the player
+has asked for nothing".
+
+So the engine's behaviour is already right. What needs saying is what a **web
+demo** should do on top of it, because "settings silently do not persist" is
+indistinguishable from "settings are broken":
+
+- **Keep running.** No start-up failure, no modal, no degraded render path — an
+  absent key clamps nothing, so the frame is the one the game asked for.
+- **Say so once, where the settings are.** A settings screen with no store
+  behind it shows its rows and states that changes last for this session only. A
+  screen that silently accepts a change it cannot keep is the failure mode this
+  bullet exists to prevent.
+- **Do not fall back to `localStorage`.** It is a second storage backend with
+  different semantics reached from outside the `StorageSource` seam, and the
+  fallback this crate is going to have is IndexedDB, behind that seam, where
+  `OpfsEnvironment` can represent the choice. Adding a side door now is work
+  thrown away and a second thing to keep in sync meanwhile.
+
+### The catalogue's edges
+
+A catalogue that quietly stops at the boundary of what its authors felt like
+enumerating is worse than a short one, because a reader cannot tell the two
+apart. So the settings a player expects to find that these catalogues do **not**
+cover, and who owns each:
+
+- **Input** — mouse sensitivity, invert Y, key binds, gamepad deadzone. Owned by
+  [19-input.md](19-input.md), and this document already places the binds
+  themselves in the profile rather than in `settings.toml`, because they are
+  structured per-player data that games extend. Two cautions on that ownership,
+  checked 2026-08-27: topic 19 names the deadzone (it is a per-device-kind
+  response curve in its device layer, and appears in its binding sketch) but
+  does **not** name a sensitivity or an invert-Y setting anywhere. Those have a
+  home and no entry in it. `[engine.input]` is the namespace they would take.
+- **Accessibility** — subtitles, text size, colourblind filters, reduced motion.
+  **No topic owns these, and that is a gap rather than a deliberate omission.**
+  Verified by searching every document under `docs/plan/`: not one mentions
+  subtitles, colourblind filtering, text scaling or reduced motion. The only
+  handling of any of it in the tree is `web/style.css`'s
+  `prefers-reduced-motion` block, which belongs to the demo site's own pages and
+  not to the engine. Whoever picks this up should expect it to be a topic of its
+  own rather than a section bolted onto this one, because two of the four —
+  subtitles and colourblind filtering — are engine subsystems (a caption
+  presenter, and a post-chain filter that would join
+  [39-capabilities.md](39-capabilities.md)'s catalogue) rather than keys.
+
+### Considered and declined
+
+- **A settings migration format beyond what this document already defines.** A
+  settings file needs no versioned container and no `migrate` seam of its own:
+  an unknown key is ignored, an unreadable value warns and clamps nothing, and
+  an absent key means the player has not asked — which is already a complete
+  answer for every skew a rename or a removal can produce. That is a property of
+  a **clamp-only** layer and does not generalise to saves, which is why
+  `SaveHeader` has a format version and `settings.toml` does not. The
+  consequence to accept with it: a renamed key silently stops clamping, so
+  renaming one is a compatibility break to avoid rather than a migration to
+  write.
+- **A per-monitor or per-adapter settings profile.**
+  [15-windowing.md](15-windowing.md) carries the full reason. It belongs here
+  too because the shape it would take is a persistence shape — a keyed set of
+  files rather than one — and the answer is that if it is ever wanted, it is
+  wanted as a `Profile` mechanism in this document, not as a second axis on the
+  key space.
 
 **Profiles are the row of this document with the least behind it** (2026-08-27).
 There is no `Profile` type anywhere in `crcbl-store`, no RON, and no persisted
