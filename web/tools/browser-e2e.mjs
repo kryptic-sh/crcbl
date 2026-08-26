@@ -3023,9 +3023,24 @@ try {
     // cannot land on a frame that was about to sweep back onto one. A nudge at
     // a time rather than held to the pitch clamp, because the clamp is the
     // ceiling and a demo left staring at a ceiling has nothing moving in it.
+    //
+    // **The clamp is read, not broken out of.** `swingBy` returns null once the
+    // view stops moving, and for a tilt that means the pitch clamp — which is
+    // the ceiling, the one bearing on this map where no plate can ever be. The
+    // first version treated that null as a dead end and gave up at exactly the
+    // moment it had arrived, so a run that had to tilt the whole way failed
+    // with the crosshair pointing somewhere it could not possibly hit a target.
+    // That is what reddened `main` on `350c98d`: `the crosshair never came off
+    // every target: range, near, far`, on a runner slow enough that the far
+    // lane's travelling plate crossed the aim during the three-beat wait.
     let offTarget = null;
-    for (let round = 0; round < LOOK_SQUARE_ROUNDS && !offTarget; round += 1) {
-      if ((await swingBy(range.tilt, range.pitch)) === null) break;
+    let atTheClamp = false;
+    for (
+      let round = 0;
+      round < LOOK_SQUARE_ROUNDS && !offTarget && !atTheClamp;
+      round += 1
+    ) {
+      atTheClamp = (await swingBy(range.tilt, range.pitch)) === null;
       const beforeTilt = hud().length;
       await until(async () =>
         since(range.aim, beforeTilt).length >= WALK_STILL_BEATS ? true : null
