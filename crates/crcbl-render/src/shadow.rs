@@ -34,8 +34,8 @@
 //! * A tile is [`TILE`]² of `D32Float`, and the atlas is allocated once for the
 //!   renderer's life. [`POINT_FACES`] of them is what a point light needs to be
 //!   shadowable at all, since its faces have to fit in the region together, and
-//!   [`LIGHT_TILES`] is one more than that — so a cube and a cone fit side by
-//!   side.
+//!   [`LIGHT_TILES`] holds two such runs with two tiles over — so two cubes and
+//!   two cones fit side by side.
 //! * A slot is one shadowed *light*, and what it costs is a
 //!   [`DrawGen`](crate::draw_gen::DrawGen) — roughly five megabytes, most of it
 //!   per-instance LOD hysteresis state that is device-local and permanent. Topic
@@ -45,11 +45,23 @@
 //!   six matrices into six tiles. A face draws what is behind it and the
 //!   rasteriser discards it.
 //!
-//! So the light region holds one point light *and* one spot, or [`LIGHT_SLOTS`]
+//! So the light region holds two point lights *and* two spots, or [`LIGHT_SLOTS`]
 //! spots, and a frame with more shadow-worthy lights than either budget covers
 //! shadows the most influential ones it can fit and lights the rest without
-//! occluding. A *second* point light is what no longer fits: two cubes are twice
-//! [`POINT_FACES`] tiles and the region is not that long.
+//! occluding. A *third* point light is what no longer fits: three cubes are three
+//! times [`POINT_FACES`] tiles and the region is not that long.
+//!
+//! # The 2026-08-26 re-tiling, which cost no memory
+//!
+//! The region held [`POINT_FACES`] tiles and one over until 2026-08-26, so
+//! exactly one point light in any scene could occlude — and a rig with a light
+//! either side of a walkway, which is an ordinary rig, had the torch that lost
+//! the tie *re-lighting* the shadow its twin cast. Widening the grid by a column
+//! and a row while shrinking [`TILE`] to match leaves [`atlas_extent`] where it
+//! was to the texel, so the image, its `D32Float` format and its memory are
+//! unchanged and the whole cost is per-tile resolution. What is *not* free is
+//! [`LIGHT_SLOTS`]: a slot is a [`DrawGen`](crate::draw_gen::DrawGen), so the
+//! culls this budget added are device-local memory the atlas did not ask for.
 //!
 //! # Stability: a sphere around the eye, snapped to texels
 //!
@@ -107,18 +119,23 @@ pub const POINT_FACES: usize = crcbl_shaders::mesh::SHADOW_POINT_FACES;
 /// [`DrawGen`](crate::draw_gen::DrawGen)s the renderer holds — one cull per
 /// shadowed light, whether that light is one tile or six.
 ///
-/// Two, which is the pair the light region is sized for: a point light's cube
-/// and one spot's map beside it. A third shadowed light is refused here, and a
-/// second *point* light is refused by [`Selection`] running out of tiles rather
+/// Four, which is what the light region is sized for: two point lights' cubes
+/// and two spots' maps beside them. A fifth shadowed light is refused here, and a
+/// *third* point light is refused by [`Selection`] running out of tiles rather
 /// than by a rule of its own — the two budgets bind in different places, which
 /// is why they are two numbers.
-pub const LIGHT_SLOTS: usize = 2;
+pub const LIGHT_SLOTS: usize = 4;
 
 /// The side of one tile in the shadow atlas, in texels.
 ///
 /// One number for every tile — a per-map resolution is what a shadow atlas with
 /// a packing policy would buy, and topic 18 puts packing post-MVP.
-pub const TILE: u32 = 1024;
+///
+/// The shader's number rather than a second one, like every constant above it:
+/// `mesh.slang` denominates every shadow bias it applies in *tile texels*, so a
+/// host that tiled the atlas one way while the sampler scaled for another would
+/// bias every map by the ratio between them.
+pub const TILE: u32 = crcbl_shaders::mesh::SHADOW_TILE;
 
 /// Tiles across the atlas.
 ///
@@ -407,9 +424,10 @@ pub const fn atlas_extent() -> (u32, u32) {
 /// Where tile `index` starts in the atlas, in texels.
 ///
 /// Row-major, so the sun's cascades are tiles `0..CASCADES` and land in the top
-/// row while [`ATLAS_COLUMNS`] is at least [`CASCADES`]. That is what keeps a
-/// cascade's rasterised tile byte-identical across a change to the grid's shape
-/// — the cascade goldens are what say so.
+/// row while [`ATLAS_COLUMNS`] is at least [`CASCADES`]. That is the arrangement
+/// the cascade goldens were blessed under; the texels themselves move whenever
+/// [`TILE`] or [`ATLAS_COLUMNS`] does, so a change to either is one those
+/// goldens have to be re-blessed through.
 #[must_use]
 pub const fn tile_origin(index: usize) -> (u32, u32) {
     let index = index as u32;
@@ -755,9 +773,9 @@ pub struct Assignment {
 /// **A light that gets no tiles still lights.** Nothing here removes a light from
 /// the frame; it decides which of them also occlude. A light can miss out two
 /// ways — no free slot, or no free *run* long enough — and the second is what a
-/// scene with two point lights hits: the first cube leaves less than a cube
-/// behind it, so the second point light lights without occluding while a spot
-/// ranked below it still fits in the tile left over.
+/// scene with three point lights hits: two cubes leave less than a cube behind
+/// them, so the third point light lights without occluding while a spot ranked
+/// below it still fits in the tiles left over.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
     /// What holds slot `i`, or `None` if the slot is free.
@@ -1496,23 +1514,30 @@ mod tests {
     #[test]
     fn the_tiles_go_to_the_largest_projected_influence() {
         let eye = Vec3::ZERO;
+        // One light more than there are slots, so exactly one has to miss out.
         let lights = [
             // 0.5 / 1 = 0.5 — nearest, and the least influential.
             spot_light_at(Vec3::new(0.0, 0.0, -1.0), 0.5),
-            // 8 / 4 = 2.0 — furthest, and the most.
+            // 8 / 4 = 2.0 — the most influential.
             spot_light_at(Vec3::new(0.0, 0.0, -4.0), 8.0),
-            // 2 / 2 = 1.0.
-            spot_light_at(Vec3::new(0.0, 0.0, -2.0), 2.0),
+            // 3 / 2 = 1.5.
+            spot_light_at(Vec3::new(0.0, 0.0, -2.0), 3.0),
+            // 5 / 5 = 1.0.
+            spot_light_at(Vec3::new(0.0, 0.0, -5.0), 5.0),
+            // 2.25 / 3 = 0.75.
+            spot_light_at(Vec3::new(0.0, 0.0, -3.0), 2.25),
         ];
         let mut selection = Selection::default();
         selection.update(&lights, eye);
         assert_eq!(
             selection.slots(),
-            &[held(1, 0), held(2, 1)],
-            "the two largest influences take the slots and the first tiles, in rank order"
+            &[held(1, 0), held(2, 1), held(3, 2), held(4, 3)],
+            "the largest influences take the slots and the first tiles, in rank order"
         );
         assert_eq!(selection.base_of(1), Some(0));
         assert_eq!(selection.base_of(2), Some(1));
+        assert_eq!(selection.base_of(3), Some(2));
+        assert_eq!(selection.base_of(4), Some(3));
         assert_eq!(
             selection.base_of(0),
             None,
@@ -1525,14 +1550,26 @@ mod tests {
     /// does not depend on the order a caller happened to build the list in.
     #[test]
     fn an_exact_tie_breaks_by_index() {
+        // One more than there are slots, or the tie decides nothing: every light
+        // would be shadowed whichever way it broke.
         let lights = [
             spot_light_at(Vec3::new(3.0, 0.0, 0.0), 1.0),
             spot_light_at(Vec3::new(-3.0, 0.0, 0.0), 1.0),
             spot_light_at(Vec3::new(0.0, 3.0, 0.0), 1.0),
+            spot_light_at(Vec3::new(0.0, -3.0, 0.0), 1.0),
+            spot_light_at(Vec3::new(0.0, 0.0, 3.0), 1.0),
         ];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
-        assert_eq!(selection.slots(), &[held(0, 0), held(1, 1)]);
+        assert_eq!(
+            selection.slots(),
+            &[held(0, 0), held(1, 1), held(2, 2), held(3, 3)]
+        );
+        assert_eq!(
+            selection.base_of(4),
+            None,
+            "the last light of an all-way tie is the one that loses it"
+        );
     }
 
     /// **A light drifting across the cutoff must not flicker its shadow on and
@@ -1544,32 +1581,43 @@ mod tests {
     /// light would never get a map.
     #[test]
     fn an_incumbent_keeps_its_tile_until_a_challenger_clearly_beats_it() {
-        // One slot's worth of contention: two lights and `LIGHT_SLOTS` slots
-        // means nothing is contended, so the list is one longer than the budget.
+        // One slot's worth of contention: a list no longer than `LIGHT_SLOTS`
+        // means nothing is contended, so it is one longer than the budget. The
+        // light at the end is the outsider and the one before it the incumbent
+        // it comes for.
         let contender = |influence: f32| spot_light_at(Vec3::new(0.0, 0.0, -1.0), influence);
-        let mut lights = [contender(3.0), contender(2.0), contender(1.0)];
+        let mut lights = [
+            contender(5.0),
+            contender(4.0),
+            contender(3.0),
+            contender(2.0),
+            contender(1.0),
+        ];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
-        assert_eq!(selection.slots(), &[held(0, 0), held(1, 1)]);
+        assert_eq!(
+            selection.slots(),
+            &[held(0, 0), held(1, 1), held(2, 2), held(3, 3)]
+        );
 
         // The outsider edges past the incumbent by a few per cent. It does not
         // take the tile, and — this is the half that matters — the incumbent
         // stays in the *same* slot and on the *same* tile rather than being
         // reshuffled.
-        lights[2] = contender(2.1);
+        lights[4] = contender(2.1);
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[held(0, 0), held(1, 1)],
+            &[held(0, 0), held(1, 1), held(2, 2), held(3, 3)],
             "a challenger 5% ahead must not take a held tile"
         );
 
         // Clearly past it, and the tile changes hands.
-        lights[2] = contender(2.0 * HOLD_RATIO + 0.1);
+        lights[4] = contender(2.0 * HOLD_RATIO + 0.1);
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[held(0, 0), held(2, 1)],
+            &[held(0, 0), held(1, 1), held(2, 2), held(4, 3)],
             "a challenger past the hold ratio must take the tile"
         );
     }
@@ -1593,25 +1641,27 @@ mod tests {
             wide,
             spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
             spot_light_at(Vec3::new(0.0, 0.0, -3.0), 1.0),
+            spot_light_at(Vec3::new(0.0, 0.0, -4.0), 1.0),
+            spot_light_at(Vec3::new(0.0, 0.0, -5.0), 1.0),
         ];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[held(2, 0), held(3, 1)],
-            "the two brightest are ineligible, so the tiles go to the two that are"
+            &[held(2, 0), held(3, 1), held(4, 2), held(5, 3)],
+            "the two brightest are ineligible, so the tiles go to the ones that are"
         );
     }
 
-    /// **A point light and a spot are shadowed in the same frame**, which is the
-    /// whole of what the light region's seventh tile buys.
+    /// **A point light and a spot are shadowed in the same frame**, which is what
+    /// the light region having a tile over a whole cube buys.
     ///
     /// The budget's shape, stated as the frame a caller actually gets: the cube
-    /// is [`POINT_FACES`] tiles and the region is one longer than that, so the
-    /// spot's map is the tile left over and both lights occlude. Until
-    /// [`LIGHT_TILES`] grew past [`POINT_FACES`] this pair was the plan's
-    /// documented degradation — the point took everything and the spot lit
-    /// without occluding — and an ordinary lighting rig hit it.
+    /// is [`POINT_FACES`] tiles and the region is longer than that, so the spot's
+    /// map is a tile left over and both lights occlude. Until [`LIGHT_TILES`]
+    /// grew past [`POINT_FACES`] this pair was the plan's documented degradation
+    /// — the point took everything and the spot lit without occluding — and an
+    /// ordinary lighting rig hit it.
     ///
     /// The spot's base is asserted, not just that it has one: it must land
     /// *after* the cube rather than inside it, and "it got a tile" is true
@@ -1626,7 +1676,7 @@ mod tests {
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[held(0, 0), held(1, POINT_FACES)],
+            &[held(0, 0), held(1, POINT_FACES), None, None],
             "the point light's cube is the first {POINT_FACES} tiles and the spot's map is \
              the one after it"
         );
@@ -1634,36 +1684,80 @@ mod tests {
         assert_eq!(selection.base_of(1), Some(POINT_FACES));
     }
 
-    /// A point light that cannot fit does not take the budget down with it, and
-    /// **the lights around it keep their tiles**.
+    /// **Two point lights both occlude in one frame**, which is what the
+    /// 2026-08-26 re-tiling of the atlas was for.
     ///
-    /// The fragmentation case, and the reason the allocation walks the whole
-    /// ranking rather than stopping at the first light it cannot place. A
-    /// [`POINT_FACES`]-tile run needs the region nearly empty, so a second point
-    /// light is what no longer fits once the first one is placed: one tile is
-    /// left and a cube needs [`POINT_FACES`]. A walk that stopped there would be
-    /// a frame where a distant point light silently switched off a nearer spot's
-    /// shadow.
+    /// Until then [`LIGHT_TILES`] was one tile past a single cube, so the second
+    /// of a pair of torches was refused a run and *re-lit* the shadow its twin
+    /// cast — a rig with a light either side of a walkway, which is an ordinary
+    /// rig, had no working shadow at all.
+    ///
+    /// Both halves are asserted, because the host handing out a run is only half
+    /// of a light that casts: `mesh.slang` admits a point light's cube only where
+    /// the whole run is inside the region, written there as
+    /// `shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES`, and a base of
+    /// [`POINT_FACES`] failed that test on every backend while the region was
+    /// seven tiles long.
     #[test]
-    fn a_point_light_that_cannot_fit_leaves_the_lights_around_it_alone() {
+    fn two_point_lights_are_both_shadowed() {
         let lights = [
-            Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 4.0)),
-            Light::Point(point_at(Vec3::new(0.0, 0.0, -4.0), 2.0)),
-            spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
+            Light::Point(point_at(Vec3::new(-2.0, 0.0, -1.0), 4.0)),
+            Light::Point(point_at(Vec3::new(2.0, 0.0, -1.0), 4.0)),
         ];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[held(0, 0), held(2, POINT_FACES)],
-            "the first point light's cube fills the region but for one tile, the second \
-             point light does not fit in what is left, and the spot ranked behind it still \
-             takes that tile"
+            &[held(0, 0), held(1, POINT_FACES), None, None],
+            "the first cube takes the first {POINT_FACES} tiles and the second the \
+             {POINT_FACES} after it"
+        );
+        for light in 0..lights.len() {
+            let base = selection
+                .base_of(light)
+                .unwrap_or_else(|| panic!("point light {light} was given no run"));
+            assert!(
+                base + POINT_FACES <= LIGHT_TILES,
+                "point light {light}'s run starts at {base}, which `mesh.slang` refuses: \
+                 its faces run off the end of a {LIGHT_TILES}-tile region"
+            );
+        }
+    }
+
+    /// A point light that cannot fit does not take the budget down with it, and
+    /// **the lights around it keep their tiles**.
+    ///
+    /// The fragmentation case, and the reason the allocation walks the whole
+    /// ranking rather than stopping at the first light it cannot place. Two cubes
+    /// leave [`LIGHT_TILES`] minus twice [`POINT_FACES`] tiles behind them, which
+    /// is less than a cube, so a *third* point light is what no longer fits. A
+    /// walk that stopped there would be a frame where a distant point light
+    /// silently switched off a nearer spot's shadow.
+    #[test]
+    fn a_point_light_that_cannot_fit_leaves_the_lights_around_it_alone() {
+        let lights = [
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 4.0)),
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -2.0), 6.0)),
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -4.0), 2.0)),
+            spot_light_at(Vec3::new(0.0, 0.0, -3.0), 1.0),
+        ];
+        let mut selection = Selection::default();
+        selection.update(&lights, Vec3::ZERO);
+        assert_eq!(
+            selection.slots(),
+            &[
+                held(0, 0),
+                held(1, POINT_FACES),
+                held(3, 2 * POINT_FACES),
+                None
+            ],
+            "two cubes fill the region but for what is left of it, the third point light \
+             does not fit in that, and the spot ranked behind it still takes a tile of it"
         );
         assert_eq!(
-            selection.base_of(1),
+            selection.base_of(2),
             None,
-            "the second cube has nowhere to go"
+            "the third cube has nowhere to go"
         );
     }
 
@@ -1683,12 +1777,16 @@ mod tests {
         let mut selection = Selection::default();
         for lights in [
             vec![spot, other],
-            // The light at index 0 is a point light now, and it wants six tiles
-            // where its incumbent run had one.
+            // The light at index 0 is a point light now, and it wants a whole
+            // cube's run where its incumbent run had one tile.
             vec![point, other],
             vec![other, point],
             vec![point],
             vec![spot, other, point],
+            // More cubes than the region has runs for, which is where a light
+            // that is refused one must not leave a partial run behind it.
+            vec![point, point, point],
+            vec![point, spot, point, other, point],
         ] {
             selection.update(&lights, Vec3::ZERO);
             let mut used = [false; LIGHT_TILES];
@@ -1722,10 +1820,10 @@ mod tests {
         ];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
-        assert_eq!(selection.slots(), &[held(0, 0), held(1, 1)]);
+        assert_eq!(selection.slots(), &[held(0, 0), held(1, 1), None, None]);
 
         selection.update(&lights[..1], Vec3::ZERO);
-        assert_eq!(selection.slots(), &[held(0, 0), None]);
+        assert_eq!(selection.slots(), &[held(0, 0), None, None, None]);
 
         selection.update(&[], Vec3::ZERO);
         assert_eq!(selection.slots(), &[None; LIGHT_SLOTS]);

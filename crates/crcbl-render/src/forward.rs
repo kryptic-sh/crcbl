@@ -10638,10 +10638,10 @@ mod tests {
     /// It is what a caller sizes [`PassTimers`](crate::PassTimers) with, so both
     /// halves matter: a bound under the widest frame times part of it and drops
     /// the rest, and a bound well over it buys query sets nothing ever writes.
-    /// Two shadowable spots fill every light slot, which is the most culls a
-    /// frame can run and so the widest frame there is — it must land exactly on
-    /// the constant, and the frame with no shadowed light at all must be short
-    /// of it by exactly the culls those slots would have added.
+    /// A shadowable spot per light slot fills every one of them, which is the
+    /// most culls a frame can run and so the widest frame there is — it must land
+    /// exactly on the constant, and the frame with no shadowed light at all must
+    /// be short of it by exactly the culls those slots would have added.
     ///
     /// The ground grid is switched on for **both** frames, because the widest
     /// frame is the one that has it: it is off by default and not a
@@ -10696,13 +10696,23 @@ mod tests {
             ForwardRenderer::MAX_PASSES
         );
 
-        renderer.set_lights(&[shadowable_spot(-1.0), shadowable_spot(1.0)]);
+        // One spot per slot, spaced so no two of them share an influence — the
+        // list has to fill every slot or the bound below is checked against a
+        // frame that could not reach it.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a handful of slots, and the value is only a position"
+        )]
+        let spots: Vec<Light> = (0..shadow::LIGHT_SLOTS)
+            .map(|slot| shadowable_spot(1.0 + slot as f32))
+            .collect();
+        renderer.set_lights(&spots);
         let widest =
             passes_in_a_frame(device, queue, &mut renderer, imported, &pool, WIDEST_EXTENT).len();
         assert_eq!(
             renderer.shadow_lights.slots().iter().flatten().count(),
             shadow::LIGHT_SLOTS,
-            "the two spots must actually hold every slot, or this is the bare frame again \
+            "the spots must actually hold every slot, or this is the bare frame again \
              under another name"
         );
         assert_eq!(

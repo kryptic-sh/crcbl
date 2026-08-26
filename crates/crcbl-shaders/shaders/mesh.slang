@@ -179,8 +179,9 @@ static const uint SHADOW_CASCADES = 2;
 /// **Not a count of lights**: `GpuLight::shadow_tile` is an index into this
 /// region and a point light occupies six of it, so how many lights a frame can
 /// shadow is a host-side budget (`crcbl_render::shadow::LIGHT_SLOTS`) that no
-/// shader has any use for.
-static const uint SHADOW_LIGHT_TILES = 7;
+/// shader has any use for. The region holds two point cubes and two spots, which
+/// is what the 2026-08-26 re-tiling of the atlas bought without growing it.
+static const uint SHADOW_LIGHT_TILES = 14;
 
 /// Tiles one point light's shadow map is, matching
 /// `crcbl_shaders::mesh::SHADOW_POINT_FACES`.
@@ -191,17 +192,21 @@ static const uint SHADOW_POINT_FACES = 6;
 
 /// Tiles across the shadow atlas, matching
 /// `crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS`.
-static const uint SHADOW_ATLAS_COLUMNS = 3;
+static const uint SHADOW_ATLAS_COLUMNS = 4;
 
 /// Tiles down it, matching `crcbl_shaders::mesh::SHADOW_ATLAS_ROWS`.
-static const uint SHADOW_ATLAS_ROWS = 3;
+static const uint SHADOW_ATLAS_ROWS = 4;
 
 /// The side of one tile in texels, matching `crcbl_shaders::mesh::SHADOW_TILE`.
 ///
 /// Read here because every shadow bias in this file is denominated in *tile
 /// texels* — see `PUNCTUAL_DEPTH_BIAS_TEXELS` — and the world footprint of one
 /// texel is what that converts through, for a cascade as much as for a cone.
-static const float SHADOW_TILE = 1024.0;
+///
+/// Chosen with `SHADOW_ATLAS_COLUMNS`: the two multiply to the atlas's extent,
+/// and the 2026-08-26 re-tiling picked the pair that leaves that product where
+/// it was, so a wider grid costs resolution here rather than texels there.
+static const float SHADOW_TILE = 768.0;
 
 /// Which atlas tile light tile `tile` of the light region was rendered into.
 ///

@@ -3701,11 +3701,12 @@ mod tests {
         // The spot scene's one light is a spot, it is the only candidate, and
         // there are tiles left after the cascades — so it holds one.
         let spot_shadow_passes = forward_passes(1);
-        // **One triple, not three**, and that is the point-light budget visible
+        // **Two triples, not three**, and that is the point-light budget visible
         // in a frame's shape: `Scene::Lights` has three point lights, each of
-        // which is six tiles, and the light region holds six — so the most
-        // influential one is shadowed and the other two light without occluding.
-        let lights_passes = forward_passes(1);
+        // which is `shadow::POINT_FACES` tiles, and the light region holds two
+        // such runs — so the two most influential are shadowed and the third
+        // lights without occluding.
+        let lights_passes = forward_passes(2);
         // **The one fixture whose camera stack asks for the lens**, and the only
         // row here whose length is a function of the frame's size:
         // `crcbl_render::bloom` derives the chain from the extent, and a 16×16
@@ -3730,8 +3731,9 @@ mod tests {
             (Scene::Cube, &cube_passes),
             // Not the cube scene's passes: `Scene::Lights` is the cube scene
             // with a longer light list, the clustering dispatch is one per
-            // camera however many lights it assigns — and one of those lights
-            // is shadowed, which costs the cull triple `lights_passes` carries.
+            // camera however many lights it assigns — and two of those lights
+            // are shadowed, which costs the cull triples `lights_passes`
+            // carries.
             (Scene::Lights, &lights_passes),
             // The same passes: `Scene::Dunes` is the same renderer with
             // different content, and a scene that quietly stopped running the

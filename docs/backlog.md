@@ -3,57 +3,65 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### Decision needed: how many point lights may cast a shadow (2026-08-26)
+### The atlas re-tiling's leftovers: resolution, and one option declined (2026-08-26)
 
-The user reported that shadows "don't work on some lights" in `apps/shard`. The
-shadow is drawn and sampled correctly; the picture is the problem, and the cause
-is a hard budget rather than a defect.
+The budget question — how many point lights may cast — was answered by widening
+the atlas to `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` tiles of
+`SHADOW_TILE`, which ships. What that decision left behind:
 
-**What was measured.** `crcbl_shaders::mesh`'s shader admits a point light's
-cube only where `shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES`. With
-`SHADOW_LIGHT_TILES = 7` and `SHADOW_POINT_FACES = 6` that is tile 0 or 1, so
-**exactly one point light casts a shadow in any scene, on every backend**.
-`shadow::Selection::update` is correct and was ruled out by reading: it ranks by
-`influence` = `radius / distance-to-eye`, ties break by index, and it does not
-truncate to `LIGHT_SLOTS` before allocating runs.
+**A quarter of the linear shadow resolution went with it**, deliberately: the
+grid gained a column and a row while the tile shrank so `shadow::atlas_extent`
+would not move, so every map is now 768 texels a side rather than 1024. The
+visible cost is measured — `crates/crcbl/tests/golden/dunes.png` had 8.61% of
+its pixels differ at all and 4.03% past the comparison's tolerance, worst
+channel delta 40, and the diff image puts every one of them on a shadow edge —
+but two things moved with it and are worth knowing before reading either as a
+regression:
 
-`shard::light::torches` puts braziers symmetrically either side of the walkway.
-The two nearest tie to the last bit on `influence`, index order picks the
-caster, and **the loser then relights the shadowed floor from the opposite side
-at equal strength**. On a native Vulkan capture at spawn the capsule's shadow is
-2 of 255 levels; brightening the zone (`TORCH_INTENSITY` 26 → 160,
-`BOUNCE_ALBEDO` 0.28 → 0.04, floor median 20 → 39) took it only to 4. Lighting
-tuning cannot fix a mirror-image fill.
+- `apps/lantern`'s `MIRROR_FRACTION_OF_PLASTER` was re-measured from 0.20 to
+  0.14. The mirror itself did **not** move (20.3 before and after; it has no
+  direct light on it); the directly-lit plaster it is compared against went from
+  83.3 to 119.9 as the coarser maps' larger world-space bias let more of the
+  lamp reach it. Measured on lavapipe, both sides, at 256×192.
+- `room.png` and `live.png` were re-blessed for the same reason.
 
-Note `light::probes` bakes from the same `TORCH_REACH`/`TORCH_INTENSITY`, so
-scaling intensity scales the baked half too and the direct-to-indirect ratio is
-unchanged. Only the direct term is shadowed — the shader multiplies `reach` into
-`diffuse` and `specular`, never into `frame.ambient` plus the probe irradiance.
+**The other two options, and why neither was taken.** Recorded so they are not
+re-argued:
 
-**The options.** The atlas is `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` tiles
-of `shadow::TILE`, D32 — today 3×3 at 1024, 36 MiB.
+- **4×4 at 1024** buys the same capability and costs +28 MiB of `D32Float`,
+  which matters because milestone 1's peak wasm memory is still unmeasured (see
+  the milestone-1 figures entry). Revisit this if shadow resolution ever becomes
+  the thing that is failing; it is a one-constant change now that the grid is
+  already four wide.
+- **Dual-paraboloid point shadows** — 2 tiles per point light instead of
+  `SHADOW_POINT_FACES` — is **declined** unless someone overrides it. The
+  paraboloid warp is nonlinear across a triangle, so it is wrong in proportion
+  to how large the triangles are, and every `crcbl::greybox` scene is large flat
+  quads: its worst case. Cube maps have no such dependence on tessellation.
 
-1. **4×4 at 1024.** 14 light tiles: two point cubes plus two spots. Costs 64
-   MiB, +28 MiB, which matters because milestone 1's peak wasm memory is still
-   unmeasured (see the milestone-1 figures entry).
-2. **4×4 at 768.** Same 36 MiB, same two-cube capability, 25% less linear shadow
-   resolution. Reblesses the cascade goldens on all four backends —
-   `shadow::tile_origin`'s docs say the arrangement is what those goldens pin.
-3. **Dual-paraboloid point shadows.** 2 tiles per point light instead of 6, so
-   three point lights fit the existing 7 tiles at no memory cost.
+**No budget makes every light cast, and that is the design.** `shard`'s zone has
+more lights than `shadow::LIGHT_SLOTS`, so the renderer still ranks them and
+shadows the ones that win. What was wrong before was the budget being one point
+light, not the ranking.
 
-**Recommendation: option 2.** It buys the capability at zero memory cost, and
-resolution is not what is failing here.
+**What was not verified locally**, stated as the gap it is. Everything under
+`crates/crcbl/tests/`, `crates/crcbl-vk/tests/` and every app golden was run on
+both radv and lavapipe and is green; beyond that:
 
-**Option 3 is declined** unless someone overrides it: the paraboloid warp is
-nonlinear across a triangle, so it is wrong in proportion to how large the
-triangles are, and every `crcbl::greybox` scene is large flat quads — its worst
-case. Cube maps have no such dependence on tessellation.
-
-Note that no option makes every light cast: with eight lights in shard's zone a
-4×4 atlas still shadows four. A ranked budget is the correct design and the docs
-in `shard::light` describing it are accurate; the defect was only that the
-budget was one point light rather than two.
+- **The browser gate and the wasm demos were not run.** `mesh.wgsl` regenerated
+  with the new constants and `FrameUniforms` grew to 1232 bytes, which is far
+  inside WebGPU's default `maxUniformBufferBindingSize`, and both `cargo clippy`
+  and `cargo doc` for `wasm32-unknown-unknown` pass — but nothing loaded a page.
+  The gate was left alone because `web/run-browser-e2e.sh`,
+  `web/run-probe-e2e.sh` and their drivers were being edited in the working tree
+  at the time, so a run would have been reading somebody else's work in
+  progress.
+- **Metal and D3D12 were type-checked, not run.** `msl/mesh.metal`,
+  `msl/mesh_cluster.metal` and the five `dxil/mesh*.dxil` containers regenerated
+  from the pinned toolchain and `compile-shaders.sh --check` agrees, and
+  cross-target `cargo clippy` is clean for `aarch64-apple-darwin` and
+  `x86_64-pc-windows-msvc` — but no frame was drawn on either, so their goldens
+  are CI's word.
 
 ### A browser that declines `unadjustedMovement` gives adjusted deltas (2026-08-26)
 
@@ -14701,30 +14709,32 @@ slice deferred or turned up:
 
 ## What punctual-light shadows left owed
 
-The atlas is a fixed 3×3 tile grid, `shadow::Selection` decides who gets tiles,
-`shadow::spot_matrix` and `shadow::point_matrix` build reversed-Z perspective
-projections, and `mesh.slang`'s `spot_visibility` and `point_visibility` sample
-them through the same 3×3 PCF kernel the cascades use. Decisions taken, so they
-are not re-argued:
+The atlas is a fixed `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` tile grid,
+`shadow::Selection` decides who gets tiles, `shadow::spot_matrix` and
+`shadow::point_matrix` build reversed-Z perspective projections, and
+`mesh.slang`'s `spot_visibility` and `point_visibility` sample them through the
+same 3×3 PCF kernel the cascades use. Decisions taken, so they are not
+re-argued:
 
 - **Two budgets, because they buy different things.** `LIGHT_TILES` is atlas
-  space — seven of them, one past the six a point light's cube needs, so a spot
-  fits beside it — and `LIGHT_SLOTS` is cull space, two of them, because a slot
-  costs a `DrawGen`. A `DrawGen` is ~5.0 MiB measured on the spot scene, 3.7 MiB
-  of it per-instance LOD hysteresis state that is device-local and permanent; a
-  tile is 4 MiB of `D32Float`. So the atlas is 36 MiB (raised from 32 on
-  2026-08-23, when the region went from six tiles to seven) and the four
-  generators are ~20 MiB, allocated whether a scene has a shadowed light or not.
-  That is deliberate: building a `DrawGen` inside `begin_frame` means a frame
-  that cannot allocate is a frame that cannot draw. **Raising either budget is
-  the memory conversation, not the atlas one.**
-- **The reachable states are one point light and one spot, or two spots**, and
-  nothing in between. Six of the seven light tiles are the minimum a point light
-  needs and the seventh is a spot's whole map, so the two kinds fit together; a
-  _second_ point light is what does not, since two cubes are twelve tiles. A
-  frame with more shadow-worthy lights than fit ranks them by projected
-  influence and hands out runs first-fit, and a point light that cannot fit six
-  consecutive tiles is **skipped without taking the budget down with it** —
+  space — two point cubes and two spots' worth — and `LIGHT_SLOTS` is cull
+  space, four of them, because a slot costs a `DrawGen`. A `DrawGen` is ~5.0 MiB
+  measured on the spot scene, 3.7 MiB of it per-instance LOD hysteresis state
+  that is device-local and permanent. The atlas is **36 MiB either way**: the
+  2026-08-26 re-tiling traded tile side for tile count so `atlas_extent` did not
+  move, and it is `SHADOW_CULLS` that grew — six generators where there were
+  four, allocated whether a scene has a shadowed light or not. That is
+  deliberate: building a `DrawGen` inside `begin_frame` means a frame that
+  cannot allocate is a frame that cannot draw. **Raising either budget is the
+  memory conversation, not the atlas one** — and after the re-tiling it is
+  `LIGHT_SLOTS`, not the atlas, that costs.
+- **The reachable states are two point lights and two spots, or four spots**,
+  and nothing in between. `SHADOW_POINT_FACES` tiles is the minimum a point
+  light needs and `LIGHT_TILES` holds two such runs with two tiles over, so both
+  kinds fit together; a _third_ point light is what does not. A frame with more
+  shadow-worthy lights than fit ranks them by projected influence and hands out
+  runs first-fit, and a point light that cannot fit a consecutive run is
+  **skipped without taking the budget down with it** —
   `a_point_light_that_cannot_fit_leaves_the_lights_around_it_alone` is the
   assertion.
 - **A cone at or past `MAX_SPOT_HALF_ANGLE` (80°) is refused a tile** rather
@@ -14780,21 +14790,28 @@ What is left:
   built.** `tile_pcf` clamps taps half a texel inside the tile, so a receiver
   within one texel of a face boundary re-samples its own edge texel instead of
   the neighbour's: the shadow edge is **under-filtered** along the twelve cube
-  edges rather than wrong. One texel at distance `d` covers `2d/1024` world
-  units, so at a metre from the light that is about two millimetres. Topic 18
-  names a border of padding per tile as the fix; build it if a seam ever shows.
-- **A shadowed spot idles five of the six light tiles.** The region is sized for
-  a point light, so a scene of spots wastes 20 MiB of atlas. A packing policy is
-  what would fix it and topic 18 puts packing post-MVP.
-- **Nothing exercises two shadowed lights at once.** `Scene::SpotShadow` has one
-  and `Scene::PointShadow` has one, so the second cull slot is covered only by
-  the host-side `Selection` tests and by the vk_e2e assertion that a free tile
-  stays at the clear.
+  edges rather than wrong. One texel at distance `d` covers `2d/SHADOW_TILE`
+  world units, so at a metre from the light that is under three millimetres —
+  and the 2026-08-26 re-tiling made it a third wider. Topic 18 names a border of
+  padding per tile as the fix; build it if a seam ever shows.
+- **A shadowed spot idles `SHADOW_POINT_FACES - 1` light tiles.** The region is
+  sized in whole cubes, so a scene of spots leaves most of the atlas written by
+  nothing. A packing policy is what would fix it and topic 18 puts packing
+  post-MVP — and the re-tiling made the waste larger, since there are now four
+  slots to idle rather than two.
+- **Nothing on a device exercises two shadowed _point_ lights at once.**
+  `forward_e2e`'s `a_point_light_and_a_spot_hold_the_cube_and_the_tile_past_it`
+  covers a cube beside a cone, and
+  `shadow::tests::two_point_lights_are_both_shadowed` covers two cubes host-side
+  — but no scene renders two point-light cubes and reads the pixels back, so
+  what says the second cube's faces land in the right tiles is `Selection` plus
+  the shader's own range check, not a picture.
 - **`Scene::Lights` changed shape without changing pixels.** Its three point
-  lights are now shadow-eligible, so the most influential takes the region and
-  the frame records one more cull triple. `lights.png` is byte-identical and
-  `every_scene_records_the_passes_it_names…` expects the extra triple — worth
-  knowing before reading that scene as unshadowed.
+  lights are shadow-eligible, so the two most influential take runs and the
+  frame records two more cull triples than the unshadowed scenes. `lights.png`
+  is byte-identical through both the 2026-08-23 and 2026-08-26 budget changes
+  and `every_scene_records_the_passes_it_names…` expects the extra triples —
+  worth knowing before reading that scene as unshadowed.
 
 ## P7B could not start as written: the engine has one light
 

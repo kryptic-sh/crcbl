@@ -70,8 +70,8 @@
 //! scene rather than a nearly complete one. It rests on
 //! `crcbl::render::shadow`'s light region holding
 //! [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles against a point
-//! light's cube of [`POINT_FACES`](crcbl::render::shadow::POINT_FACES): one
-//! tile spare, and the downlight's map is that tile. Until the region grew, the
+//! light's cube of [`POINT_FACES`](crcbl::render::shadow::POINT_FACES): tiles
+//! to spare, and the downlight's map is one of them. Until the region grew, the
 //! two constants were the same number and this room had one shadow to divide
 //! between its two punctual lights — the cone was drawn and its shadow was not.
 //! `the_shadow_atlas_holds_both_punctual_lights_on_every_frame_of_the_orbit` is
@@ -2166,7 +2166,7 @@ mod tests {
     /// `crcbl::render::shadow`'s light region holds
     /// [`LIGHT_TILES`](crcbl::render::shadow::LIGHT_TILES) tiles and a point
     /// light's cube needs [`POINT_FACES`](crcbl::render::shadow::POINT_FACES)
-    /// of them, so the region has exactly one tile spare — which is a spot's
+    /// of them, so the region has tiles to spare — and one of them is a spot's
     /// whole map. That spare tile is the downlight's shadow, and it is why the
     /// assertion below reads `[0, 1]` and not `[0]`.
     ///

@@ -21,18 +21,25 @@
 //! fixtures that accept them. What this module is is the **load**: a dozen
 //! lights in a dark room with stone between them.
 //!
-//! # Two shadowed lights, and the engine picks which
+//! # The engine picks which lights cast, and there are more than there are slots
 //!
 //! There is no "casts shadows" flag on a [`Light`]. The renderer's own
 //! [`Selection`](crcbl::render::shadow::Selection) ranks the frame's lights by
 //! `radius / distance-to-eye` and hands the atlas's tiles to the best
 //! [`LIGHT_SLOTS`](crcbl::render::shadow::LIGHT_SLOTS) of them — and the tile
-//! region holds exactly one point light's cube plus one spot. So what a visitor
-//! sees is the **nearest torch** casting and the shrine's spot casting, and the
-//! rest of the braziers lighting without occluding. That is a property of the
-//! engine rather than of this zone, and the reason this zone has more lights
-//! than slots is that a sample which only ever offered two would never exercise
-//! the selection at all.
+//! region holds two point lights' cubes beside a pair of spots' maps. So what a
+//! visitor sees is the **nearest braziers** casting and the shrine's spot
+//! casting, and the torches further off lighting without occluding. That is a
+//! property of the engine rather than of this zone, and the reason this zone has
+//! more lights than slots is that a sample which only ever offered as many as
+//! fit would never exercise the selection at all.
+//!
+//! Until 2026-08-26 the region was one tile past a single cube, so exactly one
+//! torch could occlude — and since this zone's braziers flank the walkway in
+//! pairs, the twin that lost the tie *re-lit* the shadow the winner cast. That
+//! is the defect the atlas's re-tiling fixed, and it is visible here rather than
+//! anywhere else because a symmetrical rig is what makes a missing occluder look
+//! like a working light.
 //!
 //! # The spot has something standing in it
 //!

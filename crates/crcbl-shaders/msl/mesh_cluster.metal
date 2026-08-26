@@ -104,9 +104,9 @@ struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 
 
 #line 142
-struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E7_0
+struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E14_0
 {
-    array<_MatrixStorage_float4x4_ColMajornatural_1, int(7)> data_3;
+    array<_MatrixStorage_float4x4_ColMajornatural_1, int(14)> data_3;
 };
 
 
@@ -120,7 +120,7 @@ struct FrameUniforms_natural_0
     float4 cascade_far_0;
     float4 shadow_params_0;
     uint4 cluster_grid_0;
-    _Array_natural_matrixx3Cfloatx2C4x2C4x3E7_0 light_view_proj_0;
+    _Array_natural_matrixx3Cfloatx2C4x2C4x3E14_0 light_view_proj_0;
     float4 probe_origin_0;
     float4 probe_inv_spacing_0;
     uint4 probe_counts_0;

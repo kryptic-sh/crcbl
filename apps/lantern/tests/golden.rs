@@ -143,8 +143,23 @@ const SHAFT_RATIO: f32 = 2.0;
 ///
 /// This is a non-black fallback control, not a claim that the mirror is brighter
 /// than plaster or that it rejects whole-frame brightening. The fixed Vulkan run
-/// measured a 0.24 ratio, so this leaves margin for rasterisation variation.
-const MIRROR_FRACTION_OF_PLASTER: f32 = 0.20;
+/// measures a 0.17 ratio, so this leaves margin for rasterisation variation.
+///
+/// **The comparand is what moved it, not the mirror.** It was 0.20 against a
+/// measured 0.24 until the shadow atlas was re-tiled to
+/// [`SHADOW_ATLAS_COLUMNS`](crcbl::shaders::mesh::SHADOW_ATLAS_COLUMNS) columns
+/// of [`SHADOW_TILE`](crcbl::shaders::mesh::SHADOW_TILE)-sided tiles on
+/// 2026-08-26. [`MIRROR_AT`] has no direct light on it at all — see
+/// `crcbl_lantern::room::MIRROR_MISSES` — so it read 20.3 before that change and
+/// 20.3 after it; the *plaster* it is measured against is directly lit and went
+/// from 83.3 to 119.9 as the coarser maps' larger world-space bias let more of
+/// the lamp reach it. The teeth are unchanged: with the probe rows zeroed this
+/// point reads at most 1.0, which
+/// [`zero_probes_only_remove_the_ssr_and_rough_fallbacks`] pins, so the failure
+/// this guards lands an order of magnitude below the threshold either way.
+///
+/// [`zero_probes_only_remove_the_ssr_and_rough_fallbacks`]: fn@zero_probes_only_remove_the_ssr_and_rough_fallbacks
+const MIRROR_FRACTION_OF_PLASTER: f32 = 0.14;
 
 /// How much a fully screen-space hit may vary when the probe rows are zeroed.
 ///

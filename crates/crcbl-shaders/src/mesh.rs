@@ -64,7 +64,15 @@ pub const SHADOW_CASCADES: usize = 2;
 /// exactly: [`FrameUniforms::light_view_proj`] is an array of this length, so a
 /// block sized differently on the two sides puts every member after it at the
 /// wrong offset. The same drift test covers it.
-pub const SHADOW_LIGHT_TILES: usize = 7;
+///
+/// **Two point cubes and two spots**, which is what the 2026-08-26 re-tiling of
+/// the atlas bought: the grid gained a column and a row while [`SHADOW_TILE`]
+/// shrank to keep their product where it was, so the atlas image did not change
+/// size at all. What a scene gets for it is a *second* point light that
+/// occludes — one cube is [`SHADOW_POINT_FACES`] tiles, and until then this
+/// region was one tile past exactly one of them — paid for in shadow-map
+/// resolution rather than in memory.
+pub const SHADOW_LIGHT_TILES: usize = 14;
 
 /// Tiles one point light's shadow map is: the six faces of a cube.
 ///
@@ -83,15 +91,23 @@ pub const SHADOW_POINT_FACES: usize = 6;
 /// so it has to know how many of them the tile has. See
 /// `PUNCTUAL_DEPTH_BIAS_TEXELS` there, and `crcbl_render::shadow`'s
 /// `DEPTH_BIAS_TEXELS` for the sun's.
-pub const SHADOW_TILE: u32 = 1024;
+///
+/// Chosen with [`SHADOW_ATLAS_COLUMNS`] rather than on its own: the two multiply
+/// to the atlas's extent, and the 2026-08-26 re-tiling picked the pair that
+/// leaves that product where it was — so the widened grid costs no texels, no
+/// `D32Float` memory and no allocation change, only per-tile resolution.
+pub const SHADOW_TILE: u32 = 768;
 
 /// Tiles across the shadow atlas.
 ///
-/// At least [`SHADOW_CASCADES`], which is what keeps the cascades in the top row
-/// at the origins they have always had — see `crcbl_render::shadow::tile_origin`,
-/// and the cascade goldens, which are what say the arrangement survived a change
-/// to the grid's shape.
-pub const SHADOW_ATLAS_COLUMNS: u32 = 3;
+/// At least [`SHADOW_CASCADES`], which is what keeps the cascades in the *top
+/// row* — see `crcbl_render::shadow::tile_origin`, and the cascade goldens,
+/// which are what say the arrangement survived a change to the grid's shape.
+///
+/// Their origins move whenever this or [`SHADOW_TILE`] does, so a change to
+/// either is a change every golden of a shadowed scene has to be re-blessed
+/// through; what the bound protects is the *arrangement*, not the texels.
+pub const SHADOW_ATLAS_COLUMNS: u32 = 4;
 
 /// Tiles down it.
 ///
@@ -100,7 +116,7 @@ pub const SHADOW_ATLAS_COLUMNS: u32 = 3;
 /// would be an image wider than some devices' limit. `mesh.slang` addresses a
 /// tile through both extents, so the shape is free to change without the
 /// sampling side changing with it.
-pub const SHADOW_ATLAS_ROWS: u32 = 3;
+pub const SHADOW_ATLAS_ROWS: u32 = 4;
 
 const _: () = assert!(
     (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_CASCADES + SHADOW_LIGHT_TILES,
@@ -1804,13 +1820,13 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 784,
-            "at two cascades and seven light tiles"
+            FRAME_UNIFORMS_SIZE, 1232,
+            "at two cascades and fourteen light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272, 720, 736, 752, 768 — and
+        // 224, 240, 256, 272, 1168, 1184, 1200, 1216 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
-        // `%_arr_mat4v4float_int_7`, which is the light array's own length.
+        // `%_arr_mat4v4float_int_14`, which is the light array's own length.
         // Three of the last four are the grid header's rows, which this side
         // writes as one group. Read out of `spirv/mesh.spv` with `spirv-dis`,
         // not derived from the arithmetic below — that is the point of them.

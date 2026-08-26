@@ -277,6 +277,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Only one point light could ever cast a shadow, in any scene, on any
+  backend.** `mesh.slang` admits a point light's cube only where its whole run
+  of six faces is inside the atlas's light region, and that region was seven
+  tiles — so the second point light of any pair was refused a run, lit without
+  occluding, and _re-lit_ whatever its twin was shadowing. A rig with a light
+  either side of a walkway, which is an ordinary rig, therefore had no working
+  point-light shadow at all: `apps/shard`'s flanking braziers measured the
+  player capsule's shadow at 2 of 255 levels. The atlas is now four tiles across
+  by four down instead of three by three, so `SHADOW_LIGHT_TILES` is 14 — two
+  point cubes and two spots — and `crcbl_render::shadow::LIGHT_SLOTS` is 4 to
+  match. **The image did not grow**: `SHADOW_TILE` went from 1024 to 768 with
+  the grid, and four times 768 is three times 1024, so the atlas is the same
+  3072² `D32Float` allocation to the texel and the whole cost is per-tile shadow
+  resolution. What is not free is the slots: a slot is a `DrawGen`, so the two
+  the budget added are device-local memory the atlas did not ask for. Every
+  golden of a shadowed scene moved with the tile size and was re-blessed —
+  `crates/crcbl/tests/golden/dunes.png` and `apps/lantern`'s `room.png` and
+  `live.png`.
+
 - **`apps/viewer`'s idle turntable stopped for a click that only meant focus.**
   A press with no movement is a click, and the commonest click on that canvas is
   the one that hands it the keyboard — so a visitor who clicked to type lost the
