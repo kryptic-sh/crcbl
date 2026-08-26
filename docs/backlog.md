@@ -1409,6 +1409,640 @@ which is a design question rather than a script change.
 `docs/plan/sample/` resolves today, checked by a one-off script rather than by
 the gate, which would not notice the next break.
 
+## The services and content plans — what the seven still owe
+
+`docs/plan/00-overview.md`, `13-audio.md`, `14-persistence.md`, `23-netcode.md`,
+`27-auth.md`, `32-voip.md` and `34-inventory.md` were audited against the tree
+on 2026-08-27. Three entries below need a decision rather than work, and two of
+them point at richer entries this file already carries rather than restating
+them.
+
+## Overview (`docs/plan/00-overview.md`)
+
+### Render scale is unbuilt on both sides, not just the renderer (2026-08-27)
+
+**Not built.** The overview said the _renderer half_ of render scale was
+missing, implying the shell had its half. Neither does: `render_scale` appears
+nowhere under `crates/`, in `crcbl-shell` or `crcbl-render`. The two window
+modes do exist in `crcbl-shell` (windowed and borderless on a named monitor).
+The fractional scale `crcbl-shell` handles is the compositor's HiDPI factor — a
+different quantity, and mistaking it for this is how the doc got optimistic.
+
+**What it would take:** a scale factor on the swapchain-sized render target plus
+an upscale blit at present, and a settings key to drive it; the shell needs
+nothing except to keep reporting real surface size.
+
+**What it blocks:** the MVP feature row "Own windowing (2 modes, render scale)",
+and every low-end-device story that assumes a resolution knob exists.
+
+### Wasm game modules: no `crcbl-mod`, no host (2026-08-27)
+
+**Not built at all.** The `crates/` tree has no `crcbl-mod`, and no manifest in
+the workspace depends on `wasmtime`. Every app in `apps/` is a static Rust
+binary linked against `crcbl`, so the "one API, two bindings" claim has only
+ever had one binding exercised.
+
+**What it would take:** the flat FFI ABI from topic 16, a static binding proved
+by converting one existing sample to it, then the wasm host behind a seam. The
+static-first order matters: a dual binding whose static half was never used is a
+design nobody has tested.
+
+**What it blocks:** hot reload, sandboxed modding, and the claim that the engine
+owns all module state — none of which any sample demonstrates.
+
+### RON has no implementation, and it gates four separate things (2026-08-27)
+
+**Not built, and it is a user decision.** Nothing in the workspace reads or
+writes RON: no `ron` dependency in any `Cargo.toml`, no hand-written reader, not
+one `.ron` file in the tree. The TOML half of the format rule is built
+(`crcbl-store`'s `settings.rs` through the `toml` crate).
+
+**Already in `docs/backlog.md`** as the `.scn/` scene format entry and the
+`crcbl sim --input script.ron` entry; this adds the count of things waiting on
+it, which the existing entries do not state together: the `.scn/` scene format,
+`crcbl save dump` / `save diff` (topic 14), `crcbl audio render`'s script input
+(topic 13), and topic 20's RON effect assets.
+
+**Decision needed:** adopt the `ron` crate (a new dependency, so the user's
+call) or write a reader. The trade-off is small either way for reading; the
+deterministic _writer_ the scene format needs — stable key order, stable float
+formatting — is the part that is not free with either choice, and is what makes
+clean git diffs of scenes possible at all.
+
+**What it blocks:** four features across four documents, listed above.
+
+### towers and arena do not exist, and exit criteria all over the plan name them (2026-08-27)
+
+**Not built.** `apps/` holds fourteen samples; `docs/plan/sample/` describes
+sixteen. The two missing are towers and arena. `docs/backlog.md` already records
+both as blocked on `apps/editor`.
+
+**Why it belongs here too:** exit criteria in `13-audio.md` ("towers plays
+creep/tower audio spatially in co-op") and `14-persistence.md` ("towers: save
+mid-wave, quit, resume — solo and dedicated-server co-op") are stated as MVP
+gates and cannot be met, so those documents' MVP bars are unreachable rather
+than merely unmet. Anyone reading them for "are we done" needs that stated.
+
+## Audio (`docs/plan/13-audio.md`)
+
+### The mixer bus graph and limiter (2026-08-27)
+
+**Not built**, and this is the third audit in a row to say so. `crcbl-audio` has
+no `Bus` type and no limiter; `Mixer` is a list of voices with nothing above
+them. The delivery table puts buses in P4A, which the ROADMAP marks done.
+
+**What it would take:** `master ← sfx/music/ui/voice` with per-bus gain and a
+soft-knee limiter on master, then mix snapshots on top.
+
+**What it blocks:** three consumers now, not one — P10's ducking and mix
+snapshots, `32-voip.md`'s "mixer voice bus/ducking" slice, and any per-category
+volume setting a settings screen would expose.
+
+### Voice pool, priority and stealing (2026-08-27)
+
+**Not built.** `Mixer` holds voices in a plain growable `Vec<(VoiceId, Voice)>`
+behind a `Mutex` — no capacity, no priority, no distance-based stealing.
+Per-voice state _is_ built (cursor, varispeed pitch, per-channel gains, L/R
+fractional delay lines), and a release list gives a stopped voice a one-block
+fade instead of a click.
+
+**What it would take:** a capacity, a priority score, and a steal policy.
+
+**Trap for whoever does it:** `Mixer` documents that ids are monotonic and never
+reused so a stale `VoiceId` can never name a later voice. A pool that recycles
+slots must keep that, which means the id and the slot cannot be the same thing.
+
+**What it blocks:** any game that can start more sounds than the machine can mix
+— nothing bounds voice count today.
+
+### ITD parameter smoothing and crossfaded delay lines (2026-08-27)
+
+**Partly built, and the missing part is what the 2026-07-27 correction was
+about.** The fractional delay line is there: per channel, linearly interpolated,
+capacity one past the longest ITD served so both taps stay in-buffer. There is
+**no per-block parameter smoothing and no crossfaded dual delay line**.
+`Mixer::set_mix` — whose own doc comment names the moving-emitter case, "a
+looping engine on a ship that crosses the field" — reaches `Voice::apply_mix`,
+which assigns `itd_samples` straight in with a clamp. A re-aimed voice therefore
+steps its delay length in one block, which is the click and the pitch glide the
+correction exists to prevent.
+
+**What it would take:** smooth the mix parameters across a block, and crossfade
+two delay lines for a large jump or an ear swap.
+
+**What it blocks:** the cue grammar's own promise. This is the failure mode that
+corrupts the pitch cues rules 3 and 4 depend on, so it is not cosmetic.
+
+### The transcendental policy is two conflicting requirements and neither is built (2026-08-27)
+
+**Not built, and it needs a decision.** `13-audio.md` requires own polynomial
+approximations plus a CI deny on std float transcendentals; `05-physics.md`
+requires the `libm` crate. Neither exists: no `libm` in any manifest, no
+polynomial approximations, and `crcbl-audio` calls `powf`, `sin`, `exp` and
+`cos` today (`spatial.rs`, `synth.rs`).
+
+**The deny mechanism does not exist either.** There is no `clippy.toml` anywhere
+in the workspace, and no CI step greps for anything of the kind. The audio doc
+cited a `std::fs` deny as the pattern to copy; that deny has never existed.
+Whoever builds this builds the first one of its kind and must show it failing
+before trusting it.
+
+**Evidence it matters, measured rather than argued:** the one golden buffer in
+the tree started as a digest of every sample's `f32::to_bits` and CI failed it
+on macOS _and_ on Windows the first time it ran. Windows is `x86_64` like the
+Linux runner, which is what rules out an architecture cause and pins it on libm.
+
+**Decision needed:** own polynomials plus a deny, or the `libm` crate (a new
+dependency, so the user's call). It is one decision for the whole workspace and
+currently lives in two documents saying opposite things.
+
+**What it blocks:** any cross-platform golden buffer that pins bytes rather than
+a waveform.
+
+### Occlusion (rule 5) (2026-08-27)
+
+**Not built; its stated dependency is now half met.** `crcbl-phys` has the ray
+query (`cast_ray`), so the "needs phys BVH" half is available. What is owed:
+acoustic materials on colliders (`{density, muffle_cutoff_hz, attenuation_db}`
+presets) and a per-voice filter. There is no biquad or one-pole anywhere in the
+voice path — the only lowpass in `crcbl-audio` is inside the noise generator.
+
+**What it blocks:** an MVP exit criterion ("occlusion audible and
+material-distinct"), and `32-voip.md`'s world-voice audibility test, which
+reuses the same occlusion.
+
+### Golden audio buffers per sample, and `crcbl audio render` (2026-08-27)
+
+**One golden exists; the criterion asks for one per sounding sample.**
+`crates/crcbl-audio/tests/burst-reference.wav` pins asteroids' explosion,
+compared frame by frame at a tolerance plus a separate total-energy assertion.
+`apps/asteroids` and `apps/horde` both synthesise cues deterministically from
+fixed seeds and neither has a golden; only `apps/breakout` mentions audio in a
+test target at all.
+
+**The e2e path the doc specifies does not exist:** `crcbl-cli`'s parser accepts
+`new`, `run`, `build`, `screenshot`, `replay`, `crpix`, `lod`, `import`,
+`bench`, `sim`, `settings` — `audio` exits 2 as unrecognized.
+
+**What it would take:** per-sample goldens can be written today against each
+sample's own synthesis without the CLI. The CLI verb needs a script input
+format, which is the RON decision above.
+
+**Trap:** pin the waveform at a tolerance and the energy separately, never the
+bytes. A per-sample bound alone is blind to a small coherent drift spread over a
+whole buffer; a bytes digest fails on macOS and Windows.
+
+### Audio debug overlay, cue inspector, grammar trainer, music streaming (2026-08-27)
+
+**Not built.** No audio overlay, no cue inspector, no grammar-trainer toggle, no
+streaming decode. Scheduled P10 by the delivery table, so this is a record of
+scope rather than a slip.
+
+**What it blocks:** the blindfold exit criterion is stated as a measured bar
+("≥90% accuracy after ~15 minutes of grammar-trainer practice") and the trainer
+that would produce the measurement does not exist. The number in that criterion
+has never been taken.
+
+## Persistence (`docs/plan/14-persistence.md`)
+
+### The migration seam (2026-08-27)
+
+**Not built.** `crcbl-store`'s `save.rs` has no `migrate` and nothing else in
+the crate does. The seam was specified as existing from day one and empty in
+MVP; it is neither.
+
+**Sharpest evidence that it is wanted:** `SAVE_FORMAT_VERSION` has already been
+bumped once, when the checksum field turned out to be a `DefaultHasher` digest
+rather than the SHA-256 it was documented as. That is precisely the situation a
+migration seam exists for, and there was none.
+
+**What it blocks:** every future format change breaks old saves silently or
+loudly, with nothing in between.
+
+### Save header fields: engine version, scene ref + hash, per-system versions, thumbnail (2026-08-27)
+
+**Not built.** The container is magic `CRCBLSVE`, a `format_version`, tick,
+playtime, a sector count, the sector entries, and a real SHA-256 over everything
+before it. `SaveHeader` carries `tick` and `playtime_secs` only.
+
+**Also absent from the format:** on-rails elements (orbital parameters for
+anything not live-simulated) and per-system extension blocks, both named by the
+2026-07-27 galaxy-shape correction. The sector-set half of that correction _did_
+ship and is the shape `apps/shard` writes.
+
+**What it blocks:** loading a save against the wrong scene, or the wrong engine,
+is currently undetectable.
+
+### The "no second serialization path" claim is not yet true (2026-08-27)
+
+**The container has a consumer; the claim does not.** `apps/shard` is the only
+game using `SaveWriter` / `SaveReader`, and it uses them exactly as the plan
+says an MVP sample should — one `SectorSave` at `SectorId::ZERO`, nothing
+changed in `crcbl-store` on its behalf. But the bytes inside that sector are
+shard's own hand-rolled little-endian payload with its own magic and version,
+**not** the replication encoder's output.
+
+**What it would take:** wiring a game's snapshot systems through
+`SnapshotWriter` for real, which means converting shard rather than finding the
+ground prepared.
+
+**What it blocks:** the whole design argument of the section — that save, editor
+play-mode restore and join-in-progress are one mechanism with three triggers.
+Today they are one mechanism with one trigger and one bypass.
+
+### Two of four settings layers, and the settings UI screen (2026-08-27)
+
+**Partly built.** `crcbl-store`'s `settings.rs` has a `SettingsLayer` stack with
+`EngineDefaults` and `UserFile`, appended in order so a later layer wins, and
+writes always land in the user file. There is **no game-defaults layer and no
+CLI/env override layer**. The `crcbl settings` CLI is honest about this — its
+stack has one layer, and `list` says so.
+
+**Not built:** the engine-provided settings UI screen (P10), and any defined
+`engine.audio.*` keys — the store is a generic dotted-key TOML stack with no
+audio namespace populated.
+
+**What it blocks:** a game shipping compiled-in defaults that a player's file
+overrides, which is the layering the doc's whole "small files, upgrade-friendly"
+argument rests on.
+
+### Profiles: no `Profile`, no persisted key binds (2026-08-27)
+
+**Not built.** No `Profile` type in `crcbl-store`, no RON, and a rebind does not
+survive the process. What shipped under the profile heading is
+`crcbl_store::record::Record` — one number kept between sessions, config
+directory natively or OPFS in a browser, in-memory when headless. Its own docs
+say why: four samples had each written the same platform arms, encode,
+corrupt-file case and headless rule for a high score, and the bodies matched
+line for line while the names agreed about nothing.
+
+**Related and already in `docs/backlog.md`:** `record::Backing::platform`
+answers with the _config_ directory while saves belong in the _data_ directory;
+`apps/shard` writes its own data-dir arm and the backlog marks a second consumer
+of that rule as the moment to hoist it into the engine. There is now one
+consumer.
+
+**What it blocks:** key binds, unlocks, and anything with more than one field.
+
+### `crcbl save list|dump|diff|restore` (2026-08-27)
+
+**Not built and blocked, not merely owed.** The verb is not parsed and
+`crcbl-cli` has no module for it. `dump` is specified to render a snapshot as
+RON, and nothing in the workspace reads or writes RON.
+
+**Knock-on the document states as an exit criterion:** "Same game code path for
+autosave, manual save, console `save`, CLI save" — only two of those four
+triggers exist (a game calling `SaveWriter`, and `AutosaveRing`). Nothing has
+yet tried to reach a save from outside the game process, so the shared-path
+claim is untested rather than kept.
+
+### Browser persistence: atomicity, IndexedDB fallback, quota (2026-08-27)
+
+**Built with two documented holes.** OPFS is the browser backend
+(`crates/crcbl-store/src/web/opfs.rs`), consumed by `apps/breakout`'s high score
+and `apps/shard`'s save.
+
+**Trap that contradicts the document's own wording:** "Atomic writes always" is
+a _native_ always. `write_atomic` is `std::fs` all the way down — `create_new`
+temp, `write_all`, `sync_all`, parent fsync, rename, parent fsync — and OPFS has
+no `rename` to build that on even through JS. `OpfsStorage` keeps a different
+half: torn reads prevented, **durability at return not provided**. A save that
+returned `Ok` in a browser is not yet a save that survives the tab closing. Do
+not carry a native atomicity test to the wasm job and call it passed.
+
+**Not built:** the IndexedDB fallback (the wasm side is a queue of
+`(name, bytes)` records a shim could satisfy without the crate knowing, but no
+shim does, and the choice has no representation in `OpfsEnvironment`), and quota
+negotiation (`navigator.storage.estimate()` is not surfaced, so a full disk is
+learned from a failed acknowledgement after the fact).
+
+**What it blocks:** any pre-save quota warning, and browsers without OPFS get no
+persistence rather than degraded persistence.
+
+### Persistence test matrix (2026-08-27)
+
+**Not verified by me.** The document lists a save→load→hash roundtrip property,
+version-skew fixtures per released format version, a kill-during-write atomicity
+test, a settings layer-resolution table, and an OPFS roundtrip in the browser
+e2e job. I did not enumerate `crcbl-store`'s tests to say which of those five
+exist. Treat the list as unverified in both directions.
+
+## Netcode (`docs/plan/23-netcode.md`)
+
+### There is still no network transport, and therefore no crypto (2026-08-27)
+
+**Not built.** `Transport` is implemented by `InMemoryTransport` and by
+`crcbl_store`'s `FileTransport` — a process-local pair and a replay file,
+neither touching a socket. The UDP layer, its reliability (acks, resend,
+fragmentation), connection tokens, X25519 and XChaCha20-Poly1305 are all P13 and
+all absent.
+
+**What _is_ built is narrower and easy to overread:** `crcbl_net::auth` is
+per-session HMAC-SHA256 keyed with the handshake's 32-byte `ResumeToken`,
+truncated to 128 bits, plus a `ReplayWindow`. It authenticates and orders; it
+does not encrypt.
+
+**The caveat that is not in either document until now:** the resume token
+travels in the clear inside the handshake's `Accept`, so an observer who watched
+the handshake holds the session key. The MAC defends against a spoofer who can
+send packets but did not see the handshake, and against nobody else.
+
+**Decision needed when the UDP layer starts:** taking on RustCrypto crates. The
+sanctioned-exception policy already covers it in principle; the actual
+dependency addition is still the user's call, and it is the first crypto
+dependency the workspace would have.
+
+### The channel table is three rows and the seam has two (2026-08-27)
+
+**Partly built.** `crcbl_net::transport::MessageKind` is
+`Reliable | Unreliable`, with `send_reliable` / `send_unreliable` and a
+`recv_reliable` a backend may override so control traffic is not starved.
+
+- **reliable-ordered** — built. `kind` is a truthful label on a received message
+  and an ignored field on a sent one; every implementation overwrites it, so a
+  mismatched field cannot silently reroute anything.
+- **unreliable-sequenced** — **not sequenced.** `Unreliable` promises only "may
+  be dropped or reordered". What actually stops a stale snapshot beating a fresh
+  one is a layer up: `crcbl_net::delta` refuses a delta whose tick is not newer
+  than the baseline's. Lateness is rejected at apply time rather than prevented
+  at the channel.
+- **reliable-fragmented** — does not exist. `MAX_IN_MEMORY_MESSAGE_BYTES` (64
+  KiB) _refuses_ an oversized message; nothing reassembles.
+- **unreliable-event** (added by the 2026-07-27 correction) — no representation
+  at all.
+
+**What it would take, and the trap:** whoever adds sequencing to the channel
+must keep the delta tick check rather than replace it — the two catch different
+things, and only one of them survives a transport swap.
+
+**What it blocks:** a join-in-progress snapshot larger than 64 KiB has no path
+today; transient cues (footsteps, impacts) have nowhere to ride but
+reliable-ordered, where one loss head-of-line blocks them into a stale burst.
+
+### Quantization, the priority/budget encoder, and the one-datagram rule (2026-08-27)
+
+**Not built.** No quantization anywhere in `crcbl-net`; no per-client budget, no
+relevance×staleness rotation, no adaptive snapshot rate.
+
+**Correction to the document's own plan, which had a false premise:**
+`SnapshotWriter::new_with_sector` takes a `SectorId` and a `TickId` and nothing
+else — it does _not_ take a client id, as the bandwidth section claimed. The
+per-client state is `SessionManager`'s (`last_acked_ticks` and
+`baseline_stores`, both keyed by sector), so a budget belongs there and is per
+(client, sector) rather than per client.
+
+**Hard contract to honour when it is built:** a steady-state snapshot must fit a
+single ~1200-byte datagram, because only the reliable channel fragments (and it
+does not fragment yet either). Exceeding it means shedding by priority, never
+silently fragmenting. Predicted components are exempt from rotation — skipping
+their tick stalls reconciliation.
+
+**What it blocks:** any session with more entities than fit a datagram, which is
+every session the galaxy model is for.
+
+### Netgraph HUD, LAN discovery (2026-08-27)
+
+**Not built.** No netgraph (RTT, jitter, loss, bandwidth, snapshot size, resend
+counts, tick-lead) in `crcbl-ui`'s debug overlay; no LAN announce/enumerate.
+Both are scheduled (P10 and post-MVP respectively), so this is scope, not slip.
+
+**Trap the document already names for discovery, worth keeping:** the discovery
+window must be shown to time out cleanly when nothing answers. A lobby that
+hangs on a silent network is the obvious failure and the one nobody writes a
+test for.
+
+### Netcode test matrix (2026-08-27)
+
+**Partly verified.** A fuzz target tree exists at `crates/crcbl-net/fuzz`, and
+`crates/crcbl-net/tests/replication.rs` is the crate's integration suite. The
+condition simulator (`condition.rs`) and inbound rate limiting (`rate_limit.rs`)
+are built, so the machinery the soak needs is there.
+
+**Not verified by me:** whether the reliability soak, the handshake matrix, the
+reconnect-with-hash-continuity test and the bandwidth measurement actually exist
+as tests. I read the modules, not the test list.
+
+**Certain:** the bandwidth row cannot exist — it is measured from a towers
+4-player session and there is no towers.
+
+## Auth (`docs/plan/27-auth.md`)
+
+### No trust tiers exist, and tier 1's row overstates the baseline (2026-08-27)
+
+**Not built.** `crcbl_net::handshake::Hello` carries a protocol version, an
+engine build id and a schema hash. There is no tier field, no `PlayerId`, and no
+notion of "authenticated" above the transport.
+
+**The row is wrong in the optimistic direction, twice over.** Tier 1 claims
+"encrypted vs passive snooping". Nothing encrypts, and the one thing built — the
+per-session HMAC — is keyed on a token that travels in the clear in `Accept`, so
+a passive observer of the handshake can forge as well as read. The honest row
+today is "no confidentiality, integrity only against an attacker who did not see
+the handshake".
+
+**What it blocks:** every feature gated on `authenticated + PlayerId`, and the
+topic 23 "no competitive claims" caveat, which this document says resolves here
+and does not.
+
+### The engine has no `PlayerId` (2026-08-27)
+
+**Not built.** No crate under `crates/` defines one. The only `PlayerId` in the
+tree is `apps/bracket`'s `queue::PlayerId`, a `u32` index into its simulated
+population — a sample type, not the engine one.
+
+**What it blocks:** bans and moderation (server-local denylist), replay and
+spectator POV attribution, the server-side stash keyed by PlayerId
+(`34-inventory.md`), and per-player voice mute (`32-voip.md`). Four documents
+key on a type that does not exist.
+
+### The samples this document says prove tiers do not (2026-08-27)
+
+**Shipped, and doing none of it.** The 2026-08-09 LAN correction says "breach
+and shard both run here [tier 0/1]" and names bracket as the signed-results
+consumer. All three now exist and none is a consumer:
+
+- `apps/breach` is single player — one hitscan pistol, a firing range and a bot
+  arena, `crcbl` with the `greybox` feature, in-process.
+- `apps/shard` says in its own app module that it has no network section because
+  it runs over `InMemoryTransport`.
+- `apps/bracket` is matchmaking, rating and ladder over a population with each
+  match resolved by a **stub**. It has no host, no client and no transport —
+  nothing in it imports `crcbl-net` — so there is no result crossing a trust
+  boundary to sign.
+
+**What it means:** the tier these three actually exercise is the one the
+document does not list — the in-process one, where there is no wire and the
+question does not arise. Signed results still need a consumer.
+
+### Deferred with reasons, kept on paper (2026-08-27)
+
+**Deliberately not built**, recorded so nobody re-proposes them: hosted tier 3,
+the ranked-integrity chain, and `crcbl-mint` as a running service. Their only
+consumer was a hosted deployment and the project has none by decision. The
+design is kept because it is the expensive half to get right and cheap to keep
+on paper. Reversing it is a product call, not a technical one.
+
+**Also decided and worth not re-deriving:** use the Noise Protocol Framework
+(`Noise_XX` / `Noise_XXpsk3` / `Noise_IK`) rather than a hand-rolled handshake;
+high-entropy generated PSKs only, with a PAKE (SPAKE2/CPace) as the documented
+upgrade if community servers want passphrases; 64-bit sequence transmitted
+truncated with DTLS 1.3-style implicit reconstruction and an epoch bump on
+rekey.
+
+**Honest limit to state alongside any trust claim:** this project never
+demonstrates a trust model where the host is adversarial.
+
+## Voice (`docs/plan/32-voip.md`)
+
+### Nothing in this document is built, and three prerequisites are missing too (2026-08-27)
+
+**Not built, entirely.** Verified individually:
+
+- **No capture.** No `AudioCapture` anywhere. `crcbl-audio` opens output only
+  (`AudioStream::open` takes an `AudioSource`); nothing asks `cpal` for an input
+  device or calls `getUserMedia`.
+- **No codec seam, no Opus.** No manifest depends on an Opus crate. The only
+  mention of Opus in the tree is a line in `crcbl-audio`'s QOA module saying
+  Vorbis and Opus will sit behind a decoder seam one day.
+- **The mixer voice bus does not exist** — see the bus-graph entry above.
+- **The `competitive_integrity` gate does not exist**, so every "under the gate"
+  behaviour has no flag to hang on. That is topic 31's.
+- **The forcing sample has no session.** breach shipped single-player.
+
+**What it would take, in the order the dependencies allow:** the `AudioCapture`
+seam is genuinely standalone and useful on its own (device pick, level meter,
+loopback self-monitor). Everything after it waits on the bus graph, the gate and
+a network transport.
+
+**Decisions already taken, kept so they are not re-argued:** acoustic echo
+cancellation is out of scope (research-grade DSP; ship a noise gate and ducking,
+recommend headsets, use platform AEC where free). Opus is a sanctioned exception
+behind a `VoiceCodec` seam rather than a from-scratch codec. Browser encode
+ships **libopus compiled to wasm as the baseline** with WebCodecs used
+opportunistically — WebCodecs audio _encode_ support is uneven across Firefox
+and Safari, so it is a capability check and never a requirement.
+
+**What it blocks:** nothing else depends on voice; it is a leaf.
+
+## Inventory and drag-drop (`docs/plan/34-inventory.md`)
+
+### UI drag-drop capability, and the stylesheet it assumes (2026-08-27)
+
+**Not built.** `crcbl-ui` has a drag, but only a slider's: `menu.rs` tracks a
+`dragging: Option<usize>` for the row the pointer is pulling, and `widget.rs`
+handles press-A / drag-onto-B / release. No drag source, no drop target, no
+typed payload, no `can_accept`.
+
+**The harder half is the styling, not the mechanism.** The design hangs feedback
+on `:drop-ok` / `:drop-bad` pseudo-classes "like everything else (topic 7)", and
+there is no stylesheet system in `crcbl-ui` at all — no CSS parser, no
+selectors, no pseudo-classes. The only `.css` file in the repo is
+`web/style.css`, which belongs to the Pages site.
+
+**Decision needed:** build the drag capability against the styling that exists,
+or wait for topic 7's CSS subset. Whoever picks should say which, because the
+first consumer named in the plan — the editor asset browser — does not exist
+either (there is no editor).
+
+**What it blocks:** the grid kit's entire interaction model, and outliner
+reparenting and VFX curve handles in an editor that does not exist yet.
+
+### The grid-inventory kit (2026-08-27)
+
+**Not built.** No `crcbl-inventory` crate and no inventory of any kind in the
+workspace. `apps/shard` and `apps/breach` both mention one only to say they do
+not have it.
+
+**Decision needed — already in `docs/backlog.md` with three costed options.**
+The bind: this document is written for breach, and `sample/15-shard.md` is
+explicit that shard is meant to be the kit's _second_ consumer ("a kit with one
+consumer is that consumer's shape wearing a kit's name"). Breach's inventory
+sits in milestones that are native-only by that sample's own reasoning, so
+nothing has forced the kit and shard would force it alone — the exact case both
+plans say to avoid. Shard has already taken the one deferral available to it
+(its fight slice shipped with no item, no currency, no equipped weapon), so its
+next verb is loot, and loot is where the kit is forced.
+
+**Constraint worth carrying whoever builds it:** `apps/shard`'s save module
+deliberately reserves **no** inventory field, because reserving one would answer
+the consumer question by accident. Its payload is versioned, so adding a field
+later costs a version bump and nothing else. Do not "helpfully" reserve it.
+
+**What it blocks:** shard milestone 1's exit criterion (a complete session:
+explore, fight, loot, level, save, resume) and breach's buy menu.
+
+### `crcbl icon bake` (2026-08-27)
+
+**Not built.** Neither `icon` nor `bake` parses; `crcbl-cli` accepts `new`,
+`run`, `build`, `screenshot`, `replay`, `crpix`, `lod`, `import`, `bench`,
+`sim`, `settings`. The Risks section mitigates the icon-pipeline cost by saying
+it is "part of `crcbl bake`", and there is no `crcbl bake` to be part of.
+
+**What it would take:** the offscreen render path `screenshot` already uses,
+driven over an item set, writing an atlas.
+
+**What it blocks:** grid UI item icons, so it is on the kit's critical path, not
+beside it.
+
+### Cross-fleet stash: decided and out of scope (2026-08-27)
+
+**Deliberately not built.** Engine stash = per-server-instance store;
+cross-fleet stash = backend-project territory, reached through the same
+`StorageSource` seam so the engine side never changes. Recorded so the line is
+not re-litigated when a fleet is first imagined.
+
+## Coverage gaps in the services audit
+
+Stated plainly. "Not reviewed" is the honest line.
+
+- **I did not read the other plan documents.** Claims these seven make about
+  `05-physics.md`, `07-ui-debug.md`, `11-cli-headless.md`, `12-testing.md`,
+  `16-wasm-modules.md`, `17-animation.md`, `26-prediction.md`,
+  `31-vis-culling.md` and `ROADMAP.md` were checked against the **tree**, never
+  against those documents. Where I say "topic 5 requires `libm`" I am quoting
+  `13-audio.md`'s own correction, not `05-physics.md`. Several of those files
+  are being edited concurrently by the parent and by sibling agents, so they may
+  say something different by the time this is read.
+- **I did not read `docs/plan/sample/*.md`.** Sibling agents own them. The
+  sample list in `00-overview.md` I rebuilt from `git ls-files apps/` and from
+  the _filenames_ in `docs/plan/sample/`, not from those documents' contents.
+  The one exception is `sample/15-shard.md`'s "second consumer" framing, which I
+  took from `docs/backlog.md`'s quotation of it and from `apps/shard`'s source
+  comments — not from the sample doc itself.
+- **I did not enumerate test suites.** For audio I read
+  `crates/crcbl-audio/tests/spatial_chain.rs` and `synth.rs`'s in-crate tests;
+  for netcode I noted `crates/crcbl-net/fuzz` and
+  `crates/crcbl-net/tests/replication.rs` exist without reading them. I did
+  **not** check `crcbl-store`'s tests at all, so the persistence test-matrix
+  entry above is unverified in both directions. Any statement of the form "there
+  is no test for X" in the edited documents is scoped to the files I actually
+  opened.
+- **I ran no code.** No `cargo build`, no `cargo test`, no `cargo clippy`. Every
+  "built" claim is from reading sources — signatures, module docs, struct fields
+  — not from running anything. A type that exists and does not work reads as
+  built to this audit.
+- **Gates run:** `npx --yes prettier@3.8.3 --write` then `--check` on all seven
+  files (clean), `tools/check-doc-citations.sh` on the seven and then over the
+  whole repo (2245 paths, all resolve), `tools/check-wrapped-strings.sh` on the
+  seven (clean). **Gates not run:** everything else the harness-guard job does,
+  and the whole Rust gate — I edited no Rust.
+- **Relative Markdown links and crate-relative backtick paths** are the citation
+  gate's two blind spots. I checked by hand the ones I introduced:
+  `[41-webgpu-stream.md]`, `[42-steam.md]` (from `00-overview.md`),
+  `[13-audio.md]` (from `32-voip.md`), `[27-auth.md]` (from `23-netcode.md`) —
+  all resolve relative to `docs/plan/`. I did **not** re-check the pre-existing
+  relative links in these files.
+- **Carried forward on trust, not re-checked:** the `13-audio.md` claim that
+  `05-physics.md`'s correction requires the `libm` crate; the `23-netcode.md`
+  assertion that WebRTC's costs are recorded in `docs/backlog.md` (I saw the RON
+  and inventory entries there, not the WebRTC one); the ROADMAP's phase markings
+  wherever a document says "which the ROADMAP marks done".
+- **Not audited for staleness at all** within my seven: the cue grammar's rule
+  table, the latency budget table in `32-voip.md`, the coverage/mount model in
+  `34-inventory.md`, and the galaxy-scale wire section of `23-netcode.md` beyond
+  confirming that `SectorId` reaches `messages.rs` and `session.rs`. Those are
+  design, and design was in scope to keep, not to verify.
+
 ## The sample plans — what the seventeen still owe
 
 Every file under `docs/plan/sample/` was audited against its app and against the
