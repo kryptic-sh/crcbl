@@ -68,8 +68,12 @@
 //! an overlay and composes with both of the others, which is the combination it
 //! is for.
 //!
-//! Still owed, from that document's milestones: the skinned prop, which is
-//! behind an engine feature that does not exist — nothing here does skinning.
+//! Still owed, from that document's milestones: the skinned prop. The blocker
+//! is not that the engine cannot skin — `crcbl_render::skinning`, `crcbl-anim`
+//! and `apps/puppet` all ship, and a golden holds the pose a palette asks for.
+//! It is that skin weights do not survive a decimation collapse, which
+//! `crcbl_scene::simplify`'s own header states: the quadric is over positions,
+//! and a collapse has no rule for the weights of the vertex it removes.
 //!
 //! # Rule 11 does not apply
 //!
