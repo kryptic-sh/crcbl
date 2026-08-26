@@ -36,15 +36,15 @@
 //! # Mouselook is asked for and not assumed
 //!
 //! [`Breach::pointer_mode`] answers [`PointerMode::Locked`] while the range is
-//! being shot, and the look is bound to `at.is_none()` rather than to that
-//! request — see [`Breach::pointer_event`]. **A browser declines it**: the web
-//! shell reports neither [`POINTER_LOCK`](crcbl::shell::ShellCaps) nor
-//! `RAW_POINTER_MOTION`, because `movementX`/`movementY` under Pointer Lock are
-//! accelerated and clamped by the same OS layer the capability exists to
-//! bypass. `docs/plan/sample/11-breach.md` names that as one of the four
-//! reasons the *competitive* game is native only. So on the demo site the
-//! arrows are the look, and they are bound here for exactly that reason rather
-//! than as an accessibility afterthought.
+//! being shot, and both halves of the mouse — the look and the trigger — are
+//! bound to `at.is_none()` rather than to that request. See
+//! [`Breach::pointer_event`]: a request is not a grant, and the loop declines
+//! the lock outright on a shell that clears
+//! `ShellCaps::has_mouselook`. On a shell that grants it the mouse turns the
+//! view and its primary button pulls the trigger; on one that does not, the
+//! arrows are the look and `ACTION_FIRE`'s key is the trigger, and the sample
+//! plays with the keyboard alone rather than half-working. The arrows are
+//! therefore a real second binding and not an accessibility afterthought.
 //!
 //! # `[HUD]` is logged here rather than in `crate::game`
 //!
@@ -91,18 +91,18 @@ const ACTION_LOOK_RIGHT: &str = "look-right";
 const ACTION_LOOK_UP: &str = "look-up";
 /// See [`ACTION_LOOK_LEFT`].
 const ACTION_LOOK_DOWN: &str = "look-down";
-/// The trigger. Read as a **press edge**, not as a held state: one pull is one
-/// shot, and slice 1's pistol is not an automatic weapon.
+/// The trigger's **keyboard** half. Read as a press edge, not as a held state:
+/// one pull is one shot, and slice 1's pistol is not an automatic weapon.
 ///
-/// **A key and not the mouse button, which for a shooter needs saying.** A
-/// click means two different things on the two targets this one build runs on:
-/// under the pointer lock a native run gets, it is a trigger pull at the
-/// crosshair; in a browser, where the lock is declined and the cursor is
-/// visible (see [`Breach::pointer_event`]), it is a click at a place on the
-/// page. Binding the trigger to it would make the demo's central verb mean
-/// something different in a browser from what it means natively, which is the
-/// divergence "the same build runs in both" exists to avoid. `docs/backlog.md`
-/// carries what binding it properly would take.
+/// **The mouse's half is not in the action map**, and that is the point. A
+/// click means two different things depending on whether the pointer is
+/// captured: under the lock it is a trigger pull at the crosshair, and with a
+/// visible cursor it is a click at a place on the page — the button that grabs
+/// the lock in the first place, or a press on whatever the page put under the
+/// mouse. An [`ActionMap`] binding cannot tell those apart, because it is not
+/// told where the pointer is. [`Breach::pointer_event`] can, and gates the
+/// mouse trigger on the same `at.is_none()` the look is gated on, so the two
+/// halves of the mouse are bound under one rule stated once.
 const ACTION_FIRE: &str = "fire";
 
 /// The keyboard and the mouse this sample is played with.
@@ -138,16 +138,19 @@ fn action_map() -> ActionMap {
 ///
 /// The four movement actions read the **held** state — walking is a thing that
 /// happens for as long as a key is down — and the trigger reads the **edge**,
-/// because a held trigger is one shot and not sixty a second. The look actions
+/// because a held trigger is one shot and not sixty a second. `clicked` is that
+/// same edge arriving from the mouse instead, latched by
+/// [`Breach::pointer_event`]; either source pulls the trigger, and a tick that
+/// gets both still fires once because [`Controls::fire`] is one flag. The look actions
 /// are deliberately absent: they are read in [`Breach::draw`], on the frame's
 /// clock, because the view is not part of what the server owns.
-fn controls(actions: &ActionMap, yaw: f32, pitch: f32) -> Controls {
+fn controls(actions: &ActionMap, clicked: bool, yaw: f32, pitch: f32) -> Controls {
     Controls {
         forward: actions.button_held(ACTION_FORWARD),
         back: actions.button_held(ACTION_BACK),
         left: actions.button_held(ACTION_LEFT),
         right: actions.button_held(ACTION_RIGHT),
-        fire: actions.just_pressed(ACTION_FIRE),
+        fire: actions.just_pressed(ACTION_FIRE) || clicked,
         yaw,
         pitch,
     }
@@ -257,6 +260,14 @@ pub struct Breach {
     /// after is the order the map asks for, and it is what makes a frame that
     /// runs no ticks lossless.
     pending_keys: Vec<(KeyCode, bool)>,
+    /// A trigger pull from the mouse, waiting for the next tick.
+    ///
+    /// [`Breach::pending_keys`]' counterpart, and latched for the same reason:
+    /// the pump runs once per frame and the trigger is an edge, so a click on a
+    /// frame that runs no ticks would otherwise be a shot that never happened.
+    /// Cleared by the tick that spends it, so one click stays one shot however
+    /// many ticks the frame runs.
+    pending_fire: bool,
     /// The first-person view. **Presentation**: it never crosses the wire, and
     /// the only thing the simulation is told about it is its two angles.
     eye: Eye,
@@ -489,6 +500,7 @@ fn assemble<S: Shell + ?Sized>(
             game,
             actions: action_map(),
             pending_keys: Vec::new(),
+            pending_fire: false,
             eye: Eye::default(),
             render_state: RenderState::default(),
             stats: Stats::default(),
@@ -548,8 +560,12 @@ impl HostedGame for Breach {
         // The angles go with the buttons: what the player asked for is
         // "forward" and "fire", and neither means anything beside the direction
         // they were looking when they asked.
-        self.game
-            .set_controls(controls(&self.actions, self.eye.yaw(), self.eye.pitch()));
+        self.game.set_controls(controls(
+            &self.actions,
+            core::mem::take(&mut self.pending_fire),
+            self.eye.yaw(),
+            self.eye.pitch(),
+        ));
         self.game.tick();
         // Read off the bundle rather than kept from start-up alone, so the
         // heartbeat below and the panel are reporting the device this frame
@@ -565,26 +581,35 @@ impl HostedGame for Breach {
         self.pending_keys.push((key, pressed));
     }
 
-    /// The mouse look, and the one condition it is bound under.
+    /// The whole of the mouse — the look and the trigger — and the one
+    /// condition both are bound under.
     ///
     /// **`at.is_none()` is what says the pointer is really captured.**
     /// [`PointerUpdate::motion`] states that shape: under
     /// [`PointerMode::Locked`] there is no absolute position at all, so a
     /// locked frame carries a motion and no `at`, and an unlocked one that
-    /// moved carries both. Binding the look to that rather than to the request
+    /// moved carries both. Binding to that rather than to the request
     /// [`pointer_mode`](HostedGame::pointer_mode) makes is the whole point — a
     /// request is not a grant, the loop declines the lock on a shell without
     /// `ShellCaps::has_mouselook`, and a view that turned anyway would swing
     /// while a visible cursor walked out of the window onto whatever is behind
     /// it. `apps/lantern` binds its free camera the same way.
     ///
-    /// **The buttons are deliberately not read here.** See `ACTION_FIRE` for
-    /// why the trigger is a key rather than a click.
+    /// The trigger reads the same condition for the reason `ACTION_FIRE` gives:
+    /// a click with a visible cursor is the click that asks a browser for the
+    /// lock, or a press on whatever the page has under the mouse, and neither
+    /// is a shot. So the frame that grabs the pointer does not also fire, and
+    /// every click after it does.
     fn pointer_event(&mut self, pointer: PointerUpdate) {
-        let Some(motion) = pointer.motion.filter(|_| pointer.at.is_none()) else {
+        if pointer.at.is_some() {
             return;
-        };
-        self.eye.look(motion);
+        }
+        if let Some(motion) = pointer.motion {
+            self.eye.look(motion);
+        }
+        // Latched, not fed in: the trigger is an edge and the tick has not run
+        // yet. See [`Breach::pending_fire`].
+        self.pending_fire |= pointer.pressed;
     }
 
     /// [`PointerMode::Locked`] while the range is being shot, free while the
@@ -892,6 +917,54 @@ mod tests {
             summary.feet[1].abs() < 0.05,
             "the player left the floor, at {:.2} m",
             summary.feet[1],
+        );
+    }
+
+    /// **The mouse pulls the trigger only while the pointer is captured**, and
+    /// a click with a visible cursor does not.
+    ///
+    /// That pair is the whole rule [`Breach::pointer_event`] states, and it
+    /// needs both halves: a build that fired on every click would shoot on the
+    /// very click a browser is asked for its Pointer Lock with, and one that
+    /// fired on neither would leave the mouse trigger silently unbound.
+    ///
+    /// Driven on the practice map because it fires nothing by itself — the
+    /// range warms up by shooting — so every shot on the counter is this
+    /// test's.
+    #[test]
+    fn the_mouse_fires_only_while_the_pointer_is_captured() {
+        use crcbl::math::Vec2;
+
+        let click = |at: Option<Vec2>| PointerUpdate {
+            at,
+            motion: None,
+            pressed: true,
+            released: false,
+        };
+        let mut engine = scripted(&on(crate::map::MapChoice::Practice, 300));
+        frames(&mut engine, 30);
+        assert_eq!(
+            engine.game().stats.shots,
+            0,
+            "the practice map fired the player's pistol for them",
+        );
+
+        // A visible cursor means the click is the page's, not the trigger's.
+        engine.game_mut().pointer_event(click(Some(Vec2::ZERO)));
+        frames(&mut engine, 30);
+        assert_eq!(
+            engine.game().stats.shots,
+            0,
+            "a click with the cursor at a place on the surface pulled the trigger",
+        );
+
+        // No position at all is what a granted lock looks like.
+        engine.game_mut().pointer_event(click(None));
+        frames(&mut engine, 30);
+        assert_eq!(
+            engine.game().stats.shots,
+            1,
+            "a click under the lock did not pull the trigger, or pulled it twice",
         );
     }
 

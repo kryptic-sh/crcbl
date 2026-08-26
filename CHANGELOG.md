@@ -200,6 +200,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   handed over — which is a distinction the browser gate could not make on the
   macOS runner.
 
+- **`apps/breach`'s primary mouse button pulls the trigger**, on any shell that
+  actually grants the pointer lock. It is gated on the same `at.is_none()` the
+  mouse look is gated on rather than bound through `ActionMap`, because a map
+  binding is not told where the pointer is and so cannot tell a shot at the
+  crosshair from the click that asks for the lock in the first place. The
+  keyboard trigger and the arrow-key look stay, and are what the sample plays
+  with wherever the lock is declined.
+
 ### Breaking
 
 - **`GpuInstance` gained `base_vertex` and `INSTANCE_STRIDE` is 96 bytes**,
