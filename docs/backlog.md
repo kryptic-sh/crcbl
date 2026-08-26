@@ -102,6 +102,45 @@ Stated as gaps rather than explained away:
   `EXPECTATIONS`, so group F makes only the page-level claims for it: a finger
   cannot walk this character.
 
+### Decision needed: who forces the grid-inventory kit (2026-08-26)
+
+Every demo in `docs/plan/sample/` that can run in a browser now does —
+`web/build.sh`'s array holds fourteen, and the two that do not are `towers` and
+`arena`, both blocked on `apps/editor`, which this file already records as
+declined with an override condition. So the next work is depth against the
+plans' exit criteria rather than another sample, and `shard` milestone 1 is the
+clearest: its criterion is a complete session — explore, fight, loot, level,
+save, resume — and only the first verb is built.
+
+**Loot is where it stops being a sample question.** `docs/plan/34-inventory.md`
+is the grid-inventory kit, and `15-shard.md` is explicit that shard is meant to
+be its **second** consumer: "Topic 34 is written for breach; a kit with one
+consumer is that consumer's shape wearing a kit's name." But breach's inventory
+sits in its milestone 1 and later, which are native-only by that plan's own
+reasoning, so nothing has forced the kit yet and shard would be forcing it alone
+— the exact case where a subsystem takes the shape of its single caller.
+
+The options, with the real trade-off:
+
+1. **Build the kit from shard, accept one consumer for now.** Fastest to a
+   complete milestone-1 session in a browser, and the browser is where the goal
+   is measured. Risks the kit being shard's inventory with a kit's name, which
+   is the failure its own plan names.
+2. **Give breach a native inventory milestone first, then shard adopts it.** The
+   order both plans assume, and the kit gets two consumers before it sets. Costs
+   a native-only slice that does not advance the browser goal directly, and
+   breach's later milestones are otherwise deliberately parked.
+3. **Take shard's slice 2 as fight only, and defer loot.** Needs no new
+   subsystem, keeps moving, and leaves this decision until loot actually
+   arrives. Milestone 1 stays incomplete either way, so this only defers.
+
+**Option 3 is what is being done in the meantime** — it is the next verb and
+needs nothing new — so this is not blocking today. It blocks the slice after.
+
+Related and unchanged: none of milestone 1's three recorded figures exist yet —
+no golden frames per `GeometryPath`, no browser frame budget, no peak wasm
+memory figure — and those are exit criteria, not extras.
+
 ### Every simulation-heavy demo's browser gate is near the CI step cap (2026-08-26)
 
 `Pages` run 32953192638 on `4553f9e`, job "build the demo site" — the browser
