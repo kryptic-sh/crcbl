@@ -1020,6 +1020,64 @@ const EXPECTATIONS = {
       // keystroke the driver merely dispatched.
       torches: /\btorches: (lit|out)/,
     },
+    // **AND THE ZONE BEING FOUGHT IN**, which is slice 2 and the second of
+    // `docs/plan/sample/15-shard.md`'s six verbs. Every pattern here is a field
+    // of the `[HUD]` line `apps/shard/src/app.rs` logs, and that file argues why
+    // each is on it.
+    //
+    // **This block runs after the lighting block, and that is load-bearing.**
+    // The doused window above asks for a canvas that does not change *at all*,
+    // and a body walking through the frame is a body to redraw. `foe::POSTS`
+    // puts every foe out of `foe::NOTICE_M` of the spawn and out of the frame
+    // the zone opens on — both asserted natively, in
+    // `no_foe_can_reach_the_character_where_the_zone_opens` and
+    // `no_foe_is_in_the_frame_the_zone_opens_on` — so nothing in this zone moves
+    // until this block walks the character at something.
+    fight: {
+      // Walk and strike. `KeyW` is the same binding the `zone` block holds; the
+      // blow is `Space`, for the reason `apps/breach` binds its trigger there
+      // and not to a mouse button — see `apps/shard/src/app.rs`.
+      walk: { code: 'KeyW', key: 'w', text: 'w', virtualKeyCode: 87 },
+      strike: { code: 'Space', key: ' ', text: ' ', virtualKeyCode: 32 },
+      // How many foes are on their feet. **Monotone**: nothing in this zone
+      // respawns, so a count that has fallen cannot be missed by a reader that
+      // polls late — which is the property that makes the kill check immune to
+      // however slowly the renderer is drawing.
+      alive: /\bfoes: (\d+)/,
+      // How many of them have the character. **Not** monotone — a foe that is
+      // felled stops being engaged — so every claim about it is made over the
+      // whole retained buffer of heartbeats rather than off the latest line.
+      engaged: /\bengaged: (\d+)/,
+      // What the character has left, and how many times they have been put down
+      // and returned to the spawn.
+      health: /\bhp: (\d+)/,
+      downs: /\bdowns: (\d+)/,
+      // Blows swung, and the bodies they landed on. `swings` rising with `hits`
+      // flat is a blow that reached nothing, which is the control for the cleave
+      // being resolved against `PhysicsWorld::cast_ray` rather than counted.
+      swings: /\bswings: (\d+)/,
+      hits: /\bhits: (\d+)/,
+      // How much health each side has taken off the other, summed. `taken` is
+      // the monotone half `hp` cannot be: health comes back when the character
+      // is put down, so a reader that missed the dip would see a full bar and no
+      // evidence.
+      dealt: /\bdealt: (\d+)/,
+      taken: /\btaken: (\d+)/,
+      // What the cleave would answer — `foe::Kind::label`, or the word below.
+      // The same reading the trigger resolves with, which is what makes the
+      // control blow deliberately a blow at nothing rather than a lucky miss.
+      target: /\btarget: ([a-z]+)/,
+      // What `target` reads when nothing is in reach.
+      nothing: 'none',
+      // How many foes the zone posts, from `foe::FOES`. Read rather than
+      // assumed: a page that opened a zone with no foes in it would pass every
+      // "a number changed" check going.
+      count: 3,
+      // What the character starts with, from `foe::HEALTH_MAX`. The control for
+      // "they can be hurt" is that every beat before the fight read exactly
+      // this.
+      full: 100,
+    },
   },
   orbit: {
     key: null,
@@ -3543,42 +3601,46 @@ try {
   //
   // Every failure message carries the readings, so a red run says which went
   // wrong and at what value.
+  // The four helpers the two shard blocks below share. Declared out here rather
+  // than inside the first of them because the second needs the same four, and a
+  // second copy of a key dispatcher is a second copy that can dispatch a
+  // slightly different event.
+  /** Presses or releases one of this demo's keys, through the browser's own pipeline. */
+  const zoneKey = async (
+    /** @type {{code: string, key: string, text: string, virtualKeyCode: number}} */ binding,
+    /** @type {string} */ type
+  ) =>
+    page.send('Input.dispatchKeyEvent', {
+      type,
+      code: binding.code,
+      key: binding.key,
+      windowsVirtualKeyCode: binding.virtualKeyCode,
+      nativeVirtualKeyCode: binding.virtualKeyCode,
+      ...(type === 'keyDown' ? { text: binding.text } : {}),
+    });
+  /** A press and a release, for a key that is tapped rather than held. */
+  const tapZoneKey = async (/** @type {any} */ binding) => {
+    await zoneKey(binding, 'keyDown');
+    await zoneKey(binding, 'keyUp');
+  };
+  /** The most recent value `pattern` captured on a HUD line, as a number. */
+  const latest = (/** @type {RegExp} */ pattern) => {
+    const lines = hud();
+    for (let at = lines.length - 1; at >= 0; at -= 1) {
+      const found = lines[at].match(pattern);
+      if (found) return Number(found[1]);
+    }
+    return null;
+  };
+  /** Every value `pattern` has captured on the HUD lines from `from` on. */
+  const since = (/** @type {RegExp} */ pattern, /** @type {number} */ from) =>
+    hud()
+      .slice(from)
+      .map((line) => line.match(pattern)?.[1])
+      .filter((value) => value !== undefined);
+
   if (EXPECTED.zone) {
     const zone = EXPECTED.zone;
-
-    /** Presses or releases one of this demo's keys, through the browser's own pipeline. */
-    const zoneKey = async (
-      /** @type {{code: string, key: string, text: string, virtualKeyCode: number}} */ binding,
-      /** @type {string} */ type
-    ) =>
-      page.send('Input.dispatchKeyEvent', {
-        type,
-        code: binding.code,
-        key: binding.key,
-        windowsVirtualKeyCode: binding.virtualKeyCode,
-        nativeVirtualKeyCode: binding.virtualKeyCode,
-        ...(type === 'keyDown' ? { text: binding.text } : {}),
-      });
-    /** A press and a release, for the key that toggles rather than the one held. */
-    const tapZoneKey = async (/** @type {any} */ binding) => {
-      await zoneKey(binding, 'keyDown');
-      await zoneKey(binding, 'keyUp');
-    };
-    /** The most recent value `pattern` captured on a HUD line, as a number. */
-    const latest = (/** @type {RegExp} */ pattern) => {
-      const lines = hud();
-      for (let at = lines.length - 1; at >= 0; at -= 1) {
-        const found = lines[at].match(pattern);
-        if (found) return Number(found[1]);
-      }
-      return null;
-    };
-    /** Every value `pattern` has captured on the HUD lines from `from` on. */
-    const since = (/** @type {RegExp} */ pattern, /** @type {number} */ from) =>
-      hud()
-        .slice(from)
-        .map((line) => line.match(pattern)?.[1])
-        .filter((value) => value !== undefined);
 
     // ---- the pair about input reaching the controller at all ----------------
     const startedAt = latest(zone.advance);
@@ -3735,6 +3797,191 @@ try {
         ? `no heartbeat in ${TIMEOUT_MS} ms said the torches were lit again`
         : `${readWindow(back)}; ${TORCH_FLICKER_LUMA} of swing asked for`
     );
+  }
+
+  // **AND THE ZONE BEING FOUGHT IN, WHICH NOTHING ABOVE CAN SEE.**
+  // Only shard has one. Everything in the block above is a character walking a
+  // room and a light going out, and all of it passes on a zone with nothing
+  // alive in it.
+  //
+  // **This block runs last, and after the lighting block on purpose.** That
+  // block asks for a canvas that does not change at all while the torches are
+  // out, and a body walking through the frame is a body to redraw. Every foe
+  // stands on a post outside `foe::NOTICE_M` of the spawn and outside the frame
+  // the zone opens on, so nothing moves until this block walks the character at
+  // something — and the two native tests named in the `fight` row above are what
+  // hold the posts there.
+  //
+  // Three pairs, each a positive and the control that stops it passing for the
+  // wrong reason:
+  //
+  // * a foe **engages** once the character comes at it, and **had engaged
+  //   nothing** on every heartbeat before the walk key went down. The second is
+  //   what tells "it reacted" from "it was always like that", which a sighting
+  //   check on its own cannot.
+  // * a blow **fells a foe** — the alive count falls — and a blow swung with
+  //   **nothing in reach fells nothing**. The second is the whole claim that the
+  //   cleave is resolved against `PhysicsWorld::cast_ray`: a build that counted
+  //   key presses passes the kill and fails this.
+  // * a foe's ability **costs the character health**, and the character **had
+  //   taken nothing** before the fight. The second is what tells damage from a
+  //   number that only ever counts up: a counter that was always climbing was
+  //   climbing on those beats too.
+  //
+  // **Every observable here is read over the whole retained buffer of
+  // heartbeats, not off the latest line.** `foes`, `swings`, `hits` and `taken`
+  // are monotone, so a reading that has moved cannot be missed however slowly
+  // frames are arriving; `engaged` is not — a felled foe stops being engaged —
+  // so its claims are made against the maximum any beat reported rather than
+  // against the state at the moment of asking.
+  if (EXPECTED.fight) {
+    const fight = EXPECTED.fight;
+
+    /** Every value `pattern` has captured on the beats from `from` on, as numbers. */
+    const numbersSince = (
+      /** @type {RegExp} */ pattern,
+      /** @type {number} */ from
+    ) => since(pattern, from).map(Number).filter(Number.isFinite);
+    /** The highest value `pattern` has reported since `from`, or null for none. */
+    const peakSince = (
+      /** @type {RegExp} */ pattern,
+      /** @type {number} */ from
+    ) => {
+      const seen = numbersSince(pattern, from);
+      return seen.length > 0 ? Math.max(...seen) : null;
+    };
+
+    // ---- the control for both of the pairs below, taken before anything ------
+    // Read *first*, so it is a statement about the run up to this point rather
+    // than about a window this block chose after the fact.
+    const quiet = numbersSince(fight.engaged, 0);
+    const untouched = numbersSince(fight.taken, 0);
+    const unhurt = numbersSince(fight.health, 0);
+    const restingBeats = quiet.length;
+
+    // ---- the control for the blow: a swing with nothing in reach ------------
+    // Nothing is within the cleave's reach where the lighting block left the
+    // character, and `target` is read rather than assumed — a page that had
+    // walked somewhere unexpected would otherwise have this pass for a swing
+    // that missed by luck.
+    const aimedAt = since(fight.target, 0).at(-1);
+    const beforeSwing = hud().length;
+    const swungBefore = latest(fight.swings) ?? 0;
+    const hitsBefore = latest(fight.hits) ?? 0;
+    const aliveBefore = latest(fight.alive) ?? 0;
+    await tapZoneKey(fight.strike);
+    const swung = await until(async () => {
+      const now = latest(fight.swings);
+      return now !== null && now > swungBefore ? now : null;
+    });
+    const missed =
+      swung !== null &&
+      aimedAt === fight.nothing &&
+      aliveBefore === fight.count &&
+      (peakSince(fight.hits, beforeSwing) ?? 0) === hitsBefore &&
+      (peakSince(fight.alive, beforeSwing) ?? 0) === fight.count;
+    check(
+      'C',
+      'a blow swung with nothing in reach fells nothing',
+      missed,
+      swung === null
+        ? `the strike key never reached the game: swings held at ${swungBefore} ` +
+            `over ${hud().length - beforeSwing} beat(s)`
+        : aimedAt !== fight.nothing
+          ? `something was already in reach ("${aimedAt}"), so this swing was ` +
+            `not a blow at nothing`
+          : `it swung ${swungBefore} → ${swung} with hits at ` +
+            `${peakSince(fight.hits, beforeSwing)} and ` +
+            `${peakSince(fight.alive, beforeSwing)} of ${fight.count} foes standing`
+    );
+
+    // ---- the walk that starts the fight -------------------------------------
+    // The walk key and the blow are both held from here: the character walks up
+    // the corridor at the nearest post, and the cadence the *server* owns is
+    // what decides how often the blow actually swings.
+    const beforeFight = hud().length;
+    await zoneKey(fight.walk, 'keyDown');
+    await zoneKey(fight.strike, 'keyDown');
+
+    const noticed = await until(async () =>
+      (peakSince(fight.engaged, beforeFight) ?? 0) > 0
+        ? peakSince(fight.engaged, beforeFight)
+        : null
+    );
+    const wasQuiet = restingBeats > 0 && quiet.every((value) => value === 0);
+    check(
+      'C',
+      'a foe engages the character once they come at it',
+      noticed !== null && wasQuiet,
+      !wasQuiet
+        ? `${quiet.filter((value) => value > 0).length} of ${restingBeats} beat(s) ` +
+            `before the walk key already reported an engaged foe, so this demo ` +
+            `opens engaged and nothing here is about the sighting`
+        : noticed
+          ? `${noticed} foe(s) had the character over ` +
+            `${hud().length - beforeFight} beat(s), against 0 on all ` +
+            `${restingBeats} beat(s) before the key went down`
+          : `nothing noticed the character over ${hud().length - beforeFight} ` +
+            `beat(s) of walking at them; ${latest(fight.alive)} of ${fight.count} ` +
+            `foes are standing`
+    );
+
+    // ---- the pair about being hurt ------------------------------------------
+    const hurt = await until(async () => {
+      const arrived = peakSince(fight.taken, beforeFight) ?? 0;
+      const health = numbersSince(fight.health, beforeFight);
+      const downs = peakSince(fight.downs, beforeFight) ?? 0;
+      const fell = health.some((value) => value < fight.full);
+      return arrived > 0 && (fell || downs > 0) ? { arrived, downs } : null;
+    });
+    const wasWhole =
+      untouched.length > 0 &&
+      untouched.every((value) => value === 0) &&
+      unhurt.every((value) => value === fight.full);
+    check(
+      'C',
+      "and a foe's ability costs them health, which nothing before it did",
+      hurt !== null && wasWhole,
+      !wasWhole
+        ? `the character was already losing health before anything engaged: ` +
+            `taken read ${[...new Set(untouched)].join(', ')} and hp read ` +
+            `${[...new Set(unhurt)].join(', ')} over ${untouched.length} beat(s), ` +
+            `so "taken went up" says nothing here`
+        : hurt
+          ? `${hurt.arrived} damage arrived and put them down ${hurt.downs} time(s); ` +
+            `hp read ${[...new Set(numbersSince(fight.health, beforeFight))].join(', ')} ` +
+            `against ${fight.full} on all ${untouched.length} beat(s) before`
+          : `${peakSince(fight.taken, beforeFight) ?? 0} damage arrived and hp held ` +
+            `at ${[...new Set(numbersSince(fight.health, beforeFight))].join(', ') || 'nothing'}`
+    );
+
+    // ---- and the pair about felling one --------------------------------------
+    const felled = await until(async () => {
+      const standing = numbersSince(fight.alive, beforeFight);
+      const landed = peakSince(fight.hits, beforeFight) ?? 0;
+      const lowest = standing.length > 0 ? Math.min(...standing) : fight.count;
+      return lowest < fight.count && landed > hitsBefore
+        ? { lowest, landed }
+        : null;
+    });
+    check(
+      'C',
+      'and a blow that reaches one fells it',
+      felled !== null,
+      felled
+        ? `${fight.count - felled.lowest} of ${fight.count} foe(s) went down under ` +
+            `${felled.landed - hitsBefore} landed blow(s), for ` +
+            `${peakSince(fight.dealt, beforeFight) ?? 0} damage`
+        : `${peakSince(fight.hits, beforeFight) ?? 0} blow(s) landed and ` +
+            `${latest(fight.alive)} of ${fight.count} foes are still standing after ` +
+            `${hud().length - beforeFight} beat(s); the cleave last had ` +
+            `"${since(fight.target, beforeFight).at(-1) ?? 'nothing'}" in reach`
+    );
+
+    // Not a check: the groups below are entitled to a demo nobody is leaning on
+    // a key of, exactly as the walk block above hands one back.
+    await zoneKey(fight.strike, 'keyUp');
+    await zoneKey(fight.walk, 'keyUp');
   }
 
   // **AND THE BUDGET, WHICH THE CHECK ABOVE CANNOT SEE EITHER.**

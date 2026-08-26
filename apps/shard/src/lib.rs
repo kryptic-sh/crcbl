@@ -105,6 +105,7 @@
 pub mod app;
 mod args;
 pub mod camera;
+pub mod foe;
 pub mod game;
 mod gpu;
 pub mod light;
@@ -118,6 +119,7 @@ pub mod web;
 pub use app::{Loop, PendingLoop, Shard, ShardError, Summary, run, start, with_shell};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use camera::{Iso, walk_direction};
+pub use foe::{Foe, FoeView, Kind};
 pub use game::{Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Stats};
 pub use gpu::{Gpu, Paths};
 pub use menu::{MenuKind, Menus};

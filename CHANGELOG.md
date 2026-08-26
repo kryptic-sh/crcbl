@@ -45,10 +45,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `IndirectPerBatch`, `ArrayPages` and `Rasterised` — the fallback arms, which a
   browser resolves to by construction.
 
-  **One verb of six.** Milestone 1's loop is explore, fight, loot, level, save,
-  resume; only exploring is here. No enemy, no ability, no item, no rarity, no
-  experience, no inventory grid, no save, no OPFS, no sector streaming and no
-  networking. `docs/backlog.md` carries what each of those needs.
+  **Three archetypes of foe, an ability each, and a blow that answers them**
+  (`shard::foe`). A **husk** closes and jabs; an **adept** holds a stand-off
+  band and throws down its own sighting line, walking _backwards_ when the
+  character gets inside it; a **warden** is slow, takes five blows, and stands
+  still for a telegraphed wind-up before its slam lands, so stepping out of
+  reach in that window is a slam that misses. Each walks through the same
+  `crcbl::phys::CharacterController` the character does, and each holds an
+  authored post (`foe::POSTS`) until it can actually _see_ the character — the
+  sighting is one `crcbl::phys::PhysicsWorld::cast_ray` through the zone's own
+  colliders, so a doorpost between the two is a foe that has not noticed you.
+  Unlike `apps/breach`'s practice bots there is no patrol and no respawn: a zone
+  is cleared rather than worked, and a foe that is felled stays down as a
+  non-solid body a later blow passes through.
+
+  `Space` swings the character's cleave: everything within reach that has a
+  clear line takes damage, resolved through the same `cast_ray` the sighting
+  uses, so stone between the two stops a blow exactly as it stops a sighting.
+  **Both sides have health and both can die** — the character who runs out is
+  returned to the spawn with one more down against their name. The `[HUD]`
+  heartbeat, the debug panel and the overlay carry the numbers: foes standing,
+  foes engaged, health, downs, blows swung against blows landed, damage dealt
+  against damage taken, and what the cleave would answer.
+  `web/tools/browser-e2e.mjs` reads three positive/control pairs off that line
+  in a real browser — a foe that engages when the character comes at it against
+  one that had engaged nothing on every beat before, a blow that fells a foe
+  against one swung with nothing in reach, and an ability that costs health
+  against a character who had taken nothing.
+
+  **Two verbs of six.** Milestone 1's loop is explore, fight, loot, level, save,
+  resume; exploring and fighting are here. No item, no rarity, no experience, no
+  inventory grid, no save, no OPFS, no sector streaming and no networking.
+  `docs/backlog.md` carries what each of those needs.
 
 - **`apps/breach`'s bot practice map, and a `--map` flag to choose it.**
   `docs/plan/sample/11-breach.md`'s milestone 0 is a firing range **and** a bot

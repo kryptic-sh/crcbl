@@ -7,9 +7,10 @@
 //! # There is nothing here but the shared half
 //!
 //! [`crcbl::args::Common`] owns `--headless`, `--frames`, `--tick-hz`,
-//! `--backend`, `--size`, `--screenshot` and the debug-overlay pair, and slice 1
-//! has no flag of its own to add to them: there is one zone, one character and
-//! one verb, and everything a player can change is a key rather than an argument.
+//! `--backend`, `--size`, `--screenshot` and the debug-overlay pair, and this
+//! sample has no flag of its own to add to them: there is one zone, one
+//! character, one authored set of posts and no seed, so everything a player can
+//! change is a key rather than an argument.
 //! This file is still a file rather than a call into the engine's parser, because
 //! the usage prose is this sample's and because the moment a second zone or a
 //! seed arrives there is a place to put it.
@@ -36,6 +37,7 @@ USAGE:
 CONTROLS:
     W/A/S/D              Walk, relative to where the camera is looking
     Q / E                Swing the camera a quarter turn about the character
+    SPACE                Strike everything within reach that is not behind stone
     L                    Put the torches out, and light them again
     ESC                  Pause, F3 the debug panel, F11 fullscreen
 
@@ -213,7 +215,7 @@ mod tests {
     /// would never guess.
     #[test]
     fn every_control_this_sample_binds_is_in_the_help_text() {
-        for line in ["W/A/S/D", "Q / E", "L ", "ESC"] {
+        for line in ["W/A/S/D", "Q / E", "SPACE", "L ", "ESC"] {
             assert!(USAGE.contains(line), "{line} is not in --help");
         }
     }

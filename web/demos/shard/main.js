@@ -16,21 +16,23 @@
 // has nothing to validate.
 //
 // `hint` leads with the walk keys because the page opens standing in the zone
-// with the torches already lit, so the first useful thing is to move. L is
-// listed last and named for what it does rather than for the key, because
-// dousing the torches is the one control that changes the *picture* rather than
-// the position — it is what the browser gate presses to prove the lighting is
-// being computed rather than declared. `savedLabel` is "Nothing" and that is
-// literal: the status bar says "Nothing saved." when the demo stops, which is
-// the truth about a slice with no persistence — `docs/plan/sample/15-shard.md`
-// puts saves in a later slice, and `docs/backlog.md` carries what they need.
+// with the torches already lit, so the first useful thing is to move. The blow
+// comes next, because the zone has three things in it that will not wait
+// forever. L is listed after them and named for what it does rather than for the
+// key, because dousing the torches is the one control that changes the *picture*
+// rather than the position — it is what the browser gate presses to prove the
+// lighting is being computed rather than declared. `savedLabel` is "Nothing" and
+// that is literal: the status bar says "Nothing saved." when the demo stops,
+// which is the truth about a slice with no persistence —
+// `docs/plan/sample/15-shard.md` puts saves in a later slice, and
+// `docs/backlog.md` carries what they need.
 
 import init from './crcbl_shard.js';
 import { bootDemo } from '../../engine/demo.js';
 
 bootDemo({
   init,
-  hint: 'W/A/S/D walk, relative to where the camera is looking · Q/E swing it a quarter turn · L douses the torches and lights them again · ESC opens the panel · F3 shows the stats · F11 fullscreen',
+  hint: 'W/A/S/D walk, relative to where the camera is looking · Q/E swing it a quarter turn · SPACE strikes everything in reach · L douses the torches and lights them again · ESC opens the panel · F3 shows the stats · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => ({
     prepare: () => ex.__crcbl_shard_prepare(),

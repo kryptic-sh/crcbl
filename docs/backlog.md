@@ -3,20 +3,13 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### `apps/shard` covers one verb of milestone 1's six (2026-08-26)
+### `apps/shard` covers two verbs of milestone 1's six (2026-08-26)
 
 `docs/plan/sample/15-shard.md`'s milestone 1 loop is explore, fight, loot,
-level, save, resume. Slice 1 is **explore**, deliberately, and nothing else is
-started. What each of the others needs, so the next slice does not have to
-re-derive it:
+level, save, resume. Slices 1 and 2 are **explore** and **fight**, deliberately,
+and nothing else is started. What each of the others needs, so the next slice
+does not have to re-derive it:
 
-- **Fight.** An enemy type, an ability, and a hit resolution. The pieces are
-  already in the tree: `apps/breach/src/bots.rs` walks authored routes through
-  the same `crcbl::phys::CharacterController` and resolves sight and shots
-  through the same `PhysicsWorld::cast_ray`, so the first enemy here is that
-  shape rather than a new subsystem. What shard does not have and would need is
-  a place to put health and cooldowns on the wire — `game::Intent` is one flag
-  byte and a bearing.
 - **Loot and rarity.** Nothing exists. It is a table and a roll, and the roll
   has to be a hash of a seed and an index rather than a draw from a stream, for
   `apps/sparks`' reason.
@@ -33,6 +26,52 @@ re-derive it:
   Milestone 1's exit criteria ask for it to be used **with no engine change**,
   which is the claim nobody has tested.
 
+### What `apps/shard`'s fight slice left out, and why (2026-08-26)
+
+`apps/shard/src/foe.rs` is three archetypes, one ability each, a sighting ray
+and a cooldown, and nothing else. What was considered and left out:
+
+- **Anything resembling navigation.** An engaged foe walks _straight at_ the
+  character and slides along whatever it meets. `docs/plan/24-navigation.md`
+  names `arena` as its forcing function, so shard does not force it either — the
+  same position `apps/breach` takes. The visible cost is on the two posts in the
+  far hall: a foe engaged from there has the shrine doorway between it and the
+  character, and it will slide along a doorpost rather than walk round it. The
+  husk's post is _in_ that doorway partly for this reason.
+- **A facing on any body.** Every body in this sample is a
+  `crcbl::greybox::capsule`, which has no front to turn — the same admission
+  `zone::Figure` already made about the character. `apps/breach`'s `BotView`
+  carries a `facing` and shard's `foe::FoeView` deliberately does not.
+- **Sound.** Rule 8 asks for spatial audio and the fight is the cue grammar that
+  would want it most — a warden's wind-up is a sound before it is a colour. The
+  sample plays nothing at all, here as in slice 1.
+- **Aim error, blocking, dodging, stagger, or any resource but health.** Each is
+  a system, and milestone 1's cap is "a handful of enemy archetypes and
+  abilities".
+- **A weapon.** The character's cleave is a constant reach and a constant damage
+  in `foe`, not an item — `docs/plan/34-inventory.md`'s kit is the open decision
+  recorded below, and a weapon would be its first consumer.
+
+### The fight slice pins two things the browser gate depends on (2026-08-26)
+
+Both are asserted natively so a later change fails a test rather than a gate:
+
+- **Every post in `foe::POSTS` is out of `foe::NOTICE_M` of the spawn and out of
+  the frame the zone opens on**, with three heartbeats of walking as margin.
+  `no_foe_can_reach_the_character_where_the_zone_opens` and
+  `no_foe_is_in_the_frame_the_zone_opens_on` in `apps/shard/src/foe.rs` are what
+  hold it. The second projects each post's capsule centre through the camera the
+  frame is actually drawn from and asserts it is outside the frustum
+  _vertically_, which is the bound that does not move with the canvas's aspect.
+- **Why it matters, measured.** The browser gate's lighting block asks for a
+  canvas that does not change _at all_ while the torches are out. Sabotaging
+  `Foe::advance` to engage unconditionally was run: the doused window came back
+  "4 distinct frame(s) in 4 sample(s) … swinging 0.00", so the mean luminance
+  barely moved and the **frame hash** did — a body walking through shot is
+  enough to redden a check that has nothing to do with the fight. The fight
+  block therefore runs _after_ the lighting block, and the posts are where they
+  are.
+
 ### `apps/shard` has none of milestone 1's exit-criteria figures (2026-08-26)
 
 Three of that plan's exit criteria are recordings rather than features, and none
@@ -42,8 +81,8 @@ of them has been made:
   reference frame or compares one. `apps/quarry` is the sample that already does
   this and is the shape to copy.
 - **A recorded browser budget.** What _is_ measured, on this machine, is the
-  browser gate's wall clock: 80–88 s on the SwiftShader adapter and 96 s on the
-  default `auto` mode, which also resolves to SwiftShader here. That is a gate
+  browser gate's wall clock: 82 s before the fight slice and 91–94 s after it,
+  on the `auto` adapter, which resolves to SwiftShader here. That is a gate
   timing, not the sample's frame budget, and the two should not be confused.
 - **Peak wasm memory.** Not measured at all. `web/engine/wasm-memory.js` exists
   and other demos' pages read it; nothing here reads it or records a number.
@@ -100,7 +139,21 @@ Stated as gaps rather than explained away:
 - **No hardware-adapter run of the browser gate exists**, per the entry above.
 - **The touch controls are the generic ones.** shard has no `touch` row in
   `EXPECTATIONS`, so group F makes only the page-level claims for it: a finger
-  cannot walk this character.
+  cannot walk this character, and cannot swing at anything either.
+- **Only the husk is fought in a browser.** The gate's fight block walks the
+  character at the doorway post and never reaches the adept or the warden, so
+  the stand-off band and the slam's wind-up are covered by `foe.rs`'s own tests
+  and by nothing that runs against a real window. Walking that far would cost
+  the gate several more seconds of simulated time — see the runtime entry below.
+- **The character can be put down, and nothing has watched it happen.**
+  `game::run_tick` returns them to the spawn at zero health and bumps `downs`;
+  `a_foe_that_reaches_the_character_costs_them_health` accepts either a health
+  dip or a down, and in practice sees the dip. Nothing asserts the return
+  itself, natively or in a browser.
+- **A foe is stopped by another foe and by the character, and the character is
+  stopped by a foe.** All three follow from the bodies being in the same
+  `PhysicsWorld` and none is asserted. The asymmetry is deliberate and recorded
+  under breach's "player has no body" entry.
 
 ### Decision needed: who forces the grid-inventory kit (2026-08-26)
 
@@ -134,8 +187,12 @@ The options, with the real trade-off:
    subsystem, keeps moving, and leaves this decision until loot actually
    arrives. Milestone 1 stays incomplete either way, so this only defers.
 
-**Option 3 is what is being done in the meantime** — it is the next verb and
-needs nothing new — so this is not blocking today. It blocks the slice after.
+**Option 3 has now been taken and shipped**: `apps/shard/src/foe.rs` is the
+fight slice, it needed no new subsystem, and it deliberately added no item, no
+currency and no weapon — the character's cleave is a constant in `foe` rather
+than something equipped. **So this decision is now the thing in the way.** The
+next verb is loot, and loot is where the kit is forced; nothing else in shard's
+milestone 1 can be built around it.
 
 Related and unchanged: none of milestone 1's three recorded figures exist yet —
 no golden frames per `GeometryPath`, no browser frame budget, no peak wasm
@@ -191,6 +248,17 @@ against a 60-minute job cap, so the matrix split already recorded elsewhere in
 this file stops being a tidiness item. And a browser gate verified only on this
 machine's `auto` adapter says little about CI: `auto` resolves to real hardware
 here, and the demo gate there has none.
+
+**`shard` has since grown its fight block, and it is the entry above that says
+what that costs.** Measured on this machine, `auto` adapter, same build: 82 s
+before, 91–94 s after, 47 checks to 51. The whole of the increase is the two new
+waits that are bounded by _simulated_ time — "a foe engages the character" at
+~4.8 s and "a foe's ability costs them health" at ~5.2 s, both from the
+harness's own "slowest 5" line — so both scale with the runner's slowdown rather
+than with its wall clock, which is exactly the multiplier this entry is about.
+shard's `pages.yml` step already carries a 20-minute timeout. No CI figure for
+shard exists at either size, so how much of the twenty minutes this leaves is
+not known.
 
 ### The rand 0.10 migration is written and blocked upstream (2026-08-26)
 
@@ -320,9 +388,18 @@ What would close it is a ray cast that can exclude one collider.
 exactly this reason on the sweep side; `cast_ray` has no such form, and adding
 one is an engine change rather than a sample change. With it, the player would
 carry a capsule like the bots do, the pistol would exclude it, and each bot
-could cast its own sighting ray from its own eye. Not attempted: the segment is
-symmetric, so the current arrangement answers the same question, and an engine
-change should be driven by a caller that needs it for more than one demo.
+could cast its own sighting ray from its own eye.
+
+**There are now two callers that would use it.** `apps/shard/src/game.rs` makes
+the same choice for the same reason — its foes' sighting rays and the
+character's own cleave both leave the character's capsule centre, and a collider
+there would be the first thing either of them hit. So the "driven by a caller
+that needs it for more than one demo" condition this entry set is met; what is
+left is deciding whether a `cast_ray_excluding` (or a `RayFilter`) is the shape
+`crcbl-phys` wants. Note the two samples differ in one visible way: shard's foes
+_are_ solid, so the character is stopped by a foe while a foe walks through the
+character — an asymmetry breach does not have, because its bots and its player
+never collide either way.
 
 ### `apps/breach`'s practice map is gated through a page navigation, not a second run
 

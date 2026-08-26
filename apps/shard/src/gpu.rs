@@ -51,6 +51,7 @@
 //! clearing it, so declaring the UI pass first would put the pause panel on top
 //! of the words it exists to frame.
 
+use crate::foe::FoeView;
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions};
 use crcbl::hal::{
     BindingModel, CommandEncoderDesc, DeviceCaps, GeometryPath, HalError, LightingPath,
@@ -65,7 +66,7 @@ use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
 
 use crate::light;
-use crate::zone::{self, Figure};
+use crate::zone::{self, Figure, Foes};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 
@@ -141,8 +142,10 @@ pub struct Gpu {
     ctx: GpuContext,
     /// The zone, made resident once and drawn every frame.
     renderer: ForwardRenderer,
-    /// The one instance in it that moves.
+    /// The one instance in it that is the character.
     figure: Figure,
+    /// The other instances that move: one body per [`crate::foe::POSTS`] row.
+    foes: Foes,
     /// Which selectors and effects this device drew through — see [`Paths`].
     paths: Paths,
     pool: TransientPool,
@@ -208,8 +211,8 @@ impl Gpu {
         let paths = Paths::of(&ctx.device().caps(), renderer.resolved_effects());
         // Rolled back by hand from here on: `Gpu` has no `Drop`, so a `?` would
         // leak the forward renderer's pipelines rather than release them.
-        let figure = match zone::place(&mut renderer) {
-            Ok(figure) => figure,
+        let placed = match zone::place(&mut renderer) {
+            Ok(placed) => placed,
             Err(error) => {
                 renderer.destroy(ctx.device());
                 return Err(GpuError::Hal(HalError::InvalidDescriptor(format!(
@@ -248,7 +251,8 @@ impl Gpu {
         Ok(Self {
             ctx,
             renderer,
-            figure,
+            figure: placed.figure,
+            foes: placed.foes,
             paths,
             pool: TransientPool::new(),
             timers,
@@ -299,6 +303,15 @@ impl Gpu {
     /// compare against.
     pub fn set_figure(&mut self, feet: DVec3) {
         self.figure.set_feet(&mut self.renderer, feet);
+    }
+
+    /// Draws each foe where and how the simulation says. See
+    /// [`Gpu::set_figure`] for the other half of the same pair, and
+    /// [`crate::zone::foe_material_of`] for what a body's colour means.
+    pub fn set_foes(&mut self, views: &[FoeView; crate::foe::FOES]) {
+        for (index, view) in views.iter().enumerate() {
+            self.foes.set(&mut self.renderer, index, view);
+        }
     }
 
     /// Writes the zone's lights for the next frame: the torches at `seconds`,

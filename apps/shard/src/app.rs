@@ -92,6 +92,15 @@ const ACTION_RIGHT: &str = "right";
 const ACTION_TURN_LEFT: &str = "turn-left";
 /// See [`ACTION_TURN_LEFT`].
 const ACTION_TURN_RIGHT: &str = "turn-right";
+/// Swing at whatever is in reach.
+///
+/// Bound to `Space` and **not** to the primary pointer button, for the reason
+/// `apps/breach/src/app.rs` gives and `docs/backlog.md` records: under the
+/// pointer lock a native run gets, a click is a swing at the crosshair; in a
+/// browser the lock is declined, and a click is then a click at a visible
+/// cursor's position — which for this rig is not even an aim, because the cleave
+/// answers everything in reach rather than something pointed at.
+const ACTION_STRIKE: &str = "strike";
 
 /// The key that puts the torches out and lights them again.
 ///
@@ -115,6 +124,7 @@ fn action_map() -> ActionMap {
         (ACTION_RIGHT, vec![Binding::Key(KeyCode::KeyD)]),
         (ACTION_TURN_LEFT, vec![Binding::Key(KeyCode::KeyQ)]),
         (ACTION_TURN_RIGHT, vec![Binding::Key(KeyCode::KeyE)]),
+        (ACTION_STRIKE, vec![Binding::Key(KeyCode::Space)]),
     ] {
         map.declare(ActionDecl {
             name: name.into(),
@@ -138,6 +148,12 @@ fn controls(actions: &ActionMap, yaw: f32) -> Controls {
         back: actions.button_held(ACTION_BACK),
         left: actions.button_held(ACTION_LEFT),
         right: actions.button_held(ACTION_RIGHT),
+        // **The edge as well as the held state.** A held key swings on the
+        // simulation's own cadence, which is what a player wants of a melee
+        // button; the edge is what makes a *tap* land, and a tap is a press and
+        // a release the shell pump can deliver inside one tick — so reading
+        // only `button_held` would drop it entirely.
+        strike: actions.button_held(ACTION_STRIKE) || actions.just_pressed(ACTION_STRIKE),
         yaw,
     }
 }
@@ -178,6 +194,16 @@ pub struct Summary {
     pub blocked: u64,
     /// How many ticks it stepped up onto the dais.
     pub climbed: u64,
+    /// How many foes were still on their feet when the run ended.
+    pub foes_alive: usize,
+    /// What the character had left, out of [`crate::foe::HEALTH_MAX`].
+    pub health: u32,
+    /// Blows swung, and the bodies they landed on.
+    pub swings: u64,
+    pub hits: u64,
+    /// How much health each side took off the other.
+    pub dealt: u64,
+    pub taken: u64,
     /// Whether the torches were still lit when the run ended.
     pub torches_lit: bool,
     /// Which selectors and effects the frames were drawn through — rule 12's
@@ -254,6 +280,26 @@ impl Shard {
     /// * `ground`, `blocked` and `climbed` —
     ///   [`MoveOutcome`](crcbl::phys::MoveOutcome), counted. The last is the dais
     ///   being walked onto, which is the zone's vertical variety being used.
+    /// * `foes` and `engaged` — how many are on their feet, and how many have
+    ///   the character. **The pair the fight block turns on**: every post is out
+    ///   of [`crate::foe::NOTICE_M`] of the spawn, so `engaged` is zero on every
+    ///   beat until the character walks at something, and a build that engaged
+    ///   unconditionally reports it at its ceiling from the first line. `foes` is
+    ///   **monotone**: nothing here respawns, so an alive count that has fallen
+    ///   cannot be missed by a reader that polls late.
+    /// * `swings` and `hits` — trigger pulls, and the bodies the cleave landed
+    ///   on. `swings` above `hits` is a blow that reached nothing, which is the
+    ///   control for the cleave resolving against
+    ///   [`crcbl::phys::PhysicsWorld::cast_ray`] rather than counting key
+    ///   presses.
+    /// * `hp`, `downs`, `dealt` and `taken` — what the character has left, how
+    ///   many times they have been put down, and the damage each side has done.
+    ///   `taken` is monotone and sits at zero for the whole of the run before
+    ///   anything engaged, which is what tells damage from a number that only
+    ///   ever counts up.
+    /// * `target` — what the cleave would answer, which is what makes a blow
+    ///   deliberate rather than lucky. The same reading the trigger resolves
+    ///   with, so the line cannot disagree with the swing.
     /// * `geometry`, `binding`, `lighting` and `effects` — rule 12, and the claim
     ///   `docs/plan/sample/15-shard.md` says matters here more than anywhere: a
     ///   browser has no mesh stage, no bindless and no ray query, so these are the
@@ -271,7 +317,9 @@ impl Shard {
         let stats = &self.stats;
         crcbl::log::info!(
             "[HUD] tick: {}  px: {:.2}  py: {:.2}  pz: {:.2}  bearing: {:.3}  \
-             ground: {}  blocked: {}  climbed: {}  torches: {}  flame: {:.3}  \
+             ground: {}  blocked: {}  climbed: {}  foes: {}  engaged: {}  \
+             hp: {}  downs: {}  swings: {}  hits: {}  dealt: {}  taken: {}  \
+             target: {}  torches: {}  flame: {:.3}  \
              geometry: {:?}  binding: {:?}  lighting: {:?}  effects: {}",
             stats.ticks,
             stats.position.x,
@@ -281,6 +329,15 @@ impl Shard {
             if stats.grounded { "yes" } else { "no" },
             stats.blocked,
             stats.climbed,
+            stats.alive,
+            stats.engaged,
+            stats.health,
+            stats.downs,
+            stats.swings,
+            stats.hits,
+            stats.dealt,
+            stats.taken,
+            stats.target_label(),
             if self.torches_lit { "lit" } else { "out" },
             self.flame(),
             self.paths.geometry,
@@ -546,6 +603,7 @@ impl HostedGame for Shard {
 
         self.render_state = self.game.render_state();
         gpu.set_figure(self.render_state.feet);
+        gpu.set_foes(&self.render_state.foes);
         // **The whole of the zone's lighting, decided by two numbers.** The
         // simulated clock is what makes the flames a function of the tick rather
         // than of the frame, and the switch is what the browser gate's still-frame
@@ -601,6 +659,12 @@ impl HostedGame for Shard {
             ],
             blocked: self.stats.blocked,
             climbed: self.stats.climbed,
+            foes_alive: self.stats.alive,
+            health: self.stats.health,
+            swings: self.stats.swings,
+            hits: self.stats.hits,
+            dealt: self.stats.dealt,
+            taken: self.stats.taken,
             torches_lit: self.torches_lit,
             paths: self.paths,
             commands: self.page.commands,
@@ -610,7 +674,9 @@ impl HostedGame for Shard {
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
             "shard: {} frames, {} ticks, feet at {:.2} {:.2} {:.2}, \
-             {} blocked and {} climbed, torches {}, {} overlay commands, \
+             {} blocked and {} climbed, {}/{} foes standing, {} health left, \
+             {}/{} blows landed for {} against {} taken, torches {}, \
+             {} overlay commands, \
              geometry {:?}, binding {:?}, lighting {:?}, effects {} ({:?})",
             summary.frames,
             summary.ticks,
@@ -619,6 +685,13 @@ impl HostedGame for Shard {
             summary.feet[2],
             summary.blocked,
             summary.climbed,
+            summary.foes_alive,
+            crate::foe::FOES,
+            summary.health,
+            summary.hits,
+            summary.swings,
+            summary.dealt,
+            summary.taken,
             if summary.torches_lit { "lit" } else { "out" },
             summary.commands,
             summary.paths.geometry,
@@ -806,6 +879,62 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **The strike key reaches the simulation, and a tap counts once.**
+    ///
+    /// The tap is the sharper half: the shell pump delivers a press and a
+    /// release inside one frame, so a build that read only
+    /// [`ActionMap::button_held`] would see nothing at all — which is why
+    /// [`controls`] reads the edge as well. The walk key is the control: a
+    /// build that swung on every key would pass "the counter rose" and fail
+    /// this.
+    #[test]
+    fn a_tap_of_the_strike_key_swings_once_and_a_walk_key_swings_nothing() {
+        let mut engine = scripted(&headless(300));
+        let window = engine.window();
+        frames(&mut engine, 8);
+        assert_eq!(engine.game().game().stats().swings, 0);
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyW)
+            .expect("the window is live");
+        frames(&mut engine, 30);
+        assert_eq!(
+            engine.game().game().stats().swings,
+            0,
+            "walking swung the character's blow",
+        );
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::KeyW)
+            .expect("the window is live");
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        frames(&mut engine, 4);
+        assert_eq!(
+            engine.game().game().stats().swings,
+            1,
+            "a tap of the strike key did not reach the simulation",
+        );
+
+        // …and it stays at one with nothing held, which is what says the flag is
+        // an edge the tick consumed rather than a state left set.
+        frames(&mut engine, 60);
+        assert_eq!(
+            engine.game().game().stats().swings,
+            1,
+            "the blow went on swinging after the key came up",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **A rotate key swings the camera one quarter turn and holds there**, and a
     /// walk key does not touch it.
     ///
@@ -931,7 +1060,10 @@ mod tests {
         assert_eq!(titles, expected, "no module appears that no system offered");
 
         let drawn = ui_text(&engine);
-        for row in ["tick", "climbed", "geometry", "lighting", "effects"] {
+        for row in [
+            "tick", "climbed", "health", "foes", "engaged", "target", "geometry", "lighting",
+            "effects",
+        ] {
             assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
         }
         assert!(

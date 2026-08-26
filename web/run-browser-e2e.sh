@@ -744,6 +744,52 @@ case "$DEMO" in
             echo "               died with its heartbeat still ticking" >&2
             exit 1
         fi
+        # And once more for the fight, which is slice 2 and the second of that
+        # plan's six verbs. Everything above is a character walking a room and a
+        # light going out, and all of it passes on a zone with nothing alive in
+        # it.
+        #
+        # Three names, one per pair, and each carries its own control in the
+        # verdict it prints:
+        #
+        #  - 'a blow swung with nothing in reach fells nothing' is the control
+        #    for the kill below. Without it, 'a blow fells a foe' passes for a
+        #    build that counted key presses instead of resolving a cleave
+        #    against `PhysicsWorld::cast_ray`.
+        #  - 'a foe engages the character once they come at it' requires every
+        #    heartbeat before the walk key to have reported nothing engaged.
+        #    Without that half, the check passes for a zone that opens with its
+        #    foes already coming.
+        #  - "and a foe's ability costs them health" requires the character to
+        #    have taken nothing on all of those beats. Without that half, "the
+        #    damage counter went up" passes for a number that only ever counts
+        #    up.
+        #
+        # Renaming any of them in the driver is meant to fail here and be
+        # renamed here too.
+        MISSED_BLOW="$(grep -F 'a blow swung with nothing in reach fells nothing' "${OUTPUT}.plain" || true)"
+        if [ -z "$MISSED_BLOW" ]; then
+            echo "crcbl web e2e: the driver never swung $DEMO's blow at nothing;" >&2
+            echo "               'a blow fells a foe' has no control, and it passes for" >&2
+            echo "               a build that counts key presses rather than resolving" >&2
+            echo "               the cleave against the world" >&2
+            exit 1
+        fi
+        ENGAGED="$(grep -F 'a foe engages the character once they come at it' "${OUTPUT}.plain" || true)"
+        if [ -z "$ENGAGED" ]; then
+            echo "crcbl web e2e: the driver never walked $DEMO's character at a foe;" >&2
+            echo "               nothing on that page asks whether a sighting happens at" >&2
+            echo "               all, and the whole of apps/shard/src/foe.rs is ungated" >&2
+            echo "               in a browser" >&2
+            exit 1
+        fi
+        HURT="$(grep -F "and a foe's ability costs them health" "${OUTPUT}.plain" || true)"
+        if [ -z "$HURT" ]; then
+            echo "crcbl web e2e: the driver never asked whether $DEMO's character can" >&2
+            echo "               be hurt; a zone whose foes cannot touch you is scenery," >&2
+            echo "               and every other fight check would still be green" >&2
+            exit 1
+        fi
         ;;
 esac
 

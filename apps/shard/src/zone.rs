@@ -299,6 +299,13 @@ pub const BRAZIER_MESH: usize = 4;
 pub const DOOR_MESH: usize = 5;
 /// The character, which is a capsule the size of the one the controller sweeps.
 pub const FIGURE_MESH: usize = 6;
+/// A [`crate::foe::Kind::Husk`]'s body — the capsule that archetype's
+/// controller sweeps.
+pub const HUSK_MESH: usize = 7;
+/// A [`crate::foe::Kind::Adept`]'s.
+pub const ADEPT_MESH: usize = 8;
+/// A [`crate::foe::Kind::Warden`]'s, which is the largest body in the zone.
+pub const WARDEN_MESH: usize = 9;
 
 /// Stone: the wall blocks and the doorways. [`SceneDesc::materials`] slot 0,
 /// and therefore what an instance placed without a named material would shade
@@ -314,6 +321,21 @@ pub const DAIS_MATERIAL: usize = 3;
 pub const IRON_MATERIAL: usize = 4;
 /// The character's cloth, bright enough to be found in a dark room.
 pub const FIGURE_MATERIAL: usize = 5;
+/// A husk at rest.
+pub const HUSK_MATERIAL: usize = 6;
+/// An adept at rest.
+pub const ADEPT_MATERIAL: usize = 7;
+/// A warden at rest.
+pub const WARDEN_MATERIAL: usize = 8;
+/// Any foe that has noticed the character. **The picture says which**, for the
+/// reason `apps/breach` draws an alerted bot differently: a state a reviewer
+/// cannot see is a state they cannot check the readout against.
+pub const ENGAGED_MATERIAL: usize = 9;
+/// A warden standing still with a slam half-thrown — [`crate::foe`]'s
+/// telegraph, in the frame rather than only in the numbers.
+pub const WINDUP_MATERIAL: usize = 10;
+/// A foe the character has felled, lying on the floor.
+pub const FALLEN_MATERIAL: usize = 11;
 
 /// How many pieces the zone places, counted off [`LAYOUT`] rather than written
 /// down.
@@ -322,7 +344,8 @@ pub const FIGURE_MATERIAL: usize = 5;
 /// stands on it. The character is the one instance that is not a tile.
 #[must_use]
 pub fn instance_count() -> usize {
-    let mut count = 1; // the character
+    // The character, and one body per post — the instances that are not tiles.
+    let mut count = 1 + crate::foe::FOES;
     for (_, _, cell) in tiles() {
         count += match cell {
             Cell::Wall | Cell::Floor | Cell::Spawn | Cell::Dais => 1,
@@ -345,9 +368,9 @@ pub fn instance_count() -> usize {
 const CAPACITIES: Capacities = Capacities {
     vertices: 8 * 1024,
     indices: 16 * 1024,
-    meshes: 8,
+    meshes: 12,
     instances: 512,
-    materials: 8,
+    materials: 12,
     lights: 16,
     // The irradiance volume [`crate::light`] bakes, whose size is that module's
     // `PROBE_COUNTS` rather than a number written twice — `ProbeGrid::check`
@@ -443,6 +466,14 @@ pub fn scene() -> SceneDesc<'static> {
                     FIGURE_SEGMENTS,
                 ),
             ),
+            // One body per archetype, each the capsule *that* archetype's
+            // controller sweeps — see [`crate::foe::Kind::config`]. Three
+            // meshes rather than one scaled three ways, because a scale is a
+            // number the physics never sees and a body drawn larger than the
+            // shape it collides with is a picture that lies about the sweep.
+            foe_mesh("husk", crate::foe::Kind::Husk),
+            foe_mesh("adept", crate::foe::Kind::Adept),
+            foe_mesh("warden", crate::foe::Kind::Warden),
         ],
         materials: vec![
             painted([0.31, 0.30, 0.29], STONE_ROUGHNESS),
@@ -451,10 +482,31 @@ pub fn scene() -> SceneDesc<'static> {
             painted([0.36, 0.30, 0.24], STONE_ROUGHNESS),
             painted([0.13, 0.13, 0.14], IRON_ROUGHNESS),
             painted([0.62, 0.42, 0.24], STONE_ROUGHNESS),
+            painted([0.42, 0.46, 0.38], STONE_ROUGHNESS),
+            painted([0.30, 0.36, 0.56], STONE_ROUGHNESS),
+            painted([0.46, 0.34, 0.30], STONE_ROUGHNESS),
+            painted([0.90, 0.28, 0.20], STONE_ROUGHNESS),
+            painted([0.98, 0.78, 0.22], STONE_ROUGHNESS),
+            painted([0.16, 0.15, 0.16], STONE_ROUGHNESS),
         ],
         page: grid_page(),
         probes: crate::light::probes(),
         capacities: CAPACITIES,
+    }
+}
+
+/// One archetype's body, at the dimensions its own controller sweeps.
+fn foe_mesh(label: &'static str, kind: crate::foe::Kind) -> MeshDesc<'static> {
+    let config = kind.config();
+    #[allow(clippy::cast_possible_truncation)]
+    MeshDesc {
+        label: Cow::Borrowed(label),
+        geometry: crcbl::greybox::capsule(
+            config.radius as f32,
+            (2.0 * (config.radius + config.half_height)) as f32,
+            FIGURE_RINGS,
+            FIGURE_SEGMENTS,
+        ),
     }
 }
 
@@ -494,14 +546,105 @@ impl Figure {
     }
 }
 
-/// Places every piece of the zone and hands back the character.
+/// The foes, as the renderer holds them.
+///
+/// The other instances that are rewritten every frame: a foe moves, changes
+/// colour when it notices the character, and lies down when it is felled.
+#[derive(Debug)]
+pub struct Foes {
+    bodies: [InstanceHandle; crate::foe::FOES],
+}
+
+impl Foes {
+    /// Draws one foe where and how the simulation says.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is not a post. Called only from [`crate::game`]'s own
+    /// indices.
+    pub fn set(&self, renderer: &mut ForwardRenderer, index: usize, view: &crate::foe::FoeView) {
+        renderer.set_instance(
+            self.bodies[index],
+            &InstanceDesc {
+                mesh: foe_mesh_of(view.kind),
+                material: foe_material_of(view),
+                transform: foe_transform(view),
+            },
+        );
+    }
+}
+
+/// Which mesh an archetype's body is.
+#[must_use]
+pub const fn foe_mesh_of(kind: crate::foe::Kind) -> usize {
+    match kind {
+        crate::foe::Kind::Husk => HUSK_MESH,
+        crate::foe::Kind::Adept => ADEPT_MESH,
+        crate::foe::Kind::Warden => WARDEN_MESH,
+    }
+}
+
+/// Which row a foe shades through, which is **what state it is in** first and
+/// which archetype it is second.
+///
+/// Ordered that way on purpose: a felled body and a wind-up are the two things a
+/// player has to read at a glance, and an archetype's own colour is what they
+/// read when neither is happening.
+#[must_use]
+pub const fn foe_material_of(view: &crate::foe::FoeView) -> usize {
+    if !view.alive {
+        return FALLEN_MATERIAL;
+    }
+    if view.winding {
+        return WINDUP_MATERIAL;
+    }
+    if view.engaged {
+        return ENGAGED_MATERIAL;
+    }
+    match view.kind {
+        crate::foe::Kind::Husk => HUSK_MATERIAL,
+        crate::foe::Kind::Adept => ADEPT_MATERIAL,
+        crate::foe::Kind::Warden => WARDEN_MATERIAL,
+    }
+}
+
+/// Where a foe's mesh sits, standing or felled.
+///
+/// The capsule rises from `y = 0` and is centred on its other two axes, so a
+/// standing foe is a translation and nothing else — there is no facing on a
+/// capsule, which is the same admission [`Figure`] makes about the character.
+/// Felled is a quarter turn about `+X`, which lays the body along `−Z`, lifted
+/// by the archetype's own radius so it lies **on** the floor rather than half
+/// inside it.
+fn foe_transform(view: &crate::foe::FoeView) -> Mat4 {
+    #[allow(clippy::cast_possible_truncation)]
+    let feet = Vec3::new(view.feet.x as f32, view.feet.y as f32, view.feet.z as f32);
+    if view.alive {
+        return Mat4::from_translation(feet);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let radius = view.kind.config().radius as f32;
+    Mat4::from_translation(feet + Vec3::Y * radius)
+        * Mat4::from_rotation_x(-core::f32::consts::FRAC_PI_2)
+}
+
+/// Everything [`place`] hands back: the instances the frame rewrites.
+#[derive(Debug)]
+pub struct Placed {
+    /// The character.
+    pub figure: Figure,
+    /// The zone's foes, one per [`crate::foe::POSTS`] row.
+    pub foes: Foes,
+}
+
+/// Places every piece of the zone and hands back the bodies that move.
 ///
 /// # Errors
 ///
 /// [`InstancePoolError`] if `CAPACITIES`'s instance count does not cover the
 /// zone, which is this file's numbers being wrong rather than a condition a run
 /// can be in.
-pub fn place(renderer: &mut ForwardRenderer) -> Result<Figure, InstancePoolError> {
+pub fn place(renderer: &mut ForwardRenderer) -> Result<Placed, InstancePoolError> {
     #[allow(clippy::cast_possible_truncation)]
     let at = |p: DVec3| Mat4::from_translation(Vec3::new(p.x as f32, p.y as f32, p.z as f32));
     let quarter = Mat4::from_rotation_y(core::f32::consts::FRAC_PI_2);
@@ -541,14 +684,41 @@ pub fn place(renderer: &mut ForwardRenderer) -> Result<Figure, InstancePoolError
         }
     }
 
-    // Last, so the character is the instance a reader finds at the end of the
+    // Last, so the bodies are the instances a reader finds at the end of the
     // pool rather than somewhere in the middle of the masonry.
     let handle = renderer.add_instance(&InstanceDesc {
         mesh: FIGURE_MESH,
         material: FIGURE_MATERIAL,
         transform: at(spawn()),
     })?;
-    Ok(Figure { handle })
+
+    // Each foe on its own post and standing, which is the state
+    // [`crate::foe::stand_all`] starts them in — so the first frame agrees with
+    // the first tick without either having to ask the other.
+    let mut bodies = Vec::with_capacity(crate::foe::FOES);
+    for post in crate::foe::POSTS {
+        let view = crate::foe::FoeView {
+            kind: post.kind,
+            feet: tile_centre(post.col, post.row),
+            alive: true,
+            engaged: false,
+            winding: false,
+        };
+        bodies.push(renderer.add_instance(&InstanceDesc {
+            mesh: foe_mesh_of(view.kind),
+            material: foe_material_of(&view),
+            transform: foe_transform(&view),
+        })?);
+    }
+
+    Ok(Placed {
+        figure: Figure { handle },
+        foes: Foes {
+            bodies: bodies
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("one instance per post was pushed")),
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -808,6 +978,9 @@ mod tests {
                 BRAZIER_MESH,
                 DOOR_MESH,
                 FIGURE_MESH,
+                HUSK_MESH,
+                ADEPT_MESH,
+                WARDEN_MESH,
             ]
             .map(|mesh| labels[mesh]),
             [
@@ -818,12 +991,15 @@ mod tests {
                 "brazier",
                 "doorway",
                 "figure",
+                "husk",
+                "adept",
+                "warden",
             ],
         );
-        assert_eq!(scene.meshes.len(), FIGURE_MESH + 1);
+        assert_eq!(scene.meshes.len(), WARDEN_MESH + 1);
         assert_eq!(
             scene.materials.len(),
-            FIGURE_MATERIAL + 1,
+            FALLEN_MATERIAL + 1,
             "one painted row per material constant",
         );
         for row in [
@@ -833,6 +1009,12 @@ mod tests {
             DAIS_MATERIAL,
             IRON_MATERIAL,
             FIGURE_MATERIAL,
+            HUSK_MATERIAL,
+            ADEPT_MATERIAL,
+            WARDEN_MATERIAL,
+            ENGAGED_MATERIAL,
+            WINDUP_MATERIAL,
+            FALLEN_MATERIAL,
         ] {
             assert_eq!(
                 scene.materials[row].tiling,
@@ -881,6 +1063,93 @@ mod tests {
         );
         assert_eq!(scene.probes.probes.len() as u32, CAPACITIES.probes);
         assert_eq!(scene.probes.volume.total(), CAPACITIES.probes);
+    }
+
+    /// **A foe's colour says what state it is in before it says what it is.**
+    /// A felled body and a wind-up are the two things a player has to read at a
+    /// glance, so both beat the archetype's own row; the archetype is what is
+    /// left when neither is happening.
+    ///
+    /// The resting rows are the control: three archetypes that all shaded
+    /// through one row would pass every state claim above and be
+    /// indistinguishable standing still.
+    #[test]
+    fn a_foes_colour_says_its_state_first_and_its_archetype_second() {
+        use crate::foe::{FoeView, Kind};
+
+        let standing = |kind: Kind| FoeView {
+            kind,
+            alive: true,
+            ..FoeView::default()
+        };
+        let resting: Vec<usize> = [Kind::Husk, Kind::Adept, Kind::Warden]
+            .map(|kind| foe_material_of(&standing(kind)))
+            .to_vec();
+        assert_eq!(
+            resting
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            resting.len(),
+            "two archetypes rest in the same colour: {resting:?}",
+        );
+
+        let warden = standing(Kind::Warden);
+        let engaged = FoeView {
+            engaged: true,
+            ..warden
+        };
+        assert_eq!(foe_material_of(&engaged), ENGAGED_MATERIAL);
+        assert_eq!(
+            foe_material_of(&FoeView {
+                winding: true,
+                ..engaged
+            }),
+            WINDUP_MATERIAL,
+            "a wind-up shades as an ordinary engagement",
+        );
+        assert_eq!(
+            foe_material_of(&FoeView {
+                alive: false,
+                winding: true,
+                ..engaged
+            }),
+            FALLEN_MATERIAL,
+            "a felled body is still shaded as something that is doing anything",
+        );
+    }
+
+    /// **A felled body lies on the floor rather than half inside it**, and a
+    /// standing one is where its feet are.
+    ///
+    /// The standing case is the control: a transform that lifted everything
+    /// would pass the first half.
+    #[test]
+    fn a_felled_foe_is_laid_down_on_the_floor() {
+        use crate::foe::{FoeView, Kind};
+
+        let feet = DVec3::new(1.0, 0.0, -2.0);
+        let up = FoeView {
+            kind: Kind::Warden,
+            feet,
+            alive: true,
+            ..FoeView::default()
+        };
+        let standing = foe_transform(&up).transform_point3(Vec3::ZERO);
+        assert!(
+            (standing - Vec3::new(1.0, 0.0, -2.0)).length() < 1e-5,
+            "a standing warden is drawn at {standing:?} rather than at its feet",
+        );
+
+        let down = FoeView { alive: false, ..up };
+        let lying = foe_transform(&down).transform_point3(Vec3::ZERO);
+        #[allow(clippy::cast_possible_truncation)]
+        let radius = Kind::Warden.config().radius as f32;
+        assert!(
+            (lying.y - radius).abs() < 1e-5,
+            "a felled warden's body sits at {:.3} m rather than on its own {radius:.3} m radius",
+            lying.y,
+        );
     }
 
     /// **There is no sun in here.** The directional term is a token and the flat

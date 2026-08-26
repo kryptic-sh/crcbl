@@ -24,11 +24,11 @@ meta-->
   </div>
   <h1><span class="grad">Shard</span></h1>
   <p class="tagline">
-    One torch-lit room, a corridor and a shrine, walked from a camera pulled in
-    closer than the genre usually allows. It is the first slice of an
-    action-RPG, and it is here to be the <em>load</em> on the render paths a
-    browser is stuck with — every light, every shadow and every bounce you can
-    see is going through a fallback.
+    One torch-lit room, a corridor and a shrine, walked — and fought through —
+    from a camera pulled in closer than the genre usually allows. It is the
+    first slice of an action-RPG, and it is here to be the <em>load</em> on the
+    render paths a browser is stuck with — every light, every shadow and every
+    bounce you can see is going through a fallback.
   </p>
 </header>
 
@@ -36,7 +36,7 @@ meta-->
 
 <section id="controls">
   <h2>controls</h2>
-  <h3>Walk it. Then put the torches out.</h3>
+  <h3>Walk it. Fight what is in it. Then put the torches out.</h3>
   <ul class="keys">
     <li class="key-row">
       <span>Walk, relative to where the camera is looking</span>
@@ -45,6 +45,10 @@ meta-->
     <li class="key-row">
       <span>Swing the camera a quarter turn</span>
       <span><kbd>Q</kbd> <kbd>E</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Strike everything in reach that is not behind stone</span>
+      <span><kbd>Space</kbd></span>
     </li>
     <li class="key-row">
       <span>Douse the torches — and light them again</span>
@@ -111,10 +115,25 @@ meta-->
     the room left of it, and it has never been told where a camera is.
   </p>
   <p>
-    <strong>This is one verb of six.</strong> The loop this sample is planned
-    around is explore, fight, loot, level, save, resume. Only the first is here:
-    no enemy, no ability, no item, no experience, no inventory, no save, and no
-    streaming past this one zone. The plan for the rest is in the repository.
+    <strong
+      >There are three things in here, and they are not the same thing.</strong
+    >
+    A <em>husk</em> runs at you and jabs. An <em>adept</em> keeps its distance
+    and throws — walk at it and it walks backwards, so you have to corner it. A
+    <em>warden</em> is slow, takes five blows, and stands perfectly still for a
+    moment before it slams: that stillness is the tell, and stepping out of
+    reach while it is winding up is a slam that lands on nothing. Each of them
+    holds its post until it can actually <em>see</em> you — the sighting is one
+    ray through the same colliders your capsule sweeps, so a doorpost between
+    you is a foe that has not noticed you yet. Your own blow is the same
+    question at arm's length: it answers everything in reach that is not behind
+    stone.
+  </p>
+  <p>
+    <strong>This is two verbs of six.</strong> The loop this sample is planned
+    around is explore, fight, loot, level, save, resume. The first two are here:
+    no item, no rarity, no experience, no inventory, no save, and no streaming
+    past this one zone. The plan for the rest is in the repository.
   </p>
   <!--include demo-console-note-->
 </section>

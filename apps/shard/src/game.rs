@@ -8,21 +8,36 @@
 //!                     └──▶ RenderState ──▶ crate::app, crate::page, crate::gpu
 //! ```
 //!
-//! # Slice 1 is one verb, and the verb is *explore*
+//! # Two verbs, and they are *explore* and *fight*
 //!
 //! `docs/plan/sample/15-shard.md`'s milestone 1 is "explore, fight, loot, level,
-//! save, resume". This file is the first of those and nothing else: there is no
-//! enemy, no ability, no item, no experience and no save. What there is is a
-//! character, a zone with stone in it, and gravity. `docs/backlog.md` carries the
+//! save, resume". This file is the first two of those and nothing else: there is
+//! no item, no rarity, no experience, no inventory and no save. What there is is
+//! a character, a zone with stone in it, gravity, three archetypes of foe with
+//! one ability each, and a blow that answers them. `docs/backlog.md` carries the
 //! rest with what each would take.
 //!
 //! # Nothing here does collision, and that is rule 9
 //!
 //! Every metre the character moves goes through
 //! [`CharacterController::move_and_slide`], which sweeps the capsule against
-//! [`zone::world`] and slides it along what it hits. This
-//! file decides **where from** and **which way**; the world decides what is
-//! there.
+//! [`zone::world`] and slides it along what it hits. Every foe moves through the
+//! *same* call against the *same* world — see [`crate::foe`] — and every
+//! sighting and every blow is one [`crcbl::phys::PhysicsWorld::cast_ray`]. This
+//! file decides **where from**, **which way** and **what a hit costs**; the
+//! world decides what is there.
+//!
+//! # The character carries no collider, and that is deliberate
+//!
+//! A foe's sighting ray and the character's own cleave both leave the
+//! character's capsule centre, and a collider there would be the first thing
+//! either of them hit. `apps/breach/src/game.rs` makes the same choice for the
+//! same reason, and `docs/backlog.md` records what closes it: a `cast_ray` that
+//! can exclude one collider, which is an engine change and now has two callers
+//! that would use it. The visible cost is the same one breach records — a foe
+//! walks through the character rather than being stopped by them, while the
+//! character *is* stopped by a foe, because the foes' bodies are in the world
+//! and the character's is not.
 //!
 //! # It is a real client/server sample
 //!
@@ -55,6 +70,7 @@ use crcbl::phys::{CharacterConfig, CharacterController, MoveOutcome, PhysicsWorl
 use crcbl::session::Loopback;
 
 use crate::camera::walk_direction;
+use crate::foe::{self, Foe, FoeView, Kind};
 use crate::zone;
 
 /// Distinct from every other sample's, because they are distinct protocols: a
@@ -115,6 +131,12 @@ pub struct Controls {
     pub back: bool,
     pub left: bool,
     pub right: bool,
+    /// Whether the character is swinging this tick.
+    ///
+    /// A **request** rather than an event: the cadence is the server's, so a
+    /// held key swings once per [`foe::STRIKE_PERIOD_S`] rather than once a
+    /// tick.
+    pub strike: bool,
     /// Where the view is pointing, in [`crate::camera::Iso::yaw`]'s measure.
     pub yaw: f32,
 }
@@ -126,6 +148,7 @@ struct Intent {
     back: bool,
     left: bool,
     right: bool,
+    strike: bool,
     yaw: f32,
 }
 
@@ -133,10 +156,14 @@ const INTENT_FORWARD: u8 = 1 << 0;
 const INTENT_BACK: u8 = 1 << 1;
 const INTENT_LEFT: u8 = 1 << 2;
 const INTENT_RIGHT: u8 = 1 << 3;
+/// The blow. A **request** rather than an event: the server owns the cadence, so
+/// a client that sent this every tick still swings once per
+/// [`foe::STRIKE_PERIOD_S`].
+const INTENT_STRIKE: u8 = 1 << 4;
 
 /// Every bit the flag byte defines. One set outside this mask is a frame
 /// something other than [`Intent::to_wire`] wrote.
-const INTENT_FLAGS: u8 = INTENT_FORWARD | INTENT_BACK | INTENT_LEFT | INTENT_RIGHT;
+const INTENT_FLAGS: u8 = INTENT_FORWARD | INTENT_BACK | INTENT_LEFT | INTENT_RIGHT | INTENT_STRIKE;
 
 /// How many bytes one sealed intent is: a flag byte and one IEEE-754 binary32
 /// bearing, little-endian.
@@ -163,6 +190,7 @@ impl Intent {
             (self.back, INTENT_BACK),
             (self.left, INTENT_LEFT),
             (self.right, INTENT_RIGHT),
+            (self.strike, INTENT_STRIKE),
         ] {
             if set {
                 flags |= bit;
@@ -199,6 +227,7 @@ impl Intent {
             back: flags & INTENT_BACK != 0,
             left: flags & INTENT_LEFT != 0,
             right: flags & INTENT_RIGHT != 0,
+            strike: flags & INTENT_STRIKE != 0,
             yaw,
         })
     }
@@ -232,6 +261,7 @@ impl Intent {
             merged.back |= frame.back;
             merged.left |= frame.left;
             merged.right |= frame.right;
+            merged.strike |= frame.strike;
             merged.yaw = frame.yaw;
         }
         merged
@@ -250,6 +280,39 @@ impl Intent {
 struct Stage {
     world: PhysicsWorld,
     player: CharacterController,
+    /// The zone's foes, one per [`foe::POSTS`] row, in that order.
+    foes: Vec<Foe>,
+    /// What the character has left, out of [`foe::HEALTH_MAX`].
+    health: u32,
+    /// How many times they have been put down and returned to the spawn.
+    downs: u64,
+    /// How many of the foes had the character engaged at the end of the last
+    /// tick.
+    ///
+    /// Kept rather than recomputed when the readout asks, because the answer is
+    /// one ray per foe and the tick has already paid for them.
+    engaged: usize,
+    /// How many blows the character has swung — **trigger pulls**, whether or
+    /// not anything was in reach.
+    swings: u64,
+    /// How many of those landed on a foe. One swing can land on several: the
+    /// cleave answers everything within [`foe::STRIKE_REACH_M`] that has a clear
+    /// line, so this counts *bodies struck* rather than swings that connected.
+    hits: u64,
+    /// How much health those blows took off, summed.
+    dealt: u64,
+    /// How much the foes' abilities have taken off the character, summed.
+    ///
+    /// **Monotone**, which is the half a readout needs that
+    /// [`Stage::health`] cannot give: health comes back when the character is
+    /// put down, so a reader that missed the dip would see a full bar and no
+    /// evidence.
+    taken: u64,
+    /// When the next blow may be swung, in [`Stage::elapsed`] seconds.
+    next_strike_at: f64,
+    /// Which foe the cleave would answer, as an index into [`Stage::foes`], at
+    /// the end of the last tick.
+    target: Option<usize>,
     /// How fast the character is falling, in metres a second, negative downward.
     /// Zeroed the moment they are grounded.
     fall_speed: f64,
@@ -285,9 +348,21 @@ impl Stage {
     fn new() -> Self {
         let config = CharacterConfig::default();
         let lift = DVec3::Y * (config.radius + config.half_height);
+        let mut world = zone::world();
+        let foes = foe::stand_all(&mut world);
         Self {
-            world: zone::world(),
+            world,
             player: CharacterController::new(config, zone::spawn() + lift),
+            foes,
+            health: foe::HEALTH_MAX,
+            downs: 0,
+            engaged: 0,
+            swings: 0,
+            hits: 0,
+            dealt: 0,
+            taken: 0,
+            next_strike_at: 0.0,
+            target: None,
             fall_speed: 0.0,
             ticks: 0,
             elapsed: 0.0,
@@ -296,6 +371,92 @@ impl Stage {
             blocked: 0,
             climbed: 0,
         }
+    }
+
+    /// How many foes are still on their feet.
+    fn alive(&self) -> usize {
+        self.foes.iter().filter(|foe| foe.is_alive()).count()
+    }
+}
+
+/// The nearest living foe the cleave would answer, or `None`.
+///
+/// Nearest rather than first, so the readout names the body a player would
+/// expect to be answering — and the same query the trigger resolves with, so
+/// what the panel says is what the blow does. A foe behind a pillar is not in
+/// the answer, because [`foe::can_see`] is what decides.
+fn cleave_target(world: &mut PhysicsWorld, centre: DVec3, foes: &[Foe]) -> Option<usize> {
+    let mut nearest: Option<(usize, f64)> = None;
+    for (index, target) in foes.iter().enumerate() {
+        if !foe::can_see(world, centre, target, foe::STRIKE_REACH_M) {
+            continue;
+        }
+        let gap = (target.centre() - centre).length();
+        if nearest.is_none_or(|(_, best)| gap < best) {
+            nearest = Some((index, gap));
+        }
+    }
+    nearest.map(|(index, _)| index)
+}
+
+/// One tick of the foes: each one looks, moves, and takes its ability if one is
+/// due.
+///
+/// **Nothing here decides how a foe behaves** — see [`crate::foe`]. What this
+/// function owns is the order the three happen in and what an ability that
+/// lands costs the character.
+fn step_foes(stage: &mut Stage, dt: f64) {
+    let now = stage.elapsed;
+    let Stage {
+        world,
+        player,
+        foes,
+        health,
+        taken,
+        engaged,
+        ..
+    } = stage;
+    // The character has already moved this tick, so a foe reacts to where they
+    // are now rather than to where they were.
+    let centre = player.position();
+    for foe in foes.iter_mut() {
+        foe.advance(world, centre, now, dt);
+    }
+    // Counted after the walk, so a foe that stepped out from behind a doorpost
+    // this tick is engaged on it rather than on the next one.
+    *engaged = foes.iter().filter(|foe| foe.is_engaged(now)).count();
+    for foe in foes.iter_mut() {
+        if let Some(damage) = foe.strikes(world, centre, now) {
+            *taken += u64::from(damage);
+            *health = health.saturating_sub(damage);
+        }
+    }
+}
+
+/// The character's cleave: everything within [`foe::STRIKE_REACH_M`] with a
+/// clear line takes [`foe::STRIKE_DAMAGE`].
+///
+/// Resolved **after** the foes have moved, for the reason breach's plates give:
+/// a body that had not been moved yet is one that cannot be hit where it is
+/// drawn.
+fn swing(stage: &mut Stage) {
+    stage.next_strike_at = stage.elapsed + foe::STRIKE_PERIOD_S;
+    stage.swings += 1;
+    let centre = stage.player.position();
+    let Stage {
+        world,
+        foes,
+        hits,
+        dealt,
+        ..
+    } = stage;
+    for foe in foes.iter_mut() {
+        if !foe::can_see(world, centre, foe, foe::STRIKE_REACH_M) {
+            continue;
+        }
+        *hits += 1;
+        *dealt += u64::from(foe::STRIKE_DAMAGE.min(foe.health()));
+        foe.wounded(world, foe::STRIKE_DAMAGE);
     }
 }
 
@@ -323,6 +484,34 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
     stage.blocked += u64::from(outcome.hit_wall);
     stage.climbed += u64::from(outcome.stepped_up);
     stage.outcome = outcome;
+
+    // **The foes move before the blow is resolved**, and the readout is taken
+    // between the two — see [`step_foes`] and [`swing`].
+    step_foes(stage, dt);
+    let centre = stage.player.position();
+    stage.target = {
+        let Stage { world, foes, .. } = &mut *stage;
+        cleave_target(world, centre, foes)
+    };
+    // The cadence is the **server's**: a client holding the key down still
+    // swings once per period, and one that sent the flag every tick gains
+    // nothing by it.
+    if intent.strike && stage.elapsed >= stage.next_strike_at {
+        swing(stage);
+    }
+
+    // **The character can lose.** Running out returns them to the spawn with
+    // full health and one more down against their name — which is what makes
+    // the health a pool rather than a number that only falls.
+    if stage.health == 0 {
+        stage.health = foe::HEALTH_MAX;
+        stage.downs += 1;
+        let config = *stage.player.config();
+        stage
+            .player
+            .set_position(zone::spawn() + DVec3::Y * (config.radius + config.half_height));
+        stage.fall_speed = 0.0;
+    }
 
     stage.ticks += 1;
     stage.elapsed += dt;
@@ -394,6 +583,12 @@ pub struct RenderState {
     pub blocked: bool,
     /// Seconds of simulated time — what [`crate::light`] is a function of.
     pub elapsed: f64,
+    /// One view per [`foe::POSTS`] row, in that order.
+    pub foes: [FoeView; foe::FOES],
+    /// What the character has left, out of [`foe::HEALTH_MAX`].
+    pub health: u32,
+    /// How many foes are still on their feet.
+    pub alive: usize,
 }
 
 /// The stage's numbers, for the debug overlay and the `[HUD]` line.
@@ -411,6 +606,31 @@ pub struct Stats {
     pub elapsed: f64,
     /// The bearing the last tick walked along, in radians.
     pub yaw: f32,
+    /// How many foes are still on their feet.
+    pub alive: usize,
+    /// How many of them have the character engaged.
+    ///
+    /// **The control for every claim about the fight**, on the line itself: a
+    /// build that engaged unconditionally reports this at its ceiling from the
+    /// first tick, and one that never noticed anything leaves it at zero for the
+    /// whole run.
+    pub engaged: usize,
+    /// What the character has left, out of [`foe::HEALTH_MAX`].
+    pub health: u32,
+    /// How many times they have been put down and returned to the spawn.
+    pub downs: u64,
+    /// Blows swung, and the bodies those blows landed on. `swings` above `hits`
+    /// is a swing that reached nothing, which is the control for the cleave
+    /// resolving against the world rather than counting key presses.
+    pub swings: u64,
+    pub hits: u64,
+    /// How much health the character has taken off the foes, and how much the
+    /// foes have taken off them.
+    pub dealt: u64,
+    pub taken: u64,
+    /// Which archetype the cleave would answer, or `None` for a swing that would
+    /// reach nothing.
+    pub target: Option<Kind>,
 }
 
 impl crcbl::ui::DebugModule for Stats {
@@ -431,7 +651,28 @@ impl crcbl::ui::DebugModule for Stats {
         );
         section.row("blocked", format_args!("{}", self.blocked));
         section.row("climbed", format_args!("{}", self.climbed));
+        section.row(
+            "health",
+            format_args!("{}/{}", self.health, foe::HEALTH_MAX),
+        );
+        section.row("downs", format_args!("{}", self.downs));
+        section.row("foes", format_args!("{}/{}", self.alive, foe::FOES));
+        section.row("engaged", format_args!("{}", self.engaged));
+        section.row_str("target", self.target_label());
+        section.row("swings", format_args!("{}/{}", self.hits, self.swings));
+        section.row("damage", format_args!("{} / {}", self.dealt, self.taken));
         section.row("elapsed", format_args!("{:.1} s", self.elapsed));
+    }
+}
+
+impl Stats {
+    /// What the cleave would answer, as one word.
+    ///
+    /// `"none"` rather than an empty string, so a heartbeat that names it cannot
+    /// be read as a missing field.
+    #[must_use]
+    pub fn target_label(&self) -> &'static str {
+        self.target.map_or("none", Kind::label)
     }
 }
 
@@ -548,6 +789,7 @@ impl Game {
             back: controls.back,
             left: controls.left,
             right: controls.right,
+            strike: controls.strike,
             yaw: controls.yaw,
         };
     }
@@ -595,6 +837,9 @@ impl Game {
             grounded: stage.outcome.grounded,
             blocked: stage.outcome.hit_wall,
             elapsed: stage.elapsed,
+            foes: foe::views(&stage.foes, stage.elapsed),
+            health: stage.health,
+            alive: stage.alive(),
         }
     }
 
@@ -611,6 +856,15 @@ impl Game {
             climbed: stage.climbed,
             elapsed: stage.elapsed,
             yaw: stage.yaw,
+            alive: stage.alive(),
+            engaged: stage.engaged,
+            health: stage.health,
+            downs: stage.downs,
+            swings: stage.swings,
+            hits: stage.hits,
+            dealt: stage.dealt,
+            taken: stage.taken,
+            target: stage.target.map(|index| stage.foes[index].kind()),
         }
     }
 }
@@ -645,6 +899,7 @@ mod tests {
         back: false,
         left: false,
         right: false,
+        strike: false,
         yaw: 0.0,
     };
 
@@ -654,7 +909,24 @@ mod tests {
         back: true,
         left: false,
         right: false,
+        strike: false,
         yaw: 0.0,
+    };
+
+    /// Swinging, standing still.
+    const SWING: Intent = Intent {
+        forward: false,
+        back: false,
+        left: false,
+        right: false,
+        strike: true,
+        yaw: 0.0,
+    };
+
+    /// Walking into the zone with the blow held down.
+    const CHARGE: Intent = Intent {
+        strike: true,
+        ..AHEAD
     };
 
     /// **Held input walks the character and released input stops them**, which is
@@ -758,7 +1030,12 @@ mod tests {
                 back: true,
                 left: true,
                 right: true,
+                strike: true,
                 yaw: -2.5,
+                ..Intent::default()
+            },
+            Intent {
+                strike: true,
                 ..Intent::default()
             },
         ] {
@@ -775,6 +1052,102 @@ mod tests {
         let mut nan = Intent::default().to_wire();
         nan[1..].copy_from_slice(&f32::NAN.to_le_bytes());
         assert_eq!(Intent::from_wire(&nan), None, "a bearing that is not one");
+    }
+
+    /// **A blow that reaches nothing kills nothing, and one that reaches a foe
+    /// does.** The pair the browser gate makes in a browser, made here where a
+    /// failure names the step.
+    ///
+    /// The first half is the control, and it is the whole claim that the cleave
+    /// is resolved against the world: a build that counted key presses passes
+    /// the kill and fails this, because on the spawn there is nothing within
+    /// [`foe::STRIKE_REACH_M`] of the character at all.
+    #[test]
+    fn a_blow_that_reaches_nothing_kills_nothing_and_one_that_reaches_a_foe_does() {
+        let mut stage = ready();
+        assert_eq!(stage.alive(), foe::FOES, "the zone opened with foes down");
+
+        // Swinging at the empty spawn, for long enough that the cadence lets
+        // several blows through.
+        hold(&mut stage, SWING, 2.0);
+        assert!(stage.swings > 1, "the cadence let one blow through in 2 s");
+        assert_eq!(stage.hits, 0, "a blow at an empty room landed on something");
+        assert_eq!(stage.dealt, 0);
+        assert_eq!(stage.alive(), foe::FOES);
+        assert_eq!(stage.target, None, "something was in reach on the spawn");
+
+        // …and then walking up the corridor into the husk on the doorway, with
+        // the blow held down.
+        let swung = stage.swings;
+        hold(&mut stage, CHARGE, 8.0);
+        assert!(
+            stage.swings > swung,
+            "the walk swallowed the blow: {swung} then {}",
+            stage.swings,
+        );
+        assert!(
+            stage.hits > 0,
+            "nothing was ever within reach of the cleave"
+        );
+        assert!(stage.dealt > 0);
+        assert!(
+            stage.alive() < foe::FOES,
+            "{} foes still standing after {} blow(s) landed",
+            stage.alive(),
+            stage.hits,
+        );
+    }
+
+    /// **A foe notices the character when they come at it, and not before.**
+    ///
+    /// The "not before" is the control, and it is what the browser gate's
+    /// engagement check depends on: every post is out of [`foe::NOTICE_M`] of
+    /// the spawn, so a build that engaged unconditionally fails here rather than
+    /// making that gate meaningless.
+    #[test]
+    fn a_foe_notices_the_character_only_once_they_come_at_it() {
+        let mut stage = ready();
+        hold(&mut stage, Intent::default(), 3.0);
+        assert_eq!(
+            stage.engaged, 0,
+            "a foe engaged a character standing on the spawn",
+        );
+        assert_eq!(stage.taken, 0, "something reached them on the spawn");
+        assert_eq!(stage.health, foe::HEALTH_MAX);
+
+        hold(&mut stage, AHEAD, 6.0);
+        assert!(
+            stage.engaged > 0,
+            "nothing noticed the character walking up the corridor at it",
+        );
+    }
+
+    /// **A foe's ability costs the character health**, which is what makes the
+    /// zone something a player can lose in.
+    ///
+    /// The control is the run above it: `taken` sat at zero for three seconds
+    /// with the character on the spawn, so this is not a counter that was always
+    /// climbing.
+    #[test]
+    fn a_foe_that_reaches_the_character_costs_them_health() {
+        let mut stage = ready();
+        hold(&mut stage, Intent::default(), 2.0);
+        let untouched = stage.taken;
+        assert_eq!(untouched, 0);
+
+        // Walking into the husk and standing there, without swinging back.
+        hold(&mut stage, AHEAD, 10.0);
+        assert!(
+            stage.taken > 0,
+            "{} foe(s) engaged and none of them ever landed anything",
+            stage.engaged,
+        );
+        assert!(
+            stage.health < foe::HEALTH_MAX || stage.downs > 0,
+            "the character took {} damage and still has all {} of their health",
+            stage.taken,
+            stage.health,
+        );
     }
 
     /// **A run of the whole game walks the character and reports it**, which is

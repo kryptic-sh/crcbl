@@ -2,24 +2,34 @@
 //!
 //! ```text
 //!  ┌ shard ─────────────┐
-//!  │ ZONE      hall     │
 //!  │ POSITION  0.0 18.0 │
 //!  │ FOOTING   floor    │
+//!  │ HEALTH    100/100  │
+//!  │ FOES      3        │
 //!  │ TORCHES   LIT      │
 //!  └────────────────────┘
 //!
-//!        W/A/S/D walk   Q/E turn the camera   L douses the torches
+//!    W/A/S/D walk   Q/E turn   SPACE strike   L douses the torches
 //! ```
 //!
 //! # Nothing on this panel ticks, and that is load-bearing
 //!
-//! **Every reading here is a fact about where the character is standing and what
-//! is switched on** — never a clock, a frame counter, a flame's brightness or an
-//! elapsed time. That is not restraint about clutter: `web/tools/browser-e2e.mjs`
-//! douses the torches and then asserts the **canvas stops changing**, which is
-//! the control that says the change it saw while they were lit came from the
-//! light. A tick counter drawn here would change every frame and make that
-//! control impossible to pass on a working build.
+//! **Every reading here is a fact about where the character is standing, what
+//! they have left and what is switched on** — never a clock, a frame counter, a
+//! flame's brightness or an elapsed time. That is not restraint about clutter:
+//! `web/tools/browser-e2e.mjs` douses the torches and then asserts the **canvas
+//! stops changing**, which is the control that says the change it saw while they
+//! were lit came from the light. A tick counter drawn here would change every
+//! frame and make that control impossible to pass on a working build.
+//!
+//! The two fight readings are safe on that test for the same reason the position
+//! is: they move when the *world* does and hold still when it does not.
+//! [`crate::foe::POSTS`] puts every foe out of notice range of where the gate
+//! stands the character to take those samples, and
+//! `no_foe_can_reach_the_character_where_the_zone_opens` is what holds it there.
+//! They earn their place because a player who cannot see their own health cannot
+//! tell a fight they are winning from one they are losing, which is the whole of
+//! what this slice added.
 //!
 //! The moving numbers are all on the debug panel (`F3`) and on the `[HUD]`
 //! heartbeat, where a gate reads them as text rather than as pixels.
@@ -53,6 +63,9 @@ const VALUE: [f32; 4] = [0.98, 0.95, 0.90, 1.0];
 const LIT: [f32; 4] = [0.98, 0.66, 0.30, 1.0];
 /// …and once they have been put out.
 const OUT: [f32; 4] = [0.52, 0.56, 0.66, 1.0];
+/// What a reading that is bad news is drawn in: half the character's health
+/// gone, or something in the zone still standing.
+const HURT: [f32; 4] = [0.92, 0.36, 0.30, 1.0];
 
 /// The panel's inset from the top-left corner, in pixels.
 const PANEL_INSET: f32 = 16.0;
@@ -61,7 +74,9 @@ const ROW_HEIGHT: f32 = 18.0;
 /// The panel's padding inside its own border, in pixels.
 const PANEL_PAD: f32 = 8.0;
 /// How wide the panel is, in pixels. Wide enough for the longest label and a
-/// right-aligned reading beside it.
+/// right-aligned reading beside it —
+/// `every_reading_is_laid_out_where_it_can_actually_be_seen` is what holds this
+/// number to the widest reading rather than to this sentence.
 const PANEL_WIDTH: f32 = 190.0;
 /// How thick the panel's border is, in pixels.
 const BORDER_WIDTH: f32 = 1.0;
@@ -72,7 +87,7 @@ const BORDER_WIDTH: f32 = 1.0;
 const NATURAL_SCALE: f32 = 1.0;
 
 /// The control hint, which is the whole of what a first-time visitor needs.
-const HINT: &str = "W/A/S/D walk   Q/E turn the camera   L douses the torches";
+const HINT: &str = "W/A/S/D walk   Q/E turn the camera   SPACE strikes   L douses the torches";
 
 /// What the page drew, for the loop's own tests and its summary line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -111,6 +126,20 @@ pub fn draw(
             }
             .to_string(),
             VALUE,
+        ),
+        (
+            "HEALTH",
+            format!("{}/{}", state.health, crate::foe::HEALTH_MAX),
+            if state.health * 2 <= crate::foe::HEALTH_MAX {
+                HURT
+            } else {
+                VALUE
+            },
+        ),
+        (
+            "FOES",
+            format!("{}", state.alive),
+            if state.alive > 0 { HURT } else { VALUE },
         ),
         (
             "TORCHES",
@@ -172,6 +201,9 @@ mod tests {
             grounded: true,
             blocked: false,
             elapsed: 12.5,
+            foes: [crate::foe::FoeView::default(); crate::foe::FOES],
+            health: crate::foe::HEALTH_MAX,
+            alive: crate::foe::FOES,
         }
     }
 
