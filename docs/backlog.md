@@ -3,6 +3,42 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Decision needed: Escape cannot pause a demo that holds the pointer lock (2026-08-26)
+
+`crcbl::engine::PAUSE_KEY` is `KeyCode::Escape` for every sample. **A browser
+reserves Escape while a page holds Pointer Lock**: it exits the lock and the
+page never receives the key at all. Measured on Chromium 151 with a standalone
+probe — with the lock held, a CDP-dispatched Escape produced `keys=[]` on a
+`document` keydown listener and `pointerlockchange` fired `unlocked`; the same
+dispatch unlocked produced `keys=["Escape"]`.
+
+So on the three demos whose `pointer_mode` answers `PointerMode::Locked` —
+`apps/breach`, `apps/lantern`, `apps/quarry` — a visitor who has clicked to aim
+and then presses Escape to pause gets the pointer released and no pause, while
+each demo's own on-screen hint still says Escape pauses. The second Escape then
+works, because by then the lock is gone. Native builds are unaffected: this is
+the browser's key, not the shell's.
+
+Not currently caught by the browser gate, and the reason is worth keeping: group
+E blurs the page before it tests Escape, and a blur releases the lock, so the
+gate only ever presses Escape on an unlocked page.
+
+The options, none taken yet:
+
+- **Treat losing the lock as the pause**, which is what browser first-person
+  games conventionally do — `pointerlockchange` to unlocked pauses the demo. One
+  Escape then reads to the visitor as "pause", and alt-tab pauses too, which is
+  the behaviour a player expects anyway. Costs a new edge from the shim into the
+  engine.
+- **Bind a second pause key in the browser** and say so in the hint. Cheapest,
+  but it makes the demo's controls differ per target, which is the divergence
+  "the same build runs in both" exists to avoid.
+- **Leave it**, and change each demo's hint to say Escape twice. Honest, and
+  worse for a visitor.
+
+Whichever is chosen, the gate should then press Escape on a _locked_ page, which
+it does not do today.
+
 ### The atlas re-tiling's leftovers: resolution, and one option declined (2026-08-26)
 
 The budget question — how many point lights may cast — was answered by widening
@@ -73,13 +109,26 @@ names, and where it is unavailable the shim retries the plain
 **OS-adjusted** ones — the same acceleration curve as the desktop cursor, so aim
 speed changes with how fast the hand moves.
 
-Who is affected, from MDN's compatibility data — not measured here, because the
-deltas are indistinguishable from script, which is why this is a note and not a
-test: the option landed in Chrome and Edge 88, Chrome for Android 151, Firefox
-152 and Safari 18.4. **Safari on iOS and Firefox for Android do not implement
-it**; Firefox for Android is the case that rejects with `NotSupportedError`,
-which is the branch `takeLock` retries on, and the others ignore the key.
-Anything older than those versions is in the same position.
+**Who is affected is decided by the OS, not by the browser**, which is the half
+this entry originally got wrong. Chromium rejects the option with
+`NotSupportedError` on **Linux and Android whatever its version**, and grants it
+on Windows and macOS — the platform, not the release, is the gate. Measured here
+on Chromium 151.0.7922.173 against four configurations, all rejecting: a `data:`
+page and an `http://localhost` one (`isSecureContext` true), headless and
+headed, with and without `--enable-blink-features=PointerLockOptions`. The
+request is made from inside a real `pointerdown`, so transient activation is
+satisfied. Safari on iOS and Firefox for Android also lack it.
+
+The consequence worth naming: **every Linux desktop visitor, and CI's own Linux
+job, take the fallback**, so `ShellCaps::RAW_POINTER_MOTION`'s "unaccelerated"
+half is not honoured on the platform this project is developed on. It is
+honoured natively on the same machine — X11 reads XI2's `axisvalues_raw` and
+Wayland reads `relative-pointer`'s `dx_unaccel`, both deliberately.
+
+Which path a run took is no longer merely asserted: group `AM` in
+`web/tools/probe-e2e.mjs` asserts it per platform — Windows and macOS must be
+granted the option, Linux must be refused it and reach the lock through the
+fallback. The deltas themselves are still not measured; only the path is.
 
 What it costs: a competitive shooter cannot trust aim on those browsers, which
 is one of the reasons `docs/plan/sample/11-breach.md` gives for breach being
@@ -89,35 +138,6 @@ feature — so the honest options are to leave the caveat stated, where it is no
 to add a _third_ capability bit separating "relative motion" from "unaccelerated
 relative motion". The bit was not added: nothing in the engine would branch on
 it today, and `ShellCaps::has_mouselook` would still be the check a camera runs.
-
-### A granted pointer lock is not gated in a browser (2026-08-26)
-
-What _is_ gated, and by accident rather than by design: the browser gate's touch
-group (`a second contact arrives as its own contact and moves only itself` in
-`web/tools/browser-e2e.mjs`) caught a real pointer-lock defect on every demo
-that asks for the lock — `apps/breach`, `apps/lantern` and `apps/quarry`, the
-ones whose `pointer_mode` answers `PointerMode::Locked` — because a lock taken
-by a finger freezes every coordinate after it. Removing the `pointerType` guard
-in `takeLock` in `web/engine/shell.js` puts each of those gates back to one
-failure with every contact at the same frozen value; `apps/shard`, which never
-asks for a lock, passes either way and is the control. The per-frame poll is
-covered too: misspelling the export in the shim's copy under `target/site` fails
-the breakout gate with
-`TypeError: exports.__crcbl_web_pointer_lock_wanted_TYPO is not a function`
-raised from `syncPointerLock`.
-
-What is **not** covered is the lock working. Nothing clicks the canvas with a
-mouse, checks `document.pointerLockElement`, and asserts that a demo's own yaw
-readout moved — so `takeLock` succeeding, `onPointerLockChange` reporting it,
-and `movementX` reaching a camera are all unverified in a real browser. They are
-covered on the Rust side by `crcbl-shell`'s `web::tests`, which drive the entry
-points directly and know nothing about whether a browser ever calls them.
-
-Closing it looks feasible and was not attempted. CDP's
-`Input.dispatchMouseEvent` produces trusted events, which is what
-`requestPointerLock` needs. The unknowns are whether headless Chromium grants
-the lock at all and whether a CDP mouse move carries a `movementX` — neither was
-tested. Note the gate's assertions belong to whoever owns each demo.
 
 ### Two pointer types cannot take the browser's lock, and one is a decision (2026-08-26)
 
