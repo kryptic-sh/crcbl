@@ -196,6 +196,301 @@ deliberate exceptions.
 does not fire this gate today, which is the whole point of the entry — the first
 red-check of it read as a pass because the sabotage was out of scope.
 
+### Unfinished work from the rendering plans
+
+Found auditing `docs/plan/`'s eight rendering documents on 2026-08-27. Those
+docs had already been annotated inline as work landed, so the audit's yield was
+mostly **false claims corrected** rather than plans closed; what follows is the
+work they name that the tree does not have.
+
+### The tonemap has no curve (2026-08-27)
+
+**Not built.** `18-render-features.md`'s post stack asks for a
+"filmic/ACES-fitted curve + sRGB encode".
+`crates/crcbl-shaders/shaders/tonemap.slang` implements
+`saturate(color * exposure)` and its own header says so: the operator is
+exposure-and-clamp, chosen at P1 so display-referred content reached the
+swapchain unchanged and no golden would be re-blessed twice.
+
+**What it would take.** That file says it too — "topic 18's real stack replaces
+exactly one function in this file". The pass, the `Rgba16Float` transient, the
+`TonemapParams` uniform and the runtime exposure all exist. What lands is the
+curve, plus a re-bless of every 3D golden in the tree, which is the classic
+"everything shifted" diff the `--bless` flow exists for.
+
+**Blocks.** Nothing structurally; it is a quality row. But every golden blessed
+before it lands has to be blessed again after, so the later it goes the more it
+costs.
+
+**Evidence.** `tonemap.slang`'s `tonemap` function and its "The operator is
+exposure-and-clamp, on purpose" section; `crcbl_shaders::tonemap::TonemapParams`
+is the Rust mirror.
+
+### FXAA does not exist (2026-08-27)
+
+**Not built.** `18-render-features.md` lists FXAA as MVP ("AA (MVP): FXAA —
+cheap, single pass, no history") and the P7 delivery row named it. There is no
+`fxaa.slang` in `crates/crcbl-shaders/shaders/`, no FXAA artifact in `spirv/`,
+`wgsl/`, `msl/` or `clusters/`, no resolve pass in `crcbl_render::forward`, and
+no `RenderEffects` bit for one. The only occurrence of the word in the workspace
+is a doc comment on `MultisampleState::default` in `crcbl-hal` explaining why
+MSAA is not the default.
+
+**What it would take.** One `.slang` with the four-target header, one fullscreen
+pass in the graph after tonemap, and a `RenderEffects` bit so it is a frame with
+fewer passes when off — the shape `RenderEffects::BLOOM` already has. Its input
+is the tonemapped LDR image, so it does not interact with the HDR chain.
+
+**Blocks.** Nothing depends on it; it is the last MVP row of the post stack that
+has no implementation at all. Every frame the engine draws is currently
+unresolved.
+
+**Evidence.** `grep -rni fxaa` over `crates/` and `apps/` returns one hit, in
+`crates/crcbl-hal/src/pipeline.rs`.
+
+### The prev-transform slot for TAA was never reserved (2026-08-27)
+
+**Not built, and the plan claimed otherwise.** `18-render-features.md`'s AA row
+said "the instance format reserves the prev-transform slot **now** so TAA is
+additive later", and its risk list called that "the cheap insurance".
+`crcbl_shaders::mesh::GpuInstance` carries `transform`, `mesh`, `material`,
+`sector`, `flags` and `base_vertex`. There is no previous transform.
+
+**What it would take.** One more `[f32; 16]` in `GpuInstance`, a wider
+`INSTANCE_STRIDE`, and the `std430` mirrors on both sides of `mesh.slang` and
+`mesh_cluster.slang` moved with it. Cheap today; the reason
+`GpuInstance::sector` is already reserved is precisely that it is expensive once
+§3.3's shaders index past it.
+
+**Blocks.** TAA, which is post-MVP, and motion vectors generally — so also
+motion blur and any temporal upsampler.
+
+**Evidence.** `GpuInstance` and `GpuInstance::to_bytes` in
+`crates/crcbl-shaders/src/mesh.rs`. Corrected in the doc rather than deleted.
+
+### `crcbl-render` has no upscale path (2026-08-27)
+
+**Not built, on the renderer's side of a seam whose other side is.**
+`15-windowing.md` defines borderless as an internal render target
+upscale-blitted to the native surface, `18-render-features.md` orders the whole
+post chain around a `[upscale]` stage, and `ShellCaps::HW_UPSCALE` reports what
+a window system will do for free. `crcbl-render` has no upscale pass, no
+render-scale setting, and no internal target whose extent differs from the
+swapchain's — `grep -rni "upscale|render_scale"` over `crates/crcbl-render/src/`
+returns nothing; every hit is in `crcbl-shell`.
+
+**What it would take.** An internal colour target sized by a scale factor, a
+blit or fullscreen sample into the swapchain after tonemap and AA, and the UI
+pass moved to native resolution behind it (the ordering `18-render-features.md`
+already fixes). The `RenderEffects`/`EffectRequest` resolution point is where
+the scale knob would join the other three layers.
+
+**Blocks.** The whole point of render scale — post-chain cost scaling with
+internal resolution — and topic 15's borderless story. Also
+`29-fp-rendering.md`'s PiP budget, whose first knob is an RTT resolution
+setting.
+
+**Evidence.** Verified 2026-08-27 by search over `crates/crcbl-render/src/`.
+
+### §3.6's debug draw layer is unbuilt (2026-08-27)
+
+**Not built.** `03-gpu-driven-rendering.md` §3.6 asks for "line/AABB/sphere
+immediate primitives accumulated into an instance buffer, drawn in one pass",
+and says "systems from stage 4 onward use this to visualize themselves". The
+other two rows of that section are built — `crcbl_render::timing` for the
+per-pass timestamps and `crcbl_render::cull_stats` for the delayed readback
+ring. This one has no module, no shader and no caller.
+
+**What it would take.** A vertex-pulled line/triangle pass over a per-frame
+instance buffer, drawn pre-tonemap in HDR per `18-render-features.md`'s
+interaction rule. `crcbl_render::sprite_pass` is the closest existing shape.
+
+**Blocks.** Every "visualize itself" affordance the plans promise: the
+cascade-split overlay and shadow-map inspector (topic 18), the LOD screen-error
+heatmap and freeze-LOD camera (topic 25), decal cluster heatmaps and carve
+wireframes (topic 33), the server vis view (topic 31).
+
+**Nearest existing things, and why they are not it.**
+`ForwardRenderer::set_wireframe` is a pipeline mode over scene geometry, and
+`crcbl_render::grid` is one fullscreen pass ray-casting `y = 0`. Neither takes
+primitives from a caller.
+
+### Cascade debug overlay and shadow-map inspector (2026-08-27)
+
+**Not built.** `18-render-features.md`'s shadow section names both, and its risk
+list leans on the overlay as the mitigation for CSM artefact whack-a-mole. That
+risk arrived — the fifth and sixth decisions in that document are the record of
+fighting it — and was resolved by measurement through `apps/lantern`'s review
+frames instead. `ForwardRenderer::debug_view` offers `DebugView::Heatmap`,
+`DebugView::LodTint` and `DebugView::Normals`, and nothing about shadows.
+
+**What it would take.** The debug draw layer above for the split overlay; the
+inspector is a UI panel sampling the `D32Float` atlas, which needs a
+sampled-depth read the AO pass already does.
+
+**Blocks.** Nothing shipping. It is a diagnosis cost the next shadow bug pays.
+
+### Camera-relative rendering: the f64 sector offset table (2026-08-27)
+
+**Half built.** `03-gpu-driven-rendering.md`'s 2026-07-27 correction resolved
+the contradiction between camera-relative rendering and delta-only instance
+upload by splitting it: sector-local `f32` transforms plus a sector id on the
+instance, and a per-frame f64 sector→camera offset table the vertex and cull
+shaders add. The first half is built — `GpuInstance::transform` is sector-local
+and `GpuInstance::sector` is the id. The table does not exist, nothing indexes
+`sector`, every instance is in sector 0, and `transform` is a plain model →
+world matrix.
+
+**What it would take.** A small uniform or storage array of f64-derived offsets
+(one per resident sector), an add in `mesh.slang`, `mesh_cluster.slang` and
+`cull.slang`, and the cull AABBs redefined into the same space — which that
+correction says is the point of it.
+
+**Blocks.** Large-world precision, so `apps/orbit`'s planet scale and any
+streamed sector world. The correction's own note said "must exist before P7"; P7
+has landed without it because nothing in the tree is far enough from the origin
+to lose precision.
+
+**Evidence.** The doc comment on `GpuInstance::sector` in
+`crates/crcbl-shaders/src/mesh.rs` states it: "Reserved and unconsumed — this is
+not camera-relative rendering."
+
+### No transparent pass, and therefore no depth sort (2026-08-27)
+
+**Not built.** `03-gpu-driven-rendering.md` §3.4 names a depth-sorted
+transparent pass, and its 2026-07-27 correction names the algorithm — a GPU
+radix sort over packed depth keys, bitonic for small counts — "so it isn't
+rediscovered at P7". `crcbl_render::forward` records no blended geometry pass;
+the only alpha blending in the renderer is `crcbl_render::sprite_pass`'s and
+`crcbl_render::ui_pass`'s, both of which are 2D and both of which rely on
+submission order.
+
+**What it would take.** A second geometry pass with a blend state, a
+per-instance depth key, and the sort. `18-render-features.md`'s SSR section
+already records the interaction to honour: a transparent surface must not write
+the reflectivity attachment, because it would overwrite the opaque `F0` behind
+it while the scene colour at that pixel is a blend.
+
+**Blocks.** Glass, water, foliage alpha, and `20-particles.md`'s alpha-blended
+particle buckets. Additive effects do not need it.
+
+### Occlusion culling: depth pyramid / two-phase (2026-08-27)
+
+**Not built, and correctly marked post-MVP.** §3.3 asks that the compute pass be
+left "structured so it can be inserted (visibility buffer slot in the pass
+inputs)". There is no depth pyramid, no Hi-Z and no two-phase pass in
+`crcbl-render` — `grep -rni "depth pyramid|hi-z|occlusion cull"` over
+`crates/crcbl-render/src/` returns nothing.
+
+**Coverage gap, stated plainly:** whether `crcbl_render::draw_gen`'s pass
+structure actually admits the insertion was **not** verified. The three-dispatch
+shape (clear, cull, draw-args) with graph-computed barriers looks like it does,
+but nobody has tried.
+
+### `20-particles.md`'s GPU-resident system (2026-08-27)
+
+**Not built; `crcbl-vfx` is its CPU staging and says so.** That crate's module
+docs are explicit: "the CPU staging of it … That document's destination is a
+GPU-resident system — spawn and update in compute, an alive count feeding
+indirect draw arguments, no CPU involvement after the spawn command. Nothing
+here is that." What is there is the data layout (`ParticlePool` as the SSBO's
+structure-of-arrays), the per-effect ranges (`RangeAllocator`), the stateless
+per-particle randomness (`pcg3d`), the fixed modifier menu (`EffectDesc`) and a
+`ParticleSystem` stepped by a loop.
+
+**Also unbuilt in that document:** the RON effect asset schema, its bake and hot
+reload; billboards, flipbooks, soft particles, ribbons (and the circular vertex
+history the 2026-07-27 correction added for them); depth-buffer collision; the
+depth-bin sort; and the per-bucket indirect draw. Mesh particles work today by
+riding §3's ordinary instance path, which is what `apps/sparks` does.
+
+**What it would take, in the order the crate was arranged for.** Replace the
+loop in `crcbl-vfx`'s `system` module with a compute dispatch over the same pool
+layout; the determinism argument was built to survive the move (a particle is a
+hash of seed, index and stream, so it is the same particle in a workgroup as in
+a loop). Then the alive count into indirect draw arguments, then a billboard
+pass.
+
+**Blocks.** Effect counts that do not touch CPU cost, which is the document's
+whole premise; and `33-decals.md`'s impact VFX, which assume a VFX system
+exists.
+
+### LOD: joint-weight-aware collapse for skinned meshes (2026-08-27)
+
+**Not built.** `25-lod.md` says "joint-weight-aware collapse is part of the
+auto-gen slice (weights carried through edge collapses)".
+`crcbl_scene::lod_resolve` builds the hierarchy over the bind pose and nothing
+there carries weights through a collapse. The QEM simplifier, the cluster DAG
+builder and `crcbl lod` are built.
+
+**Blocks.** Simplifying a skinned mesh without seam and weight artefacts. Not
+blocking today because no skinned asset in the tree has a generated DAG.
+
+### `Bindless` has no implementation (2026-08-27)
+
+**Deliberately so, and the reason is recorded.** `03-gpu-driven-rendering.md`
+§3.2 says the texture column landed as an `ArrayPages` layer and that
+`BindingModel::Bindless` was not built, because `crcbl-mtl` withdraws
+`DESCRIPTOR_INDEXING` and a bindless lookup would leave Metal with no texture
+path at all. That is a decision, not an omission — recorded here so §3's exit
+criterion "every `BindingModel` value renders the sandbox scene" is not read as
+an open bug.
+
+**What still binds future work.** A page is one image, so every layer shares an
+extent, a format and a mip count. Real imported content does not have one
+extent, which is the constraint `Bindless` exists to lift and the trigger for
+building it. Two prerequisites are already closed: `BindingKind::SampledImage`
+carries a `view_type`, and every backend honours `BindGroupEntry::array_index`.
+
+### Ray-traced lighting (P7C) is not built (2026-08-27)
+
+**Confirmed absent.** `crcbl-hal` has `Features::RAY_QUERY`,
+`Features::ACCELERATION_STRUCTURE` and `LightingPath` with its `INPUTS` set, and
+that is all: no BLAS bake, no TLAS refit, no `crcbl as stats`, no ray-tracing
+`.slang`, and no `LightingPath` consumer outside `Debug` impls, one log line and
+adapter tests. The renderer is raster only.
+
+**Standing scheduling question, already framed in the doc.** The 2026-08-23
+correction in `18-render-features.md` notes that of the two backends that can
+ray trace, `crcbl-dx12` is deferred alongside `crcbl-mtl` — so P7C would be a
+whole second lighting implementation reaching Vulkan hardware with `RAY_QUERY`
+and nothing else. That document says the decision belongs in the backlog rather
+than in it.
+
+### Whole documents with nothing built, re-verified (2026-08-27)
+
+Kept intact; listed so the next audit does not re-derive it.
+
+- **`29-fp-rendering.md`** — viewmodel pass, ADS, PiP optics. No viewmodel pass,
+  no depth-slice remap, no second camera. `apps/breach` is new and untracked at
+  the time of this audit and was not examined.
+- **`31-vis-culling.md`** — server-side visibility replication filtering. No
+  `vis_culled` tag, no `competitive_integrity` gate, no PVS bake, no leak
+  auditor anywhere in `crates/`, `apps/` or `tools/`.
+- **`33-decals.md`** — no decal type, no carve volume, no `carveable` flag. The
+  four files matching "decal" are the CLI importer, its test, a `forward_e2e`
+  shadow test and `apps/lantern`'s room, none of which is a decal system. The
+  froxel grid it plans to bin into does now exist (`crcbl_render::light_grid`),
+  which is noted in the doc.
+- **`37-materials.md`** — the whole authoring layer. No material template, no
+  `.mat.ron`, no `crcbl mat` subcommand, no permutation manager. Nothing in the
+  workspace reads or writes RON at all. What exists is the runtime shape:
+  `GpuMaterial`'s `base_color`, `metallic`, `roughness` and page-layer column,
+  filled from glTF by `crcbl_scene::gltf_import`.
+
+### Coverage gaps in this audit (2026-08-27)
+
+- §3's exit criteria "10k+ instanced meshes … CPU frame time flat vs instance
+  count" and "zero per-frame descriptor writes (RenderDoc-verified)" were
+  **not** verified. `apps/horde`'s own docs say it "holds a thousand and then
+  wants ten"; no RenderDoc capture is recorded anywhere in the tree.
+- Whether the depth prepass took the `GreaterOrEqual` overdraw win or kept the
+  zero-risk clearing fallback was not checked against the shipped
+  `crcbl_render::forward`; `18-render-features.md` describes both and says the
+  fallback is taken by saying so in the code.
+- `apps/breach` and `web/demos/breach/` were untracked working-tree additions
+  during this audit and were not read, so nothing here accounts for them.
+
 ### Unfinished work from the backend and platform plans
 
 ### The Vulkan suballocator is still owed (2026-08-27)
