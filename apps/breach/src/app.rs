@@ -260,6 +260,18 @@ pub struct Breach {
     /// after is the order the map asks for, and it is what makes a frame that
     /// runs no ticks lossless.
     pending_keys: Vec<(KeyCode, bool)>,
+    /// Whether the pointer is really captured, as the last frame that could
+    /// tell it said.
+    ///
+    /// **`at.is_none()` on its own does not mean captured**, which is the trap
+    /// this field exists to step around. [`PointerUpdate::at`] is `Some` only
+    /// on a frame the pointer actually **moved**, so a click with a visible
+    /// cursor that has been sitting still reports no position either — and
+    /// reading that as a capture is a shot the visitor never asked for, on the
+    /// commonest click there is. A *motion* carrying no position is a shape
+    /// only a held lock produces, so that is what sets this, and a motion
+    /// carrying one clears it.
+    captured: bool,
     /// A trigger pull from the mouse, waiting for the next tick.
     ///
     /// [`Breach::pending_keys`]' counterpart, and latched for the same reason:
@@ -500,6 +512,7 @@ fn assemble<S: Shell + ?Sized>(
             game,
             actions: action_map(),
             pending_keys: Vec::new(),
+            captured: false,
             pending_fire: false,
             eye: Eye::default(),
             render_state: RenderState::default(),
@@ -601,7 +614,16 @@ impl HostedGame for Breach {
     /// is a shot. So the frame that grabs the pointer does not also fire, and
     /// every click after it does.
     fn pointer_event(&mut self, pointer: PointerUpdate) {
-        if pointer.at.is_some() {
+        // Only a frame that carries a motion can say whether the pointer is
+        // held, and it says it by whether a position came with it. A frame with
+        // neither — a click from a mouse that has not moved — says nothing, and
+        // leaves the answer as it was. See [`Breach::captured`].
+        if pointer.motion.is_some() {
+            self.captured = pointer.at.is_none();
+        } else if pointer.at.is_some() {
+            self.captured = false;
+        }
+        if !self.captured {
             return;
         }
         if let Some(motion) = pointer.motion {
@@ -637,6 +659,10 @@ impl HostedGame for Breach {
         // Recorded as well as answered: `pointer_mode` is asked immediately
         // after this and needs to know, and it is handed no argument.
         self.paused = paused;
+        // The pause frees the pointer — `pointer_mode` below answers
+        // `PointerMode::Free` — so whatever was held is not held any more, and
+        // a click on the panel is a click at a place on it.
+        self.captured &= !paused;
         MenuKind::of(paused)
     }
 
@@ -921,12 +947,16 @@ mod tests {
     }
 
     /// **The mouse pulls the trigger only while the pointer is captured**, and
-    /// a click with a visible cursor does not.
+    /// neither a click with a visible cursor nor one from a mouse that has not
+    /// moved counts as captured.
     ///
-    /// That pair is the whole rule [`Breach::pointer_event`] states, and it
-    /// needs both halves: a build that fired on every click would shoot on the
-    /// very click a browser is asked for its Pointer Lock with, and one that
-    /// fired on neither would leave the mouse trigger silently unbound.
+    /// Three cases, and the third is the one that is easy to get wrong. A
+    /// build that fired on every click would shoot on the very click a browser
+    /// is asked for its Pointer Lock with; one that fired on none would leave
+    /// the mouse trigger silently unbound; and one that read `at.is_none()` as
+    /// "captured" would fire on a still mouse with the cursor in plain sight,
+    /// because [`PointerUpdate::at`] is `Some` only on a frame the pointer
+    /// moved. See [`Breach::captured`].
     ///
     /// Driven on the practice map because it fires nothing by itself — the
     /// range warms up by shooting — so every shot on the counter is this
@@ -941,10 +971,17 @@ mod tests {
             pressed: true,
             released: false,
         };
-        let mut engine = scripted(&on(crate::map::MapChoice::Practice, 300));
+        let moved = |at: Option<Vec2>| PointerUpdate {
+            at,
+            motion: Some(Vec2::new(4.0, 0.0)),
+            pressed: false,
+            released: false,
+        };
+        let mut engine = scripted(&on(crate::map::MapChoice::Practice, 400));
         frames(&mut engine, 30);
+        let shots = |engine: &Loop<HeadlessShell>| engine.game().stats.shots;
         assert_eq!(
-            engine.game().stats.shots,
+            shots(&engine),
             0,
             "the practice map fired the player's pistol for them",
         );
@@ -953,16 +990,29 @@ mod tests {
         engine.game_mut().pointer_event(click(Some(Vec2::ZERO)));
         frames(&mut engine, 30);
         assert_eq!(
-            engine.game().stats.shots,
+            shots(&engine),
             0,
             "a click with the cursor at a place on the surface pulled the trigger",
         );
 
-        // No position at all is what a granted lock looks like.
+        // **A still mouse reports no position either.** Nothing has captured
+        // the pointer, so this must not fire — and it is the commonest click
+        // there is.
         engine.game_mut().pointer_event(click(None));
         frames(&mut engine, 30);
         assert_eq!(
-            engine.game().stats.shots,
+            shots(&engine),
+            0,
+            "a click from a mouse that had not moved was read as a captured pointer",
+        );
+
+        // A motion with no position at all is what a granted lock looks like,
+        // and only that makes the click a shot.
+        engine.game_mut().pointer_event(moved(None));
+        engine.game_mut().pointer_event(click(None));
+        frames(&mut engine, 30);
+        assert_eq!(
+            shots(&engine),
             1,
             "a click under the lock did not pull the trigger, or pulled it twice",
         );

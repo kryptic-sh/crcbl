@@ -229,12 +229,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   macOS runner.
 
 - **`apps/breach`'s primary mouse button pulls the trigger**, on any shell that
-  actually grants the pointer lock. It is gated on the same `at.is_none()` the
-  mouse look is gated on rather than bound through `ActionMap`, because a map
-  binding is not told where the pointer is and so cannot tell a shot at the
-  crosshair from the click that asks for the lock in the first place. The
-  keyboard trigger and the arrow-key look stay, and are what the sample plays
-  with wherever the lock is declined.
+  actually grants the pointer lock. It is gated in `pointer_event` rather than
+  bound through `ActionMap`, because a map binding is not told where the pointer
+  is and so cannot tell a shot at the crosshair from the click that asks for the
+  lock in the first place. What says "captured" is a pointer _motion_ carrying
+  no absolute position, which is a shape only a held lock produces — not
+  `at.is_none()` on its own, which is also what a click from a mouse that has
+  not moved reports, and which would have fired on the commonest click there is.
+  The keyboard trigger and the arrow-key look stay, and are what the sample
+  plays with wherever the lock is declined.
 
 - **Mouse look in a browser.** `crcbl-shell`'s web backend reports
   `ShellCaps::POINTER_LOCK | RAW_POINTER_MOTION`, so `ShellCaps::has_mouselook`
