@@ -30,26 +30,57 @@ to add a _third_ capability bit separating "relative motion" from "unaccelerated
 relative motion". The bit was not added: nothing in the engine would branch on
 it today, and `ShellCaps::has_mouselook` would still be the check a camera runs.
 
-### The web shim's pointer-lock path has no automated gate (2026-08-26)
+### A granted pointer lock is not gated in a browser (2026-08-26)
 
-`web/tools/browser-e2e.mjs` never takes a pointer lock, so `syncPointerLock`,
-`takeLock` and `onPointerLockChange` in `web/engine/shell.js` — and the
-`__crcbl_web_pointer_lock` and `__crcbl_web_pointer_lock_wanted` pair they drive
-— are covered on the Rust side by `crcbl-shell`'s `web::tests` and in a real
-browser only by the fact that the poll runs. That much _is_ verified:
-misspelling the export in the shim's copy under `target/site` failed the
-breakout gate with
+What _is_ gated, and by accident rather than by design: the browser gate's touch
+group (`a second contact arrives as its own contact and moves only itself` in
+`web/tools/browser-e2e.mjs`) caught a real pointer-lock defect on the two demos
+that ask for the lock, because a lock taken by a finger zeroes every coordinate
+after it. Removing the `pointerType` guard in `takeLock` in
+`web/engine/shell.js` puts quarry's gate back to 41/42 with every contact at
+`-25`. The per-frame poll is covered too: misspelling the export in the shim's
+copy under `target/site` fails the breakout gate with
 `TypeError: exports.__crcbl_web_pointer_lock_wanted_TYPO is not a function`
-raised from `syncPointerLock`, so the per-frame poll demonstrably executes. What
-is unverified is everything after a click: that the lock is granted, that
-`movementX` arrives, and that the engine turns a camera with it.
+raised from `syncPointerLock`.
+
+What is **not** covered is the lock working. Nothing clicks the canvas with a
+mouse, checks `document.pointerLockElement`, and asserts that a demo's own yaw
+readout moved — so `takeLock` succeeding, `onPointerLockChange` reporting it,
+and `movementX` reaching a camera are all unverified in a real browser. They are
+covered on the Rust side by `crcbl-shell`'s `web::tests`, which drive the entry
+points directly and know nothing about whether a browser ever calls them.
 
 Closing it looks feasible and was not attempted. CDP's
 `Input.dispatchMouseEvent` produces trusted events, which is what
-`requestPointerLock` needs, so a group could click the canvas, poll
-`document.pointerLockElement`, dispatch moves and assert a demo's own yaw
-readout moved. The unknowns are whether headless Chromium grants the lock at all
-and whether a CDP mouse move carries a `movementX` — neither was tested.
+`requestPointerLock` needs. The unknowns are whether headless Chromium grants
+the lock at all and whether a CDP mouse move carries a `movementX` — neither was
+tested. Note the gate's assertions belong to whoever owns each demo.
+
+### Two pointer types cannot take the browser's lock, and one is a decision (2026-08-26)
+
+`takeLock` in `web/engine/shell.js` requires `pointerType === 'mouse'`, so
+neither a finger nor a pen takes the lock.
+
+**Touch is not a judgement call.** A locked page is one where Chromium reports
+`clientX`/`clientY` as `0`, so `position` answers `-rect.left` for everything
+after the grant; a finger has no cursor to pin either. Letting a touch
+`pointerdown` take it is the defect described in the entry above.
+
+**A pen is the decision.** A stylus reports absolute positions and has no
+acceleration curve for `unadjustedMovement` to bypass, so a pen-driven mouselook
+would be differencing absolute positions with extra steps — which is the thing
+`ShellCaps::RAW_POINTER_MOTION` exists to stop. If someone wants a stylus to
+turn a camera, that is a feature with its own design, not a missing `||`.
+
+**The residual, unverified:** a hybrid device where a mouse holds the lock
+legitimately and someone then touches the screen. The contact reaches
+`__crcbl_web_touch` with the zeroed coordinate, exactly as in the defect above,
+because the touch entry point deliberately does not apply the lock's position
+suppression — a contact's coordinate is its whole content. Not reproduced: the
+gate cannot be in that state now that only a mouse takes the lock. The candidate
+fix, if it ever bites, is to release the lock when a touch contact arrives — the
+poll re-arms on the next frame, so a later mouse click takes it back — rather
+than to drop the contact or report it somewhere the finger is not.
 
 ### `apps/shard` covers four verbs of milestone 1's six (2026-08-26)
 

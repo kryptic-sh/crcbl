@@ -242,12 +242,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `PointerMode::Locked` to `Free` on every browser build.
   `WebShell::set_pointer_mode` publishes the request through the new
   `__crcbl_web_pointer_lock_wanted` export; `web/engine/shell.js` polls it once
-  a frame, arms a one-shot `pointerdown` on the canvas — a browser grants
-  `requestPointerLock` only from a user gesture, and wasm never is one — and
-  reports the outcome back through the new `__crcbl_web_pointer_lock` entry
-  point. While that says locked, `ShellEvent::PointerMotion` carries `raw_delta`
-  and no `abs`, and `Button` and `Wheel` carry no position, exactly as the
-  Wayland and X11 backends do.
+  a frame and waits for a `pointerdown` from a **mouse** — a browser grants
+  `requestPointerLock` only from a user gesture, wasm is never in one, and a
+  finger has no cursor to pin — then reports the outcome back through the new
+  `__crcbl_web_pointer_lock` entry point. While that says locked,
+  `ShellEvent::PointerMotion` carries `raw_delta` and no `abs`, and `Button` and
+  `Wheel` carry no position, exactly as the Wayland and X11 backends do.
 
   `__crcbl_web_pointer_motion` takes two more arguments, the `movementX` /
   `movementY` delta scaled to device pixels; a page with its own copy of the

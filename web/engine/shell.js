@@ -288,8 +288,22 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     return document.pointerLockElement === canvas;
   }
 
-  /** Whether the one-shot gesture listener below is installed. */
+  /** Whether the gesture listener below is installed. */
   let lockArmed = false;
+
+  /** Starts waiting for the gesture that can take the lock. */
+  function armLock() {
+    if (lockArmed) return;
+    lockArmed = true;
+    canvas.addEventListener('pointerdown', takeLock);
+  }
+
+  /** Stops waiting — the lock was taken, given up, or is no longer wanted. */
+  function disarmLock() {
+    if (!lockArmed) return;
+    lockArmed = false;
+    canvas.removeEventListener('pointerdown', takeLock);
+  }
 
   /**
    * Takes the lock, from inside the gesture that armed this.
@@ -310,9 +324,28 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
    * page whose gate reads the console, and the outcome that matters arrives at
    * `onPointerLockChange` regardless. A request made with no gesture left
    * rejects `NotAllowedError` and is left alone here for that reason.
+   *
+   * **A mouse and nothing else takes it.** A browser grants Pointer Lock from
+   * *any* gesture, a finger's `pointerdown` included, and a locked page is one
+   * where `clientX`/`clientY` stop being a position — Chromium reports them as
+   * `0`, so `position` answers `-rect.left` for every event after the grant. A
+   * contact reported there is a contact where the finger is not, which is how
+   * the browser gate's touch group went red on the two demos that ask for the
+   * lock. There is nothing to pin either: a finger has no cursor. A pen is
+   * excluded for the same second reason, and that one is a decision rather
+   * than an oversight — `docs/backlog.md` carries it.
+   *
+   * A gesture this declines leaves the listener **armed**, which is why the
+   * arming is not `{ once: true }`: a one-shot is burned by the touch that
+   * ignores it, and the mouse press it was waiting for would then never find
+   * it. `disarmLock` below is what spends it, on the gesture that is really
+   * taking the lock.
+   *
+   * @param {PointerEvent} event
    */
-  function takeLock() {
-    lockArmed = false;
+  function takeLock(event) {
+    if (event.pointerType !== 'mouse') return;
+    disarmLock();
     const asked = canvas.requestPointerLock?.({ unadjustedMovement: true });
     if (!asked || typeof asked.then !== 'function') return;
     asked.catch((/** @type {unknown} */ error) => {
@@ -347,15 +380,10 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   function syncPointerLock() {
     const wanted = exports.__crcbl_web_pointer_lock_wanted(canvasId) !== 0;
     if (wanted) {
-      if (lockArmed || isLocked()) return;
-      lockArmed = true;
-      canvas.addEventListener('pointerdown', takeLock, { once: true });
+      if (!isLocked()) armLock();
       return;
     }
-    if (lockArmed) {
-      lockArmed = false;
-      canvas.removeEventListener('pointerdown', takeLock);
-    }
+    disarmLock();
     if (isLocked()) document.exitPointerLock?.();
   }
 
@@ -658,11 +686,10 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       }
       cancelAnimationFrame(lockPoll);
       // The armed click is not in `listeners` — it is added and removed as the
-      // engine changes its mind — so it is taken down by name, and a lock this
-      // shim is no longer watching is released rather than left on a canvas
-      // nothing is driving.
-      canvas.removeEventListener('pointerdown', takeLock);
-      lockArmed = false;
+      // engine changes its mind — so it comes down through the same pair that
+      // put it up, and a lock this shim is no longer watching is released
+      // rather than left on a canvas nothing is driving.
+      disarmLock();
       if (isLocked()) document.exitPointerLock?.();
       observer.disconnect();
       dprQuery.removeEventListener('change', onDprChange);

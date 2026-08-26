@@ -748,6 +748,14 @@ pub(crate) mod shim {
     /// [`TOUCH_CANCELLED`]. Anything else is dropped with a log line rather
     /// than guessed at: an unknown phase mapped onto `Moved` would report a
     /// finger that is still down after it has gone.
+    ///
+    /// **The pointer lock does not reach this entry point**, unlike
+    /// [`__crcbl_web_pointer_motion`] and the two beside it. A contact's
+    /// coordinate is the whole content of a touch event — there is no delta to
+    /// fall back on — and Pointer Lock is a statement about a *cursor*, which a
+    /// finger does not have. The shim keeps the two apart at the source by
+    /// letting only a mouse gesture take the lock, so a locked canvas is one
+    /// nobody is touching.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub unsafe extern "C" fn __crcbl_web_touch(
         canvas: u32,
