@@ -34,12 +34,15 @@ it today, and `ShellCaps::has_mouselook` would still be the check a camera runs.
 
 What _is_ gated, and by accident rather than by design: the browser gate's touch
 group (`a second contact arrives as its own contact and moves only itself` in
-`web/tools/browser-e2e.mjs`) caught a real pointer-lock defect on the two demos
-that ask for the lock, because a lock taken by a finger zeroes every coordinate
-after it. Removing the `pointerType` guard in `takeLock` in
-`web/engine/shell.js` puts quarry's gate back to 41/42 with every contact at
-`-25`. The per-frame poll is covered too: misspelling the export in the shim's
-copy under `target/site` fails the breakout gate with
+`web/tools/browser-e2e.mjs`) caught a real pointer-lock defect on every demo
+that asks for the lock — `apps/breach`, `apps/lantern` and `apps/quarry`, the
+ones whose `pointer_mode` answers `PointerMode::Locked` — because a lock taken
+by a finger freezes every coordinate after it. Removing the `pointerType` guard
+in `takeLock` in `web/engine/shell.js` puts each of those gates back to one
+failure with every contact at the same frozen value; `apps/shard`, which never
+asks for a lock, passes either way and is the control. The per-frame poll is
+covered too: misspelling the export in the shim's copy under `target/site` fails
+the breakout gate with
 `TypeError: exports.__crcbl_web_pointer_lock_wanted_TYPO is not a function`
 raised from `syncPointerLock`.
 
