@@ -1096,6 +1096,356 @@ yet**, and the bodies are drawn as a map rather than in 3D. So `05-physics.md`'s
 exit criterion ("deorbit + land, across at least one sector boundary with no
 visible seam") is not met by it.
 
+## Tooling and infrastructure — what the ten plans still owe
+
+The ten documents `docs/plan/06-assets-scenes.md`, `07-ui-debug.md`,
+`08-editor.md`, `11-cli-headless.md`, `12-testing.md`, `16-wasm-modules.md`,
+`19-input.md`, `22-replay.md`, `40-profiling.md` and `42-steam.md` were audited
+against the tree on 2026-08-27. What follows is what they still describe and the
+tree does not have.
+
+### The scene format does not exist, and five plans wait on it (2026-08-27)
+
+**Not built.** There is no `.scn/` directory format, no deterministic RON
+writer, no chunk load/save, no dirty-chunk tracking — and no RON reader of any
+kind. `grep 'ron' --include=Cargo.toml` over the workspace returns zero
+dependency lines; the only `ron` in the tree is prose.
+`docs/plan/06-assets-scenes.md` task 4 is the whole of it.
+
+**What it would take:** a `ron` dependency (a user decision by standing rule),
+the canonical writer with the invariants the plan already fixes — stable entity
+IDs persisted and never regenerated, canonical field order, shortest-roundtrip
+float formatting, no timestamps — and the load→save→byte-identical property test
+the plan names as the gate.
+
+**What it blocks:**
+
+- `crcbl import --out <dir>` — refused by name today in
+  `crates/crcbl-cli/src/import_cmd.rs`, which says there is nothing to write to.
+- `crcbl bake`, and the `PackSource` asset source behind it.
+- `crcbl sim <scene>` and `crcbl sim --input script.ron` — both refused by name
+  in `crates/crcbl-cli/src/args.rs`.
+- `crcbl-scene`'s save→load→hash roundtrip test, a topic-12 anchor.
+- The stage 8 editor's features 5 and 6 (scene IO, asset browser).
+
+**Evidence:** no `ron` in any `Cargo.toml`; `crates/crcbl-scene/src/` contains
+`gltf_import`, `gltf_check`, `gltf_render`, `simplify`, `meshlet`,
+`cluster_dag`, `lod`, `lod_resolve`, `gltf_fixture` — no scene serialiser among
+them.
+
+### Asset hot reload is still entirely future tense (2026-08-27)
+
+**Not built.** No file watcher exists: `notify` appears in no `Cargo.toml`.
+There is no asset reimport path, no in-place GPU pool update, no shader
+recompile keyed by hash, and no per-chunk scene reload. `crcbl-assets`' own
+module docs describe hot reload as the thing that would reintroduce the
+`Unloaded` state, which the registry deliberately does not have because nothing
+can reach it today.
+
+**What it would take:** a `notify` dependency (user decision), the reimport
+path, and the deletion-queue retire calls `AssetRegistry`'s refcount stops short
+of.
+
+**What it blocks:** `07-ui-debug.md`'s stylesheet hot reload (the whole "styles
+hot-reload like web dev" claim), the editor's revert path, and
+`06-assets-scenes.md`'s "editing a texture/shader/scene chunk reflects without
+restart" exit criterion.
+
+### Git LFS is off, and turning it on is a two-part change (2026-08-27)
+
+**Deliberate, not an oversight** — `.gitattributes` carries the reasoning:
+everything binary through P8 is small, golden images are re-blessed often (which
+LFS handles worse than plain git), and a `filter=lfs` line breaks `git commit`
+outright on a clone without the git-lfs binary. The commented-out line is in the
+file.
+
+**The trap to carry forward:** the commit that enables LFS must also add
+`lfs: true` to **every** `actions/checkout` step in CI, or CI silently tests
+against pointer files. `.gitattributes` says so; nothing enforces it.
+
+**Trigger:** the P9 glTF corpus. Which is the next entry.
+
+### No vendored glTF corpus; the fixture is synthesized in code (2026-08-27)
+
+**Not built.** `git ls-files` finds zero committed `.glb`/`.gltf` anywhere, and
+`crates/crcbl-scene` has no `tests/` directory. What exists is
+`crates/crcbl-scene/src/gltf_fixture.rs` behind the `gltf-fixture` feature: a
+triangle document and its `.glb` container built in code, with the rationale in
+that crate's `Cargo.toml` — a binary container is a fixture nobody reviewing a
+change can read.
+
+**Considered and kept:** the synthesized fixture is the right shape for importer
+unit tests and should stay. What is missing is the Khronos sample subset that
+`12-testing.md`'s anchor list asks for — real documents with sparse accessors,
+extensions, odd component types — which is the corpus LFS turns on for.
+
+### Coverage gates one workspace floor, not per-crate thresholds (2026-08-27)
+
+**Partially built.** `cargo llvm-cov` runs in `ci.yml`'s `coverage (linux)` job,
+pinned to lavapipe so the number is not runner-dependent, and gates
+`COVERAGE_FLOOR` through `cargo llvm-cov report --fail-under-lines`. That is a
+**single workspace floor**. The per-crate split `12-testing.md` used to promise
+(core/phys/net high, backend crates looser because e2e covers them) does not
+exist, and `ci.yml`'s own comment says why: it waits for tooling that can
+express it. Doc corrected; the gap is real and stays.
+
+### The `crcbl-ui` in the tree is not the CSS/DOM system `07-ui-debug.md` designs (2026-08-27)
+
+**Not built:** the element tree (block/span builder), the CSS-subset parser,
+cascade and specificity, `default.css`, the flex layout engine, stylesheet hot
+reload, the UI inspector, the entity inspector, the console, the debug-draw
+controls panel, focus/`:focus`/`:engaged`, spatial navigation and the reserved
+`ui_move`/`ui_accept`/`ui_back` action set.
+
+**What is built:** `crates/crcbl-ui`'s `draw_list` (`DrawList`, `DrawCommand`,
+`Vertex2d`), `text` (`FontAtlas` — a built-in **monospace bitmap** ASCII font,
+not a `fontdue`/`swash` rasterizer and not the shelf/skyline+LRU atlas the doc's
+2026-07-27 correction specifies), `widget` (`Label`, `Button`, `Style`,
+`SkinInsets`, `PointerInput`, `UiState`, `WidgetId`), `menu`, `touch`, `debug`
+and `budget`. `Style` is a struct of five colours — the pre-CSS model.
+
+**A constraint the CSS work must honour, discovered in `menu`:** the UI pass's
+atlas is a single-channel glyph coverage mask and `DrawList` has no
+textured-quad command, so `Menu::render` emits text only and
+`crcbl_render::MenuArt` owns the nine-sliced frames. Any styled widget with a
+picture in it splits the same way until `DrawList` grows a textured command.
+`07-ui-debug.md` now records this.
+
+**Evidence:** no `.css` file is read by any engine crate (`web/style.css` is the
+demo site's); `grep flex crates/` hits only shader code; no `block`/`span`
+builder exists.
+
+### `crcbl_ui::hud`'s two panel types have no consumer (2026-08-27)
+
+**Re-verified with one correction.** `Hud` and `HudPanel` are named by
+`crates/crcbl-ui/src/lib.rs`'s re-export and by nothing else in the workspace —
+no crate, no app. `Anchor` is not in that set: it shares the module and
+`crates/crcbl-ui/src/debug.rs` imports it, so **the unit to delete is the two
+types, not the file**, and `Anchor` needs a home first. The audit's first pass
+said the whole module had no consumer; it does. `07-ui-debug.md`'s 2026-08-09
+correction says to delete it when the widget set lands, because it is built on
+the pre-CSS model (`Label` has no per-label colour; `HudPanel` auto-sizes where
+a measured constant is wanted). Every sample hand-rolls its own HUD instead.
+
+**Not deleted here** because deleting it is a code change outside this audit's
+write scope, and the correction's condition (the widget set landing) has not
+happened.
+
+### No system outside `crcbl-render` contributes a `DebugModule` (2026-08-27)
+
+**Partially built.** The composition claim holds and has a real second
+implementer: `crcbl_render::timing::FrameTimings` and
+`crcbl_render::counters::FrameCounters` both implement `DebugModule`.
+
+**Still open:** the netgraph. `crcbl-client` does not depend on `crcbl-ui` and
+there is no `NetGraph` anything in the tree — `grep -ri netgraph` over `crates/`
+and `apps/` returns nothing. `07-ui-debug.md`'s correction settles the
+dependency question (a simulation crate may depend on `crcbl-ui`; there is no
+cycle, since `crcbl-ui` depends only on `glam`, `bytemuck` and `crcbl-core`), so
+what is left is the work, not the decision. This file's "The debug overlay, and
+what is left of it" entry has been updated to say so.
+
+### The editor is not started, and blocks two sample plans (2026-08-27)
+
+**Not built.** There is no `apps/editor`; `tools/check-doc-citations.sh`
+allow-lists that path on purpose, naming `docs/plan/08-editor.md` as its design.
+
+**It waits on two unbuilt things:** the scene format (first entry above —
+features 5 and 6 have nothing to open or save) and stage 7's inspector (previous
+entry).
+
+**It blocks two sample plans, and they are the only two samples with no app
+directory:** `docs/plan/sample/07-towers.md`, whose milestone 2 _is_ the editor
+dogfood pass and whose exit criterion is "map authored 100% in the editor, zero
+hand-edited scene text"; and `docs/plan/sample/08-arena.md`, which wants an
+editor-built map. Every other `docs/plan/sample/*.md` has a matching `apps/`
+dir. `08-editor.md` now records this.
+
+**Its 2026-08-09 shell corrections re-verified and still hold:** `CF_HDROP`
+appears nowhere in `crates/crcbl-shell/src`; Win32 publishes `text/uri-list` as
+`Encoding::Registered` (`win32/clipboard.rs`); AppKit reads `public.file-url`
+(`appkit/pasteboard.rs`, which also records that `NSFilenamesPboardType` is
+deprecated); X11 has no XDND (`x11/shell.rs` says `ShellCaps::DRAG_DROP` is
+cut). So OS file drag-drop into the asset browser is **seam work owed before the
+editor wants it**, not editor work.
+
+### Wasm module hosting: nothing but the static binding exists (2026-08-27)
+
+**Not built.** No `wasmtime` in any `Cargo.toml`, no `sdk/` directory, no
+`crcbl-abigen`, no ABI, no guest SDK, no conformance suite. This is about
+hosting _guest_ wasm modules and is unrelated to `crcbl-shell`'s own wasm32
+browser build, which exists.
+
+**What is built:** the static binding, `crcbl_ecs::game_module::GameModule`
+(`name`, `register`, `tick`).
+
+**A doc claim corrected while auditing:** `16-wasm-modules.md` said
+`apps/lantern` and `apps/quarry` "carry none and claim no exemption". They do
+claim one now — `docs/plan/sample/13-lantern.md` and
+`docs/plan/sample/14-quarry.md` both exempt themselves from sample rules 2 and
+10 on the ground that they open no `World`. **`apps/bracket` and `apps/sparks`
+carry none and claim no exemption**, and that is the live gap:
+`docs/plan/sample/16-bracket.md` does not mention `GameModule` at all. Either
+they need the exemption written or they need the impl.
+
+**Two browser gaps stated in the doc and worth keeping visible:**
+`WebAssembly.instantiate` has neither NaN canonicalization nor fuel, so the
+static-vs-wasm equivalence gate is unprotected against NaN divergence, and a
+browser-hosted single-player game with mods has no containment at all.
+
+### Input: patterns, contexts, RON bindings, rebind persistence and every gamepad backend (2026-08-27)
+
+**Not built**, all of it re-verified:
+
+- **Patterns.** `ActionDecl` carries no pattern list. A button reports
+  `ButtonState::Held { duration }` for the game to interpret; there is no `tap`,
+  `double-tap`, `hold` or `repeat` evaluator.
+- **Contexts.** No context stack anywhere in `crates/crcbl-input/src/lib.rs`.
+  The only gating is `ActionMap::set_enabled` per action. This is what
+  `07-ui-debug.md`'s reserved UI action set depends on to keep menu WASD from
+  shadowing gameplay WASD.
+- **RON binding assets.** Nothing parses one; a game declares actions in code.
+- **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
+  overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
+  `crcbl-store` has no profile or binding type.
+- **Glyph hints.** No glyph anything in `crcbl-input`.
+- **Every gamepad backend.** No evdev, no XInput, no GameController, no Web
+  Gamepad API. `grep -i gamepad crates/crcbl-input/src crates/crcbl-shell/src`
+  returns nothing but unrelated XInput**2** (X11 pointer) mentions.
+
+**Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
+`MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, and
+`virtual_button`/`virtual_stick` driving `crcbl_ui::touch`.
+
+**Blocked, not merely unscheduled:** local-multiplayer device assignment, per
+`19-input.md`'s 2026-08-09 correction — `DeviceId` names a device _kind_ on
+every backend, so any test asserting two devices are distinguishable would pass
+vacuously. Re-read the correction; it still describes the tree.
+
+### Replay: the container is flat, and every `crcbl replay` subverb is owed (2026-08-27)
+
+**Built:** `crcbl_store::replay` (magic `CRBLREPL`, `format_version`,
+`tick_count`, `tick_rate`, `start_tick`, then one full `ServerToClient` message
+per `TickEntry`), `FileTransport`, `crcbl_store::crash_ring::CrashRing`, and
+`crcbl replay <FILE> [--json]` reading the metadata
+(`crates/crcbl-cli/src/replay_cmd.rs`).
+
+**Not built:** keyframes, the seek index, deltas (every entry is a full
+message), the input side-track, the marker track, POV metadata. Nothing installs
+the crash ring on a panic hook and no CI job attaches one. `verify`, `dump`,
+`diff` and `clip` are not words the parser knows, and each needs machinery the
+format does not carry — `verify` the input track, `clip` the keyframe index.
+
+**Ordering constraint worth keeping:** the 2026-07-27 correction requires the
+client's delta-apply path to accept previous-tick baselines as well as acked
+ones, and says it must exist at P2 rather than being discovered when the first
+replay is written.
+
+### Profiling: five of the eight gaps are still open (2026-08-27)
+
+Four of `40-profiling.md`'s eight are struck through and genuinely closed
+(`crcbl_core::trace`, `Pool::stats`, `crcbl_render::counters`,
+`crcbl_render::cull_stats`). A fifth — the benchmark harness — I struck through
+in this pass, because `crcbl bench --scenario jobs|phys`
+(`crates/crcbl-cli/src/bench/`) pins the scenario, warms up, reports p50/p95/p99
+and max with no mean, refuses percentiles below `MIN_PERCENTILE_SAMPLES`, and
+emits JSON beside an environment block.
+
+**Still open:**
+
+- **Baseline storage, `--compare`, per-metric thresholds.** Nothing stores a
+  previous run.
+- **Trace export.** No Chrome Trace Event JSON writer, and no job-system tracks.
+- **Memory/occupancy accounting.** Pool residency, buffer bytes, descriptor
+  counts, staging-ring pressure — all invisible.
+- **`crcbl-jobs` has no spans**, and no reader puts `PoolStats` on the trace or
+  in a panel row. `crcbl bench --scenario jobs` is the only consumer.
+  `crates/crcbl-jobs/Cargo.toml` depends on `thiserror` alone — it does **not**
+  depend on `crcbl-core`, so the dependency edge the span module's placement
+  decision anticipated ("every crate that has to open a span depends on it
+  already, except `crcbl-jobs`, which gains it") has not been added.
+- **Sample-owned bench scenarios.** The ones that need a device are not written,
+  which is why the environment block carries no adapter, backend or driver
+  version.
+- **Every debug-panel perf row except Frame.** The pass list, CPU breakdown,
+  counters row, memory row, jobs row and the freeze toggle are all owed. Note
+  the recorded hazard: `DebugModule` labels share one namespace and nothing
+  detects a collision, so a test that searches the draw list by label text can
+  silently read the wrong row.
+- **`--cfg crcbl_trace_off`.** Deliberately absent until there is a shipping
+  build to serve; the decision (never a Cargo feature, because CI's
+  `--all-features` runs would then test the compiled-out arm) is recorded and
+  should not be re-argued.
+
+### Steamworks: nothing built (2026-08-27)
+
+**Nothing exists** — no `crcbl-steam` crate, no `steamworks` dependency, no
+`CRCBL_STEAM_SDK` anywhere. `docs/plan/42-steam.md` is research and design only,
+and claims no roadmap phase. Its four open decisions are **not repeated here**:
+they are this file's own "Steamworks: four decisions the plan is waiting on"
+entry, which the doc now points at instead of carrying its own copy. Nothing was
+lost in that removal — the binding-route argument lives in the doc's "The
+binding route — presented, not decided" section, the cloud and Steam Input
+arguments in "Where Steam meets seams the engine already has", and the app-id
+decision only ever existed in the backlog's form.
+
+### `check-doc-citations.sh` misses crate-relative paths too (2026-08-27)
+
+A **second** blind spot beside the relative-Markdown-link one this file already
+records. The gate matches only backtick paths that begin with a top-level
+directory (`crates|apps|web|docs|tools|.github`), so a crate-relative citation
+like `crcbl-cli/src/bench.rs` is never checked. One was already stale —
+`40-profiling.md` pointed at a file that is now a directory — and it was found
+by hand, not by the gate.
+
+**What it would take:** the same widening the relative-link entry proposes, plus
+a resolution rule for a bare `crcbl-*/…` prefix (try `crates/`, then `apps/`).
+The awkward part is that some such paths are deliberately external —
+`42-steam.md` cites `public/steam/steam_api.json` inside the Steam SDK and
+`steamworks-sys/build.rs` in a third-party repo — so widening needs an opt-out,
+which is a design question rather than a script change.
+
+**Verified in this pass:** every relative `.md` link in `docs/plan/` and
+`docs/plan/sample/` resolves today, checked by a one-off script rather than by
+the gate, which would not notice the next break.
+
+## Coverage gaps in the tooling audit
+
+Stated plainly, as gaps:
+
+- **`docs/plan/22-replay.md` was read and verified but not edited.** Its "what
+  is actually built" corrections were spot-checked against
+  `crates/crcbl-store/src/replay.rs` (format constants, `FileTransport`),
+  `crash_ring.rs` and `crates/crcbl-cli/src/replay_cmd.rs`, and all held. I
+  found nothing prunable that was not already marked.
+- **`docs/plan/42-steam.md`'s technical content was not verified against a real
+  Steamworks SDK.** Every C signature, accessor version, packing rule and
+  licence quote in it came from the doc's own 2026-08-22 research against a
+  third-party header mirror. I checked only that nothing in the tree implements
+  any of it. The doc's own provenance rule (re-read from a real SDK before
+  trusting a declaration) still stands and I did not test it.
+- **I did not verify `07-ui-debug.md`'s CSS/flex design against any browser or
+  spec.** I established only that none of it is implemented.
+- **I did not run `cargo test`, `cargo clippy` or any GPU harness.** This pass
+  touched Markdown only. The gates I ran are `prettier@3.8.3 --check`,
+  `tools/check-doc-citations.sh` and `tools/check-wrapped-strings.sh`.
+- **`docs/plan/12-testing.md`'s two _closed_ correction blocks (shader-artifact
+  validation, cross-backend compare) were left in place unverified.** They read
+  as archaeology but their content is a live description of four validation
+  gates, so "when in doubt, keep" applied. Whether `spirv-val`, the naga WGSL
+  test, the signed-DXIL assertion and `xcrun metal -c` all still run as
+  described was not re-checked in this pass.
+- **I did not check the sample plans (`docs/plan/sample/*.md`)** beyond the
+  towers/arena blocking relationship and the lantern/quarry/bracket/sparks
+  `GameModule` exemptions.
+- **The five findings I inherited from the `12-testing.md` pre-verification were
+  acted on, and one of them was wrong.** That report claimed
+  `crates/crcbl-vk/tests/run-vk-e2e.ps1` surfaces `--bless`; it explicitly does
+  not — its own comment says "There is no `--bless` flag here, unlike the Linux
+  script", because it runs a different lavapipe build from the one the
+  references were blessed on. I wrote the correct fact into the doc. The other
+  four findings I spot-checked and they held.
+
 ## Coverage gaps in the simulation audit
 
 Stated plainly, so the next session does not mistake silence for coverage.
@@ -10786,14 +11136,15 @@ The modular panel is built and all three samples switch it on with F3 (or
   `rate_limited_message_count`/`rate_limited_byte_count`. Those are real numbers
   and a module could show them, but they are a connection-health readout, not a
   netgraph, and shipping them under that name would make the P10 work look done.
-  The second is placement: the module belongs in the crate that owns the numbers
-  (`crcbl-client`, following `crcbl-render`'s example), which means a
-  `crcbl-client → crcbl-ui` dependency. That is not obviously wrong — `crcbl-ui`
-  depends on nothing but `glam` and `bytemuck`, so there is no cycle — but it is
-  the first time a simulation crate would depend on the UI, and it is a call
-  worth making deliberately rather than in passing. **What it would take**: the
-  transport growing byte and timing counters, then a `DebugModule` impl beside
-  them, then one `add` line in each sample that has a connection.
+  The second was placement: the module belongs in the crate that owns the
+  numbers (`crcbl-client`, following `crcbl-render`'s example), which means a
+  `crcbl-client → crcbl-ui` dependency. **That half is settled** — `crcbl-ui`
+  depends only on `glam`, `bytemuck` and `crcbl-core`, so there is no cycle, and
+  `crcbl-render` has since set the precedent twice, with `FrameTimings` and
+  `FrameCounters` both implementing `DebugModule`. What is left is the work, not
+  the decision. **What it would take**: the transport growing byte and timing
+  counters, then a `DebugModule` impl beside them, then one `add` line in each
+  sample that has a connection.
 - **The overlay starts hidden in a release wasm build.** The default is
   `cfg!(debug_assertions)`, which is sample rule 4's "on by default in dev
   builds" taken literally; the demos on `crcbl.kryptic.sh` are release builds,
