@@ -123,6 +123,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`apps/viewer`'s idle turntable stopped for a click that only meant focus.**
+  A press with no movement is a click, and the commonest click on that canvas is
+  the one that hands it the keyboard — so a visitor who clicked to type lost the
+  camera's idle turn for the rest of the session. It now hands over on a drag
+  that has actually moved. This was intermittent rather than constant for a
+  reason worth knowing: `PointerUpdate`'s `pressed` and `released` are per-frame
+  edges, so a click landing inside one frame arrives as both at once and cancels
+  itself, while the same click split across two frames arrives as a press alone.
+  The browser gate's own focus click split about one run in three on the macOS
+  runner and reddened the viewer's motion check there, which is how it was
+  found.
+
 - **A skinned mesh drew its bind pose, on every backend.** The vertex stage
   resolved its base vertex through the _draw's bucket_, and no skinned region
   has a bucket — buckets are built once, from the description's meshes — so the

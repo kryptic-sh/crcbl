@@ -1005,13 +1005,26 @@ impl HostedGame for Viewer {
         // of anything, and stopping the turntable on it would stop it the moment
         // the mouse arrived.
         //
-        // **This covers a press as well as a movement**, which is why
-        // `button_event` above latches nothing. A held button reaches here on
-        // the frames it is held for, and `is_dragging` is what those frames
-        // mean. A second latch on the press itself was written first and then
-        // deleted: removing it left this module's turntable test green, so it
-        // was a line no test could tell the presence of.
-        self.handed_over |= self.controls.is_dragging();
+        // **A drag that moved**, and the motion is load-bearing rather than
+        // decoration. A press with no movement is a click, and the commonest
+        // click on this canvas is the one that hands it the keyboard — a
+        // gesture about focus, not about the camera. Latching on the press
+        // stopped the turntable for a visitor who had only clicked to type.
+        //
+        // It also produced a failure that took two occurrences to read.
+        // `PointerUpdate`'s `pressed` and `released` are per-frame edges, so a
+        // click landing inside one frame arrives as both at once and
+        // `Controls::pointer` sets the drag and clears it again — while the
+        // same click split across two frames arrives as a press alone, and
+        // latched. The browser gate's focus click is that click: it coalesces
+        // here and on the Linux and Windows runners, and on macOS it split
+        // about one run in three, freezing the turntable a second into the run
+        // at 20.6° and 20.3° in the two failures on record. See
+        // `docs/backlog.md`. Nothing had stalled; the rule was wrong.
+        //
+        // A held button reaches here on the frames it is held for, so a press
+        // that becomes a drag latches on the first frame the hand moves.
+        self.handed_over |= self.controls.is_dragging() && pointer.motion.is_some();
     }
 
     /// The pan drag. Both non-primary buttons start one — see
@@ -1572,11 +1585,13 @@ mod tests {
     ///
     /// **Each way of taking hold is asserted on its own engine**, because they
     /// latch at different call sites and one of them covering for another is
-    /// exactly how a line here stops being checked. The first version of this
-    /// test pressed a button *carrying a pointer position*, which reaches
-    /// `pointer_event` as well — so it went on passing with the press's own
-    /// latch deleted, and proved only that something somewhere stopped the
-    /// turntable.
+    /// exactly how a line here stops being checked.
+    ///
+    /// **And a click is not one of them**, which is the third case here and the
+    /// one with a failure behind it: a press that never moves is a gesture
+    /// about focus, and stopping the turntable on it stopped it for a visitor
+    /// who had clicked to type. See `pointer_event`, and the browser gate's
+    /// macOS failures in `docs/backlog.md`.
     #[test]
     fn the_turntable_turns_until_someone_takes_hold_and_then_never_again() {
         let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 64);
@@ -1597,8 +1612,8 @@ mod tests {
             "a turntable orbits the document; it does not wander off it"
         );
 
-        // A press that carries no pointer position, so `pointer_event` never
-        // runs and the only thing that can latch is the press itself.
+        // A drag: the press, and then the frame the hand moves on, which is the
+        // one that latches.
         let mut engine = scripted(&options);
         engine.frame().expect("a frame");
         let window = engine.window();
@@ -1612,7 +1627,54 @@ mod tests {
             )
             .expect("the window is live");
         engine.frame().expect("a frame");
-        assert_still(&mut engine, "a button press");
+        engine
+            .shell_mut()
+            .move_pointer(window, PhysicalPoint::new(80.0, 0.0), (80.0, 0.0))
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_still(&mut engine, "a drag");
+
+        // **And the click that is not a drag leaves it running.** The control
+        // for the case above: a build that latched on the press would pass that
+        // one and fail this, and it is the build the macOS runner was failing
+        // on. The press and the release land in the same frame here, which is
+        // what a click that lands inside one frame does — and the split click
+        // below is the same gesture arriving over two.
+        for gesture in ["a click inside one frame", "a click across two"] {
+            let mut engine = scripted(&options);
+            engine.frame().expect("a frame");
+            let window = engine.window();
+            engine
+                .shell_mut()
+                .button(
+                    window,
+                    PointerButton::Left,
+                    crcbl::core::input::ButtonState::Pressed,
+                    None,
+                )
+                .expect("the window is live");
+            if gesture == "a click across two" {
+                engine.frame().expect("a frame");
+            }
+            engine
+                .shell_mut()
+                .button(
+                    window,
+                    PointerButton::Left,
+                    crcbl::core::input::ButtonState::Released,
+                    None,
+                )
+                .expect("the window is live");
+            engine.frame().expect("a frame");
+            let before = engine.game().camera();
+            engine.frame().expect("a frame");
+            assert_ne!(
+                engine.game().camera().eye,
+                before.eye,
+                "{gesture} stopped the turntable — a visitor who clicked the canvas to \
+                 type has not taken hold of the camera",
+            );
+        }
 
         // The wheel, which latches at its own call site and nowhere else.
         let mut engine = scripted(&options);
