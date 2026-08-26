@@ -788,6 +788,14 @@ const EXPECTATIONS = {
     // nothing for group C's `Space` to start, and the `range` block below
     // presses everything this demo answers to.
     key: null,
+    // **This demo's heartbeat is twice as fast as everyone else's**, at half a
+    // simulated second — `apps/breach/src/game.rs`'s `HEARTBEAT_TICKS` says why,
+    // and it is this gate: every wait the two blocks below make is a whole
+    // number of heartbeats, so the period is what the step costs. Declared here
+    // because group E divides by it to work out how far behind real time this
+    // machine is running the demo, and a wrong denominator there shrinks every
+    // budget that reading scales.
+    beatMs: 500,
     // Read off the *first* line, and it asks three things a page that merely
     // booted cannot say. `ground: yes` is `MoveOutcome::grounded`, which no run
     // that failed to sweep a capsule against `apps/breach/src/map.rs`'s world
@@ -801,7 +809,7 @@ const EXPECTATIONS = {
     // deliberate coupling to `crates/crcbl-hal/src/caps.rs`: a renamed variant
     // fails here loudly.
     waiting: (line) =>
-      line.includes('[HUD] tick: 60') &&
+      line.includes('[HUD] tick: 30') &&
       line.includes('ground: yes') &&
       line.includes('pilot: range') &&
       line.includes('geometry: IndirectPerBatch') &&
@@ -878,6 +886,58 @@ const EXPECTATIONS = {
       // — which the ceiling then stands behind, so the shot has something to
       // land on rather than reaching its range in mid-air.
       offTarget: 'range',
+    },
+    // **AND THE OTHER MAP**, which is milestone 0's other half: the bot
+    // practice map. `apps/breach` is the only demo on the site with two of
+    // them, and the only one a query string chooses between — see
+    // `web/demos/breach/main.js` and `apps/breach/src/web.rs`.
+    //
+    // Every pattern here is a field of the `[HUD]` line
+    // `apps/breach/src/app.rs` logs on that map, and that file argues why each
+    // is on it. Nothing in this block presses a key: three bots walking their
+    // patrols is already a picture that moves, and one of them is in the open
+    // in front of the spawn shooting at a visitor who has touched nothing —
+    // which is what lets every claim below be about the simulation rather than
+    // about the input path group C has already exercised.
+    practice: {
+      // What `web/demos/breach/main.js` turns into
+      // `__crcbl_breach_map(1)`, before boot.
+      query: '?map=practice',
+      // Which map the rest of the line is about, and the name this one has.
+      map: /\bmap: ([a-z]+)/,
+      mapName: 'practice',
+      // The player's own position. `pz` is the same field the `range` block's
+      // `advance` reads and is taken from there rather than spelled twice;
+      // `px` is this block's, because nothing else needs it.
+      playerAcross: /\bpx: (-?[\d.]+)/,
+      // Where the first bot's feet are. **The pair this block's liveness claim
+      // rests on**, and it is a *bot's* position: nothing on this map moves it
+      // but that bot's own `move_and_slide`.
+      botAcross: /\bbotx: (-?[\d.]+)/,
+      botAlong: /\bbotz: (-?[\d.]+)/,
+      // How many bots are on their feet.
+      alive: /\bbots: (\d+)/,
+      // How many have the player in sight, and how many are near enough to and
+      // cannot because something is in the way. The second is the control for
+      // the first — see `apps/breach/src/bots.rs`, where the sighting is one
+      // `PhysicsWorld::cast_ray` and cover is the only thing that answers it.
+      seen: /\bseen: (\d+)/,
+      covered: /\bcovered: (\d+)/,
+      // What the player has left, how many times the bots have run them out of
+      // it, and the bots' trigger pulls against the ones that arrived.
+      health: /\bhp: (\d+)/,
+      downs: /\bdowns: (\d+)/,
+      fired: /\bfired: (\d+)/,
+      taken: /\btaken: (\d+)/,
+      // The field only the *firing range*'s heartbeat carries, which is how
+      // this block tells the two maps' lines apart by shape rather than by
+      // trusting the slice it took: a travelling plate is the other map's
+      // liveness fixture and must not be what answers for this one.
+      moverField: /\bmover: /,
+      // How many bots the map has, from `map::practice::BOTS`. Read rather
+      // than assumed: a page that opened the practice map with no bots on it
+      // would pass every "a number changed" check going.
+      count: 3,
     },
   },
   orbit: {
@@ -1024,9 +1084,18 @@ const WALK_STILL_BEATS = 3;
  * shorter than one frame is a press and a release the demo sees in the same
  * breath, which is nothing held at all. Doubling makes the shortest hold that
  * works the one that gets used, on a fast machine and a slow one.
+ *
+ * **The ladder starts where it used to reach, and is three rungs rather than
+ * five.** Every rung that fails costs its own hold *and* a heartbeat to find
+ * out, and the rungs under half a second are the ones that were always going to
+ * fail on the machine the ladder exists for — a frame there is longer than they
+ * are. Starting at 500 ms lands in one round on every machine measured, and
+ * caps the worst case at 3.5 s of holds instead of 6.2 s and three heartbeats
+ * instead of five. This is the constant the Pages step that hit a ten-minute cap
+ * spent its minutes in.
  */
-const LOOK_NUDGE_MS = 200;
-const LOOK_NUDGE_ROUNDS = 5;
+const LOOK_NUDGE_MS = 500;
+const LOOK_NUDGE_ROUNDS = 3;
 
 /**
  * How far the view must have swung, in radians, for a nudge to count as having
@@ -1136,12 +1205,18 @@ const TICK_WINDOW_BEATS = 2;
 /**
  * What one heartbeat is *supposed* to take, in wall-clock milliseconds.
  *
- * The samples log one every sixtieth tick, and sixty ticks is a second of
+ * Most samples log one every sixtieth tick, and sixty ticks is a second of
  * simulated time — so on a machine keeping up, the beat and this number are the
  * same. The ratio between them is therefore how far behind real time this
  * machine is running the demo, which is the one factor every fixed budget in
  * this file needs and none of them had: they were all chosen on a desktop where
  * the ratio is 1.
+ *
+ * **A demo that logs on a different period says so**, through a `beatMs` row in
+ * `EXPECTATIONS`: the ratio is only a measure of the machine if the numerator
+ * and the denominator are the same interval, and a demo whose heartbeat is
+ * twice as fast would otherwise report a machine twice as quick as it is and
+ * shrink every budget scaled by it.
  */
 const NOMINAL_BEAT_MS = 1_000;
 
@@ -1898,16 +1973,33 @@ async function preflight(binary, mode, origin) {
 // The checks
 // ---------------------------------------------------------------------------
 
-/** @type {{ group: string, name: string, ok: boolean, detail: string }[]} */
+/** @type {{ group: string, name: string, ok: boolean, detail: string, ms: number }[]} */
 const checks = [];
 
+/**
+ * When the last check was recorded, so the next one can say how long it took.
+ *
+ * **This exists because a browser gate's cost is a CI failure of its own.** The
+ * Pages run of 2026-08-26 lost breach's step to the ten-minute cap while every
+ * assertion in it was green, and working out *which* wait had grown meant
+ * guessing — every budget in this file is scaled by a measured slowdown, so the
+ * expensive one is not the one with the largest constant. A per-check elapsed,
+ * summarised at the end, turns that into a reading.
+ */
+let checkedAt = Date.now();
+
 function check(group, name, ok, detail = '') {
-  checks.push({ group, name, ok: Boolean(ok), detail });
+  const now = Date.now();
+  checks.push({ group, name, ok: Boolean(ok), detail, ms: now - checkedAt });
+  checkedAt = now;
   console.log(
     `  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`
   );
   return Boolean(ok);
 }
+
+/** How many of the slowest checks the verdict names. */
+const SLOWEST_REPORTED = 5;
 
 function group(name) {
   console.log(`\nweb e2e: ${name}`);
@@ -2181,14 +2273,37 @@ try {
   // Group E learned this against the pause menu and `RESUME`; the same fix
   // never reached here, and only horde made it visible, because only horde's
   // centre button destroys the run rather than being idempotent.
-  const rect = await evaluate(
-    page,
-    `(() => { const c = document.getElementById('canvas');
+  /**
+   * Where the focus click lands, with the canvas scrolled into view first.
+   *
+   * A function rather than a value read once, because a navigation replaces the
+   * document: the element an old rect described is gone, and so is the focus it
+   * had.
+   */
+  const focusPoint = async () =>
+    evaluate(
+      page,
+      `(() => { const c = document.getElementById('canvas');
               c.scrollIntoView({ block: 'center', behavior: 'instant' });
               const r = c.getBoundingClientRect();
               return { x: Math.round(r.x + ${FOCUS_CLICK_INSET}), y: Math.round(r.y + ${FOCUS_CLICK_INSET}),
                        left: r.x, top: r.y }; })()`
-  );
+    );
+  /** One real click at `at`, through the browser's own input pipeline. */
+  const clickAt = async (/** @type {{x: number, y: number}} */ at) => {
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await page.send('Input.dispatchMouseEvent', {
+        type,
+        x: at.x,
+        y: at.y,
+        button: 'left',
+        clickCount: 1,
+        buttons: type === 'mousePressed' ? 1 : 0,
+      });
+    }
+  };
+
+  const rect = await focusPoint();
   const inViewport = await evaluate(
     page,
     `(() => { const r = document.getElementById('canvas').getBoundingClientRect();
@@ -2201,16 +2316,7 @@ try {
     inViewport === true,
     `(${rect.x}, ${rect.y}) is ${inViewport === true ? 'inside' : 'outside'} the window`
   );
-  for (const type of ['mousePressed', 'mouseReleased']) {
-    await page.send('Input.dispatchMouseEvent', {
-      type,
-      x: rect.x,
-      y: rect.y,
-      button: 'left',
-      clickCount: 1,
-      buttons: type === 'mousePressed' ? 1 : 0,
-    });
-  }
+  await clickAt(rect);
   const focused = await evaluate(page, `document.activeElement?.id ?? ''`);
   check(
     'C',
@@ -2978,6 +3084,265 @@ try {
     }
   }
 
+  // **AND THE OTHER MAP, WHICH IS MILESTONE 0'S OTHER HALF.** Only breach has
+  // one. Everything above is the firing range; `docs/plan/sample/11-breach.md`
+  // asks for a bot practice map beside it, "playable in a browser from the same
+  // build that runs natively", and this block is the only thing anywhere that
+  // opens it in a browser at all.
+  //
+  // It gets there the way a visitor would: `?map=practice`, which
+  // `web/demos/breach/main.js` turns into `__crcbl_breach_map` before boot.
+  // Navigating is the whole reset — the shim's `pagehide` teardown runs and the
+  // next document starts from the top — and it is the same move group F makes
+  // to get a page booted with touch on.
+  //
+  // Nothing here presses a key, and that is the point: three bots walk their
+  // authored routes, one of them is in the open in front of the spawn, and it
+  // shoots. So the three pairs below are about the simulation and not about the
+  // input path the `range` block has already driven:
+  //
+  // * a bot **advances along its own patrol**, and the **player did not move
+  //   and no travelling plate reported anything**. Without the control, "a
+  //   number changed" passes for the other map's mover or for a demo that
+  //   walked the player instead of a bot.
+  // * a bot **notices the player**, and another **is in range and cannot**.
+  //   The second is the control for the first: a build that noticed
+  //   unconditionally passes the sighting and leaves `covered` at zero for
+  //   ever, which is exactly the failure a sighting check on its own cannot
+  //   tell from success. This is the pair that says
+  //   `PhysicsWorld::cast_ray` is doing the work rather than a distance test.
+  // * a bot's round **takes the player's health**, and a round with cover in
+  //   the way **does not arrive**. Without the control, "health fell" passes
+  //   for a build whose bots hit whatever they fired at, and the map's cover
+  //   would be scenery.
+  if (EXPECTED.practice) {
+    const practice = EXPECTED.practice;
+    const mapUrl = `${url}${practice.query}`;
+    const before = hud().length;
+    await page.send('Page.navigate', { url: mapUrl });
+    await until(async () =>
+      evaluate(page, `document.readyState === 'complete'`)
+    );
+    const rebooted = await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 3 ? status : null;
+    });
+
+    /** Every heartbeat this map has logged since the navigation. */
+    const beats = () =>
+      hud()
+        .slice(before)
+        .filter((line) => line.match(practice.map)?.[1] === practice.mapName);
+    /** Every value `pattern` has captured on those, as the words they are. */
+    const words = (/** @type {RegExp} */ pattern) =>
+      beats()
+        .map((line) => line.match(pattern)?.[1])
+        .filter((value) => value !== undefined);
+    /** …and as numbers, with anything unreadable dropped. */
+    const readings = (/** @type {RegExp} */ pattern) =>
+      words(pattern).map(Number).filter(Number.isFinite);
+    /** The highest value `pattern` has reported, or null if it never did. */
+    const peak = (/** @type {RegExp} */ pattern) => {
+      const seen = readings(pattern);
+      return seen.length > 0 ? Math.max(...seen) : null;
+    };
+
+    const opened = await until(async () =>
+      beats().length > 0 && peak(practice.alive) === practice.count
+        ? beats().at(-1)
+        : null
+    );
+    check(
+      'C',
+      "the practice map opens from the page's own query string",
+      Boolean(opened) && rebooted === 3,
+      opened
+        ? opened.trim()
+        : `${beats().length} heartbeat(s) said "${practice.mapName}" out of ` +
+            `${hud().length - before} since ${mapUrl} was loaded, and the ` +
+            `status is ${rebooted ?? 'never settled'} — the last line was ` +
+            `"${(hud().at(-1) ?? 'none').trim()}"`
+    );
+
+    // ---- the pair about the patrol -----------------------------------------
+    /** Where the first bot's feet were on each beat, as one string a beat. */
+    const patrol = () => {
+      const across = words(practice.botAcross);
+      const along = words(practice.botAlong);
+      return across.map((x, at) => `${x},${along[at] ?? '?'}`);
+    };
+    const walked = await until(async () => {
+      const steps = new Set(patrol());
+      return steps.size > 1 ? steps : null;
+    });
+    check(
+      'C',
+      'a bot walks its patrol under its own steam',
+      walked !== null,
+      walked
+        ? `its feet took ${walked.size} positions: ${[...walked].join(' ')}`
+        : `it never left ${patrol()[0] ?? 'anywhere'} over ${beats().length} beat(s)`
+    );
+
+    // **And it was a bot that moved.** Two ways the check above could pass for
+    // the wrong reason, and both are closed here.
+    //
+    // The first is that the moving reading is not a bot's at all. Asking
+    // whether the *player* stood still does not close it — nothing has pressed
+    // a key since the navigation, so a build reporting the player's position
+    // under a bot's name reports a number that does not move, which fails the
+    // positive and leaves this one green. What closes it is that the two
+    // readings are **different readings**: the bot's feet and the player's are
+    // compared on every beat, and a heartbeat printing one of them twice is
+    // caught however still either of them is. Measured that way, sabotaging
+    // `arena_stats` to report the player's position here fails this check
+    // instead of quietly passing it.
+    //
+    // The second is that the page never left the firing range, whose
+    // travelling plate moves on a timer and is what group C's `moving` check
+    // already reads. A heartbeat carrying that field at all is the range's, so
+    // none of them may.
+    const together = beats().filter((line) => {
+      const bot = `${line.match(practice.botAcross)?.[1]},${line.match(practice.botAlong)?.[1]}`;
+      const player = `${line.match(practice.playerAcross)?.[1]},${line.match(EXPECTED.range.advance)?.[1]}`;
+      return bot === player;
+    });
+    const stood = new Set(
+      beats().map(
+        (line) =>
+          `${line.match(practice.playerAcross)?.[1]},` +
+          `${line.match(EXPECTED.range.advance)?.[1]}`
+      )
+    );
+    const plateReported = beats().filter((line) =>
+      practice.moverField.test(line)
+    );
+    check(
+      'C',
+      'and it is a bot that moved, not the player and not the other map',
+      beats().length > 0 && together.length === 0 && plateReported.length === 0,
+      plateReported.length > 0
+        ? `${plateReported.length} of ${beats().length} beat(s) still reported a ` +
+            `travelling plate, so this is the firing range and the query string ` +
+            `did nothing: "${plateReported.at(-1)?.trim()}"`
+        : together.length > 0
+          ? `${together.length} of ${beats().length} beat(s) put the bot's feet exactly ` +
+            `where the player's are, so the reading above is the player's under ` +
+            `another name: "${together.at(-1)?.trim()}"`
+          : `the bot's feet were never the player's, who held ` +
+            `${[...stood].join(' ')} for all ${beats().length} beat(s)`
+    );
+
+    // ---- the pair about the sighting ---------------------------------------
+    const noticed = await until(async () =>
+      (peak(practice.seen) ?? 0) > 0 ? peak(practice.seen) : null
+    );
+    check(
+      'C',
+      'a bot notices the player when it can see them',
+      noticed !== null,
+      noticed
+        ? `${noticed} bot(s) had the player in sight at once`
+        : `no bot ever saw the player over ${beats().length} beat(s), though ` +
+            `${peak(practice.covered) ?? 0} were near enough and blocked`
+    );
+
+    // **The control, and it is the whole claim about `cast_ray`.** `covered`
+    // counts bots that are inside the notice range and still cannot see the
+    // player, so a build that noticed anything within range — a distance test
+    // wearing a ray's name — reports it as zero for the whole run while the
+    // sighting check above stays green.
+    const blocked = await until(async () =>
+      (peak(practice.covered) ?? 0) > 0 ? peak(practice.covered) : null
+    );
+    check(
+      'C',
+      'and a bot behind cover does not, though it is near enough to',
+      blocked !== null,
+      blocked
+        ? `${blocked} bot(s) were in range with the pillar in the way`
+        : `every bot in range saw the player on all ${beats().length} beat(s) ` +
+            `(seen went up to ${peak(practice.seen) ?? 0} of ${practice.count}), ` +
+            `so the cover on this map stops nothing`
+    );
+
+    // ---- the pair about being shot at --------------------------------------
+    const hurt = await until(async () => {
+      const health = readings(practice.health);
+      const arrived = peak(practice.taken) ?? 0;
+      const downs = peak(practice.downs) ?? 0;
+      const fell = health.some((value, at) => at > 0 && value < health[at - 1]);
+      return arrived > 0 && (fell || downs > 0) ? { arrived, downs } : null;
+    });
+    check(
+      'C',
+      "a bot's round reaches the player and costs them health",
+      hurt !== null,
+      hurt
+        ? `${hurt.arrived} round(s) arrived and put them down ${hurt.downs} time(s); ` +
+            `health read ${readings(practice.health).join(', ')}`
+        : `${peak(practice.taken) ?? 0} round(s) of ${peak(practice.fired) ?? 0} ` +
+            `arrived and health held at ${[...new Set(readings(practice.health))].join(', ') || 'nothing'}`
+    );
+
+    // **The control.** A bot goes on shooting for a moment after it loses
+    // sight, and those rounds land in whatever is now in the way — so `fired`
+    // ahead of `taken` is cover having stopped one. A build whose bots hit
+    // whatever they fired at reports the two in step for the whole run and
+    // passes the check above regardless.
+    const stopped = await until(async () => {
+      const rounds = beats()
+        .map((line) => ({
+          fired: Number(line.match(practice.fired)?.[1]),
+          taken: Number(line.match(practice.taken)?.[1]),
+        }))
+        .filter(
+          ({ fired, taken }) => Number.isFinite(fired) && Number.isFinite(taken)
+        );
+      const short = rounds.filter(({ fired, taken }) => fired > taken).at(-1);
+      return short ?? null;
+    });
+    check(
+      'C',
+      'and a round with cover in the way never arrives',
+      stopped !== null,
+      stopped
+        ? `${stopped.fired - stopped.taken} of ${stopped.fired} round(s) went into ` +
+            `something other than the player`
+        : `every one of the ${peak(practice.fired) ?? 0} round(s) fired arrived, ` +
+            `so nothing on this map ever stopped one`
+    );
+
+    // ---- and the page goes back to the map the rest of this run judges ------
+    // Not a check: the groups below are entitled to the demo they have always
+    // been handed, which is the firing range — `moving` above read its
+    // travelling plate and group D's canvas checks were written against its
+    // room. Leaving the run on a second map would be this block changing what
+    // every check after it is looking at.
+    const backAt = hud().length;
+    await page.send('Page.navigate', { url });
+    await until(async () =>
+      evaluate(page, `document.readyState === 'complete'`)
+    );
+    await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 3 ? status : null;
+    });
+    // **And the canvas gets its keyboard back.** A navigation replaces the
+    // document, so the click group C made was on an element that no longer
+    // exists — and group E's first claim is that *blurring* the canvas pauses
+    // the demo, which a canvas that never had focus cannot do. Without this the
+    // whole of group E fails on this demo and on no other, for a reason that is
+    // this block's doing rather than the page's.
+    await clickAt(await focusPoint());
+    await until(async () =>
+      (await evaluate(page, `document.activeElement?.id ?? ''`)) === 'canvas'
+        ? true
+        : null
+    );
+    await until(async () => (hud().length > backAt ? hud().length : null));
+  }
+
   // **AND THE BUDGET, WHICH THE CHECK ABOVE CANNOT SEE EITHER.**
   // Only sparks has one. `moving` above says a particle count is changing, and
   // it would go on saying so for a page whose effects never retired, whose
@@ -3604,7 +3969,8 @@ try {
   // the factor actually applied is what a reader needs when a later check fails.
   // `beat === null` means the control below has already failed, so the run is
   // red whatever this says.
-  const slowdown = beat ? Math.max(1, beat.beat / NOMINAL_BEAT_MS) : 1;
+  const nominalBeat = EXPECTED.beatMs ?? NOMINAL_BEAT_MS;
+  const slowdown = beat ? Math.max(1, beat.beat / nominalBeat) : 1;
   const budget = (ms) => Math.round(ms * slowdown);
 
   check(
@@ -5155,6 +5521,18 @@ if (checks.length === 0) {
 
 console.log(
   `web e2e: ${checks.length - failed.length}/${checks.length} checks passed`
+);
+
+// **What the run spent its time on**, in the order that matters when a step is
+// about to hit a CI timeout. The elapsed is the wall clock from the previous
+// check to this one, so it covers the waiting the check did as well as the
+// assertion itself — which is the whole of where a browser gate's minutes go.
+const slowest = [...checks]
+  .sort((a, b) => b.ms - a.ms)
+  .slice(0, SLOWEST_REPORTED);
+console.log(
+  `web e2e: slowest ${slowest.length} of ${checks.length} check(s): ` +
+    slowest.map((c) => `${c.name} ${(c.ms / 1000).toFixed(1)}s`).join(', ')
 );
 
 if (failed.length) {

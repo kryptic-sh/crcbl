@@ -65,7 +65,7 @@ use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowId};
 
 use crate::camera::Eye;
-use crate::game::{Controls, Game, RenderState, Stats};
+use crate::game::{ArenaStats, Controls, Game, RenderState, Scene, Stats};
 use crate::gpu::{Gpu, Paths};
 use crate::menu::{MenuKind, Menus};
 use crate::page::PageStats;
@@ -165,6 +165,38 @@ fn look_turn(actions: &ActionMap, seconds: f32) -> (f32, f32) {
     )
 }
 
+/// The middle of the `[HUD]` line: whichever map's own fields.
+///
+/// Built as one string rather than branched into two `log::info!` calls, so the
+/// line's shared half — the position, the score, the pilot and rule 12's three
+/// selectors — has exactly one spelling and a browser reads the same fields off
+/// both maps.
+fn arena_fields(arena: &ArenaStats) -> String {
+    match *arena {
+        ArenaStats::Range {
+            plates_down,
+            mover_x,
+        } => format!(
+            "near: {}  mover: {mover_x:.2}",
+            if plates_down[0] { "down" } else { "up" },
+        ),
+        ArenaStats::Practice {
+            alive,
+            seen,
+            covered,
+            health,
+            downs,
+            fired,
+            taken,
+            lead,
+        } => format!(
+            "bots: {alive}  seen: {seen}  covered: {covered}  hp: {health}  downs: {downs}  \
+             fired: {fired}  taken: {taken}  botx: {:.2}  botz: {:.2}",
+            lead.x, lead.z,
+        ),
+    }
+}
+
 // ---- summary -----------------------------------------------------------------
 
 /// What a finished run reports.
@@ -185,6 +217,8 @@ pub struct Summary {
     /// The mode the window system actually had the window in, **not** the one
     /// the run last asked for.
     pub mode: DisplayMode,
+    /// Which of the two maps the run was on.
+    pub map: crate::map::MapChoice,
     /// Where the player's feet ended up, in metres.
     pub feet: [f64; 3],
     /// How many shots were fired over the run.
@@ -275,6 +309,24 @@ impl Breach {
     ///   reads, and a page whose loop had stopped would leave it standing
     ///   still.
     ///
+    /// **`map` says which room the rest of the line is about**, and the fields
+    /// after it are that map's. `near` and `mover` above are the range's; the
+    /// practice map's are these, and the gate reads three pairs out of them:
+    ///
+    /// * `bots` — how many are on their feet, and `botx`/`botz`, where the
+    ///   first one's feet are. That pair is a **bot's** position and not the
+    ///   player's, which is what makes "the patrol walks under its own steam" a
+    ///   claim about `crate::bots` rather than about the input path.
+    /// * `seen` and `covered` — how many bots have the player in sight, and how
+    ///   many are near enough to and cannot because something is in the way.
+    ///   The second is the control for the first: a build that noticed
+    ///   unconditionally reports a rising `seen` and a `covered` that never
+    ///   leaves zero.
+    /// * `hp`, `downs`, `fired` and `taken` — what the player has left, how many
+    ///   times they have been put down, and the bots' shots against the ones
+    ///   that arrived. `fired` above `taken` is a round cover stopped, which is
+    ///   the control for `hp` ever falling at all.
+    ///
     /// It also names the three selectors — see the module docs.
     fn log_heartbeat(&self) {
         if self.stats.ticks == 0
@@ -288,7 +340,7 @@ impl Breach {
         let stats = &self.stats;
         crcbl::log::info!(
             "[HUD] tick: {}  px: {:.2}  py: {:.2}  pz: {:.2}  yaw: {:.3}  pitch: {:.3}  \
-             shots: {}  hits: {}  acc: {}  aim: {}  near: {}  mover: {:.2}  ground: {}  \
+             shots: {}  hits: {}  acc: {}  aim: {}  map: {}  {}  ground: {}  \
              pilot: {}  geometry: {:?}  binding: {:?}  lighting: {:?}",
             stats.ticks,
             stats.position.x,
@@ -303,8 +355,8 @@ impl Breach {
                 None => "--".to_string(),
             },
             stats.crosshair.label(),
-            if stats.plates_down[0] { "down" } else { "up" },
-            stats.mover_x,
+            stats.arena.map().name(),
+            arena_fields(&stats.arena),
             if stats.grounded { "yes" } else { "no" },
             if stats.warming_up { "range" } else { "player" },
             self.paths.geometry,
@@ -382,7 +434,13 @@ pub fn with_shell<S: Shell + ?Sized>(
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
 
-    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu())?;
+    let gpu = Gpu::open(
+        shell.as_ref(),
+        window,
+        extent,
+        options.common.gpu(),
+        options.map,
+    )?;
     assemble(
         Booted {
             shell,
@@ -424,7 +482,7 @@ fn assemble<S: Shell + ?Sized>(
         booted
     };
     let paths = booted.gpu.paths();
-    let game = Game::new(options.common.tick_hz).map_err(BreachError::Game)?;
+    let game = Game::new(options.common.tick_hz, options.map).map_err(BreachError::Game)?;
     Ok(Loop::new(
         booted,
         Breach {
@@ -590,7 +648,13 @@ impl HostedGame for Breach {
                 .point_at(crate::game::SQUARE_UP.0, crate::game::SQUARE_UP.1);
         }
 
-        gpu.set_plates(self.render_state.plates_x, self.render_state.plates_down);
+        match &self.render_state.scene {
+            Scene::Range {
+                plates_x,
+                plates_down,
+            } => gpu.set_plates(*plates_x, *plates_down),
+            Scene::Practice { bots, .. } => gpu.set_bots(bots),
+        }
         // The simulation is `f64` and the renderer's camera is `f32`; this is
         // the one place the two meet.
         #[allow(clippy::cast_possible_truncation)]
@@ -626,6 +690,7 @@ impl HostedGame for Breach {
             exit: run.exit,
             paused: run.paused,
             mode: run.mode,
+            map: self.stats.arena.map(),
             feet: [
                 self.stats.position.x,
                 self.stats.feet,
@@ -640,10 +705,12 @@ impl HostedGame for Breach {
 
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
-            "breach: {} frames, {} ticks, feet at {:.2} {:.2} {:.2}, {} shot(s) and {} hit(s), \
-             {} overlay commands, geometry {:?}, binding {:?}, lighting {:?} ({:?})",
+            "breach: {} frames, {} ticks on the {} map, feet at {:.2} {:.2} {:.2}, \
+             {} shot(s) and {} hit(s), {} overlay commands, \
+             geometry {:?}, binding {:?}, lighting {:?} ({:?})",
             summary.frames,
             summary.ticks,
+            summary.map.name(),
             summary.feet[0],
             summary.feet[1],
             summary.feet[2],
@@ -700,7 +767,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                 window,
                 clock_source,
                 options.common.gpu(),
-                (),
+                options.map,
             ),
             options: options.clone(),
         })
@@ -734,6 +801,11 @@ mod tests {
     }
 
     fn headless(frames: u64) -> Options {
+        on(crate::map::MapChoice::Range, frames)
+    }
+
+    /// A headless run of `map`, for `frames` frames.
+    fn on(map: crate::map::MapChoice, frames: u64) -> Options {
         Options {
             common: Common {
                 headless: true,
@@ -741,6 +813,7 @@ mod tests {
                 frames: Some(frames),
                 ..Common::new(crate::game::DEFAULT_TICK_HZ)
             },
+            map,
         }
     }
 
@@ -784,6 +857,36 @@ mod tests {
         assert_eq!(
             summary.hits, summary.shots,
             "the range's own demonstration missed",
+        );
+        assert!(
+            summary.feet[1].abs() < 0.05,
+            "the player left the floor, at {:.2} m",
+            summary.feet[1],
+        );
+    }
+
+    /// **A headless run of the practice map walks its bots and gets shot at**,
+    /// which is the one check that says the whole second bundle — that map's
+    /// scene description, its instance pool, its bots and the shots they take —
+    /// came up and produced a frame with something on it.
+    ///
+    /// Nothing presses a key: the practice map has no warm-up because three
+    /// bots on patrol are already a picture that moves, and one of them is in
+    /// the open in front of the spawn.
+    #[test]
+    fn a_headless_practice_run_walks_its_bots_and_shoots_back() {
+        let summary =
+            run(&on(crate::map::MapChoice::Practice, 300)).expect("the null backend always runs");
+        assert_eq!(summary.map, crate::map::MapChoice::Practice);
+        assert!(summary.ticks > 0, "no tick ran");
+        assert!(
+            summary.commands > 0,
+            "the run presented frames with nothing on them",
+        );
+        assert_eq!(
+            (summary.shots, summary.hits),
+            (0, 0),
+            "the practice map fired the player's pistol for them",
         );
         assert!(
             summary.feet[1].abs() < 0.05,
@@ -877,6 +980,7 @@ mod tests {
                 frames: Some(600),
                 ..Common::new(crate::game::DEFAULT_TICK_HZ * 6)
             },
+            map: crate::map::MapChoice::Range,
         };
         let mut engine = scripted(&slow);
         let window = engine.window();

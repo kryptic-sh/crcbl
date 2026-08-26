@@ -1,7 +1,7 @@
 //! Breach — the native front end.
 //!
 //! ```text
-//! breach [--headless] [--frames N] [--size WxH] [--tick-hz N] …
+//! breach [--map M] [--headless] [--frames N] [--size WxH] [--tick-hz N] …
 //! ```
 //!
 //! Argv in, exit code out, and nothing else: the sample itself is the
@@ -22,10 +22,11 @@ fn main() -> ExitCode {
         run,
         |summary| {
             format!(
-                "breach: {} frames, {} ticks on the {} shell at {}x{}, {} \
+                "breach: {} frames, {} ticks of the {} map on the {} shell at {}x{}, {} \
                  (feet at {:.2} {:.2} {:.2}, {}/{} shots hit, {:?}/{:?}/{:?}, {:?})",
                 summary.frames,
                 summary.ticks,
+                summary.map.name(),
                 summary.backend,
                 summary.extent.0,
                 summary.extent.1,

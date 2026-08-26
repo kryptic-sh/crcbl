@@ -592,7 +592,7 @@ esac
 # `breach` alone, because it is the only demo shot from inside the shooter's
 # head.
 #
-# Three names are matched rather than six, and they are the block's *controls* —
+# Three names are matched for the range block, and they are its *controls* —
 # the halves worth deleting when a slow machine makes them flake. Each is what
 # stops a positive passing for the wrong reason:
 #
@@ -631,6 +631,65 @@ case "$DEMO" in
             echo "               turned; nothing else on that page reads the angle the" >&2
             echo "               shot is aimed along, and a browser has no mouselook to" >&2
             echo "               fall back on" >&2
+            exit 1
+        fi
+        # And the same argument once more for the *other map*, which is
+        # milestone 0's other half. Everything above is the firing range; the
+        # practice map is reached only by this driver navigating to
+        # `?map=practice`, and if that block goes missing the whole of
+        # `apps/breach/src/bots.rs` and `apps/breach/src/map/practice.rs` is
+        # ungated in a browser while every check above stays green — because
+        # every check above is about a different room.
+        #
+        # Four names are matched rather than seven. The first says the query
+        # string reached the game at all, without which the other six are being
+        # asked of the firing range and pass or fail for reasons that have
+        # nothing to do with bots. The other three are the block's *controls* —
+        # the halves worth deleting when a slow machine makes them flake, and
+        # each is what stops a positive passing for the wrong reason:
+        #
+        #  - 'and it is a bot that moved, not the player and not the other map'
+        #    is what says the moving reading belongs to a patrol. Without it,
+        #    'a bot walks its patrol' passes for the range's travelling plate.
+        #  - 'and a bot behind cover does not, though it is near enough to' is
+        #    what says the sighting is a ray. Without it, 'a bot notices the
+        #    player' passes for a build that noticed everything in range.
+        #  - 'and a round with cover in the way never arrives' is what says the
+        #    cover stops a shot. Without it, 'a bot's round reaches the player'
+        #    passes for bots that hit whatever they fire at.
+        #
+        # Renaming any of them in the driver is meant to fail here and be
+        # renamed here too.
+        OPENED="$(grep -F "the practice map opens from the page's own query string" "${OUTPUT}.plain" || true)"
+        if [ -z "$OPENED" ]; then
+            echo "crcbl web e2e: the driver never opened $DEMO's second map;" >&2
+            echo "               milestone 0's bot practice map is not reached by any" >&2
+            echo "               browser gate, and every check above is about the" >&2
+            echo "               firing range instead" >&2
+            exit 1
+        fi
+        PATROLLED="$(grep -F 'and it is a bot that moved, not the player and not the other map' "${OUTPUT}.plain" || true)"
+        if [ -z "$PATROLLED" ]; then
+            echo "crcbl web e2e: the driver never asked whose position moved on" >&2
+            echo "               $DEMO's practice map; 'a bot walks its patrol' has no" >&2
+            echo "               control, and it passes for the other map's travelling" >&2
+            echo "               plate" >&2
+            exit 1
+        fi
+        COVERED="$(grep -F 'and a bot behind cover does not, though it is near enough to' "${OUTPUT}.plain" || true)"
+        if [ -z "$COVERED" ]; then
+            echo "crcbl web e2e: the driver never asked whether cover stops $DEMO's" >&2
+            echo "               bots seeing; 'a bot notices the player' has no control," >&2
+            echo "               and it passes for a build that noticed everything" >&2
+            echo "               inside its range without casting a ray at all" >&2
+            exit 1
+        fi
+        STOPPED_ROUND="$(grep -F 'and a round with cover in the way never arrives' "${OUTPUT}.plain" || true)"
+        if [ -z "$STOPPED_ROUND" ]; then
+            echo "crcbl web e2e: the driver never asked whether cover stops a round on" >&2
+            echo "               $DEMO's practice map; 'a bot's round reaches the" >&2
+            echo "               player' has no control, and it passes for bots that hit" >&2
+            echo "               whatever they fire at" >&2
             exit 1
         fi
         ;;

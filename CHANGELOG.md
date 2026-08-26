@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/breach`'s bot practice map, and a `--map` flag to choose it.**
+  `docs/plan/sample/11-breach.md`'s milestone 0 is a firing range **and** a bot
+  practice map; this is the second half. A second greybox room — a pillar tall
+  enough to break a sightline, two crates and a patrol circuit around them —
+  with three bots in it. Each walks an **authored waypoint route**
+  (`map::practice::ROUTES`) through the same `crcbl::phys::CharacterController`
+  the player walks through, notices the player through the same
+  `crcbl::phys::PhysicsWorld::cast_ray` the pistol resolves with, and shoots
+  back on a fixed cadence with that same pistol. The player has health and
+  respawns; a bot the player shoots goes down and comes back on its route.
+  **There is no navmesh and no pathfinding** — `docs/plan/24-navigation.md` is a
+  later subsystem whose own forcing function is a different sample, and
+  `apps/breach` deliberately does not force it.
+
+  Cover is the whole subject: a bot sees the player only when nothing is between
+  their eyes, so a bot crossing the far side of its circuit loses the player
+  behind the pillar and picks them up again at either end — and the rounds it
+  fires in between go into the pillar rather than into the player. The `[HUD]`
+  heartbeat and the debug panel carry that as numbers: which map, how many bots
+  are alive, how many have the player in sight, how many are in range and
+  covered, the player's health and respawn count, and the bots' shots against
+  the ones that arrived.
+
+  `--map range|practice` chooses the map on a command line, `?map=practice`
+  chooses it on the demo page (through a new `__crcbl_breach_map` wasm export),
+  and `/demos/breach/` still opens the firing range. `web/tools/browser-e2e.mjs`
+  drives the second map in a real browser: it navigates to `?map=practice` and
+  reads three positive/control pairs off the heartbeat — a patrol that walks
+  (and it is a bot's position, not the player's and not the other map's
+  travelling plate), a sighting that happens (and one that cover stops), and a
+  round that costs health (and one that never arrives).
+
 - **`apps/breach`, a first-person firing range, on the demo site.**
   `docs/plan/sample/11-breach.md`'s milestone 0, first slice: a greybox indoor
   range — floor, four walls, a ceiling, a firing line and three lanes with a
@@ -50,9 +82,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reports no `RAW_POINTER_MOTION`, so the engine declines the pointer lock
   rather than telling a first-person camera it has aim input it can trust — the
   first of the four reasons that sample's competitive milestones are native
-  only. Slice 1 has no bots, no second map, no weapon but the pistol, no armour,
-  no ballistics and no networking beyond the in-memory loopback every sample
-  has; `docs/backlog.md` carries the rest.
+  only. Milestone 0 has no weapon but the pistol, no armour, no ballistics and
+  no networking beyond the in-memory loopback every sample has;
+  `docs/backlog.md` carries the rest.
 
 - **`crcbl-vfx`: the first slice of the particle system.** A `ParticleSystem`
   holds a structure-of-arrays `ParticlePool` and hands each effect a contiguous

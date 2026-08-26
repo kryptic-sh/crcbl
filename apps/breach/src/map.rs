@@ -1,5 +1,11 @@
 //! The range: what the player walks on, what the pistol can hit, and what both
-//! are drawn as.
+//! are drawn as — and [`MapChoice`], which says which of this sample's two maps
+//! a run opened on.
+//!
+//! Everything at this level is the **firing range**. The bot practice map is
+//! [`practice`], a module of its own, and it is written from this one's shell
+//! constants — [`CEILING_Y`], [`SLAB_THICKNESS`], [`WALL_THICKNESS`] and
+//! `painted` — because the two rooms are the same building.
 //!
 //! ```text
 //!            +X
@@ -70,6 +76,52 @@ use crcbl::render::{
 use crcbl::shaders::mesh::GpuMaterial;
 
 use crate::camera::EYE_HEIGHT;
+
+pub mod practice;
+
+// ---------------------------------------------------------------------------
+// Which map
+// ---------------------------------------------------------------------------
+
+/// Which of breach's two maps a run opens on.
+///
+/// **The one thing about this sample a page can choose.** `--map` sets it on a
+/// command line and `__crcbl_breach_map` sets it from a browser — see
+/// `apps/breach/src/args.rs` for the pair, which is the shape `apps/horde`'s
+/// `--prefill`
+/// already has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MapChoice {
+    /// The firing range: three lanes, three plates, and a line to shoot from.
+    #[default]
+    Range,
+    /// The bot practice map: cover, sightlines and a patrol circuit.
+    Practice,
+}
+
+impl MapChoice {
+    /// Every map, in the order `--help` lists them.
+    pub const ALL: [Self; 2] = [Self::Range, Self::Practice];
+
+    /// What `--map` spells it, and what the `[HUD]` line and the panel call it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Range => "range",
+            Self::Practice => "practice",
+        }
+    }
+
+    /// The map `name` spells, or `None` for anything else.
+    ///
+    /// The inverse of [`name`](Self::name), and the only place a string becomes
+    /// a map — `--map`, the wasm export and the page's `?map=` all come through
+    /// here, so they cannot disagree about what a name means.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|map| map.name() == name)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The room
@@ -324,7 +376,7 @@ const CAPACITIES: Capacities = Capacities {
 /// square over the whole of the floor. It spends the 32² grid page rather than
 /// `crcbl_greybox::material`'s 1024² one, because a demo that runs in a browser
 /// should not upload eight megatexels to show a ruler.
-fn painted(tint: [f32; 3]) -> GpuMaterial {
+pub(crate) fn painted(tint: [f32; 3]) -> GpuMaterial {
     GpuMaterial {
         base_color: [tint[0], tint[1], tint[2], 1.0],
         tiling: GpuMaterial::TILING_PHYSICAL,

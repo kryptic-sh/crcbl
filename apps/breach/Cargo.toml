@@ -1,6 +1,6 @@
 [package]
 name = "breach"
-description = "Breach — first-person firing range: one hitscan pistol, three lanes, the same character controller puppet drives"
+description = "Breach — first person, one hitscan pistol, two maps: a firing range and a bot practice arena"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,21 +1,35 @@
 //! Argument parsing for the breach sample.
 //!
 //! ```text
-//! breach [--headless] [--frames N] [--size WxH] [--tick-hz N] …
+//! breach [--map M] [--headless] [--frames N] [--size WxH] [--tick-hz N] …
 //! ```
 //!
-//! # There is nothing left here but the shared half
+//! # One flag of its own, and it is which map
 //!
 //! [`crcbl::args::Common`] owns `--headless`, `--frames`, `--tick-hz`,
-//! `--backend`, `--size`, `--screenshot` and the debug-overlay pair, and slice
-//! 1 has no flag of its own to add to them: the range is fixed, the pistol is
-//! the only weapon, and everything a player can change is a key rather than an
-//! argument. This file is still a file rather than a call into the engine's
-//! parser, because the usage prose is this sample's and because
+//! `--backend`, `--size`, `--screenshot` and the debug-overlay pair. What is
+//! breach's is `--map`, because this sample has two of them —
+//! `docs/plan/sample/11-breach.md`'s milestone 0 is a firing range **and** a bot
+//! practice map — and everything else a player can change is a key rather than
+//! an argument.
+//!
+//! # A page has no argv, so the browser's half is a static
+//!
+//! [`REQUESTED_MAP`] is `--map` reachable from a browser, and it is the shape
+//! `apps/horde`'s `--prefill` already has: `crcbl::impl_web_pending!` opens the
+//! sample with `<Options>::default()` and nothing crosses into wasm except
+//! through an export, so `crate::web`'s `__crcbl_breach_map` parks the choice
+//! here and [`Options::default`] reads it back. A native run parses `--map` onto
+//! the options it is already holding and never touches it.
+//!
 //! `docs/backlog.md` records the one flag rule 12 still owes — a way to hold a
 //! render path below what the device offers — which is where it will go.
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crcbl::args::{Common, Consumed};
+
+use crate::map::MapChoice;
 
 /// The `--help` text.
 ///
@@ -25,7 +39,8 @@ use crcbl::args::{Common, Consumed};
 /// `the_shared_half_of_the_usage_text_is_the_engines_verbatim` asserts this
 /// string *contains* both blocks byte for byte.
 pub const USAGE: &str = "\
-breach — a first-person firing range: one hitscan pistol, three lanes
+breach — first person, one hitscan pistol, two maps: a firing range and a
+         bot practice arena
 
 USAGE:
     breach [OPTIONS]
@@ -39,6 +54,9 @@ CONTROLS:
     ESC                  Pause, F3 the debug panel, F11 fullscreen
 
 OPTIONS:
+    --map <M>            Which map to open: range (the firing range, default) or
+                         practice (the bot practice map — cover, three bots on
+                         authored patrols, and they shoot back)
     --headless           Run without a window (for CI / determinism tests)
     --frames <N>         Stop after N presented frames
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
@@ -68,11 +86,39 @@ OPTIONS:
                          debug build, hidden in a release build'
     -h, --help           Print this help";
 
+/// Which map a run built from [`Options::default`] opens on.
+///
+/// **This is the browser's `--map`, and it is a static because a page has no
+/// other way in** — see the module docs. Stored as the index into
+/// [`MapChoice::ALL`], because that is what an atomic can hold; anything outside
+/// it reads back as the default, which is unreachable while
+/// [`request_map`] is the only writer.
+///
+/// `Relaxed` because the value carries nothing with it and is written on the
+/// same thread that later reads it: the browser's main thread, before `boot`.
+static REQUESTED_MAP: AtomicU8 = AtomicU8::new(0);
+
+/// Asks that the next run built from [`Options::default`] open on `map`.
+///
+/// Read once, when the options are taken, so it has to be set before the game is
+/// built. `crate::web`'s `__crcbl_breach_map` is what enforces that ordering for
+/// a page — it refuses once start-up has gone past the point where this would be
+/// read — and it is the reason this exists.
+pub fn request_map(map: MapChoice) {
+    let index = MapChoice::ALL
+        .iter()
+        .position(|candidate| *candidate == map)
+        .unwrap_or(0);
+    REQUESTED_MAP.store(index as u8, Ordering::Relaxed);
+}
+
 /// What the command line asked breach for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     /// The flags every sample has.
     pub common: Common,
+    /// Which map to open. See [`MapChoice`].
+    pub map: MapChoice,
 }
 
 impl Default for Options {
@@ -86,6 +132,13 @@ impl Default for Options {
             common: Common::new(crate::game::DEFAULT_TICK_HZ).with_screenshot(),
             #[cfg(target_arch = "wasm32")]
             common: Common::new(crate::game::DEFAULT_TICK_HZ),
+            // The range unless a page asked otherwise — see [`REQUESTED_MAP`].
+            // A command line sets `map` on the options this returns, so `parse`
+            // overwrites whatever lands here.
+            map: MapChoice::ALL
+                .get(REQUESTED_MAP.load(Ordering::Relaxed) as usize)
+                .copied()
+                .unwrap_or_default(),
         }
     }
 }
@@ -93,11 +146,20 @@ impl Default for Options {
 /// What the command line asked for.
 pub type Invocation = crcbl::args::Invocation<Options>;
 
+/// Every map `--map` will answer to, for the rejection message.
+fn map_names() -> String {
+    MapChoice::ALL
+        .iter()
+        .map(|map| map.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Parses a flat `["--flag", "value", "--flag2"]` iterator.
 ///
-/// Every argument is offered to the shared set; what comes back as
-/// [`Consumed::No`] is the unknown-argument rejection, because breach claims
-/// none of its own.
+/// Every argument is offered to the shared set first; `--map` is the one this
+/// sample claims for itself, and what comes back as [`Consumed::No`] after both
+/// is the unknown-argument rejection.
 pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut options = Options::default();
     let mut args = args.peekable();
@@ -107,7 +169,19 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
             Consumed::Yes => continue,
             Consumed::Help => return Invocation::Help,
             Consumed::Bad(message) => return Invocation::BadUsage(message),
-            Consumed::No => return Invocation::BadUsage(format!("unknown argument: {arg}")),
+            Consumed::No => {}
+        }
+        if arg != "--map" {
+            return Invocation::BadUsage(format!("unknown argument: {arg}"));
+        }
+        let Some(name) = args.next() else {
+            return Invocation::BadUsage(format!("--map needs a map: {}", map_names()));
+        };
+        match MapChoice::from_name(&name) {
+            Some(map) => options.map = map,
+            None => {
+                return Invocation::BadUsage(format!("--map {name} is not a map: {}", map_names()));
+            }
         }
     }
 
@@ -190,6 +264,59 @@ mod tests {
         assert!(rejected(&["--nonsense"]).contains("nonsense"));
     }
 
+    /// **`--map` reaches the simulation, and a name that is not a map is
+    /// refused rather than quietly opening the default one.**
+    ///
+    /// The rejection carries the list, because a flag whose valid values are
+    /// only in `--help` is one a reader has to go and look up.
+    #[test]
+    fn the_map_flag_names_a_map_and_refuses_anything_else() {
+        for map in MapChoice::ALL {
+            assert_eq!(parsed(&["--map", map.name()]).map, map);
+            assert!(
+                USAGE.contains(map.name()),
+                "{} is not in --help",
+                map.name()
+            );
+        }
+        let refused = rejected(&["--map", "carpark"]);
+        assert!(refused.contains("carpark"), "{refused}");
+        for map in MapChoice::ALL {
+            assert!(refused.contains(map.name()), "{refused}");
+        }
+        assert!(rejected(&["--map"]).contains("--map"));
+    }
+
+    /// **A name and the map it spells are the same thing read both ways**,
+    /// which is what lets `--map`, the wasm export and the page's `?map=` share
+    /// one table instead of three.
+    #[test]
+    fn every_map_answers_to_its_own_name() {
+        for map in MapChoice::ALL {
+            assert_eq!(MapChoice::from_name(map.name()), Some(map));
+        }
+        assert_eq!(MapChoice::from_name("Range"), None, "names are exact");
+        assert_eq!(MapChoice::from_name(""), None);
+    }
+
+    /// **A run nobody has asked anything of opens on the firing range**, which
+    /// is what keeps the demo site's `/demos/breach/` the page it has always
+    /// been: `?map=` is what asks for the other one.
+    ///
+    /// Asserted through the two facts [`REQUESTED_MAP`] is built on — it starts
+    /// at zero, and zero is [`MapChoice::ALL`]'s first row — rather than by
+    /// reading the static itself. It is process-wide and `request_map` is
+    /// allowed to write it, so a test that read it would be a test that raced
+    /// every other test in this binary. `apps/horde`'s `REQUESTED_PREFILL` is
+    /// left alone for the same reason; what covers the write is the browser
+    /// gate, which loads the page with `?map=practice` and reads the map back
+    /// off the `[HUD]` line.
+    #[test]
+    fn a_run_nobody_asked_anything_of_opens_on_the_range() {
+        assert_eq!(MapChoice::default(), MapChoice::Range);
+        assert_eq!(MapChoice::ALL[0], MapChoice::default());
+    }
+
     /// The shared flags are documented in two places — here and in
     /// `crcbl::args` — and this is what stops them disagreeing.
     #[test]
@@ -206,8 +333,6 @@ mod tests {
             USAGE.contains(crcbl::args::SCREENSHOT_HELP),
             "the --screenshot block has drifted from crcbl::args"
         );
-        assert!(
-            USAGE.contains("breach — a first-person firing range: one hitscan pistol, three lanes")
-        );
+        assert!(USAGE.contains("breach — first person, one hitscan pistol, two maps"));
     }
 }

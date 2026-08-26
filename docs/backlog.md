@@ -3,24 +3,65 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### `apps/breach` is milestone 0's first slice, and the rest of it is not built
+### The rand 0.10 migration is written and blocked upstream (2026-08-26)
+
+Dependabot proposed `rand_core` 0.9.5 → 0.10.1 and `rand_chacha` 0.9.0 → 0.10.0
+(PRs #12 and #13, both **closed** rather than merged — the reasoning is on them
+so it is not only in a chat log).
+
+**The migration itself is small and understood.** `rand_core` 0.10 renames
+`RngCore` to `TryRng` (fallible, with an associated `Error`) and makes `Rng` a
+blanket-implemented alias for `TryRng<Error = Infallible>`. So an implementor
+writes `TryRng` with `type Error = Infallible` and gets `next_u32`/`next_u64`/
+`fill_bytes` free — which is why the PR showed
+`E0407: method next_u32 is not a member of trait RngCore`. `SeedableRng` is
+unchanged, and every `from_seed` error in that build was the
+`use rand_core::{RngCore, SeedableRng}` line failing as a whole and taking
+`SeedableRng` out of scope with it. The change is confined to `crcbl-rand`:
+`rng.rs`, three `use` sites in `entropy.rs`, the module docs in `lib.rs`, and
+`tests/determinism.rs`. `crcbl-webgpu`'s `probe.rs` and `crcbl-net`'s
+`condition.rs` have `fill_bytes`/`next_u64` of their own and do not touch the
+traits.
+
+**The ChaCha8 stream does not change, which was the thing worth knowing first.**
+Built against `rand_chacha` 0.10 in a throwaway crate outside the workspace, the
+all-`0x42` seed's first `next_u64` draws are byte-identical to
+`tests/determinism.rs`'s `SEED42_GOLDEN`. So the goldens must **not** be
+regenerated on this upgrade — if they move, that is a defect and not expected
+churn, which is exactly what that file's header says.
+
+**What blocks it is not in this repo.** `proptest` 1.11.0 — the newest release —
+pins `rand` 0.9 and `rand_chacha` 0.9, and it is a dev-dependency of
+`crcbl-core`. Upgrading `crcbl-rand` therefore puts two copies of both
+`rand_core` and `rand_chacha` in the lock, and `deny.toml` sets
+`multiple-versions = "deny"`, which CI checks with `--all-features`.
+
+**Deliberately not solved with a skip.** That file's own comment says the ban
+was tightened from `warn` to `deny` so a new duplicate fails rather than joining
+a warning nobody reads, and that the skips are for duplicates that cannot be
+resolved from here. This one can be — by not upgrading — so skipping it would be
+papering over a self-inflicted duplicate, and it would ship two ChaCha
+implementations in every binary.
+
+**When `proptest` ships a release on `rand` 0.10, this becomes a short job.**
+Check that before assuming it is still blocked; nothing else stands in the way.
+
+### `apps/breach` has milestone 0's two maps, and the rest is not built
 
 `docs/plan/sample/11-breach.md`'s milestone 0 is "firing range **+ bot practice
 map**, single player, rasterised lighting and both geometry fallbacks, shipped
-on the Pages site". `apps/breach` is the firing range half. What is deliberately
-absent, in the order that doc puts it:
+on the Pages site". Both maps are built and both are browser-gated. What is
+deliberately absent, in the order that doc puts it:
 
-- **The bot practice map.** A second greybox map and navigation (topic 24) for
-  warm-up bots. Nothing in `apps/breach` is shaped against it yet: `map::world`
-  hands back one `PhysicsWorld` and one array of plate colliders, and a second
-  map would want that to be a value the game is handed rather than a function it
-  calls. The bots themselves need `crcbl` to have a navigation pillar at all.
 - **Golden frames per `GeometryPath`.** That milestone's exit criteria ask for
   one per path plus "a recorded browser budget for first-person content".
   `apps/lantern/tests/golden.rs` is the shape; breach has no golden test and no
-  recorded budget. The frame is deterministic enough for one — the warm-up is a
-  pure function of the tick and the travelling plate is a pure function of the
-  simulated time — so this is work rather than a question.
+  recorded budget, on either map. The range's frame is deterministic enough for
+  one — the warm-up is a pure function of the tick and the travelling plate is a
+  pure function of the simulated time — and so is the practice map's, whose bots
+  are a pure function of the tick as long as nobody presses anything. So this is
+  work rather than a question, and the practice map wants a **second** golden
+  set: it is the only breach frame with a character-shaped mesh in it.
 - **Rule 12's forcing flag.** `apps/breach/src/gpu.rs`'s `Paths` reports which
   selectors the device chose, on the panel, the `[HUD]` line and the summary.
   Rule 12 also asks that "every sample accepts a flag forcing a lesser path".
@@ -31,20 +72,83 @@ absent, in the order that doc puts it:
 - **First-person rendering (topic 29) beyond a camera.** No viewmodel pass, no
   ADS, no PiP optic. The player is invisible, which is what a first-person slice
   with no viewmodel honestly is; there is no rig and no `crcbl-anim` in the
-  sample.
+  sample. The bots are greybox capsules — `crcbl::greybox::capsule` at the
+  controller's own dimensions — rather than rigged characters, for the same
+  reason: `apps/puppet` owns the rig, and a borrowed one here would be a second
+  character system to keep working.
 - **The weapon kit (topic 38), ballistics (28) and armour.** One hitscan pistol,
   no penetration, no drop, no recoil pattern, no reload or malfunction states,
   no armour and no limb model. `game::trace` is a single `cast_ray` and stops at
   the first hit; a penetration chain would be the same call in a loop with the
   material at each hit deciding what is left of the round.
 - **Rule 11's `.crpix` art.** `apps/breach/src/lib.rs` claims the exemption for
-  slice 1 and says why: the doc asks for pixel art for the grid inventory, the
-  buy menu, the killfeed and the scoreboard, and slice 1 has none of those. The
-  exemption expires the moment one arrives.
+  milestone 0 and says why: the doc asks for pixel art for the grid inventory,
+  the buy menu, the killfeed and the scoreboard, and milestone 0 has none of
+  those. The exemption expires the moment one arrives.
 - **Sound.** Rule 8 asks for spatial audio through `crcbl-audio`, and a firing
   range is the easiest possible cue grammar — a shot, a hit on steel, a plate
-  falling. Slice 1 plays nothing at all. This is the cheapest of the entries
-  here and the most visible omission.
+  falling. Neither map plays anything at all. This is the cheapest of the
+  entries here and the most visible omission — and the practice map makes it
+  worse rather than better, because a bot shooting at you from behind is the one
+  cue a player genuinely cannot get from the picture.
+
+### `apps/breach`'s practice bots are dumber than the plan's, on purpose
+
+`apps/breach/src/bots.rs` is patrol, notice, shoot, lose interest, and nothing
+else. What was considered and left out, each with the reason:
+
+- **Anything resembling navigation.** No path query, no poly mesh, no steering,
+  no avoidance. `docs/plan/24-navigation.md` names `arena`'s bots as its forcing
+  function, not breach's, and forcing a navigation pillar out of a practice map
+  would be building the subsystem from the wrong demo. A bot walks
+  `map::practice::ROUTES` and slides along whatever it bumps into, which is
+  `CharacterController::move_and_slide` doing it rather than the bot.
+- **Cover use, flanking, squads, difficulty tuning.** Each is a behaviour tree
+  or a utility system, and the sample has no place to put one yet. Milestone 2's
+  5v5 bots are where that question is actually asked.
+- **Aim error.** A bot that can see the player hits them, every round. There is
+  no spread, no reaction time and no first-shot delay beyond the cadence, so the
+  only thing between a player and a hit is cover. That makes the demo legible
+  and the browser gate's control exact — `fired` above `taken` is cover and
+  nothing else — and it is also why standing still in the open is punished
+  harder than a practice map should punish it. Ballistics (topic 28) is where
+  spread belongs.
+
+### `apps/breach`'s player has no body, so the bots walk through them
+
+`apps/breach/src/game.rs` never adds a collider for the player. That is what
+lets the pistol cast from inside where a body would be — a ray leaving the eye
+would otherwise hit the player's own capsule 30 cm out — and it is why
+`bots::has_line_of_sight` casts from the **player's** end of the segment rather
+than the bot's, which that module's docs argue.
+
+The visible cost is on the practice map: a bot on its route walks straight
+through the player rather than being stopped by them. Nothing else in the sample
+notices.
+
+What would close it is a ray cast that can exclude one collider.
+`PhysicsWorld::sweep_sphere_excluding` and `sweep_capsule_excluding` exist for
+exactly this reason on the sweep side; `cast_ray` has no such form, and adding
+one is an engine change rather than a sample change. With it, the player would
+carry a capsule like the bots do, the pistol would exclude it, and each bot
+could cast its own sighting ray from its own eye. Not attempted: the segment is
+symmetric, so the current arrangement answers the same question, and an engine
+change should be driven by a caller that needs it for more than one demo.
+
+### `apps/breach`'s practice map is gated through a page navigation, not a second run
+
+`web/tools/browser-e2e.mjs` reaches the practice map by navigating the _same_
+browser to `?map=practice` in the middle of group C and then navigating back to
+the range, so the groups after it judge the demo they always have. Two full page
+boots is about seven seconds of the breach gate's runtime.
+
+The alternative considered and declined: a second gate target, so
+`CRCBL_WEB_E2E_DEMO=breach-practice` would be its own CI step. It would need a
+second page, a second `web/build.sh` DEMOS row and two more `pages.yml` steps
+(`tools/check-browser-gate-demos.sh` enforces both), all to run a second copy of
+groups A, B, D, E, F, H and I against the same wasm — which is far more CI
+minutes than the two navigations cost. Worth revisiting only if breach grows a
+third map.
 
 ### `apps/breach`'s trigger is a key, because a click means two things
 
@@ -103,7 +207,12 @@ Two consequences worth knowing before touching either:
   running perfectly well.
 
 A second moving fixture — a swinging lamp, a fan — would take the weight off one
-plate. Not built: it is scenery for a slice that has none yet.
+plate. Not built: it is scenery for a map that has none yet.
+
+The **practice map does not have this problem**: three bots walk their patrols
+whatever the player does, and the gate's block for that map reads a bot's own
+feet rather than a plate. But the range is what group D judges, because that is
+the map the page opens on and the map the block navigates back to.
 
 ### `apps/breach` and `apps/puppet` each own a copy of the yaw→direction step
 

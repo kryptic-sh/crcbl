@@ -1,6 +1,20 @@
 //! The simulation: one capsule walking [`crate::map`], one hitscan pistol
 //! shooting down it, and the server that owns both.
 //!
+//! # Two maps, one tick
+//!
+//! [`MapChoice`] says which of them a run opened on, and `Arena` is the half
+//! of the stage that differs: the firing range's plates and its demonstration,
+//! or the practice map's bots. Everything above that line — the walk, the ray,
+//! the wire, the score — is one implementation, which is the point of building
+//! the second map inside this sample rather than beside it.
+//!
+//! The practice map has **no warm-up**: it does not need one, because three
+//! bots walking their patrols is already a picture that moves, and one of them
+//! is shooting at a visitor who has not touched anything. `crate::bots` owns
+//! what a bot does; what this file owns is the order it happens in and what a
+//! round that arrives takes off the player.
+//!
 //! ```text
 //!  Stage ──▶ BreachModule ──▶ Server ──┐                     ┌──▶ Client
 //!  (this file)                         └── InMemoryTransport ┘
@@ -74,8 +88,10 @@ use crcbl::phys::{
 };
 use crcbl::session::Loopback;
 
+use crate::bots::{self, Bot};
 use crate::camera::{EYE_HEIGHT, forward, walk_direction};
-use crate::map::{self, LANE_LIST, LANES};
+use crate::map::practice::{BOTS, BotView};
+use crate::map::{self, LANE_LIST, LANES, MapChoice};
 
 /// Distinct from every other sample's, because they are distinct protocols: a
 /// client built for one must not hand-shake with a server running another. The
@@ -121,10 +137,24 @@ pub const RANGE_M: f64 = 64.0;
 /// come back to it.
 pub const PLATE_RESET_S: f64 = 2.5;
 
-/// How often the `[HUD]` heartbeat is logged, in ticks: a second of simulated
-/// time at [`DEFAULT_TICK_HZ`], the cadence every sample's heartbeat is spaced
-/// at.
-pub const HEARTBEAT_TICKS: u64 = 60;
+/// How often the `[HUD]` heartbeat is logged, in ticks: **half** a second of
+/// simulated time at [`DEFAULT_TICK_HZ`].
+///
+/// Twice as often as every other sample's, and that is this demo's gate paying
+/// for itself. `web/tools/browser-e2e.mjs` reads a dozen claims out of this line
+/// — a walk that advances and stops, a shot that scores and one that does not, a
+/// view that turns, a patrol that walks, a sighting that cover breaks — and
+/// every one of them waits a whole number of heartbeats for its answer. On the
+/// software rasteriser the browser gate runs on, a simulated second is nearly
+/// three wall seconds, so the heartbeat period *is* what that gate costs: the
+/// Pages run of 2026-08-26 lost breach's step to a ten-minute cap with every
+/// assertion in it green. Halving the period halves the waiting and changes no
+/// claim.
+///
+/// What it costs is one more log line a second. The driver is told the shorter
+/// period through its `beatMs` row, so the slowdown it scales every other budget
+/// by stays a true reading of how far behind real time the demo is running.
+pub const HEARTBEAT_TICKS: u64 = 30;
 
 /// How long the warm-up spends on each lane, in seconds.
 pub const WARMUP_LANE_S: f64 = 2.4;
@@ -161,8 +191,11 @@ pub enum Aim {
     /// is a miss: the target has been taken, and taking it twice is not two
     /// hits.
     Downed,
-    /// Some other surface of the range — a wall, the floor, the ceiling, a
-    /// plate's post or the kerb.
+    /// A bot on the practice map, and which one. **The only other thing in
+    /// this sample that scores**, and the practice map's answer to a plate.
+    Bot(usize),
+    /// Some other surface of the map — a wall, the floor, the ceiling, a
+    /// plate's post, the kerb, or a block of cover.
     Range,
     /// Nothing inside [`RANGE_M`]. See that constant: on a closed room this is
     /// a report about the map rather than a thing a player can aim at.
@@ -176,6 +209,7 @@ impl Aim {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Plate(lane) => LANE_LIST[lane].label,
+            Self::Bot(bot) => map::practice::ROUTES[bot].label,
             Self::Downed => "down",
             Self::Range => "range",
             Self::Nothing => "none",
@@ -185,7 +219,7 @@ impl Aim {
     /// Whether a shot along this line scores.
     #[must_use]
     pub const fn scores(self) -> bool {
-        matches!(self, Self::Plate(_))
+        matches!(self, Self::Plate(_) | Self::Bot(_))
     }
 }
 
@@ -362,6 +396,54 @@ impl Intent {
 // The stage
 // ---------------------------------------------------------------------------
 
+/// The half of the stage that belongs to the map rather than to the player.
+///
+/// One arm per [`MapChoice`], because the two maps genuinely have nothing in
+/// common below the player: the range has plates on timers and a demonstration
+/// that runs itself, and the practice map has bots. A struct carrying both would
+/// give every range run an empty bot list to step and every practice run three
+/// plates nothing can hit.
+enum Arena {
+    /// The firing range.
+    Range(Plates),
+    /// The bot practice map.
+    Practice(Squad),
+}
+
+/// The range's own state.
+struct Plates {
+    /// The plates' colliders, near lane first — what a ray's answer is compared
+    /// against, and what a knock-down moves.
+    ids: [ColliderId; LANES],
+    /// When each plate stands back up, in [`Stage::elapsed`] seconds, or `None`
+    /// for a plate that is already standing.
+    down_until: [Option<f64>; LANES],
+    /// Whether the range is still running its own demonstration.
+    warming_up: bool,
+}
+
+/// The practice map's own state.
+struct Squad {
+    /// One bot per [`crate::map::practice::ROUTES`] row.
+    bots: Vec<Bot>,
+    /// What the player has left, out of [`bots::HEALTH_MAX`].
+    health: u32,
+    /// How many times they have been put down and respawned.
+    downs: u64,
+    /// How many rounds the bots have fired.
+    fired: u64,
+    /// How many of them reached the player. The difference between the two is
+    /// cover, and nothing else — see [`crate::bots`].
+    taken: u64,
+    /// How many bots had the player in sight at the end of the last tick, and
+    /// how many were in range and could not see them anyway.
+    ///
+    /// Kept rather than recomputed when the panel asks, because the answer is
+    /// three ray casts and the tick has already paid for them.
+    seen: usize,
+    covered: usize,
+}
+
 /// Everything this sample simulates.
 ///
 /// Behind an `Arc<Mutex<_>>` shared with [`BreachModule`], for the reason
@@ -369,9 +451,8 @@ impl Intent {
 /// reads the result, and the two are not the same call stack.
 struct Stage {
     world: PhysicsWorld,
-    /// The plates' colliders, near lane first — what a ray's answer is compared
-    /// against, and what a knock-down moves.
-    plates: [ColliderId; LANES],
+    /// Whichever of the two maps this run opened on.
+    arena: Arena,
     player: CharacterController,
     /// How fast the player is falling, in metres a second, negative downward.
     /// Zeroed the moment they are grounded.
@@ -381,13 +462,8 @@ struct Stage {
     /// plates' timers are measured against, so a paused demo's plates stay
     /// where they are.
     elapsed: f64,
-    /// When each plate stands back up, in [`Stage::elapsed`] seconds, or `None`
-    /// for a plate that is already standing.
-    down_until: [Option<f64>; LANES],
     shots: u64,
     hits: u64,
-    /// Whether the range is still running its own demonstration.
-    warming_up: bool,
     /// The angles the last tick actually walked and shot along.
     aim: (f32, f32),
     /// What the crosshair was on at the end of the last tick.
@@ -414,23 +490,51 @@ fn eye_of(player: &CharacterController) -> DVec3 {
 }
 
 impl Stage {
-    /// The player on the spawn, ungrounded until the first move finds the floor,
-    /// with every plate standing.
-    fn new() -> Self {
+    /// The player on `map`'s spawn, ungrounded until the first move finds the
+    /// floor, with the map's own furniture in its opening state.
+    fn new(map: MapChoice) -> Self {
         let config = CharacterConfig::default();
-        let centre = map::SPAWN + DVec3::Y * (config.radius + config.half_height);
-        let (world, plates) = map::world();
+        let lift = DVec3::Y * (config.radius + config.half_height);
+        let (world, arena, spawn) = match map {
+            MapChoice::Range => {
+                let (world, ids) = map::world();
+                (
+                    world,
+                    Arena::Range(Plates {
+                        ids,
+                        down_until: [None; LANES],
+                        warming_up: true,
+                    }),
+                    map::SPAWN,
+                )
+            }
+            MapChoice::Practice => {
+                let mut world = map::practice::world();
+                let bots = bots::spawn_all(&mut world);
+                (
+                    world,
+                    Arena::Practice(Squad {
+                        bots,
+                        health: bots::HEALTH_MAX,
+                        downs: 0,
+                        fired: 0,
+                        taken: 0,
+                        seen: 0,
+                        covered: 0,
+                    }),
+                    map::practice::SPAWN,
+                )
+            }
+        };
         Self {
             world,
-            plates,
-            player: CharacterController::new(config, centre),
+            arena,
+            player: CharacterController::new(config, spawn + lift),
             fall_speed: 0.0,
             ticks: 0,
             elapsed: 0.0,
-            down_until: [None; LANES],
             shots: 0,
             hits: 0,
-            warming_up: true,
             aim: (0.0, 0.0),
             crosshair: Aim::Nothing,
             outcome: MoveOutcome::default(),
@@ -438,9 +542,41 @@ impl Stage {
         }
     }
 
-    /// Which lane a collider is the plate of, if it is one.
-    fn lane_of(&self, id: ColliderId) -> Option<usize> {
-        self.plates.iter().position(|&plate| plate == id)
+    /// Which map this run opened on.
+    const fn map(&self) -> MapChoice {
+        match self.arena {
+            Arena::Range(_) => MapChoice::Range,
+            Arena::Practice(_) => MapChoice::Practice,
+        }
+    }
+
+    /// Whether the range is still running its own demonstration. Always false on
+    /// the practice map, which has bots walking about instead and hands the
+    /// controls over from the first tick.
+    const fn warming_up(&self) -> bool {
+        match &self.arena {
+            Arena::Range(plates) => plates.warming_up,
+            Arena::Practice(_) => false,
+        }
+    }
+
+    /// What a ray's answer means: a plate, a bot, or the room.
+    fn what_is(&self, id: ColliderId) -> Aim {
+        match &self.arena {
+            Arena::Range(plates) => match plates.ids.iter().position(|&plate| plate == id) {
+                // A plate whose collider is in its lying-down pose can still be
+                // hit — by a shot aimed at the floor — and that is a miss, not
+                // a second hit on a target already taken.
+                Some(lane) if plates.down_until[lane].is_some() => Aim::Downed,
+                Some(lane) => Aim::Plate(lane),
+                None => Aim::Range,
+            },
+            Arena::Practice(squad) => squad
+                .bots
+                .iter()
+                .position(|bot| bot.body() == id && bot.is_alive())
+                .map_or(Aim::Range, Aim::Bot),
+        }
     }
 
     /// Writes a plate's collider where it is now: standing or knocked flat, at
@@ -448,9 +584,16 @@ impl Stage {
     ///
     /// **The collider and nothing else**, since the mesh is the frame's
     /// business — [`RenderState`] is what carries the same two facts across.
+    ///
+    /// A no-op on a map with no plates on it, which is the honest shape: the
+    /// callers below are the range's own tick.
     fn set_plate(&mut self, lane: usize, down: bool) {
+        let Arena::Range(plates) = &self.arena else {
+            return;
+        };
+        let id = plates.ids[lane];
         let at = map::plate_collider(LANE_LIST[lane], map::plate_x(lane, self.elapsed), down);
-        self.world.set_box(self.plates[lane], at);
+        self.world.set_box(id, at);
     }
 }
 
@@ -533,12 +676,104 @@ fn warmup_fires(seconds: f64, dt: f64) -> bool {
 /// starts on rather than one that merely looks like it.
 fn reset_range(stage: &mut Stage) {
     for lane in 0..LANES {
-        if stage.down_until[lane].take().is_some() {
+        let was_down = match &mut stage.arena {
+            Arena::Range(plates) => plates.down_until[lane].take().is_some(),
+            Arena::Practice(_) => false,
+        };
+        if was_down {
             stage.set_plate(lane, false);
         }
     }
     stage.shots = 0;
     stage.hits = 0;
+}
+
+/// Stands the plates whose delay has expired back up, and moves the travelling
+/// one to where this instant puts it.
+///
+/// Run **before** the shot is resolved, so a plate whose delay expires on this
+/// tick can be taken again on it, and so a mover whose collider lagged its mesh
+/// is never a target that cannot be hit where it is drawn.
+fn step_plates(stage: &mut Stage) {
+    for lane in 0..LANES {
+        let due = match &stage.arena {
+            Arena::Range(plates) => {
+                plates.down_until[lane].is_some_and(|until| stage.elapsed >= until)
+            }
+            Arena::Practice(_) => false,
+        };
+        if due {
+            if let Arena::Range(plates) = &mut stage.arena {
+                plates.down_until[lane] = None;
+            }
+            stage.set_plate(lane, false);
+        }
+    }
+    let mover_down = match &stage.arena {
+        Arena::Range(plates) => plates.down_until[map::MOVER_LANE].is_some(),
+        Arena::Practice(_) => return,
+    };
+    stage.set_plate(map::MOVER_LANE, mover_down);
+}
+
+/// One tick of the practice map: every bot walks its patrol, looks for the
+/// player and takes its shot if one is due.
+///
+/// **Nothing here decides where a bot goes** — see [`crate::bots`], and
+/// `docs/plan/24-navigation.md` for why breach is not the sample that forces a
+/// navmesh. What this function owns is the order the three happen in and what a
+/// round that arrives does to the player.
+fn step_bots(stage: &mut Stage, dt: f64) {
+    let Stage {
+        world,
+        arena,
+        player,
+        fall_speed,
+        elapsed,
+        ..
+    } = stage;
+    let Arena::Practice(squad) = arena else {
+        return;
+    };
+    let now = *elapsed;
+
+    for bot in &mut squad.bots {
+        bot.patrol(world, now, dt);
+    }
+
+    // The sighting comes after the walk, so a bot that stepped out from behind
+    // the pillar this tick is seen on it rather than on the next one.
+    let eye = eye_of(player);
+    squad.seen = 0;
+    squad.covered = 0;
+    for index in 0..squad.bots.len() {
+        let in_sight = bots::has_line_of_sight(world, eye, &squad.bots[index]);
+        if in_sight {
+            squad.seen += 1;
+            squad.bots[index].notice(now);
+        } else if bots::is_within_notice(eye, &squad.bots[index]) {
+            squad.covered += 1;
+        }
+        if squad.bots[index].wants_to_shoot(now) {
+            squad.fired += 1;
+            // **The round is resolved along the segment the sighting is.** A
+            // bot that has just lost the player goes on shooting at where they
+            // were, and cover is what those rounds land in — which is the whole
+            // of the difference between `fired` and `taken`.
+            if in_sight {
+                squad.taken += 1;
+                squad.health = squad.health.saturating_sub(bots::BOT_DAMAGE);
+            }
+        }
+    }
+
+    if squad.health == 0 {
+        squad.health = bots::HEALTH_MAX;
+        squad.downs += 1;
+        let config = *player.config();
+        player.set_position(map::practice::SPAWN + DVec3::Y * (config.radius + config.half_height));
+        *fall_speed = 0.0;
+    }
 }
 
 /// One tick of the simulation: an intent in, a displacement and a ray through
@@ -548,11 +783,13 @@ fn run_tick(stage: &mut Stage, player: Intent, dt: f64) {
     // range. The same tick is the first one they drive, so the handover costs
     // nothing here — squaring the shooter up is the client's to do, because
     // the view is the client's: see [`RenderState::imposed_aim`].
-    if stage.warming_up && player.is_active() {
-        stage.warming_up = false;
+    if stage.warming_up() && player.is_active() {
+        if let Arena::Range(plates) = &mut stage.arena {
+            plates.warming_up = false;
+        }
         reset_range(stage);
     }
-    let intent = if stage.warming_up {
+    let intent = if stage.warming_up() {
         warmup(stage.elapsed, dt)
     } else {
         player
@@ -579,19 +816,14 @@ fn run_tick(stage: &mut Stage, player: Intent, dt: f64) {
     stage.blocked += u64::from(outcome.hit_wall);
     stage.outcome = outcome;
 
-    // Plates come back up **before** the shot is resolved, so a plate whose
-    // delay expires on this tick can be taken again on it. The alternative
-    // reads as a plate that is visibly standing and cannot be hit.
-    for lane in 0..LANES {
-        if stage.down_until[lane].is_some_and(|until| stage.elapsed >= until) {
-            stage.down_until[lane] = None;
-            stage.set_plate(lane, false);
-        }
+    // **The map's own furniture moves before the shot is resolved**: the
+    // range's plates come back up and its mover travels, and the practice map's
+    // bots walk, look and shoot. A target that had not been moved yet is one
+    // that cannot be hit where it is drawn.
+    match stage.map() {
+        MapChoice::Range => step_plates(stage),
+        MapChoice::Practice => step_bots(stage, dt),
     }
-    // And the travelling plate is moved to where this instant puts it, for the
-    // same reason and in the same window: a mover whose collider lagged its
-    // mesh is a target that cannot be hit where it is drawn.
-    stage.set_plate(map::MOVER_LANE, stage.down_until[map::MOVER_LANE].is_some());
 
     // **The shot conversion**, and the one ray this tick casts — see the module
     // docs for why the crosshair and the trigger share it.
@@ -601,10 +833,23 @@ fn run_tick(stage: &mut Stage, player: Intent, dt: f64) {
 
     if intent.fire {
         stage.shots += 1;
-        if let Aim::Plate(lane) = stage.crosshair {
-            stage.hits += 1;
-            stage.down_until[lane] = Some(stage.elapsed + PLATE_RESET_S);
-            stage.set_plate(lane, true);
+        match stage.crosshair {
+            Aim::Plate(lane) => {
+                stage.hits += 1;
+                if let Arena::Range(plates) = &mut stage.arena {
+                    plates.down_until[lane] = Some(stage.elapsed + PLATE_RESET_S);
+                }
+                stage.set_plate(lane, true);
+            }
+            Aim::Bot(index) => {
+                stage.hits += 1;
+                let now = stage.elapsed;
+                let Stage { world, arena, .. } = stage;
+                if let Arena::Practice(squad) = arena {
+                    squad.bots[index].down(world, now);
+                }
+            }
+            Aim::Downed | Aim::Range | Aim::Nothing => {}
         }
     }
 
@@ -619,14 +864,7 @@ fn trace(stage: &mut Stage, eye: DVec3, along: DVec3) -> Aim {
     let Some((id, _)) = stage.world.cast_ray(&ray) else {
         return Aim::Nothing;
     };
-    match stage.lane_of(id) {
-        // A plate whose collider is in its lying-down pose can still be hit —
-        // by a shot aimed at the floor — and that is a miss, not a second hit
-        // on a target already taken.
-        Some(lane) if stage.down_until[lane].is_some() => Aim::Downed,
-        Some(lane) => Aim::Plate(lane),
-        None => Aim::Range,
-    }
+    stage.what_is(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -677,6 +915,54 @@ fn lock(shared: &Arc<Mutex<Stage>>) -> MutexGuard<'_, Stage> {
 // What a frame reads
 // ---------------------------------------------------------------------------
 
+/// What a frame draws that belongs to the map rather than to the player.
+///
+/// An enum rather than a struct with both maps' fields on it, for `Arena`'s
+/// reason: a range frame has no bots to draw and a practice frame has no plates,
+/// and a caller that had to guess which half was live would guess wrong exactly
+/// once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scene {
+    /// The firing range's three plates.
+    Range {
+        /// Which are lying down, near lane first.
+        plates_down: [bool; LANES],
+        /// Where each is across the range, near lane first — the same
+        /// [`map::plate_x`] the colliders were written at, so the picture and
+        /// the physics are one instant rather than two.
+        plates_x: [f64; LANES],
+    },
+    /// The practice map's bots, and what the player has left.
+    Practice {
+        /// One view per [`crate::map::practice::ROUTES`] row.
+        bots: [BotView; BOTS],
+        /// The player's health, out of [`bots::HEALTH_MAX`].
+        health: u32,
+    },
+}
+
+impl Default for Scene {
+    /// The range as it stands before the first tick, because
+    /// [`MapChoice::default`] is the range.
+    fn default() -> Self {
+        Self::Range {
+            plates_down: [false; LANES],
+            plates_x: core::array::from_fn(|lane| map::plate_x(lane, 0.0)),
+        }
+    }
+}
+
+impl Scene {
+    /// Which map this is a frame of.
+    #[must_use]
+    pub const fn map(&self) -> MapChoice {
+        match self {
+            Self::Range { .. } => MapChoice::Range,
+            Self::Practice { .. } => MapChoice::Practice,
+        }
+    }
+}
+
 /// Everything the frame draws, snapshotted once per draw.
 ///
 /// A plain struct rather than a borrow of the stage: the frame runs on the
@@ -693,14 +979,11 @@ pub struct RenderState {
     /// Whether the player is standing on the floor.
     pub grounded: bool,
     /// Whether the last move was stopped by something too steep to stand on —
-    /// the firing line, or a wall.
+    /// the firing line, a block of cover, or a wall.
     pub blocked: bool,
-    /// Which plates are lying down, near lane first.
-    pub plates_down: [bool; LANES],
-    /// Where each plate is across the range, near lane first — the same
-    /// [`map::plate_x`] the colliders were written at, so the picture and the
-    /// physics are one instant rather than two.
-    pub plates_x: [f64; LANES],
+    /// What the map has in it, which is the half of the frame that differs
+    /// between the two.
+    pub scene: Scene,
     /// What the crosshair is on.
     pub crosshair: Aim,
     pub shots: u64,
@@ -726,6 +1009,75 @@ pub struct RenderState {
     pub imposed_aim: Option<(f32, f32)>,
 }
 
+/// The numbers that belong to one map or the other, for the panel and the
+/// `[HUD]` line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ArenaStats {
+    /// The firing range's.
+    Range {
+        /// Which plates are lying down, near lane first.
+        plates_down: [bool; LANES],
+        /// Where the travelling plate is across the range, in metres —
+        /// [`map::plate_x`] at [`map::MOVER_LANE`].
+        ///
+        /// **The one number on the range's heartbeat that nothing a player does
+        /// can move**, which is what `web/tools/browser-e2e.mjs` reads to tell
+        /// a running demo from a stalled one.
+        mover_x: f64,
+    },
+    /// The practice map's.
+    Practice {
+        /// How many bots are on their feet.
+        alive: usize,
+        /// How many of those have the player in sight this tick.
+        seen: usize,
+        /// How many are within [`bots::NOTICE_M`] and cannot see the player
+        /// anyway, because something is in the way.
+        ///
+        /// **The control for `seen`, on the line itself.** A build that noticed
+        /// unconditionally reports a `seen` that rises and a `covered` that is
+        /// always zero, which is the failure a sighting check on its own cannot
+        /// tell from success.
+        covered: usize,
+        /// What the player has left, out of [`bots::HEALTH_MAX`].
+        health: u32,
+        /// How many times they have been put down and respawned.
+        downs: u64,
+        /// How many rounds the bots have fired.
+        fired: u64,
+        /// How many of them reached the player. `fired` above `taken` is cover
+        /// having stopped a round — see [`crate::bots`].
+        taken: u64,
+        /// Where the first bot's feet are, in metres.
+        ///
+        /// **The number that says the patrol is walking**, and it is a *bot's*
+        /// rather than the player's: nothing on this map moves it but the
+        /// bot's own `move_and_slide`.
+        lead: DVec3,
+    },
+}
+
+impl Default for ArenaStats {
+    /// The range's, because [`MapChoice::default`] is the range.
+    fn default() -> Self {
+        Self::Range {
+            plates_down: [false; LANES],
+            mover_x: map::plate_x(map::MOVER_LANE, 0.0),
+        }
+    }
+}
+
+impl ArenaStats {
+    /// Which map these are the numbers of.
+    #[must_use]
+    pub const fn map(&self) -> MapChoice {
+        match self {
+            Self::Range { .. } => MapChoice::Range,
+            Self::Practice { .. } => MapChoice::Practice,
+        }
+    }
+}
+
 /// The stage's numbers, for the debug overlay.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats {
@@ -737,14 +1089,8 @@ pub struct Stats {
     pub shots: u64,
     pub hits: u64,
     pub crosshair: Aim,
-    pub plates_down: [bool; LANES],
-    /// Where the travelling plate is across the range, in metres —
-    /// [`map::plate_x`] at [`map::MOVER_LANE`].
-    ///
-    /// **The one number on this demo's heartbeat that nothing a player does can
-    /// move**, which is what `web/tools/browser-e2e.mjs` reads to tell a
-    /// running demo from a stalled one.
-    pub mover_x: f64,
+    /// Whichever map's numbers this run has.
+    pub arena: ArenaStats,
     pub warming_up: bool,
     /// Where the last tick was looking, in radians.
     pub aim: (f32, f32),
@@ -755,6 +1101,31 @@ impl Stats {
     #[must_use]
     pub fn accuracy(&self) -> Option<f64> {
         accuracy(self.shots, self.hits)
+    }
+}
+
+/// Whichever map's numbers this stage has, for [`Stats`].
+///
+/// A free function rather than a method because it reads the arena and the
+/// clock and nothing else, and because the two arms are what the panel and the
+/// `[HUD]` line branch on — keeping the branch here is what stops either of them
+/// growing its own.
+fn arena_stats(stage: &Stage) -> ArenaStats {
+    match &stage.arena {
+        Arena::Range(plates) => ArenaStats::Range {
+            plates_down: core::array::from_fn(|lane| plates.down_until[lane].is_some()),
+            mover_x: map::plate_x(map::MOVER_LANE, stage.elapsed),
+        },
+        Arena::Practice(squad) => ArenaStats::Practice {
+            alive: squad.bots.iter().filter(|bot| bot.is_alive()).count(),
+            seen: squad.seen,
+            covered: squad.covered,
+            health: squad.health,
+            downs: squad.downs,
+            fired: squad.fired,
+            taken: squad.taken,
+            lead: squad.bots.first().map_or(DVec3::ZERO, Bot::feet),
+        },
     }
 }
 
@@ -799,17 +1170,43 @@ impl crcbl::ui::DebugModule for Stats {
             None => section.row_str("accuracy", "--"),
         }
         section.row("aim", format_args!("{}", self.crosshair.label()));
-        for (lane, at) in LANE_LIST.iter().enumerate() {
-            section.row(
-                at.label,
-                format_args!(
-                    "{:.0} m  {}",
-                    at.distance(),
-                    if self.plates_down[lane] { "down" } else { "up" },
-                ),
-            );
+        section.row_str("map", self.arena.map().name());
+        match self.arena {
+            ArenaStats::Range {
+                plates_down,
+                mover_x,
+            } => {
+                for (lane, at) in LANE_LIST.iter().enumerate() {
+                    section.row(
+                        at.label,
+                        format_args!(
+                            "{:.0} m  {}",
+                            at.distance(),
+                            if plates_down[lane] { "down" } else { "up" },
+                        ),
+                    );
+                }
+                section.row("mover", format_args!("{mover_x:.2} m"));
+            }
+            ArenaStats::Practice {
+                alive,
+                seen,
+                covered,
+                health,
+                downs,
+                fired,
+                taken,
+                lead,
+            } => {
+                section.row("bots", format_args!("{alive}/{BOTS}"));
+                section.row("seen", format_args!("{seen}"));
+                section.row("covered", format_args!("{covered}"));
+                section.row("health", format_args!("{health}/{}", bots::HEALTH_MAX));
+                section.row("downs", format_args!("{downs}"));
+                section.row("incoming", format_args!("{taken}/{fired}"));
+                section.row("lead", format_args!("{:.1} {:.1}", lead.x, lead.z));
+            }
         }
-        section.row("mover", format_args!("{:.2} m", self.mover_x));
         section.row(
             "pilot",
             format_args!("{}", if self.warming_up { "range" } else { "player" }),
@@ -860,7 +1257,7 @@ impl std::fmt::Debug for Game {
 }
 
 impl Game {
-    /// Builds the server, its client and the stage between them.
+    /// Builds the server, its client and the stage between them, on `map`.
     ///
     /// # Errors
     ///
@@ -871,9 +1268,9 @@ impl Game {
     /// # Panics
     ///
     /// If `tick_hz` is zero.
-    pub fn new(tick_hz: u32) -> Result<Self, GameError> {
+    pub fn new(tick_hz: u32, map: MapChoice) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
-        let shared = Arc::new(Mutex::new(Stage::new()));
+        let shared = Arc::new(Mutex::new(Stage::new(map)));
 
         // An empty world, and that is the honest shape: this sample has no
         // entity and no ECS system. What the server hosts is the module, and
@@ -914,9 +1311,10 @@ impl Game {
         }
 
         crcbl::log::info!(
-            "sim: {tick_hz} Hz, {:.3} ms per tick, walking at {WALK_SPEED} m/s, \
+            "sim: {tick_hz} Hz, {:.3} ms per tick on the {} map, walking at {WALK_SPEED} m/s, \
              pistol reaching {RANGE_M} m",
             tick_period.as_secs_f64() * 1e3,
+            map.name(),
         );
         Ok(game)
     }
@@ -977,13 +1375,21 @@ impl Game {
             eye: eye_of(&stage.player),
             grounded: stage.outcome.grounded,
             blocked: stage.outcome.hit_wall,
-            plates_down: core::array::from_fn(|lane| stage.down_until[lane].is_some()),
-            plates_x: core::array::from_fn(|lane| map::plate_x(lane, stage.elapsed)),
+            scene: match &stage.arena {
+                Arena::Range(plates) => Scene::Range {
+                    plates_down: core::array::from_fn(|lane| plates.down_until[lane].is_some()),
+                    plates_x: core::array::from_fn(|lane| map::plate_x(lane, stage.elapsed)),
+                },
+                Arena::Practice(squad) => Scene::Practice {
+                    bots: bots::views(&squad.bots, stage.elapsed),
+                    health: squad.health,
+                },
+            },
             crosshair: stage.crosshair,
             shots: stage.shots,
             hits: stage.hits,
-            warming_up: stage.warming_up,
-            imposed_aim: stage.warming_up.then_some(stage.aim),
+            warming_up: stage.warming_up(),
+            imposed_aim: stage.warming_up().then_some(stage.aim),
         }
     }
 
@@ -1000,9 +1406,8 @@ impl Game {
             shots: stage.shots,
             hits: stage.hits,
             crosshair: stage.crosshair,
-            plates_down: core::array::from_fn(|lane| stage.down_until[lane].is_some()),
-            mover_x: map::plate_x(map::MOVER_LANE, stage.elapsed),
-            warming_up: stage.warming_up,
+            arena: arena_stats(&stage),
+            warming_up: stage.warming_up(),
             aim: stage.aim,
         }
     }
@@ -1015,14 +1420,53 @@ mod tests {
     /// One tick at the default rate.
     const DT: f64 = 1.0 / DEFAULT_TICK_HZ as f64;
 
-    /// A stage that has already found the floor, with the warm-up switched off
+    /// A range that has already found the floor, with the warm-up switched off
     /// so a test drives it, squared up down the near lane.
     fn ready() -> Stage {
-        let mut stage = Stage::new();
-        stage.warming_up = false;
+        let mut stage = Stage::new(MapChoice::Range);
+        if let Arena::Range(plates) = &mut stage.arena {
+            plates.warming_up = false;
+        }
         run_tick(&mut stage, Intent::default(), DT);
         assert!(stage.outcome.grounded, "the spawn has no floor under it");
         stage
+    }
+
+    /// A practice map that has already found the floor. It has no warm-up to
+    /// switch off — see the module docs.
+    fn practice() -> Stage {
+        let mut stage = Stage::new(MapChoice::Practice);
+        run_tick(&mut stage, Intent::default(), DT);
+        assert!(stage.outcome.grounded, "the spawn has no floor under it");
+        stage
+    }
+
+    /// Whether one of the range's plates is lying down.
+    ///
+    /// A helper so the assertions below read as claims about the range rather
+    /// than as a match on which arena the stage is in.
+    fn plate_down(stage: &Stage, lane: usize) -> bool {
+        match &stage.arena {
+            Arena::Range(plates) => plates.down_until[lane].is_some(),
+            Arena::Practice(_) => panic!("this stage has no plates"),
+        }
+    }
+
+    /// The practice map's numbers, whichever tick they were read on.
+    fn squad(stage: &Stage) -> (usize, usize, usize, u32, u64, u64, u64) {
+        match arena_stats(stage) {
+            ArenaStats::Practice {
+                alive,
+                seen,
+                covered,
+                health,
+                downs,
+                fired,
+                taken,
+                ..
+            } => (alive, seen, covered, health, downs, fired, taken),
+            ArenaStats::Range { .. } => panic!("this stage has no bots"),
+        }
     }
 
     /// Holds `intent` for `seconds`.
@@ -1117,7 +1561,7 @@ mod tests {
 
         shoot(&mut stage, 0.0, 0.0);
         assert_eq!((stage.shots, stage.hits), (1, 1));
-        assert!(stage.down_until[0].is_some(), "the plate did not go down");
+        assert!(plate_down(&stage, 0), "the plate did not go down");
 
         // A quarter turn puts the side wall in the crosshair, and nothing else.
         let aside = core::f32::consts::FRAC_PI_2;
@@ -1178,15 +1622,15 @@ mod tests {
     fn a_plate_comes_back_up_and_can_be_taken_again() {
         let mut stage = ready();
         shoot(&mut stage, 0.0, 0.0);
-        assert!(stage.down_until[0].is_some());
+        assert!(plate_down(&stage, 0));
 
         // Well short of the delay: still down.
         hold(&mut stage, Intent::default(), PLATE_RESET_S * 0.5);
-        assert!(stage.down_until[0].is_some(), "it stood up early");
+        assert!(plate_down(&stage, 0), "it stood up early");
         assert_eq!(stage.crosshair, Aim::Range, "the near lane is not clear");
 
         hold(&mut stage, Intent::default(), PLATE_RESET_S);
-        assert!(stage.down_until[0].is_none(), "it never stood back up");
+        assert!(!plate_down(&stage, 0), "it never stood back up");
         assert_eq!(stage.crosshair, Aim::Plate(0));
         shoot(&mut stage, 0.0, 0.0);
         assert_eq!((stage.shots, stage.hits), (2, 2));
@@ -1208,7 +1652,7 @@ mod tests {
                 "the bearing to the {} lane missed it",
                 at.label,
             );
-            assert!(stage.down_until[lane].is_some());
+            assert!(plate_down(&stage, lane));
         }
     }
 
@@ -1235,9 +1679,9 @@ mod tests {
     /// resets it.**
     #[test]
     fn the_warmup_runs_until_somebody_takes_the_controls() {
-        let mut stage = Stage::new();
+        let mut stage = Stage::new(MapChoice::Range);
         hold(&mut stage, Intent::default(), 3.0 * WARMUP_LANE_S);
-        assert!(stage.warming_up, "a page with no input keeps the warm-up");
+        assert!(stage.warming_up(), "a page with no input keeps the warm-up");
         assert!(stage.shots >= 3, "the warm-up fired {} shots", stage.shots);
         assert_eq!(
             stage.hits, stage.shots,
@@ -1247,7 +1691,10 @@ mod tests {
             stage.plates_down_count() > 0,
             "the warm-up never knocked anything down",
         );
-        assert!(stage.warming_up, "the camera is not following the warm-up",);
+        assert!(
+            stage.warming_up(),
+            "the camera is not following the warm-up",
+        );
 
         run_tick(
             &mut stage,
@@ -1259,7 +1706,7 @@ mod tests {
             DT,
         );
         assert!(
-            !stage.warming_up,
+            !stage.warming_up(),
             "a movement key did not take the controls"
         );
         assert_eq!((stage.shots, stage.hits), (0, 0), "the score did not reset");
@@ -1272,12 +1719,8 @@ mod tests {
 
         hold(&mut stage, Intent::default(), 2.0 * WARMUP_LANE_S);
         assert!(
-            !stage.warming_up,
+            !stage.warming_up(),
             "the warm-up came back after the player let go"
-        );
-        assert!(
-            !stage.warming_up,
-            "the camera never came back to the player"
         );
     }
 
@@ -1295,6 +1738,188 @@ mod tests {
                 .count();
             assert_eq!(fired, slots, "at {hz} Hz the warm-up fired {fired} times");
         }
+    }
+
+    /// **A bot in the open sees the player and a bot behind the pillar does
+    /// not**, read off the same pair of counters the browser gate does.
+    ///
+    /// The positive and its control in one run, with nobody touching anything:
+    /// a build that noticed unconditionally leaves `covered` at zero for ever,
+    /// and one that never noticed leaves `seen` there. The bots' own patrols
+    /// are what move them in and out of cover — see
+    /// [`crate::map::practice::ROUTES`].
+    #[test]
+    fn a_bot_in_the_open_is_seen_and_one_behind_the_pillar_is_not() {
+        let mut stage = practice();
+        let mut ever_seen = 0;
+        let mut ever_covered = 0;
+        // A whole lap of the longest patrol, which is when every bot has been
+        // on both sides of the pillar.
+        for _ in 0..(30.0 / DT) as u64 {
+            run_tick(&mut stage, Intent::default(), DT);
+            let (_, seen, covered, ..) = squad(&stage);
+            ever_seen = ever_seen.max(seen);
+            ever_covered = ever_covered.max(covered);
+        }
+        assert!(
+            ever_seen > 0,
+            "no bot ever saw the player standing in the open in front of them",
+        );
+        assert!(
+            ever_covered > 0,
+            "every bot saw the player from everywhere, so the cover does nothing",
+        );
+    }
+
+    /// **A bot's round takes the player's health, and a round with cover in the
+    /// way does not.** The second is the control for the first: a build whose
+    /// bots hit whatever they fired at reports `fired` and `taken` in step for
+    /// the whole run.
+    #[test]
+    fn a_round_that_arrives_costs_health_and_one_that_is_blocked_does_not() {
+        let mut stage = practice();
+        for _ in 0..(30.0 / DT) as u64 {
+            run_tick(&mut stage, Intent::default(), DT);
+        }
+        let (_, _, _, health, downs, fired, taken) = squad(&stage);
+        assert!(taken > 0, "nothing ever hit the player in thirty seconds");
+        assert!(
+            health < bots::HEALTH_MAX || downs > 0,
+            "the player took {taken} round(s) and still has {health} health",
+        );
+        assert!(
+            fired > taken,
+            "every one of the {fired} round(s) fired arrived, so cover stopped none of them",
+        );
+    }
+
+    /// **The player is put back on the spawn with their health when the bots
+    /// run them out of it**, rather than standing there at zero.
+    #[test]
+    fn the_player_respawns_when_the_bots_run_them_out_of_health() {
+        let mut stage = practice();
+        let mut downed = false;
+        for _ in 0..(120.0 / DT) as u64 {
+            run_tick(&mut stage, Intent::default(), DT);
+            if squad(&stage).4 > 0 {
+                downed = true;
+                break;
+            }
+        }
+        assert!(downed, "the bots never ran the player out of health");
+        let (_, _, _, health, ..) = squad(&stage);
+        assert_eq!(health, bots::HEALTH_MAX, "a respawn left the player hurt");
+        let feet = feet_of(&stage.player);
+        let position = stage.player.position();
+        assert!(
+            (position.x - map::practice::SPAWN.x).abs() < 0.1
+                && (position.z - map::practice::SPAWN.z).abs() < 0.1
+                && feet.abs() < 0.1,
+            "they came back at {:.2} {feet:.2} {:.2}",
+            position.x,
+            position.z,
+        );
+    }
+
+    /// **A shot at a bot puts it down, and it comes back on its own route.**
+    ///
+    /// Aimed at the bot the map keeps in the open, so this is a claim about
+    /// what a hit does rather than about whether one was possible. The control
+    /// is inside it: a downed bot is no longer something the crosshair reports,
+    /// which is what makes the second shot below meaningful.
+    #[test]
+    fn a_shot_at_a_bot_puts_it_down_and_it_gets_back_up() {
+        let mut stage = practice();
+        let (target, before) = (2, squad(&stage).0);
+        assert_eq!(
+            before,
+            map::practice::BOTS,
+            "a bot was down before the shot"
+        );
+
+        let eye = eye_of(&stage.player);
+        let at = match &stage.arena {
+            Arena::Practice(squad) => bots::eye_of(squad.bots[target].feet()),
+            Arena::Range(_) => unreachable!("this stage is the practice map"),
+        };
+        let (yaw, pitch) = aim_at(eye, at);
+        let (yaw, pitch) = (yaw as f32, pitch as f32);
+        run_tick(
+            &mut stage,
+            Intent {
+                yaw,
+                pitch,
+                ..Intent::default()
+            },
+            DT,
+        );
+        assert_eq!(
+            stage.crosshair,
+            Aim::Bot(target),
+            "the crosshair is on {:?} rather than on the bot it was pointed at",
+            stage.crosshair,
+        );
+
+        shoot(&mut stage, yaw, pitch);
+        assert_eq!((stage.shots, stage.hits), (1, 1));
+        assert_eq!(squad(&stage).0, before - 1, "the bot stayed on its feet");
+
+        // One more tick along the same bearing, because the crosshair is
+        // resolved *before* the trigger is on the tick that fires — so the
+        // reading that says the body has stopped stopping rays is the next
+        // one.
+        run_tick(
+            &mut stage,
+            Intent {
+                yaw,
+                pitch,
+                ..Intent::default()
+            },
+            DT,
+        );
+        assert_ne!(
+            stage.crosshair,
+            Aim::Bot(target),
+            "a downed bot is still what the crosshair reports",
+        );
+
+        hold(&mut stage, Intent::default(), bots::BOT_RESPAWN_S + 1.0);
+        assert_eq!(squad(&stage).0, before, "the bot never got back up");
+    }
+
+    /// **The practice map hands the controls over from the first tick**, and
+    /// therefore never imposes an aim on the camera: it has three bots walking
+    /// about in it, which is what the range needs a demonstration to stand in
+    /// for.
+    #[test]
+    fn the_practice_map_has_no_warm_up_because_it_does_not_need_one() {
+        let mut stage = Stage::new(MapChoice::Practice);
+        hold(&mut stage, Intent::default(), 3.0 * WARMUP_LANE_S);
+        assert!(!stage.warming_up(), "the practice map ran a demonstration");
+        assert_eq!(
+            stage.shots, 0,
+            "something pulled the player's trigger for them",
+        );
+        // And the bots are what is moving instead. Read off the same field the
+        // `[HUD]` line carries, which is a *bot's* position and not the
+        // player's — a stage that moved the player would fail this.
+        let lead = match arena_stats(&stage) {
+            ArenaStats::Practice { lead, .. } => lead,
+            ArenaStats::Range { .. } => unreachable!("this stage is the practice map"),
+        };
+        assert!(
+            (lead - map::practice::ROUTES[0].waypoints[0]).length() > 1.0,
+            "the first bot is still on its first waypoint at {lead}",
+        );
+        assert!(
+            (stage.player.position()
+                - (map::practice::SPAWN
+                    + DVec3::Y
+                        * (stage.player.config().radius + stage.player.config().half_height)))
+                .length()
+                < 0.05,
+            "the player moved without being asked to",
+        );
     }
 
     /// **The wire is validated rather than trusted.** These are the only bytes
@@ -1411,7 +2036,7 @@ mod tests {
         /// How many plates are lying down — a test helper, so the assertions
         /// above read as claims rather than as index arithmetic.
         fn plates_down_count(&self) -> usize {
-            self.down_until.iter().filter(|down| down.is_some()).count()
+            (0..LANES).filter(|&lane| plate_down(self, lane)).count()
         }
     }
 }

@@ -1,9 +1,9 @@
 //! Breach — a first-person firing range, on the same controller `apps/puppet`
 //! walks.
 //!
-//! `docs/plan/sample/11-breach.md`, **milestone 0, slice 1**: the web slice's
-//! firing range, single player, running natively and in a browser from one
-//! build.
+//! `docs/plan/sample/11-breach.md`, **milestone 0**: the web slice's firing
+//! range *and* its bot practice map, single player, running natively and in a
+//! browser from one build.
 //!
 //! # What it proves
 //!
@@ -31,6 +31,14 @@
 //!                                                    │
 //!                                    Aim ────────────┴──▶ crosshair, score, plates
 //! ```
+//!
+//! # Two maps
+//!
+//! [`MapChoice`] picks between them, `--map` sets it on a command line and
+//! `__crcbl_breach_map` sets it from a page — the shape `apps/horde`'s
+//! `--prefill` already has. The browser's default is the range, so
+//! `/demos/breach/` is the page it has always been and `?map=practice` is what
+//! asks for the other one.
 //!
 //! # The range
 //!
@@ -74,21 +82,37 @@
 //! `IndirectPerBatch` and `LightingPath::Rasterised` by construction — which is
 //! why milestone 0 is built before the native game rather than after it.
 //!
+//! # The practice map
+//!
+//! [`map::practice`] is the second greybox room: a pillar and two crates for
+//! cover, and three bots on **authored patrol routes**. Each walks its list of
+//! waypoints through the same [`crcbl::phys::CharacterController`], notices the
+//! player with the same [`crcbl::phys::PhysicsWorld::cast_ray`] the pistol is,
+//! and shoots back on a fixed cadence with that same pistol. The player has
+//! health and respawns; the bots go down when they are shot and come back.
+//!
+//! **There is no navmesh and no pathfinding.** `docs/plan/24-navigation.md` is a
+//! post-MVP subsystem whose own text names `arena`'s bots as its forcing
+//! function rather than breach's, and [`bots`] is where the argument lives —
+//! along with why the sighting ray is cast from the player's end.
+//!
 //! # What is not here yet
 //!
-//! **Slice 1 is the range and nothing else.** No bots and no bot practice map;
-//! no weapon but the one hitscan pistol — no ballistics, no penetration, no
-//! armour, no ADS, no recoil, no reload and no viewmodel; no inventory, no
-//! rounds, no economy and no networking beyond the in-memory loopback every
-//! sample has. Those are milestone 0's other half and milestones 1 onward, and
-//! `docs/backlog.md` carries the list with what each would take.
+//! **Milestone 0 is two maps and nothing else.** No weapon but the one hitscan
+//! pistol — no ballistics, no penetration, no armour, no ADS, no recoil, no
+//! reload and no viewmodel; no inventory, no rounds, no economy and no
+//! networking beyond the in-memory loopback every sample has. Those are
+//! milestones 1 onward, and `docs/backlog.md` carries the list with what each
+//! would take.
 //!
 //! Two things are absent from the picture rather than merely from the feature
 //! list, and both are deliberate: **the player is invisible**, because a
 //! first-person slice with no viewmodel has nothing to draw of them and a
-//! borrowed rig would be a second character system to maintain; and **the room
-//! is lit by lamps rather than by a sun**, because it has a ceiling —
-//! [`map::house_light`] says so where the light is built.
+//! borrowed rig would be a second character system to maintain — and on the
+//! practice map that goes further than cosmetics, since a player with no body
+//! is a player the bots walk through; and **the rooms are lit by lamps rather
+//! than by a sun**, because they have ceilings — [`map::house_light`] says so
+//! where the light is built.
 //!
 //! # Rule 11 does not apply
 //!
@@ -97,7 +121,7 @@
 //! picture against — pixel art in front of it would be showing the wrong
 //! system. `docs/plan/sample/11-breach.md` does ask for it, and names what for:
 //! the grid inventory's item icons, the buy menu, the killfeed and the
-//! scoreboard. Slice 1 has none of those.
+//! scoreboard. Milestone 0 has none of those.
 //!
 //! # One library, two front ends
 //!
@@ -108,6 +132,7 @@
 
 pub mod app;
 mod args;
+pub mod bots;
 pub mod camera;
 pub mod game;
 mod gpu;
@@ -119,9 +144,13 @@ pub mod page;
 pub mod web;
 
 pub use app::{Breach, BreachError, Loop, PendingLoop, Summary, run, start, with_shell};
+pub use args::request_map;
 pub use args::{Invocation, Options, USAGE, parse};
 pub use camera::{Eye, forward, walk_direction};
-pub use game::{Aim, Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Stats};
+pub use game::{
+    Aim, ArenaStats, Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Scene, Stats,
+};
 pub use gpu::{Gpu, Paths};
+pub use map::MapChoice;
 pub use menu::{MenuKind, Menus};
 pub use page::PageStats;

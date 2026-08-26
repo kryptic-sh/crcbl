@@ -7,9 +7,9 @@
 //!  │ HITS          5  │
 //!  │ ACCURACY    83%  │              ─┼─
 //!  │ AIM        near  │
-//!  │ NEAR   8 m  DOWN │
-//!  │ MID   12 m    UP │
-//!  │ FAR   18 m    UP │
+//!  │ NEAR   8 m  DOWN │        …and on the practice map the last four rows
+//!  │ MID   12 m    UP │        are the player's health and what each bot is
+//!  │ FAR   18 m    UP │        doing: PATROL, ONTO YOU, or DOWN.
 //!  └──────────────────┘
 //!
 //!        W/A/S/D walk   mouse or the arrows look   SPACE fires
@@ -43,17 +43,23 @@ use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::text::FontAtlas;
 use crcbl::ui::widget::NATURAL_FONT_SIZE;
 
-use crate::game::{RenderState, accuracy};
-use crate::map::{LANE_LIST, LANES};
+use crate::bots::HEALTH_MAX;
+use crate::game::{RenderState, Scene, accuracy};
+use crate::map::LANE_LIST;
 
 const PANEL_BG: [f32; 4] = [0.06, 0.07, 0.11, 0.80];
 const BORDER: [f32; 4] = [0.34, 0.38, 0.48, 1.0];
 const LABEL: [f32; 4] = [0.66, 0.70, 0.80, 1.0];
 const VALUE: [f32; 4] = [0.95, 0.96, 1.0, 1.0];
-/// What a lane is drawn in while its plate is lying down — the one piece of
-/// state on this panel worth a colour, and the same orange the plate itself is
-/// drawn in ([`crate::map::PLATE_DOWN_MATERIAL`]).
+/// What a lane is drawn in while its plate is lying down, and what a bot that
+/// has noticed the player is drawn in — the one piece of state on this panel
+/// worth a colour, and the same orange the plate and the bot themselves are
+/// drawn in ([`crate::map::PLATE_DOWN_MATERIAL`],
+/// [`crate::map::practice::BOT_ALERT_MATERIAL`]).
 const DOWN: [f32; 4] = [0.95, 0.55, 0.36, 1.0];
+
+/// What the health reading is drawn in once it has been shot down to a third.
+const HURT: [f32; 4] = [0.95, 0.40, 0.36, 1.0];
 
 /// The crosshair over nothing worth shooting.
 const CROSSHAIR: [f32; 4] = [0.86, 0.89, 0.95, 0.85];
@@ -111,7 +117,7 @@ pub fn draw(
     let width = extent.0 as f32;
     let height = extent.1 as f32;
 
-    let mut rows: Vec<(&str, String, [f32; 4])> = Vec::with_capacity(4 + LANES);
+    let mut rows: Vec<(&str, String, [f32; 4])> = Vec::with_capacity(8);
     rows.push(("SHOTS", format!("{}", state.shots), VALUE));
     rows.push(("HITS", format!("{}", state.hits), VALUE));
     rows.push((
@@ -131,17 +137,49 @@ pub fn draw(
             VALUE
         },
     ));
-    for (lane, at) in LANE_LIST.iter().enumerate() {
-        let down = state.plates_down[lane];
-        rows.push((
-            at.label,
-            format!(
-                "{:.0} m  {}",
-                at.distance(),
-                if down { "DOWN" } else { "UP" }
-            ),
-            if down { DOWN } else { VALUE },
-        ));
+    match &state.scene {
+        Scene::Range { plates_down, .. } => {
+            for (lane, at) in LANE_LIST.iter().enumerate() {
+                let down = plates_down[lane];
+                rows.push((
+                    at.label,
+                    format!(
+                        "{:.0} m  {}",
+                        at.distance(),
+                        if down { "DOWN" } else { "UP" }
+                    ),
+                    if down { DOWN } else { VALUE },
+                ));
+            }
+        }
+        Scene::Practice { bots, health } => {
+            // The player's own state first, because on this map it is the one
+            // reading that decides what happens next.
+            rows.push((
+                "HEALTH",
+                format!("{health}"),
+                if *health * 3 <= HEALTH_MAX {
+                    HURT
+                } else {
+                    VALUE
+                },
+            ));
+            for (view, route) in bots.iter().zip(crate::map::practice::ROUTES) {
+                rows.push((
+                    route.label,
+                    if view.alive {
+                        if view.alerted { "ONTO YOU" } else { "PATROL" }.to_string()
+                    } else {
+                        "DOWN".to_string()
+                    },
+                    if view.alive && !view.alerted {
+                        VALUE
+                    } else {
+                        DOWN
+                    },
+                ));
+            }
+        }
     }
 
     let panel_height = 2.0f32.mul_add(PANEL_PAD, rows.len() as f32 * ROW_HEIGHT);
@@ -216,13 +254,38 @@ mod tests {
     use crate::game::Aim;
     use crcbl::ui::draw_list::DrawCommand;
 
+    /// The readings the practice map would show with a bot onto the player, one
+    /// down and the player hurt — the longest strings this panel ever draws.
+    fn under_fire() -> RenderState {
+        use crate::map::practice::BotView;
+        RenderState {
+            shots: 2,
+            hits: 1,
+            crosshair: Aim::Bot(0),
+            scene: Scene::Practice {
+                bots: core::array::from_fn(|index| BotView {
+                    alive: index != 2,
+                    alerted: index == 0,
+                    ..BotView::default()
+                }),
+                health: 16,
+            },
+            ..RenderState::default()
+        }
+        // One view per route, which is what the panel iterates against.
+        // `from_fn` is sized by the array type, so this cannot drift.
+    }
+
     /// The readings a run part way through a string would show.
     fn shooting() -> RenderState {
         RenderState {
             shots: 6,
             hits: 5,
             crosshair: Aim::Plate(0),
-            plates_down: [true, false, false],
+            scene: Scene::Range {
+                plates_down: [true, false, false],
+                plates_x: [0.0; crate::map::LANES],
+            },
             ..RenderState::default()
         }
     }
@@ -385,6 +448,58 @@ mod tests {
                 pos.x >= PANEL_INSET
                     && pos.x + atlas.text_width(text, NATURAL_SCALE) <= panel_right,
                 "{text:?} is outside the panel's {PANEL_INSET}..{panel_right} columns: {pos:?}",
+            );
+        }
+    }
+
+    /// **The practice map's panel carries what that map is about, and fits.**
+    ///
+    /// Its readings are words rather than numbers — `ONTO YOU` is the longest
+    /// string this panel ever right-aligns — so a [`PANEL_WIDTH`] that suits the
+    /// range's `18 m  DOWN` can still push one of them off the panel, and
+    /// nothing about the range's own layout test would see it.
+    #[test]
+    fn the_practice_panel_names_every_bot_and_fits_inside_the_panel() {
+        let atlas = FontAtlas::built_in();
+        let mut list = DrawList::new();
+        let extent = (960u32, 720u32);
+        draw(&mut list, &atlas, extent, &under_fire());
+
+        let drawn: Vec<(Vec2, &str)> = list
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { pos, text, .. } => Some((*pos, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        let words: Vec<&str> = drawn.iter().map(|(_, text)| *text).collect();
+        assert!(words.contains(&"HEALTH"), "no health reading: {words:?}");
+        assert!(
+            words.contains(&"16"),
+            "the health reading is wrong: {words:?}"
+        );
+        for route in crate::map::practice::ROUTES {
+            assert!(
+                words.contains(&route.label),
+                "{} is not on the panel: {words:?}",
+                route.label,
+            );
+        }
+        for state in ["ONTO YOU", "PATROL", "DOWN"] {
+            assert!(words.contains(&state), "no bot reads {state}: {words:?}");
+        }
+        // And no lane is named, because this map has none.
+        for lane in LANE_LIST {
+            assert!(!words.contains(&lane.label), "the range's lanes are here");
+        }
+
+        let panel_right = PANEL_INSET + PANEL_WIDTH;
+        for (pos, text) in drawn.iter().filter(|(_, text)| *text != HINT) {
+            let end = pos.x + atlas.text_width(text, NATURAL_SCALE);
+            assert!(
+                pos.x >= PANEL_INSET && end <= panel_right,
+                "{text:?} runs to {end} past the panel's {panel_right} columns",
             );
         }
     }

@@ -4,10 +4,11 @@
   "slug": "breach",
   "name": "Breach",
   "title": "Breach — Crucible",
-  "description": "A first-person firing range on Crucible's swept-capsule controller: one hitscan pistol, three lanes, drawing through WebGPU.",
+  "description": "A first-person firing range and a bot practice map on Crucible's swept-capsule controller: one hitscan pistol, bots on authored patrols, drawing through WebGPU.",
   "nav": [
     { "href": "/", "label": "all demos" },
     { "href": "#controls", "label": "controls" },
+    { "href": "?map=practice", "label": "practice map" },
     { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/breach", "label": "source" }
   ],
   "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/breach\">apps/breach</a>",
@@ -25,8 +26,10 @@ meta-->
   <p class="tagline">
     A firing range, seen from inside the shooter's head. One pistol, three
     lanes, and a line you cannot walk past. It exists to prove that the
-    character controller behind puppet does not know which camera is watching
-    it.
+    character controller behind puppet does not know which camera is watching it
+    — and there is a
+    <a href="?map=practice">bot practice map</a> next door where three of them
+    walk patrols and shoot back.
   </p>
 </header>
 
@@ -112,10 +115,42 @@ meta-->
     fallback nobody proved.
   </p>
   <p>
-    <strong>This is the first slice of a much larger sample.</strong> There are
-    no bots, no second map, no weapon but this one, no armour, no ballistics and
-    no rounds. The plan for the rest is in the repository.
+    <strong>This is the first milestone of a much larger sample.</strong> There
+    is no weapon but this one, no armour, no ballistics and no rounds. The plan
+    for the rest is in the repository.
   </p>
   <!--include demo-console-note-->
+</section>
+
+<section id="practice">
+  <h2>the practice map</h2>
+  <h3>
+    <a href="?map=practice">?map=practice</a> opens the other room, from the
+    same build.
+  </h3>
+  <p>
+    Three bots walk <strong>authored patrol routes</strong> — a list of
+    waypoints somebody wrote down — through the same swept-capsule controller
+    you walk through. There is no navmesh and no pathfinding anywhere in this
+    demo, and that is a scope decision rather than an omission: navigation is a
+    later subsystem, and the sample that forces it is a different one.
+  </p>
+  <p>
+    What the bots do have is <strong>sight</strong>. A bot notices you when
+    nothing is between its eye and yours, and that question is the same
+    <code>cast_ray</code> the pistol is — so the pillar in the middle of the
+    room genuinely blocks it. Walk behind it and the panel says so; watch a bot
+    cross the far side of its circuit and you can see it lose you and pick you
+    up again. They shoot back on a fixed cadence, they keep shooting for a
+    moment after they lose you, and those rounds go into whatever is now in the
+    way.
+  </p>
+  <p>
+    You have health, and they will run you out of it if you stand in the open.
+    Shooting a bot puts it down; it gets back up on its route a few seconds
+    later. That is the whole of the behaviour — patrol, notice, shoot, lose
+    interest. No squads, no flanking, no difficulty. A practice map is supposed
+    to be something you can read.
+  </p>
 </section>
 <!--/body-->

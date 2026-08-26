@@ -14,17 +14,24 @@
 //!
 //! What is left here is what is genuinely breach's: the
 //! [`WebPending`](crcbl::web::WebPending) impl, which opens the sample with its
-//! own [`Options`]. The symbol names stay here too, written out one per line —
-//! two demos can be open in one browser and the exports must not collide, so the
-//! macro takes each name as an argument rather than building it from a prefix.
+//! own [`Options`], and [`__crcbl_breach_map`], which is `--map` reachable from
+//! a page. The symbol names stay here too, written out one per line — two demos
+//! can be open in one browser and the exports must not collide, so the macro
+//! takes each name as an argument rather than building it from a prefix.
 //!
 //! # What the page shows, and what decides it
 //!
 //! `Options::default()` is the whole of the page's configuration: a page has no
-//! argv, so the range, the tick rate and the pistol are the ones the binary
-//! opens with. What a visitor sees is the range shooting itself within a second
-//! of arriving, and their first step or trigger pull taking it over —
-//! [`crate::game`] carries that argument.
+//! argv, so the tick rate and the pistol are the ones the binary opens with, and
+//! the map is whichever [`__crcbl_breach_map`] was last told — the **firing
+//! range** unless something asked otherwise, which is what keeps
+//! `/demos/breach/` the page it has always been.
+//!
+//! What a visitor sees on the range is it shooting itself within a second of
+//! arriving, and their first step or trigger pull taking it over —
+//! [`crate::game`] carries that argument. What they see on `?map=practice` is
+//! three bots already walking their patrols, and one of them already shooting
+//! at them: that map needs no warm-up because it is not empty.
 //!
 //! # This page is `docs/plan/sample/11-breach.md`'s milestone 0, and no more
 //!
@@ -67,6 +74,7 @@
 //! | --- | --- | --- |
 //! | [`__crcbl_breach_prepare`] | `() -> i32` | Install the log sink and the browser storage backends. **First call**, before any `__crcbl_web_fetch_*` or `__crcbl_web_opfs_*`. `1`, or `0` if it was already called. |
 //! | [`__crcbl_breach_log_level`] | `(i32) -> i32` | Set the log filter: `0` off … `5` trace. `1`/`0`. |
+//! | [`__crcbl_breach_map`] | `(u32) -> u32` | Which map to open, as an index into [`MapChoice::ALL`](crate::map::MapChoice::ALL). **Before `boot`**. `1` if it was recorded, `0` if it was refused. |
 //! | [`__crcbl_breach_boot`] | `() -> i32` | Open the shell on the canvas `__crcbl_web_canvas` announced, create the window, start the polled device request. `1`/`0`. |
 //! | [`__crcbl_breach_frame`] | `(f64) -> i32` | One `requestAnimationFrame`, given `performance.now()`. Returns the new status. |
 //! | [`__crcbl_breach_status`] | `() -> i32` | The status, without advancing anything. |
@@ -94,6 +102,7 @@
 //!   → fetch pre-load       (__crcbl_web_fetch_*)
 //!   → OPFS restore + ready (__crcbl_web_opfs_*)
 //! __crcbl_web_canvas(id)                     // which canvas this instance drives
+//! __crcbl_breach_map(n)                     // optional; before boot()
 //! __crcbl_breach_boot()                     // shell + window; no size yet
 //! rAF loop, every frame:
 //!   __crcbl_web_resize(id, w, h, dpr)        // from ResizeObserver, when it changes
@@ -109,6 +118,7 @@
 
 use crate::app::{Loop, PendingLoop};
 use crate::args::Options;
+use crate::map::MapChoice;
 
 // The status codes and the asset base are the shim's wire format, so they have
 // exactly one definition; see [`crcbl::web`]. Re-exported rather than reached
@@ -136,6 +146,40 @@ pub use crcbl::web::{
 // would let that resolve to the trait method instead — which is the infinite
 // recursion the guard exists to catch. See `crcbl::impl_web_pending`.
 crcbl::impl_web_pending!(PendingLoop, Loop, Options, crate::app::BreachError);
+
+// ---------------------------------------------------------------------------
+// Which map, reachable from a page
+// ---------------------------------------------------------------------------
+
+/// Opens the run on [`MapChoice::ALL`]`[map]` rather than on the default one.
+///
+/// **This is `--map`, reachable from a page**, and it is the same code path:
+/// `crate::app`'s `assemble` reads [`Options::map`](crate::args::Options) and
+/// hands it to both the simulation and the renderer, whether the options came
+/// from a command line or from here. `web/demos/breach/main.js` is what turns a
+/// `?map=` query into this call, so the name a visitor types and the name
+/// `--map` takes are one table — [`MapChoice::from_name`].
+///
+/// **Call it before [`__crcbl_breach_boot`]**, because that is what builds the
+/// game: the value is read once, when the options are taken. Answers `1` if the
+/// choice was recorded and `0` if it was refused — either because start-up has
+/// already gone past the point where it would be read, or because `map` is not
+/// an index into [`MapChoice::ALL`]. Those are the only two mistakes a page can
+/// make with it, and both leave the run on the map it would have opened anyway.
+#[unsafe(no_mangle)]
+pub extern "C" fn __crcbl_breach_map(map: u32) -> u32 {
+    if __crcbl_breach_status() > STATUS_PREPARED {
+        return 0;
+    }
+    let Ok(index) = usize::try_from(map) else {
+        return 0;
+    };
+    let Some(&choice) = MapChoice::ALL.get(index) else {
+        return 0;
+    };
+    crate::args::request_map(choice);
+    1
+}
 
 // ---------------------------------------------------------------------------
 // Exports
