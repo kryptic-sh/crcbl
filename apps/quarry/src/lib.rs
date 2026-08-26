@@ -18,7 +18,7 @@
 //!
 //! # What is here so far
 //!
-//! Milestones 1 to 4, less the two overlays milestone 2 owes. [`face`]
+//! Milestones 1 to 4, whole. [`face`]
 //! generates the content, [`scene`] describes it as one flat mesh and [`dag`]
 //! as a cluster hierarchy,
 //! and `tests/device/residency.rs` draws both through the real renderer on an

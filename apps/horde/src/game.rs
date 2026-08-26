@@ -827,10 +827,12 @@ const SPAWN_BURST_CAP: u32 = 64;
 ///
 /// **1500, not the plan's 10,000, and that is a decision rather than an
 /// oversight.** The exit criterion of `docs/plan/sample/03-horde.md` is 10k at
-/// 60 fps and 60 Hz, and the roadmap puts that behind P7 (GPU-driven rendering)
-/// and P8 (`crcbl-jobs`), neither of which exists. The sub-slice that raises
-/// this and measures where it breaks is the one after next; `--max-enemies` is
-/// here so raising it needs no rebuild.
+/// 60 fps and 60 Hz. Both phases the roadmap put that behind have since moved:
+/// P7's GPU-driven half landed, and `crcbl-jobs` ships — this file's own
+/// `steer_enemies` runs on its pool. What has not happened is the sub-slice
+/// that raises this number and measures where it breaks, so the ceiling stays
+/// where it was last measured rather than where the plan wants it.
+/// `--max-enemies` is here so raising it needs no rebuild.
 pub const DEFAULT_MAX_ENEMIES: usize = 1_500;
 
 /// The gap between spawns after `elapsed` seconds of a run.
