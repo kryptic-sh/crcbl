@@ -584,6 +584,58 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument for the other end of that controller, which is breach's
+# whole subject. Every other check in the driver passes against a page whose
+# input path is severed: that demo runs a target across its far lane on a timer,
+# so `moving` goes on reporting a range that advances and a canvas that changes
+# while nothing a player did ever reached `move_and_slide` or `cast_ray`.
+# `breach` alone, because it is the only demo shot from inside the shooter's
+# head.
+#
+# Three names are matched rather than six, and they are the block's *controls* —
+# the halves worth deleting when a slow machine makes them flake. Each is what
+# stops a positive passing for the wrong reason:
+#
+#  - 'and stops where they are when the key is released' is what says the walk
+#    key is what moved the player. Without it, "the player advances" passes for
+#    a demo that drifts.
+#  - 'and a shot aimed away from every plate does not score' is what says the
+#    pistol resolves a ray rather than counting trigger pulls. Without it, "a
+#    shot scores a hit" passes for a build that scored on everything.
+#  - 'a look key turns the view' carries its own control inside it — the view
+#    has to have been standing still before the key went down — and without the
+#    whole check nothing on this page asks whether the view can be aimed at all.
+#
+# Renaming any of them in the driver is meant to fail here and be renamed here
+# too.
+case "$DEMO" in
+    breach)
+        STOPPED="$(grep -F 'and stops where they are when the key is released' "${OUTPUT}.plain" || true)"
+        if [ -z "$STOPPED" ]; then
+            echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
+            echo "               'the player advances' has no control, and it passes" >&2
+            echo "               for a demo that drifts on its own" >&2
+            exit 1
+        fi
+        MISSED="$(grep -F 'and a shot aimed away from every plate does not score' "${OUTPUT}.plain" || true)"
+        if [ -z "$MISSED" ]; then
+            echo "crcbl web e2e: the driver never fired $DEMO's pistol at anything but a" >&2
+            echo "               target; 'a shot at a plate scores a hit' has no control," >&2
+            echo "               and it passes for a build that scores on every trigger" >&2
+            echo "               pull" >&2
+            exit 1
+        fi
+        LOOKED="$(grep -F 'a look key turns the view' "${OUTPUT}.plain" || true)"
+        if [ -z "$LOOKED" ]; then
+            echo "crcbl web e2e: the driver never asked whether $DEMO's view can be" >&2
+            echo "               turned; nothing else on that page reads the angle the" >&2
+            echo "               shot is aimed along, and a browser has no mouselook to" >&2
+            echo "               fall back on" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the same argument once more for the budget, which is sparks' whole
 # subject. Every other check in the driver passes against a page whose particles
 # never retire and whose pool budget is not enforced: `moving` reads a count,

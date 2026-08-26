@@ -96,6 +96,7 @@ SAMPLES=(
     "asteroids 960x720"
     "bare 960x720"
     "bracket 960x720"
+    "breach 960x720"
     "breakout 960x720"
     "flappy 960x720"
     "horde 960x720"

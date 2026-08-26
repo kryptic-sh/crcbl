@@ -1,0 +1,32 @@
+[package]
+name = "breach"
+description = "Breach — first-person firing range: one hitscan pistol, three lanes, the same character controller puppet drives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# `cdylib` for the browser demo, `rlib` so the binary and the tests share one
+# crate — the same pair every sample uses. See `apps/breakout/Cargo.toml` for
+# why both names are needed.
+[lib]
+name = "crcbl_breach"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "breach"
+path = "src/main.rs"
+
+# One engine dependency, like every other sample — with the `greybox` feature
+# on, which is what the range is built out of. The room is a floor, four walls,
+# a ceiling, a firing line and three target plates, and every one of them is a
+# `crcbl::greybox` primitive over one set of numbers `src/map.rs` also writes
+# the colliders from. The `scene` feature stays off: nothing here imports a
+# glTF document, and slice 1's player is invisible, so there is no character
+# asset either.
+[dependencies]
+crcbl = { workspace = true, features = ["greybox"] }
+
+[lints]
+workspace = true

@@ -3,6 +3,125 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `apps/breach` is milestone 0's first slice, and the rest of it is not built
+
+`docs/plan/sample/11-breach.md`'s milestone 0 is "firing range **+ bot practice
+map**, single player, rasterised lighting and both geometry fallbacks, shipped
+on the Pages site". `apps/breach` is the firing range half. What is deliberately
+absent, in the order that doc puts it:
+
+- **The bot practice map.** A second greybox map and navigation (topic 24) for
+  warm-up bots. Nothing in `apps/breach` is shaped against it yet: `map::world`
+  hands back one `PhysicsWorld` and one array of plate colliders, and a second
+  map would want that to be a value the game is handed rather than a function it
+  calls. The bots themselves need `crcbl` to have a navigation pillar at all.
+- **Golden frames per `GeometryPath`.** That milestone's exit criteria ask for
+  one per path plus "a recorded browser budget for first-person content".
+  `apps/lantern/tests/golden.rs` is the shape; breach has no golden test and no
+  recorded budget. The frame is deterministic enough for one — the warm-up is a
+  pure function of the tick and the travelling plate is a pure function of the
+  simulated time — so this is work rather than a question.
+- **Rule 12's forcing flag.** `apps/breach/src/gpu.rs`'s `Paths` reports which
+  selectors the device chose, on the panel, the `[HUD]` line and the summary.
+  Rule 12 also asks that "every sample accepts a flag forcing a lesser path".
+  `apps/quarry`'s `Forced` is the shape to copy — it withholds the features that
+  would select anything better — and `apps/breach/src/args.rs` says where the
+  flag would go. Without it, the only device that exercises the fallbacks is a
+  browser, which does exercise them on every Pages run.
+- **First-person rendering (topic 29) beyond a camera.** No viewmodel pass, no
+  ADS, no PiP optic. The player is invisible, which is what a first-person slice
+  with no viewmodel honestly is; there is no rig and no `crcbl-anim` in the
+  sample.
+- **The weapon kit (topic 38), ballistics (28) and armour.** One hitscan pistol,
+  no penetration, no drop, no recoil pattern, no reload or malfunction states,
+  no armour and no limb model. `game::trace` is a single `cast_ray` and stops at
+  the first hit; a penetration chain would be the same call in a loop with the
+  material at each hit deciding what is left of the round.
+- **Rule 11's `.crpix` art.** `apps/breach/src/lib.rs` claims the exemption for
+  slice 1 and says why: the doc asks for pixel art for the grid inventory, the
+  buy menu, the killfeed and the scoreboard, and slice 1 has none of those. The
+  exemption expires the moment one arrives.
+- **Sound.** Rule 8 asks for spatial audio through `crcbl-audio`, and a firing
+  range is the easiest possible cue grammar — a shot, a hit on steel, a plate
+  falling. Slice 1 plays nothing at all. This is the cheapest of the entries
+  here and the most visible omission.
+
+### `apps/breach`'s trigger is a key, because a click means two things
+
+`ACTION_FIRE` in `apps/breach/src/app.rs` is bound to `Space` alone. Binding it
+to the primary pointer button as well is the obvious thing and was not done, for
+a reason that outlives slice 1: under the pointer lock a native run gets, a
+click is a trigger pull at the crosshair; in a browser the lock is declined —
+the web shell reports no `RAW_POINTER_MOTION`, so `ShellCaps::has_mouselook` is
+false and the loop refuses the request — and a click is then a click at a
+visible cursor's position, which is not an aim.
+
+`HostedGame` gives a game no way to ask whether the lock it requested was
+granted. `PointerUpdate` discriminates for _motion_ — a locked frame carries a
+motion and no `at` — but a press-only frame carries neither either way, so the
+same test does not work for the button. What would close it is either a
+`HostedGame` hook reporting the mode actually in force, or the game tracking
+"the last motion arrived with no `at`" itself, which is state that goes stale
+the moment the pointer stops moving.
+
+Worth revisiting when milestone 1 brings ADS, because that binding has the same
+question.
+
+### `apps/breach`'s browser gate cannot check the mouse look at all
+
+`web/tools/browser-e2e.mjs`'s `range` block drives the arrow keys, because that
+is the whole of what the demo answers to in a browser. So the mouse path —
+`Breach::pointer_event`, `Eye::look`, and the `at.is_none()` condition it is
+bound under — is covered by `apps/breach/src/camera.rs`'s unit tests and by
+nothing that runs against a real window. `tools/run-samples-windowed.sh` opens a
+real window but sends no input.
+
+`crates/crcbl-shell` has X11 and Wayland e2e harnesses that synthesise input; a
+windowed breach run driven through one of those, asserting the yaw moved, is the
+gap. Not attempted.
+
+### `apps/breach`'s browser gate leans on one moving plate for liveness
+
+An indoor range with a ceiling has no sun, no sky and nothing else that moves,
+so the only thing that changes on a breach canvas with nobody touching it is the
+far lane's travelling plate — `map::MOVER_LANE`, driven by `map::plate_x` off
+the simulated clock. Two of the browser gate's generic claims rest on it: the
+`moving` probe in group C reads the `mover:` field off the `[HUD]` line, and
+group D's "the canvas changes between frames" needs the plate to be **in shot**.
+
+Two consequences worth knowing before touching either:
+
+- Freeze or remove the travelling plate and two checks go red, one of them in a
+  group that has nothing to do with breach. Verified by sabotage: making
+  `plate_x` ignore its `seconds` argument fails
+  `the travelling target keeps crossing its lane under its own steam` _and_
+  `the canvas changes between frames while the simulation runs`.
+- The `range` block in `web/tools/browser-e2e.mjs` therefore puts the view back
+  down the range after its own checks, measuring the turn rate off the look
+  check rather than carrying a copy of it. Before that existed the block left
+  the camera pitched at the ceiling and group D failed on a demo that was
+  running perfectly well.
+
+A second moving fixture — a swinging lamp, a fan — would take the weight off one
+plate. Not built: it is scenery for a slice that has none yet.
+
+### `apps/breach` and `apps/puppet` each own a copy of the yaw→direction step
+
+`apps/breach/src/camera.rs::walk_direction` and
+`apps/puppet/src/camera.rs::walk_direction` are the same three lines of
+trigonometry with opposite signs, because the two demos measure yaw in the two
+conventions their cameras came with — puppet's is `OrbitCamera`'s and breach's
+is `Flyer`'s. **This duplication is deliberate and should not be merged**: the
+whole claim the pair exists to make is that the conversion belongs to the demo
+rather than to `crcbl-phys`, and a shared helper in a third place would be the
+first step back toward putting it in the engine. Recorded here so the idea is
+not re-proposed every time somebody greps for `walk_direction`.
+
+What _would_ be worth doing, if a third first-person sample arrives, is moving
+the conversion into `crcbl-render` beside `Flyer` — where a camera basis already
+lives — rather than into the physics crate. That is a different move and it does
+not weaken the claim.
+
 ### The particle simulation runs on the CPU, and the plan wants it in compute
 
 `docs/plan/20-particles.md`'s design is spawn and update in a compute pass, an

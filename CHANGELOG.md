@@ -16,6 +16,44 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/breach`, a first-person firing range, on the demo site.**
+  `docs/plan/sample/11-breach.md`'s milestone 0, first slice: a greybox indoor
+  range — floor, four walls, a ceiling, a firing line and three lanes with a
+  target plate each, one of which travels — walked with `W/A/S/D`, looked around
+  with the mouse or the arrows, and shot with one hitscan pistol on `SPACE`. A
+  trigger pull is a `crcbl::phys::PhysicsWorld::cast_ray` from the eye along the
+  view; a ray that lands on a standing plate scores and knocks it down, and the
+  plate stands back up after a fixed delay. The overlay carries a crosshair that
+  lights up on a target, the score and each lane's state; the debug panel and
+  the `[HUD]` heartbeat add the position, the angle being aimed along and — rule
+  12 — the `GeometryPath`, `BindingModel` and `LightingPath` the frames were
+  drawn through, which in a browser are the fallbacks by construction.
+
+  **What a reader gets out of it is the claim `apps/puppet` could only assert.**
+  `crcbl::phys::CharacterController` takes a world-space displacement and holds
+  no camera; puppet drives it from a third-person orbit camera and breach drives
+  the _same_ controller from a first-person one that shares none of puppet's
+  code — down to measuring its yaw the other way round — and `crcbl-phys` gained
+  nothing for either of them. The firing line is the same argument in miniature:
+  it is a kerb over the controller's own `step_offset`, so the player is kept
+  behind it by the controller refusing to climb it rather than by a rule in the
+  game code.
+
+  Nobody has to press anything to see it work: with no input the range runs
+  itself, sweeping onto each lane and taking the plate down, and the first key
+  or trigger pull hands the controls over — squaring the shooter up down the
+  near lane and resetting the score, so a visitor's first string starts from a
+  known pose rather than from whatever bearing the demonstration was swinging
+  through. The far lane's plate travels its lane on a timer either way.
+
+  There is no mouselook in the browser and that is deliberate: the web shell
+  reports no `RAW_POINTER_MOTION`, so the engine declines the pointer lock
+  rather than telling a first-person camera it has aim input it can trust — the
+  first of the four reasons that sample's competitive milestones are native
+  only. Slice 1 has no bots, no second map, no weapon but the pistol, no armour,
+  no ballistics and no networking beyond the in-memory loopback every sample
+  has; `docs/backlog.md` carries the rest.
+
 - **`crcbl-vfx`: the first slice of the particle system.** A `ParticleSystem`
   holds a structure-of-arrays `ParticlePool` and hands each effect a contiguous
   `SlotRange` out of it, so an effect's live particles are one run of records —

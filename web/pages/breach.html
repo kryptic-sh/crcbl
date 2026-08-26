@@ -1,0 +1,121 @@
+<!--meta
+{
+  "out": "demos/breach/index.html",
+  "slug": "breach",
+  "name": "Breach",
+  "title": "Breach — Crucible",
+  "description": "A first-person firing range on Crucible's swept-capsule controller: one hitscan pistol, three lanes, drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/breach", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/breach\">apps/breach</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/breach/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● post-MVP</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Breach</span></h1>
+  <p class="tagline">
+    A firing range, seen from inside the shooter's head. One pistol, three
+    lanes, and a line you cannot walk past. It exists to prove that the
+    character controller behind puppet does not know which camera is watching
+    it.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>The range is already shooting. Step up and it is yours.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Walk, relative to where you are looking</span>
+      <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Look — turn left and right</span>
+      <span><kbd>←</kbd> <kbd>→</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Look — tilt up and down</span>
+      <span><kbd>↑</kbd> <kbd>↓</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Fire. One pull is one shot.</span>
+      <span><kbd>SPACE</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+  <div class="note">
+    <strong>There is no mouselook on this page, and that is deliberate.</strong>
+    A browser reports pointer movement only through Pointer Lock, and the
+    numbers it gives are accelerated and smoothed by the same operating-system
+    layer that raw input exists to bypass — so the engine declines the lock here
+    rather than telling a first-person camera it has aim input it can trust. The
+    native build takes the mouse. Firing is a key on both, because a click means
+    a trigger pull under a lock and a click on a page without one, and the same
+    build should not have its central verb mean two things. This is the first of
+    the reasons the competitive version of this sample will not ship to a
+    browser at all.
+  </div>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The same controller as puppet, driven from a different camera.</h3>
+  <p>
+    You are a capsule the size of a person, and every metre you cover goes
+    through one call: a <strong>world-space displacement</strong> in, and
+    whatever the room left of it out. That call holds no camera, no view angle
+    and no facing at all — which is the whole point. The third-person demo next
+    door turns a stick into a direction using the angle its orbit camera happens
+    to be at; this one does the same job from a first-person view, measuring its
+    yaw the other way round, and the physics gained nothing for either of them.
+  </p>
+  <p>
+    The <strong>firing line</strong> is not a rule. It is a kerb taller than the
+    step the controller will climb, so walking into it is the same refusal the
+    orange step in puppet is. Nothing in this demo's code checks where you are
+    standing.
+  </p>
+  <p>
+    The pistol is <strong>hitscan</strong>: pulling the trigger casts a ray from
+    your eye along the way you are looking, into the same world the capsule
+    sweeps against. What it lands on is what the crosshair is on — one ray a
+    tick, shared between the two, so the picture and the score cannot disagree.
+    A ray that lands on a standing plate knocks it down and scores; one that
+    lands on a wall, on a post, or on a plate already lying flat does not, and
+    the readout says which.
+  </p>
+  <p>
+    The whole of it runs on the authoritative server, over the same in-memory
+    transport every demo here uses: the keys and the trigger are sealed into a
+    nine-byte move-and-fire command, the client sends it, and the server decodes
+    it and steps the player on a fixed timestep. The view is the one thing on
+    the other side of that seam, because it is presentation — the only part of
+    it the simulation is ever told is the two angles above.
+  </p>
+  <p>
+    The panel names the three render paths this browser selected. It will say
+    <code>IndirectPerBatch</code>, <code>ArrayPages</code> and
+    <code>Rasterised</code>, because a browser has no mesh stage, no bindless
+    and no ray query — and that is the reason this slice was built before the
+    native game rather than after it. A fallback proven after the fact is a
+    fallback nobody proved.
+  </p>
+  <p>
+    <strong>This is the first slice of a much larger sample.</strong> There are
+    no bots, no second map, no weapon but this one, no armour, no ballistics and
+    no rounds. The plan for the rest is in the repository.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

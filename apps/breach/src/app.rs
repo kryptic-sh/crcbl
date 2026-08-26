@@ -1,0 +1,1067 @@
+//! Breach's start-up, its controls, and the [`HostedGame`] methods the engine's
+//! loop calls.
+//!
+//! # There is no loop in this file
+//!
+//! ```text
+//! Loop::frame()                     ← the engine's
+//!   pump, input, menu, pause, resize
+//!     ─────────────────────────────→ Breach::key_event      (queued, not applied)
+//!     ─────────────────────────────→ Breach::pointer_event  (the mouse look)
+//!   run_ticks  ─────────────────────→ Breach::tick          (controls, then a tick)
+//!   draw_list.clear()
+//!     ─────────────────────────────→ Breach::draw           (view, plates, overlay)
+//!     menu, debug overlay             ← the engine's
+//!   gpu.frame()
+//! ```
+//!
+//! What is left here is start-up, because a window's title is this sample's;
+//! the action map, because a keyboard is not something [`crate::game`] should
+//! know about; the view, because it is presentation; and the trait methods,
+//! because they are what a hosted game is.
+//!
+//! # The view turns on the frame's clock, the player walks on the tick's
+//!
+//! [`Breach::tick`] sends the simulation what the player is holding down, the
+//! trigger edge, and the two angles the view is at; [`Breach::draw`] turns the
+//! view and points it out of wherever the tick left the player's eye. That
+//! split is the seam `docs/plan/30-player-kit.md` draws — movement is a server
+//! system, the camera is client presentation — and it is why a paused frame can
+//! still be looked around from while the player does not move.
+//!
+//! The two angles crossing that seam are the whole of what the simulation knows
+//! about the camera. [`crate::camera`] is where they become a walk direction
+//! and a ray, and `crcbl-phys` never sees any of it.
+//!
+//! # Mouselook is asked for and not assumed
+//!
+//! [`Breach::pointer_mode`] answers [`PointerMode::Locked`] while the range is
+//! being shot, and the look is bound to `at.is_none()` rather than to that
+//! request — see [`Breach::pointer_event`]. **A browser declines it**: the web
+//! shell reports neither [`POINTER_LOCK`](crcbl::shell::ShellCaps) nor
+//! `RAW_POINTER_MOTION`, because `movementX`/`movementY` under Pointer Lock are
+//! accelerated and clamped by the same OS layer the capability exists to
+//! bypass. `docs/plan/sample/11-breach.md` names that as one of the four
+//! reasons the *competitive* game is native only. So on the demo site the
+//! arrows are the look, and they are bound here for exactly that reason rather
+//! than as an accessibility afterthought.
+//!
+//! # `[HUD]` is logged here rather than in `crate::game`
+//!
+//! Every other line on it is the simulation's, and `apps/puppet` logs its
+//! heartbeat from the tick for that reason. This one also names the three
+//! selectors the frame is drawn through — rule 12 — and those are
+//! [`crate::Paths`]', which the stage cannot see. Logging it here is what
+//! puts both on one line at one cadence; `apps/quarry` does the same, and for
+//! the same reason.
+
+use crcbl::core::input::KeyCode;
+use crcbl::engine::{
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
+};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::math::Vec3;
+use crcbl::prelude::*;
+use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowId};
+
+use crate::camera::Eye;
+use crate::game::{Controls, Game, RenderState, Stats};
+use crate::gpu::{Gpu, Paths};
+use crate::menu::{MenuKind, Menus};
+use crate::page::PageStats;
+
+pub use crate::args::Options;
+
+// ---- the controls --------------------------------------------------------------
+
+/// Walk, relative to where the player is looking.
+const ACTION_FORWARD: &str = "forward";
+/// See [`ACTION_FORWARD`].
+const ACTION_BACK: &str = "back";
+/// See [`ACTION_FORWARD`].
+const ACTION_LEFT: &str = "left";
+/// See [`ACTION_FORWARD`].
+const ACTION_RIGHT: &str = "right";
+/// Turn the view, anticlockwise and clockwise. The keyboard's half of the look
+/// — see the module docs for why a browser has only this half.
+const ACTION_LOOK_LEFT: &str = "look-left";
+/// See [`ACTION_LOOK_LEFT`].
+const ACTION_LOOK_RIGHT: &str = "look-right";
+/// Tilt it up and down. See [`ACTION_LOOK_LEFT`].
+const ACTION_LOOK_UP: &str = "look-up";
+/// See [`ACTION_LOOK_LEFT`].
+const ACTION_LOOK_DOWN: &str = "look-down";
+/// The trigger. Read as a **press edge**, not as a held state: one pull is one
+/// shot, and slice 1's pistol is not an automatic weapon.
+///
+/// **A key and not the mouse button, which for a shooter needs saying.** A
+/// click means two different things on the two targets this one build runs on:
+/// under the pointer lock a native run gets, it is a trigger pull at the
+/// crosshair; in a browser, where the lock is declined and the cursor is
+/// visible (see [`Breach::pointer_event`]), it is a click at a place on the
+/// page. Binding the trigger to it would make the demo's central verb mean
+/// something different in a browser from what it means natively, which is the
+/// divergence "the same build runs in both" exists to avoid. `docs/backlog.md`
+/// carries what binding it properly would take.
+const ACTION_FIRE: &str = "fire";
+
+/// The keyboard and the mouse this sample is played with.
+///
+/// Declared in one place so the bindings and the read-out below cannot name
+/// different actions: a typo in either is an action that resolves to nothing,
+/// and [`ActionMap`] answers `false` for an action nobody declared rather than
+/// complaining.
+fn action_map() -> ActionMap {
+    let mut map = ActionMap::new();
+    for (name, bindings) in [
+        (ACTION_FORWARD, vec![Binding::Key(KeyCode::KeyW)]),
+        (ACTION_BACK, vec![Binding::Key(KeyCode::KeyS)]),
+        (ACTION_LEFT, vec![Binding::Key(KeyCode::KeyA)]),
+        (ACTION_RIGHT, vec![Binding::Key(KeyCode::KeyD)]),
+        (ACTION_LOOK_LEFT, vec![Binding::Key(KeyCode::ArrowLeft)]),
+        (ACTION_LOOK_RIGHT, vec![Binding::Key(KeyCode::ArrowRight)]),
+        (ACTION_LOOK_UP, vec![Binding::Key(KeyCode::ArrowUp)]),
+        (ACTION_LOOK_DOWN, vec![Binding::Key(KeyCode::ArrowDown)]),
+        (ACTION_FIRE, vec![Binding::Key(KeyCode::Space)]),
+    ] {
+        map.declare(ActionDecl {
+            name: name.into(),
+            kind: ActionKind::Button,
+            bindings,
+        });
+    }
+    map
+}
+
+/// What the input is asking the **simulation** for on the tick `actions` has
+/// just begun, at the angles the view is currently at.
+///
+/// The four movement actions read the **held** state — walking is a thing that
+/// happens for as long as a key is down — and the trigger reads the **edge**,
+/// because a held trigger is one shot and not sixty a second. The look actions
+/// are deliberately absent: they are read in [`Breach::draw`], on the frame's
+/// clock, because the view is not part of what the server owns.
+fn controls(actions: &ActionMap, yaw: f32, pitch: f32) -> Controls {
+    Controls {
+        forward: actions.button_held(ACTION_FORWARD),
+        back: actions.button_held(ACTION_BACK),
+        left: actions.button_held(ACTION_LEFT),
+        right: actions.button_held(ACTION_RIGHT),
+        fire: actions.just_pressed(ACTION_FIRE),
+        yaw,
+        pitch,
+    }
+}
+
+/// How far the view should turn this frame from held keys, given how long the
+/// frame was: `(yaw, pitch)` in radians.
+fn look_turn(actions: &ActionMap, seconds: f32) -> (f32, f32) {
+    let axis = |positive: &str, negative: &str| {
+        f32::from(i8::from(actions.button_held(positive)) - i8::from(actions.button_held(negative)))
+    };
+    (
+        axis(ACTION_LOOK_RIGHT, ACTION_LOOK_LEFT) * crate::camera::TURN_RATE * seconds,
+        axis(ACTION_LOOK_UP, ACTION_LOOK_DOWN) * crate::camera::TURN_RATE * seconds,
+    )
+}
+
+// ---- summary -----------------------------------------------------------------
+
+/// What a finished run reports.
+///
+/// [`PartialEq`] but not [`Eq`], unlike the 2D samples': the position is floats,
+/// so two runs are compared by the numbers they produced and there is no total
+/// order to claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    pub backend: Backend,
+    pub frames: u64,
+    pub ticks: u64,
+    pub events: u64,
+    pub extent: (u32, u32),
+    pub exit: ExitReason,
+    /// Whether the simulation was stopped when the run ended.
+    pub paused: bool,
+    /// The mode the window system actually had the window in, **not** the one
+    /// the run last asked for.
+    pub mode: DisplayMode,
+    /// Where the player's feet ended up, in metres.
+    pub feet: [f64; 3],
+    /// How many shots were fired over the run.
+    pub shots: u64,
+    /// How many of them hit a standing plate.
+    pub hits: u64,
+    /// Which selectors the frames were drawn through — rule 12's "says which it
+    /// took", in the summary line as well as in the panel.
+    pub paths: Paths,
+    /// How many commands the last overlay drew. Zero would mean a run that
+    /// presented frames with nothing on them, which is the one failure a
+    /// headless smoke test could otherwise report as a pass.
+    pub commands: usize,
+}
+
+// ---- errors ------------------------------------------------------------------
+
+/// What can stop breach: the loop's own failures, plus this sample's.
+pub type BreachError = crcbl::engine::LoopError<crate::game::GameError>;
+
+// ---- the hosted game ---------------------------------------------------------
+
+/// Breach, as the engine's loop hosts it.
+#[derive(Debug)]
+pub struct Breach {
+    game: Game,
+    /// The keyboard and the mouse, resolved into [`Controls`] once per tick.
+    actions: ActionMap,
+    /// Key events from the shell pump, replayed after `ActionMap::begin_tick`.
+    ///
+    /// The pump runs once per **frame** and the map's edge flags are per
+    /// **tick**, and `begin_tick` clears those flags — so an event fed before
+    /// it has its press edge erased. That matters more here than it does in
+    /// `apps/puppet`: the trigger is read as an edge, so a shot fed at the
+    /// wrong moment is a shot that never happened. Queueing here and replaying
+    /// after is the order the map asks for, and it is what makes a frame that
+    /// runs no ticks lossless.
+    pending_keys: Vec<(KeyCode, bool)>,
+    /// The first-person view. **Presentation**: it never crosses the wire, and
+    /// the only thing the simulation is told about it is its two angles.
+    eye: Eye,
+    /// Refilled from the simulation every frame.
+    render_state: RenderState,
+    /// The simulation's numbers, snapshotted in [`Breach::tick`].
+    stats: Stats,
+    /// What the last frame's overlay drew, from the same frame.
+    page: PageStats,
+    /// Whether the loop is stopped, as [`Breach::menu_kind`] was last told.
+    ///
+    /// Kept because [`Breach::pointer_mode`] is asked `&self` and the pause is
+    /// the loop's state rather than this game's. `apps/lantern` keeps the same
+    /// copy for the same reason.
+    paused: bool,
+    /// Which selectors this device drew through, read off the GPU bundle.
+    ///
+    /// Kept here rather than reached through `gpu` because
+    /// [`HostedGame::debug_sections`] and [`HostedGame::summary`] are handed
+    /// `&self` and no GPU at all.
+    paths: Paths,
+}
+
+impl Breach {
+    /// The `[HUD]` line, on the cadence every other sample uses.
+    ///
+    /// `web/tools/browser-e2e.mjs` reads five claims out of it, and each one is
+    /// a number nothing on the JS side can move:
+    ///
+    /// * `px`, `py`, `pz` — where the player is. The gate holds a key and
+    ///   requires `pz` to advance, then releases it and requires `pz` to stop,
+    ///   which is the pair a demo that merely drifts cannot pass.
+    /// * `yaw` — where they are looking, as
+    ///   [`crate::camera::Eye::yaw`] reached the tick. The gate holds a look
+    ///   key and requires it to take new values, which is the only thing on the
+    ///   page that says the view is being turned rather than the picture merely
+    ///   changing.
+    /// * `shots` and `hits` — [`crate::game`]'s counters. The gate fires once
+    ///   with a plate in the crosshair and requires both to rise, then turns
+    ///   away and fires again and requires only `shots` to. The second is the
+    ///   control for the first: a build that scored on every trigger pull
+    ///   passes the hit and fails the miss.
+    /// * `aim` — what the crosshair is on, which is what makes the two shots
+    ///   above deliberate rather than lucky.
+    /// * `near` — the nearest lane's plate, up or down. The observable a hit
+    ///   has on the *range* rather than on the score.
+    /// * `mover` — where [`crate::map::MOVER_LANE`]'s travelling plate is, which
+    ///   is the one number here **nothing a player does can move**. It is what
+    ///   the gate's generic "the demo advances under its own steam" check
+    ///   reads, and a page whose loop had stopped would leave it standing
+    ///   still.
+    ///
+    /// It also names the three selectors — see the module docs.
+    fn log_heartbeat(&self) {
+        if self.stats.ticks == 0
+            || !self
+                .stats
+                .ticks
+                .is_multiple_of(crate::game::HEARTBEAT_TICKS)
+        {
+            return;
+        }
+        let stats = &self.stats;
+        crcbl::log::info!(
+            "[HUD] tick: {}  px: {:.2}  py: {:.2}  pz: {:.2}  yaw: {:.3}  pitch: {:.3}  \
+             shots: {}  hits: {}  acc: {}  aim: {}  near: {}  mover: {:.2}  ground: {}  \
+             pilot: {}  geometry: {:?}  binding: {:?}  lighting: {:?}",
+            stats.ticks,
+            stats.position.x,
+            stats.feet,
+            stats.position.z,
+            stats.aim.0,
+            stats.aim.1,
+            stats.shots,
+            stats.hits,
+            match stats.accuracy() {
+                Some(percent) => format!("{percent:.0}%"),
+                None => "--".to_string(),
+            },
+            stats.crosshair.label(),
+            if stats.plates_down[0] { "down" } else { "up" },
+            stats.mover_x,
+            if stats.grounded { "yes" } else { "no" },
+            if stats.warming_up { "range" } else { "player" },
+            self.paths.geometry,
+            self.paths.binding,
+            self.paths.lighting,
+        );
+    }
+
+    /// The simulation, for scripted tests and for an embedder that drives it.
+    pub const fn game(&self) -> &Game {
+        &self.game
+    }
+
+    /// Where the view is pointing, for this crate's own tests.
+    pub const fn eye(&self) -> &Eye {
+        &self.eye
+    }
+
+    /// What the last frame's overlay drew.
+    pub const fn page(&self) -> &PageStats {
+        &self.page
+    }
+}
+
+/// The loop breach runs in.
+///
+/// A type alias, because the loop is the engine's. `S` is the shell type: the
+/// native path builds `Loop<dyn Shell>`, and the tests build
+/// `Loop<HeadlessShell>` so they can inject the events a compositor would send.
+pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Breach>;
+
+/// Runs the full loop.
+///
+/// # Errors
+///
+/// [`BreachError`] if the shell, the GPU or the simulation's server failed.
+/// Teardown runs on every path.
+pub fn run(options: &Options) -> Result<Summary, BreachError> {
+    crcbl::engine::drive(start(options)?)
+}
+
+/// Opens a shell, a window, a GPU and the simulation.
+///
+/// # Errors
+///
+/// [`BreachError`] if any of them refused.
+pub fn start(options: &Options) -> Result<Loop, BreachError> {
+    let shell = crcbl::engine::open_shell(options.common.headless)?;
+    with_shell(shell, options)
+}
+
+/// Builds the loop on an already-open shell, blocking on both waits.
+///
+/// The browser cannot use this — a main thread may not sit in
+/// [`wait_for_configure`] — and takes [`PendingLoop`] instead. What the two
+/// share is everything after the waiting, which is `assemble` — private, because
+/// a caller has no `Booted` to hand it.
+///
+/// # Errors
+///
+/// [`BreachError`] if the window never configured, the GPU would not open, or
+/// the simulation's server could not be built.
+pub fn with_shell<S: Shell + ?Sized>(
+    mut shell: Box<S>,
+    options: &Options,
+) -> Result<Loop<S>, BreachError> {
+    let clock_source = Clock::new(options.common.headless);
+    let window = open_the_window(
+        shell.as_mut(),
+        &clock_source,
+        options.common.display_mode(),
+        options.common.size,
+    )?;
+
+    let mut events = 0;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+
+    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu())?;
+    assemble(
+        Booted {
+            shell,
+            window,
+            gpu,
+            clock_source,
+            events,
+        },
+        options,
+    )
+}
+
+/// The half of start-up that is the same however the GPU arrived.
+///
+/// [`Booted`] is what both bring-up paths hand over, so the simulation is built
+/// and the loop assembled in one place rather than one per path — a second copy
+/// is how the browser build would come to run a subtly different sample.
+///
+/// # Errors
+///
+/// [`BreachError`] if the simulation's server could not be built.
+fn assemble<S: Shell + ?Sized>(
+    booted: Booted<S, Gpu>,
+    options: &Options,
+) -> Result<Loop<S>, BreachError> {
+    // `--screenshot`, armed before the first frame because the frame it names is
+    // counted from this point. The flag forces `--headless` on, so the context
+    // behind this is always an offscreen ring.
+    //
+    // The mutable binding lives inside the `cfg` rather than on the parameter: a
+    // browser build arms nothing, so a `mut` in the signature would be one the
+    // wasm32 target correctly reports as unused.
+    #[cfg(not(target_arch = "wasm32"))]
+    let booted = {
+        let mut booted = booted;
+        if let Some(request) = options.common.screenshot_request() {
+            booted.gpu.context_mut().set_screenshot(request);
+        }
+        booted
+    };
+    let paths = booted.gpu.paths();
+    let game = Game::new(options.common.tick_hz).map_err(BreachError::Game)?;
+    Ok(Loop::new(
+        booted,
+        Breach {
+            game,
+            actions: action_map(),
+            pending_keys: Vec::new(),
+            eye: Eye::default(),
+            render_state: RenderState::default(),
+            stats: Stats::default(),
+            page: PageStats::default(),
+            paused: false,
+            paths,
+        },
+        options.common.loop_config(),
+    ))
+}
+
+/// Creates the one window this sample has: its title, its app id, its size.
+fn open_the_window<S: Shell + ?Sized>(
+    shell: &mut S,
+    clock_source: &Clock,
+    mode: DisplayMode,
+    size: Option<crcbl::shell::PhysicalSize>,
+) -> Result<WindowId, BreachError> {
+    Ok(crcbl::engine::open_window(
+        shell,
+        clock_source,
+        &WindowDesc {
+            title: "Breach",
+            app_id: "sh.kryptic.crcbl.breach",
+            size: crcbl::engine::requested_window_size(size),
+            mode,
+            ..WindowDesc::default()
+        },
+    )?)
+}
+
+/// Breach's half of the frame, and nothing else.
+impl HostedGame for Breach {
+    type Error = crate::game::GameError;
+    type Gpu = Gpu;
+    type MenuKind = MenuKind;
+    /// Breach declares no menu action of its own — see [`crate::menu`].
+    /// Uninhabited rather than a placeholder enum, so [`Breach::apply`] is a
+    /// match on nothing and the compiler agrees there is no case to handle.
+    type MenuAction = core::convert::Infallible;
+    type Summary = Summary;
+
+    const NAME: &'static str = "breach";
+
+    fn menus() -> Menus {
+        crate::menu::menus()
+    }
+
+    fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
+        // `ActionMap` holds its timers in `f32`, which is the precision an
+        // input edge is worth.
+        #[allow(clippy::cast_possible_truncation)]
+        self.actions.begin_tick(tick_dt as f32);
+        for (key, pressed) in std::mem::take(&mut self.pending_keys) {
+            self.actions.key_event(key, pressed);
+        }
+        // The angles go with the buttons: what the player asked for is
+        // "forward" and "fire", and neither means anything beside the direction
+        // they were looking when they asked.
+        self.game
+            .set_controls(controls(&self.actions, self.eye.yaw(), self.eye.pitch()));
+        self.game.tick();
+        // Read off the bundle rather than kept from start-up alone, so the
+        // heartbeat below and the panel are reporting the device this frame
+        // actually has.
+        self.paths = gpu.paths();
+        self.stats = self.game.stats();
+        self.log_heartbeat();
+    }
+
+    fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        // Queued rather than fed straight in: the map's edges belong to the
+        // tick, not to the frame. See [`Breach::pending_keys`].
+        self.pending_keys.push((key, pressed));
+    }
+
+    /// The mouse look, and the one condition it is bound under.
+    ///
+    /// **`at.is_none()` is what says the pointer is really captured.**
+    /// [`PointerUpdate::motion`] states that shape: under
+    /// [`PointerMode::Locked`] there is no absolute position at all, so a
+    /// locked frame carries a motion and no `at`, and an unlocked one that
+    /// moved carries both. Binding the look to that rather than to the request
+    /// [`pointer_mode`](HostedGame::pointer_mode) makes is the whole point — a
+    /// request is not a grant, the loop declines the lock on a shell without
+    /// `ShellCaps::has_mouselook`, and a view that turned anyway would swing
+    /// while a visible cursor walked out of the window onto whatever is behind
+    /// it. `apps/lantern` binds its free camera the same way.
+    ///
+    /// **The buttons are deliberately not read here.** See `ACTION_FIRE` for
+    /// why the trigger is a key rather than a click.
+    fn pointer_event(&mut self, pointer: PointerUpdate) {
+        let Some(motion) = pointer.motion.filter(|_| pointer.at.is_none()) else {
+            return;
+        };
+        self.eye.look(motion);
+    }
+
+    /// [`PointerMode::Locked`] while the range is being shot, free while the
+    /// pause panel is up.
+    ///
+    /// A player who cannot reach their own cursor cannot leave, and the pause
+    /// panel is the one place this demo has to be left from.
+    fn pointer_mode(&self) -> PointerMode {
+        if self.paused {
+            PointerMode::Free
+        } else {
+            PointerMode::Locked
+        }
+    }
+
+    fn menu_action(_id: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
+        None
+    }
+
+    fn apply(&mut self, action: core::convert::Infallible) {
+        match action {}
+    }
+
+    fn menu_kind(&mut self, _menus: &mut Menus, paused: bool) -> MenuKind {
+        // Recorded as well as answered: `pointer_mode` is asked immediately
+        // after this and needs to know, and it is handed no argument.
+        self.paused = paused;
+        MenuKind::of(paused)
+    }
+
+    fn draw(
+        &mut self,
+        gpu: &mut Gpu,
+        draw_list: &mut crcbl::ui::draw_list::DrawList,
+        frame: FrameInfo,
+    ) {
+        // **The view turns on the wall clock**, so a paused frame can still be
+        // looked around from — and so the turn is smooth on a machine whose
+        // frames do not line up with its ticks.
+        let (yaw, pitch) = look_turn(&self.actions, frame.render_dt.as_secs_f32());
+        if yaw != 0.0 || pitch != 0.0 {
+            self.eye.turn(yaw, pitch);
+        }
+
+        let was_the_range_aiming = self.render_state.imposed_aim.is_some();
+        self.render_state = self.game.render_state();
+
+        // **And is taken away again while the range is running itself**, and
+        // handed back squared up. The demonstration is aiming, and a
+        // first-person camera that ignored that would be showing a different
+        // room from the one being shot at; the frame the imposition ends is
+        // the one that puts the shooter on the near lane, so a visitor's first
+        // string starts from a known pose rather than from whatever bearing
+        // the warm-up was swinging through. See [`RenderState::imposed_aim`],
+        // which is where the argument lives — including why this edge is the
+        // client's to notice and not a pose the simulation imposes for a tick.
+        if let Some((yaw, pitch)) = self.render_state.imposed_aim {
+            self.eye.point_at(yaw, pitch);
+        } else if was_the_range_aiming {
+            self.eye
+                .point_at(crate::game::SQUARE_UP.0, crate::game::SQUARE_UP.1);
+        }
+
+        gpu.set_plates(self.render_state.plates_x, self.render_state.plates_down);
+        // The simulation is `f64` and the renderer's camera is `f32`; this is
+        // the one place the two meet.
+        #[allow(clippy::cast_possible_truncation)]
+        let eye = Vec3::new(
+            self.render_state.eye.x as f32,
+            self.render_state.eye.y as f32,
+            self.render_state.eye.z as f32,
+        );
+        gpu.set_camera(self.eye.camera(eye));
+
+        self.page = crate::page::draw(draw_list, gpu.atlas(), gpu.extent(), &self.render_state);
+    }
+
+    /// **Breach's two modules, and no third.**
+    ///
+    /// No network section: this sample runs over `InMemoryTransport` and has no
+    /// connection to report on. No audio section either — slice 1 plays
+    /// nothing, and a section that said so would be a module with no system
+    /// behind it. What it does have is the range, whose every row is a number
+    /// [`crcbl::phys`] produced, and the paths, which is rule 12.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        panel.add(&self.stats);
+        panel.add(&self.paths);
+    }
+
+    fn summary(&self, run: RunSummary) -> Summary {
+        Summary {
+            backend: run.backend,
+            frames: run.frames,
+            ticks: run.ticks,
+            events: run.events,
+            extent: run.extent,
+            exit: run.exit,
+            paused: run.paused,
+            mode: run.mode,
+            feet: [
+                self.stats.position.x,
+                self.stats.feet,
+                self.stats.position.z,
+            ],
+            shots: self.stats.shots,
+            hits: self.stats.hits,
+            paths: self.paths,
+            commands: self.page.commands,
+        }
+    }
+
+    fn log_summary(summary: &Summary) {
+        crcbl::log::info!(
+            "breach: {} frames, {} ticks, feet at {:.2} {:.2} {:.2}, {} shot(s) and {} hit(s), \
+             {} overlay commands, geometry {:?}, binding {:?}, lighting {:?} ({:?})",
+            summary.frames,
+            summary.ticks,
+            summary.feet[0],
+            summary.feet[1],
+            summary.feet[2],
+            summary.shots,
+            summary.hits,
+            summary.commands,
+            summary.paths.geometry,
+            summary.paths.binding,
+            summary.paths.lighting,
+            summary.exit,
+        );
+    }
+}
+
+// ---- polled start-up ---------------------------------------------------------
+
+/// A [`Loop`] being started one poll at a time, for a caller that may not block
+/// — which on a browser main thread is every caller.
+///
+/// The state machine, the pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s; all that is left here is this sample's
+/// `Options` and the `assemble` call the engine deliberately stops short of.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
+    options: Options,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// `clock_source` is the caller's because the browser's cannot be
+    /// [`Clock::new`]'s: `std::time::Instant::now` panics on
+    /// `wasm32-unknown-unknown`, so a page drives the loop from
+    /// `performance.now()` instead.
+    ///
+    /// # Errors
+    ///
+    /// [`BreachError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, BreachError> {
+        let window = open_the_window(
+            shell.as_mut(),
+            &clock_source,
+            options.common.display_mode(),
+            options.common.size,
+        )?;
+        Ok(Self {
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.gpu(),
+                (),
+            ),
+            options: options.clone(),
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`BreachError`] if the window went away before it had a size, if the
+    /// device request failed, or if the simulation could not be built.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, BreachError> {
+        let Some(booted) = self.boot.poll::<BreachError>()? else {
+            return Ok(None);
+        };
+        assemble(booted, &self.options).map(Some)
+    }
+}
+
+// ---- tests -------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crcbl::args::Common;
+    use crcbl::engine::PAUSE_KEY;
+    use crcbl::shell::HeadlessShell;
+
+    fn scripted(options: &Options) -> Loop<HeadlessShell> {
+        with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+    }
+
+    fn headless(frames: u64) -> Options {
+        Options {
+            common: Common {
+                headless: true,
+                backend: Some(GpuBackend::Null),
+                frames: Some(frames),
+                ..Common::new(crate::game::DEFAULT_TICK_HZ)
+            },
+        }
+    }
+
+    /// Every `Text` command the frame handed to the UI pass.
+    fn ui_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
+        use crcbl::ui::draw_list::DrawCommand;
+        engine
+            .gpu()
+            .draw_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Runs `count` frames.
+    fn frames(engine: &mut Loop<HeadlessShell>, count: usize) {
+        for _ in 0..count {
+            engine.frame().expect("a frame");
+        }
+    }
+
+    /// **A headless run shoots the range and draws it.** The one check that says
+    /// the whole bundle — server, controller, ray cast, renderer and overlay —
+    /// came up and produced a frame with something on it.
+    #[test]
+    fn a_headless_run_shoots_the_range_and_draws_it() {
+        let summary = run(&headless(240)).expect("the null backend always runs");
+        assert_eq!(summary.frames, 240);
+        assert_eq!(summary.exit, ExitReason::FrameBudget);
+        assert!(summary.ticks > 0, "no tick ran");
+        assert!(
+            summary.commands > 0,
+            "the run presented frames with nothing on them",
+        );
+        // The warm-up fires on its own, and it aims at a plate before it does.
+        assert!(summary.shots > 0, "nothing was fired over the whole run");
+        assert_eq!(
+            summary.hits, summary.shots,
+            "the range's own demonstration missed",
+        );
+        assert!(
+            summary.feet[1].abs() < 0.05,
+            "the player left the floor, at {:.2} m",
+            summary.feet[1],
+        );
+    }
+
+    /// **Two identical runs agree exactly**, which is what a fixed timestep over
+    /// a scripted warm-up is for.
+    #[test]
+    fn a_headless_run_is_deterministic() {
+        let first = run(&headless(120)).expect("headless runs everywhere");
+        let second = run(&headless(120)).expect("headless runs everywhere");
+        assert_eq!(first, second, "two identical runs must agree exactly");
+        assert_eq!(first.backend, Backend::Headless);
+    }
+
+    /// **The look keys turn the view and the walk keys do not.** They are read
+    /// on the frame's clock rather than the tick's, so this is also the check
+    /// that they are read at all: an action declared and never polled is
+    /// silent.
+    ///
+    /// Driven after the warm-up has been taken over, because until then the
+    /// range owns the view and would overwrite any turn — which is the
+    /// behaviour [`RenderState::imposed_aim`] describes and this test is the
+    /// only thing that pins.
+    #[test]
+    fn the_look_keys_turn_the_view_and_the_walk_keys_leave_it_alone() {
+        let mut engine = scripted(&headless(120));
+        let window = engine.window();
+        // Take the controls with one tap of a movement key, then let go.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyD)
+            .expect("the window is live");
+        frames(&mut engine, 4);
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::KeyD)
+            .expect("the window is live");
+        frames(&mut engine, 4);
+        assert!(
+            !engine.game().game().render_state().warming_up,
+            "a movement key did not take the controls",
+        );
+        let opened = engine.game().eye().yaw();
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::ArrowRight)
+            .expect("the window is live");
+        frames(&mut engine, 8);
+        let turned = engine.game().eye().yaw();
+        assert!(turned > opened, "the right arrow left the yaw at {turned}");
+
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::ArrowRight)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyW)
+            .expect("the window is live");
+        frames(&mut engine, 8);
+        assert!(
+            (engine.game().eye().yaw() - turned).abs() < 1e-6,
+            "walking turned the view",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The square-up survives a frame that is worth several ticks.** The
+    /// range hands the view over by imposing a pose, and the client adopts it
+    /// when it draws — so a pose offered on one tick and withdrawn on the next
+    /// is one a slow frame never sees. This is the browser's case, not a
+    /// hypothetical: the gate runs on a software rasteriser, and the first run
+    /// of it walked off at the warm-up's last bearing and put its shot into a
+    /// wall.
+    ///
+    /// Driven at six ticks a frame, which is what a browser at ten frames a
+    /// second is doing. The bearing the warm-up is on when the key lands is
+    /// asserted first, because a warm-up that happened to be squared up
+    /// already would pass this whatever the handover did.
+    #[test]
+    fn the_range_squares_the_shooter_up_even_when_a_frame_is_many_ticks() {
+        let slow = Options {
+            common: Common {
+                headless: true,
+                backend: Some(GpuBackend::Null),
+                frames: Some(600),
+                ..Common::new(crate::game::DEFAULT_TICK_HZ * 6)
+            },
+        };
+        let mut engine = scripted(&slow);
+        let window = engine.window();
+        // Far enough in for the warm-up to be off the near lane, which is the
+        // only bearing that would flatter the handover.
+        frames(&mut engine, 200);
+        let swung = engine.game().eye().yaw();
+        assert!(
+            (swung - crate::game::SQUARE_UP.0).abs() > 0.05,
+            "the warm-up was already squared up at yaw {swung}, so this proves nothing",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyW)
+            .expect("the window is live");
+        frames(&mut engine, 60);
+        let squared = engine.game().eye().yaw();
+        assert!(
+            (squared - crate::game::SQUARE_UP.0).abs() < 1e-6,
+            "the handover left the view at yaw {squared}, not squared up",
+        );
+
+        let walked = engine.game().game().render_state();
+        assert!(
+            walked.position.z < crate::map::SPAWN_Z - 0.5,
+            "the walk did not start: z = {:.2}",
+            walked.position.z,
+        );
+        assert!(
+            (walked.position.x - crate::map::SPAWN.x).abs() < 0.05,
+            "the walk drifted to x = {:.2}, so ticks ran at the old bearing",
+            walked.position.x,
+        );
+        assert_eq!(
+            walked.crosshair,
+            crate::game::Aim::Plate(0),
+            "a squared-up shooter is looking down the near lane",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A held walk key reaches the simulation and moves the player**, which is
+    /// the path this sample exists to prove: shell event → action map → wire →
+    /// module → `move_and_slide`, driven from a first-person camera. The same
+    /// claim `web/tools/browser-e2e.mjs` makes in a browser, made here where a
+    /// failure names the step.
+    #[test]
+    fn a_held_key_reaches_the_controller_and_moves_the_player() {
+        let mut engine = scripted(&headless(300));
+        let window = engine.window();
+        frames(&mut engine, 8);
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyW)
+            .expect("the window is live");
+        frames(&mut engine, 60);
+        let walked = engine.game().game().render_state();
+        assert!(!walked.warming_up, "the warm-up survived a key press");
+        assert!(
+            walked.position.z < crate::map::SPAWN_Z - 0.5,
+            "a second of walking got to z = {:.2} from {:.2}",
+            walked.position.z,
+            crate::map::SPAWN_Z,
+        );
+
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::KeyW)
+            .expect("the window is live");
+        frames(&mut engine, 60);
+        let stopped = engine.game().game().render_state();
+        assert!(
+            (stopped.position - walked.position).length() < 0.01,
+            "it kept moving after the key came up: {:?} then {:?}",
+            walked.position,
+            stopped.position,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The trigger is an edge, not a held state**, which is the difference
+    /// between a pistol and a machine gun — and the one claim about this
+    /// sample's input that nothing else here can make: `Controls::fire` is read
+    /// with `just_pressed`, and a build that read it as held would fire on
+    /// every tick the key was down.
+    #[test]
+    fn a_held_trigger_is_one_shot_and_not_sixty() {
+        let mut engine = scripted(&headless(300));
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        // Long enough that a held-state reading would have fired dozens of
+        // times, and long enough for the knocked plate to come back up.
+        frames(&mut engine, 200);
+        let held = engine.game().game().render_state();
+        assert_eq!(
+            (held.shots, held.hits),
+            (1, 1),
+            "the trigger fired more than once while it was held down",
+        );
+        assert!(!held.warming_up, "a trigger pull did not take the controls",);
+
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        frames(&mut engine, 30);
+        assert_eq!(
+            engine.game().game().render_state().shots,
+            2,
+            "a second press did not fire",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The panel renders with no network module, and it names the paths.**
+    /// The sections breach has are the frame's, the GPU's where the device has
+    /// timestamp queries, this sample's own, and rule 12's. Nothing else, and
+    /// no configuration decided that.
+    #[test]
+    fn the_overlay_is_composed_of_exactly_the_modules_breach_has() {
+        let mut options = headless(8);
+        options.common.debug_overlay = Some(true);
+        let mut engine = scripted(&options);
+        frames(&mut engine, 2);
+
+        let titles: Vec<&str> = engine
+            .debug()
+            .panel
+            .sections()
+            .iter()
+            .map(crcbl::ui::DebugSection::title)
+            .collect();
+        let expected: &[&str] = if engine.gpu().timings().is_some() {
+            &["frame", "gpu", "counters", "breach", "paths"]
+        } else {
+            &["frame", "counters", "breach", "paths"]
+        };
+        assert_eq!(titles, expected, "no module appears that no system offered");
+
+        let drawn = ui_text(&engine);
+        for row in ["frame", "shots", "hits", "geometry", "lighting"] {
+            assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
+        }
+        assert!(
+            drawn.iter().any(|t| t == "ACCURACY"),
+            "the overlay is drawn behind the panel: {drawn:?}",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// Escape stops the player and puts the one menu this sample has on screen;
+    /// escape again starts it. The overlay keeps drawing either way.
+    #[test]
+    fn escape_stops_the_player_and_shows_the_pause_menu() {
+        let mut engine = scripted(&headless(24));
+        let window = engine.window();
+        frames(&mut engine, 2);
+        let running = engine.game().game().ticks_run();
+        assert!(running > 0, "the simulation never ticked");
+        assert_eq!(engine.menu_kind(), MenuKind::None);
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        frames(&mut engine, 2);
+        assert!(engine.is_paused());
+        assert_eq!(engine.menu_kind(), MenuKind::Paused);
+        assert_eq!(
+            engine.game().game().ticks_run(),
+            running,
+            "a paused loop runs no ticks",
+        );
+        assert!(
+            ui_text(&engine).iter().any(|t| t == "ACCURACY"),
+            "the overlay is drawn behind the panel",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+}

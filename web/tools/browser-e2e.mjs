@@ -772,6 +772,114 @@ const EXPECTATIONS = {
       refused: /\bclamped: (\d+)/,
     },
   },
+  // **The demo whose subject is a controller seen from the other end**, and the
+  // other half of `apps/puppet`'s claim: the same
+  // `crcbl::phys::CharacterController`, driven from a first-person camera that
+  // shares no code with puppet's orbit one. Everything in the `range` block
+  // below is that seam being exercised in a browser.
+  breach: {
+    // The fifth demo that draws mesh instances, so the fifth whose cull pass
+    // has something to count. See lantern's row and group D.
+    culls: true,
+    // **No start key, and no click either.** breach binds its trigger to a key
+    // alone — `apps/breach/src/app.rs`'s `ACTION_FIRE` argues why — and it has
+    // no waiting state to leave: the range runs its own demonstration from the
+    // first tick and the first thing the player does ends it. So there is
+    // nothing for group C's `Space` to start, and the `range` block below
+    // presses everything this demo answers to.
+    key: null,
+    // Read off the *first* line, and it asks three things a page that merely
+    // booted cannot say. `ground: yes` is `MoveOutcome::grounded`, which no run
+    // that failed to sweep a capsule against `apps/breach/src/map.rs`'s world
+    // can report. `pilot: range` is the waiting state this demo has instead of
+    // a start screen. And the three selectors are rule 12 — a browser has no
+    // mesh stage, no bindless and no ray query, so these are the arms the
+    // capability model resolves to *by construction*, and this line is the only
+    // place anything checks that they are the ones the frame took. The same
+    // shape of claim lantern and quarry make, asked of all three selectors at
+    // once. `Breach::log_heartbeat` prints their own `Debug`, which is a
+    // deliberate coupling to `crates/crcbl-hal/src/caps.rs`: a renamed variant
+    // fails here loudly.
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') &&
+      line.includes('ground: yes') &&
+      line.includes('pilot: range') &&
+      line.includes('geometry: IndirectPerBatch') &&
+      line.includes('binding: ArrayPages') &&
+      line.includes('lighting: Rasterised'),
+    // The travelling plate on the far lane, and it is the strictest value this
+    // demo has: `map::plate_x` is a pure function of the *simulated* time, so a
+    // page presenting frames without ticking leaves it standing still, and
+    // **nothing a player does can move it** — which is what keeps this check
+    // about the loop rather than about the input that group C has already
+    // dispatched by the time it runs. `map::MOVER_PERIOD_S` is slow enough to
+    // be tracked by a shooter and still moves the plate far more than the two
+    // decimal places the line prints it to, between beats a second apart.
+    moving: /\bmover: (-?[\d.]+)/,
+    movingLabel:
+      'the travelling target keeps crossing its lane under its own steam',
+    // **The controller and the pistol, driven and then let go of** — the block
+    // below. Every pattern here is a field of the `[HUD]` line
+    // `apps/breach/src/app.rs` logs, and that file argues why each is on it.
+    range: {
+      // `code` is what the engine binds to; `text` and the virtual key code are
+      // what a real keyboard sends.
+      //
+      // `KeyW` walks away from the eye, and the range squares the shooter up
+      // down the near lane the moment they take the controls — so a held `W` is
+      // a walk down `pz` and nothing else.
+      //
+      // `ArrowRight` and `ArrowUp` are the look. **A browser has no mouselook
+      // at all**: the web shell reports no `RAW_POINTER_MOTION`, because
+      // `movementX`/`movementY` under Pointer Lock are accelerated by the same
+      // OS layer the capability exists to bypass, so the engine declines the
+      // lock — which `docs/plan/sample/11-breach.md` names as one of the four
+      // reasons the competitive game is native only. The arrows are what this
+      // page is aimed with, and therefore what this gate drives.
+      walk: { code: 'KeyW', key: 'w', text: 'w', virtualKeyCode: 87 },
+      turn: { code: 'ArrowRight', key: 'ArrowRight', virtualKeyCode: 39 },
+      turnBack: { code: 'ArrowLeft', key: 'ArrowLeft', virtualKeyCode: 37 },
+      tilt: { code: 'ArrowUp', key: 'ArrowUp', virtualKeyCode: 38 },
+      tiltBack: { code: 'ArrowDown', key: 'ArrowDown', virtualKeyCode: 40 },
+      fire: { code: 'Space', key: ' ', text: ' ', virtualKeyCode: 32 },
+      // Which reading advances under the walk key, and which way. `pz` falls.
+      advance: /\bpz: (-?[\d.]+)/,
+      // Where the view is pointing. The engine's own number, read off the
+      // heartbeat rather than off a pixel: a check that compared two canvases
+      // could not tell a turned view from a target that moved.
+      yaw: /\byaw: (-?[\d.]+)/,
+      // And how far above or below level it is, which is the other half of
+      // putting the view back where the range is before the generic groups
+      // judge what is on the canvas.
+      pitch: /\bpitch: (-?[\d.]+)/,
+      // Which pilot the range is under. The mark the look checks measure their
+      // "the view was standing still" control from — before it the range is
+      // sweeping its own aim, and a stillness claim there would be false.
+      pilot: /\bpilot: (range|player)/,
+      // How far down the range the walk must still stop short of, in the same
+      // metres `advance` reads. **This is what stops "and stops where they are"
+      // passing for a player the firing line stopped**: the range is a kerb the
+      // controller will not climb, so a build that ignored every key release
+      // walks to the line and then stands perfectly still there — three equal
+      // readings, and a check with nothing to say about the key. The line is at
+      // `map::FIRING_LINE_Z`, which the heartbeat reports as about 0.5; the
+      // honest run settles six metres short of it.
+      stopsShortOf: 3.0,
+      // The score, and what the crosshair is on.
+      shots: /\bshots: (\d+)/,
+      hits: /\bhits: (\d+)/,
+      aim: /\baim: ([a-z-]+)/,
+      // The nearest lane's plate, up or down — the observable a hit has on the
+      // *range* rather than on the score.
+      nearest: /\bnear: (up|down)/,
+      // What `aim` reads when the crosshair is on the room rather than on a
+      // target: `game::Aim::Range`'s label. The miss is aimed by tilting the
+      // view up a nudge at a time until the crosshair has cleared every plate
+      // — which the ceiling then stands behind, so the shot has something to
+      // land on rather than reaching its range in mid-air.
+      offTarget: 'range',
+    },
+  },
   orbit: {
     key: null,
     // Read off the *first* line, which is the ship still on the pad — so it
@@ -883,9 +991,11 @@ const CULL_STATS_LINE = /cull stats: frame \d+ kept \d+ instances/;
  * How far the character must get past where it started, in metres, before the
  * walk key is credited with having reached the controller.
  *
- * `apps/puppet` logs a heartbeat every simulated second and walks at 3.2 m/s, so
- * one beat under a held key is about three metres — this is comfortably inside
- * one beat and far outside anything a settling capsule could drift.
+ * The two demos that drive `crcbl::phys::CharacterController` both log a
+ * heartbeat every simulated second and both walk at a shade over three metres a
+ * second — `apps/puppet` at 3.2 and `apps/breach` at 3.4 — so one beat under a
+ * held key is about three metres. This is comfortably inside one beat and far
+ * outside anything a settling capsule could drift, for either of them.
  */
 const WALK_ADVANCE_M = 1.0;
 
@@ -897,6 +1007,49 @@ const WALK_ADVANCE_M = 1.0;
  * is what makes it a claim about staying stopped rather than about one line.
  */
 const WALK_STILL_BEATS = 3;
+
+/**
+ * How long a look key is held for the first nudge of the view, in milliseconds,
+ * and how many times that is doubled before the nudge is given up on.
+ *
+ * **Nudged rather than held until the heartbeat notices.** `apps/breach` turns
+ * at over a radian a second and logs one heartbeat a second, so a key held
+ * until a new angle is reported has already spun the player most of the way
+ * round — and a demo left facing a blank ceiling fails group D's "the canvas
+ * changes between frames" for a reason that is the driver's doing rather than
+ * the demo's.
+ *
+ * **And doubled rather than fixed**, because a look key is read on the frame
+ * and a software rasteriser under load draws frames a second apart: a hold
+ * shorter than one frame is a press and a release the demo sees in the same
+ * breath, which is nothing held at all. Doubling makes the shortest hold that
+ * works the one that gets used, on a fast machine and a slow one.
+ */
+const LOOK_NUDGE_MS = 200;
+const LOOK_NUDGE_ROUNDS = 5;
+
+/**
+ * How far the view must have swung, in radians, for a nudge to count as having
+ * landed — and for a look key to be credited with turning the view.
+ *
+ * Well under what one nudge buys and far above the nothing a view that ignored
+ * the key would move.
+ */
+const LOOK_NUDGE_RAD = 0.1;
+
+/**
+ * How square the view must be left before the generic groups judge the canvas,
+ * in radians, and how many rounds are spent getting it there.
+ *
+ * The travelling target is the only thing in this room that moves on its own,
+ * so a driver that walked away leaving the camera pointed at a wall would hand
+ * group D a still picture of a demo that is running perfectly well. Half a
+ * radian is loose on purpose: the far lane only has to be somewhere in a frame
+ * a good deal wider than that, and a tighter tolerance would be a driver
+ * chasing a number rather than a demo pointing at its range.
+ */
+const LOOK_SQUARE_RAD = 0.5;
+const LOOK_SQUARE_ROUNDS = 4;
 
 /**
  * How far a foot height may sit from the step it is standing on, in metres.
@@ -2442,6 +2595,387 @@ try {
         : `the highest its feet reached was ${top} m; the step it climbed is ` +
             `${walk.lowStep} m and the one it must not is ${walk.highStep} m`
     );
+  }
+
+  // **AND THE FIRST-PERSON HALF OF THE SAME CLAIM.** Only breach has one.
+  // `moving` above reads a plate that travels its lane on a timer, so it says
+  // the loop is running and would go on saying so for a page whose input path
+  // is severed — nothing a player does can move that number, which is exactly
+  // what makes it a good liveness check and a useless input check.
+  //
+  // So this block drives the demo's own keys and reads what they did, in three
+  // pairs, each a positive and the control that stops it passing for the wrong
+  // reason:
+  //
+  // * the player **advances** while the walk key is held, and **stops** when it
+  //   is released, **short of the firing line**. A demo that drifts passes "a
+  //   number changed" and fails the first half; a demo that never reads a key
+  //   release walks to the line the controller will not climb and stands there
+  //   perfectly still, which passes the second half until the third clause is
+  //   there to ask where it stopped.
+  // * a shot with a plate in the crosshair **scores**, and a shot aimed away
+  //   from every plate **does not**. A build that scored on every trigger pull
+  //   passes the first and fails the second.
+  // * a look key **turns the view**, and the view **was standing still before
+  //   it was pressed**. Without the control, "the yaw took two values" passes
+  //   for the range's own warm-up, which sweeps its aim between the lanes with
+  //   nobody touching anything.
+  //
+  // Both shots are aimed by driving the demo's own look input and reading the
+  // `aim` field back, rather than by reaching past it into the simulation — so
+  // what the gate proves is that a player can aim, not that a test can.
+  if (EXPECTED.range) {
+    const range = EXPECTED.range;
+
+    /** The most recent value `pattern` captured on a HUD line, as a number. */
+    const latest = (/** @type {RegExp} */ pattern) => {
+      const lines = hud();
+      for (let at = lines.length - 1; at >= 0; at -= 1) {
+        const found = lines[at].match(pattern);
+        if (found) return Number(found[1]);
+      }
+      return null;
+    };
+    /** The most recent value `pattern` captured, as the word it is. */
+    const word = (/** @type {RegExp} */ pattern) => {
+      const lines = hud();
+      for (let at = lines.length - 1; at >= 0; at -= 1) {
+        const found = lines[at].match(pattern);
+        if (found) return found[1];
+      }
+      return null;
+    };
+    /** Every value `pattern` has captured on the HUD lines from `from` on. */
+    const since = (/** @type {RegExp} */ pattern, /** @type {number} */ from) =>
+      hud()
+        .slice(from)
+        .map((line) => line.match(pattern)?.[1])
+        .filter((value) => value !== undefined);
+    /**
+     * Presses or releases one of this demo's keys, through the browser.
+     *
+     * `key` and `text` are not the same field and cannot be folded into one:
+     * `key` is the DOM key value every binding has, and `text` is the
+     * character the press types, which only a printable key has. Sending a
+     * `text` of `'ArrowRight'` is rejected outright — `Invalid 'text'
+     * parameter` — so a binding without a character omits it.
+     */
+    const key = async (
+      /** @type {string} */ type,
+      /** @type {{code: string, key: string, text?: string, virtualKeyCode: number}} */ binding
+    ) =>
+      page.send('Input.dispatchKeyEvent', {
+        type,
+        code: binding.code,
+        key: binding.key,
+        windowsVirtualKeyCode: binding.virtualKeyCode,
+        nativeVirtualKeyCode: binding.virtualKeyCode,
+        ...(type === 'keyDown' && binding.text !== undefined
+          ? { text: binding.text }
+          : {}),
+      });
+    /** One press and release — which for the trigger is one shot. */
+    const tap = async (
+      /** @type {{code: string, key: string, text?: string, virtualKeyCode: number}} */ binding
+    ) => {
+      await key('keyDown', binding);
+      await key('keyUp', binding);
+    };
+    /** A key held for `ms`, which for a look key is a measured swing. */
+    const nudge = async (
+      /** @type {{code: string, key: string, text?: string, virtualKeyCode: number}} */ binding,
+      /** @type {number} */ ms
+    ) => {
+      await key('keyDown', binding);
+      await pause(ms);
+      await key('keyUp', binding);
+    };
+    /** Waits for one heartbeat past `mark`, so a nudge can be read back. */
+    const beat = async (/** @type {number} */ mark) =>
+      until(async () => (hud().length > mark ? hud().length : null));
+    /**
+     * Holds a look key until the angle `pattern` reports has moved, doubling
+     * the hold until it does.
+     *
+     * Both angles are read from heartbeats logged with nothing held — one
+     * before the press and one after the release — so the swing and the time
+     * it took cover the same interval and their ratio is the rate the view
+     * turns at, which is what puts it back afterwards.
+     */
+    const swingBy = async (
+      /** @type {{code: string, key: string, text?: string, virtualKeyCode: number}} */ binding,
+      /** @type {RegExp} */ pattern
+    ) => {
+      let ms = LOOK_NUDGE_MS;
+      for (let round = 0; round < LOOK_NUDGE_ROUNDS; round += 1) {
+        const from = latest(pattern);
+        await nudge(binding, ms);
+        const mark = hud().length;
+        await beat(mark);
+        const to = latest(pattern);
+        if (
+          from !== null &&
+          to !== null &&
+          Math.abs(to - from) >= LOOK_NUDGE_RAD
+        ) {
+          return { from, to, ms };
+        }
+        ms *= 2;
+      }
+      return null;
+    };
+    /**
+     * The first HUD line since `from` that reports more shots than `before`,
+     * with the score it carried.
+     *
+     * Read off **one line** rather than by sampling the two counters
+     * separately: a shot and the hit it did or did not score are one tick's
+     * work, and two reads a poll apart could straddle the next trigger pull.
+     */
+    const shotAfter = async (
+      /** @type {number} */ from,
+      /** @type {number} */ before
+    ) =>
+      until(async () => {
+        for (const line of hud().slice(from)) {
+          const shots = Number(line.match(range.shots)?.[1]);
+          const hits = Number(line.match(range.hits)?.[1]);
+          if (
+            Number.isFinite(shots) &&
+            Number.isFinite(hits) &&
+            shots > before
+          ) {
+            return { shots, hits, line };
+          }
+        }
+        return null;
+      });
+
+    // ---- the pair about input reaching the controller at all ----------------
+    const startedAt = latest(range.advance);
+    await key('keyDown', range.walk);
+    const advanced = await until(async () => {
+      const now = latest(range.advance);
+      return startedAt !== null &&
+        now !== null &&
+        startedAt - now >= WALK_ADVANCE_M
+        ? now
+        : null;
+    });
+    check(
+      'C',
+      'the player advances while the walk key is held',
+      advanced !== null,
+      advanced === null
+        ? `they started at ${startedAt} and never got ${WALK_ADVANCE_M} m past it — ` +
+            `last reading ${latest(range.advance)} over ${hud().length} HUD line(s)`
+        : `they walked from ${startedAt} to ${advanced}`
+    );
+
+    // **They have to have still been moving when the key came up**, or "it
+    // stopped" is a claim about a player the firing line had already stopped.
+    // The two lines before the release are both under a held key, so a pair of
+    // equal readings there is the vacuous case and this is what catches it.
+    const atRelease = hud().length;
+    await key('keyUp', range.walk);
+    const lastHeld = hud()[atRelease - 1]?.match(range.advance)?.[1];
+    const priorHeld = hud()[atRelease - 2]?.match(range.advance)?.[1];
+    const stillMoving = Boolean(
+      lastHeld && priorHeld && lastHeld !== priorHeld
+    );
+
+    const settled = await until(async () => {
+      const readings = since(range.advance, atRelease);
+      if (readings.length < WALK_STILL_BEATS) return null;
+      const tail = readings.slice(-WALK_STILL_BEATS);
+      return tail.every((value) => value === tail[0]) ? tail[0] : null;
+    });
+    const shortOfTheLine =
+      settled !== null && Number(settled) > range.stopsShortOf;
+    check(
+      'C',
+      'and stops where they are when the key is released',
+      Boolean(settled) && stillMoving && shortOfTheLine,
+      !stillMoving
+        ? `they were already standing still before the release (${priorHeld} then ` +
+            `${lastHeld}), so this check would pass on a demo that never moved`
+        : settled === null
+          ? `they kept moving with nothing held: ${since(range.advance, atRelease).join(', ')}`
+          : shortOfTheLine
+            ? `they held ${settled} for ${WALK_STILL_BEATS} beats after the release, ` +
+              `${(Number(settled) - range.stopsShortOf).toFixed(2)} m short of where the ` +
+              `firing line would have stopped them anyway`
+            : `they stopped at ${settled}, which is on the firing line — the range ` +
+              `stopped them, not the key coming up`
+    );
+
+    // ---- the pair about the pistol ------------------------------------------
+    // The range squares the shooter up down the near lane when they step up to
+    // it, and the walk above only moved them along that lane — so a plate is
+    // already in the crosshair. Asserted rather than assumed, because it is
+    // what makes the shot below deliberate: firing at whatever happened to be
+    // there and calling a hit a hit would be the check passing for the wrong
+    // reason.
+    const aimed = await until(async () => {
+      const at = word(range.aim);
+      return at && at !== range.offTarget && at !== 'none' && at !== 'down'
+        ? at
+        : null;
+    });
+    check(
+      'C',
+      'a plate is in the crosshair before the shot',
+      Boolean(aimed),
+      aimed
+        ? `the crosshair is on the ${aimed} lane`
+        : `the crosshair reports "${word(range.aim) ?? 'nothing'}" — there is no ` +
+            `target to shoot at, so a hit below would be an accident`
+    );
+
+    const shotsBeforeHit = latest(range.shots) ?? 0;
+    const hitsBeforeHit = latest(range.hits) ?? 0;
+    const hitMark = hud().length;
+    await tap(range.fire);
+    const scored = await shotAfter(hitMark, shotsBeforeHit);
+    // **Two observables, not one.** The score is what the demo counted; the
+    // plate going down is what happened to the range. A build that incremented
+    // a counter and left the target standing passes the first and fails the
+    // second, and it is the second a visitor would notice.
+    const knocked =
+      scored !== null && since(range.nearest, hitMark).includes('down');
+    const hitScored = scored !== null && scored.hits > hitsBeforeHit;
+    check(
+      'C',
+      'a shot at a plate scores a hit and knocks it down',
+      hitScored && knocked,
+      hitScored && knocked
+        ? `${scored.line.trim()} — and the ${aimed} plate went down with it`
+        : scored === null
+          ? `no heartbeat after the shot reported more than ${shotsBeforeHit} shot(s) — ` +
+            `the trigger never reached the simulation`
+          : hitScored
+            ? `${scored.line.trim()} — but the ${aimed} plate never went down: ` +
+              `${since(range.nearest, hitMark).join(', ') || 'no readings'}`
+            : `hits stayed at ${hitsBeforeHit} while shots went to ${scored.shots}: ` +
+              `${scored.line.trim()}`
+    );
+
+    // ---- the pair about the view --------------------------------------------
+    // The control first, and it is measured from the tick the player took the
+    // range over: before that the warm-up is sweeping its own aim between the
+    // lanes, so "the yaw was standing still" would be false there and this
+    // check would be measuring the wrong thing.
+    const tookOver = await until(async () => {
+      const at = hud().findIndex(
+        (line) => line.match(range.pilot)?.[1] === 'player'
+      );
+      return at >= 0 && hud().length - at >= WALK_STILL_BEATS ? at : null;
+    });
+    const held = tookOver === null ? [] : since(range.yaw, tookOver);
+    const wasStill =
+      held.length > 1 && held.every((value) => value === held[0]);
+
+    const beforeTurn = hud().length;
+    const turned = await swingBy(range.turn, range.yaw);
+    check(
+      'C',
+      'a look key turns the view',
+      turned !== null && wasStill,
+      !wasStill
+        ? `the view was already taking new angles with nothing held ` +
+            `(${held.join(', ') || 'no readings'}), so this check would pass on a ` +
+            `demo whose camera drifts`
+        : turned !== null
+          ? `${turned.ms} ms of the turn key swung it from ${turned.from} to ${turned.to}`
+          : `the yaw never moved: ` +
+            `${[...new Set(since(range.yaw, beforeTurn))].join(', ') || 'none'}`
+    );
+
+    // **The rate the view turns at, measured rather than assumed**, so the
+    // view can be put back where it was without this file carrying a copy of
+    // the demo's look speed — a constant that would go quietly wrong the day
+    // somebody tuned it.
+    const lookRate =
+      turned === null
+        ? null
+        : Math.abs(turned.to - turned.from) / (turned.ms / 1000);
+    /** Holds a look key for as long as `radians` of swing takes. */
+    const swing = async (
+      /** @type {{code: string, key: string, text?: string, virtualKeyCode: number}} */ binding,
+      /** @type {number} */ radians
+    ) => {
+      if (!lookRate) return;
+      // Floored at the hold that was measured to work here: a shorter one is a
+      // press and a release inside a single frame, which turns nothing.
+      const ms = Math.max(turned.ms, (1000 * radians) / lookRate);
+      await nudge(binding, Math.min(4000, ms));
+    };
+
+    // ---- and the control for the shot ---------------------------------------
+    // Aimed by tilting the view up a nudge at a time until three consecutive
+    // heartbeats agree the crosshair is off every target — three, so the shot
+    // cannot land on a frame that was about to sweep back onto one. A nudge at
+    // a time rather than held to the pitch clamp, because the clamp is the
+    // ceiling and a demo left staring at a ceiling has nothing moving in it.
+    let offTarget = null;
+    for (let round = 0; round < LOOK_SQUARE_ROUNDS && !offTarget; round += 1) {
+      if ((await swingBy(range.tilt, range.pitch)) === null) break;
+      const beforeTilt = hud().length;
+      await until(async () =>
+        since(range.aim, beforeTilt).length >= WALK_STILL_BEATS ? true : null
+      );
+      const tail = since(range.aim, beforeTilt).slice(-WALK_STILL_BEATS);
+      if (
+        tail.length === WALK_STILL_BEATS &&
+        tail.every((at) => at === range.offTarget)
+      ) {
+        offTarget = tail;
+      }
+    }
+    const aimReadings = () => [
+      ...new Set(hud().map((line) => line.match(range.aim)?.[1])),
+    ];
+
+    const shotsBeforeMiss = latest(range.shots) ?? 0;
+    const hitsBeforeMiss = latest(range.hits) ?? 0;
+    const missMark = hud().length;
+    await tap(range.fire);
+    const missed = await shotAfter(missMark, shotsBeforeMiss);
+    check(
+      'C',
+      'and a shot aimed away from every plate does not score',
+      offTarget !== null && missed !== null && missed.hits === hitsBeforeMiss,
+      offTarget === null
+        ? `the crosshair never came off every target: ` +
+            `${aimReadings().join(', ') || 'no readings'}`
+        : missed === null
+          ? `no heartbeat after the shot reported more than ${shotsBeforeMiss} shot(s)`
+          : `${missed.line.trim()} — hits went ${hitsBeforeMiss} → ${missed.hits}`
+    );
+
+    // ---- and the view goes back where the range is --------------------------
+    // Not a check: it is what the groups below are entitled to, having been
+    // handed a demo this block spent a minute aiming somewhere else. The only
+    // thing in this room that moves on its own is the travelling target, and
+    // "the canvas changes between frames" is a question about the demo, not
+    // about where the last driver left the camera pointing.
+    for (let round = 0; round < LOOK_SQUARE_ROUNDS; round += 1) {
+      const yawNow = latest(range.yaw) ?? 0;
+      const pitchNow = latest(range.pitch) ?? 0;
+      if (
+        Math.abs(yawNow) < LOOK_SQUARE_RAD &&
+        Math.abs(pitchNow) < LOOK_SQUARE_RAD
+      ) {
+        break;
+      }
+      const mark = hud().length;
+      await swing(yawNow > 0 ? range.turnBack : range.turn, Math.abs(yawNow));
+      await swing(
+        pitchNow > 0 ? range.tiltBack : range.tilt,
+        Math.abs(pitchNow)
+      );
+      await beat(mark);
+    }
   }
 
   // **AND THE BUDGET, WHICH THE CHECK ABOVE CANNOT SEE EITHER.**

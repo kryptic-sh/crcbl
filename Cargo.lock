@@ -120,6 +120,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "breach"
+version = "0.1.0"
+dependencies = [
+ "crcbl",
+]
+
+[[package]]
 name = "breakout"
 version = "0.1.0"
 dependencies = [
