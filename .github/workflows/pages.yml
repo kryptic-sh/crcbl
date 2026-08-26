@@ -408,8 +408,22 @@ jobs:
         timeout-minutes: 10
         run: CRCBL_WEB_E2E_DEMO=sparks ./web/run-browser-e2e.sh
 
+      # **Twenty rather than the ten its neighbours take.** This step does not
+      # fail — on the run that reddened `main` it reported 46 checks, every one
+      # of them green, and then died mid-group-F at the cap. It is simply the
+      # longest gate here: 613s against a 600s ceiling, beside puppet's 468s,
+      # lantern's 456s and quarry's 436s.
+      #
+      # Those three are the reason this is a cap change rather than a demo
+      # change: they sit at three quarters of the same ceiling, so the ceiling
+      # is what is wrong, not breach. Why every simulation-heavy demo runs this
+      # close is a live question — the runner has no GPU, and its software
+      # rasteriser drives the simulation at a fraction of real time, so every
+      # check that waits on simulated progress waits in wall-clock multiples of
+      # it. `docs/backlog.md` carries what is measured and what is still
+      # unexplained.
       - name: Render breach in a real browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=breach ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
@@ -581,8 +595,9 @@ jobs:
         timeout-minutes: 12
         run: CRCBL_WEB_E2E_DEMO=sparks ./web/run-browser-e2e.sh --headless
 
+      # Twenty, for the reason the build job's breach step carries.
       - name: Render breach in a real browser
-        timeout-minutes: 12
+        timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=breach ./web/run-browser-e2e.sh --headless
 
   probe-windows:

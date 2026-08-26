@@ -3,6 +3,57 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Every simulation-heavy demo's browser gate is near the CI step cap (2026-08-26)
+
+`Pages` run 32953192638 on `4553f9e`, job "build the demo site" — the browser
+gate for each demo, measured from the step timings:
+
+```
+613s  breach     ← over the 600s cap; killed mid-run
+468s  puppet
+456s  lantern
+436s  quarry
+197s  sparks
+134s  viewer
+ 43s  breakout … 21s hud   (the 2D demos)
+```
+
+**breach's step does not fail.** Its log reports 46 checks, every one green,
+including all seven practice checks, and then dies at the cap. So the step
+timeout was raised to 20 minutes rather than the demo being changed — but
+puppet, lantern and quarry sit at three quarters of the same ceiling, so this is
+a property of the job and not of breach.
+
+**What is measured.** The runner has no GPU and drives the browser on a software
+rasteriser at roughly half a frame a second. Under it the simulation advances at
+a fraction of real time, so every check that waits on _simulated_ progress — a
+walk of so many metres, a plate cycle, a patrol leg — waits in a wall-clock
+multiple of it. On this machine, pinned to four cores to imitate a runner, the
+breach gate takes 210s against 69s unpinned, and the simulation runs about 6
+ticks a second against a nominal 60.
+
+**What is NOT the cause, checked and ruled out.** `FrameClock`'s catch-up cap
+(`DEFAULT_MAX_CATCH_UP_TICKS`, 8) is not binding: at CI's frame rate the clock
+queues roughly four ticks a frame, under the cap, and `crcbl::engine::run_ticks`
+drains without a cap of its own. Exposing the cap through `LoopConfig` and
+raising it for breach was written, measured and **reverted** — it moved the tick
+rate not at all (330 ticks in 55.3s, before and after). Do not re-propose it
+without new evidence.
+
+**What is still unexplained**, and is the thread to pull next: at ~2 frames a
+second a frame's real delta should queue ~30 ticks, and only ~3 run. Either the
+delta reaching `FrameClock::update` is far smaller than the wall-clock gap
+between frames, or the browser loop is not driving it from real time. Instrument
+`FrameClock`'s delta and `dropped_ticks` in a wasm build before theorising
+further — everything above this paragraph is measured, and this paragraph is
+not.
+
+**Two consequences worth holding.** The job's steps now sum to about 42 minutes
+against a 60-minute job cap, so the matrix split already recorded elsewhere in
+this file stops being a tidiness item. And a browser gate verified only on this
+machine's `auto` adapter says little about CI: `auto` resolves to real hardware
+here, and the demo gate there has none.
+
 ### The rand 0.10 migration is written and blocked upstream (2026-08-26)
 
 Dependabot proposed `rand_core` 0.9.5 → 0.10.1 and `rand_chacha` 0.9.0 → 0.10.0
