@@ -4,6 +4,26 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
+## Status: not started, and what waits on it
+
+There is no `apps/editor`. `tools/check-doc-citations.sh` allow-lists that path
+on purpose, naming this document as its design, so the absence is recorded
+rather than merely true.
+
+Two things sit behind it, in both directions:
+
+- **It waits on stage 6.** Features 5 (scene IO) and 6 (asset browser) have
+  nothing to open or save: there is no `.scn/` directory format and no RON
+  reader anywhere in the workspace — see
+  [06-assets-scenes.md](06-assets-scenes.md), whose task 4 is the unbuilt half.
+  Feature 3 waits on stage 7's inspector, which is also unbuilt
+  ([07-ui-debug.md](07-ui-debug.md)).
+- **Two sample plans wait on it**, and they are the only two samples with no app
+  directory. [sample/07-towers.md](sample/07-towers.md)'s milestone 2 _is_ this
+  document's dogfood pass — its exit criterion is "map authored 100% in the
+  editor, zero hand-edited scene text" — and
+  [sample/08-arena.md](sample/08-arena.md) wants an editor-built map too.
+
 ## Architecture
 
 - **The editor is a client+server pair**, exactly like the sandbox: an editor

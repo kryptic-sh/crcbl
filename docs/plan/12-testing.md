@@ -31,19 +31,25 @@ interesting part is the order of many.
 ## Infrastructure (P0, then grows)
 
 - **Runner**: `cargo nextest` workspace-wide. E2E suites are gated **per
-  crate**, never workspace-wide: `vk-e2e`, `wgpu-e2e`, `mtl-e2e`, `wayland-e2e`,
-  `x11-e2e`, `win32-e2e`, `cli-e2e` and `render-e2e` are each declared by the
-  crate that owns the hardware or window system its suite needs. One workspace
-  `e2e` feature could only ever mean "all of it", which on every real machine is
-  a superset of what is actually present; a per-crate name says which loader,
-  compositor or GPU a run is claiming, so a CI job can select exactly the suites
-  its runner can honour and a developer can turn on the one backend they have.
-  `crcbl-dx12` has no feature at all, and that is argued rather than overlooked
-  — `crates/crcbl-dx12/tests/run-dx12-e2e.sh` makes the case: D3D12 ships in
-  Windows and WARP ships with it, so unlike Metal (no software rasteriser
-  exists) and Vulkan (no loader on a bare machine) there is no Windows machine
-  where that suite _cannot_ run. Hiding it behind a feature would take working
-  coverage away from the ordinary Windows job in exchange for nothing.
+  crate**, never workspace-wide: `crcbl-vk` declares `vk-e2e`, `crcbl-mtl`
+  `mtl-e2e`, `crcbl-shell` `wayland-e2e`/`x11-e2e`/`win32-e2e`, `crcbl-cli`
+  `cli-e2e`, each sample `golden-e2e`, and `crates/crcbl` one feature per render
+  suite it owns (`render-e2e`, `hal-seam-e2e`, `draw-gen-e2e`, `forward-e2e`,
+  `sprite-e2e`, `mesh-e2e`, `windowed-e2e`) — each declared by the crate that
+  owns the hardware or window system its suite needs. There is no `wgpu-e2e`: it
+  went with `crcbl-wgpu` on 2026-08-21, and the coverage that replaced it is
+  `web/run-cross-backend-e2e.sh`, which drives a browser rather than a Cargo
+  feature. One workspace `e2e` feature could only ever mean "all of it", which
+  on every real machine is a superset of what is actually present; a per-crate
+  name says which loader, compositor or GPU a run is claiming, so a CI job can
+  select exactly the suites its runner can honour and a developer can turn on
+  the one backend they have. `crcbl-dx12` has no feature at all, and that is
+  argued rather than overlooked — `crates/crcbl-dx12/tests/run-dx12-e2e.sh`
+  makes the case: D3D12 ships in Windows and WARP ships with it, so unlike Metal
+  (no software rasteriser exists) and Vulkan (no loader on a bare machine) there
+  is no Windows machine where that suite _cannot_ run. Hiding it behind a
+  feature would take working coverage away from the ordinary Windows job in
+  exchange for nothing.
 - **Nothing may skip silently — and `--all-features` is not what prevents it.**
   Every gated suite is `#[ignore]`d _on top of_ its feature;
   `crates/crcbl-shell/tests/wayland_e2e.rs`'s header says why. So
@@ -61,8 +67,8 @@ interesting part is the order of many.
   reported total rather than counting lines of its output is deliberate: a line
   count silently picks up headers and lands a number close enough to look right.
 - **A harness over a crate whose tests are mixed selects `--run-ignored only`,
-  not `all`.** Where the suite is its own target — `vk_e2e`, `wgpu_e2e`,
-  `wayland_e2e` — the two flags pick the same tests, because everything in that
+  not `all`.** Where the suite is its own target — `vk_e2e`, `wayland_e2e`,
+  `win32_e2e` — the two flags pick the same tests, because everything in that
   binary needs the hardware. `crcbl-mtl` and `crcbl-dx12` keep their tests in
   `src/` alongside pure ones (the next section says why they must), so
   `--run-ignored all` there had the harness run the whole crate and made the
@@ -98,15 +104,27 @@ interesting part is the order of many.
   left the prose attached to a different program.) The property is the same one
   `nextest-summary.sh` protects: a run that silently did less work than it
   claimed cannot pass.
-- **Software GPU in CI**: render e2e runs on **lavapipe** (Vulkan) and wgpu's
-  GL/software fallbacks — every commit exercises real render paths without
-  hardware runners. The mac and Windows arms did not wait for a scheduled
-  hardware job in the end: `mtl e2e` on `macos-latest` and `dx12 e2e` on
-  `windows-latest` run per commit like everything else, the first against the
-  runner's real GPU and the second pinned to WARP.
+- **Software GPU in CI**: render e2e runs on **lavapipe** (Vulkan), the browser
+  arm under headless Chromium's SwiftShader, and D3D12 on WARP — every commit
+  exercises real render paths without hardware runners. Each of those is a
+  software implementation of one API; there is no GL path in the tree at all,
+  and `docs/backlog.md` carries the OpenGL decline and its reasoning. The mac
+  and Windows arms did not wait for a scheduled hardware job in the end:
+  `mtl e2e` on `macos-latest` and `dx12 e2e` on `windows-latest` run per commit
+  like everything else, the first against the runner's real GPU and the second
+  pinned to WARP.
 - **Golden images**: `crcbl screenshot` output vs checked-in references; compare
-  with per-pixel tolerance + SSIM-style metric (rasterizers differ slightly);
-  regenerate via `--bless` flag; diffs uploaded as CI artifacts on failure.
+  with per-pixel tolerance + SSIM-style metric (`crcbl_golden::ssim`, over
+  non-overlapping 8x8 luma blocks rather than the original 11x11 Gaussian
+  window). **Blessing is an environment variable, not a flag** — a nextest-run
+  test binary has no argv of its own, so `crcbl_golden::blessing()` reads
+  `BLESS_ENV` (`CRCBL_BLESS`) and only a harness that owns its own command line
+  spells it `--bless` (`crates/crcbl-vk/tests/run-vk-e2e.sh`; the PowerShell
+  sibling deliberately does not, because it runs a different lavapipe build from
+  the one the references were blessed on). A blessed run is **not** a pass:
+  `Outcome::into_result` still returns an error, guarded by
+  `blessing_overwrites_and_is_still_not_a_pass`. Diffs uploaded as CI artifacts
+  on failure.
 - **Determinism harness**: same input script → same state hash, asserted across
   runs and (same-binary) across CI jobs; any nondeterminism source (time, RNG,
   iteration order) must be injected/seeded — enforced from P2, in every sim e2e
@@ -114,9 +132,13 @@ interesting part is the order of many.
 - **Frame-poll discipline** for anything async (swapchain warm-up, asset loads):
   poll for the condition with deadline, never fixed sleeps (slow-CI flake
   lesson, learned elsewhere the hard way).
-- **Coverage**: `cargo llvm-cov` in CI with per-crate thresholds — gate on
-  meaningful floors (core/phys/net high; backend crates measured but gated
-  looser since e2e covers them), trend tracked, not vanity-chased.
+- **Coverage**: `cargo llvm-cov` runs in `ci.yml`'s `coverage (linux)` job,
+  pinned to lavapipe so the number does not move with the runner, and gates a
+  **single workspace floor** — `COVERAGE_FLOOR` handed to
+  `cargo llvm-cov report --fail-under-lines`. The per-crate thresholds this
+  bullet used to promise (core/phys/net high, backend crates looser because e2e
+  covers them) are not built, and the workflow says why: the split waits for
+  tooling that can express it. Trend tracked, not vanity-chased.
 
 ## Naming and placement
 
@@ -205,10 +227,10 @@ directory half, and now they actually do.** Both once kept every test unmarked �
 `crcbl-dx12` carried no `#[ignore]` anywhere — which is what let their harnesses
 run the whole crate and guard on a count that mixed pure tests with device ones.
 Every test whose body causes a real device, instance or adapter to be created is
-now `#[ignore]`d with a reason naming its harness, in the form `crcbl-vk` and
-`crcbl-wgpu` use; every test that passes with no GPU is not. The split was read
-off the bodies, tracing `instance::tests::open`, `device::tests::open_device`
-and `instance::tests::pinned_adapter` through each module's local helpers, so in
+now `#[ignore]`d with a reason naming its harness, in the form `crcbl-vk` uses;
+every test that passes with no GPU is not. The split was read off the bodies,
+tracing `instance::tests::open`, `device::tests::open_device` and
+`instance::tests::pinned_adapter` through each module's local helpers, so in
 both crates the split falls out of what a test's body does rather than out of
 where the file sits. Calls that look like hardware and are not stayed on the
 pure side, each because it can pass on a machine with no GPU:
@@ -233,8 +255,8 @@ tests, print nothing, and still pass its `--no-tests fail` check.
 **Filenames name the subject, never the taxonomy tier.**
 
 - `<platform>_e2e.rs` for a hardware or window-system suite: `wayland_e2e.rs`,
-  `x11_e2e.rs`, `win32_e2e.rs`, `wgpu_e2e.rs`, `render_e2e.rs`, `cli_e2e.rs`,
-  and `vk_e2e/` where the suite is large enough to want modules.
+  `x11_e2e.rs`, `win32_e2e.rs`, `render_e2e.rs`, `cli_e2e.rs`, and `vk_e2e/`
+  where the suite is large enough to want modules.
 - `seam_from_outside.rs` for a test that exercises a crate's public surface from
   an integration binary. `crcbl-hal` and `crcbl-shell` both use it, and both
   headers give the same reason: an in-crate test can reach private items, so it
@@ -285,8 +307,15 @@ validation-report assertion once, for all of them.
   velocity within tolerance — see orbit sample exit criteria), bullet-
   through-paper CCD suite, BVH property tests, determinism hash 1000-tick
   replays.
-- `crcbl-scene`: glTF corpus (Khronos samples subset vendored) load-and- count
-  asserts; scene save→load→hash roundtrip.
+- `crcbl-scene`: the glTF fixture is **synthesized in code**, not vendored —
+  `crates/crcbl-scene/src/gltf_fixture.rs` behind the `gltf-fixture` feature
+  builds a triangle document and its `.glb` container, and that crate's
+  `Cargo.toml` gives the reason: a binary container is a fixture nobody
+  reviewing a change can read. There is no Khronos sample subset in the tree and
+  no committed `.glb`/`.gltf` anywhere; vendoring one is what `.gitattributes`
+  says LFS turns on for, and it is still owed. The scene save→load→hash
+  roundtrip cannot exist yet either — there is no scene format to save
+  ([06-assets-scenes.md](06-assets-scenes.md)).
 - `crcbl-ui`: draw-list snapshot tests (widget tree → draw-command list compare
   — no GPU needed); hit-test unit grid.
 - Editor: random-command/undo property test (stage 8 exit criterion) runs
@@ -296,16 +325,16 @@ validation-report assertion once, for all of them.
 
 ## Delivery
 
-| Slice                                                     | Roadmap phase       |
-| --------------------------------------------------------- | ------------------- |
-| nextest + CI skeleton, coverage wiring, NullBackend suite | P0                  |
-| lavapipe render e2e + golden-image tooling (`--bless`)    | P1                  |
-| Determinism harness + sim e2e pattern                     | P2                  |
-| Phys analytic/property/CCD suites                         | P3, grows P6/P8/P11 |
-| Cross-backend image compare (vk↔wgpu)                     | P5                  |
-| glTF corpus + scene roundtrip                             | P9                  |
-| UI draw-list snapshots                                    | P4, P10             |
-| Editor command/undo property suite                        | P12                 |
+| Slice                                                      | Roadmap phase       |
+| ---------------------------------------------------------- | ------------------- |
+| nextest + CI skeleton, coverage wiring, NullBackend suite  | P0                  |
+| lavapipe render e2e + golden-image tooling (`CRCBL_BLESS`) | P1                  |
+| Determinism harness + sim e2e pattern                      | P2                  |
+| Phys analytic/property/CCD suites                          | P3, grows P6/P8/P11 |
+| Cross-backend image compare (native ↔ browser)             | **Built**           |
+| glTF corpus + scene roundtrip                              | P9                  |
+| UI draw-list snapshots + hit-test grid                     | **Built**           |
+| Editor command/undo property suite                         | P12                 |
 
 ## Exit criteria (MVP)
 
@@ -323,13 +352,6 @@ validation-report assertion once, for all of them.
 
 ## Corrections (2026-08-09)
 
-- **"wgpu's GL/software fallbacks" do not run in CI.** The infrastructure
-  section says render e2e runs on lavapipe _and_ those fallbacks; nothing
-  exercises a GL device anywhere. **The action this asked for is moot**: GL was
-  reachable only through `crcbl-wgpu`, which was deleted 2026-08-21, so there is
-  no suite left to point at a GL device and no GL path in the tree at all.
-  `docs/backlog.md` carries the OpenGL decline and its reasoning. The claim is
-  what has to go, not the coverage.
 - **Shader artifacts are validated one target in four.** `spirv-val` runs on the
   SPIR-V; the WGSL, MSL and DXIL emitted from the same source are checked by
   nothing, which is how a shader Dawn rejects passed every gate and shipped a

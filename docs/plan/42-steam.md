@@ -641,57 +641,16 @@ implementation.
 
 ## Decisions this document asks for
 
-Recorded here in the backlog's format; they move to `docs/backlog.md` when work
-is scheduled.
-
-### DECISION NEEDED — binding route, and publishing our own flat-API declarations
-
-Route (a) means this public MIT repo contains hand-written Rust `extern "C"`
-declarations and `repr(C)` structs describing Valve's ABI — function names,
-argument types, struct layouts, callback ids — authored by us, transcribing no
-header text. The access agreement licenses the SDK source "solely to develop"
-and does not contemplate this either way; the ecosystem precedent is strong
-(Steamworks.NET has published exactly this, MIT-licensed with Valve's awareness,
-for over a decade; `steamworks-sys` publishes bindgen output — and the SDK
-itself — on crates.io), but precedent is not permission and this research read
-the agreement, not a lawyer.
-
-- **(a) Accept the posture and hand-write the declarations** — zero
-  dependencies, loader semantics we control, the drift gate as the safety net.
-  The recommendation.
-- **(b) Depend on `steamworks-rs`** — the ABI risk becomes theirs; costs a
-  link-time `DT_NEEDED` (no graceful absence), a vendored SDK in the dependency
-  graph, an event-model mismatch to wrap over, and the workspace's first large
-  foreign binding. A new dependency, so the user's call by standing rule either
-  way.
-
-### DECISION NEEDED — an app id of our own
-
-Everything real beyond slice 1 (achievement definitions, stats schema,
-Auto-Cloud config, rich presence localisation, game-server logins) is configured
-per-app on the partner site, and SpaceWar cannot carry it. A registered app
-means a Steamworks partner account and the app-credit fee, and names a product
-decision — which sample, if any, is the thing on Steam (towers and bracket are
-the candidates the sample ladder suggests). Until then, slices 2+ are built
-against 480 with mechanism-only smoke tests.
-
-### DECISION NEEDED — cloud saves: Auto-Cloud config or a `StorageSource` backend
-
-- **(a) Auto-Cloud only** — zero code, uses `crcbl-store`'s existing atomic file
-  layout; sync timing is Valve's (on exit), no in-game sync UI possible.
-- **(b) `SteamCloudStorage` backend over `ISteamRemoteStorage`** — per-file
-  control, quota introspection, conflict surfacing; a real slice of async code
-  behind the seam. The plan's lean: (a) first, (b) only when a sample
-  demonstrates a need Auto-Cloud cannot meet.
-
-### DECISION NEEDED — Steam Input, or the topic-19 backends only
-
-Declined above for the action-mapper conflict; the counterweight is Steam Deck
-verification, which requires first-class Steam Input. If Deck is ever a target,
-`ISteamInput` returns as a slice that feeds `ActionMap` through
-`Binding::Virtual` — origins and glyphs included — and topic 19's backend table
-gains the row with that justification. Until someone says "Deck", the P10/P14
-hand-FFI backends stand alone.
+**All four are already in `docs/backlog.md`**, under "Steamworks: four decisions
+the plan is waiting on": the binding route (and whether this MIT repo publishes
+our own flat-API declarations), an app id of our own, cloud saves as Auto-Cloud
+configuration or a `StorageSource` backend, and Steam Input versus topic 19's
+own device backends. That entry carries each option and its trade-off, plus the
+two things this research could not verify — whether SDK **1.64** exists at all,
+and the exact interface accessor version strings, which were read from
+Steamworks.NET's header mirror rather than Valve's login-gated zip. The
+reasoning behind each recommendation is in the sections above; the backlog is
+where the answer lands, so it is not restated here.
 
 ## What this document does not settle
 

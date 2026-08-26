@@ -29,9 +29,14 @@ collider shapes, component variants map natively to Rust enums; TOML forces
 stringly `type = "..."` conventions and verbose nesting). **TOML for flat
 config** where ubiquity and editor support win. Both get comments.
 
-`.gitattributes` in the workspace root (P0): LFS for
-`*.glb *.gltf *.png *.wav *.flac`; cooked outputs are build artifacts, never
-tracked.
+`.gitattributes` in the workspace root exists and marks those types binary, but
+**LFS is deliberately not enabled yet** and that file carries the reason:
+everything binary through P8 is small, golden images are re-blessed often (which
+LFS handles worse than plain git), and a `filter=lfs` line breaks `git commit`
+outright on a clone without the git-lfs binary. It turns on when the P9 glTF
+corpus lands — and when it does, every `actions/checkout` step in CI must gain
+`lfs: true` in the same commit, or CI silently tests against pointer files.
+Cooked outputs are build artifacts, never tracked.
 
 ## Scene format: directory of chunk files
 
@@ -94,12 +99,15 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
 
 ## Asset model
 
-- `AssetId` = 64-bit hash of canonical path (stable across machines);
-  `AssetHandle<T>` = runtime generational handle (from `crcbl-core`).
-- Load states: `Unloaded → Loading → Ready | Failed` — **async from day one**,
-  because wasm has no blocking filesystem: all IO goes through an `AssetSource`
-  trait (`DirSource` native; `FetchSource` wasm in stage 10; `PackSource` for
-  baked blobs). Physics sector streaming (stage 5) rides the same trait.
+- `AssetId` = **128 bits**, and the corrections below replace hash-of-path with
+  a sidecar GUID as its source; `AssetId::from_path` survives as the CLI/debug
+  lookup and `AssetId::from_bits` is where a GUID arrives without the type
+  changing shape. The handle is `crcbl_core::Handle<Asset>`, not a second handle
+  type — see the task-2 note below for why there is no `<T>` parameter.
+- Load states: `Loading → Ready | Failed` — **async from day one**, because wasm
+  has no blocking filesystem: all IO goes through an `AssetSource` trait
+  (`DirSource` native; `FetchSource` wasm in stage 10; `PackSource` for baked
+  blobs). Physics sector streaming (stage 5) rides the same trait.
 - Dependency tracking: scene → meshes → materials → textures. Refcounted
   release; the GPU pools get retire calls through the stage 2 deletion queue.
 
@@ -133,11 +141,10 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
 4. Scene-dir format: deterministic RON writer, chunk load/save, dirty-chunk
    tracking, roundtrip property tests.
 5. Watcher + reload paths (assets, shaders, per-chunk scene reload).
-6. `crcbl import` CLI wiring — the **report** is built
-   (`crcbl import <gltf> [--json]`, counts plus the importer's skip warnings);
-   what it does not do is write, because task 4 has not landed and there is no
-   scene directory to write into. `crcbl bake` (may land later, pre-Pages-demo
-   of a scene-heavy sample).
+6. `crcbl import` CLI wiring — the **report** half is built; see the task-3 note
+   below and [11-cli-headless.md](11-cli-headless.md). Writing waits on task 4,
+   which has not landed, so there is no scene directory to write into.
+   `crcbl bake` (may land later, pre-Pages-demo of a scene-heavy sample).
 7. Sandbox: load a real glTF scene (Sponza or similar) via a `.scn/` dir, fly
    through it at stage 3 performance targets.
 

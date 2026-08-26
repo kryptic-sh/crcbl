@@ -21,6 +21,37 @@ toolkit the stage 8 editor is made of.
 - Debug tools become visible: everything instrumented in stages 2–6 gets a live
   surface.
 
+## What is built, and how far it is from this design
+
+`crates/crcbl-ui` exists and is **not** the DOM/CSS system described below.
+Nothing in the workspace parses a stylesheet, lays out a flex box or builds a
+block/span tree; no engine crate reads a `.css` file, and `crcbl_ui::widget`'s
+`Style` is a plain struct of five colours rather than a cascade. What shipped is
+the pre-CSS toolkit the debug panel and the samples needed first:
+
+- **`draw_list`** — `DrawList`, `DrawCommand`, `Vertex2d`: the one interface
+  between the UI and the renderer, as the rendering section below describes.
+- **`text`** — `FontAtlas`, a built-in **monospace bitmap** ASCII font with
+  metrics and a simple layout. Not the `fontdue`/`swash`-class rasterizer, and
+  not the shelf/skyline atlas with LRU eviction the corrections below specify:
+  those arrive with real fonts, and nothing has needed one yet.
+- **`widget`** — `Label`, `Button`, `Style`, `SkinInsets`, `PointerInput`,
+  `UiState`, `WidgetId`. The rest of the MVP widget set below is unbuilt.
+- **`menu`** — `Menu`, `MenuItem`, `Slider`, `MenuSet`: keyboard-first, with the
+  pointer optional. Worth reading before designing on top of it, because it
+  already meets one constraint this document has not: the UI pass's atlas is a
+  single-channel glyph coverage mask and `DrawList` has no textured-quad
+  command, so a menu's nine-sliced frames live in `crcbl_render::MenuArt` and
+  `Menu::render` emits text alone. Any styled widget with a picture in it splits
+  the same way.
+- **`touch`** — `TouchStick`, `TouchButton`; see [19-input.md](19-input.md).
+- **`debug`** and **`budget`** — the modular panel described under "Debug tools"
+  below, and the frame CPU-vs-GPU row [40-profiling.md](40-profiling.md) owns.
+
+`crcbl-ui` depends on `glam`, `bytemuck` and `crcbl-core` (the latter for the
+shell's `ContactId`/`TouchPhase`, which `touch` hit-tests). It names no
+renderer, so the dependency-direction exit criterion below holds.
+
 ## Architecture: immediate-mode authoring, DOM-like model, CSS-subset styling
 
 Three cleanly separated layers:
@@ -194,7 +225,7 @@ settings list — the classic console-menu UX failure, banned by rule.
   **puppet's device-swap showcase is the acceptance test** (full menu flow on
   pad alone).
 
-## Debug tools (`crcbl-ui::debug` or thin crate atop it)
+## Debug tools (`crcbl_ui::debug`)
 
 **One panel, assembled from modules, that every sample switches on.** This is a
 standing requirement on samples, not a feature they opt into — see
@@ -322,14 +353,25 @@ Surfaces for instrumentation that already exists:
   a `DebugModule` impl and therefore a dependency on `crcbl-ui`. The backlog
   treats that as an open call ("the first time a simulation crate would depend
   on the UI"); this document already made it, and there is no cycle — `crcbl-ui`
-  depends on nothing but `glam` and `bytemuck`. The dependency-direction check
-  in the exit criteria is about `crcbl-ui` not naming the renderer, which is
-  unaffected.
-- **`crcbl_ui::hud` has no consumer and should be deleted rather than
-  extended.** `Hud`/`HudPanel` are used by nothing in the workspace — `lib.rs`
-  re-exports them and no other file names them; every sample hand-rolls its own
-  HUD instead, because `Label` has no per-label colour and `HudPanel` auto-sizes
-  where a measured constant is wanted. Adding a `color` field would build on the
-  pre-CSS model this document replaces — colour is a style property here, and
-  panel sizing is flex layout. **Delete it when the widget set lands**, and let
-  the samples adopt the styled widgets instead.
+  depends only on `glam`, `bytemuck` and `crcbl-core`, which is the bottom of
+  the graph. The dependency-direction check in the exit criteria is about
+  `crcbl-ui` not naming the renderer, which is unaffected.
+
+  **The precedent is already set, by a different crate.** There is still no
+  netgraph and `crcbl-client` still does not depend on `crcbl-ui`, but
+  `crcbl-render` does: `FrameTimings` and `FrameCounters` both implement
+  `DebugModule` and contribute their own sections. So "the system contributes
+  its own module" is a shape the tree holds to, and the client's turn is the
+  next instance of it rather than the first.
+
+- **`crcbl_ui::hud`'s `Hud` and `HudPanel` have no consumer and should be
+  deleted rather than extended.** Both are used by nothing in the workspace —
+  `lib.rs` re-exports them and no other file names them; every sample hand-rolls
+  its own HUD instead, because `Label` has no per-label colour and `HudPanel`
+  auto-sizes where a measured constant is wanted. **The module file is not the
+  unit to delete**, though: `Anchor` lives in it too and
+  `crates/crcbl-ui/src/debug.rs` imports it, so a deletion takes the two types
+  and leaves `Anchor` a home. Adding a `color` field would build on the pre-CSS
+  model this document replaces — colour is a style property here, and panel
+  sizing is flex layout. **Delete them when the widget set lands**, and let the
+  samples adopt the styled widgets instead.

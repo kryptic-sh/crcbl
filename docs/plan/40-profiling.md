@@ -28,15 +28,14 @@ afterwards that it worked.
   `Features::TIMESTAMP_QUERY` gets no timers and an empty report, which is what
   browsers actually do.
 - **`Features::DEBUG_MARKERS`** for capture tools.
-- **`crcbl-cli`** with the subcommands its `args.rs` parses — `new`, `run`,
-  `build`, `screenshot`, `replay`, `crpix`, `lod` — `--json` output, and a
-  report module.
+- **`crcbl-cli`** — every verb `crates/crcbl-cli/src/args.rs`'s `Command` parses
+  (`crcbl bench` among them, below), `--json` output on all of them, and a
+  report module. [11-cli-headless.md](11-cli-headless.md) owns the list.
 
 ## What is missing
 
 Written when the GPU side was genuinely good and the rest was not there at all.
-Three of the eight have since been closed and say so below; the rest still
-stand.
+The struck items below have since been closed; the rest still stand.
 
 1. ~~**No CPU-side spans.** Nothing measures the tick, the ECS schedule,
    physics, asset upload, culling's CPU half or the shell's frame. The GPU
@@ -51,11 +50,19 @@ stand.
    below. The ECS schedule, physics and asset upload are still unspanned,
    because they are not phases the engine's loop has — they live inside a game's
    `tick`.
-2. **No benchmark harness.** `apps/horde` has ad-hoc flags (`--wall-clock`,
+2. ~~**No benchmark harness.** `apps/horde` has ad-hoc flags (`--wall-clock`,
    `--fps 0`, `--tick-hz 1`, `--frames`, `--prefill`) and the numbers in
    [sample/03-horde.md](sample/03-horde.md) were produced by hand. There is no
    fixed scenario set, no warm-up, no statistics beyond a mean, and no
-   machine-readable output.
+   machine-readable output.~~ **Built for the scenarios that need no device.**
+   `crcbl bench --scenario jobs|phys` (`crates/crcbl-cli/src/bench/`) pins the
+   scenario, warms up, and reports p50, p95, p99 and max — and no mean, and no
+   percentile at all below `MIN_PERCENTILE_SAMPLES`, where a nearest-rank p95 is
+   the maximum wearing a percentile's name — as both a human line and `--json`,
+   beside an environment block. That block carries no adapter, backend or driver
+   version because neither scenario opens a device. The sample-owned scenarios
+   that would are not written, so `apps/horde`'s ad-hoc flags are still how its
+   numbers get produced.
 3. **No baseline or regression detection.** Nothing stores a previous run to
    compare against, so "is this slower than last week" is unanswerable.
 4. **No trace export.** Nothing a real profiler UI can open.
@@ -71,9 +78,12 @@ stand.
    the largest burst one submission queued, and the submission count. Relaxed
    atomics nothing in the pool reads back, counted per chunk rather than per
    item, and torn across fields if read mid-call — which the type documents
-   rather than preventing with a lock, for the reason under Risks. What is still
-   absent is a _reader_: nothing puts these on the trace or in a panel row, and
-   `crcbl-jobs` still has no spans.
+   rather than preventing with a lock, for the reason under Risks. The one
+   reader is `crcbl bench --scenario jobs`, which reports them in its human and
+   `--json` output. Nothing puts them on the trace or in a panel row, and
+   `crcbl-jobs` still has no spans — it does not depend on `crcbl-core`, so the
+   dependency the span module's placement decision anticipated has not been
+   added yet.
 7. ~~**Counters are piecemeal.** `SceneStats`, `visible_count` and each sample's
    own rows exist; there is no one place a frame's draw count, instance count,
    cluster count or triangle count is reported.~~ **Built** as
@@ -206,8 +216,13 @@ A CLI subcommand beside `screenshot`, headless, one scenario per invocation:
 adds, and they are what makes a slowdown visible without exporting anything:
 
 - **Frame**: CPU frame time and GPU frame time side by side with p50/p95, and
-  which of the two is the budget — the single most useful row, because
-  "GPU-bound" is the first question and nothing answers it today.
+  which of the two is the budget — the single most useful row, and the reason it
+  is first: "GPU-bound" is the first question and nothing answered it.
+  **Built**, as `crcbl_ui::budget`'s `BudgetStats`, fed by
+  `Loop::record_frame_cost`. It shows two rolling distributions rather than
+  pairing one frame's two numbers, because the GPU report is frames latent and a
+  single-frame pairing would be wrong by exactly that offset. Every row below it
+  is still owed.
 - **Pass list**: the existing per-pass GPU times, sorted by cost, with the
   frame's total and each pass's share.
 - **CPU breakdown**: tick, schedule, physics, upload, record, present-wait.
@@ -239,12 +254,12 @@ the wrong row.
 
 ## Delivery
 
-| Slice                                                                            | Phase                                                                                                                                                         |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                                                       |
-| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | **Started** — the subcommand and the `jobs` and `phys` scenarios (`crcbl-cli/src/bench.rs`); the sample-owned scenarios, which need a device, are not written |
-| Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                                                                                                                            |
-| Baseline storage + `--compare` + thresholds                                      | P8                                                                                                                                                            |
-| Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)                                                                                                            |
-| The rest of the debug panel's perf rows; freeze toggle                           | P10 (with the UI slice that owns the panel)                                                                                                                   |
-| Tracy or another external profiler, if wanted                                    | later, on demonstrated need and a dependency decision                                                                                                         |
+| Slice                                                                            | Phase                                                                                                                                                              |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                                                            |
+| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | **Started** — the subcommand and the `jobs` and `phys` scenarios (`crates/crcbl-cli/src/bench/`); the sample-owned scenarios, which need a device, are not written |
+| Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                                                                                                                                 |
+| Baseline storage + `--compare` + thresholds                                      | P8                                                                                                                                                                 |
+| Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)                                                                                                                 |
+| The rest of the debug panel's perf rows; freeze toggle                           | P10 (with the UI slice that owns the panel)                                                                                                                        |
+| Tracy or another external profiler, if wanted                                    | later, on demonstrated need and a dependency decision                                                                                                              |
