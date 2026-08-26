@@ -3,6 +3,58 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Decision needed: how many point lights may cast a shadow (2026-08-26)
+
+The user reported that shadows "don't work on some lights" in `apps/shard`. The
+shadow is drawn and sampled correctly; the picture is the problem, and the cause
+is a hard budget rather than a defect.
+
+**What was measured.** `crcbl_shaders::mesh`'s shader admits a point light's
+cube only where `shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES`. With
+`SHADOW_LIGHT_TILES = 7` and `SHADOW_POINT_FACES = 6` that is tile 0 or 1, so
+**exactly one point light casts a shadow in any scene, on every backend**.
+`shadow::Selection::update` is correct and was ruled out by reading: it ranks by
+`influence` = `radius / distance-to-eye`, ties break by index, and it does not
+truncate to `LIGHT_SLOTS` before allocating runs.
+
+`shard::light::torches` puts braziers symmetrically either side of the walkway.
+The two nearest tie to the last bit on `influence`, index order picks the
+caster, and **the loser then relights the shadowed floor from the opposite side
+at equal strength**. On a native Vulkan capture at spawn the capsule's shadow is
+2 of 255 levels; brightening the zone (`TORCH_INTENSITY` 26 → 160,
+`BOUNCE_ALBEDO` 0.28 → 0.04, floor median 20 → 39) took it only to 4. Lighting
+tuning cannot fix a mirror-image fill.
+
+Note `light::probes` bakes from the same `TORCH_REACH`/`TORCH_INTENSITY`, so
+scaling intensity scales the baked half too and the direct-to-indirect ratio is
+unchanged. Only the direct term is shadowed — the shader multiplies `reach` into
+`diffuse` and `specular`, never into `frame.ambient` plus the probe irradiance.
+
+**The options.** The atlas is `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` tiles
+of `shadow::TILE`, D32 — today 3×3 at 1024, 36 MiB.
+
+1. **4×4 at 1024.** 14 light tiles: two point cubes plus two spots. Costs 64
+   MiB, +28 MiB, which matters because milestone 1's peak wasm memory is still
+   unmeasured (see the milestone-1 figures entry).
+2. **4×4 at 768.** Same 36 MiB, same two-cube capability, 25% less linear shadow
+   resolution. Reblesses the cascade goldens on all four backends —
+   `shadow::tile_origin`'s docs say the arrangement is what those goldens pin.
+3. **Dual-paraboloid point shadows.** 2 tiles per point light instead of 6, so
+   three point lights fit the existing 7 tiles at no memory cost.
+
+**Recommendation: option 2.** It buys the capability at zero memory cost, and
+resolution is not what is failing here.
+
+**Option 3 is declined** unless someone overrides it: the paraboloid warp is
+nonlinear across a triangle, so it is wrong in proportion to how large the
+triangles are, and every `crcbl::greybox` scene is large flat quads — its worst
+case. Cube maps have no such dependence on tessellation.
+
+Note that no option makes every light cast: with eight lights in shard's zone a
+4×4 atlas still shadows four. A ranked budget is the correct design and the docs
+in `shard::light` describing it are accurate; the defect was only that the
+budget was one point light rather than two.
+
 ### A browser that declines `unadjustedMovement` gives adjusted deltas (2026-08-26)
 
 `crcbl-shell`'s web backend sets `ShellCaps::RAW_POINTER_MOTION`, and the thing
