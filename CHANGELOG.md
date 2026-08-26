@@ -16,6 +16,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/shard`, the first slice of the action-RPG sample, on the site.**
+  `docs/plan/sample/15-shard.md`'s milestone 1 exists to put _content_ through
+  the render paths a browser is stuck with, and this is that content: one
+  torch-lit interior zone, assembled from `crcbl::greybox` primitives off a
+  single ASCII table (`zone::LAYOUT`) that the meshes and the colliders are both
+  read from, walked on the same `crcbl::phys::CharacterController` `apps/puppet`
+  and `apps/breach` drive. It builds for `wasm32` and ships at `/demos/shard/`,
+  which gives the Pages site a 3D sample that is a game rather than a fixture.
+
+  **The lighting is the point.** Braziers carry point lights that flicker on the
+  _simulated_ clock, the shrine carries a spot whose cone falls across the
+  corridor's doorposts, there are more lights than the renderer's shadow slots
+  so it ranks them and shadows the two that win, and the ambient term is a baked
+  irradiance volume gathered by casting rays into the same colliders the capsule
+  sweeps against — so a torch behind a pillar does not reach the probe on the
+  far side of it. `L` puts the torches out. None of those features gained a line
+  on this sample's behalf; the sample is the load on them.
+
+  **A third camera rig on one controller** (`shard::camera`): a fixed isometric
+  elevation at a distance far shorter than the genre's, with a yaw that moves in
+  quarter turns on `Q`/`E`. puppet orbits behind the shoulder and breach sits
+  inside the head; `crcbl-phys` gained nothing for any of the three.
+
+  Rule 12 in full: the `[HUD]` heartbeat, the debug panel and the summary line
+  all name the `GeometryPath`, `BindingModel` and `LightingPath` the frames were
+  actually drawn through, and the browser gate asserts they are
+  `IndirectPerBatch`, `ArrayPages` and `Rasterised` — the fallback arms, which a
+  browser resolves to by construction.
+
+  **One verb of six.** Milestone 1's loop is explore, fight, loot, level, save,
+  resume; only exploring is here. No enemy, no ability, no item, no rarity, no
+  experience, no inventory grid, no save, no OPFS, no sector streaming and no
+  networking. `docs/backlog.md` carries what each of those needs.
+
 - **`apps/breach`'s bot practice map, and a `--map` flag to choose it.**
   `docs/plan/sample/11-breach.md`'s milestone 0 is a firing range **and** a bot
   practice map; this is the second half. A second greybox room — a pillar tall

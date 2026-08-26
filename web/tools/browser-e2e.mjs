@@ -940,6 +940,87 @@ const EXPECTATIONS = {
       count: 3,
     },
   },
+  // **The demo whose subject is the fallback paths carrying real content**, and
+  // the site's first 3D one that is a *game* rather than a fixture.
+  // `docs/plan/sample/15-shard.md`'s milestone 1 exists to put a lit interior
+  // through `IndirectPerBatch`, `ArrayPages` and `LightingPath::Rasterised`,
+  // which are the arms a browser resolves to by construction — so the `waiting`
+  // line below is the same rule-12 claim breach makes, asked of a scene with
+  // more lights than shadow slots and a baked irradiance volume in it.
+  //
+  // The `zone` block after it is where this row earns its length: it drives the
+  // walk key, and then it puts the torches out.
+  shard: {
+    // The sixth demo that draws mesh instances, so the sixth whose cull pass has
+    // something to count. See lantern's row and group D.
+    culls: true,
+    // **No start key.** The zone is already lit and already flickering when the
+    // page opens, and the character is standing in it — there is no waiting
+    // state to leave, so group C's start-key half would be a check wired to
+    // nothing. The `zone` block presses everything this demo answers to.
+    key: null,
+    // This demo's heartbeat is a quarter of a simulated second, which is the
+    // shortest on the site — `apps/shard/src/game.rs`'s `HEARTBEAT_TICKS`
+    // argues it, and the argument is this gate: shard is the heaviest scene
+    // here, so every wait measured in beats is what its browser step costs.
+    // Group E divides by this to work out how far behind real time the machine
+    // is running the demo.
+    beatMs: 250,
+    // Read off the *first* line. `ground: yes` is `MoveOutcome::grounded`, which
+    // no run that failed to sweep a capsule against the colliders
+    // `apps/shard/src/zone.rs` builds from `LAYOUT` can report. `torches: lit`
+    // is the switch this demo's whole light block turns on, read before
+    // anything has touched it. And the three selectors are rule 12: that plan
+    // says path reporting "matters here more than anywhere, because this is the
+    // sample where the fallback paths carry real content", and this line is the
+    // only place anything checks that the frames went through the arms the
+    // capability model is supposed to have chosen. `Shard::log_heartbeat`
+    // prints their own `Debug`, which is a deliberate coupling to
+    // `crates/crcbl-hal/src/caps.rs`: a renamed variant fails here loudly.
+    waiting: (line) =>
+      line.includes('[HUD] tick: 15') &&
+      line.includes('ground: yes') &&
+      line.includes('torches: lit') &&
+      line.includes('geometry: IndirectPerBatch') &&
+      line.includes('binding: ArrayPages') &&
+      line.includes('lighting: Rasterised'),
+    // How bright the first torch is, and the strictest value this demo has:
+    // `light::flame` is a pure function of the *simulated* seconds, so a page
+    // presenting frames without ticking leaves it standing still, and
+    // **nothing a player's walk can move** — which is what keeps this check
+    // about the loop rather than about the input group C has already
+    // dispatched. Its two periods are incommensurable and neither divides the
+    // half-second beat, so consecutive heartbeats cannot land on one value.
+    moving: /\bflame: ([\d.]+)/,
+    movingLabel: 'the torchlight keeps flickering under its own steam',
+    // **The walk, and the light** — the block below. Every pattern here is a
+    // field of the `[HUD]` line `apps/shard/src/app.rs` logs, and that file
+    // argues why each is on it.
+    zone: {
+      // `code` is what the engine binds to; `text` and the virtual key code are
+      // what a real keyboard sends. `KeyW` walks away from the camera, and the
+      // camera opens at a bearing of zero looking down `-Z` — so a held `W` is a
+      // walk down `pz` and nothing else. The spawn is eighteen metres down that
+      // axis from the far wall, which is what makes the "and then it stopped"
+      // control below a claim about the key rather than about the room.
+      walk: { code: 'KeyW', key: 'w', text: 'w', virtualKeyCode: 87 },
+      // The one key on this page that changes the *picture* rather than the
+      // position. `apps/shard/src/app.rs` handles it outside the action map,
+      // because it is presentation.
+      torch: { code: 'KeyL', key: 'l', text: 'l', virtualKeyCode: 76 },
+      // Which reading advances under the walk key, and which way. `pz` falls.
+      advance: /\bpz: (-?[\d.]+)/,
+      // `MoveOutcome::hit_wall`, counted. **The control that stops "and then it
+      // stopped" passing for a character the zone stopped**: three equal
+      // readings are what a capsule pressed against stone reports too, and this
+      // is what says nothing was pressed against.
+      blocked: /\bblocked: (\d+)/,
+      // The switch itself, so the canvas comparisons either side of the torch
+      // key are anchored to a reading the *engine* made rather than to a
+      // keystroke the driver merely dispatched.
+      torches: /\btorches: (lit|out)/,
+    },
+  },
   orbit: {
     key: null,
     // Read off the *first* line, which is the ship still on the pad — so it
@@ -1051,11 +1132,12 @@ const CULL_STATS_LINE = /cull stats: frame \d+ kept \d+ instances/;
  * How far the character must get past where it started, in metres, before the
  * walk key is credited with having reached the controller.
  *
- * The two demos that drive `crcbl::phys::CharacterController` both log a
- * heartbeat every simulated second and both walk at a shade over three metres a
- * second — `apps/puppet` at 3.2 and `apps/breach` at 3.4 — so one beat under a
- * held key is about three metres. This is comfortably inside one beat and far
- * outside anything a settling capsule could drift, for either of them.
+ * The demos that drive `crcbl::phys::CharacterController` all walk at a few
+ * metres a second — `apps/puppet` at 3.2, `apps/breach` at 3.4, `apps/shard` at
+ * 4.2 — and all log a heartbeat every simulated second or half-second, so one
+ * beat under a held key is at least a metre and a half. This is comfortably
+ * inside one beat and far outside anything a settling capsule could drift, for
+ * any of them.
  */
 const WALK_ADVANCE_M = 1.0;
 
@@ -1149,6 +1231,69 @@ const BLEND_WALK_MIN = 0.9;
  * approaching it; this is the printed precision and nothing more.
  */
 const BLEND_IDLE_MAX = 0.05;
+
+/**
+ * How many times shard's canvas is sampled in each of the torch block's three
+ * phases, and how far apart, in milliseconds.
+ *
+ * The gap is small because the sampling is not: `toDataURL` on this canvas,
+ * decoded back and counted, measured about 0.7 s a sample on the software
+ * rasteriser the gate runs on, so five samples span some four seconds of the
+ * demo whatever this number is. Four rather than more because each one costs
+ * that 0.7 s three times over — this block runs a lit window, a doused one and a
+ * lit one again — and a browser gate that spends minutes learning nothing is
+ * what `docs/plan/sample/11-breach.md`'s ten-minute timeout was made of.
+ *
+ * Four rather than fewer because of what the window has to contain: the shorter
+ * of the two sine waves `apps/shard/src/light.rs` flickers on has a period of
+ * 0.79 *simulated* seconds, and the demo runs at about a fifth of real time on
+ * that rasteriser, so four samples span roughly two thirds of a cycle. That is
+ * what the swing below was measured over.
+ */
+const TORCH_SAMPLES = 4;
+const TORCH_SAMPLE_GAP_MS = 80;
+
+/**
+ * How far the canvas's mean luminance must swing across the lit window, and how
+ * little it may swing across the doused one, in 0..255 bytes.
+ *
+ * **These are a measured pair and not a guess**, and the pair is what makes the
+ * check non-vacuous: the same reading has to move for the lit zone and hold
+ * still for the doused one, so a page drawing noise fails the second and a page
+ * showing one frame for ever fails the first.
+ *
+ * Measured on the SwiftShader adapter this gate runs on, over five runs: the lit
+ * windows swung between 0.12 and 0.80 of a byte, and every doused window swung
+ * nothing at all — its samples were the same frame down to the last bit, so the
+ * spread was exactly zero rather than merely small. The two thresholds are
+ * therefore set either side of a gap with no reading anywhere in it, which is
+ * the only way a pair like this is worth having.
+ */
+const TORCH_FLICKER_LUMA = 0.04;
+const TORCH_STILL_LUMA = 0.01;
+
+/**
+ * How much of the doused canvas the frame must be *left* with, as a fraction of
+ * the lit canvas's mean luminance — and how much of it one flat colour may
+ * cover.
+ *
+ * **The first is the control for the control.** A build whose torch key merely
+ * *froze* the flicker would hand this block a still frame with the heartbeat
+ * still running and the picture still a picture, and pass everything else here;
+ * what it cannot do is get darker. Measured: the lit windows read 14.18 and
+ * 14.01 of mean luminance and the doused one read 9.18, which is 0.65 of them —
+ * the zone keeps its shrine spot and its baked irradiance volume when the
+ * torches go out, so the drop is the torches' share of the frame rather than a
+ * fade to nothing.
+ *
+ * **The second is the control for the stillness claim.** "The picture stopped
+ * changing when the lights went out" has a cheap wrong explanation — the frame
+ * went black, and a black frame is trivially still — so the doused canvas has
+ * to still be a *picture*: no single quantised colour covering more of it than
+ * this. Measured at 0.53 with the torches out, against 0.39 with them lit.
+ */
+const TORCH_DARKER_RATIO = 0.95;
+const TORCH_FLAT_SHARE = 0.85;
 
 /**
  * How many particles sparks' switchable emitter must hold before its count
@@ -1719,6 +1864,15 @@ const launch = (binary, mode) =>
  * checks only need "is it one colour", "which colours" and "did it change".
  * Colours are quantised to 5 bits per channel so two rasterisers disagreeing in
  * the last bit does not read as a different frame.
+ *
+ * `luma` is the exception to that quantisation, and it is the *unquantised*
+ * mean over every pixel: Rec. 709 relative luminance of the bytes as they came
+ * back, averaged. It is what shard's torch block reads, and it exists because
+ * `hash` and `distinct` can only say a frame differs, never which way — "the
+ * room got darker when the lights went out" is a claim about a magnitude, and a
+ * hash cannot make it. Being unquantised is deliberate for the other half of
+ * that block: a five-bit shift throws away exactly the small, smooth brightness
+ * swings a flickering torch produces on a wall.
  */
 const SAMPLE_CANVAS = (selector) => `(async () => {
   const canvas = document.querySelector(${JSON.stringify(selector)});
@@ -1734,12 +1888,14 @@ const SAMPLE_CANVAS = (selector) => `(async () => {
   const pixels = context.getImageData(0, 0, scratch.width, scratch.height).data;
   const histogram = new Map();
   let hash = 2166136261;
+  let light = 0;
   for (let i = 0; i < pixels.length; i += 4) {
     const key = ((pixels[i] >> 3) << 10) | ((pixels[i + 1] >> 3) << 5) | (pixels[i + 2] >> 3);
     histogram.set(key, (histogram.get(key) ?? 0) + 1);
     hash = Math.imul(hash ^ pixels[i], 16777619);
     hash = Math.imul(hash ^ pixels[i + 1], 16777619);
     hash = Math.imul(hash ^ pixels[i + 2], 16777619);
+    light += 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
   }
   const ranked = [...histogram.entries()].sort((a, b) => b[1] - a[1]);
   const total = pixels.length / 4;
@@ -1748,6 +1904,7 @@ const SAMPLE_CANVAS = (selector) => `(async () => {
     height: scratch.height,
     distinct: histogram.size,
     hash: hash >>> 0,
+    luma: light / total,
     top: ranked.slice(0, 5).map(([key, count]) => ({
       rgb: [((key >> 10) & 31) << 3, ((key >> 5) & 31) << 3, (key & 31) << 3],
       share: count / total,
@@ -3356,6 +3513,228 @@ try {
         : null
     );
     await until(async () => (hud().length > backAt ? hud().length : null));
+  }
+
+  // **AND THE ZONE BEING WALKED, AND THEN UNLIT.**
+  // Only shard has one. `moving` above says the torchlight is flickering, and
+  // it would go on saying so for a page whose input was severed and for a page
+  // whose lighting was a picture of a lit room rather than a lit room — the
+  // flame reading is computed on the simulation's clock and printed, and
+  // nothing about it has been near a pixel.
+  //
+  // So this block drives the demo's own keys and reads what happened, in two
+  // pairs and a control:
+  //
+  // * the character **advances** while the walk key is held and **stops** when
+  //   it is released. The second is the control for the first, and it has a
+  //   control of its own: `blocked` must not have risen, because three equal
+  //   positions are exactly what a capsule pressed against stone reports and
+  //   that would be the room stopping the character rather than the key.
+  // * the canvas **keeps changing while the torches burn** and **holds still
+  //   when they are put out**, with the loop still beating through the stillness
+  //   and the frame still a picture rather than a black rectangle. This is the
+  //   one claim on this page that is about the lighting being *computed*: every
+  //   other check here reads a number the demo printed about itself, and a build
+  //   that logged `lighting: Rasterised` while drawing an unlit scene would pass
+  //   all of them. What it cannot fake is a canvas whose brightness follows a
+  //   light nobody is looking at the log of.
+  // * and lighting them again **brings the movement back**, which is what says
+  //   the stillness was a light going out rather than the demo dying.
+  //
+  // Every failure message carries the readings, so a red run says which went
+  // wrong and at what value.
+  if (EXPECTED.zone) {
+    const zone = EXPECTED.zone;
+
+    /** Presses or releases one of this demo's keys, through the browser's own pipeline. */
+    const zoneKey = async (
+      /** @type {{code: string, key: string, text: string, virtualKeyCode: number}} */ binding,
+      /** @type {string} */ type
+    ) =>
+      page.send('Input.dispatchKeyEvent', {
+        type,
+        code: binding.code,
+        key: binding.key,
+        windowsVirtualKeyCode: binding.virtualKeyCode,
+        nativeVirtualKeyCode: binding.virtualKeyCode,
+        ...(type === 'keyDown' ? { text: binding.text } : {}),
+      });
+    /** A press and a release, for the key that toggles rather than the one held. */
+    const tapZoneKey = async (/** @type {any} */ binding) => {
+      await zoneKey(binding, 'keyDown');
+      await zoneKey(binding, 'keyUp');
+    };
+    /** The most recent value `pattern` captured on a HUD line, as a number. */
+    const latest = (/** @type {RegExp} */ pattern) => {
+      const lines = hud();
+      for (let at = lines.length - 1; at >= 0; at -= 1) {
+        const found = lines[at].match(pattern);
+        if (found) return Number(found[1]);
+      }
+      return null;
+    };
+    /** Every value `pattern` has captured on the HUD lines from `from` on. */
+    const since = (/** @type {RegExp} */ pattern, /** @type {number} */ from) =>
+      hud()
+        .slice(from)
+        .map((line) => line.match(pattern)?.[1])
+        .filter((value) => value !== undefined);
+
+    // ---- the pair about input reaching the controller at all ----------------
+    const startedAt = latest(zone.advance);
+    const blockedBefore = latest(zone.blocked);
+    await zoneKey(zone.walk, 'keyDown');
+    const advanced = await until(async () => {
+      const now = latest(zone.advance);
+      return startedAt !== null &&
+        now !== null &&
+        startedAt - now >= WALK_ADVANCE_M
+        ? now
+        : null;
+    });
+    check(
+      'C',
+      'the walk key reaches the controller and the character walks the zone',
+      advanced !== null,
+      advanced === null
+        ? `it started at ${startedAt} and never got ${WALK_ADVANCE_M} m past it — ` +
+            `last reading ${latest(zone.advance)} over ${hud().length} HUD line(s)`
+        : `they walked from ${startedAt} to ${advanced}`
+    );
+
+    // **They have to have still been moving when the key came up**, or "they
+    // stopped" is a claim about a character something else had already stopped.
+    // The two lines before the release are both under a held key, so a pair of
+    // equal readings there is the vacuous case and this is what catches it.
+    const atRelease = hud().length;
+    await zoneKey(zone.walk, 'keyUp');
+    const lastHeld = hud()[atRelease - 1]?.match(zone.advance)?.[1];
+    const priorHeld = hud()[atRelease - 2]?.match(zone.advance)?.[1];
+    const stillMoving = Boolean(
+      lastHeld && priorHeld && lastHeld !== priorHeld
+    );
+    const settled = await until(async () => {
+      const readings = since(zone.advance, atRelease);
+      if (readings.length < WALK_STILL_BEATS) return null;
+      const tail = readings.slice(-WALK_STILL_BEATS);
+      return tail.every((value) => value === tail[0]) ? tail[0] : null;
+    });
+    const blockedAfter = latest(zone.blocked);
+    const unobstructed =
+      blockedBefore !== null && blockedAfter === blockedBefore;
+    check(
+      'C',
+      'and stops where they are when it is released',
+      Boolean(settled) && stillMoving && unobstructed,
+      !stillMoving
+        ? `they were already standing still before the release (${priorHeld} then ` +
+            `${lastHeld}), so this check would pass on a demo that never moved`
+        : !unobstructed
+          ? `the zone refused the walk ${blockedAfter} time(s) against ` +
+            `${blockedBefore} before it, so stone stopped them and not the key`
+          : settled
+            ? `they held ${settled} for ${WALK_STILL_BEATS} beats after the ` +
+              `release, with blocked flat at ${blockedAfter}`
+            : `they kept walking with nothing held: ${since(zone.advance, atRelease).join(', ')}`
+    );
+
+    // ---- the pair about the light being computed rather than declared -------
+    /**
+     * Samples the canvas across a window wide enough to hold a flicker cycle,
+     * and reduces it to what the three checks below compare.
+     *
+     * `beats` is how many heartbeats arrived while the samples were being
+     * taken, and it is the reason the doused window can claim stillness at all:
+     * a canvas that stopped changing because the demo stopped running is the
+     * other explanation for every still frame, and a rising heartbeat is what
+     * rules it out. `flattest` is the largest share any one quantised colour
+     * took of any frame in the window — the black-rectangle control.
+     */
+    const sampleWindow = async () => {
+      const from = hud().length;
+      const taken = [];
+      for (let at = 0; at < TORCH_SAMPLES; at += 1) {
+        if (at > 0) await pause(TORCH_SAMPLE_GAP_MS);
+        const sample = await evaluate(page, SAMPLE_CANVAS('#canvas'));
+        if (sample) taken.push(sample);
+      }
+      const lumas = taken.map((sample) => sample.luma);
+      return {
+        samples: taken.length,
+        frames: new Set(taken.map((sample) => sample.hash)).size,
+        beats: hud().length - from,
+        mean: lumas.length
+          ? lumas.reduce((sum, value) => sum + value, 0) / lumas.length
+          : 0,
+        spread: lumas.length ? Math.max(...lumas) - Math.min(...lumas) : 0,
+        flattest: taken.length
+          ? Math.max(...taken.map((sample) => sample.top[0]?.share ?? 1))
+          : 1,
+      };
+    };
+    /** What a window measured, for a failure message to carry. */
+    const readWindow = (/** @type {any} */ window) =>
+      `${window.frames} distinct frame(s) in ${window.samples} sample(s) over ` +
+      `${window.beats} beat(s), mean luma ${window.mean.toFixed(2)} swinging ` +
+      `${window.spread.toFixed(2)}, flattest colour ${(window.flattest * 100).toFixed(1)}%`;
+
+    const lit = await sampleWindow();
+    check(
+      'C',
+      'the torchlight keeps the picture changing with nothing held',
+      lit.samples === TORCH_SAMPLES &&
+        lit.frames > 1 &&
+        lit.spread >= TORCH_FLICKER_LUMA,
+      `${readWindow(lit)}; ${TORCH_FLICKER_LUMA} of swing asked for`
+    );
+
+    // The switch, read off the demo's own heartbeat rather than assumed from
+    // the keystroke — a dispatched key that went nowhere would otherwise be
+    // reported below as a lighting failure.
+    const beforeDouse = hud().length;
+    await tapZoneKey(zone.torch);
+    const doused = await until(async () =>
+      since(zone.torches, beforeDouse).includes('out') ? hud().length : null
+    );
+    const out = await sampleWindow();
+    check(
+      'C',
+      'and dousing them leaves a still frame that is darker but not blank',
+      doused !== null &&
+        out.samples === TORCH_SAMPLES &&
+        out.beats > 0 &&
+        out.frames === 1 &&
+        out.spread <= TORCH_STILL_LUMA &&
+        out.mean <= lit.mean * TORCH_DARKER_RATIO &&
+        out.flattest < TORCH_FLAT_SHARE,
+      doused === null
+        ? `no heartbeat in ${TIMEOUT_MS} ms said the torches were out — the key ` +
+            `never reached the game, so nothing below is about the lighting`
+        : `${readWindow(out)}; asked for a swing under ${TORCH_STILL_LUMA}, a ` +
+            `mean under ${(lit.mean * TORCH_DARKER_RATIO).toFixed(2)} (the lit ` +
+            `window read ${lit.mean.toFixed(2)}) and no colour over ` +
+            `${(TORCH_FLAT_SHARE * 100).toFixed(0)}%`
+    );
+
+    // And back, which is what says the stillness was a light going out rather
+    // than the page dying with a heartbeat still ticking.
+    const beforeRelight = hud().length;
+    await tapZoneKey(zone.torch);
+    const relit = await until(async () =>
+      since(zone.torches, beforeRelight).includes('lit') ? hud().length : null
+    );
+    const back = await sampleWindow();
+    check(
+      'C',
+      'and lighting them again brings the flicker back',
+      relit !== null &&
+        back.samples === TORCH_SAMPLES &&
+        back.frames > 1 &&
+        back.spread >= TORCH_FLICKER_LUMA,
+      relit === null
+        ? `no heartbeat in ${TIMEOUT_MS} ms said the torches were lit again`
+        : `${readWindow(back)}; ${TORCH_FLICKER_LUMA} of swing asked for`
+    );
   }
 
   // **AND THE BUDGET, WHICH THE CHECK ABOVE CANNOT SEE EITHER.**

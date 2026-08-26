@@ -695,6 +695,58 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument once more for the zone, which is shard's whole subject.
+# Every other check in that driver reads a number the demo printed about itself,
+# and a build that logged `lighting: Rasterised` while drawing a flat-lit room
+# would pass all of them — the flame reading is computed on the simulation clock
+# and has never been near a pixel. `shard` alone, because it is the only demo
+# whose claim is that the lighting is being *computed*.
+#
+# Three names are matched, and they are the block's *controls* — the halves
+# worth deleting when a slow machine makes them flake. Each is what stops a
+# positive passing for the wrong reason:
+#
+#  - 'and stops where they are when it is released' is what says the walk key is
+#    what moved the character. Without it, "the character walks" passes for a
+#    demo that drifts.
+#  - 'and dousing them leaves a still frame that is darker but not blank' is the
+#    whole lighting claim's control: it asserts the canvas stops changing when
+#    the torches go out, while the heartbeat keeps arriving and the frame stays
+#    a picture. Without it, "the picture keeps changing" passes for a page
+#    drawing noise, and nothing on this site asks whether a light does anything.
+#  - 'and lighting them again brings the flicker back' is what says the
+#    stillness was a light going out. Without it, the check above passes for a
+#    page that died with its heartbeat still ticking.
+#
+# Renaming any of them in the driver is meant to fail here and be renamed here
+# too.
+case "$DEMO" in
+    shard)
+        STOPPED_WALK="$(grep -F 'and stops where they are when it is released' "${OUTPUT}.plain" || true)"
+        if [ -z "$STOPPED_WALK" ]; then
+            echo "crcbl web e2e: the driver never let go of $DEMO's walk key;" >&2
+            echo "               'the character walks the zone' has no control, and it" >&2
+            echo "               passes for a demo that drifts on its own" >&2
+            exit 1
+        fi
+        DOUSED="$(grep -F 'and dousing them leaves a still frame that is darker but not blank' "${OUTPUT}.plain" || true)"
+        if [ -z "$DOUSED" ]; then
+            echo "crcbl web e2e: the driver never put $DEMO's torches out; 'the picture" >&2
+            echo "               keeps changing' has no control, and it passes for a page" >&2
+            echo "               drawing noise — nothing else on this site asks whether" >&2
+            echo "               the lighting is computed rather than declared" >&2
+            exit 1
+        fi
+        RELIT="$(grep -F 'and lighting them again brings the flicker back' "${OUTPUT}.plain" || true)"
+        if [ -z "$RELIT" ]; then
+            echo "crcbl web e2e: the driver never lit $DEMO's torches again; 'the frame" >&2
+            echo "               holds still when they are out' passes for a page that" >&2
+            echo "               died with its heartbeat still ticking" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the same argument once more for the budget, which is sparks' whole
 # subject. Every other check in the driver passes against a page whose particles
 # never retire and whose pool budget is not enforced: `moving` reads a count,

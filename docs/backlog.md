@@ -3,6 +3,105 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `apps/shard` covers one verb of milestone 1's six (2026-08-26)
+
+`docs/plan/sample/15-shard.md`'s milestone 1 loop is explore, fight, loot,
+level, save, resume. Slice 1 is **explore**, deliberately, and nothing else is
+started. What each of the others needs, so the next slice does not have to
+re-derive it:
+
+- **Fight.** An enemy type, an ability, and a hit resolution. The pieces are
+  already in the tree: `apps/breach/src/bots.rs` walks authored routes through
+  the same `crcbl::phys::CharacterController` and resolves sight and shots
+  through the same `PhysicsWorld::cast_ray`, so the first enemy here is that
+  shape rather than a new subsystem. What shard does not have and would need is
+  a place to put health and cooldowns on the wire — `game::Intent` is one flag
+  byte and a bearing.
+- **Loot and rarity.** Nothing exists. It is a table and a roll, and the roll
+  has to be a hash of a seed and an index rather than a draw from a stream, for
+  `apps/sparks`' reason.
+- **Level.** Nothing exists.
+- **Save and resume.** Nothing exists, and it is the one with a platform seam:
+  the plan puts saves in OPFS in the browser. `web/engine/storage.js` is the
+  shim other demos use for their own persistence; shard's `savedLabel` in
+  `web/demos/shard/main.js` says "Nothing" and that is currently true.
+- **Sector streaming.** The zone is one fixed `zone::LAYOUT`. The plan wants
+  modular pieces "assembled per seed", and the pieces are the part slice 1 built
+  — a seeded assembler over them, and the border locking `docs/plan/25-lod.md`
+  describes, are what is missing.
+- **The inventory kit.** Topic 34's grid is not used anywhere in this sample.
+  Milestone 1's exit criteria ask for it to be used **with no engine change**,
+  which is the claim nobody has tested.
+
+### `apps/shard` has none of milestone 1's exit-criteria figures (2026-08-26)
+
+Three of that plan's exit criteria are recordings rather than features, and none
+of them has been made:
+
+- **A golden frame per `GeometryPath`.** Nothing in `apps/shard` renders a
+  reference frame or compares one. `apps/quarry` is the sample that already does
+  this and is the shape to copy.
+- **A recorded browser budget.** What _is_ measured, on this machine, is the
+  browser gate's wall clock: 80–88 s on the SwiftShader adapter and 96 s on the
+  default `auto` mode, which also resolves to SwiftShader here. That is a gate
+  timing, not the sample's frame budget, and the two should not be confused.
+- **Peak wasm memory.** Not measured at all. `web/engine/wasm-memory.js` exists
+  and other demos' pages read it; nothing here reads it or records a number.
+
+### `apps/shard`'s zone has no roof, and that is deliberate (2026-08-26)
+
+Not a missing piece — do not "fix" it. `zone::WALL_TOP_Y` is the height of the
+walls, and nothing is drawn above it. Measured: with ceiling slabs over the open
+tiles, `camera::Iso` put the eye five metres above the character at the
+isometric elevation, so every frame the browser gate sampled was the _top_ of
+those slabs — 93% black, and byte-identical from one frame to the next. The
+module docs in `apps/shard/src/zone.rs` carry the argument and the measurement.
+
+The same geometry decided where the character starts: the eye sits about two and
+a half tiles behind them, so a spawn near the outer wall looks out over the top
+of it. `zone::LAYOUT`'s `S` is at the mouth of the corridor for that reason, and
+moving it back towards the entrance will bring the dark foreground back.
+
+### `apps/shard`'s browser-gate thresholds are measured on one rasteriser (2026-08-26)
+
+`TORCH_FLICKER_LUMA`, `TORCH_STILL_LUMA`, `TORCH_DARKER_RATIO` and
+`TORCH_FLAT_SHARE` in `web/tools/browser-e2e.mjs` are all set from readings
+taken on this machine's SwiftShader adapter, and their doc comments carry the
+numbers. They were **not** measured on a hardware adapter, on lavapipe, or on
+CI's runner — `auto` resolves to SwiftShader on this machine, so no hardware run
+of shard's gate exists. The pair that matters is wide: the lit windows swung
+0.12 to 0.80 of a byte and every doused window swung exactly zero, so a
+rasteriser that shades a little differently has room. A rasteriser with temporal
+noise would fail the `frames === 1` half of the doused check, and that is the
+one to look at first if this ever goes red somewhere else.
+
+### `apps/shard`'s camera cannot be pitched, zoomed, or pointed (2026-08-26)
+
+`camera::Iso` holds a fixed elevation and a fixed distance and offers four
+bearings. That is the rig the plan asks for, and it means the browser gate never
+exercises a _look_ input on this page — `apps/breach`'s gate is the only one
+that does. Considered and declined for slice 1: a pitch control would be a
+second camera behaviour to test and would let a visitor put the eye back above
+the walls, which is the failure the entry above describes.
+
+### Not verified in `apps/shard` (2026-08-26)
+
+Stated as gaps rather than explained away:
+
+- **The debug panel and the pause menu were not driven in a browser.** The
+  headless tests in `app.rs` cover both; nothing presses F3 or Escape on the
+  page beyond the generic group E pause checks every demo gets.
+- **`Q`/`E` were not driven in a browser either.** `camera.rs` and `app.rs` test
+  the swing natively; the browser gate presses only `W` and `L`.
+- **The `geometry` and `binding` selectors were not separately red-checked.**
+  Reporting `LightingPath::RayTraced` from `gpu::Paths::of` was sabotaged and
+  the gate went red on it; the other two are read off the same `DeviceCaps` in
+  the same function and were taken as covered by that.
+- **No hardware-adapter run of the browser gate exists**, per the entry above.
+- **The touch controls are the generic ones.** shard has no `touch` row in
+  `EXPECTATIONS`, so group F makes only the page-level claims for it: a finger
+  cannot walk this character.
+
 ### Every simulation-heavy demo's browser gate is near the CI step cap (2026-08-26)
 
 `Pages` run 32953192638 on `4553f9e`, job "build the demo site" — the browser

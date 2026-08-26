@@ -1,0 +1,33 @@
+[package]
+name = "shard"
+description = "Shard — a torch-lit interior zone walked in an isometric-ish third person, on the raster fallback paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# `cdylib` for the browser demo, `rlib` so the binary and the tests share one
+# crate — the same pair every sample uses. See `apps/breakout/Cargo.toml` for
+# why both names are needed.
+[lib]
+name = "crcbl_shard"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "shard"
+path = "src/main.rs"
+
+# One engine dependency, like every other sample — with the `greybox` feature
+# on, which is what the zone is assembled out of. Every wall block, floor slab,
+# pillar, dais, brazier and doorway is a `crcbl::greybox` primitive placed on a
+# tile of `src/zone.rs`'s layout, and the colliders come off the same layout.
+# The `scene` feature stays off: nothing here imports a glTF document, and the
+# character is a `crcbl::greybox::capsule` rather than an authored rig — slice 1
+# has no animation, so a skinned asset would be a second character system with
+# nothing to drive it.
+[dependencies]
+crcbl = { workspace = true, features = ["greybox"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the demo boots. shard has none: the zone is read off one ASCII table in apps/shard/src/zone.rs and built from crcbl::greybox's primitives, the irradiance volume is gathered at start-up rather than loaded, and its shaders and font atlas are compiled into the wasm module. Sample rule 11 exempts this sample by name, so there is no sprite art to fetch either. The list is the seam, not the content.",
+  "keys": []
+}

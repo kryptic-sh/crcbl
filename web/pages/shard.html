@@ -1,0 +1,121 @@
+<!--meta
+{
+  "out": "demos/shard/index.html",
+  "slug": "shard",
+  "name": "Shard",
+  "title": "Shard — Crucible",
+  "description": "A torch-lit interior zone walked in an isometric-ish third person: flickering point lights with shadows, screen-space occlusion and reflections, and a baked irradiance volume, all through WebGPU's fallback paths.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "#whats-running", "label": "what runs" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/shard", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/shard\">apps/shard</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/shard/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● post-MVP</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Shard</span></h1>
+  <p class="tagline">
+    One torch-lit room, a corridor and a shrine, walked from a camera pulled in
+    closer than the genre usually allows. It is the first slice of an
+    action-RPG, and it is here to be the <em>load</em> on the render paths a
+    browser is stuck with — every light, every shadow and every bounce you can
+    see is going through a fallback.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>Walk it. Then put the torches out.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Walk, relative to where the camera is looking</span>
+      <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Swing the camera a quarter turn</span>
+      <span><kbd>Q</kbd> <kbd>E</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Douse the torches — and light them again</span>
+      <span><kbd>L</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+  <div class="note">
+    <strong>The camera is closer than the convention, on purpose.</strong> An
+    isometric action-RPG is usually played from far enough back that a face is
+    four pixels and a wet floor is a smear. This sample exists to show what the
+    lighting is doing, so it keeps the isometric elevation — the same
+    <code>atan(1/√2)</code> tilt the genre is named for — and gives up the
+    distance. You cannot pitch it or push it out; the only thing you control is
+    which of four bearings it looks from.
+  </div>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The fallback paths, carrying real content.</h3>
+  <p>
+    Open the panel and it names the three paths this browser selected. It will
+    say <code>IndirectPerBatch</code>, <code>ArrayPages</code> and
+    <code>Rasterised</code>, because a browser has no mesh stage, no bindless
+    and no ray query — and that is the entire reason this zone was built. The
+    engine's own fixtures already prove those paths draw <em>something</em>
+    correctly. What they had never carried is a scene where being wrong is
+    obvious: a dark interior, where a shadow in the wrong place or an ambient
+    term that has forgotten the walls is the first thing you notice.
+  </p>
+  <p>
+    The torches are <strong>point lights that flicker</strong>, and they flicker
+    on the simulation's clock rather than the frame's — two sine waves at
+    incommensurable periods, per-torch phase, so the room breathes and never
+    repeats and a slow frame does not change the light. The shrine carries a
+    <strong>spot</strong> whose cone falls across the corridor's doorposts.
+    There are more lights in the zone than there are shadow slots, so the
+    renderer ranks them by how much of your screen they are worth and shadows
+    the two that win — walk toward a brazier and watch which one takes over.
+  </p>
+  <p>
+    <strong>Nothing here is flat-lit.</strong> The ambient term is a baked
+    irradiance volume: a grid of probes, each one gathered by casting rays into
+    the same colliders your capsule sweeps against, so a torch behind a pillar
+    genuinely does not reach the probe on the far side of it. Screen-space
+    occlusion darkens the creases, and screen-space reflections have a floor
+    smooth enough to show them. The floor is the reason it is smoother than the
+    walls.
+  </p>
+  <p>
+    The zone itself is <strong>one ASCII table</strong> in the source. Every
+    floor slab, wall block, pillar, dais, brazier and doorway is read off the
+    same grid the colliders are, which is why what looks solid is solid. That
+    modularity is not tidiness — it is the shape a streamed world has to be, and
+    this is that kit at its first size.
+  </p>
+  <p>
+    You are a capsule on the same character controller puppet and breach use,
+    and this is the <strong>third</strong> camera rig driving it: puppet orbits
+    behind the shoulder, breach sits inside the head, and this one hangs at a
+    fixed elevation and snaps between bearings. The controller gained nothing
+    for any of the three — it takes a world-space displacement and returns what
+    the room left of it, and it has never been told where a camera is.
+  </p>
+  <p>
+    <strong>This is one verb of six.</strong> The loop this sample is planned
+    around is explore, fight, loot, level, save, resume. Only the first is here:
+    no enemy, no ability, no item, no experience, no inventory, no save, and no
+    streaming past this one zone. The plan for the rest is in the repository.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

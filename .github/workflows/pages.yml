@@ -426,6 +426,16 @@ jobs:
         timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=breach ./web/run-browser-e2e.sh
 
+      # 20 rather than the 10 its neighbours get, for breach's reason one step
+      # up: this is the heaviest scene on the site, and `docs/backlog.md`'s note
+      # on the browser gates records that the runner drives it on a software
+      # rasteriser at a fraction of real time. Measured at 88 s locally on that
+      # same rasteriser, which is what the demo was tuned to; the runner is
+      # several times slower again.
+      - name: Render shard in a real browser
+        timeout-minutes: 20
+        run: CRCBL_WEB_E2E_DEMO=shard ./web/run-browser-e2e.sh
+
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
       # from the step log.
@@ -599,6 +609,11 @@ jobs:
       - name: Render breach in a real browser
         timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=breach ./web/run-browser-e2e.sh --headless
+
+      # See the windowed job's note on this step.
+      - name: Render shard in a real browser
+        timeout-minutes: 20
+        run: CRCBL_WEB_E2E_DEMO=shard ./web/run-browser-e2e.sh --headless
 
   probe-windows:
     name: probe the seam on Windows

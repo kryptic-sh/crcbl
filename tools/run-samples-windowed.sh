@@ -105,6 +105,7 @@ SAMPLES=(
     "orbit 960x720"
     "puppet 960x720"
     "quarry 960x720"
+    "shard 960x720"
     "sparks 960x720"
     "viewer 960x720 ${VIEWER_MODEL}"
 )

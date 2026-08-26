@@ -150,6 +150,7 @@ DEMOS=(
   "puppet:crcbl_puppet:demos/puppet"
   "sparks:crcbl_sparks:demos/sparks"
   "breach:crcbl_breach:demos/breach"
+  "shard:crcbl_shard:demos/shard"
 )
 
 profile_flag=()
