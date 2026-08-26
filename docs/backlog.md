@@ -1409,6 +1409,668 @@ which is a design question rather than a script change.
 `docs/plan/sample/` resolves today, checked by a one-off script rather than by
 the gate, which would not notice the next break.
 
+## The sample plans — what the seventeen still owe
+
+Every file under `docs/plan/sample/` was audited against its app and against the
+engine crates on 2026-08-27. Nothing here is a closed plan waiting to be
+deleted; it is what those plans still describe and the tree does not have.
+
+## breakout (`docs/plan/sample/01-breakout.md`)
+
+### Breakout's layout is still compile-time constants (2026-08-27)
+
+**Not built.** `BRICK_ROWS`, `BRICK_COLS` and the derived origin are `const` in
+`apps/breakout/src/game.rs`; there is no `.scn/` directory anywhere in the tree
+and no `apps/editor`. The doc's milestone 3 is "layout from scene file, then
+edited in the editor", which makes breakout the smallest editor round-trip test
+— and both halves are outside this sample.
+
+**What it would take:** the stage 6 scene format, then the editor phase. **What
+it blocks:** the sample's own milestone 3, and the "smallest editor round-trip
+test" role the editor phase would otherwise have to invent a fixture for.
+
+### Breakout's 10-minute soak and store-persistence checks are unrun (2026-08-27)
+
+**Partly built.** The high score persists through `crcbl::store::record::Record`
+(`apps/breakout/src/high_score.rs`), natively and through OPFS in a browser, so
+the persistence exit criterion has an implementation. What has not been run is
+the deterministic input-script criterion's full form — "same script → same final
+score hash" — as a recorded artefact rather than a unit test.
+
+**What it would take:** a scripted run through the determinism harness with the
+hash recorded in the doc. **What it blocks:** nothing; it is an unclosed exit
+criterion.
+
+## asteroids (`docs/plan/sample/02-asteroids.md`)
+
+### Asteroids' tuning constants are not data-driven (2026-08-27)
+
+**Not built.** Milestone 3 asks for "tuning constants from a data file — first
+use of data-driven balance outside scenes". The constants are still in
+`apps/asteroids/src/game.rs`. The milestone is written "(after stage 6)", and
+stage 6 has produced no `.scn/` and no data-file loader a sample uses.
+
+**What it would take:** the stage 6 asset path, then a balance table this sample
+reads through `AssetSource`. **What it blocks:** the first demonstration that
+game balance is data rather than code — which every later sample inherits.
+
+### Asteroids' 10-minute soak and stale-handle session are unrun (2026-08-27)
+
+**Partly built.** `hundreds_of_spawns_and_deaths_leak_nothing` in
+`apps/asteroids/src/game.rs` asserts entity and pool counts return to baseline,
+which is the leak check in miniature. The exit criteria ask for a **10-minute**
+input-script soak and for a full session with the **entity inspector open and
+entities selected as they die** — and there is no entity inspector in the tree
+to open.
+
+**What it would take:** the debug-tools inspector (a `crcbl-ui` surface, not a
+sample feature), plus a long scripted run. **What it blocks:** the stale-handle
+criterion, which is the one asteroids exists to answer.
+
+## horde (`docs/plan/sample/03-horde.md`)
+
+### Horde's default enemy cap is 1500, and whether it should still be (2026-08-27)
+
+**A decision, not an oversight.** `DEFAULT_MAX_ENEMIES` in
+`apps/horde/src/game.rs` is 1500 rather than the plan's ten thousand, and
+`--max-enemies` raises it without a rebuild. Its doc comment used to justify the
+number by saying P7 and P8 do not exist; both have since moved, and the comment
+was corrected in the same pass that found it.
+
+**What is still open:** whether 1500 is the right default now that the tick
+parallelises. `crates/crcbl-jobs` ships, `apps/horde`'s `steer_enemies` runs on
+`crcbl_jobs::pool`'s `par_for`, and the sample doc's 2026-08-10 re-measurement
+records every converged case inside the frame budget at sixteen workers. The
+sub-slice that raises the ceiling and measures where it breaks has not run, so
+the number is where it was last measured rather than where the plan wants it.
+
+**What it blocks:** the sample's own 10k-at-60 exit criterion, which no run has
+attempted since the pool landed.
+
+### Horde's "playable and mildly fun for 5 minutes" exit criterion is unmet and unmeetable as written (2026-08-27)
+
+**Carried forward from the doc, not re-measured.** The doc records a default run
+ending in a death at about 24 seconds, and a death in under a second at
+`--prefill 5000` and above, because ten thousand in a 96x72 arena is 0.82 units
+apart and contact damage is a rate summed over everything touching. The doc says
+this is already in `docs/backlog.md`; I did not confirm the entry is still
+there.
+
+**What it would take:** a design decision — a bigger arena, a different damage
+model, or a rewritten criterion that separates the render claim from the
+survival claim. **What it blocks:** the sample's exit.
+
+### Horde has no browser budget of its own (2026-08-27)
+
+**Not measured.** The doc's own conditions table says so:
+`web/run-browser-e2e.sh` runs the demo under Chromium's SwiftShader, which
+measures the software rasteriser rather than the browser, and no machine with a
+real browser GPU has taken the number. The exit criteria already treat it as a
+separate figure.
+
+**What it would take:** a machine with a browser-visible GPU. **What it
+blocks:** the browser half of the render exit criterion — for every sample, not
+just this one.
+
+## hud (`docs/plan/sample/04-hud.md`)
+
+### hud's whole P10 half waits on a styling system (2026-08-27)
+
+**Not built**, and each piece waits on the same thing rather than on this
+sample: the CSS subset and its stylesheets, the theme switcher, the gallery
+page, the UI inspector, hot reload, and per-theme golden frames.
+`apps/hud/src/page.rs` draws everything out of `DrawList::rect`,
+`DrawList::rect_outline` and `DrawList::text` — there is no style resolution
+anywhere. The **wasm front end and the Pages demo are NOT among the gaps**:
+`apps/hud/src/web.rs`, `web/demos/hud/` and the `hud` row in `web/build.sh`'s
+`DEMOS` all exist, and `apps/hud/tests/run-hud-golden.sh` runs in CI against
+lavapipe with `apps/hud/tests/golden/panels.png` as its reference. The doc used
+to record the web build as deferred; that has been corrected.
+
+**What it would take:** the styling system (topic 7 / P10). **What it blocks:**
+hud's exit criteria in full, and the wider claim that the engine's own UI —
+debug overlay, editor chrome, every sample HUD — is styled by stylesheets.
+
+## viewer (`docs/plan/sample/05-viewer.md`)
+
+### Viewer's hot-reload demo is built but not recorded (2026-08-27)
+
+**Partly built.** `apps/viewer/src/watch.rs` polls the document's path four
+times a second with a settle delay — deliberately a poll rather than a
+filesystem-notification dependency, because every platform API reports a
+re-export as a burst that must be debounced back into one anyway. So the Blender
+→ re-export → live update loop works. Milestone 3 asks for the loop to be
+**recorded** as a demo ("doubles as engine marketing"), and no recording exists.
+
+**What it would take:** a capture. Not engineering. **What it blocks:**
+milestone 3's stated deliverable.
+
+### Viewer's Khronos-suite coverage figure has never been taken (2026-08-27)
+
+**Not measured.** The exit criterion is "loads >=90% of the Khronos
+glTF-Sample-Models suite without crash; failures log actionable messages".
+`crates/crcbl-scene/src/gltf_check.rs` and `gltf_fixture.rs` exist and
+`apps/viewer/src/model.rs` turns every way a document can be wrong into a
+sentence, so the machinery is there — the **number** is not, and I did not find
+a harness that walks the suite.
+
+**What it would take:** the sample-model repo checked out, a batch run, and the
+percentage plus the failure reasons recorded in the doc. **What it blocks:**
+viewer's headline exit criterion, which is the asset pipeline's acceptance test.
+
+## orbit (`docs/plan/sample/06-orbit.md`)
+
+### Orbit's moon transfer and landing are unbuilt (2026-08-27)
+
+**Partly built.** Milestones 1 and 2 ship: the ascent, the orbit, timewarp with
+its auto-drop. `apps/orbit/src/lib.rs` states the rest plainly — the moon's
+frame exists and a ship that reached it would be handed over, but nothing flies
+there yet. So milestone 3 (SOI transition + sector crossing) and milestone 4
+(land and return) are unstarted, and with them the exit criterion "full mission
+completable by a patient human".
+
+**What it would take:** a transfer burn the flight plan can fly, and a landing
+on the moon's surface — all of it on `crcbl::phys::Frames` and
+`sphere_of_influence`, which already ship. **What it blocks:** the physics
+pillar's acceptance test at its full extent; the frame hierarchy is exercised in
+one body's frame only today.
+
+### Orbit draws a map view, not 3D bodies (2026-08-27)
+
+**Partly built.** `apps/orbit/src/page.rs` draws the planet and its atmosphere
+as filled discs built from horizontal rectangles, and the orbit as a stroked
+polyline. The Scope's central claim — planet to orbit to moon "with no visible
+seam or jitter", camera-relative rendering and `WorldPos` rebase demonstrated
+end to end — cannot be judged from a map view, because there is no 3D frame in
+which a seam would show.
+
+**What it would take:** the bodies as 3D instances under the same camera the
+rest of the samples use. **What it blocks:** the exit criterion "sector boundary
+crossing invisible at max warp and live rates alike", which is the sample's
+reason for existing on the ladder at S5.
+
+### Orbit owes sample rule 11 and claims no exemption (2026-08-27)
+
+**Not built.** The doc asks for `.crpix` art for the flight UI's chrome and the
+map view — the navball-lite, prograde/retrograde markers, apo/peri glyphs.
+`apps/orbit` has no `build.rs` and no `assets/`; the flight instruments are
+rectangles, polylines and text. Unlike hud, viewer, sparks, lantern, quarry,
+shard and puppet, this sample's doc grants **no** rule 11 exemption, so this is
+an open obligation rather than a settled decision.
+
+**What it would take:** either the sheets, or an argued exemption written into
+the doc. The exemption is hard to argue: rule 11's own text says the exemption
+is narrow and orbit has explicit 2D chrome. **What it blocks:** rule 11's claim
+that the ladder has no untextured-quad holdouts left.
+
+## towers (`docs/plan/sample/07-towers.md`)
+
+### There is no towers crate, and the dependency chain has three separate links (2026-08-27)
+
+**Not built at all.** There is no towers directory under `apps/` and no `towers`
+row in `web/build.sh`'s `DEMOS`. Nothing in the doc has been tested against
+code. The three links are independent and only one of them is the editor:
+
+1. **Milestone 2 waits on the editor.** There is no `apps/editor` — the
+   workspace `Cargo.toml` records the absence as deliberate until the editor
+   phase — and no `.scn/` directory anywhere in the tree. Every "editor-built"
+   and "authored in the editor" line inherits this, including the exit criterion
+   "map authored 100% in the editor, zero hand-edited scene text".
+2. **Milestone 3 waits on a wire.** `crates/crcbl-net` ships `InMemoryTransport`
+   and nothing else — no UDP transport, no LAN host discovery, no lobby browser
+   — so "co-op over real transport" and the 4-player LAN exit criterion have
+   nothing to run on.
+3. **Milestone 1 waits on neither.** A solo loop on a hardcoded map needs tower
+   acquisition by sphere overlap, a swept projectile against moving creeps, a
+   trigger volume for creep-reaches-exit, and a dev fly/walk controller.
+   `crcbl-phys` has all four: `PhysicsWorld` carries a per-collider trigger flag
+   (`is_trigger`) whose colliders are non-solid and skipped by the sweeps,
+   `sweep_sphere` and `overlap_sphere` are what breakout, asteroids and horde
+   already run on, and `CharacterController` is driven from three different
+   cameras by `apps/puppet`, `apps/breach` and `apps/shard`. The one genuine
+   absence is a **spline type**: nothing in `crcbl-phys` or `crcbl-scene` offers
+   one (the only splines in the workspace are `crcbl-anim`'s clip interpolation
+   and `crcbl-scene`'s glTF importer), so a path follower would be sample code
+   over kinematic bodies.
+
+**What it would take:** milestone 1 is buildable today. Milestones 2 and 3 are
+each blocked on a phase, not on this sample. **What it blocks:** the MVP-era
+flagship, the editor's own dogfood measurement, and the only planned consumer of
+the debug panel's network module that has more than one client.
+
+### towers' audio non-goal was withdrawn (2026-08-27)
+
+**Correction, not a gap.** The non-goals list said "audio (engine gap)".
+`crates/crcbl-audio` ships — device seam with a real-time streaming thread
+natively and an `AudioWorklet` in the browser, plus mixer, spatial and synth
+modules — and breakout, flappy, asteroids and horde all emit spatial cues
+through it. Sample rule 8 applies to towers with no exemption. The doc has been
+corrected; no work is owed until the sample exists.
+
+## arena (`docs/plan/sample/08-arena.md`)
+
+### There is no arena crate, and its own condition-simulator dependency already shipped (2026-08-27)
+
+**Not built at all.** There is no arena directory under `apps/` and no `arena`
+row in `DEMOS`. "Not started before MVP ends" is still the standing decision, so
+this is the plan holding rather than a slip.
+
+**Built already, and not by arena:** the doc lists "network condition tooling —
+simulated latency/jitter/loss as a first-class engine debug feature" as a
+post-MVP engine feature arena pulls in. `crates/crcbl-net/src/condition.rs`
+wraps any `Transport` with configurable packet loss, latency, jitter,
+duplication and reordering from a deterministic seed, applying the impairments
+to the unreliable send because the reliable one promises ordered lossless
+delivery over a lossy wire underneath. It landed with no arena to drive it.
+
+**Not built:** milestone 1 needs a real wire between two machines
+(`InMemoryTransport` is the only transport). Milestones 2 and 3 need prediction,
+reconciliation and server-side rewind — `docs/plan/26-prediction.md` designs
+them and nothing implements them. Milestone 4 additionally needs a `Server` that
+holds more than one transport and one session manager.
+
+**What it blocks:** `docs/plan/24-navigation.md`, whose own text names
+**arena's** bots as navigation's forcing function rather than breach's — so the
+navmesh subsystem is waiting on a sample that has not started. `apps/breach`'s
+practice map deliberately walks its bots on authored waypoint routes rather than
+borrowing navigation early.
+
+## puppet (`docs/plan/sample/09-puppet.md`)
+
+### Puppet's character is authored in code, so the asset-pipeline honesty check is unmet (2026-08-27)
+
+**Partly built, and the gap is the interesting half.** Milestone 1 and the first
+half of milestone 2 ship: a character walks a blockout under
+`crcbl::phys::CharacterController` and is posed by a locomotion blend the
+controller's own measured speed drives, blended through `crcbl::anim::blend` and
+drawn through the engine's skinning dispatch. **But the character is a greybox
+humanoid authored in `apps/puppet/src/rig.rs`** — no asset on disk, no glTF
+parse — rather than the "Khronos Fox/CesiumMan class, or a CC0 rig" the Scope
+names. The exit criterion "character + clips imported from a stock glTF with
+zero manual fixup — the asset-pipeline honesty check" is therefore **entirely
+unmet**, and a rig the sample authored cannot answer it.
+
+**What it would take:** importing a stock rig through `crcbl-scene`'s glTF path
+and converting it into what `crcbl::anim` poses. `apps/viewer/src/anim.rs`
+already does exactly this conversion for an arbitrary document, so the path
+exists — what has not been done is pointing puppet at it. **What it blocks:**
+the honesty check, which is the only criterion that tests the importer against
+content this workspace did not author.
+
+### The rest of puppet's milestones 2, 3 and 4 are unbuilt (2026-08-27)
+
+**Not built:** no state machine, no jump, no run, no root motion, no animation
+events and therefore no footstep cues, no socket prop, and none of the
+device-swap showcase — the rebind UI and the glyph hints that follow the
+last-active device. That last group is topic 19's forcing function.
+
+**Also not built:** puppet's map is authored in `apps/puppet/src/map.rs` rather
+than as a `.scn/` dir, for the same reason breakout's grid is in code. **Also
+not built:** milestone 5's golden frames. `apps/puppet` has no `tests/`
+directory at all, so nothing pins a pose; the Pages demo half of milestone 5 is
+done (`apps/puppet/src/web.rs`, `web/demos/puppet/`, the `puppet` row in
+`DEMOS`).
+
+**One engine limit is visible in the picture**: the slopes are rounded, because
+`crcbl-phys` has no oriented box to make a wedge out of.
+
+**What it blocks:** the footstep-timing exit criterion is topic 17's event test
+"live", and nothing else in the tree exercises animation events.
+
+## sparks (`docs/plan/sample/10-sparks.md`)
+
+### The sparks gallery is two stock effects of the nine its Scope names (2026-08-27)
+
+**Partly built.** `apps/sparks/src/effects.rs` has `impact_sparks`, `smoke_puff`
+and `spam` (the hostile one). The Scope names impact sparks, smoke puff, fire +
+embers, muzzle flash, rain, snow, magic swirl, explosion with debris mesh
+particles, and a rocket trail — each meant to double as a shipped preset games
+start from.
+
+**What it would take:** each further effect needs the render mode it is written
+for, so this is downstream of the item below rather than independent of it.
+**What it blocks:** the exit criterion "every topic 20 feature has a gallery
+entry".
+
+### Every particle render mode past mesh particles is unbuilt, and the step runs on the CPU (2026-08-27)
+
+**Not built:** billboards, velocity-stretched, flipbook, soft, ribbon/trail,
+additive vs alpha-sorted, and sorting of any kind. No RON effect assets and
+therefore no hot reload; no workbench, no sliders, no curve or gradient widgets.
+The simulation step runs on the **CPU**, which `docs/plan/20-particles.md` calls
+the staging rather than the destination — there is no GPU-resident pipeline, so
+the doc's headline "GPU-resident pipeline at a glance" claim is not what the
+sample currently demonstrates.
+
+**Built:** a simulated particle becomes an instance on the stage 3 GPU-driven
+path with no shader and no pass of its own, and the hostile effect is held at
+its pool share with a refusal counter on the page.
+
+**Colour is quantised, and it is a finding rather than a shortcut.** The
+instance path carries a mesh, a material row and a transform, and no
+per-instance tint — so colour over lifetime is `effects::PALETTE_STEPS` baked
+material rows per effect, each particle drawn through the row nearest its
+colour. Deliberately not fixed in the sample, because the hard cap is that the
+gallery exercises what topic 20 ships.
+
+### There is no `crcbl vfx` subcommand and no sparks goldens (2026-08-27)
+
+**Not built.** The exit criteria name "golden frames per stock effect in CI
+(`crcbl vfx render`)". `crates/crcbl-cli/src/args.rs` dispatches `new`, `run`,
+`build`, `screenshot`, `replay`, `crpix`, `lod`, `import`, `bench`, `sim` and
+`settings` — there is no `vfx`. `apps/sparks` has no `tests/` directory either.
+
+**What it would take:** the two together — the subcommand exists to produce the
+frames. **What it blocks:** the VFX regression surface, which is the pattern
+hud's widget gallery established and lantern and quarry both followed.
+
+### sparks takes a rule 2 exemption that was unwritten (2026-08-27)
+
+**Recorded, not owed.** `docs/backlog.md` already flags that `apps/bracket` and
+`apps/sparks` "carry none and claim no exemption" from sample rules 2 and 10.
+For sparks the exemption has now been written into
+`docs/plan/sample/10-sparks.md` on topic 20's own grounds — visual-only VFX are
+"client + GPU ... zero gameplay reads, zero readbacks", and "gameplay-relevant
+particles are not particles — they're entities". For bracket the answer is the
+opposite (see below), so that backlog entry can be closed for sparks and
+narrowed to bracket.
+
+## breach (`docs/plan/sample/11-breach.md`)
+
+### Milestone 0 shipped, but its own bullet's rendering and weapon-kit claims did not (2026-08-27)
+
+**Built:** `apps/breach` is the firing range **and** the bot practice map,
+single player, native and browser from one build; `web/demos/breach/` is the
+page and `breach` is a row in `DEMOS`. `MapChoice` picks between them via
+`--map` natively and `__crcbl_breach_map` from the page. The controller's
+camera-agnosticism is now evidence rather than a comment — `apps/puppet` orbits
+it, breach sits inside its head, `apps/shard` fixes an isometric rig on it, and
+`crcbl-phys` gained nothing for any of the three. The pistol is
+`crcbl::phys::PhysicsWorld::cast_ray` and nothing in the sample intersects
+anything itself. The firing line is a kerb over `CharacterConfig::step_offset`
+rather than a rule in the game code.
+
+**Not built, though milestone 0's own text names them:** first-person rendering
+(topic 29) and the weapon kit (topic 38). There is one hitscan pistol — no
+ballistics, penetration, armour, ADS, recoil, reload or **viewmodel**, so no
+viewmodel pass, no magnified optic and no 1P/3P sync. Milestone 0's exit
+criteria also ask for golden frames per `GeometryPath` and a recorded browser
+budget for first-person content; neither is taken, and `apps/breach` has no
+`tests/` directory.
+
+**Two absences are in the picture rather than the feature list:** the player is
+invisible (no viewmodel to draw, and a borrowed rig would be a second character
+system — on the practice map that means the bots walk through the player), and
+the rooms are lit by lamps rather than a sun because they have ceilings.
+
+**What it would take:** topics 29 and 38 are their own subsystems. **What it
+blocks:** nothing downstream — milestone 1 onward is native and gated on arena
+proving prediction first.
+
+### Breach owes rule 11 and claims no exemption (2026-08-27)
+
+**Not built, and correctly so for now.** The Scope asks for `.crpix` art and
+names what for — the grid inventory's item icons above all, since topic 34's
+grid is item _shapes_, plus the buy menu, the killfeed and the scoreboard.
+Milestone 0 has none of those UI surfaces, so it has no `build.rs` and no
+`assets/`. The obligation arrives with the UI, not before.
+
+## flappy (`docs/plan/sample/12-flappy.md`)
+
+Nothing owed that I found. The debug panel claim that this doc carried as "still
+owed" was false and has been corrected: `HostedGame::debug_sections` in
+`apps/flappy/src/app.rs` contributes the course and the audio and no network
+module, which is the modularity check the doc wanted. Same correction applied to
+`docs/plan/sample/01-breakout.md`, whose single module is the board.
+
+## lantern (`docs/plan/sample/13-lantern.md`)
+
+### Ray tracing and the acceleration structures are unbuilt (2026-08-27)
+
+**Not built**, and the doc is honest about the consequence: the environment a
+reflection falls back to is **baked** — a blurry static grid `bounce` gathers
+from one analytic bounce off the room's axis-aligned shell — and it is the only
+answer the raster path has for anything outside the frame. The debug panel's
+`unbuilt` section says so on screen. Milestones 2 and 3 (BLAS/TLAS, ray-traced
+shadows and AO, ray-traced reflections and GI, side-by-side and A/B-flip modes)
+are all unstarted, and the exit criterion "every topic 18 effect has a golden
+frame **per lighting path**" cannot be met with one path.
+
+**What it would take:** topic 18's ray-tracing half. **What it blocks:** the
+sample's entire reason for existing — that a human has compared the two lighting
+paths on the same scene.
+
+### The `[engine.video]` layer of the toggle resolution order has no source (2026-08-27)
+
+**Partly built.** Topic 39's resolution order has three layers. The
+**programmatic** one is built and is what both `--no-shadows` / `--no-ao` /
+`--no-reflections` and the pause menu's `SHADOWS` / `AO` / `REFLECTIONS` rows
+drive; the **camera-stack** one has a consumer now, the in-scene monitor asking
+for `room::MONITOR_STACK`. `[engine.video]` still has no source in this tree, so
+milestone 4's "toggle matrix across all three layers" is two thirds done.
+
+**Also:** no device in the tree clamps an effect, so the `UNAVAILABLE` arm of a
+menu row is covered by a unit test that constructs the device set rather than by
+a machine that reports one.
+
+**Corrected while auditing:** this doc listed the **Pages web demo** and **a CI
+leg that runs the golden suite** as still owed. Both are built —
+`apps/lantern/src/web.rs`, `web/demos/lantern/`, the `lantern` row in `DEMOS`,
+and a `Draw lantern's room on lavapipe` step in `.github/workflows/ci.yml`
+running `apps/lantern/tests/run-lantern-golden.sh` under the validation layers.
+
+### The four `crcbl-render` findings the monitor left are unfixed (2026-08-27)
+
+**Carried forward on trust from the doc**, not re-verified: duplicate imports,
+an undeclared page read, one view per renderer and one view per offscreen run.
+The doc says all four are in `docs/backlog.md`; I did not confirm the entries.
+
+## quarry (`docs/plan/sample/14-quarry.md`)
+
+### Three of the four QEM properties quarry claims to prove are not implemented (2026-08-27)
+
+**Not built**, and this is the highest-value correction in the quarry doc.
+`crcbl_scene::simplify`'s own module header is the account:
+
+- **Position borders ARE locked** — an edge used by any number of faces other
+  than two is a border and every vertex on one is refused as a collapse
+  endpoint, so a tiling mesh keeps its boundary loop exactly, and not
+  optionally. Interior edges a caller needs preserved go through
+  `simplify_with_locked_edges`, which is how `cluster_dag`'s group boundaries
+  survive.
+- **UV and normal seams are NOT constrained.** A seam is a discontinuity in an
+  attribute the function is never handed. A seam split into coincident position
+  vertices is locked only as a side effect of the index topology; a seam that
+  **shares** positions is invisible and drifts. `docs/plan/25-lod.md` calls this
+  out under Risks and it is not addressed.
+- **Material boundaries are NOT constrained**, for the same reason: material
+  assignment is per primitive and never reaches the function.
+- **Skinning weights are NOT carried through a collapse.**
+
+The doc's "Proves" bullet asserted all four. It now distinguishes them.
+
+**What it would take:** `docs/plan/25-lod.md`'s attribute slice. **What it
+blocks:** the exit criterion "the seam review is recorded with the content it
+was done against" — which cannot pass while the seams are known to drift.
+
+### Quarry's skinned prop is blocked on decimation, not on skinning (2026-08-27)
+
+**Not built.** The engine **can** skin: `crcbl_render::skinning`, `crcbl-anim`
+and `apps/puppet` all ship and a golden holds the pose a palette asks for. The
+narrow blocker is the last bullet above — `crcbl_scene::simplify`'s quadric is
+over positions and a collapse has no rule for the weights of the vertex it
+removes. Nothing about quarry unblocks it.
+
+### Quarry's two human judgements and its browser budget are untaken (2026-08-27)
+
+**Not done**, and the doc already states both as owed rather than met: whether
+the 233 differing pixels at the dolly's far stop read as "the same scene at the
+same budget" is a judgement, and the seam review against `quarry_face(CELLS)`
+and `quarry_tile` asks for a human to look. Neither has been. The browser budget
+milestone 4 asks for is also unrecorded, though the page exists
+(`apps/quarry/src/web.rs`, `web/demos/quarry/`).
+
+**Contradiction found and not resolved by me:** `apps/quarry/src/lib.rs`'s
+module header says both "Milestones 1 to 4, less the two overlays milestone 2
+owes" and, further down, "Milestone 2's three debug overlays are all built". The
+overlays exist (`--lod-view`, `--heatmap`, the freeze key), so the later
+sentence is the right one and the earlier clause is stale. That is a Rust doc
+comment and outside this audit's write scope.
+
+## shard (`docs/plan/sample/15-shard.md`)
+
+### Two of milestone 1's six verbs, and its whole inventory claim, are unbuilt (2026-08-27)
+
+**Partly built.** Explore, fight, save and resume ship. There is **no item, no
+rarity, no experience and no inventory grid** — and the save format has **no
+field reserved for one, deliberately**, because who forces
+`docs/plan/34-inventory.md`'s kit is an open question and a reserved field would
+answer it by accident. So milestone 1's "the grid-inventory kit gets a second
+consumer" claim is entirely unstarted, along with the exit criterion that
+depends on it ("the inventory kit used without a single engine change made on
+its behalf").
+
+**What it would take:** deciding whether shard or breach forces topic 34, then
+building it. **What it blocks:** topic 34's own validity — a kit with one
+consumer is that consumer's shape wearing a kit's name, which is this doc's
+phrasing.
+
+### Shard's milestone 1 measurements are all untaken (2026-08-27)
+
+**Not measured:** golden frames per `GeometryPath` from a fixed camera set, the
+recorded browser budget for real 3D content, and the peak wasm memory figure —
+which this doc says is the first sample whose content could plausibly approach
+the wasm32 address-space ceiling. `apps/shard` has no `tests/` directory.
+
+**What it blocks:** three of milestone 1's four exit criteria, and the "first 3D
+browser budget on the site" gap this sample exists to close.
+
+### Shard's milestone 2 is unstarted and blocked outside the sample (2026-08-27)
+
+**Not built at all.** Sector streaming, interest-managed replication, a
+dedicated headless server, per-server identity, and the native ray-traced /
+meshlet rendering path. `crcbl-net` ships `InMemoryTransport` and nothing else,
+so there is no wire; `Server` holds one transport and one session manager, so
+"many concurrent clients" has no implementation.
+
+**One absence is in the picture rather than the feature list:** the character is
+a capsule — the _same_ capsule `crcbl::phys::CharacterConfig` sweeps, so the
+figure on screen is the shape the physics moved. An authored rig would be a
+second character system with no animation to drive it, and `apps/puppet` owns
+that seam.
+
+## bracket (`docs/plan/sample/16-bracket.md`)
+
+### bracket's transport milestone is blocked on a command path, not on UDP (2026-08-27)
+
+**Partly built.** Milestone 1's model, milestone 4's driver and milestone 5's
+web demo ship: the widening-tolerance queue, Elo ratings with a K-factor
+schedule, the match stub, a UI-only client, and
+`bracket sim [--seed N] [--players N] [--ticks N]` for the headless soak.
+`web/demos/bracket/` is the page.
+
+**The blocker is narrower than "there is no UDP".** There is no UDP transport
+and no LAN discovery, but the demo runs its `Sim` **directly** rather than over
+any transport, and routing it through a loopback as things stand would be worse
+than not doing it — it would put the matchmaker behind a tick-shaped input
+channel and look like the claim while not being it. Queueing, leaving the queue
+and reporting a result are **commands**: `crcbl-server`'s receive loop has an
+arm for `ClientToServer::Command` whose body is empty, with a comment saying
+that a caller must not read it as a command being acted on. So the missing piece
+is a way for a `GameModule` to receive a command and reply to it, and it is
+engine work. `docs/backlog.md` already carries this under "bracket does not yet
+drive the transport (2026-08-24)"; it is re-verified and still accurate.
+
+**Rule 2 is owed here rather than exempted.** `apps/bracket` opens no `World`
+and implements no `GameModule`. Unlike sparks, bracket should NOT get an
+exemption written — its exit criteria assume the transport arrives — so the
+backlog entry flagging "apps/bracket and apps/sparks carry none and claim no
+exemption" resolves to: exemption written for sparks, impl owed for bracket.
+
+### bracket's signed-result milestone is unstarted (2026-08-27)
+
+**Not built.** Milestone 3 — identity, result signing, and the rejection paths
+demonstrated to fail. `crcbl-net`'s `auth` module carries the per-session MAC
+every post-handshake message takes, which is the ingredient; nothing signs a
+_result_. The exit criterion "a forged or unsigned match result is rejected,
+demonstrated by a test that fails when the check is removed" has nothing to
+remove.
+
+**What it blocks:** topic 27's tier 3, which `docs/plan/sample/11-breach.md`
+explicitly handed to bracket when breach went LAN-only. If bracket does not
+build it, nothing does.
+
+### bracket's recorded numbers are absent from the doc (2026-08-27)
+
+**Not recorded.** The exit criteria ask for a stated population size converging
+to true skill within a stated tolerance over a stated number of matches, "the
+numbers recorded here, from a run, not estimated", plus a queue-time versus
+match-quality curve at several population sizes including the degenerate small
+one. `bracket sim` prints a report; no figure from it is in the doc.
+
+**What it would take:** running it and pasting the output. Cheap. **What it
+blocks:** two exit criteria, and it is the least expensive unclosed item in this
+whole audit.
+
+## Coverage gaps in the sample audit
+
+- **I did not run the test suite, `cargo clippy`, `cargo fmt` or `cargo doc`.**
+  This slice edited only Markdown under `docs/plan/sample/`, so no Rust changed
+  — but that means no claim here about a test passing has been re-run by me.
+  Every "the test asserts X" statement is read off the test's name and its
+  surrounding source, not off a green run.
+- **Gates I did run:** `bash tools/check-doc-citations.sh docs/plan/sample/*.md`
+  (104 paths, all resolve), `bash tools/check-wrapped-strings.sh` (672 files, no
+  collapsed literals), `npx prettier@3.8.3 --write` then `--check` on all
+  seventeen files (clean). I also checked by hand that every relative Markdown
+  link in the directory resolves on disk, since the citation gate does not see
+  those. I did **not** run the citation gate over the whole tree, only over my
+  own files.
+- **Numbers I did not verify and therefore removed rather than corrected.**
+  `docs/plan/sample/03-horde.md` carried "161 tests"; I did not run
+  `cargo test -p horde` to check it, so the sentence lost the count rather than
+  gaining a new one. Every measured table in that doc — the render series, the
+  batching claim, the fill margin, the simulation series, the `--workers`
+  re-measurement, and the superseded 18a table — is **carried forward on
+  trust**. I read them for internal consistency and left them untouched; none
+  was re-measured.
+- **`docs/plan/sample/14-quarry.md`'s Measured section is likewise carried
+  forward.** The 233-pixel figure, the cluster counts, the cone-rejection
+  result: all read, none re-run.
+- **I did not read** `docs/plan/ROADMAP.md`, any of `docs/plan/*.md` outside the
+  sample directory beyond spot checks (`08-editor.md` existence, `25-lod.md`
+  named by `simplify.rs`, `26-prediction.md`, `24-navigation.md`,
+  `20-particles.md`), or `docs/backlog.md` in full — it is very large and I read
+  only the passages my greps landed in. So an entry here may duplicate one
+  already in the backlog; the bracket transport entry is the one I checked and
+  it does duplicate, deliberately, because it needed re-verifying.
+- **I did not read most app source.** For each of the fourteen shipping samples
+  I read the `src/lib.rs` module header in full and spot-checked the specific
+  symbols I cite (`debug_sections` in breakout and flappy, `DEFAULT_MAX_ENEMIES`
+  and `lerp_angle` and the leak test in the 2D games, `effects.rs` and `show.rs`
+  in sparks, `queue.rs` / `rating.rs` / `sim.rs` / `main.rs` in bracket). The
+  bodies of `game.rs`, `app.rs` and `gpu.rs` in each sample are unread. Where I
+  restate a header's claim I am trusting a doc comment, which is fresher than
+  the plan but is still a claim.
+- **Engine crates: I verified symbol existence, not behaviour.** `crcbl-phys`'s
+  `Frames`, `sphere_of_influence`, `Atmosphere`, `PointGravity`,
+  `AtmosphericDrag`, `SemiImplicitEuler`, `propagate`, `CharacterController`,
+  `cast_ray`, `sweep_sphere`, `overlap_sphere_into`, `body_mut` and the collider
+  trigger flag; `crcbl-net`'s `InMemoryTransport`, `condition.rs` and the empty
+  `Command` arm in `crcbl-server`; `crcbl-scene`'s `simplify.rs` constraint
+  header; `crcbl-render`'s `skinning.rs`, `shadow.rs`, `effects.rs`, `probe.rs`;
+  `crcbl-anim`'s modules; `crcbl-audio`'s modules; the `crcbl` CLI's subcommand
+  dispatch. In every case I opened the definition or the module header. I did
+  not exercise any of them.
+- **I did not check whether `apps/breach` and `apps/shard` are described
+  correctly on the live demo site**, only that they are rows in `DEMOS` and have
+  `web/demos/<name>/` directories.
+- **Two things outside my write scope that need a fix elsewhere**, both stated
+  above: `DEFAULT_MAX_ENEMIES`'s doc comment in `apps/horde/src/game.rs`
+  justifies its value with "neither P7 nor P8 exists", which the same sample's
+  own 2026-08-10 measurement contradicts; and `apps/quarry/src/lib.rs`'s header
+  contradicts itself about milestone 2's overlays.
+
 ## Coverage gaps in the tooling audit
 
 Stated plainly, as gaps:
@@ -15012,7 +15674,7 @@ more places.
 hand-assembled in `crates/crcbl-scene/src/gltf_fixture.rs` — one triangle, one
 material, two nodes — which is what makes the malformed cases readable in a diff
 but means no Khronos sample, no exporter output and no large file has ever been
-through this code. [12-testing.md](12-testing.md)'s anchor list wants a vendored
+through this code. `docs/plan/12-testing.md`'s anchor list wants a vendored
 Khronos subset at P9; that is where the "does it load Sponza" question gets
 answered, and until then "it parses glTF" means "it parses the subset the
 fixtures cover".
