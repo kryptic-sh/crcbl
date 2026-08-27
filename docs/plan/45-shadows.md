@@ -472,6 +472,132 @@ shape of every edge softening slightly rather than anything moving — and
 `room.png` and `live.png` in `apps/lantern/tests/golden/`. Every other golden in
 the tree still matches.
 
+### A tenth, taken 2026-08-28: the filter's width comes from the blocker
+
+The ninth decision gave the filter a shape and a fixed reach of two tile texels.
+Two texels is 21 mm of penumbra on `apps/lantern`'s near cascade and 125 mm on
+its outer one, and that is the whole of it — the same width under a caster
+resting on the floor as under one thrown from the top of a wall. Real shadows do
+not work that way, and the frame says so: the far boundary of the brass block's
+shadow, which is thrown from the block's top edge onto the outer cascade,
+arrives quantised to the 62.5 mm texels the map stored it in. It reads as a
+**sawtooth**, because a two-texel filter cannot cover an edge whose true
+penumbra wants twenty.
+
+So `tile_pcf` takes its radius as a parameter and the sun measures one per
+fragment — **PCSS**, the industry's standard soft shadow, and the first rung on
+this ladder that costs a second sampling loop rather than a different kernel in
+the one that exists.
+
+**The estimate.** `sun_penumbra_texels` in `mesh.slang` reads sixteen depths
+straight out of the map over eight tile texels, keeps the ones nearer the light
+than the receiver — reversed-Z, so nearer is _larger_ — and averages them. The
+difference between that average and the receiver's own depth is a height, once
+the cascade's box has been un-projected: an orthographic cascade of radius `r`
+is `2 r + SHADOW_CASTER_REACH` deep and spreads that range linearly over `0..1`,
+so one unit of clip depth is the whole of it. A sun of angular radius `θ` turns
+a height into a half-shadow's width by a similar triangle, and dividing by the
+cascade's texel footprint puts it in the unit the filter wants.
+
+**`Load`, not a sampler**, which is also why the rung needs no new descriptor.
+The atlas's only sampler is the comparison one, and a comparison sampler cannot
+return a depth; a filtering one would average four depths across a silhouette
+and report a blocker at a height nothing in the scene occupies.
+
+**The result is clamped at both ends, and both ends are load-bearing.** Below at
+`SHADOW_FILTER_TEXELS`, because a contact is not a sub-texel-sharp edge but a
+quantised one, and a radius under the width the ninth decision was tuned around
+trades its dither back for the staircase it removed. Above at
+`SHADOW_SEARCH_TEXELS`, because a filter wider than the search that sized it
+spreads taps over texels nothing measured. The fallback when no tap found a
+blocker is the _lower_ clamp rather than "lit": sixteen points over eight texels
+is a sparser look than thirty-two over two, so a thin caster can fall between
+search taps, and answering fully lit there would leak light through it. The
+search sizes the filter; it never replaces it.
+
+#### The physical sun is a no-op at this atlas, and that was measured
+
+The real sun is a 0.531° disc, so `tan` of its angular radius is 0.004634. A
+cascade texel is `2 r / SHADOW_TILE`: 10.6 mm on lantern's near cascade and 62.5
+mm on its outer one. At the physical value a blocker needs **4.6 m** of
+separation before its penumbra reaches even two texels on the near cascade, and
+**27 m** on the outer one — and nothing in either test scene casts that far.
+Rendered at the physical value against the same frame with the constant at zero,
+`apps/lantern` differed in **36 bytes of 4,915,200, each by one**, and the dunes
+terrain was byte-identical.
+
+That is worth stating plainly rather than discovering later: **shipping the
+physical number would buy sixteen taps and no picture.** So
+`SHADOW_SUN_TAN_RADIUS` is a softness knob whose unit happens to be an angle,
+and the shipped 0.02 is a sun about four times oversized — 1.15° against the
+real disc's 0.27°. What keeps it honest is that everything downstream of it is
+physical: the width still comes from a real blocker height through a similar
+triangle, so it tracks the scene rather than being a fudge per material.
+
+#### The sweep that picked it
+
+Measured as the RMS departure of lantern's far shadow boundary from the straight
+line it should be, each row smoothed by nine pixels so the filter's own dither
+cancels — the naive per-pixel metrics all move the wrong way here, because the
+wider filter's dither dominates them while the artefact the eye reads is the
+low-frequency sawtooth. Beside it, the dunes terrain's acne and grain from the
+ninth decision's harness:
+
+| `SHADOW_SUN_TAN_RADIUS` | Edge wobble | Dunes acne | Dunes grain |
+| ----------------------- | ----------- | ---------- | ----------- |
+| 0 (a fixed filter)      | 1.58 px     | 24 dots    | 0.918       |
+| 0.010                   | 1.13 px     | 24 dots    | 0.918       |
+| 0.015                   | 0.50 px     | 24 dots    | 0.918       |
+| **0.020 (shipped)**     | **0.58 px** | 24 dots    | 0.918       |
+| 0.030                   | 1.07 px     | 25 dots    | 0.942       |
+| 0.050                   | 1.08 px     | 23 dots    | 1.005       |
+| 0.100                   | 1.08 px     | 43 dots    | 1.222       |
+
+The minimum is a tie between 0.015 and 0.02 — 0.08 px apart, under what one
+scene resolves — and the wider of the two is taken because the effect it buys
+away from this one edge is larger at no measured cost on the other scene. Past
+0.03 the number stops moving: the estimate has saturated at
+`SHADOW_SEARCH_TEXELS`, and 1.08 px is what the fully clamped filter leaves.
+Acne and grain keep climbing past that anyway, which is the ninth decision's
+finding that a wider disc buys acne back.
+
+**The contact end was checked separately**, because a rung called contact
+hardening that softens contacts has failed at the thing it is named for: the
+brass block's foot line is unmoved between the fixed filter and the shipped
+value, which is the lower clamp doing its job.
+
+**The sun only.** `punctual_visibility` passes `SHADOW_FILTER_TEXELS` and always
+will from here: a spot's and a point face's maps are perspective projections, so
+a difference of two of their depths is not a distance until it is un-projected,
+and neither light has an angular radius to scale one by. `volumetric.slang`
+passes the constant too, for a different reason — a blocker search sizes a
+penumbra from how far a _surface_ stands below its caster, and a froxel is a
+volume of air with no surface to stand on. That is the same reasoning that drops
+both biases there.
+
+`SHADOW_CASTER_REACH` moved into `crcbl_shaders::mesh` and
+`crcbl_render::shadow`'s `CASTER_REACH` now takes it from there. The sampling
+side inverts the box the host builds, and two declarations would let a matrix
+and its inverse drift apart — which would scale every penumbra by the ratio
+between them, and no frame says how wide a penumbra should be.
+
+Guards: `the_blocker_search_sizes_the_filter_from_what_is_nearer_the_light` pins
+the reversed-Z sense of "blocker", the depth-range factor and the clamp's order,
+each of which draws a plausible frame when it is wrong;
+`the_shadow_discs_are_the_vogel_spirals_they_claim_to_be` now re-derives the
+search's sixteen-point table as well as the filter's thirty-two, separately,
+because a Vogel spiral's radii depend on the count it was generated for. All
+four were verified by sabotage with the artifacts regenerated, so what fired was
+the assertion and not `build.rs`'s manifest check.
+
+Goldens re-blessed: `room.png` and `live.png` in `apps/lantern/tests/golden/`.
+Every scene in `crates/crcbl/tests/render_e2e.rs` still matches at 256×192 — the
+penumbra change falls under the rasteriser tolerance at that size — and so does
+every browser-path golden.
+
+**Nothing in the tree times this either.** Sixteen taps on top of thirty-two, on
+the fragment path only; `docs/backlog.md` carries the gap.
+
 ### The quality ladder, taken 2026-08-27
 
 What ships, first, because the ladder is only readable against it: **stable
@@ -500,10 +626,13 @@ and it is recorded here as evidence that the tile is now the binding constraint
 on shadow quality — every map is 768 texels a side where it was 1024 — not as a
 defect with a fix attached.
 
-**Those numbers are from before the seventh decision**, which re-blessed `cube`
-and moved exactly the shadow edges the diff is made of. Whether the failure
-survived it is a question only a Pages run answers — this machine's adapter is
-not SwiftShader — and `docs/backlog.md` is where that is tracked.
+**Those numbers are from before the seventh decision, and it fixed them.** That
+decision re-blessed `cube` and moved exactly the shadow edges the diff was made
+of. The Pages run for it — `cec27b3`, run 33109785579 — has all three browser
+golden jobs green, linux and windows included, and so does the run for the ninth
+decision's commit. The re-tiling's cost was real and is now paid; what stands
+from the paragraph above is the part that was never about that frame, which is
+that every map is 768 texels a side where it was 1024.
 
 The ladder, in the order it should be climbed:
 
@@ -521,12 +650,14 @@ The ladder, in the order it should be climbed:
   integer-indexed constant table this rung insisted on. What the rung did not
   anticipate is that a wider penumbra is not free at the same tap count: it took
   thirty-two, not twelve, to keep the dither under what the box already had.
-- **PCSS, or contact hardening.** A blocker search over the map, then a filter
-  whose width comes from how far the blockers it found are — the industry
-  standard soft shadow, and the first rung here that costs a **second sampling
-  loop** rather than a different kernel in the one loop that exists. It is also
-  the first that makes the tile resolution above bind harder, since a blocker
-  search reads a neighbourhood the re-tiling already made coarser.
+- ~~**PCSS, or contact hardening.**~~ **Built 2026-08-28** — the tenth decision
+  above has the estimate, the clamps and the sweep. It cost the second sampling
+  loop this rung said it would: sixteen `Load`s over eight tile texels, on the
+  fragment path and for the sun alone. What the rung did not anticipate is that
+  the _physical_ sun buys nothing at a 768-texel tile, which the decision
+  measures rather than asserts, so the shipped angle is an artistic one and says
+  so. The ladder above this is empty; what is left for shadows is the tile
+  resolution itself, and that is `docs/backlog.md`'s question, not a rung.
 
 Refused, with the reasons:
 

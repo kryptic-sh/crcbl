@@ -810,7 +810,9 @@ mod tests {
 
         for signature in [
             "float2 atlas_uv(uint tile, float2 tile_uv)",
-            "float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)",
+            "float2 shadow_rotation(float2 pixel)",
+            "float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, \
+             float radius)",
         ] {
             assert_eq!(
                 one_function(MESH, signature, "frame."),

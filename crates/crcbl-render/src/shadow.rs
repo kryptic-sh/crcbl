@@ -230,8 +230,14 @@ const SPLIT_LAMBDA: f32 = 0.7;
 /// number plus `2 * radius` — 88 m on the outer cascade, of which 40 was this —
 /// and a bias of 0.0094 in clip was 0.83 m of world slack against walls 0.15 m
 /// thick. [`DEPTH_BIAS_TEXELS`] is what removed the coupling; this is a caster
-/// budget again and nothing else reads it.
-const CASTER_REACH: f32 = 40.0;
+/// budget again.
+///
+/// **Taken from the shader rather than declared here**, because the sampling
+/// side inverts the box this builds: `mesh.slang`'s `sun_penumbra_texels` reads
+/// `2 * radius + SHADOW_CASTER_REACH` back out of a shadow-clip depth to get the
+/// metres a penumbra is sized from. Two declarations would let the matrix and
+/// its inverse drift apart.
+const CASTER_REACH: f32 = crcbl_shaders::mesh::SHADOW_CASTER_REACH;
 
 /// The constant part of the sun's shadow comparison bias, in **texels of the
 /// cascade the fragment landed in**.

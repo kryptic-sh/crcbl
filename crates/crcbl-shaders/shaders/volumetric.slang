@@ -439,6 +439,17 @@ static const uint SHADOW_DITHER[16] = {
     0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u,
 };
 
+/// Which of [`SHADOW_ROTATIONS`] this pixel takes, as a `(cos, sin)` pair.
+///
+/// `mesh.slang`'s helper. There it is shared between the blocker search and the
+/// filter that search sizes; here there is only the filter, and it stays a
+/// function so the two files' kernels remain the same text.
+float2 shadow_rotation(float2 pixel)
+{
+    uint2 cell = uint2(pixel) & 3u;
+    return SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
+}
+
 /// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
 /// space, dithered by `pixel`.
 ///
@@ -447,12 +458,16 @@ static const uint SHADOW_DITHER[16] = {
 /// so a tap exactly on the edge reads the neighbouring map's depths as if they
 /// were this one's.
 ///
+/// `radius` is a parameter there because the sun's penumbra is measured per
+/// fragment; the one caller here passes [`SHADOW_FILTER_TEXELS`] and always
+/// will, for the reason `volumetric_sun_visibility` gives.
+///
 /// `pixel` is the froxel's column index where a fragment passes its own pixel
 /// coordinate. It stands in for one exactly: the froxel grid is a tiling of the
 /// screen, so neighbouring columns are neighbouring pixels made coarse, and the
 /// lattice that picks a rotation wants nothing finer than an integer that
 /// changes between neighbours.
-float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)
+float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float radius)
 {
     float2 texel = params.shadow_params.xy;
     // The grid's two extents, which is what turns an *atlas* texel into a step
@@ -462,13 +477,12 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)
     float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
     float2 tile_min = float2(0.5, 0.5) * texel * grid;
 
-    uint2 cell = uint2(pixel) & 3u;
-    float2 rotation = SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
+    float2 rotation = shadow_rotation(pixel);
 
     float visibility = 0.0;
     for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        float2 spoke = SHADOW_DISC[index] * SHADOW_FILTER_TEXELS;
+        float2 spoke = SHADOW_DISC[index] * radius;
         // The rotation, written out: a complex multiply by `(cos, sin)`.
         float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
                                spoke.x * rotation.y + spoke.y * rotation.x);
@@ -523,7 +537,12 @@ float volumetric_sun_visibility(float3 world_position, float2 pixel)
     // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
     // push into the viewport rather than into the matrix.
     float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    return tile_pcf(cascade, tile_uv, ndc.z, pixel);
+    // The constant width, not the sun's measured one. A blocker search sizes a
+    // penumbra from how far a *surface* stands below its caster, and a froxel is
+    // a volume of air with no surface to stand: the height it would measure is
+    // the distance to whatever the map holds behind it, which is not a shadow
+    // this air is inside. The same reasoning that drops both biases here.
+    return tile_pcf(cascade, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
 }
 
 /// What one slice of the medium does, given the segment of the tile's centre

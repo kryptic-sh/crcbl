@@ -619,6 +619,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The sun's shadow filter is as wide as the penumbra the scene has, not a
+  constant.** `mesh.slang`'s `tile_pcf` takes its radius as a parameter, and
+  `sun_penumbra_texels` measures one per fragment: sixteen depths `Load`ed from
+  the atlas over eight tile texels, the ones nearer the light averaged into a
+  blocker height, and a similar triangle through `SHADOW_SUN_TAN_RADIUS` turning
+  that height into a width. PCSS, in other words, and the width is clamped
+  between the old fixed reach and the search's own — under it a contact would
+  lose the dither the rotated disc was tuned around, over it the filter would
+  spread taps across texels nothing measured.
+
+  What it buys: the far boundary of `apps/lantern`'s block shadow, thrown from
+  the block's top edge onto a cascade whose texels are 62.5 mm, arrived
+  quantised to them as a sawtooth. Its RMS departure from the straight line it
+  should be fell **1.58 px to 0.58 px**. The block's foot line did not move,
+  which is the lower clamp doing its job.
+
+  **The physical sun buys nothing here and that was measured.** At `tan` of the
+  real 0.27° angular radius, `apps/lantern` differed from a fixed filter in 36
+  bytes of 4,915,200 and the dunes terrain not at all — a cascade texel is
+  larger than the penumbra the geometry implies. So the shipped constant is a
+  softness knob at four times the sun's size, and it says so.
+
+  The sun only: `punctual_visibility` and `volumetric.slang` pass the fixed
+  reach. `crcbl_shaders::mesh::SHADOW_CASTER_REACH` is new and
+  `crcbl_render::shadow::CASTER_REACH` now takes its value from it, because the
+  blocker search inverts the box `cascade_matrix` builds.
+
 - **The sun's and every punctual light's shadow bias is a normal offset, not a
   slope-scaled depth bias.** `mesh.slang`'s `shadow_slope` is gone;
   `shadow_normal_offset` moves the receiver **along its own geometric normal**

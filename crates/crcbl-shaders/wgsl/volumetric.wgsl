@@ -79,18 +79,23 @@ fn volumetric_slice_start_0( index_0 : u32) -> f32
     return start_0;
 }
 
+fn shadow_rotation_0( pixel_1 : vec2<f32>) -> vec2<f32>
+{
+    var cell_0 : vec2<u32> = (vec2<u32>(pixel_1) & (vec2<u32>(u32(3))));
+    return SHADOW_ROTATIONS_0[SHADOW_DITHER_0[cell_0.y * u32(4) + cell_0.x]];
+}
+
 fn atlas_uv_0( tile_0 : u32,  tile_uv_0 : vec2<f32>) -> vec2<f32>
 {
     return (vec2<f32>(f32(tile_0 % u32(4)), f32(tile_0 / u32(4))) + tile_uv_0) / vec2<f32>(4.0f, 4.0f);
 }
 
-fn tile_pcf_0( tile_1 : u32,  tile_uv_1 : vec2<f32>,  reference_0 : f32,  pixel_1 : vec2<f32>) -> f32
+fn tile_pcf_0( tile_1 : u32,  tile_uv_1 : vec2<f32>,  reference_0 : f32,  pixel_2 : vec2<f32>,  radius_0 : f32) -> f32
 {
     var texel_0 : vec2<f32> = params_0.shadow_params_0.xy;
     const grid_0 : vec2<f32> = vec2<f32>(4.0f, 4.0f);
     var _S2 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_0 * grid_0;
-    var cell_0 : vec2<u32> = (vec2<u32>(pixel_1) & (vec2<u32>(u32(3))));
-    var _S3 : u32 = cell_0.y * u32(4) + cell_0.x;
+    var _S3 : vec2<f32> = shadow_rotation_0(pixel_2);
     var index_1 : u32 = u32(0);
     var visibility_0 : f32 = 0.0f;
     for(;;)
@@ -102,11 +107,11 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_1 : vec2<f32>,  reference_0 : f32,  pixel_
         {
             break;
         }
-        var spoke_0 : vec2<f32> = SHADOW_DISC_0[index_1] * vec2<f32>(2.0f);
+        var spoke_0 : vec2<f32> = SHADOW_DISC_0[index_1] * vec2<f32>(radius_0);
         var _S4 : f32 = spoke_0.x;
-        var _S5 : f32 = SHADOW_ROTATIONS_0[SHADOW_DITHER_0[_S3]].x;
+        var _S5 : f32 = _S3.x;
         var _S6 : f32 = spoke_0.y;
-        var _S7 : f32 = SHADOW_ROTATIONS_0[SHADOW_DITHER_0[_S3]].y;
+        var _S7 : f32 = _S3.y;
         var visibility_1 : f32 = visibility_0 + (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (atlas_uv_0(tile_1, clamp(tile_uv_1 + vec2<f32>(_S4 * _S5 - _S6 * _S7, _S4 * _S7 + _S6 * _S5) * texel_0 * grid_0, _S2, vec2<f32>(1.0f) - _S2))), (reference_0)));
         index_1 = index_1 + u32(1);
         visibility_0 = visibility_1;
@@ -114,7 +119,7 @@ fn tile_pcf_0( tile_1 : u32,  tile_uv_1 : vec2<f32>,  reference_0 : f32,  pixel_
     return visibility_0 / 32.0f;
 }
 
-fn volumetric_sun_visibility_0( world_position_0 : vec3<f32>,  pixel_2 : vec2<f32>) -> f32
+fn volumetric_sun_visibility_0( world_position_0 : vec3<f32>,  pixel_3 : vec2<f32>) -> f32
 {
     var cascade_0 : u32;
     var _S8 : f32 = length(world_position_0 - params_0.eye_0.xyz);
@@ -151,7 +156,7 @@ fn volumetric_sun_visibility_0( world_position_0 : vec3<f32>,  pixel_2 : vec2<f3
     {
         return 1.0f;
     }
-    return tile_pcf_0(cascade_0, vec2<f32>(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_2);
+    return tile_pcf_0(cascade_0, vec2<f32>(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_3, 2.0f);
 }
 
 fn fog_exp_neg_0( x_0 : f32) -> f32

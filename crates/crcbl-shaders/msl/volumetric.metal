@@ -56,7 +56,7 @@ struct VolumetricParams_natural_0
 };
 
 
-#line 608 "shaders/volumetric.slang"
+#line 627 "shaders/volumetric.slang"
 struct KernelContext_0
 {
     VolumetricParams_natural_0 constant* params_0;
@@ -133,6 +133,14 @@ float volumetric_slice_start_0(uint index_0)
 }
 
 
+#line 447
+float2 shadow_rotation_0(float2 pixel_1)
+{
+    uint2 cell_0 = uint2(pixel_1) & (uint2(3U) );
+    return SHADOW_ROTATIONS_0[SHADOW_DITHER_0[cell_0.y * 4U + cell_0.x]];
+}
+
+
 #line 391
 float2 atlas_uv_0(uint tile_0, float2 tile_uv_0)
 {
@@ -141,152 +149,151 @@ float2 atlas_uv_0(uint tile_0, float2 tile_uv_0)
 }
 
 
-#line 455
-float tile_pcf_0(uint tile_1, float2 tile_uv_1, float reference_0, float2 pixel_1, KernelContext_0 thread* kernelContext_2)
+#line 470
+float tile_pcf_0(uint tile_1, float2 tile_uv_1, float reference_0, float2 pixel_2, float radius_0, KernelContext_0 thread* kernelContext_2)
 {
     float2 texel_0 = kernelContext_2->params_0->shadow_params_0.xy;
 
-#line 462
+#line 477
     float2 grid_0 = float2(4.0f, 4.0f);
     float2 _S2 = float2(0.5f, 0.5f) * texel_0 * grid_0;
 
-    uint2 cell_0 = uint2(pixel_1) & (uint2(3U) );
-    uint _S3 = cell_0.y * 4U + cell_0.x;
+    float2 _S3 = shadow_rotation_0(pixel_2);
 
-#line 466
+#line 480
     uint index_1 = 0U;
 
-#line 466
+#line 480
     float visibility_0 = 0.0f;
 
 
     for(;;)
     {
 
-#line 469
+#line 483
         if(index_1 < 32U)
         {
         }
         else
         {
 
-#line 469
+#line 483
             break;
         }
-        float2 spoke_0 = SHADOW_DISC_0[index_1] * float2(2.0f) ;
+        float2 spoke_0 = SHADOW_DISC_0[index_1] * float2(radius_0) ;
 
         float _S4 = spoke_0.x;
 
-#line 473
-        float _S5 = SHADOW_ROTATIONS_0[SHADOW_DITHER_0[_S3]].x;
+#line 487
+        float _S5 = _S3.x;
 
-#line 473
+#line 487
         float _S6 = spoke_0.y;
 
-#line 473
-        float _S7 = SHADOW_ROTATIONS_0[SHADOW_DITHER_0[_S3]].y;
+#line 487
+        float _S7 = _S3.y;
 
 
 
         float _S8 = ((kernelContext_2->shadow_atlas_0).sample_compare((kernelContext_2->shadow_sampler_0), (atlas_uv_0(tile_1, clamp(tile_uv_1 + float2(_S4 * _S5 - _S6 * _S7, _S4 * _S7 + _S6 * _S5) * texel_0 * grid_0, _S2, float2(1.0f)  - _S2))), (reference_0), level((0.0f))));
 
-#line 476
+#line 490
         float visibility_1 = visibility_0 + _S8;
 
-#line 469
+#line 483
         index_1 = index_1 + 1U;
 
-#line 469
+#line 483
         visibility_0 = visibility_1;
 
-#line 469
+#line 483
     }
 
-#line 479
+#line 493
     return visibility_0 / 32.0f;
 }
 
 
-#line 498
-float volumetric_sun_visibility_0(float3 world_position_0, float2 pixel_2, KernelContext_0 thread* kernelContext_3)
+#line 512
+float volumetric_sun_visibility_0(float3 world_position_0, float2 pixel_3, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 498
+#line 512
     uint cascade_0;
 
-#line 503
+#line 517
     float _S9 = length(world_position_0 - kernelContext_3->params_0->eye_0.xyz);
 
-#line 503
+#line 517
     uint index_2 = 0U;
 
     for(;;)
     {
 
-#line 505
+#line 519
         if(index_2 < 2U)
         {
         }
         else
         {
 
-#line 505
+#line 519
             cascade_0 = 1U;
 
-#line 505
+#line 519
             break;
         }
         if(_S9 < kernelContext_3->params_0->cascade_far_0[index_2])
         {
 
-#line 507
+#line 521
             cascade_0 = index_2;
 
 
             break;
         }
 
-#line 505
+#line 519
         index_2 = index_2 + 1U;
 
-#line 505
+#line 519
     }
 
-#line 514
+#line 528
     float4 clip_0 = (((float4(world_position_0, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(0)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(0)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(0)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(0)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(1)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(1)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(1)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(1)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(2)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(2)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(2)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(2)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(3)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(3)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(3)], (&kernelContext_3->params_0->shadow_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(3)]))));
 
 
     float3 ndc_1 = clip_0.xyz / float3(clip_0.w) ;
 
-#line 517
+#line 531
     bool _S10;
     if(any((abs(ndc_1.xy)) > (float2(1.0f) )))
     {
 
-#line 518
+#line 532
         _S10 = true;
 
-#line 518
+#line 532
     }
     else
     {
 
-#line 518
+#line 532
         _S10 = (ndc_1.z) <= 0.0f;
 
-#line 518
+#line 532
     }
 
-#line 518
+#line 532
     if(_S10)
     {
         return 1.0f;
     }
 
-#line 520
-    float _S11 = tile_pcf_0(cascade_0, float2(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_2, kernelContext_3);
+#line 534
+    float _S11 = tile_pcf_0(cascade_0, float2(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z, pixel_3, 2.0f, kernelContext_3);
 
-#line 526
+#line 545
     return _S11;
 }
 
@@ -423,7 +430,7 @@ float3 volumetric_source_0(float3 view_direction_0, float visibility_2, KernelCo
 }
 
 
-#line 540
+#line 559
 float4 volumetric_slice_0(float3 from_0, float3 to_0, float visibility_3, KernelContext_0 thread* kernelContext_5)
 {
     float reference_1 = kernelContext_5->params_0->fog_params_0.z;
@@ -433,7 +440,7 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float visibility_3, Kernel
 
     float survives_0 = fog_exp_neg_0(fog_optical_depth_0(kernelContext_5->params_0->fog_params_0.x, kernelContext_5->params_0->fog_params_0.y, from_0.y - reference_1, to_0.y - reference_1, length_of_0));
 
-#line 547
+#line 566
     float3 view_direction_1;
 
 
@@ -441,72 +448,72 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float visibility_3, Kernel
     if(length_of_0 > 9.99999997475242708e-07f)
     {
 
-#line 551
+#line 570
         view_direction_1 = segment_0 / float3(length_of_0) ;
 
-#line 551
+#line 570
     }
     else
     {
 
-#line 551
+#line 570
         view_direction_1 = float3(0.0f, 0.0f, 1.0f);
 
-#line 551
+#line 570
     }
 
-#line 551
+#line 570
     float3 _S17 = volumetric_source_0(view_direction_1, visibility_3, kernelContext_5);
     return float4(_S17 * float3((1.0f - survives_0)) , survives_0);
 }
 
 
-#line 562
+#line 581
 [[kernel]] void scatterMain(uint3 thread_0 [[thread_position_in_grid]], VolumetricParams_natural_0 constant* params_1 [[buffer(0)]], depth2d<float, access::sample> shadow_atlas_1 [[texture(0)]], sampler shadow_sampler_1 [[sampler(0)]], float device* visibilities_1 [[buffer(2)]], packed_float4 device* volumetrics_1 [[buffer(1)]])
 {
 
-#line 562
+#line 581
     thread KernelContext_0 kernelContext_6;
 
-#line 562
+#line 581
     (&kernelContext_6)->params_0 = params_1;
 
-#line 562
+#line 581
     (&kernelContext_6)->shadow_atlas_0 = shadow_atlas_1;
 
-#line 562
+#line 581
     (&kernelContext_6)->shadow_sampler_0 = shadow_sampler_1;
 
-#line 562
+#line 581
     (&kernelContext_6)->visibilities_0 = visibilities_1;
 
-#line 562
+#line 581
     (&kernelContext_6)->volumetrics_0 = volumetrics_1;
 
     uint froxel_0 = thread_0.x;
     uint tiles_0 = max(params_1->grid_x_0, 1U) * max(params_1->grid_y_0, 1U);
     uint _S18 = max(params_1->slices_0, 1U);
 
-#line 566
+#line 585
     bool _S19;
     if(froxel_0 >= (tiles_0 * _S18))
     {
 
-#line 567
+#line 586
         _S19 = true;
 
-#line 567
+#line 586
     }
     else
     {
 
-#line 567
+#line 586
         _S19 = froxel_0 >= ((&kernelContext_6)->params_0->froxel_count_0);
 
-#line 567
+#line 586
     }
 
-#line 567
+#line 586
     if(_S19)
     {
         return;
@@ -515,103 +522,103 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float visibility_3, Kernel
     uint tile_x_1 = froxel_0 % max(params_1->grid_x_0, 1U);
     uint _S20 = froxel_0 / max(params_1->grid_x_0, 1U);
 
-#line 573
+#line 592
     uint tile_y_1 = _S20 % max(params_1->grid_y_0, 1U);
     uint slice_0 = froxel_0 / tiles_0;
 
     thread float3 near_point_1;
     thread float near_depth_1;
 
-#line 577
+#line 596
     volumetric_tile_ray_0(tile_x_1, tile_y_1, &near_point_1, &near_depth_1, &kernelContext_6);
 
     float3 along_0 = (near_point_1 - (&kernelContext_6)->params_0->eye_0.xyz) / float3(near_depth_1) ;
 
-#line 579
+#line 598
     float from_depth_0;
 
-#line 589
+#line 608
     if(slice_0 == 0U)
     {
 
-#line 589
+#line 608
         from_depth_0 = 0.0f;
 
-#line 589
+#line 608
     }
     else
     {
 
-#line 589
+#line 608
         from_depth_0 = volumetric_slice_start_0(slice_0);
 
-#line 589
+#line 608
     }
     uint _S21 = slice_0 + 1U;
 
-#line 590
+#line 609
     float to_depth_0;
 
-#line 590
+#line 609
     if(_S21 == _S18)
     {
 
-#line 590
+#line 609
         to_depth_0 = 1000.0f;
 
-#line 590
+#line 609
     }
     else
     {
 
-#line 590
+#line 609
         to_depth_0 = volumetric_slice_start_0(_S21);
 
-#line 590
+#line 609
     }
 
     float3 from_1 = (&kernelContext_6)->params_0->eye_0.xyz + along_0 * float3(from_depth_0) ;
     float3 to_1 = (&kernelContext_6)->params_0->eye_0.xyz + along_0 * float3(to_depth_0) ;
 
-#line 593
+#line 612
     float _S22 = volumetric_sun_visibility_0((from_1 + to_1) * float3(0.5f) , float2(float(tile_x_1), float(tile_y_1)), &kernelContext_6);
 
-#line 608
+#line 627
     *((&kernelContext_6)->visibilities_0+froxel_0) = _S22;
 
-#line 608
+#line 627
     packed_float4 device* _S23 = (&kernelContext_6)->volumetrics_0+froxel_0;
 
-#line 608
+#line 627
     float4 _S24 = volumetric_slice_0(from_1, to_1, _S22, &kernelContext_6);
 
-#line 608
+#line 627
     *_S23 = packed_float4(_S24) ;
 
     return;
 }
 
 
-#line 622
+#line 641
 [[kernel]] void integrateMain(uint3 thread_1 [[thread_position_in_grid]], VolumetricParams_natural_0 constant* params_2 [[buffer(0)]], depth2d<float, access::sample> shadow_atlas_2 [[texture(0)]], sampler shadow_sampler_2 [[sampler(0)]], float device* visibilities_2 [[buffer(2)]], packed_float4 device* volumetrics_2 [[buffer(1)]])
 {
 
-#line 622
+#line 641
     thread KernelContext_0 kernelContext_7;
 
-#line 622
+#line 641
     (&kernelContext_7)->params_0 = params_2;
 
-#line 622
+#line 641
     (&kernelContext_7)->shadow_atlas_0 = shadow_atlas_2;
 
-#line 622
+#line 641
     (&kernelContext_7)->shadow_sampler_0 = shadow_sampler_2;
 
-#line 622
+#line 641
     (&kernelContext_7)->visibilities_0 = visibilities_2;
 
-#line 622
+#line 641
     (&kernelContext_7)->volumetrics_0 = volumetrics_2;
 
     uint tile_2 = thread_1.x;
@@ -624,26 +631,26 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float visibility_3, Kernel
 
     float3 _S26 = float3(0.0f, 0.0f, 0.0f);
 
-#line 632
+#line 651
     uint slice_1 = 0U;
 
-#line 632
+#line 651
     float3 accumulated_0 = _S26;
 
-#line 632
+#line 651
     float through_0 = 1.0f;
 
     for(;;)
     {
 
-#line 634
+#line 653
         if(slice_1 < _S25)
         {
         }
         else
         {
 
-#line 634
+#line 653
             break;
         }
         uint froxel_1 = tile_2 + slice_1 * tiles_1;
@@ -652,10 +659,10 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float visibility_3, Kernel
             break;
         }
 
-#line 639
+#line 658
         float4 _S27 = float4(*((&kernelContext_7)->volumetrics_0+froxel_1)) ;
 
-#line 639
+#line 658
         *((&kernelContext_7)->volumetrics_0+froxel_1) = packed_float4(float4(accumulated_0, through_0)) ;
 
 
@@ -663,19 +670,19 @@ float4 volumetric_slice_0(float3 from_0, float3 to_0, float visibility_3, Kernel
         float3 accumulated_1 = accumulated_0 + float3(through_0)  * _S27.xyz;
         float through_1 = through_0 * _S27.w;
 
-#line 634
+#line 653
         slice_1 = slice_1 + 1U;
 
-#line 634
+#line 653
         accumulated_0 = accumulated_1;
 
-#line 634
+#line 653
         through_0 = through_1;
 
-#line 634
+#line 653
     }
 
-#line 646
+#line 665
     return;
 }
 

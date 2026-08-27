@@ -15,31 +15,34 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
-### The shadow filter costs 32 taps and nothing times it (2026-08-28)
+### The shadow filter costs 48 taps and nothing times it (2026-08-28)
 
 `docs/plan/45-shadows.md`'s ninth decision replaced the 3×3 box filter with a
 32-tap rotated disc, in `tile_pcf` in both `mesh.slang` and `volumetric.slang`.
-That is three and a half times the taps, on the fragment path and on the froxel
-scatter pass, and **the count was chosen entirely on the picture**: the grain
-measurement in that decision says what 16, 24 and 32 taps leave on a smooth
-shadowed surface, and nothing says what any of them cost.
+The tenth put a 16-tap blocker search in front of it, in `sun_penumbra_texels`,
+on the fragment path and for the sun alone. So a sun-lit fragment reads 48
+texels of the atlas where it read 9, and a froxel reads 32; and **both counts
+were chosen entirely on the picture**. The grain table in the ninth decision
+says what 16, 24 and 32 filter taps leave on a smooth shadowed surface, and the
+wobble table in the tenth says what the search buys on a quantised edge. Neither
+says what any of it costs.
 
 There is no shadow-pass timing in the tree to measure it with — no GPU timestamp
 around the lighting draw, no profiler HUD row for it. So the honest statement is
-that a filter three and a half times more expensive shipped on quality evidence
-alone, and whether it is affordable on a weaker adapter than this machine's RX
-7900 XTX is unknown. CI's runners are software rasterisers and time nothing
-comparable.
+that a filter five times more expensive shipped on quality evidence alone, and
+whether it is affordable on a weaker adapter than this machine's RX 7900 XTX is
+unknown. CI's runners are software rasterisers and time nothing comparable.
 
 What would settle it, in order of cost:
 
 1. **A timestamp around the forward pass**, which the HAL already has the
    primitives for, reported by the sample the way the froxel pass's dispatch
    counts are. That prices this and every later rung.
-2. **`SHADOW_TAPS` as a graphics-quality setting** rather than a constant — it
-   is the natural first entry for the settings seam, since 16 taps is a real
-   quality tier rather than a broken one, and the grain table says exactly what
-   each tier looks like.
+2. **`SHADOW_TAPS` and `SHADOW_SEARCH_TAPS` as graphics-quality settings**
+   rather than constants — the natural first entries for the settings seam,
+   since 16 filter taps is a real quality tier rather than a broken one and a
+   search of eight is a coarser estimate rather than no estimate. The two tables
+   say exactly what each tier looks like.
 3. Nothing, and accept it, which is where it stands.
 
 ### The normal offset scallops one silhouette's foot (2026-08-28)
@@ -360,55 +363,6 @@ this is picked up.
 `Scene::Ssr` golden re-blessed to a smooth gradient where the strided march
 stepped, the other six lantern claims and both lantern goldens are unchanged,
 and the residual is a fade constant rather than a wrong pixel.
-
-### The `cube` browser golden fails and nothing has decided what to do (2026-08-27)
-
-**Unresolved on CI, and it is the reason the Pages workflow is red — and the
-frame has now been re-blessed twice underneath it.** The antialiasing flip
-re-blessed the whole suite, and 2026-08-28's normal-offset bias
-(`docs/plan/45-shadows.md`'s seventh decision) re-blessed `cube` again — that
-one moved the shadow edges the diff below is made of, so it is the change most
-likely to have taken the failure with it. Both times
-`web/run-render-harness-e2e.sh` passed `cube` **locally** afterwards: 11 of 13
-scenes matched, with only the two excused ones — `ssr` and `ui` — left. That is
-not the CI answer. The local browser gate runs on this machine's adapter and the
-runners are SwiftShader, so only a Pages run decides whether the noise below
-survives the filter. If it does, the three options are still the options.
-
-The failure as it was measured: the `cube` scene fails the browser-path golden
-identically on the linux and windows runners — both are SwiftShader, so they
-produce byte-identical numbers — while macOS passes. Measured off the
-`render-harness-golden-diff-linux` artifact: 64 grossly-wrong pixels against a
-budget of 49 (the rasteriser profile's gross ratio of 0.001 over 49152 pixels),
-a maximum channel delta of 216, and an ssim of 0.998945.
-
-The diff was viewed, all three images. Actual and expected are visually
-identical; the difference is scattered noise along shadow edges on the face
-gradients and the pyramid edges. `Scene::Cube` has one directional light and no
-point lights, so what moved is the sun cascades' origins: the 2026-08-26
-re-tiling widened the atlas grid and shrank every tile to keep the image extent
-constant, and the whole cost of that trade was per-tile resolution.
-
-Three options, none taken:
-
-1. **Add `cube` to the browser expected-to-fail list.** Cheapest, and it is what
-   `ssr` and `ui` already do on that path. It also spends the one signal that
-   would catch a real regression in that frame.
-2. **Widen the browser gross-pixel budget**, after sweeping to find where the
-   real margin is rather than picking a number that clears today's 64.
-3. **Treat the tile as too small** and reverse or re-tune the trade — which is
-   the option that says the shadow implementation is not good enough, and is the
-   one `docs/plan/sample/18-sundial.md` exists to answer with evidence.
-
-**Re-blessing `cube.png` is wrong** and is recorded here so it is not
-re-proposed: the native golden jobs are green against that exact file, so a
-re-bless would break them to fix the browser.
-
-**Evidence:** the artifact was downloaded and the three PNGs viewed by hand. The
-attribution to `e2c3584` is by elimination over the commit range in which the
-failure begins — the linux golden passed on `87d35d5`, `88a23cc` and `9a729ea`,
-the failure begins at `8eebaee`, and `e2c3584` is the only pixel-moving commit
-between them. That is an argument, not a bisect.
 
 ### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
 

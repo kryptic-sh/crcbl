@@ -118,6 +118,24 @@ pub const SHADOW_ATLAS_COLUMNS: u32 = 4;
 /// sampling side changing with it.
 pub const SHADOW_ATLAS_ROWS: u32 = 4;
 
+/// How far in front of a cascade's near plane still writes depth, in world
+/// units.
+///
+/// A caster standing between the sun and a cascade's sphere is outside the
+/// sphere and must still darken what is inside it, so
+/// `crcbl_render::shadow::cascade_matrix` pulls the light's box back this far —
+/// which is where the number is spent, and that module's `CASTER_REACH` takes
+/// it from here rather than declaring a second copy.
+///
+/// **The sampling side reads it too**, which is why it lives here rather than
+/// there: a cascade of radius `r` is an orthographic box `2 r + this` deep, and
+/// `mesh.slang`'s `sun_penumbra_texels` needs exactly that factor to turn a
+/// difference of two shadow-clip depths back into the metres a penumbra is
+/// measured in. Two copies of it would put the blocker search and the matrix it
+/// is inverting on different numbers, and the picture that produces is a
+/// penumbra scaled wrongly rather than anything that looks like a bug.
+pub const SHADOW_CASTER_REACH: f32 = 40.0;
+
 const _: () = assert!(
     (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_CASCADES + SHADOW_LIGHT_TILES,
     "every tile of the grid is either a cascade's or a light's"
@@ -1735,6 +1753,17 @@ mod tests {
                 "mesh.slang does not declare `{declaration}`; the atlas's geometry has drifted"
             );
         }
+        // Not atlas geometry but the same kind of number: the cascade's depth
+        // range, which `crcbl_render::shadow::cascade_matrix` builds and
+        // `sun_penumbra_texels` inverts. A shader holding a different one sizes
+        // every penumbra by the ratio between the two — a picture, and a
+        // plausible one, since no frame says how wide a penumbra should be.
+        let reach = format!("static const float SHADOW_CASTER_REACH = {SHADOW_CASTER_REACH:?};");
+        assert!(
+            mesh.contains(&reach),
+            "mesh.slang does not declare `{reach}`, so the blocker search is inverting a box \
+             the host does not build"
+        );
         const {
             assert!(
                 SHADOW_CASCADES >= 1 && SHADOW_CASCADES <= 4,
@@ -3047,6 +3076,54 @@ mod tests {
         }
     }
 
+    /// **The blocker search reads the map in the sense reversed-Z gives it, and
+    /// sizes the filter from what it found.**
+    ///
+    /// Three slips here each draw a picture and none of them draws this rung.
+    /// Comparing `depth < reference` collects the depths *behind* the receiver,
+    /// which is every texel of an unoccluded surface, so every fragment gets the
+    /// widest filter the clamp allows and the whole frame goes soft. Dropping
+    /// the depth range turns a clip-space difference into metres by accident,
+    /// scaling every penumbra by the cascade's own depth — tens of metres of it
+    /// — so the clamp saturates and the same thing happens. And a clamp with its
+    /// ends the other way round pins every penumbra to one number, which is a
+    /// fixed filter wearing sixteen extra taps.
+    ///
+    /// A golden holds none of them to account: each is a smooth frame that a
+    /// re-bless accepts. What is measured rather than asserted is the artefact
+    /// the rung exists to remove, and `docs/plan/45-shadows.md`'s tenth decision
+    /// carries the sweep — the edge wobble on `apps/lantern`'s far shadow
+    /// boundary against `SHADOW_SUN_TAN_RADIUS`, with the acne and grain the
+    /// same frames cost.
+    #[test]
+    fn the_blocker_search_sizes_the_filter_from_what_is_nearer_the_light() {
+        let source = include_str!("../shaders/mesh.slang");
+        let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            // Reversed-Z: nearer the light is a *larger* depth, so a blocker is
+            // one that compares greater.
+            "if (depth > reference) { sum += depth; found += 1.0; }",
+            // The depth range, which is `cascade_matrix`'s box inverted.
+            "float separation = (sum / found - reference) * (2.0 * radius + \
+             SHADOW_CASTER_REACH);",
+            // A similar triangle over that height, in texels of this cascade,
+            // and clamped to the span the search can speak for.
+            "float texel_world = 2.0 * radius / SHADOW_TILE;",
+            "return clamp(separation * SHADOW_SUN_TAN_RADIUS / texel_world, \
+             SHADOW_FILTER_TEXELS, SHADOW_SEARCH_TEXELS);",
+            // And the sun is the only light that gets it: a punctual map is a
+            // perspective projection whose depths are not a distance.
+            "return tile_pcf(light_tile(tile), tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);",
+        ] {
+            let wanted = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                squeezed.contains(&wanted),
+                "sun_penumbra_texels no longer sizes the filter the way the tenth decision \
+                 measured:\n{wanted}"
+            );
+        }
+    }
+
     /// Pulls every `float2(x, y)` literal out of one `static const` table in
     /// `shaders/mesh.slang`.
     ///
@@ -3074,43 +3151,53 @@ mod tests {
             .collect()
     }
 
-    /// **The shadow filter's taps are the Vogel spiral its doc comment says they
+    /// **Both shadow discs are the Vogel spirals their doc comments say they
     /// are.**
     ///
-    /// Two dozen coordinates transcribed by hand into a shader are two dozen
+    /// Four dozen coordinates transcribed by hand into a shader are four dozen
     /// chances to fat-finger a digit, and nothing downstream would say so: a
     /// wrong tap still samples the map, still returns a fraction, and moves a
     /// penumbra by an amount no golden distinguishes from the filter working.
-    /// So the table is re-derived from the formula its doc quotes — radius
+    /// So each table is re-derived from the formula its doc quotes — radius
     /// `sqrt((i + 0.5) / n)` at angle `i π (3 - sqrt 5)` — rather than pinned to
     /// a copy of itself.
     ///
+    /// **Both, and separately**, because the generator's radii depend on the
+    /// count it was generated for: `SHADOW_SEARCH_DISC` is not a prefix or a
+    /// stride of `SHADOW_DISC` and re-deriving it against the filter's count
+    /// would pass a table that is neither.
+    ///
     /// The tolerance is what six printed decimals can carry.
     #[test]
-    fn the_shadow_disc_is_the_vogel_spiral_it_claims_to_be() {
-        let disc = shader_table("SHADOW_DISC");
-        let count = disc.len();
-        let declared = format!("static const uint SHADOW_TAPS = {count};");
-        assert!(
-            include_str!("../shaders/mesh.slang").contains(&declared),
-            "SHADOW_DISC has {count} taps and SHADOW_TAPS declares another number, so the loop \
-             in tile_pcf reads past the table or stops short of it"
-        );
+    fn the_shadow_discs_are_the_vogel_spirals_they_claim_to_be() {
         let golden_angle = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
-        for (index, &(x, y)) in disc.iter().enumerate() {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "a tap index is at most a few dozen"
-            )]
-            let position = index as f64;
-            let radius = ((position + 0.5) / count as f64).sqrt();
-            let angle = position * golden_angle;
-            let (wanted_x, wanted_y) = (radius * angle.cos(), radius * angle.sin());
+        for (table, taps) in [
+            ("SHADOW_DISC", "SHADOW_TAPS"),
+            ("SHADOW_SEARCH_DISC", "SHADOW_SEARCH_TAPS"),
+        ] {
+            let disc = shader_table(table);
+            let count = disc.len();
+            let declared = format!("static const uint {taps} = {count};");
             assert!(
-                (x - wanted_x).abs() < 1e-6 && (y - wanted_y).abs() < 1e-6,
-                "SHADOW_DISC[{index}] is ({x}, {y}) where the spiral it claims to be puts \
-                 ({wanted_x}, {wanted_y})"
+                include_str!("../shaders/mesh.slang").contains(&declared),
+                "{table} has {count} taps and {taps} declares another number, so the loop that \
+                 walks it reads past the table or stops short of it"
             );
+            for (index, &(x, y)) in disc.iter().enumerate() {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a tap index is at most a few dozen"
+                )]
+                let position = index as f64;
+                let radius = ((position + 0.5) / count as f64).sqrt();
+                let angle = position * golden_angle;
+                let (wanted_x, wanted_y) = (radius * angle.cos(), radius * angle.sin());
+                assert!(
+                    (x - wanted_x).abs() < 1e-6 && (y - wanted_y).abs() < 1e-6,
+                    "{table}[{index}] is ({x}, {y}) where the spiral it claims to be puts \
+                     ({wanted_x}, {wanted_y})"
+                );
+            }
         }
     }
 

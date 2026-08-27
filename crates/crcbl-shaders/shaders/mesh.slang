@@ -1700,6 +1700,139 @@ static const uint SHADOW_DITHER[16] = {
     0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u,
 };
 
+/// The world distance in front of a cascade's near plane that still writes
+/// depth, and therefore the part of that cascade's depth range no receiver
+/// occupies.
+///
+/// The same number is `crcbl_render::shadow`'s `CASTER_REACH`, which takes it
+/// from here — a caster standing between the sun and the cascade's sphere is
+/// outside the sphere and must still darken what is inside it, so the light's
+/// box is pulled back this far. What the sampling side needs it for is the
+/// **inverse** of that arithmetic: a cascade of radius `r` is an orthographic
+/// box `2 r + SHADOW_CASTER_REACH` deep, and that is the factor turning a
+/// difference of two shadow-clip depths back into metres, which is the only
+/// unit a penumbra can be measured in.
+static const float SHADOW_CASTER_REACH = 40.0;
+
+/// The tangent of the sun's angular radius, which is what makes a penumbra
+/// widen with distance from its caster.
+///
+/// A blocker `s` metres above a receiver casts a penumbra `s` times this wide,
+/// because the sun is a disc rather than a point and the geometry of the
+/// half-shadow is a similar triangle. That is the whole of contact hardening:
+/// the number does not depend on the scene, only on how large the light looks
+/// from it.
+///
+/// # The physical number is a no-op here, and that was measured
+///
+/// **The real sun's is 0.004634** — half of a 0.5310° disc, tangent taken. A
+/// cascade texel is `2 r / SHADOW_TILE`: 10.6 mm on the near cascade of
+/// `apps/lantern`'s split and 62.5 mm on the outer one, so the physical sun
+/// needs 4.6 m of blocker separation before its penumbra reaches even
+/// [`SHADOW_FILTER_TEXELS`] on the near cascade, and 27 m on the outer one.
+/// Nothing in either test scene casts that far. Rendered at the physical value
+/// against the same frame with this at zero, `apps/lantern` differed in **36
+/// bytes of 4,915,200 by one** and the dunes terrain was byte-identical.
+///
+/// So this is a **softness knob whose unit happens to be an angle**, not a
+/// measurement of the sun, and the shipped value is a sun about four times
+/// oversized — `atan(0.02)` is 1.15°, against the real disc's 0.27° radius.
+/// What buys the honesty back is that everything downstream of it *is*
+/// physical: the estimate is a similar triangle over a real blocker height, so
+/// the width still tracks the scene rather than a fudge per material.
+///
+/// # The sweep that picked it
+///
+/// The artefact this rung exists to remove is the staircase on
+/// `apps/lantern`'s far shadow boundary. The outer cascade's texels are 62.5 mm
+/// and the edge is quantised to them, which reads as a sawtooth because a
+/// two-texel filter cannot cover a penumbra that wants twenty. Measured as the
+/// RMS departure of that edge from the straight line it should be, each row
+/// smoothed by nine pixels so the filter's own dither cancels:
+///
+/// | This constant       | Edge wobble | Dunes acne | Dunes grain |
+/// | ------------------- | ----------- | ---------- | ----------- |
+/// | 0 (a fixed filter)  | 1.58 px     | 24 dots    | 0.918       |
+/// | 0.010               | 1.13 px     | 24 dots    | 0.918       |
+/// | 0.015               | 0.50 px     | 24 dots    | 0.918       |
+/// | 0.020 (shipped)     | 0.58 px     | 24 dots    | 0.918       |
+/// | 0.030               | 1.07 px     | 25 dots    | 0.942       |
+/// | 0.050               | 1.08 px     | 23 dots    | 1.005       |
+/// | 0.100               | 1.08 px     | 43 dots    | 1.222       |
+///
+/// The minimum is a tie between 0.015 and 0.02 — 0.08 px apart, which is under
+/// what one scene resolves — and the wider of the two is taken because the
+/// effect it buys away from this one edge is larger at no measured cost. Past
+/// 0.03 the number stops moving because the estimate saturates at
+/// [`SHADOW_SEARCH_TEXELS`], and 1.08 px is what the fully clamped filter
+/// leaves; acne and grain keep climbing anyway, which is the ninth decision's
+/// finding that a wider disc buys acne back.
+static const float SHADOW_SUN_TAN_RADIUS = 0.02;
+
+/// How far the blocker search reaches, in tile texels, and therefore the widest
+/// penumbra the filter is allowed to draw.
+///
+/// The two are one number because a penumbra wider than the search is a penumbra
+/// sized from blockers the search did not look at: the filter would spread taps
+/// across texels nothing measured, and the width would be whatever the nearest
+/// blocker inside the search happened to be. Clamping the filter to the search
+/// makes the estimate's domain and the filter's domain the same set of texels.
+///
+/// Eight, four times [`SHADOW_FILTER_TEXELS`], and it binds: the sweep in
+/// [`SHADOW_SUN_TAN_RADIUS`] stops moving past 0.03 because `apps/lantern`'s
+/// far shadow boundary has saturated here. That is the intended shape — the
+/// clamp is what stops a distant caster asking for a filter the atlas cannot
+/// pay for — and 500 mm of penumbra on the outer cascade is already more than
+/// any of that sweep's frames wanted.
+static const float SHADOW_SEARCH_TEXELS = 8.0;
+
+/// How many taps the blocker search takes.
+///
+/// Half the filter's, and they are buying a different thing: the filter's count
+/// sets how many values it can return, and this one only has to find *a*
+/// representative blocker depth. An average over sixteen is already stable
+/// enough that the radius it produces does not flicker between neighbouring
+/// pixels, and the rotation below is shared with the filter so the two discs
+/// turn together.
+static const uint SHADOW_SEARCH_TAPS = 16;
+
+/// The blocker search's tap positions: a **Vogel disc** of [`SHADOW_SEARCH_TAPS`]
+/// points, generated exactly as [`SHADOW_DISC`] is and re-derived by the same
+/// test.
+///
+/// Its own table rather than a stride through [`SHADOW_DISC`], because a Vogel
+/// spiral's radii depend on the count it was generated for: taking every other
+/// point of a thirty-two point disc gives sixteen points whose radii still run
+/// `sqrt((i + 0.5) / 32)`, which is a disc with a hole in its rim rather than a
+/// smaller disc.
+static const float2 SHADOW_SEARCH_DISC[SHADOW_SEARCH_TAPS] = {
+    float2(+0.176777, +0.000000), float2(-0.225772, +0.206826),
+    float2(+0.034558, -0.393771), float2(+0.284571, +0.371173),
+    float2(-0.522223, -0.092374), float2(+0.494695, -0.314685),
+    float2(-0.165466, +0.615525), float2(-0.315561, -0.607594),
+    float2(+0.684642, +0.250030), float2(-0.712256, +0.294009),
+    float2(+0.343354, -0.733729), float2(+0.253730, +0.808932),
+    float2(-0.764746, -0.443186), float2(+0.897134, -0.197232),
+    float2(-0.547507, +0.778772), float2(-0.126487, -0.976090),
+};
+
+/// Which of [`SHADOW_ROTATIONS`] this pixel takes, as a `(cos, sin)` pair.
+///
+/// A function rather than two lines in each caller because the blocker search
+/// and the filter it sizes have to agree: a search that walked a differently
+/// turned disc would measure a penumbra the filter then does not draw, and the
+/// disagreement would be a per-pixel one, which reads as noise rather than as a
+/// wrong number. Sharing the lookup makes agreement structural.
+///
+/// `pixel` is the fragment's `SV_Position.xy`. Only its low two bits per axis
+/// are read, so the value's magnitude and its sub-pixel fraction never enter the
+/// arithmetic.
+float2 shadow_rotation(float2 pixel)
+{
+    uint2 cell = uint2(pixel) & 3u;
+    return SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
+}
+
 /// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
 /// space, dithered by the fragment's pixel coordinate.
 ///
@@ -1709,12 +1842,16 @@ static const uint SHADOW_DITHER[16] = {
 /// around each tap, so a tap exactly on the edge would still reach across it and
 /// read the neighbouring map's depths as if they were this one's.
 ///
+/// `radius` is the disc's reach in tile texels, and it is a parameter rather
+/// than [`SHADOW_FILTER_TEXELS`] because the sun's penumbra is not a constant
+/// width — `sun_penumbra_texels` measures one per fragment. Everything that
+/// reads a map the sun does not own passes the constant, which is what it was
+/// before this became a parameter.
+///
 /// `pixel` is the fragment's `SV_Position.xy`, and it is a parameter for
 /// `geometric_normal_of`'s reason: a shader stage that has no such thing must
-/// not be able to call this by accident. Only its low two bits per axis are
-/// read, so the value's magnitude and its sub-pixel fraction never enter the
-/// arithmetic.
-float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)
+/// not be able to call this by accident.
+float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float radius)
 {
     float2 texel = frame.shadow_params.xy;
     // The grid's two extents, which is what turns an *atlas* texel into a step
@@ -1724,13 +1861,12 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)
     float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
     float2 tile_min = float2(0.5, 0.5) * texel * grid;
 
-    uint2 cell = uint2(pixel) & 3u;
-    float2 rotation = SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
+    float2 rotation = shadow_rotation(pixel);
 
     float visibility = 0.0;
     for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        float2 spoke = SHADOW_DISC[index] * SHADOW_FILTER_TEXELS;
+        float2 spoke = SHADOW_DISC[index] * radius;
         // The rotation, written out: a complex multiply by `(cos, sin)`.
         float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
                                spoke.x * rotation.y + spoke.y * rotation.x);
@@ -1739,6 +1875,87 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)
             shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
     }
     return visibility / float(SHADOW_TAPS);
+}
+
+/// How wide the sun's penumbra is at this fragment, in texels of cascade
+/// `cascade`, ready for [`tile_pcf`]'s `radius`.
+///
+/// # The estimate
+///
+/// This is PCSS's first half: a **blocker search**. It reads
+/// [`SHADOW_SEARCH_TAPS`] depths straight out of the map over
+/// [`SHADOW_SEARCH_TEXELS`], keeps the ones nearer the light than this fragment
+/// — reversed-Z, so nearer is *larger* — and averages them. That average is how
+/// far above the receiver the thing shadowing it stands, and
+/// [`SHADOW_SUN_TAN_RADIUS`] turns a height into a half-shadow's width.
+///
+/// **`Load`, not a sampler.** A blocker depth is a stored value, and filtering
+/// four of them would average across a silhouette and report a blocker at a
+/// height nothing in the scene occupies. It is also why this needs no second
+/// sampler object: the atlas's only sampler is the comparison one the filter
+/// uses, and a comparison sampler cannot return a depth.
+///
+/// # Why the result is clamped at both ends
+///
+/// Below, at [`SHADOW_FILTER_TEXELS`]: a contact is not a sub-texel-sharp edge,
+/// it is a *quantised* one, and letting the radius fall under the filter width
+/// the rest of this file was tuned around trades the ninth decision's dither for
+/// the staircase it removed. Above, at [`SHADOW_SEARCH_TEXELS`]: a wider filter
+/// than the search that sized it spreads taps over texels nothing measured.
+///
+/// The fallback when no tap found a blocker is that same lower clamp rather than
+/// "lit". The search is sixteen points over eight texels and the filter is
+/// thirty-two over two, so the filter is the denser look at the neighbourhood
+/// the receiver actually touches: a thin caster can fall between search taps,
+/// and answering `1.0` there would leak light through it. The search's job is to
+/// size the filter, never to replace it.
+float sun_penumbra_texels(uint cascade, float2 tile_uv, float reference, float2 rotation)
+{
+    float2 texel = frame.shadow_params.xy;
+    float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
+    float2 tile_min = float2(0.5, 0.5) * texel * grid;
+    // The atlas's extent in texels, which is what turns a normalised atlas
+    // coordinate into the integer `Load` wants.
+    float2 extent = float2(1.0, 1.0) / texel;
+
+    float sum = 0.0;
+    float found = 0.0;
+    for (uint index = 0u; index < SHADOW_SEARCH_TAPS; ++index)
+    {
+        float2 spoke = SHADOW_SEARCH_DISC[index] * SHADOW_SEARCH_TEXELS;
+        float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
+                               spoke.x * rotation.y + spoke.y * rotation.x);
+        float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
+        // `min` against the last texel rather than trust to the clamp above: that
+        // one is in tile space and half a texel inside, so the product below
+        // lands inside the atlas by construction — but it is a float product,
+        // and an out-of-range `Load` is undefined rather than clamped.
+        int2 coord =
+            int2(min(atlas_uv(cascade, tap) * extent, extent - float2(1.0, 1.0)));
+        float depth = shadow_atlas.Load(int3(coord, 0));
+        if (depth > reference)
+        {
+            sum += depth;
+            found += 1.0;
+        }
+    }
+
+    if (found <= 0.0)
+    {
+        return SHADOW_FILTER_TEXELS;
+    }
+
+    // Shadow-clip depth back to metres. The cascade's box is `2 * radius` deep
+    // through the sphere plus `SHADOW_CASTER_REACH` in front of it, and an
+    // orthographic projection spreads that range linearly over `0..1`, so one
+    // unit of `ndc.z` is the whole of it. `cascade_matrix` on the host is where
+    // those two ends are set.
+    float radius = frame.cascade_far[cascade];
+    float separation = (sum / found - reference) * (2.0 * radius + SHADOW_CASTER_REACH);
+    float texel_world = 2.0 * radius / SHADOW_TILE;
+    return clamp(separation * SHADOW_SUN_TAN_RADIUS / texel_world,
+                 SHADOW_FILTER_TEXELS,
+                 SHADOW_SEARCH_TEXELS);
 }
 
 /// What fraction of a cascade's reach the fade into the next one takes up.
@@ -1852,7 +2069,14 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     // `shadow_normal_offset` returns, so what it moves is `tile_uv` and the
     // texel this fragment reads. That is the difference between raising a
     // comparison and taking a different one.
-    return tile_pcf(cascade, tile_uv, ndc.z, pixel);
+    // The filter's width, which for the sun is not a constant: a contact is
+    // sharp and a shadow thrown from height is soft, and `sun_penumbra_texels`
+    // is what reads the difference out of the map. The rotation is taken once
+    // and handed to both so the disc the search walks is the disc the filter
+    // draws.
+    float2 rotation = shadow_rotation(pixel);
+    float radius = sun_penumbra_texels(cascade, tile_uv, ndc.z, rotation);
+    return tile_pcf(cascade, tile_uv, ndc.z, pixel, radius);
 }
 
 /// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
@@ -2062,7 +2286,11 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
     // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
     // push into the viewport rather than into the matrix.
     float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    return tile_pcf(light_tile(tile), tile_uv, ndc.z, pixel);
+    // The constant width, not the sun's measured one: a punctual map is a
+    // perspective projection, so a difference of two of its depths is not a
+    // distance until it is un-projected, and its light has no angular radius to
+    // scale one by. Contact hardening for these is its own rung.
+    return tile_pcf(light_tile(tile), tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
 }
 
 /// The fraction of a shadowed spot this fragment can see.
