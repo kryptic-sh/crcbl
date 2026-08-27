@@ -7531,6 +7531,7 @@ pub(crate) mod tests {
             "mesh_cluster instances",
             &GpuInstance {
                 transform: IDENTITY,
+                previous_transform: IDENTITY,
                 mesh: 0,
                 material: 0,
                 sector: 0,
