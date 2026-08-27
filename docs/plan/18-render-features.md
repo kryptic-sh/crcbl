@@ -22,15 +22,15 @@ meant, and the code and test comments that name
 `docs/plan/18-render-features.md` were deliberately left alone rather than
 churned in a move commit.
 
-| Technique                                               | Document                                           |
-| ------------------------------------------------------- | -------------------------------------------------- |
-| Lighting paths, the light list, clustered forward, BRDF | [44-lighting.md](44-lighting.md)                   |
-| Shadows: cascades, atlas tiles, bias, filter ladder     | [45-shadows.md](45-shadows.md)                     |
-| Ambient occlusion: SSAO, its blur, GTAO                 | [46-ambient-occlusion.md](46-ambient-occlusion.md) |
-| Screen-space reflections: the march, roughness          | [47-reflections.md](47-reflections.md)             |
-| The post-processing stack: order, HDR, tonemap, bloom   | [48-post-processing.md](48-post-processing.md)     |
-| Antialiasing: FXAA, SMAA, TAA, MSAA                     | [49-antialiasing.md](49-antialiasing.md)           |
-| Irradiance probes: the L1 grid                          | [50-irradiance-probes.md](50-irradiance-probes.md) |
+| Technique                                                               | Document                                           |
+| ----------------------------------------------------------------------- | -------------------------------------------------- |
+| Lighting paths, the light list, clustered forward, BRDF, the PBR ladder | [44-lighting.md](44-lighting.md)                   |
+| Shadows: cascades, atlas tiles, bias, filter ladder                     | [45-shadows.md](45-shadows.md)                     |
+| Ambient occlusion: SSAO, its blur, GTAO                                 | [46-ambient-occlusion.md](46-ambient-occlusion.md) |
+| Screen-space reflections: the march, roughness                          | [47-reflections.md](47-reflections.md)             |
+| The post-processing stack: order, HDR, tonemap, bloom                   | [48-post-processing.md](48-post-processing.md)     |
+| Antialiasing: FXAA, SMAA, TAA, MSAA                                     | [49-antialiasing.md](49-antialiasing.md)           |
+| Irradiance probes: the L1 grid                                          | [50-irradiance-probes.md](50-irradiance-probes.md) |
 
 **What this engine does not do at all** is a different question from how well it
 does these, and it is answered in one place:
@@ -67,6 +67,7 @@ does these, and it is answered in one place:
 | Bloom chain                                                                                                                                   | **Built 2026-08-23** (P10) — off unless a view asks; see `RenderEffects::DEFAULT_STACK`                                                                                                                                                                                                         |
 | The render quality pass: **SMAA 1x**, **GTAO + bent normals**, **Hi-Z + cone-traced SSR**, shadow cross-fade → rotated Poisson PCF → **PCSS** | P10, with the bloom chain, for the reason that row gives: the profiler HUD is what shows a quality rung's cost honestly. Each rung's section above says what it costs and what it refuses. **The Hi-Z half of the SSR rung is built (2026-08-27)**; the cone trace over a colour pyramid is not |
 | MSAA                                                                                                                                          | **No phase, and not a rejection** — viable and priced by the seventh decision, and not the default for exactly as long as SSAO and SSR read a single-sample depth                                                                                                                               |
+| **Multi-scatter energy compensation** on the GGX lobe                                                                                         | P10, with the quality pass — a `DFG` table fetch and a few multiplies, and the table is the one specular IBL needs anyway. [44-lighting.md](44-lighting.md)'s rung 1                                                                                                                            |
 | Auto-exposure; TAA (jitter, motion vectors, the `GpuInstance` slot); temporal SSR; shadow atlases                                             | post-MVP. The instance slot is **one blocker for two features** — see the antialiasing and reflection sections                                                                                                                                                                                  |
 
 **P7B and P7C are new phases** carrying the raster twin and the ray-traced path

@@ -62,6 +62,15 @@ Stated first, and with the same evidence discipline as the gaps.
   that matches its native frame to a channel delta of two.
 - **Reversed-Z, an HDR scene target, and linear lighting from the first pass.**
   All three are table stakes and all three are here.
+- **A physically based BRDF**, not a Blinn-Phong lobe with a roughness slider
+  bolted on: Cook-Torrance with Trowbridge-Reitz `D`, Smith height-correlated
+  visibility and Schlick's `F`, over glTF's own metallic-roughness pair —
+  `shaders/mesh.slang`'s `ggx_lobe`. `f0` interpolates from the dielectric 0.04
+  to the base colour on `metallic` and the diffuse albedo scales down by it, so
+  a conductor reflects and does not scatter. This is the same BRDF Unreal, Unity
+  HDRP and Filament shade with, and [44-lighting.md](44-lighting.md) carries the
+  derivation. **The BRDF is not this engine's PBR gap** — §2 and §5 are, and
+  that document's ladder is what closes them.
 
 ## 2. Materials — the largest gap, and the one nothing yet plans
 
@@ -88,13 +97,22 @@ them gets.
    member already wastes `zw`, so a packed tangent costs no stride at all, which
    is the cheap answer and the one glTF feeds directly — or screen-space
    derivatives of position and UV in the fragment stage, which costs no vertex
-   data and is wrong on mirrored UVs. **The vertex route is the one to take**,
-   and the reason is this file's own recurring one: derivatives differ in the
-   last place across four rasterisers, and this workspace's goldens are
-   cross-backend.
+   data. **The vertex route is the one to take, and the reason is mirrored
+   UVs**: the derivative route cannot recover the handedness glTF stores in a
+   tangent's `w`, so every mirrored shell on a character lights inside out.
+   Corrected 2026-08-27 — this rung used to argue determinism instead, and that
+   argument was wrong on its face: `shaders/mesh.slang`'s `geometric_normal_of`
+   already takes `ddx`/`ddy` in the fragment stage, its result drives the shadow
+   slope bias, and the cross-backend goldens hold over it.
 2. **A second and third texture page**, on the base-colour page's own pattern —
    `crcbl_render::scene::PageDesc` already owns layer 0 as the neutral texel,
-   and a normal page's neutral is `(0.5, 0.5, 1.0)` rather than white.
+   and a normal page's neutral is `(0.5, 0.5, 1.0)` rather than white. **Linear,
+   not sRGB**: `crcbl_render::forward`'s `BASE_COLOR_PAGE_FORMAT` is
+   `Rgba8UnormSrgb` because a base-colour texel is a colour, and a normal,
+   roughness, metalness or occlusion texel is a number. Decoding one through the
+   sRGB curve is wrong by a gamma and looks merely "shinier than intended",
+   which is why it survives review — see [44-lighting.md](44-lighting.md)'s
+   rung 2.
 3. **Emissive**, which is a factor and a page and one add before the tonemap —
    and which the bloom chain already existing makes worth more than it costs.
    **The factor half is built (2026-08-27)**: `GpuMaterial::emissive` is a
@@ -209,6 +227,22 @@ the right first rung.
   approximate directional radiance for SSR's fallback — documented in
   `shaders/ssr.slang`, honest about being approximate, and the reason a metal
   out of the march's reach looks flat.
+
+  **The determinism rule does not block it**, which is worth stating because it
+  blocks so much else on this page. Karis's split-sum needs a `DFG` table over
+  `(N·V, roughness)` and a roughness-indexed radiance mip chain; both are
+  **baked at build time and committed like a shader artifact**, so the run-time
+  cost is a multiply and two fetches and four backends read the same bytes.
+  Baking a transcendental into a table is the general escape, and
+  [44-lighting.md](44-lighting.md)'s rung 3 is where it is written down.
+
+- **No multi-scatter energy compensation**, which is the cheapest realism rung
+  on this page and is blocked on nothing. Single-scatter GGX drops every
+  microfacet bounce after the first, so a rough conductor renders too dark, by
+  an amount that varies with roughness and `N·V` and that no constant factor can
+  absorb. Fdez-Agüera's closed form reads it back out of the same `DFG` table
+  the rung above needs, so one table serves both.
+  [44-lighting.md](44-lighting.md)'s rung 1.
 - **No screen-space GI.** The engine already marches screen space for
   reflections and already has a Hi-Z pyramid to march it with, so SSGI is closer
   than it looks: the same march with a cosine-distributed ray instead of a
@@ -376,25 +410,34 @@ listed here so a survey of gaps does not read as a list of things to build.
 - **Float-hash rotations and interleaved-gradient noise**, anywhere — they
   amplify by construction the driver differences this workspace's goldens cannot
   absorb.
-- **A second material model** — one BRDF, and every path shades with it.
+- **A second material model** — one BRDF, and every path shades with it. That
+  refuses each of anisotropic GGX, clearcoat, sheen and subsurface by name:
+  every one is a real term in a modern material system and every one is a second
+  lobe, so the first of them arrives with a `MATERIAL_STRIDE` widening and can
+  bring the rest. [44-lighting.md](44-lighting.md) prices them.
+- **Parallax occlusion mapping** — a per-pixel march with a dependent texture
+  read, for an effect normal mapping already approximates. It is a rung above
+  normal maps rather than beside them, and there is no normal map yet.
 
 ## Delivery
 
 Ordered by benefit per unit of work, which is not the order of the sections
 above.
 
-| Rung                                                     | Why here                                                                                 |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| **Reserve the previous-transform slot in `GpuInstance`** | §9 — smallest change on this page, unblocks five features, gets more expensive with time |
-| **Exponential height fog**                               | §4 — one term, no new pass, but `exp` needs a determinism answer first                   |
-| **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road      |
-| **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                  |
-| **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                               |
-| ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                         |
-| **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time                                                  |
-| **Froxel volumetric fog**                                | §4 — the culling is already paid for                                                     |
-| **Auto-exposure**                                        | §6 — a histogram and a reduce                                                            |
-| **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                              |
-| **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal                                              |
-| Colour grading, DOF, lens artefacts                      | §6 — polish, after the curve exists to grade against                                     |
-| SSGI, temporal SSR, TAA, temporal upscaling              | §9's slot first; each is its own rung after it                                           |
+| Rung                                                     | Why here                                                                                                      |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Reserve the previous-transform slot in `GpuInstance`** | §9 — smallest change on this page, unblocks five features, gets more expensive with time                      |
+| **Exponential height fog**                               | §4 — one term, no new pass, but `exp` needs a determinism answer first                                        |
+| **Multi-scatter energy compensation**                    | §5 — a table fetch and a few multiplies; the cheapest realism rung here, blocked on nothing                   |
+| **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road                           |
+| **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                                       |
+| **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                                                    |
+| ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                              |
+| **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time                                                                       |
+| **Froxel volumetric fog**                                | §4 — the culling is already paid for                                                                          |
+| **Auto-exposure**                                        | §6 — a histogram and a reduce                                                                                 |
+| **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                   |
+| **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table |
+| **Specular antialiasing (roughness regularisation)**     | §2's normal maps first — the aliasing it removes is the one no AA rung can                                    |
+| Colour grading, DOF, lens artefacts                      | §6 — polish, after the curve exists to grade against                                                          |
+| SSGI, temporal SSR, TAA, temporal upscaling              | §9's slot first; each is its own rung after it                                                                |

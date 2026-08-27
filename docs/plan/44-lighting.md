@@ -176,3 +176,139 @@ Two consequences worth stating before somebody meets them:
   highlight a factor of `pi` under the surface it sits on, which is not a look
   anyone chose — and it is what keeps a roughness of a half close to the Blinn
   exponent of 32 it replaced.
+
+## Physically based: what holds and what is missing (2026-08-27)
+
+The lobe above is a physically based BRDF and the rest of the frame is built to
+match it — linear HDR from the first pass, a tonemap that maps scene-referred
+radiance to display, and a metallic-roughness row whose two factors mean what
+glTF says they mean. **The BRDF is not this engine's PBR gap.** What separates
+it from a current engine's look is that the BRDF's _inputs_ are constants, that
+it loses energy at high roughness, and that it has no environment to reflect —
+three rungs, each independently landable, in the order their benefit per unit of
+work falls.
+
+### Rung 1 — Multi-scatter energy compensation
+
+A single-scatter GGX lobe accounts for light that bounces off the microsurface
+**once**. Everything that bounces twice or more is dropped, and the share
+dropped grows with roughness: a furnace test — a surface under uniform white
+light, which must return exactly white — comes back visibly grey for a rough
+conductor, and darker the rougher it gets. So a rough metal in this engine is
+too dark, and the error is not a constant that a factor could absorb because it
+varies with both roughness and `N·V`.
+
+The two standard answers both add the missing energy back from a table of the
+lobe's directional albedo:
+
+- **Kulla-Conty** stores `E(N·V, roughness)`, the fraction the single-scatter
+  lobe returns, and adds a second lobe scaled by `1 / E - 1`.
+- **Fdez-Agüera**'s closed form (what the Khronos glTF sample viewer ships)
+  reads the same information out of the split-sum `DFG` pair that rung 3 needs
+  anyway, so it costs no second table.
+
+**Take Fdez-Agüera**, for that last reason: one table serves both rungs, and a
+table that two features read is a table somebody will keep correct.
+
+**It is legal here, and the reason generalises.** The compensation term is
+multiplies and divides over a sampled table, so no transcendental reaches a
+colour. That is the general escape this workspace has from its own determinism
+rule: **bake the transcendental into a texture at build time and sample it at
+run time.** A table is data — it is compared as an artifact, byte for byte,
+exactly as `spirv/manifest.txt` compares a compiled shader — where the same
+arithmetic evaluated per fragment is four platforms' `pow` disagreeing in the
+last place.
+
+**Blocked on nothing.** The term needs `f0`, roughness and `N·V`, and
+`fragmentMain` holds all three before it enters the light loop. This rung can
+land before rung 3 and hand rung 3 a `DFG` table that already exists.
+
+### Rung 2 — The inputs: a texture set, and its colour space
+
+[43-render-standards.md](43-render-standards.md)'s §2 is this rung and carries
+the dependency order — tangent frame, then pages, then alpha modes. Two things
+belong here rather than there, because they are properties of the shading model
+rather than of the material asset:
+
+- **The non-colour pages are linear, and nothing about them may be sRGB.**
+  `crcbl_render::forward`'s `BASE_COLOR_PAGE_FORMAT` is `Rgba8UnormSrgb` and is
+  right to be: a base-colour texel is an sRGB-encoded colour, which is what glTF
+  defines it as. A normal, a roughness, a metalness or an occlusion texel is
+  **not a colour** — it is a number — and decoding it through an sRGB curve is
+  wrong by a gamma. This is the classic PBR bug and it survives review because
+  it looks plausible: roughness read through the decode is too smooth in the
+  mid-range and the surface merely reads as "shinier than intended". A second
+  page constant, `Rgba8Unorm`, and a test that asserts the two formats differ is
+  the whole guard.
+- **Two channels, not three, for a normal page.** The tangent-space `z` is
+  `sqrt(1 - x² - y²)`, which is a square root and therefore allowed where a
+  transcendental would not be, and reconstructing it means a BC5-class two-
+  channel format holds the map at half the bytes with more precision per
+  channel. The neutral texel §2 names as `(0.5, 0.5, 1.0)` becomes `(0.5, 0.5)`.
+
+### Rung 3 — Specular IBL by the split-sum approximation
+
+[43-render-standards.md](43-render-standards.md)'s §5 states the gap: L1
+irradiance answers a diffuse question, and a rough metal needs prefiltered
+radiance. The standard construction is Karis's split-sum, and both of its halves
+survive this workspace's determinism rule for the same reason rung 1 does:
+
+- **The `DFG` table** — two dimensions, `(N·V, roughness)`, two channels, a
+  scale and a bias on `f0`. Baked once at build time and **committed like a
+  shader artifact**, so there is no runtime `pow`, no per-platform derivation
+  and nothing to re-bless: a table that four backends read the same bytes of
+  gives four backends the same answer by construction. `Rg16Float` at 64×64 is
+  the usual size and is a few kilobytes.
+- **The prefiltered radiance chain** — the environment convolved against the GGX
+  lobe at increasing roughness, one mip per step. The run-time lookup is
+  `roughness * (mips - 1)` and a `SampleLevel`: one multiply, one fetch. The
+  _bake_ may use whatever arithmetic it likes, because its output is an image
+  compared as an artifact rather than a frame compared as a golden.
+
+**This rung and §8's sky are one rung, not two.** A prefilter needs something to
+convolve, and this engine's background is the scene target's clear colour. The
+smallest thing that closes both is a gradient sky rendered into a small cube,
+prefiltered on the way in — which also gives §5's SSR miss a real radiance
+fallback in place of the L1 decode it approximates with today.
+
+### Rung 4 — Specular antialiasing, once normal maps exist
+
+A high-frequency normal map under a low roughness aliases: the shading signal
+moves faster than the pixel grid samples it, and the result is a field of
+fireflies that **no antialiasing rung removes**, because the aliasing is in the
+shading rather than in the geometry. [49-antialiasing.md](49-antialiasing.md)'s
+whole ladder is silent on it by construction.
+
+The industry answer is roughness regularisation: widen the lobe by the
+screen-space variance of the normal, so a surface whose normal is changing fast
+within one pixel is shaded as if it were rougher. Kaplanyan's formulation and
+the Tokuyoshi-Kaplanyan improvement are both derivatives of the normal, a dot
+product and a clamp.
+
+**The determinism objection does not apply, and it is worth being exact about
+why**, because §2 raises it against derivative-based tangents in stronger terms
+than the tree supports. `shaders/mesh.slang`'s `geometric_normal_of` already
+takes `ddx`/`ddy` of the world position in the fragment stage, its result drives
+the shadow slope bias, and that reaches the frame — under cross-backend goldens
+that hold today. So screen-space derivatives are not banned here and never were.
+What §2's argument actually rules out is deriving a **tangent frame** from
+derivatives, and the reason is mirrored UVs, where the derivative route gives a
+handedness the vertex route gets right.
+
+### What stays out, and why
+
+- **A second BRDF lobe of any kind** — anisotropic GGX, clearcoat, sheen,
+  subsurface. Each is a real term in a modern material system and each is a
+  second material model, which the rule at the top of this file refuses until an
+  asset in this tree needs one. They are additive later: the row has no space at
+  `MATERIAL_STRIDE` today, so the first of them arrives with a stride widening
+  and can bring the rest.
+- **Parallax occlusion mapping.** A per-pixel march with a dependent texture
+  read, for an effect normal mapping already approximates; it is a rung above
+  normal maps rather than beside them, and there is no normal map yet.
+- **Burley diffuse is not refused, it is unranked.** Its fifth powers are
+  Schlick's and decompose into multiplies exactly as `ggx_lobe`'s do, so the
+  determinism argument that rules out AgX does not touch it. What it buys is a
+  retroreflective rim on rough dielectrics, which is small next to any rung
+  above; Unreal ships Lambert for the same trade. Revisit when the inputs are
+  textures and the difference has somewhere to show.
