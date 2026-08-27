@@ -17,7 +17,7 @@
 use crate::harness::Headless;
 use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh};
 use crcbl::render::{
-    EffectOverride, EffectRequest, ForwardRenderer, Projection, RenderEffects, TransientPool,
+    EffectOverride, EffectRequest, Fog, ForwardRenderer, Projection, RenderEffects, TransientPool,
 };
 use crcbl_shaders::tonemap::TonemapCurve;
 
@@ -417,5 +417,241 @@ fn an_emissive_material_adds_its_radiance_and_scales_nothing() {
     assert!(
         unchanged > 1000,
         "and the background must not emit: only {unchanged} texels held still"
+    );
+}
+
+/// The cube's frame under a given fog, as the linear values the shader wrote.
+///
+/// **The reflections are off and the resolve is off**, each for the reason the
+/// emissive frame above turns them off. A resolve blends neighbouring texels,
+/// so a per-texel identity would be measured through a filter; and
+/// `ssr_blur.slang` composites the screen-space reflections **after** this pass
+/// — so with them on, the value in the target is the fogged radiance plus an
+/// unfogged reflection, and no exact relation between two densities survives
+/// that. That ordering is a real gap rather than a test convenience, and
+/// `docs/backlog.md` carries it.
+fn fogged_cube_hdr(fog: Fog) -> HdrTarget {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    renderer.set_fog(fog);
+    place_cube(&mut renderer);
+    let mut hdr = Vec::new();
+    let _ = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(Projection::default()),
+        Some(&mut hdr),
+    );
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    HdrTarget(hdr)
+}
+
+/// The fog colour these tests scatter, chosen to make the algebra below well
+/// conditioned.
+///
+/// Red alone, and far above anything the lit cube reaches, so `A - F` in that
+/// channel is large and the transmittance solved out of it is not a ratio of
+/// two nearly equal numbers. Green and blue are exactly zero, which is what
+/// lets the same transmittance be recovered a **second** way — as `B / A` —
+/// with no knowledge of the fog colour at all.
+const FOG_SCATTER: [f32; 3] = [8.0, 0.0, 0.0];
+
+/// Uniform fog of a given density: a zero falloff is air that does not thin
+/// with height, so the optical depth is `density * distance` exactly.
+///
+/// That is what makes the relation the test below asserts a *clean* one — at
+/// twice the density every ray has exactly twice the optical depth, whatever
+/// its length, and no geometry has to be known to say so.
+fn uniform_fog(density: f32) -> Fog {
+    Fog {
+        density,
+        falloff: 0.0,
+        reference_height: 0.0,
+        color: crcbl::math::Vec3::from_array(FOG_SCATTER),
+    }
+}
+
+/// **The fog colour is unobservable while the density is zero.**
+///
+/// Narrower than it first looks, and the narrowing is the point. The composite
+/// runs unconditionally — there is no branch selecting fog — so this says the
+/// colour reaches no pixel through a path that does not read the density, which
+/// is how a fog term gets written that tints every frame in the tree.
+///
+/// **It is not, on its own, the additive-zero claim.** Both frames here run the
+/// same shader, so anything that fogs them *equally* — a density floored to a
+/// minimum, say — is invisible to a comparison between them. That was measured
+/// rather than assumed: flooring the density at `0.01` leaves this test green,
+/// and leaves this suite's `goldens` green too, because the darkening it
+/// produces is inside [`crcbl_golden::Tolerance::RASTERISER`] on this scene.
+/// See `docs/backlog.md`, which carries that as a coverage note.
+///
+/// What does carry the claim is the arithmetic, in three checked pieces:
+/// `crcbl_shaders::fog`'s `the_exponential_is_exactly_one_at_zero` says the
+/// transmittance at zero optical depth is exactly `1.0`; its
+/// `the_shader_spells_the_same_constants` pins the composite as
+/// `lit * t + fog * (1 - t)`, whose value at `t == 1` is `lit` bit for bit
+/// where a `lerp` would be `fog + (lit - fog)`; and this test says the density
+/// is what gates it. None of the three is the whole statement alone.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_fog_colour_is_unobservable_at_zero_density() {
+    let untouched = fogged_cube_hdr(Fog::NONE);
+    let configured = fogged_cube_hdr(uniform_fog(0.0));
+    assert_eq!(
+        untouched.0, configured.0,
+        "a zero-density fog with a colour set moved the frame, so the colour is \
+         reaching pixels through a path that does not read the density"
+    );
+}
+
+/// **The fog thickens by the exponential law, per texel, with no geometry
+/// known.**
+///
+/// The observable that separates a working height-fog term from every plausible
+/// wrong one. Transmittance is `e^-tau` and uniform fog's `tau` is
+/// `density * distance`, so **doubling the density squares the transmittance**
+/// at every texel at once — whatever that texel's distance is. A linear falloff
+/// passes none of this; a fog applied before the shading rather than after it
+/// passes none of it; an `exp` that is subtly the wrong function fails it by
+/// more than the tolerance below.
+///
+/// The transmittance is recovered two independent ways per texel and both are
+/// checked against each other: from green, where the fog scatters nothing, as
+/// `B / A`; and from red, where it scatters [`FOG_SCATTER`], as
+/// `(B - F) / (A - F)`. Those agreeing is what says one transmittance drove
+/// every channel rather than three unrelated numbers landing plausibly.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn doubling_the_fog_density_squares_the_transmittance() {
+    /// Thick enough that the transmittance is well away from one at the cube,
+    /// thin enough that squaring it does not put the doubled frame at the fog
+    /// colour, where the algebra stops being able to see anything.
+    const DENSITY: f32 = 0.15;
+    /// Half a per cent of full transmittance. `Rgba16Float` carries about three
+    /// decimal digits at these magnitudes and the relation squares one of them,
+    /// so this is the precision of the target rather than of the arithmetic.
+    const TOLERANCE: f32 = 0.005;
+    /// A texel is the cube only if the fog moved its green measurably — the
+    /// background is written by no fragment of `mesh.slang` and is unfogged.
+    const LIT_FLOOR: f32 = 0.05;
+
+    let clear = fogged_cube_hdr(uniform_fog(0.0));
+    let once = fogged_cube_hdr(uniform_fog(DENSITY));
+    let twice = fogged_cube_hdr(uniform_fog(DENSITY * 2.0));
+
+    let mut checked = 0usize;
+    let mut thickest = 1.0f32;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let [ar, ag, _, _] = clear.pixel(x, y);
+            let [br, bg, _, _] = once.pixel(x, y);
+            let [cr, _, _, _] = twice.pixel(x, y);
+            if ag <= LIT_FLOOR {
+                // The background, which no fragment of this shader wrote.
+                assert!(
+                    (br - ar).abs() < TOLERANCE,
+                    "fog moved a texel the mesh does not cover at ({x}, {y})"
+                );
+                continue;
+            }
+
+            let from_green = bg / ag;
+            let from_red = (br - FOG_SCATTER[0]) / (ar - FOG_SCATTER[0]);
+            assert!(
+                (from_green - from_red).abs() < TOLERANCE,
+                "the transmittance at ({x}, {y}) is {from_green} read from green \
+                 and {from_red} read from red, so one number did not drive both"
+            );
+
+            let doubled = (cr - FOG_SCATTER[0]) / (ar - FOG_SCATTER[0]);
+            assert!(
+                (doubled - from_green * from_green).abs() < TOLERANCE,
+                "doubling the density at ({x}, {y}) took the transmittance to \
+                 {doubled}, where squaring {from_green} gives {}",
+                from_green * from_green
+            );
+            thickest = thickest.min(from_green);
+            checked += 1;
+        }
+    }
+
+    assert!(
+        checked > 1000,
+        "only {checked} texels carried the mesh, so this measured almost nothing"
+    );
+    // And that the fog was thick enough to have been measuring something: a
+    // density that changed no texel would satisfy every relation above with a
+    // transmittance of one.
+    assert!(
+        thickest < 0.9,
+        "the thickest fog left {thickest} of the radiance, so this test would \
+         have passed on a shader that ignored the density entirely"
+    );
+}
+
+/// **The reference height is a height: raising the plane thickens the fog.**
+///
+/// Uniform fog above says nothing about the *height* half of exponential height
+/// fog, because a zero falloff is exactly the branch that ignores it. This is
+/// the cheapest statement that the other branch runs and runs the right way
+/// round: density falls off **above** the reference plane, so moving the plane
+/// up puts the scene deeper into the thick air and every texel must dim.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn raising_the_reference_plane_thickens_the_fog() {
+    /// A falloff on the scale of the scene, so the height term is neither flat
+    /// nor saturated across the cube.
+    const FALLOFF: f32 = 2.0;
+    const DENSITY: f32 = 0.15;
+    const LIT_FLOOR: f32 = 0.05;
+
+    let height = |reference_height: f32| Fog {
+        density: DENSITY,
+        falloff: FALLOFF,
+        reference_height,
+        color: crcbl::math::Vec3::from_array(FOG_SCATTER),
+    };
+    let low = fogged_cube_hdr(height(-FALLOFF));
+    let high = fogged_cube_hdr(height(FALLOFF));
+    let clear = fogged_cube_hdr(uniform_fog(0.0));
+
+    let mut dimmed = 0usize;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let [_, ag, _, _] = clear.pixel(x, y);
+            if ag <= LIT_FLOOR {
+                continue;
+            }
+            let [_, lg, _, _] = low.pixel(x, y);
+            let [_, hg, _, _] = high.pixel(x, y);
+            assert!(
+                hg <= lg,
+                "raising the fog plane brightened ({x}, {y}): {hg} against {lg}, \
+                 so the density is rising with height instead of falling"
+            );
+            if hg < lg {
+                dimmed += 1;
+            }
+        }
+    }
+    assert!(
+        dimmed > 1000,
+        "only {dimmed} texels moved, so the reference height reached almost \
+         nothing and this would pass on a shader that ignored it"
     );
 }

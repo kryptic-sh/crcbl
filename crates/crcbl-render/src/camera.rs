@@ -373,6 +373,75 @@ impl Default for DirectionalLight {
     }
 }
 
+/// Exponential height fog: how thick the air is, and what colour it scatters.
+///
+/// `docs/plan/43-render-standards.md` §4's cheapest large win. Density falls
+/// off exponentially with height above [`reference_height`](Self::reference_height),
+/// and `mesh.slang`'s fragment stage integrates it along the ray from the eye
+/// to each shaded point — so a distant surface fades towards
+/// [`color`](Self::color) and a valley fills while a hilltop stays clear, from
+/// four numbers and no extra pass.
+///
+/// **[`Fog::NONE`] is the default and is exactly no fog**, not nearly none:
+/// a zero density gives a zero optical depth, whose transmittance is exactly
+/// one, and the shader composites as two multiplies rather than an
+/// interpolation so that one returns the unfogged radiance bit for bit. Every
+/// golden blessed before fog existed still matches.
+///
+/// [`ForwardRenderer::set_fog`] is what a caller hands this to, and
+/// [`crcbl_shaders::fog`] is the arithmetic both sides run.
+///
+/// [`ForwardRenderer::set_fog`]: crate::forward::ForwardRenderer::set_fog
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fog {
+    /// Optical depth added per world unit travelled at the reference height.
+    ///
+    /// Zero is off. The useful range is small — a density of one puts a surface
+    /// a single unit away behind more than half the fog — so this is tenths and
+    /// hundredths for a scene measured in metres.
+    pub density: f32,
+    /// The height over which the density falls by a factor of `e`.
+    ///
+    /// Larger is a thicker atmosphere reaching further up; zero or less is fog
+    /// that does not thin with height at all, which is the limit this
+    /// approaches rather than a special case in the shader.
+    pub falloff: f32,
+    /// Where the density is [`density`](Self::density), in render-space `y`.
+    ///
+    /// Usually the ground the scene sits on, so the fog is thickest where the
+    /// geometry is and thins above it.
+    pub reference_height: f32,
+    /// The radiance the fog scatters towards the eye.
+    ///
+    /// **May exceed 1.0**, like [`DirectionalLight::color`] and for the same
+    /// reason: the scene target is `Rgba16Float` and this is a radiance rather
+    /// than a display colour, so a bright sky's haze is allowed to bloom.
+    pub color: Vec3,
+}
+
+impl Fog {
+    /// No fog, which is what a renderer nobody has called
+    /// [`ForwardRenderer::set_fog`] on carries.
+    ///
+    /// The colour is black and unobservable: it is read only through the
+    /// density, which is zero here.
+    ///
+    /// [`ForwardRenderer::set_fog`]: crate::forward::ForwardRenderer::set_fog
+    pub const NONE: Self = Self {
+        density: 0.0,
+        falloff: 0.0,
+        reference_height: 0.0,
+        color: Vec3::ZERO,
+    };
+}
+
+impl Default for Fog {
+    /// [`Fog::NONE`].
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

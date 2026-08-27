@@ -44,31 +44,49 @@ take the derivative route for tangents and pay nothing — which
 gradient sky. All three read the row as it stands, which is why `44-lighting.md`
 ranks them first.
 
-### Height fog: the arithmetic is built, the plumbing is not (2026-08-27)
+### Fog is composited before the reflections, so a reflection is unfogged (2026-08-27)
 
-The `exp` question that made this a decision is **answered** —
-`crcbl_shaders::fog` builds the exponential out of the operations the shading
-rule permits, so no exception, table or binding is owed. What is left is the
-half that touches the frame:
+`mesh.slang`'s fragment stage applies exponential height fog to the radiance it
+finishes, and `ssr_blur.slang` adds the screen-space reflection **after** that
+pass. So a reflection arrives at full strength on top of an already-fogged
+surface, and a distant mirror reads as more reflective through fog than it
+should.
 
-- **Fog parameters in the frame uniform block** — density, falloff, the
-  reference height and a colour. This widens the block, so all four Slang copies
-  of it and the Rust mirror move together, the way `GpuInstance` did.
-- **The Slang mirror of `exp_neg`, `one_minus_exp_over` and `optical_depth`**,
-  spelled with the same constants, plus a test that holds the two copies to each
-  other the way `the_shader_spells_the_same_constants` does for the ACES fit.
-  There is no `#include` in these shaders, so a second consumer means a second
-  copy and the guard is what stops them drifting.
-- **The composite in the shading pass** and a golden that has fog switched on.
-  Fog defaults off, so nothing already blessed moves.
+**What it would take:** fog the reflection by the transmittance of the same ray
+before adding it, which means the blur pass needs the fog rows and the depth it
+already samples — or move the composite after the reflection resolve, which is
+the larger change and puts fog somewhere the emissive and ambient terms are no
+longer beside it.
 
-**Two corrections landed with the decision**, both worth keeping because both
-were load-bearing and both were wrong: this tree has no exact image compare at
-all — every golden runs under `crcbl_golden::Tolerance::RASTERISER`, and
-`Tolerance::EXACT` appears only in `compare-png` and `compare-readback`'s
-argument parsing — and the no-transcendentals rule has two escapes rather than
-one, the cooked table (`crcbl_shaders::dfg`) and the built-from-permitted-parts
-construction (`crcbl_shaders::fog`).
+Not urgent: the error is bounded by how much the reflection contributes, and
+`RenderEffects::REFLECTIONS` is off in every frame that measures the fog law
+(`crates/crcbl/tests/mesh_e2e/hdr.rs` says why in writing).
+
+### The mesh goldens absorb a whole-frame darkening of a few per cent (2026-08-27)
+
+Measured while red-checking the fog composite, and worth keeping because it was
+a surprise. Flooring the fog density at `0.01` — which darkens every lit texel
+of the demo cube by roughly three per cent — leaves all four goldens in
+`crates/crcbl/tests/mesh_e2e/goldens.rs` **green** under
+`crcbl_golden::Tolerance::RASTERISER`.
+
+Two reasons, both structural rather than a slack tolerance: the default key
+light is bright enough that much of the cube tonemaps to saturation, where a
+three per cent cut changes nothing at all, and the swapchain is sRGB, so a
+linear cut of three per cent is a good deal less than three per cent of an
+encoded channel.
+
+**What this means for anyone reasoning about coverage:** "the goldens would have
+caught it" is not a safe assumption for a small _uniform_ change to the whole
+frame. They catch structure — a moved edge, a missing pass, a wrong colour — far
+better than they catch gain. A term that scales the whole picture slightly needs
+an assertion of its own, which is why the fog slice's zero-density claim is
+carried by exact arithmetic (`crcbl_shaders::fog`'s
+`the_exponential_is_exactly_one_at_zero` and the composite the shader guard
+pins) rather than by a golden.
+
+**Not measured:** where the threshold actually is. Nobody swept the darkening
+until a golden reddened; the one figure above is the one data point.
 
 ### The emissive page is not built; the factor is (2026-08-27)
 

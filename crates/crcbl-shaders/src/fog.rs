@@ -273,6 +273,96 @@ mod tests {
         ((f64::from(got) - want) / want).abs() / f64::from(f32::EPSILON / 2.0)
     }
 
+    /// The literal `mesh.slang` assigns to `name`, parsed.
+    ///
+    /// Compared as a **value** rather than as text: `LN2_LO` is `3.1946183e-5`
+    /// in Slang and `0.000031946183` when Rust prints it, so a spelling
+    /// comparison would fail on two identical numbers — and, worse, would pass
+    /// on a shader constant that merely contained the right digits somewhere.
+    fn shader_scalar(source: &str, name: &str) -> f32 {
+        let declaration = format!("static const float {name} = ");
+        let at = source
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("mesh.slang declares no {name}"))
+            + declaration.len();
+        let rest = &source[at..];
+        let end = rest.find(';').expect("a declaration ends in a semicolon");
+        rest[..end]
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a float: {error}"))
+    }
+
+    /// The initialiser `mesh.slang` gives array `name`, parsed the same way.
+    fn shader_array(source: &str, name: &str) -> Vec<f32> {
+        let declaration = format!("static const float {name}[");
+        let at = source
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("mesh.slang declares no {name}"));
+        let rest = &source[at..];
+        let open = rest.find('{').expect("an initialiser opens with a brace");
+        let close = rest.find('}').expect("an initialiser closes with a brace");
+        rest[open + 1..close]
+            .split(',')
+            .map(|value| {
+                value
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{name} holds a non-float: {error}"))
+            })
+            .collect()
+    }
+
+    /// Every constant this module fixes, against what `mesh.slang` spells.
+    ///
+    /// There is no `#include` in these shaders, so the fog arithmetic exists
+    /// twice and nothing but this holds the copies together. It is the guard
+    /// `crate::tonemap`'s `the_shader_spells_the_same_constants` is, for the
+    /// same reason: a slip in one digit compiles, renders a plausible frame and
+    /// passes every golden blessed after the slip.
+    #[test]
+    fn the_shader_spells_the_same_constants() {
+        let source = include_str!("../shaders/mesh.slang");
+        for (value, name) in [
+            (LOG2_E, "FOG_LOG2_E"),
+            (LN2_HI, "FOG_LN2_HI"),
+            (LN2_LO, "FOG_LN2_LO"),
+            (MAX_ARGUMENT, "FOG_MAX_ARGUMENT"),
+            (MAX_OPTICAL_DEPTH, "FOG_MAX_OPTICAL_DEPTH"),
+            (SERIES_CUTOFF, "FOG_SERIES_CUTOFF"),
+        ] {
+            assert_eq!(
+                shader_scalar(source, name),
+                value,
+                "mesh.slang's {name} is not this module's"
+            );
+        }
+        assert_eq!(
+            shader_array(source, "FOG_KERNEL"),
+            KERNEL.to_vec(),
+            "mesh.slang's FOG_KERNEL is not this module's KERNEL"
+        );
+        assert_eq!(
+            shader_array(source, "FOG_RATIO_KERNEL"),
+            RATIO_KERNEL.to_vec(),
+            "mesh.slang's FOG_RATIO_KERNEL is not this module's RATIO_KERNEL"
+        );
+
+        // And that the fragment stage still *runs* it: a constant table the
+        // shader stopped reading would pass every comparison above.
+        for spelling in [
+            "float fog_exp_neg(float x)",
+            "fog_optical_depth(frame.fog_params.x, frame.fog_params.y,",
+            "lit = lit * fog_survives + frame.fog_color.rgb * (1.0 - fog_survives);",
+        ] {
+            assert!(
+                source.contains(spelling),
+                "mesh.slang no longer contains `{spelling}`, so the constants \
+                 here are feeding nothing"
+            );
+        }
+    }
+
     #[test]
     fn the_kernel_coefficients_are_reciprocal_factorials() {
         let mut factorial = 1.0f64;

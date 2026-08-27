@@ -190,6 +190,16 @@ struct FrameUniforms
     /// member's offset moves, so every golden blessed before this member existed
     /// still matches.
     float4 lod_params;
+    /// Exponential height fog's two rows: the density, falloff and reference
+    /// height, then the radiance it scatters. `mesh.slang` documents both and
+    /// its fragment stage is the only thing that reads either.
+    ///
+    /// **Read by nothing in this file**, and declared for `lod_params`' reason
+    /// exactly: this block and `mesh.slang`'s are one buffer, so a block short
+    /// of a row here is one whose size the two stages disagree about.
+    float4 fog_params;
+    /// The fog's scattered radiance in `rgb`; `w` unread. See `fog_params`.
+    float4 fog_color;
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.

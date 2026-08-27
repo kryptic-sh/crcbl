@@ -386,6 +386,27 @@ struct FrameUniforms
     /// member's offset moves, so every golden blessed before this member existed
     /// still matches.
     float4 lod_params;
+    /// Exponential height fog: `x` the density at the reference height, per
+    /// world unit travelled; `y` the height over which that density falls by a
+    /// factor of `e`; `z` the reference height itself; `w` unread.
+    ///
+    /// **A zero density is exactly no fog.** `fog_optical_depth` is then
+    /// exactly zero, `fog_transmittance` of zero is exactly one, and the
+    /// composite below is `lit * t + fog * (1 - t)` — which at `t == 1` returns
+    /// `lit` bit for bit, where a `lerp` would return `lit + (fog - lit)` and
+    /// lose the low bits of an HDR value far from the fog colour. So this is a
+    /// feature made of data with no branch selecting it, on the probe grid's
+    /// terms, and no golden blessed before it existed moves.
+    ///
+    /// **Last in the block**, on `lod_params`' terms: no existing member's
+    /// offset changes.
+    float4 fog_params;
+    /// The radiance the fog scatters towards the eye, in `rgb`; `w` unread.
+    ///
+    /// Pre-tonemap and unclamped like everything else this stage writes: it is
+    /// a radiance rather than a display colour, so a bright sky's fog may sit
+    /// above one and the bloom chain may see it.
+    float4 fog_color;
 };
 
 /// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
@@ -1298,6 +1319,146 @@ float3 specular_compensation(float3 f0, float n_dot_v, float roughness)
     float albedo = clamp(specular_albedo_at(n_dot_v, roughness), MIN_DIRECTIONAL_ALBEDO, 1.0);
     float gain = 1.0 / albedo - 1.0;
     return float3(1.0, 1.0, 1.0) + f0 * gain;
+}
+
+/// `log2(e)`, mirroring `crcbl_shaders::fog::LOG2_E`.
+///
+/// The four fog constants and the two kernels below are the Slang half of that
+/// module. There is no `#include` in these shaders, so the copy is the only way
+/// to share the arithmetic, and
+/// `crcbl_shaders::fog::the_shader_spells_the_same_constants` is what stops the
+/// two drifting.
+static const float FOG_LOG2_E = 1.44269504;
+
+/// `ln 2` with its low mantissa bits cleared, so `n * FOG_LN2_HI` is exact.
+/// `crcbl_shaders::fog::LN2_HI`.
+static const float FOG_LN2_HI = 0.69311523;
+
+/// What `FOG_LN2_HI` dropped. `crcbl_shaders::fog::LN2_LO`.
+static const float FOG_LN2_LO = 3.1946183e-5;
+
+/// The largest magnitude `fog_exp_neg` takes before it saturates, chosen so the
+/// reduced exponent stays normal at both ends.
+/// `crcbl_shaders::fog::MAX_ARGUMENT`.
+static const float FOG_MAX_ARGUMENT = 87.0;
+
+/// Optical depth past which `fog_optical_depth` stops counting.
+/// `crcbl_shaders::fog::MAX_OPTICAL_DEPTH`.
+static const float FOG_MAX_OPTICAL_DEPTH = 32.0;
+
+/// Below this reduced height difference the ratio below takes its series.
+/// `crcbl_shaders::fog::SERIES_CUTOFF`.
+static const float FOG_SERIES_CUTOFF = 0.125;
+
+/// Reciprocal factorials, `1/i!`. `crcbl_shaders::fog::KERNEL`.
+static const float FOG_KERNEL[8] = {
+    1.0, 1.0, 0.5, 0.16666667, 0.041666668, 0.008333334, 0.0013888889, 0.00019841270
+};
+
+/// The same one factorial along, `1/(i+1)!`. `crcbl_shaders::fog::RATIO_KERNEL`.
+static const float FOG_RATIO_KERNEL[5] = {
+    1.0, 0.5, 0.16666667, 0.041666668, 0.008333334
+};
+
+/// `e^-x`, without calling a transcendental.
+///
+/// **This is why fog could be built at all.** This workspace's rule is that no
+/// transcendental may reach a colour — four platforms' implementations of them
+/// differ in the last place — and `docs/plan/43-render-standards.md` §4 held
+/// exponential height fog as a decision rather than a slice for exactly that
+/// reason. The way out is to build the function from the operations the rule
+/// permits: range reduction against a two-part `ln 2`, a Taylor kernel in
+/// Horner form over the reciprocal factorials, and `2^-n` written straight into
+/// an IEEE exponent field. Every step is an operation IEEE-754 specifies
+/// exactly, so the only freedom a compiler keeps is whether to contract a
+/// multiply and an add — one unit in the last place, four orders of magnitude
+/// inside what the goldens compare under.
+///
+/// `crcbl_shaders::fog::exp_neg` is the same arithmetic on the host, measured
+/// there against `f64::exp`.
+float fog_exp_neg(float x)
+{
+    float clamped = clamp(x, -FOG_MAX_ARGUMENT, FOG_MAX_ARGUMENT);
+
+    // e^-x = 2^-n * e^-r, with |r| at most half of ln 2.
+    float n = floor(clamped * FOG_LOG2_E + 0.5);
+    float reduced = (clamped - n * FOG_LN2_HI) - n * FOG_LN2_LO;
+
+    float u = -reduced;
+    float kernel = FOG_KERNEL[7];
+    for (int term = 6; term >= 0; --term)
+    {
+        kernel = kernel * u + FOG_KERNEL[term];
+    }
+
+    // 2^-n by exponent field. The clamp above is what keeps this inside the
+    // normal range, so no bias arithmetic is needed for the subnormal end.
+    return kernel * asfloat(uint(127 - int(n)) << 23);
+}
+
+/// `(1 - e^-d) / d`, which tends to one as `d` does.
+///
+/// The direct form loses every significant bit as `d` shrinks, its numerator
+/// being a difference of two nearly equal numbers; below the cutoff this takes
+/// the series that difference converges to, which has no cancellation in it.
+/// A level ray — the commonest one in a frame — is exactly the case that needs
+/// it. `crcbl_shaders::fog::one_minus_exp_over`.
+float fog_one_minus_exp_over(float d)
+{
+    if (abs(d) < FOG_SERIES_CUTOFF)
+    {
+        float u = -d;
+        float series = FOG_RATIO_KERNEL[4];
+        for (int term = 3; term >= 0; --term)
+        {
+            series = series * u + FOG_RATIO_KERNEL[term];
+        }
+        return series;
+    }
+    return (1.0 - fog_exp_neg(d)) / d;
+}
+
+/// The optical depth of exponential height fog along one ray.
+///
+/// `height_a` and `height_b` are the segment's two ends measured from the fog
+/// reference plane and `distance` is its length, so the integral of a density
+/// that falls off as `e^(-h/falloff)` is
+///
+/// ```text
+/// tau = density * distance * e^-a * (1 - e^-d) / d
+/// ```
+///
+/// with `a = height_a / falloff` and `d = (height_b - height_a) / falloff`.
+/// Factored so the leading exponential comes out front, which is what puts a
+/// level ray on the series branch above rather than on a division by nearly
+/// zero. Symmetric in the two ends, as the integral it evaluates is.
+///
+/// A `falloff` of zero or less is fog that does not thin with height, and gives
+/// `density * distance` — the limit the height form approaches as the falloff
+/// grows, so the branch is a continuation and not a special case.
+/// `crcbl_shaders::fog::optical_depth`.
+float fog_optical_depth(float density, float falloff, float height_a, float height_b,
+                        float distance)
+{
+    if (falloff <= 0.0)
+    {
+        return clamp(density * distance, 0.0, FOG_MAX_OPTICAL_DEPTH);
+    }
+
+    float a = height_a / falloff;
+    float d = (height_b - height_a) / falloff;
+    float tau = density * distance * fog_exp_neg(a) * fog_one_minus_exp_over(d);
+    return clamp(tau, 0.0, FOG_MAX_OPTICAL_DEPTH);
+}
+
+/// How much of a surface's radiance survives the fog between it and the eye.
+///
+/// Exactly one where the density is zero, which is what makes the composite in
+/// `fragmentMain` an identity on an unfogged frame.
+/// `crcbl_shaders::fog::transmittance`.
+float fog_transmittance(float optical_depth)
+{
+    return fog_exp_neg(max(optical_depth, 0.0));
 }
 
 /// Ceiling on the slope factor every shadow bias in this file is scaled by.
@@ -2243,6 +2404,31 @@ FragmentOutput fragmentMain(VertexOutput input)
     // bloom chain reads as a glow, and clamping here would throw exactly that
     // away.
     lit += emissive_of(material);
+
+    // **Exponential height fog, and it is the last thing that touches the
+    // radiance.** Everything above answers what left the surface; this answers
+    // how much of it survived the air on the way to the eye, so it composites
+    // over the finished sum — the emission included, since a lamp seen through
+    // fog is as fogged as the wall beside it.
+    //
+    // **Written as two multiplies and not as a `lerp`.** At zero density the
+    // transmittance is exactly one, and `lit * 1 + fog * 0` returns `lit` bit
+    // for bit where `lerp(fog, lit, 1)` returns `fog + (lit - fog)` and loses
+    // the low bits of any HDR value far from the fog colour. That is what makes
+    // the whole feature additive-zero: a frame with no fog configured is the
+    // frame this engine drew before fog existed, and every golden blessed then
+    // still matches. `docs/plan/43-render-standards.md` §4.
+    //
+    // The ray is eye to fragment, and both ends are measured from the fog's
+    // reference plane. Unbranched for the probe grid's reason: a feature made
+    // of data has nothing to select.
+    float3 fog_offset = frame.camera_position.xyz - input.world_position;
+    float fog_depth = fog_optical_depth(frame.fog_params.x, frame.fog_params.y,
+                                        frame.camera_position.y - frame.fog_params.z,
+                                        input.world_position.y - frame.fog_params.z,
+                                        length(fog_offset));
+    float fog_survives = fog_transmittance(fog_depth);
+    lit = lit * fog_survives + frame.fog_color.rgb * (1.0 - fog_survives);
 
     FragmentOutput output;
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap

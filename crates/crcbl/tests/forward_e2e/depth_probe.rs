@@ -1155,6 +1155,12 @@ fn render_probe(
         // screen-error heatmap is the mesh path's, and it is a debug view this
         // frame never switches on.
         lod_params: [0.0; 4],
+        // And no fog: a zero density is what makes `mesh.slang`'s composite the
+        // identity, so this probe reads the radiance the shading produced
+        // rather than one an atmosphere has been over. The colour is
+        // unobservable while the density is zero and is written as such.
+        fog_params: [0.0; 4],
+        fog_color: [0.0; 4],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

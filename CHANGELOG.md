@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Exponential height fog.** `ForwardRenderer::set_fog` takes a
+  `crcbl_render::Fog` — density, falloff, reference height and a scattered
+  radiance — and `mesh.slang` composites it over every shaded surface, so
+  distance reads as distance and a valley fills while a hilltop stays clear. No
+  new pass and no new binding: two `float4` rows at the end of
+  `mesh::FrameUniforms`, which grows from 1232 to 1264 bytes. A host that writes
+  that block itself has two rows to add; every existing member keeps its offset.
+
+  **`Fog::NONE` is the default and is exactly off.** The transmittance at zero
+  density is exactly one and the shader composites as `lit * t + fog * (1 - t)`
+  rather than as a `lerp`, so a caller who never asks for fog gets the frame
+  this engine drew before it existed, bit for bit.
+
+  Known gap: the screen-space reflections `ssr_blur.slang` adds after this pass
+  arrive unfogged onto a fogged surface — `docs/backlog.md` carries it.
+
 - **An exponential the shading rule allows.** `crcbl_shaders::fog` computes
   `e^-x`, the exponential-height-fog optical depth along a ray and the
   transmittance it implies, without calling a transcendental function —

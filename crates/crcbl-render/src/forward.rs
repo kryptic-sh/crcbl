@@ -155,7 +155,7 @@ use crcbl_shaders::{
 };
 use glam::{Mat4, Quat, Vec3};
 
-use crate::camera::{Camera, DirectionalLight};
+use crate::camera::{Camera, DirectionalLight, Fog};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::counters::FrameCounters;
 use crate::cull::Frustum;
@@ -1003,6 +1003,16 @@ pub struct ForwardRenderer {
     ///
     /// [`FrameUniforms::NORMALS_VIEW_ON`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON
     normals_view: bool,
+
+    /// The exponential height fog the colour pass composites over its
+    /// radiance — see [`set_fog`](ForwardRenderer::set_fog).
+    ///
+    /// **[`Fog::NONE`] by default**, on [`normals_view`](Self::normals_view)'s
+    /// terms: a caller who never asks for fog draws the frame this renderer
+    /// drew before the feature existed, and exactly that frame — the shader's
+    /// composite is an identity at zero density rather than an interpolation
+    /// that nearly is.
+    fog: Fog,
 
     /// Whether the colour pass tints each cluster by its DAG level instead of
     /// shading — see [`set_lod_view`](ForwardRenderer::set_lod_view).
@@ -3980,6 +3990,10 @@ impl ForwardRenderer {
             // `set_normals_view` existed. It builds nothing, so there is no
             // second field here.
             normals_view: false,
+            // Off on the same terms, and "off" here is a density of zero: the
+            // shader's composite is exactly the identity there, so a caller who
+            // never calls `set_fog` gets the frame byte for byte.
+            fog: Fog::NONE,
             lod_view: false,
             heatmap: false,
             // Following the camera, on the line above's terms: the selection eye
@@ -4671,6 +4685,17 @@ impl ForwardRenderer {
                 self.lod_params[2],
                 0.0,
             ],
+            // `w` is padding on both rows — the block's rows are sixteen bytes
+            // wide whatever is in them. A renderer nobody called `set_fog` on
+            // writes a zero density here, which the fragment stage composites
+            // as the identity.
+            fog_params: [
+                self.fog.density,
+                self.fog.falloff,
+                self.fog.reference_height,
+                0.0,
+            ],
+            fog_color: self.fog.color.extend(0.0).to_array(),
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -7022,6 +7047,40 @@ impl ForwardRenderer {
     /// [`FrameUniforms::NORMALS_VIEW_ON`]: crcbl_shaders::mesh::FrameUniforms::NORMALS_VIEW_ON
     pub const fn set_normals_view(&mut self, on: bool) {
         self.normals_view = on;
+    }
+
+    /// Sets the exponential height fog the colour pass composites over every
+    /// shaded surface.
+    ///
+    /// `docs/plan/43-render-standards.md` §4's cheapest large win: distance
+    /// reads as distance, a valley fills while a hilltop stays clear, and it
+    /// costs four numbers in a block every pipeline already binds.
+    ///
+    /// # It adds no pass and cannot fail
+    ///
+    /// On [`set_normals_view`](Self::set_normals_view)'s terms exactly — two
+    /// rows of the frame's uniform block, read by arithmetic in the fragment
+    /// stage every device already runs. There is nothing to build, so there is
+    /// nothing to refuse and no `supports_` probe beside it.
+    ///
+    /// # Off is exactly off
+    ///
+    /// [`Fog::NONE`] is the default and a zero density is an *exact* identity,
+    /// not an approximate one: the optical depth is zero, its transmittance is
+    /// exactly one, and `mesh.slang` composites as `lit * t + fog * (1 - t)`
+    /// rather than as a `lerp`, which at `t == 1` would return
+    /// `fog + (lit - fog)` and lose the low bits of an HDR radiance far from
+    /// the fog colour. So this feature moves no frame it is not switched on
+    /// for.
+    ///
+    /// # What it does not fog
+    ///
+    /// The screen-space reflections `ssr_blur.slang` adds **after** this pass,
+    /// which arrive unfogged onto an already-fogged surface — see
+    /// `docs/backlog.md`. Fog is applied where the radiance is finished, and
+    /// the reflection composite is one pass later.
+    pub const fn set_fog(&mut self, fog: Fog) {
+        self.fog = fog;
     }
 
     /// Draws each cluster tinted by the DAG level it was decimated to, instead

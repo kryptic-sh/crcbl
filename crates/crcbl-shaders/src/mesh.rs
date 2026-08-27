@@ -140,11 +140,11 @@ const _: () = assert!(
 ///
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
 /// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
-/// `float4x4` and the irradiance grid's [`PROBE_VOLUME_SIZE`] header. Checked
-/// against the `Offset` decorations `slangc` emits by this module's
-/// `the_uniform_block_matches_the_offsets_slangc_emits`.
+/// `float4x4`, the irradiance grid's [`PROBE_VOLUME_SIZE`] header, and the LOD
+/// and fog rows. Checked against the `Offset` decorations `slangc` emits by
+/// this module's `the_uniform_block_matches_the_offsets_slangc_emits`.
 pub const FRAME_UNIFORMS_SIZE: usize =
-    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE + 16;
+    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE + 16 + 32;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -350,6 +350,34 @@ pub struct FrameUniforms {
     /// existing member's offset moves, so every golden blessed before this
     /// member existed still matches.
     pub lod_params: [f32; 4],
+    /// Exponential height fog: `x` the density at the reference height, per
+    /// world unit of travel; `y` the height over which that density falls by a
+    /// factor of `e`; `z` the reference height itself, in world units; `w`
+    /// unread padding.
+    ///
+    /// **Zero density is exactly no fog**, not nearly none. The optical depth
+    /// is then exactly zero, [`crate::fog::transmittance`] of zero is exactly
+    /// one, and `mesh.slang` composites as `lit * t + fog * (1 - t)` rather
+    /// than as a `lerp` — which at `t = 1` is `lit + (fog - lit)` and is *not*
+    /// `lit` for an HDR value far from the fog colour. So the feature is data
+    /// with no branch selecting it, on
+    /// [`probes`](Self::probes)' terms, and every golden blessed before fog
+    /// existed still matches.
+    ///
+    /// `crcbl_render::ForwardRenderer::set_fog` is what writes it, and
+    /// [`crate::fog`] is the arithmetic both sides run.
+    ///
+    /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms.
+    pub fog_params: [f32; 4],
+    /// The radiance fog scatters towards the eye, in `rgb`; `w` unread padding.
+    ///
+    /// Pre-tonemap and unclamped, like everything else this pass produces: it
+    /// is a radiance and not a display colour, so a bright sky's fog is allowed
+    /// to be above one and the bloom chain is allowed to see it.
+    ///
+    /// Read only through [`fog_params`](Self::fog_params)'s density, so its
+    /// value is unobservable while that density is zero.
+    pub fog_color: [f32; 4],
 }
 
 impl FrameUniforms {
@@ -463,6 +491,8 @@ impl FrameUniforms {
         bytes[at..at + PROBE_VOLUME_SIZE].copy_from_slice(&self.probes.to_bytes());
         at += PROBE_VOLUME_SIZE;
         put(&mut bytes, &mut at, &self.lod_params);
+        put(&mut bytes, &mut at, &self.fog_params);
+        put(&mut bytes, &mut at, &self.fog_color);
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -1875,15 +1905,15 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1232,
+            FRAME_UNIFORMS_SIZE, 1264,
             "at two cascades and fourteen light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272, 1168, 1184, 1200, 1216 — and
+        // 224, 240, 256, 272, 1168, 1184, 1200, 1216, 1232, 1248 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
         // `%_arr_mat4v4float_int_14`, which is the light array's own length.
-        // Three of the last four are the grid header's rows, which this side
-        // writes as one group. Read out of `spirv/mesh.spv` with `spirv-dis`,
+        // Three of the middle rows are the grid header's, which this side
+        // writes as one group, and the last two are the fog's. Read out of `spirv/mesh.spv` with `spirv-dis`,
         // not derived from the arithmetic below — that is the point of them.
         let cascades = 64 * SHADOW_CASCADES;
         let lights = 64 * SHADOW_LIGHT_TILES;
@@ -1898,6 +1928,8 @@ mod tests {
             144 + cascades,
             144 + cascades + lights,
             144 + cascades + lights + PROBE_VOLUME_SIZE,
+            160 + cascades + lights + PROBE_VOLUME_SIZE,
+            176 + cascades + lights + PROBE_VOLUME_SIZE,
         ];
         let sizes = [
             64usize,
@@ -1909,6 +1941,8 @@ mod tests {
             16,
             lights,
             PROBE_VOLUME_SIZE,
+            16,
+            16,
             16,
         ];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
@@ -1952,6 +1986,8 @@ mod tests {
                 counts: [2, 3, 4],
             },
             lod_params: [70.0, 71.0, 72.0, 73.0],
+            fog_params: [80.0, 81.0, 82.0, 83.0],
+            fog_color: [90.0, 91.0, 92.0, 93.0],
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -2025,6 +2061,21 @@ mod tests {
             [at(lod), at(lod + 4), at(lod + 8), at(lod + 12)],
             [70.0, 71.0, 72.0, 73.0],
             "the selection numbers"
+        );
+        // And the two fog rows past them, which is where the block now ends.
+        // Every lane again: the density, the falloff and the reference height
+        // are three `float`s of one width, and a permutation between them is a
+        // frame that fogs by the wrong law rather than one that fails.
+        let fog = lod + 16;
+        assert_eq!(
+            [at(fog), at(fog + 4), at(fog + 8), at(fog + 12)],
+            [80.0, 81.0, 82.0, 83.0],
+            "the fog parameters"
+        );
+        assert_eq!(
+            [at(fog + 16), at(fog + 20), at(fog + 24), at(fog + 28)],
+            [90.0, 91.0, 92.0, 93.0],
+            "the fog colour"
         );
     }
 
