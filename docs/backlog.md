@@ -4129,8 +4129,17 @@ It ran out on 2026-08-25. Eleven demos rendered for 29 minutes against a
 30-minute cap; puppet was the one still running when the cap hit. The failure
 mode is the quiet one: the deploy step is gated on the build job, so it
 **skipped** rather than failed — CI green, workflow green-looking, and the site
-left a commit behind. The cap is raised to 60 minutes, which buys room and fixes
-nothing structural.
+left a commit behind. The cap was raised to 60 minutes, which bought room and
+fixed nothing structural.
+
+**It ran out again on 2026-08-27, from the other end.** This time it was the
+per-_step_ caps, not the job's: the shadow ladder's rotated disc and blocker
+search took quarry from 480 s to 602 s and lantern from 471 s to 612 s, over
+their own ten-minute bounds, and two runs failed with every check inside them
+having passed. Those two steps are now 20 minutes, with breach and shard, and
+the job is 90 — see "The shadow filter costs 48 taps" for the per-commit table
+and for what nobody has measured. Both numbers are room, not a fix; the sum is
+still a sum and the demos are still serial.
 
 **The structural answer is a matrix job that downloads the `site` artifact.**
 `probe-macos` and `probe-windows` already do exactly that — they take the
@@ -4149,9 +4158,18 @@ its grip, and the deploy step's `needs:` has to name the new job or the gate
 stops gating.
 
 **The two heavy 3D frames are why the total is what it is.** On the Pages runner
-quarry and lantern each take over seven minutes against well under one for a 2D
+quarry and lantern each take over ten minutes against well under one for a 2D
 demo — each behind by the factor its own heartbeat reports, on a software
 rasteriser. Puppet is a third heavy frame and it landed on the end of the queue.
+
+**And a per-step cap cannot say what it looks like it says.**
+`web/tools/browser-e2e.mjs` scales its own per-check budgets to the machine it
+is on — quarry's run reported "every later budget scaled 34.6x" — so a slower
+frame stretches the run instead of failing a check. The gate therefore has no
+way to report "this got slower"; it can only run out of wall clock. That is why
+a rendering change five times more expensive per fragment showed up as an
+infrastructure timeout two commits later rather than as a red check on the
+commit that made it.
 
 ### The character controller's slope sweep is platform-sensitive at its last step
 

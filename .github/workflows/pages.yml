@@ -53,21 +53,30 @@ jobs:
     # **The whole budget, not one demo's.** Every browser gate runs in this one
     # job, serially, because they all drive the site this job just built — so
     # what has to fit here is their sum, and that sum grows with every demo the
-    # site ships. The per-step `timeout-minutes: 10` below bound a single
-    # hanging demo; they cannot bound the total, and when the job cap is the
-    # smaller of the two it is the cap that fires. It did on 2026-08-25: eleven
+    # site ships. The per-step `timeout-minutes` below bound a single hanging
+    # demo; they cannot bound the total, and when the job cap is the smaller of
+    # the two it is the cap that fires. It did on 2026-08-25: eleven
     # demos rendered for 29 minutes, puppet was the one still running when the
     # 30-minute cap hit, and the deploy step was skipped rather than failed —
     # green-looking workflow, site a commit behind.
     #
     # The two heavy 3D frames dominate and are the reason the total is what it
-    # is: on this runner quarry and lantern each take over seven minutes against
+    # is: on this runner quarry and lantern each take over ten minutes against
     # well under one for a 2D demo, each behind by the factor its own heartbeat
     # reports. `docs/backlog.md` carries the structural answer — render the
     # demos in a matrix job that downloads the `site` artifact, the way the
     # probe jobs already do, so they run in parallel and the total stops being a
     # sum at all.
-    timeout-minutes: 60
+    #
+    # **90 rather than 60 since 2026-08-28**, because the sum grew again: the
+    # shadow ladder's rotated disc and its blocker search put quarry from 480 s
+    # to 602 s and lantern from 471 s to 612 s, over their own caps, and the
+    # deploy step went back to being skipped on a run that had passed every
+    # check inside it. `docs/backlog.md`'s "The shadow filter costs 48 taps" has
+    # the per-commit table. Raising a cap does not make a frame cheaper and is
+    # not claimed to; what it does is stop a bound written to catch a *hang*
+    # from firing on a demo that finished.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -374,14 +383,23 @@ jobs:
       # failed before touching a number — a heartbeat control failing now means
       # fewer than two HUD lines in a minute, which is a different claim from the
       # four-second one it used to make.
+      # **20 rather than 10, with breach and shard, since 2026-08-28.** Both
+      # demos render the sun's shadow filter, and the shadow ladder's last two
+      # rungs took them past ten minutes on this runner — 602 s and 612 s, each
+      # having reported every one of its checks passing before the cap killed
+      # the step. `web/tools/browser-e2e.mjs` scales its own per-check budgets
+      # to the machine it is on, so a slower frame stretches the run rather than
+      # failing it: the cap is the only thing that can fire, and what it says
+      # when it does is "out of wall clock", never "too slow". The job header
+      # above and `docs/backlog.md` carry the cost itself.
       - name: Render quarry in a real browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
 
       # lantern last: it is the heaviest frame the site ships, and its local
       # evidence is the same 34-of-34 SwiftShader run quarry's was.
       - name: Render lantern in a real browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh
 
       # viewer and orbit are the two samples whose subject does not move on its
@@ -498,8 +516,9 @@ jobs:
     # on does not change under it while it is still unproven.
     runs-on: macos-15
     # Was 20 while this job ran the probe alone; seven demo gates follow it now,
-    # and the two 3D ones took 5–6 minutes each on the Linux runner.
-    timeout-minutes: 60
+    # and the two 3D ones took over ten minutes each on the Linux runner after
+    # the shadow ladder's last two rungs — see the build job's header.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -578,11 +597,11 @@ jobs:
         run: CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh --headless
 
       - name: Render quarry in a real browser
-        timeout-minutes: 12
+        timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh --headless
 
       - name: Render lantern in a real browser
-        timeout-minutes: 12
+        timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh --headless
 
       - name: Render viewer in a real browser
