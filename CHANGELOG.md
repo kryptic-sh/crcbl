@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **An exponential the shading rule allows.** `crcbl_shaders::fog` computes
+  `e^-x`, the exponential-height-fog optical depth along a ray and the
+  transmittance it implies, without calling a transcendental function —
+  `exp_neg`, `optical_depth` and `transmittance`, plus the constants the Slang
+  mirror will spell. This is what unblocks height fog, which
+  `docs/plan/43-render-standards.md` §4 had held as a decision rather than a
+  slice: the workspace's rule is that no transcendental may reach a colour, and
+  the construction here is range reduction, a Taylor kernel over the reciprocal
+  factorials and an exponent field written directly, all of it operations
+  IEEE-754 pins down. Measured within two units in the last place of `f64::exp`
+  over its whole domain, and the closed-form integral is checked against Simpson
+  quadrature.
+
+  Nothing renders fog yet — the frame uniforms, the shader mirror and the
+  composite are the next slice.
+
 - **Every instance now says where it was last frame.**
   `crcbl_shaders::mesh::GpuInstance` carries `previous_transform` beside
   `transform` and `INSTANCE_STRIDE` grows from 96 to 160 bytes — a **format

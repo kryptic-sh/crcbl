@@ -292,6 +292,11 @@ pub mod ssr;
 /// The uniform block `fxaa.slang` reads, in the layout that shader declares.
 pub mod fxaa;
 
+// `fog` carries its own `//!` header, for the reason `upscale` and `dfg` do
+// below: both forms on one module makes rustdoc resolve its intra-doc links in
+// this file's scope rather than its own.
+pub mod fog;
+
 /// The uniform block `tonemap.slang` reads, in the layout that shader declares.
 pub mod tonemap;
 

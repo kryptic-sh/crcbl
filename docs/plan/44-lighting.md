@@ -146,6 +146,15 @@ Why GGX now rather than a roughness-driven Blinn later:
   transcendental functions differ in the last place between the four targets, so
   none of them may reach a colour.
 
+  **There are two ways out of the rule, and both are in use.** Bake the function
+  into a table at cook time and sample it — rung 1's `DFG` table below — or
+  build it out of the operations the rule permits, which is what
+  `crcbl_shaders::fog` does for the exponential height fog
+  [43-render-standards.md](43-render-standards.md) §4 wanted: range reduction, a
+  Taylor kernel over the reciprocal factorials, and an exponent field written
+  directly. The table costs an artifact and a binding; the construction costs
+  neither, and is available whenever the function has one.
+
   **The rule is about shading, not about the file**, and the correction is worth
   making because the looser claim invites the wrong test. `mesh.slang` does call
   `log2` — three times, in `froxel_of`, inverting the cluster grid's exponential

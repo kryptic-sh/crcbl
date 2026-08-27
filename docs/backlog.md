@@ -44,30 +44,31 @@ take the derivative route for tangents and pay nothing — which
 gradient sky. All three read the row as it stands, which is why `44-lighting.md`
 ranks them first.
 
-### DECISION NEEDED — exponential height fog needs `exp`, which shading forbids (2026-08-27)
+### Height fog: the arithmetic is built, the plumbing is not (2026-08-27)
 
-`docs/plan/43-render-standards.md` §4 ranks height fog as the cheapest large win
-on the gap list, and it still is — but the closed-form integral is `exp` twice
-(density falloff with height, transmittance along the ray) and this workspace's
-rule is that no transcendental may reach a colour, because four platforms
-disagree in the last place and a cross-backend golden has no tolerance to absorb
-it. `log2` in `mesh.slang`'s `froxel_of` is not a precedent: its result is
-floored into an integer slice index, so a last-place disagreement changes
-nothing.
+The `exp` question that made this a decision is **answered** —
+`crcbl_shaders::fog` builds the exponential out of the operations the shading
+rule permits, so no exception, table or binding is owed. What is left is the
+half that touches the frame:
 
-Three exits, written out in that section: a rational fit of the exponential (the
-trick `tonemap.slang` already uses on the ACES RRT, and the reason that pass
-could be blessed on all four backends); the first shading goldens in the tree to
-carry a tolerance rather than an exact compare, declared where the bless flow
-meets it; or skip the analytic form and march the froxel grid, where the
-integration is a sum over slices and no closed form appears. The third needs no
-exception and is the most work.
+- **Fog parameters in the frame uniform block** — density, falloff, the
+  reference height and a colour. This widens the block, so all four Slang copies
+  of it and the Rust mirror move together, the way `GpuInstance` did.
+- **The Slang mirror of `exp_neg`, `one_minus_exp_over` and `optical_depth`**,
+  spelled with the same constants, plus a test that holds the two copies to each
+  other the way `the_shader_spells_the_same_constants` does for the ACES fit.
+  There is no `#include` in these shaders, so a second consumer means a second
+  copy and the guard is what stops them drifting.
+- **The composite in the shading pass** and a golden that has fog switched on.
+  Fog defaults off, so nothing already blessed moves.
 
-**Evidence:** the transcendental ban is `44-lighting.md`'s BRDF argument and is
-what ruled out AgX for the tonemap; the `log2` sites are `froxel_of` in
-`crates/crcbl-shaders/shaders/mesh.slang`, and they are the only ones in that
-file. Nothing was prototyped — this is a reading of the constraint, not a
-measurement of an error.
+**Two corrections landed with the decision**, both worth keeping because both
+were load-bearing and both were wrong: this tree has no exact image compare at
+all — every golden runs under `crcbl_golden::Tolerance::RASTERISER`, and
+`Tolerance::EXACT` appears only in `compare-png` and `compare-readback`'s
+argument parsing — and the no-transcendentals rule has two escapes rather than
+one, the cooked table (`crcbl_shaders::dfg`) and the built-from-permitted-parts
+construction (`crcbl_shaders::fog`).
 
 ### The emissive page is not built; the factor is (2026-08-27)
 

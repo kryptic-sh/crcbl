@@ -23,17 +23,19 @@
 //! # Why the bytes are committed rather than computed
 //!
 //! [`bake`] is the integrator and it importance-samples the lobe, which means
-//! `sin`, `cos` and a `powf` — and this workspace's goldens are compared across
-//! four backends with **no tolerance**, on a machine whose `libm` is not the one
-//! CI's macOS and Windows runners have. A table computed at build time would
+//! `sin`, `cos` and a `powf` — evaluated on a machine whose `libm` is not the
+//! one CI's macOS and Windows runners have, for goldens that are blessed once
+//! and compared on all four backends. A table computed at build time would
 //! therefore be four slightly different tables, and every reflective pixel in
 //! every golden would disagree by a last place somewhere.
 //!
 //! So the table is data: baked on one machine, committed, and read by everyone.
 //! That is the same arrangement `clusters/dunes.dag` is under and for a related
-//! reason, and it is also the general escape this crate has from its own
+//! reason, and it is one of the two escapes this crate has from its own
 //! no-transcendentals rule — a `pow` evaluated once at cook time and stored is
-//! not a `pow` four platforms evaluate per fragment.
+//! not a `pow` four platforms evaluate per fragment. The other is
+//! [`crate::fog`]: build the function out of the operations the rule permits,
+//! which needs no artifact but only works where such a construction exists.
 //!
 //! Regenerate or verify with the tool that owns it:
 //!
