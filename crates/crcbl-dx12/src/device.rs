@@ -7360,6 +7360,12 @@ pub(crate) mod tests {
                 counts: [0; 3],
             },
             lod_params: [1.0, 1.0, 1.0, 0.0],
+            // No fog: a zero density is what makes the fragment stage's
+            // composite the identity, so this probe reads the shading rather
+            // than an atmosphere over it. The colour is unobservable while the
+            // density is zero and is written as such.
+            fog_params: [0.0; 4],
+            fog_color: [0.0; 4],
         };
 
         // One triangle over the centre of the target and neither corner, in
