@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_audio::mixer::Bus`: six fixed gain stages, so a player can turn the
+  music down without turning the gunfire down.** `master`, `music`, `sfx`, `ui`,
+  `voice` and `ambience`, each one linear gain reachable through
+  `Mixer::set_bus_gain`. A voice is routed at spawn with `Voice::with_bus` and
+  defaults to `Bus::Sfx`, so every existing caller keeps sounding as it did. The
+  final gain is `sample × voice_gain × bus_gain × master_gain`, left to right —
+  contract rather than detail, because a regrouping moves every sample of every
+  golden buffer. Nothing reads the `[engine.audio]` keys yet: the gains are
+  reachable from code, not from a settings file.
+
 - **An ambient-occlusion debug view.**
   `crcbl_render::ForwardRenderer::set_occlusion_view` draws the blurred
   occlusion channel as grey in place of the shaded picture, on the sentinel lane

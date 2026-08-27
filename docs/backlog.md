@@ -76,6 +76,29 @@ What would settle it, in order of cost:
    say exactly what each tier looks like.
 3. Nothing, and accept it, which is where it stands.
 
+### The audio buses ship without a reader or a wire slot (2026-08-28)
+
+`docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. Two halves of
+it are not, both deliberately out of that slice:
+
+- **Nothing reads `[engine.audio]`.** The six keys are named by
+  `Bus::settings_key` and no code maps one to `Mixer::set_bus_gain`.
+  `crates/crcbl/src/settings.rs` is the join module that would do it — it is
+  where `video_effects` reads `[engine.video]` — but that module is written as
+  the video layer, and an audio key resolves through two layers where a video
+  key resolves through four, so the two do not share a resolution path. Until it
+  lands, a player's volume settings are a file nothing loads.
+- **`AudioEvent` carries no bus.** The plan already prices this: a 28-byte wire
+  format gaining a route becomes 29 or 32, and `WIRE_SIZE` plus both round-trip
+  tests move with it. It is worth doing rather than deriving the bus from the
+  sound id — the same sound legitimately belongs to different buses in different
+  contexts — but it is a versioned wire change and wants its own slice.
+- **No limiter, so the buses meet the same clamp the voices did.** `fill` still
+  clamps the sum to `[-1, 1]` per sample, which is what the plan's own
+  2026-08-09 correction records as the missing master limiter. Buses make it
+  easier to hit: a player raising several buses is a mix that clips where the
+  same voices at unity did not.
+
 ### What GTAO left owed (2026-08-28)
 
 `docs/plan/46-ambient-occlusion.md`'s delivery section holds what shipped and

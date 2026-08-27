@@ -106,11 +106,40 @@ Grammar invariants (what makes it a learnable skill):
 
 ## Buses and volume (LOCKED 2026-08-27)
 
+### Built 2026-08-28: the gain stages exist
+
+`Bus` and its six variants, `Voice::with_bus`, `Mixer::set_bus_gain` and the
+three-multiply chain are in `crates/crcbl-audio/src/mixer.rs`. The gap section
+below is left as written because it is the argument for the decision rather than
+a status line, and the decision it argues for did not change in the building.
+
+What the code adds beyond the decision, both of them consequences nobody had to
+choose:
+
+- **`Mixer::route_gain` returns unity for `Bus::Master`.** The master is a bus
+  like the others _and_ the stage every voice passes through, so a voice routed
+  to it would otherwise take its gain twice — a master at a half turning exactly
+  those voices down to a quarter.
+  `a_voice_on_the_master_bus_is_not_attenuated_twice` is the guard.
+- **The gains are read once per block, not once per voice.** A gain that moved
+  between two voices of one block would put a step inside the buffer that
+  neither voice asked for.
+
+The order contract is asserted by `the_gain_chain_is_voice_then_bus_then_master`
+with three gains whose products differ under regrouping — and the test checks
+that property of the three gains first, so a later edit cannot quietly pick
+three that associate and leave the assertion unable to fail.
+
+**What is not built**: nothing reads the `[engine.audio]` keys yet, so the gains
+are reachable from code and not from a player's file; and `AudioEvent` still
+carries no bus, which is the wire break the section below prices.
+
 ### The gap, stated plainly
 
 **A player cannot turn the music down without turning the gunfire down.** That
 is not a shortfall against an ambitious design; it is the state of the crate.
-Verified in `crates/crcbl-audio/src/mixer.rs` on 2026-08-27:
+Verified in `crates/crcbl-audio/src/mixer.rs` on 2026-08-27, and **fixed
+2026-08-28** by the section above:
 
 - A `Voice` has a linear `volume`, clamped to `[0, 1]`, plus per-channel
   `gains`. `Voice::with_volume` and `Mixer::set_mix` are the ways in, and
