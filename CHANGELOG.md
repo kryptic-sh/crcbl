@@ -619,6 +619,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Ambient occlusion is GTAO, a horizon integral, not a hemisphere of depth
+  comparisons.** `ssao.slang`'s `occlusion_at` takes two slices through the eye
+  per pixel — the second the first turned an exact quarter turn — marches four
+  pixel-steps along each side of each to find the highest horizon, and evaluates
+  the closed-form slice integral over the two angles. Sixteen depth taps where
+  there were eight. The pass, its `R8Unorm` target, the binding,
+  `ssao_blur.slang` and the structural-ratio test are unchanged.
+
+  Every angle comes through `crcbl_shaders::ssao::acos_approx`, which is
+  Abramowitz and Stegun 4.4.45 and a `sqrt` rather than the target's `acos`: no
+  graphics API specifies an accuracy for that intrinsic, and two rasterisers
+  disagreeing about it is the driver divergence this technique was chosen to
+  avoid. It is swept against `f64::acos` to `MAX_ACOS_ERROR`, and `ssao.slang`'s
+  copy of the coefficients is compared as values.
+
+  What it buys, in the goldens: the hemisphere had been laying a soft wash over
+  flat surfaces that face the camera, and every one of the five frames that
+  moved moved by losing one. `probes`' floor is a single flat quad with its
+  walls more than a sampling radius away, and it now measures identical to the
+  same frame rendered with occlusion switched off; `lights`' cube had a diagonal
+  gradient across a flat front face. The contact darkening they surround is
+  still there, and tighter — in `Scene::Ao`'s trough the wall foot goes from
+  53.1 to 51.7 luma and the gradient stops terracing, 19 distinct levels in 19
+  steps against 13 in 16.
+
+- **`SsaoParams::bias` and `forward.rs`'s `SSAO_BIAS` are gone**, and
+  `SsaoParams::params.y` is padding. The bias existed because a threshold
+  comparison turns a flat surface's own quantised samples into grey haze; a
+  horizon integral has no threshold, since a sample in the surface's own plane
+  lands exactly on the tangent where the integral is stationary. Swept from zero
+  to 0.4 radians of angular bias and it moved nothing, so it was deleted rather
+  than left as a uniform nothing reads.
+
 - **The sun's shadow filter is as wide as the penumbra the scene has, not a
   constant.** `mesh.slang`'s `tile_pcf` takes its radius as a parameter, and
   `sun_penumbra_texels` measures one per fragment: sixteen depths `Load`ed from

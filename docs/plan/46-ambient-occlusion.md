@@ -248,3 +248,69 @@ Refused, with the reasons:
   remedy, not AO's wish. For AO a wrong reconstructed normal costs a pixel an
   eighth of its occlusion, which is the budget this section already declined to
   spend a colour target on.
+
+### Built 2026-08-28: what the horizon integral cost and what it bought
+
+`occlusion_at` is the integral, `ROTATIONS` is `SLICE_DIRECTIONS`, and nothing
+else in the pass moved — the resource, the binding, `ssao_blur.slang` and the
+structural-ratio test are the ones the section above promised would not. Two
+slices per pixel, the second the first turned an exact quarter turn, four
+marching steps along each side of each: sixteen depth taps against the eight the
+hemisphere took.
+
+**The frames say the technique was over-occluding open surfaces, not
+under-occluding contacts.** Five goldens moved and every one of them moved the
+same way — a broad wash lifted off a flat surface while the contact line under
+it stayed. `probes` is the clearest: its floor is one flat quad, its walls are
+more than the sampling radius away, and the hemisphere had been laying a soft
+vignette over the whole thing. `lights` had a diagonal gradient across the
+cube's front face, which is flat and faces the camera. Both are gone; the wall
+junction and the box corner in `ao` are still there and tighter.
+
+**The arc cosine is this crate's, not the target's.** Every angle in the
+integral comes through one, no target specifies its accuracy, and two
+rasterisers disagreeing about `acos` is precisely the driver divergence the
+section above argued GTAO would _avoid_. `crcbl_shaders::ssao::acos_approx` is
+Abramowitz and Stegun 4.4.45 — a degree-three minimax fit and a square root,
+both exactly specified — swept against `f64::acos` to `MAX_ACOS_ERROR`, and
+`ssao.slang` carries the same four coefficients under a test that compares them
+as values. The bound is asserted from _below_ as well: a ceiling nothing
+approaches would pass on the intrinsic the polynomial exists to refuse.
+
+**The trap, written down because it draws a picture rather than an error.** The
+tilt of the surface inside a slice is signed by which side of the view direction
+the projected normal leans towards, and the direction it is signed against must
+be perpendicular to `view`. A screen-space direction lifted into view space with
+a zero `z` is perpendicular to the view _axis_, and those two coincide only at
+the exact centre of the frame. Sign with it and every off-centre pixel gets a
+tilt leaning the wrong way, which puts both horizon clamps on the wrong sides: a
+flat floor stops being unoccluded and picks up a smooth wash growing towards the
+frame's edges — a vignette, which is a thing renderers have, and would have been
+blessed. What caught it was `probes`' flatness assertion, which measures two
+blocks of one flat floor a fifth of the frame apart and allows half a channel
+level between them; the wash was three. The guard is now
+`the_slice_tilt_is_signed_against_the_view_orthogonal_tangent`.
+
+Two things the horizon integral made unnecessary, both deleted rather than left
+as machinery:
+
+- **The depth bias.** `SsaoParams::bias` and `forward.rs`'s `SSAO_BIAS` existed
+  because half of a flat surface's own samples land marginally in front of it
+  once depth is quantised, which a threshold comparison turns into grey haze. A
+  horizon integral has no threshold: a sample in the surface's own plane lands
+  exactly on the tangent, where the integral is stationary. Swept from zero to
+  0.4 radians of angular bias against the same frames and it moved nothing that
+  the sign fix above did not move further, so the uniform is gone and `params.y`
+  is padding.
+- **A self-occlusion fudge at all.** There is none in the shipped code, which is
+  why `probes`' floor now matches its AO-off render byte for byte.
+
+**SSAO did not stay as the cheap tier.** The decision above says it would, on
+the FXAA-under-SMAA pattern, and that is still the right shape — but a tier
+needs a selector to choose it and there is none, so keeping the eight-tap body
+would have been a second technique nothing could reach. `docs/backlog.md`
+carries it.
+
+**Bent normals are still owed**, and they are the half that makes this more than
+a quality bump. They need the `R8Unorm` target widened, so they are their own
+slice.

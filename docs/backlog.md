@@ -15,7 +15,7 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
-### The shadow filter costs 48 taps and nothing times it (2026-08-28)
+### The shadow filter costs 48 taps and it timed out the browser gate (2026-08-28)
 
 `docs/plan/45-shadows.md`'s ninth decision replaced the 3×3 box filter with a
 32-tap rotated disc, in `tile_pcf` in both `mesh.slang` and `volumetric.slang`.
@@ -28,13 +28,44 @@ wobble table in the tenth says what the search buys on a quantised edge. Neither
 says what any of it costs.
 
 There is no shadow-pass timing in the tree to measure it with — no GPU timestamp
-around the lighting draw, no profiler HUD row for it. So the honest statement is
-that a filter five times more expensive shipped on quality evidence alone, and
-whether it is affordable on a weaker adapter than this machine's RX 7900 XTX is
-unknown. CI's runners are software rasterisers and time nothing comparable.
+around the lighting draw, no profiler HUD row for it. So the filter shipped on
+quality evidence alone.
+
+**Something timed it anyway, and it went red.** The Pages workflow's browser
+gate runs each demo against SwiftShader with a `timeout-minutes: 10` cap per
+demo, and the per-step durations across four runs are the price of the two
+decisions:
+
+| demo    | 00c92e3 | cec27b3 | 713da9d (rotated disc) | c5bdf25 (PCSS) |
+| ------- | ------- | ------- | ---------------------- | -------------- |
+| quarry  | 480s    | 491s    | 586s                   | 602s — timeout |
+| lantern | 471s    | 479s    | 612s — timeout         | skipped        |
+
+Both runs failed on the cap with **every check inside them passing** — quarry
+reported 42/42 before the step was killed — because `web/tools/browser-e2e.mjs`
+scales its own per-check budgets to the machine it is on, so a slower frame
+stretches the run instead of failing it. So the gate cannot say "too slow"; it
+can only run out of wall clock, which is what it did.
+`docs/plan/49-antialiasing.md` and the Pages workflow's own header already say
+the per-step caps bound a _hanging_ demo and cannot bound a total; this is the
+first time the total was the thing that moved.
+
+Two commits of main have therefore not deployed, and the failing job is the one
+that builds and publishes the site.
+
+What is not yet known: whether the cost is the 48 taps themselves or the branch
+divergence they add on a CPU rasteriser, since a SwiftShader lane runs every tap
+the widest fragment in it takes.
 
 What would settle it, in order of cost:
 
+0. **An early-out on a unanimous neighbourhood**, which is the standard
+   optimisation for exactly this filter and is missing: a handful of cheap taps
+   first, and the full disc only where they disagree. Most of a frame is wholly
+   lit or wholly shadowed, so it is where nearly all of the 48 taps go to waste.
+   It is not free of visual change — a small probe can be unanimous where the
+   wide one is not — so it needs the goldens re-blessed and the penumbra crops
+   re-read, which is why it is a slice rather than a patch.
 1. **A timestamp around the forward pass**, which the HAL already has the
    primitives for, reported by the sample the way the froxel pass's dispatch
    counts are. That prices this and every later rung.
@@ -44,6 +75,41 @@ What would settle it, in order of cost:
    search of eight is a coarser estimate rather than no estimate. The two tables
    say exactly what each tier looks like.
 3. Nothing, and accept it, which is where it stands.
+
+### What GTAO left owed (2026-08-28)
+
+`docs/plan/46-ambient-occlusion.md`'s delivery section holds what shipped and
+the evidence. What the slice deferred or turned up:
+
+- **Bent normals are not built, and they are the half that matters.** A scalar
+  occlusion can only scale the ambient term; a bent normal is a direction to
+  sample it _along_, which is the hook `probe_irradiance` already has and the
+  only honest route to the specular occlusion `docs/plan/47-reflections.md`
+  refuses. It needs the `R8Unorm` AO target widened to carry a direction, which
+  touches the resource, the binding and `mesh.slang`'s consumer, so it is its
+  own slice rather than a follow-up edit.
+- **SSAO was replaced, not kept as a cheap tier.** The GTAO decision said it
+  would stay on the antialiasing ladder's FXAA-under-SMAA pattern, and that is
+  still right — sixteen depth taps and an arc cosine is a real budget on a
+  software rasteriser. But a tier needs something to select it and there is no
+  graphics-quality seam yet, so a preserved eight-tap `occlusion_at` would have
+  been a second technique nothing could reach. It is one `git show` away when
+  the seam exists; the entry above on `SHADOW_TAPS` as a quality setting is the
+  same question for shadows and the two want answering together.
+- **Nothing times GTAO either.** It doubled the AO pass's depth taps, eight to
+  sixteen, and added an `acos_approx` and a `sqrt` per tap. The shadow-filter
+  entry above is the same gap and the same missing timestamp; a browser gate
+  already on a timeout cap is the only instrument in the tree that will notice.
+- **`SLICE_COUNT` is 2 and `SLICE_STEPS` is 4, chosen to sit near the eight taps
+  the hemisphere took, not fitted.** Reference implementations run more slices
+  with a temporal filter to hide the noise; this one has no temporal filter and
+  leans on `ssao_blur.slang` instead. What a third slice would buy has not been
+  rendered.
+- **The `probes` flatness assertion is the only guard that would have caught the
+  tilt-sign bug**, and it is in the probe test rather than the AO one, by
+  accident. `Scene::Ao` looks into a closed trough with no open flat surface
+  turned away from the frame's centre, so it cannot see a vignette; `Scene::Ao`
+  growing one would be the right home for the check.
 
 ### The normal offset scallops one silhouette's foot (2026-08-28)
 
@@ -17725,11 +17791,12 @@ reasons. What the first slice deferred or turned up:
   two that costs quality for speed, so it wants the per-pass GPU timers pointed
   at `ssao` and `ssao-blur` first — nobody has measured what the pair actually
   costs.
-- **`SSAO_RADIUS` is 0.5 and the kernel reaches ~⅞ of it laterally**, both tuned
-  against `Scene::Ao` alone. The first, normal-hugging kernel gave a ratio of
-  1.03 — visually nothing. Neither has been retuned; both have now been
-  **measured** against a real room — see "The AO constants against lantern's
-  room", which finds the radius sane at room scale.
+- **`SSAO_RADIUS` is 0.5 and was tuned against `Scene::Ao` alone.** It has not
+  been retuned; it has been **measured** against a real room — see "The AO
+  constants against lantern's room", which finds it sane at room scale. The
+  kernel this bullet used to pair it with is gone: GTAO marches to the radius
+  rather than sampling a table inside it, so the radius is now the only AO
+  tuning constant outside the blur.
 - **`AO_RATIO` is 1.10 rather than a shadow-like 1.5**, and that is not
   slackness: bands are read after the sRGB encode and AO scales ambient alone,
   so a wall closing half a hemisphere cannot approach halving a pixel. Measured
@@ -19071,12 +19138,17 @@ own printed numbers at its 256×192.
   occlusion in a room wants a tighter band; 0.5 is at the top of the usual
   range. **This is the finding a retune would act on**, and it is a judgement
   about looks, so it wants goldens and a human, which is what the deferral said.
-- **The gradient terraces.** 63.31 → 74.66 is about eleven sRGB levels spread
-  over roughly 150 pixels at 1280×960, so a band every fourteen pixels or so.
-  Invisible at the goldens' 256×192, where the whole gradient is ten pixels
-  wide, and visible in a contrast-stretched crop of the full-resolution frame.
-  In a room lit mostly by ambient — which is what a lighting fixture is — that
-  banding is what a reviewer would notice first, ahead of the radius.
+- **The gradient terraced, and GTAO 2026-08-28 is what stopped it.** It was
+  about eleven sRGB levels over roughly 150 pixels at 1280×960 — a band every
+  fourteen pixels — invisible at the goldens' 256×192 and plain in a
+  contrast-stretched crop. Re-measured after the horizon integral shipped, over
+  the same 0.40 units of floor approaching the wall and the same strip: the
+  hemisphere put 13 distinct levels in 16 steps, so it repeated values; the
+  integral puts 19 in 19, which is monotone. The rest of that profile barely
+  moved — open floor 75.14 either way, the foot 53.14 against 51.68, the reach
+  0.390 against 0.370 — because `Scene::Ao` is a closed trough and the wash the
+  integral removes needs an open surface to appear on. `probes` and `lights` are
+  where it showed.
 - **The bilateral blur holds at a silhouette, with about a fortieth left.** The
   render-e2e's own reading on this GPU:
   `cube — the pyramid's underside measures 67.3 along its silhouette and 66.0 two rows in, against a clear of 37.0`

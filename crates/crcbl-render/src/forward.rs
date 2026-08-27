@@ -405,16 +405,6 @@ const DFG_SIZE_U32: u32 = dfg::DFG_SIZE as u32;
 /// objects a unit apart still do not shade each other at all.
 const SSAO_RADIUS: f32 = 0.5;
 
-/// The depth bias `ssao.slang` needs before a surface may occlude, in view-space
-/// units.
-///
-/// A flat surface samples its own plane, and reconstructing that plane from a
-/// quantised depth buffer puts about half the samples marginally in front of it —
-/// which is uniform grey haze over every flat wall in the frame rather than
-/// occlusion. Small against [`SSAO_RADIUS`], so a real contact shadow survives
-/// it.
-const SSAO_BIAS: f32 = 0.02;
-
 /// The `R8Unorm` texel that occludes nothing: `1.0`, which is `0xFF`.
 ///
 /// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and therefore
@@ -4909,7 +4899,6 @@ impl ForwardRenderer {
                 inv_proj: inv_projection.to_cols_array(),
                 proj: projection.to_cols_array(),
                 radius: SSAO_RADIUS,
-                bias: SSAO_BIAS,
             },
         )?;
         // The reflection march's block: the same two matrices and nothing else.
