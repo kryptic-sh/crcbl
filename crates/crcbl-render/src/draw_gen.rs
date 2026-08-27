@@ -1353,6 +1353,29 @@ pub(crate) fn compute_pipeline(
             shader.name()
         ))
     })?;
+    compute_pipeline_entry(device, label, shader, entry_point, layout, workgroup_size)
+}
+
+/// [`compute_pipeline`] for a module with **more than one** compute entry
+/// point, which is a thing Slang compiles and [`Shader::entry_point`] refuses
+/// to guess between.
+///
+/// `crate::volumetric` is the caller that needs it: its scatter and integrate
+/// kernels are two entry points of one module because they share the froxel
+/// arithmetic and there is no `#include` to share it any other way.
+///
+/// The name is not checked against the module here — a wrong one fails at
+/// pipeline creation, which is where every backend reports it.
+///
+/// [`Shader::entry_point`]: crcbl_shaders::Shader::entry_point
+pub(crate) fn compute_pipeline_entry(
+    device: &dyn Device,
+    label: &str,
+    shader: &crcbl_shaders::Shader,
+    entry_point: &str,
+    layout: PipelineLayoutHandle,
+    workgroup_size: u32,
+) -> Result<ComputePipelineHandle, HalError> {
     let module = device.create_shader_module(&ShaderModuleDesc {
         label: Some(shader.name()),
         spirv: shader.spirv(),

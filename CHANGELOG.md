@@ -34,8 +34,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `fog::one_minus_exp_over` are public now, the latter being the shape of every
   homogeneous-medium integral rather than only height fog's.
 
-  **No pass reads this yet.** The 3D scattering target, the integration along
-  `z` and the composite are the next slice, along with the Slang mirror.
+- **Volumetric fog: the froxel column, behind `RenderEffects::VOLUMETRIC_FOG`.**
+  Three passes over the subdivision `light_cluster.slang` already builds —
+  `volumetric.slang` writes what each slab of air scatters and transmits, scans
+  each column into an exclusive prefix, and `volumetric_composite.slang`
+  integrates the last partial slice along the pixel's own ray and composites
+  over the frame. A storage buffer rather than a 3D texture, for the reasons
+  `docs/plan/51-volumetrics.md` gives.
+
+  **Off by default**, and it is not in `RenderEffects::DEFAULT_STACK`: the
+  medium it integrates is the same exponential height fog `mesh.slang`
+  composites analytically, so the frame block's fog density is zeroed on a frame
+  that runs the froxel path and the air is charged once. A frame with
+  `Fog::NONE` draws identically either way, byte for byte.
+  `[engine.video] volumetric_fog` is the settings key.
+
+  **No light scatters into the column yet** — the single-scattering albedo is
+  one against an isotropic environment, which is algebraically the closed form
+  the fragment stage was already computing, and that equality is what `crcbl`'s
+  `mesh_e2e` measures. Rung 1b of `docs/plan/51-volumetrics.md` is the cascade
+  lookup that makes it a shaft.
 
 - **The sky is drawn behind the frame.** The gradient already lit the scene and
   was what a missed reflection fell back to, but nothing put it on screen — a

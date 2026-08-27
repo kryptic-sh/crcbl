@@ -187,6 +187,7 @@ use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
+use crate::volumetric::{Volumetric, VolumetricImages};
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -632,6 +633,7 @@ const RENDER_PASSES: u32 = 6
     + Ssao::PASSES
     + Hiz::PASSES
     + Ssr::PASSES
+    + Volumetric::PASSES
     + Bloom::MAX_PASSES
     + Fxaa::PASSES
     + Upscale::PASSES;
@@ -695,6 +697,12 @@ fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32), upscaling: bool
     }
     if effects.contains(RenderEffects::ANTIALIASING) {
         passes += Fxaa::PASSES as u64;
+    }
+    if effects.contains(RenderEffects::VOLUMETRIC_FOG) {
+        // **One of [`Volumetric::PASSES`], not all three.** The scatter and the
+        // column scan are compute dispatches; what this function counts is
+        // full-screen *draws*, and only the composite is one.
+        passes += 1;
     }
     passes
 }
@@ -1307,6 +1315,9 @@ pub struct ForwardRenderer {
     /// `docs/plan/18-render-features.md`'s reflection march — see
     /// [`crate::ssr`].
     ssr: Ssr,
+    /// `docs/plan/51-volumetrics.md`'s froxel volume and its composite — see
+    /// [`crate::volumetric`].
+    volumetric: Volumetric,
     /// `docs/plan/18-render-features.md`'s bloom chain — see [`crate::bloom`].
     bloom: Bloom,
     /// `docs/plan/18-render-features.md`'s antialiasing resolve — see
@@ -1416,6 +1427,9 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s reflection march, which owns one
     /// pipeline, one layout and a ring of blocks.
     ssr: Option<Ssr>,
+    /// `docs/plan/51-volumetrics.md`'s froxel volume, which owns three
+    /// pipelines, two layouts and two rings of buffers.
+    volumetric: Option<Volumetric>,
     /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
     /// pipelines, two layouts, a sampler and a ring of blocks.
     bloom: Option<Bloom>,
@@ -1479,6 +1493,9 @@ impl Rollback {
         }
         if let Some(bloom) = self.bloom {
             bloom.destroy(device);
+        }
+        if let Some(volumetric) = self.volumetric {
+            volumetric.destroy(device);
         }
         if let Some(ssr) = self.ssr {
             ssr.destroy(device);
@@ -3876,6 +3893,21 @@ impl ForwardRenderer {
             Self::build_depth_fullscreen,
         )?);
 
+        // --- the froxel volume ---
+        //
+        // Stored whole for the three above's reason, and after them because
+        // `Rollback::run` releases in the reverse order of construction. It sits
+        // between the march and the chain in the frame as well: the medium is
+        // scene content and the chain is a lens. Its volume holds the same
+        // [`FROXEL_CAPACITY`] the clustering pass's grid does, because it is
+        // subdivided by the same [`Grid`] — see [`crate::volumetric`].
+        rollback.volumetric = Some(Volumetric::new(
+            device,
+            instance_buffers.len(),
+            crate::light_grid::FROXEL_CAPACITY,
+            Self::build_fullscreen,
+        )?);
+
         // --- the bloom chain ---
         //
         // Stored whole for the pair above's reason, and after them because
@@ -4092,6 +4124,10 @@ impl ForwardRenderer {
                 .ssr
                 .take()
                 .unwrap_or_else(|| unreachable!("the march was placed in the rollback above")),
+            volumetric: rollback
+                .volumetric
+                .take()
+                .unwrap_or_else(|| unreachable!("the volume was placed in the rollback above")),
             bloom: rollback
                 .bloom
                 .take()
@@ -4743,6 +4779,27 @@ impl ForwardRenderer {
                 perspective,
             },
         )?;
+        // The froxel volume's block: the same grid, the same camera and the
+        // medium. **The same `Grid` value the clustering pass was just given**,
+        // not a second `Grid::for_frame` — the composite converts a pixel to a
+        // froxel index with these numbers, and two grids would have it read a
+        // column built for somewhere else.
+        //
+        // Written whether or not this frame adds the passes, on every other
+        // block's terms: one written only on the frames that draw is stale on
+        // the frame a caller first switches the effect on.
+        self.volumetric.begin_frame(
+            device,
+            self.frame,
+            self.grid,
+            FrameView {
+                extent,
+                view_projection,
+                eye: camera.eye,
+                perspective,
+            },
+            self.fog,
+        )?;
 
         // The frame's gradient, resolved once and handed to all three of the
         // things that want a sky: the L1 projection below for the ambient term,
@@ -4788,8 +4845,19 @@ impl ForwardRenderer {
             // wide whatever is in them. A renderer nobody called `set_fog` on
             // writes a zero density here, which the fragment stage composites
             // as the identity.
+            //
+            // **Zeroed on a frame that runs the froxel volume**, which
+            // integrates the same medium along the same rays: leaving it would
+            // charge the air twice, once here and once in
+            // `volumetric_composite.slang`, and the frame would be plausibly
+            // over-fogged rather than wrong in a way anything reports. See
+            // [`RenderEffects::VOLUMETRIC_FOG`].
             fog_params: [
-                self.fog.density,
+                if self.frame_effects.contains(RenderEffects::VOLUMETRIC_FOG) {
+                    0.0
+                } else {
+                    self.fog.density
+                },
                 self.fog.falloff,
                 self.fog.reference_height,
                 0.0,
@@ -5892,6 +5960,14 @@ impl ForwardRenderer {
                 graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent)),
             )
         });
+        // Where the froxel volume's composite writes, conditional on the effect
+        // for the reflection pair's reason exactly: an image nobody reads or
+        // writes is a physical image taken out of the pool for a pass that does
+        // not exist. It is the scene target's description, because it stands in
+        // for that image from here on.
+        let fogged = effects
+            .contains(RenderEffects::VOLUMETRIC_FOG)
+            .then(|| graph.create_image("scene-fogged", TransientImageDesc::scene_color(extent)));
         // The Hi-Z pyramid's levels, **conditional on the march** that is the
         // only thing that reads them: an image nobody samples is a physical
         // image out of the pool for a pass that does not exist. Level 0 is the
@@ -6318,6 +6394,33 @@ impl ForwardRenderer {
             self.sky_pass
                 .add_pass(graph, frame, scene_color, scene_depth);
         }
+
+        // `docs/plan/51-volumetrics.md`'s froxel volume, and it composites over
+        // the sky as well as over the geometry — a pixel at the far plane is a
+        // whole column of air, which is exactly what makes a distant horizon
+        // read as distant.
+        //
+        // **Before the reflection march**, where `mesh.slang`'s closed form also
+        // ran: the march reads the scene colour as reflected radiance, and fog
+        // it can see is fog the surface it bounced off could see. The reflection
+        // the blur adds afterwards is still unfogged, which is the same gap the
+        // analytic path has and `docs/backlog.md` carries.
+        let scene_color = match fogged {
+            Some(composited) => {
+                self.volumetric.add_passes(
+                    graph,
+                    frame,
+                    self.grid,
+                    VolumetricImages {
+                        depth: scene_depth,
+                        color: scene_color,
+                        composited,
+                    },
+                );
+                composited
+            }
+            None => scene_color,
+        };
 
         // `docs/plan/18-render-features.md`'s reflection march and its blur, and
         // **the second of them is the composite**: the march reads the scene
@@ -7828,6 +7931,7 @@ impl ForwardRenderer {
         self.upscale.destroy(device);
         self.fxaa.destroy(device);
         self.bloom.destroy(device);
+        self.volumetric.destroy(device);
         self.ssr.destroy(device);
         self.hiz.destroy(device);
         self.ssao.destroy(device);
@@ -13063,10 +13167,12 @@ mod tests {
     /// Named rather than written out at each of the three sites that force them
     /// on, because the point of those sites is "every effect there is" and the
     /// bug they exist to catch is a new effect joining the set and one site
-    /// still measuring the old one while calling it the whole stack. The two are
+    /// still measuring the old one while calling it the whole stack. They are
     /// held out of the default for different reasons — [`crate::effects`] gives
-    /// both — and share only that a test wanting the widest frame must ask.
-    const POST_EFFECTS: RenderEffects = RenderEffects::BLOOM.union(RenderEffects::ANTIALIASING);
+    /// each — and share only that a test wanting the widest frame must ask.
+    const POST_EFFECTS: RenderEffects = RenderEffects::BLOOM
+        .union(RenderEffects::ANTIALIASING)
+        .union(RenderEffects::VOLUMETRIC_FOG);
 
     /// Every effect this renderer draws is either in the default stack or in
     /// [`POST_EFFECTS`].

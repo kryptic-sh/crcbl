@@ -148,12 +148,134 @@ pub fn integrate_slice(source: f32, extinction: f32, thickness: f32) -> SliceInt
     }
 }
 
+/// Bytes in the volumetric passes' parameter block, matching
+/// `struct VolumetricParams` in `shaders/volumetric.slang` and the identical
+/// declaration in `shaders/volumetric_composite.slang`.
+///
+/// One `float4x4` (64), four `float4` (16 each) and eight `uint`s (32).
+pub const PARAMS_SIZE: usize = 64 + 4 * 16 + 8 * 4;
+
+/// Bytes one froxel occupies in the column buffer: one `float4`.
+///
+/// It carries two different pairs at two different times — a slice's own
+/// radiance and transmittance after `scatterMain`, the column in front of that
+/// slice after `integrateMain` — which `volumetric.slang`'s header argues.
+pub const FROXEL_STRIDE: usize = 16;
+
+/// Invocations per workgroup in both of `volumetric.slang`'s entry points.
+pub const WORKGROUP_SIZE: u32 = 64;
+
+/// What the scattering, integration and composite passes cannot derive for
+/// themselves.
+///
+/// Written once per frame by `crcbl_render::volumetric` and bound by all three,
+/// so a pixel's froxel and the froxel a column was written into come from one
+/// set of numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VolumetricParams {
+    /// Clip → world, column-major, for unprojecting a tile's screen centre and
+    /// a pixel's own ray.
+    pub inverse_view_proj: [f32; 16],
+    /// World-space eye in `xyz`; `w` unused.
+    pub eye: [f32; 4],
+    /// Row 3 of the view-projection, so `dot(depth_row, (p, 1))` is `p`'s view
+    /// depth — the row `crcbl_shaders::light::ClusterParams` is handed, from
+    /// the same matrix.
+    pub depth_row: [f32; 4],
+    /// Density, scale height, reference height, unused — the row
+    /// `crcbl_shaders::mesh::FrameUniforms::fog_params` carries, handed to
+    /// exactly one of the two paths.
+    pub fog_params: [f32; 4],
+    /// The radiance the medium scatters towards the eye in `rgb`; `w` unused.
+    pub fog_color: [f32; 4],
+    /// Tiles across.
+    pub grid_x: u32,
+    /// Tiles down.
+    pub grid_y: u32,
+    /// Depth slices: `crcbl_shaders::light::CLUSTER_DEPTH_SLICES` for a
+    /// perspective camera, `1` for an orthographic one.
+    pub slices: u32,
+    /// Pixels per tile edge.
+    pub tile_pixels: u32,
+    /// Viewport width in pixels.
+    pub viewport_x: u32,
+    /// Viewport height in pixels.
+    pub viewport_y: u32,
+    /// Froxels the column buffer holds, which every pass bounds its indices by.
+    pub froxel_count: u32,
+}
+
+impl VolumetricParams {
+    /// The block as the bytes the shaders read.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
+        let mut bytes = [0u8; PARAMS_SIZE];
+        let mut at = 0;
+        for value in self
+            .inverse_view_proj
+            .into_iter()
+            .chain(self.eye)
+            .chain(self.depth_row)
+            .chain(self.fog_params)
+            .chain(self.fog_color)
+        {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        for value in [
+            self.grid_x,
+            self.grid_y,
+            self.slices,
+            self.tile_pixels,
+            self.viewport_x,
+            self.viewport_y,
+            self.froxel_count,
+        ] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        // The trailing `pad0` stays zero: it exists so the block's size is the
+        // multiple of 16 bytes a uniform buffer needs, and nothing reads it.
+        debug_assert_eq!(at + 4, PARAMS_SIZE, "a field escaped the writer");
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Anisotropies that cover both lobes, the isotropic case, and the clamp.
     const ANISOTROPIES: [f32; 7] = [-0.9, -0.5, -0.1, 0.0, 0.3, 0.8, MAX_ANISOTROPY];
+
+    /// The two shaders that read [`VolumetricParams`].
+    const SHADERS: [(&str, &str); 2] = [
+        (
+            "volumetric.slang",
+            include_str!("../shaders/volumetric.slang"),
+        ),
+        (
+            "volumetric_composite.slang",
+            include_str!("../shaders/volumetric_composite.slang"),
+        ),
+    ];
+
+    /// The literal a shader assigns to a `static const float`, parsed as a
+    /// value — `crate::fog`'s `shader_scalar`, and it compares numbers rather
+    /// than text for that function's reason.
+    fn shader_scalar(source: &str, name: &str) -> f32 {
+        let declaration = format!("static const float {name} = ");
+        let at = source
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("the shader declares no {name}"))
+            + declaration.len();
+        let rest = &source[at..];
+        let end = rest.find(';').expect("a declaration ends in a semicolon");
+        rest[..end]
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a float: {error}"))
+    }
 
     /// `2 pi` times Simpson's rule over `cos_theta`, which is the solid-angle
     /// integral of any function that depends on direction only through it.
@@ -376,5 +498,121 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Both shaders cut the frustum at the same depths, and those depths are
+    /// the grid `crcbl_shaders::light` describes.
+    ///
+    /// The pair is one structure written in two files: the scatter pass walks
+    /// the boundaries forward to place a slice, and the composite walks the
+    /// same chain to find which slice a pixel is in. A constant that differs
+    /// between them puts a pixel's partial segment in a slice whose prefix
+    /// belongs to a different one — a frame that is plausibly foggy and wrong
+    /// by a whole slice at the far end.
+    #[test]
+    fn the_shaders_cut_the_frustum_where_the_light_grid_does() {
+        for (file, source) in SHADERS {
+            for (value, name) in [
+                (crate::light::CLUSTER_NEAR, "CLUSTER_NEAR"),
+                (crate::light::CLUSTER_FAR, "CLUSTER_FAR"),
+                (crate::light::SLICE_RATIO, "CLUSTER_SLICE_RATIO"),
+            ] {
+                assert_eq!(
+                    shader_scalar(source, name),
+                    value,
+                    "{file}'s {name} is not crcbl_shaders::light's"
+                );
+            }
+            let slices = format!(
+                "static const uint CLUSTER_DEPTH_SLICES = {};",
+                crate::light::CLUSTER_DEPTH_SLICES
+            );
+            assert!(
+                source.contains(&slices),
+                "{file} does not declare {} depth slices",
+                crate::light::CLUSTER_DEPTH_SLICES
+            );
+        }
+    }
+
+    /// Both shaders declare the same parameter block, field for field.
+    ///
+    /// Compared as text with the whitespace collapsed, because that is exactly
+    /// what has to match: `crcbl_shaders::declaration_order` records that Metal
+    /// and D3D12 lay a block out in declaration order, so two shaders bound to
+    /// **one** buffer with two orderings read each other's fields — an eye
+    /// where a fog colour should be, which renders rather than failing.
+    #[test]
+    fn the_two_shaders_declare_one_block() {
+        let block = |source: &str| {
+            let at = source
+                .find("struct VolumetricParams")
+                .expect("the block is declared");
+            let rest = &source[at..];
+            let end = rest.find("\n};").expect("the block is closed");
+            rest[..end]
+                .lines()
+                .map(str::trim)
+                .filter(|line| {
+                    !line.is_empty() && !line.starts_with("///") && !line.starts_with("//")
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(
+            block(SHADERS[0].1),
+            block(SHADERS[1].1),
+            "{} and {} declare different parameter blocks",
+            SHADERS[0].0,
+            SHADERS[1].0
+        );
+    }
+
+    /// The block's bytes are its fields in declaration order, and the writer
+    /// covers every one of them.
+    ///
+    /// Every field is given a distinct value, so a writer that skipped one or
+    /// swapped two lands a plausible number in the wrong place — which is the
+    /// failure that renders instead of erroring.
+    #[test]
+    fn the_params_block_writes_its_fields_in_declaration_order() {
+        let params = VolumetricParams {
+            inverse_view_proj: [0.5; 16],
+            eye: [1.5; 4],
+            depth_row: [2.5; 4],
+            fog_params: [3.5; 4],
+            fog_color: [4.5; 4],
+            grid_x: 7,
+            grid_y: 11,
+            slices: 13,
+            tile_pixels: 17,
+            viewport_x: 19,
+            viewport_y: 23,
+            froxel_count: 29,
+        };
+        let bytes = params.to_bytes();
+        assert_eq!(bytes.len(), PARAMS_SIZE);
+
+        let float_at = |offset: usize| {
+            f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+        };
+        let uint_at = |offset: usize| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+        };
+        for (offset, value) in [(0, 0.5), (64, 1.5), (80, 2.5), (96, 3.5), (112, 4.5)] {
+            assert_eq!(float_at(offset), value, "the row at byte {offset}");
+        }
+        for (offset, value) in [
+            (128, 7),
+            (132, 11),
+            (136, 13),
+            (140, 17),
+            (144, 19),
+            (148, 23),
+            (152, 29),
+        ] {
+            assert_eq!(uint_at(offset), value, "the word at byte {offset}");
+        }
+        assert_eq!(uint_at(156), 0, "the pad word is not written");
     }
 }

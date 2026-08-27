@@ -432,6 +432,18 @@ fn an_emissive_material_adds_its_radiance_and_scales_nothing() {
 /// that. That ordering is a real gap rather than a test convenience, and
 /// `docs/backlog.md` carries it.
 fn fogged_cube_hdr(fog: Fog) -> HdrTarget {
+    fogged_cube_hdr_via(fog, false)
+}
+
+/// [`fogged_cube_hdr`], with the medium integrated by whichever of the two paths
+/// `froxels` names.
+///
+/// `false` is `mesh.slang`'s closed form, which every fog test above measures.
+/// `true` is `docs/plan/51-volumetrics.md`'s froxel volume: three passes, and
+/// the fragment stage's own density zeroed so the air is charged once. The two
+/// are the same medium along the same rays, which is what makes one frame
+/// evidence about the other.
+fn fogged_cube_hdr_via(fog: Fog, froxels: bool) -> HdrTarget {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
@@ -440,7 +452,8 @@ fn fogged_cube_hdr(fog: Fog) -> HdrTarget {
     renderer.set_effect_request(EffectRequest {
         programmatic: EffectOverride::none()
             .force(RenderEffects::ANTIALIASING, Some(false))
-            .force(RenderEffects::REFLECTIONS, Some(false)),
+            .force(RenderEffects::REFLECTIONS, Some(false))
+            .force(RenderEffects::VOLUMETRIC_FOG, Some(froxels)),
         ..EffectRequest::default()
     });
     renderer.set_fog(fog);
@@ -470,6 +483,31 @@ fn fogged_cube_hdr(fog: Fog) -> HdrTarget {
 /// lets the same transmittance be recovered a **second** way — as `B / A` —
 /// with no knowledge of the fog colour at all.
 const FOG_SCATTER: [f32; 3] = [8.0, 0.0, 0.0];
+
+/// How far the froxel column's transmittance may sit from the closed form's at
+/// this fixture's extent — see
+/// [`the_froxel_volume_integrates_the_same_medium_the_closed_form_does`].
+///
+/// **Measured, not chosen.** The gap is the tile-centre quantisation, so it
+/// grows with the medium and then falls again as the frame saturates: swept on
+/// radv over densities from `0.02` to `0.6`, it rises from `0.0025` to a peak of
+/// `0.0113` around `0.4` and falls back to `0.0099`. The test runs at `0.15`,
+/// where it is `0.0082`. This is the peak of that whole sweep rounded up, so the
+/// bound does not depend on which density the fixture happens to use — and it is
+/// still an order of magnitude under the `0.13` a one-cell slice-boundary
+/// disagreement between the two shaders produced, which is the mistake it caught.
+const FROXEL_TRACKS: f32 = 0.012;
+
+/// How far the froxel column's doubled transmittance may sit from the square of
+/// its single one — see
+/// [`doubling_the_density_squares_the_transmittance_through_the_froxel_volume`].
+///
+/// **Measured, not chosen.** This one moves the *other* way with the medium —
+/// it is `Rgba16Float`'s precision on a transmittance near one rather than a
+/// quantisation of the column — swept on radv from `0.0016` at a density of
+/// `0.02` down to `0.0002` at `0.4`. The test runs at `0.15`, where it is
+/// `0.0006`; this is the peak of the sweep rounded up.
+const FROXEL_SQUARES: f32 = 0.002;
 
 /// Uniform fog of a given density: a zero falloff is air that does not thin
 /// with height, so the optical depth is `density * distance` exactly.
@@ -602,6 +640,154 @@ fn doubling_the_fog_density_squares_the_transmittance() {
         thickest < 0.9,
         "the thickest fog left {thickest} of the radiance, so this test would \
          have passed on a shader that ignored the density entirely"
+    );
+}
+
+/// **The froxel volume is exactly the identity at zero density.**
+///
+/// The off-switch this effect needs and cannot get from its own bit. Three
+/// passes run on every frame the effect is on, whatever the medium is, so
+/// "nobody set a fog" has to be a value rather than an absence: every froxel's
+/// transmittance is exactly one and its radiance exactly zero, and
+/// `volumetric_composite.slang` multiplies by that one and adds those zeroes.
+///
+/// Compared against the *analytic* path's own zero-density frame rather than
+/// against itself, so it also says the two paths agree somewhere — a composite
+/// that scaled or tinted whatever it read would fail here before any medium
+/// existed to blame.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_froxel_volume_is_exactly_the_identity_at_zero_density() {
+    let analytic = fogged_cube_hdr_via(uniform_fog(0.0), false);
+    let froxels = fogged_cube_hdr_via(uniform_fog(0.0), true);
+    assert_eq!(
+        analytic.0, froxels.0,
+        "the froxel volume moved a frame with no medium in it, so its composite is \
+         reaching pixels through a path that does not read the density"
+    );
+}
+
+/// **The froxel volume integrates the same medium the closed form does.**
+///
+/// Rung 1a of `docs/plan/51-volumetrics.md` has no light loop in it, so the
+/// column it integrates is algebraically the exponential `mesh.slang`
+/// composites: a single-scattering albedo of one against an isotropic
+/// environment. The two frames therefore have to agree — and this is the only
+/// thing that says the buffer, the two dispatches, the prefix scan and the
+/// composite are wired to each other at all. Every one of them can be wrong in a
+/// way that still produces a plausibly foggy picture.
+///
+/// **They agree closely rather than exactly**, and the gap is a design decision
+/// rather than a defect: the column is built along each *tile's* centre ray, and
+/// a pixel elsewhere in the tile looks along a slightly longer or shorter one.
+/// At this fixture's extent the grid is four tiles by three, which is about as
+/// coarse as it ever gets — [`FROXEL_TRACKS`] is what that measures out to, and
+/// it is measured rather than chosen. Rung 3's reprojection is what shrinks it;
+/// see topic 51.
+///
+/// The relation is checked on the *transmittance* rather than on the radiance,
+/// for `doubling_the_fog_density_squares_the_transmittance`'s reason: green is
+/// the channel [`FOG_SCATTER`] leaves alone, so `B / A` recovers what the medium
+/// did with no knowledge of the medium's colour.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_froxel_volume_integrates_the_same_medium_the_closed_form_does() {
+    const DENSITY: f32 = 0.15;
+    const LIT_FLOOR: f32 = 0.05;
+
+    let clear = fogged_cube_hdr_via(uniform_fog(0.0), false);
+    let analytic = fogged_cube_hdr_via(uniform_fog(DENSITY), false);
+    let froxels = fogged_cube_hdr_via(uniform_fog(DENSITY), true);
+
+    let mut checked = 0usize;
+    let mut worst = 0.0f32;
+    let mut thickest = 1.0f32;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let [_, ag, _, _] = clear.pixel(x, y);
+            if ag <= LIT_FLOOR {
+                continue;
+            }
+            let closed = analytic.pixel(x, y)[1] / ag;
+            let marched = froxels.pixel(x, y)[1] / ag;
+            worst = worst.max((closed - marched).abs());
+            thickest = thickest.min(closed);
+            checked += 1;
+        }
+    }
+
+    eprintln!(
+        "crcbl mesh e2e: volumetrics — {checked} texel(s), worst transmittance gap {worst:.4}, \
+         thickest closed-form transmittance {thickest:.4}"
+    );
+    assert!(
+        checked > 1000,
+        "only {checked} texels carried the mesh, so this measured almost nothing"
+    );
+    assert!(
+        thickest < 0.9,
+        "the thickest fog left {thickest} of the radiance, so both paths would have \
+         agreed on a shader that ignored the density entirely"
+    );
+    assert!(
+        worst <= FROXEL_TRACKS,
+        "the froxel volume and the closed form disagree by {worst} somewhere, past the \
+         {FROXEL_TRACKS} this grid's tile-centre rays account for — the column is not \
+         integrating the medium the fragment stage integrates"
+    );
+}
+
+/// **The froxel path thickens by the same exponential law.**
+///
+/// [`doubling_the_fog_density_squares_the_transmittance`]'s claim, asked of the
+/// other path. The test above says the two paths agree at one density, which a
+/// composite that happened to land there — a fixed scale, say — would also
+/// satisfy; this says the froxel column responds to the medium the way an
+/// optical depth does, which nothing that is not integrating one will.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn doubling_the_density_squares_the_transmittance_through_the_froxel_volume() {
+    const DENSITY: f32 = 0.15;
+    const LIT_FLOOR: f32 = 0.05;
+
+    let clear = fogged_cube_hdr_via(uniform_fog(0.0), true);
+    let once = fogged_cube_hdr_via(uniform_fog(DENSITY), true);
+    let twice = fogged_cube_hdr_via(uniform_fog(DENSITY * 2.0), true);
+
+    let mut checked = 0usize;
+    let mut worst = 0.0f32;
+    let mut thickest = 1.0f32;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let [_, ag, _, _] = clear.pixel(x, y);
+            if ag <= LIT_FLOOR {
+                continue;
+            }
+            let single = once.pixel(x, y)[1] / ag;
+            let doubled = twice.pixel(x, y)[1] / ag;
+            worst = worst.max((doubled - single * single).abs());
+            thickest = thickest.min(single);
+            checked += 1;
+        }
+    }
+
+    eprintln!(
+        "crcbl mesh e2e: volumetrics — {checked} texel(s), worst squaring gap {worst:.4}, \
+         thickest transmittance {thickest:.4}"
+    );
+    assert!(
+        checked > 1000,
+        "only {checked} texels carried the mesh, so this measured almost nothing"
+    );
+    assert!(
+        thickest < 0.9,
+        "the thickest fog left {thickest} of the radiance, so this would have passed \
+         on a column that ignored the density entirely"
+    );
+    assert!(
+        worst <= FROXEL_SQUARES,
+        "doubling the density moved the froxel column's transmittance off its square by \
+         {worst}, past the {FROXEL_SQUARES} the slice split accounts for"
     );
 }
 

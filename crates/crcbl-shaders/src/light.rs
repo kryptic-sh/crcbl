@@ -115,6 +115,22 @@ pub const CLUSTER_NEAR: f32 = 0.1;
 /// `light_cluster.slang`'s per-light depth cut.
 pub const CLUSTER_FAR: f32 = 1000.0;
 
+/// The ratio between one depth slice's start and the next:
+/// `(CLUSTER_FAR / CLUSTER_NEAR)^(1 / CLUSTER_DEPTH_SLICES)`.
+///
+/// The same split [`slice_near`] writes as a power, named because
+/// `volumetric.slang` and `volumetric_composite.slang` walk it as a **chain of
+/// multiplies** rather than calling `pow`. That is not a micro-optimisation: a
+/// slice boundary is an integer index in `light_cluster.slang`, where a
+/// last-place disagreement changes nothing, and an endpoint of an optical-depth
+/// integral in the volumetric pair, where it reaches a colour and
+/// `docs/plan/44-lighting.md`'s shading rule applies. A multiply chain is exact
+/// arithmetic on every target and has no add in it for a compiler to contract.
+///
+/// `the_slice_ratio_is_the_split_it_claims` is what holds the constant to the
+/// power it stands for.
+pub const SLICE_RATIO: f32 = 1.467_799_3;
+
 /// Bytes in the clustering pass's parameter block, matching
 /// `struct LightClusterParams` in `shaders/light_cluster.slang`.
 ///
@@ -460,6 +476,35 @@ mod tests {
                     "{file} must declare `{declaration}`"
                 );
             }
+        }
+    }
+
+    /// [`SLICE_RATIO`] really is the split it claims, and walking it forward
+    /// lands on the same boundaries [`slice_near`] computes.
+    ///
+    /// The two forms are the two halves of one grid: `light_cluster.slang`
+    /// calls `pow`, and the volumetric pair multiplies. A constant transcribed
+    /// with one digit wrong would compile, cut the frustum into slices that are
+    /// still monotonic, and put the medium's boundaries somewhere the light
+    /// grid's are not — which no image would report as an error.
+    #[test]
+    fn the_slice_ratio_is_the_split_it_claims() {
+        let wanted = f64::from(CLUSTER_FAR / CLUSTER_NEAR)
+            .powf(1.0 / f64::from(CLUSTER_DEPTH_SLICES)) as f32;
+        assert_eq!(
+            SLICE_RATIO, wanted,
+            "SLICE_RATIO is not the ratio of the exponential split"
+        );
+
+        let mut walked = CLUSTER_NEAR;
+        for index in 0..=CLUSTER_DEPTH_SLICES {
+            let error = (walked - slice_near(index)).abs() / slice_near(index);
+            assert!(
+                error < 1e-5,
+                "slice {index} starts at {walked} by multiplication and {} by power",
+                slice_near(index)
+            );
+            walked *= SLICE_RATIO;
         }
     }
 

@@ -406,6 +406,34 @@ dxil = vertexMain:dxil/upscale.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1
 dxil = fragmentMain:dxil/upscale.fragmentMain.dxil:ecbf3ac076c1e09ffea2192389c2d934f9b9c2dcef1e1110dad6bc75da3559cf
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[volumetric]
+source = shaders/volumetric.slang
+source-sha256 = eb3ff6b1b85e572f61b6a0b3ede83801df5361c8e590eaea5744781f8b156361
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/volumetric.spv
+spirv-sha256 = d1b2cefb7107f72c1801e627b552ed45a375ce10e1903c172215c23b2dd2c322
+wgsl = wgsl/volumetric.wgsl
+wgsl-sha256 = e2fe97d800a5317dfbb063314ce6854a6a451fd3c4914c322e33325b52e47f28
+msl = msl/volumetric.metal
+msl-sha256 = 22e43154f3a3b6cddc0e4fed59443ef58753f1bf61294e259fbb9917796573cd
+dxil = scatterMain:dxil/volumetric.scatterMain.dxil:7a460680cdeb4b3decf6a9d5c3f9fb2a50705209781fff6291c22cd99cabab10
+dxil = integrateMain:dxil/volumetric.integrateMain.dxil:2c3915232587d81f30eddca322fdcf6970ef891e24ec027924d83219cf1fc9ae
+entry-points = scatterMain:glcompute, integrateMain:glcompute
+
+[volumetric_composite]
+source = shaders/volumetric_composite.slang
+source-sha256 = 0b017957c4c0be7a21962d78004be1a1ea20ba50640719a9e789baf2aef68db7
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/volumetric_composite.spv
+spirv-sha256 = 1593bb3ce4dbf047e2ea81b1a2190348c476995921c4c1e364b3511a2943e04d
+wgsl = wgsl/volumetric_composite.wgsl
+wgsl-sha256 = f2a70f6f72dd47f5cbccbb8a01a19df405d338cde774292ccadc04cef6c06d9f
+msl = msl/volumetric_composite.metal
+msl-sha256 = 381c4ef9b48203c95f13f3370f0272ce55bf9caccef94039824b42f7c8f2faaf
+dxil = vertexMain:dxil/volumetric_composite.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/volumetric_composite.fragmentMain.dxil:825643cf3068907f6f2c0a1d63c3866a5939b7116dff957cf3f9554ded7afdc7
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [zero_dispatch_probe]
 source = shaders/zero_dispatch_probe.slang
 source-sha256 = abc48dcabe1622f0171461d5bc28c9940bf2480cdf25b910a68bcd5dbb389bf3

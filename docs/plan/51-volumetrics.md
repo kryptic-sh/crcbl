@@ -1,8 +1,9 @@
 # Topic 51 — Volumetrics: height fog, the froxel column, and light shafts
 
-Written 2026-08-27, when the arithmetic landed and the passes did not. Its place
-in the set is [18-render-features.md](18-render-features.md)'s index; what a
-current engine ships and where this one stands against it is
+Written 2026-08-27, when the arithmetic landed and the passes did not; the
+plumbing landed the same day. Its place in the set is
+[18-render-features.md](18-render-features.md)'s index; what a current engine
+ships and where this one stands against it is
 [43-render-standards.md](43-render-standards.md) §4, which now points here for
 the froxel half.
 
@@ -20,9 +21,22 @@ Henyey-Greenstein, the angular half; `integrate_slice` is what one slice of a
 column owes the composite, the radiance it adds and the fraction it transmits,
 with the self-attenuation term that makes slicing not change the picture.
 
-**Not built.** Everything that puts either of those on a GPU per froxel: the
-buffer, the two compute passes, the composite. Nothing in any shader reads
-`crcbl_shaders::volumetric` yet.
+**Built.** The frame that carries a column — rung 1a. `volumetric.slang` cuts
+the frustum into the same froxels `light_cluster.slang` does and writes what
+each slab of air scatters and transmits, then scans each column into an
+exclusive prefix; `volumetric_composite.slang` reads that prefix, integrates the
+last partial slice along the pixel's own ray and composites over the frame.
+`crcbl_render::volumetric` owns the three passes and
+`RenderEffects::VOLUMETRIC_FOG` switches them on — off by default, and the frame
+block's fog density is zeroed when they run, so the medium is charged once.
+
+**Not built.** The light loop — rung 1b. Nothing in `scatterMain` reads a light
+or a shadow cascade yet, so the column's single-scattering albedo is one against
+an isotropic environment, which is algebraically the closed form `mesh.slang`
+was already compositing. That equality is what `crcbl`'s `mesh_e2e` measures,
+and it is the only reason a rung with no shaft in it is worth landing: it proves
+the buffer, the two dispatches, the scan and the composite are wired to each
+other before a light is asked of them.
 
 ## The decisions
 
@@ -126,7 +140,8 @@ sunlight through a window is the thing anyone means by volumetrics.
 
 | Rung                                                  | What it buys                                                                     | What it costs                                                                                                   |
 | ----------------------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| **1 — the sun's shaft**                               | Light shafts from the directional light, the effect anyone means by the word     | The froxel buffer, a scatter pass, an integrate pass, a composite pass, and the cascade lookup copied once      |
+| **1a — the column** _(built)_                         | The frame a shaft will be drawn into, proved against the closed form             | The froxel buffer, a scatter pass, an integrate pass and a composite pass                                       |
+| **1b — the sun's shaft**                              | Light shafts from the directional light, the effect anyone means by the word     | The cascade lookup copied once into `scatterMain`, and the drift guard that enumerates the copy                 |
 | **2 — punctual lights**                               | Glow around every point and spot light, cones made visible                       | The froxel light list in the scatter pass, and the attenuation and cone copy that goes with it                  |
 | **3 — a 3D target and temporal reprojection**         | The filtered lookup, and enough samples per froxel to stop a shaft from crawling | A volume in the transient pool, the engine's first 3D image on four backends, and a history buffer to reproject |
 | **4 — a density field rather than a constant medium** | Fog banks, ground mist, a medium that is somewhere rather than everywhere        | A source for the field, which is a content question and not only a rendering one                                |
@@ -147,14 +162,29 @@ exactly one of them.
 
 What the passes owe on top of that is the part the host cannot see:
 
-- **The buffer holds what the host says it should.** A readback of the
-  scattering buffer for a scene with one directional light and a known medium,
-  compared per froxel against `crcbl_shaders::volumetric` on the CPU. This is
-  the rung-1 gate and it needs no golden image at all.
-- **Doubling the medium's density squares the column's transmittance**, the same
-  law `doubling_the_fog_density_squares_the_transmittance` holds the closed form
-  to, now measured through the froxel path. A linear falloff passes a golden and
-  fails this.
+- **The column is the closed form while the albedo is one.** _Built_ —
+  `the_froxel_volume_integrates_the_same_medium_the_closed_form_does` in
+  `crcbl`'s `mesh_e2e` draws the fixture cube twice under the same medium, once
+  through each path, and compares the transmittance texel by texel. It is the
+  rung-1a gate and it needs no golden image at all. It caught the mistake it was
+  written for: the two shaders disagreed by one cell about where a slice begins,
+  which drew a plausibly foggy frame and moved the transmittance by `0.13`
+  against the `0.008` the tile-centre quantisation accounts for.
+- **Switching the effect on with no medium is exactly the identity.** _Built_ —
+  `the_froxel_volume_is_exactly_the_identity_at_zero_density`, byte for byte
+  against the analytic path's own zero-density frame. Three passes run whatever
+  the medium is, so "nobody set a fog" has to be a value rather than an absence.
+- **Doubling the medium's density squares the column's transmittance.** _Built_
+  — `doubling_the_density_squares_the_transmittance_through_the_froxel_volume`,
+  the same law `doubling_the_fog_density_squares_the_transmittance` holds the
+  closed form to, now measured through the froxel path. A linear falloff passes
+  a golden and fails this.
+- **The buffer holds what the host says it should.** Not built: a readback of
+  the scattering buffer compared per froxel against `crcbl_shaders::volumetric`
+  on the CPU. The frame-level equality above is the cheaper statement of the
+  same thing and is what rung 1a shipped with; a per-froxel readback is what
+  will separate a wrong scatter from a wrong scan once the two stop being
+  algebraically equal at rung 1b.
 - **A froxel in shadow scatters nothing.** The observable that separates a real
   shaft from a uniform glow: the same medium, the same light, an occluder moved
   in and out, and the column behind the occluder going dark. Without it the pass

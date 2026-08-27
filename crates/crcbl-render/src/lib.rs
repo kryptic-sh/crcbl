@@ -159,6 +159,7 @@ pub mod timing;
 pub mod transient;
 pub mod ui_pass;
 mod upscale;
+mod volumetric;
 
 pub use button_skin::{ButtonSkin, screen_rect_to_target};
 pub use camera::{Camera, DirectionalLight, Fog, Projection, Sky};

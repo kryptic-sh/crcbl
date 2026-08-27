@@ -114,6 +114,25 @@ bitflags::bitflags! {
         /// effect of the pass arriving. `docs/plan/18-render-features.md`'s
         /// antialiasing section is where that ladder is written down.
         const ANTIALIASING = 1 << 4;
+        /// Volumetric fog — the froxel scatter, the column scan that turns it
+        /// into a prefix, and the fullscreen composite over the frame.
+        ///
+        /// `docs/plan/51-volumetrics.md`'s ladder. **The third bit not in
+        /// [`RenderEffects::DEFAULT_STACK`], and for a reason neither of the
+        /// other two has**: this one does not add a term, it *moves* one. The
+        /// medium it integrates is the same exponential height fog `mesh.slang`
+        /// composites analytically, so a frame that ran both would charge the
+        /// air twice — [`ForwardRenderer::add_passes`] zeroes the frame block's
+        /// density when this is on, and the froxel path owns the medium
+        /// instead.
+        ///
+        /// A view with [`Fog::NONE`](crate::Fog::NONE) draws the same frame
+        /// either way, exactly: a zero density gives every froxel a
+        /// transmittance of one and no radiance, and the composite multiplies
+        /// by that one and adds those zeroes.
+        ///
+        /// [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
+        const VOLUMETRIC_FOG = 1 << 5;
     }
 }
 
@@ -133,6 +152,10 @@ impl RenderEffects {
     /// [`ANTIALIASING`](Self::ANTIALIASING) is out for a different reason,
     /// written on the bit itself: it belongs here on the merits and is held out
     /// only until the re-bless it forces is taken deliberately.
+    /// [`VOLUMETRIC_FOG`](Self::VOLUMETRIC_FOG) is out for a third: it does not
+    /// add a term to the picture, it takes one away from the fragment stage and
+    /// computes it somewhere else, and which of the two a view wants is a cost
+    /// question rather than a correctness one.
     ///
     /// So the default is the most correct picture and no lens, and a view that
     /// wants the lens asks for it: through its own stack, or through
@@ -142,7 +165,7 @@ impl RenderEffects {
     /// [`camera`](EffectRequest::camera) holds, and it is why adding the bloom
     /// bit — and then the antialiasing bit — did not change a single frame the
     /// engine already drew.
-    pub const DEFAULT_STACK: Self = Self::all().difference(Self::BLOOM);
+    pub const DEFAULT_STACK: Self = Self::all().difference(Self::BLOOM.union(Self::VOLUMETRIC_FOG));
 
     /// Every effect and the one word a report spells it with, in bit order.
     ///
@@ -162,6 +185,7 @@ impl RenderEffects {
         (Self::REFLECTIONS, "ssr"),
         (Self::BLOOM, "bloom"),
         (Self::ANTIALIASING, "aa"),
+        (Self::VOLUMETRIC_FOG, "vfog"),
     ];
 
     /// This set as a debug panel row and a headless summary line spell it:
@@ -432,8 +456,8 @@ mod tests {
         );
     }
 
-    /// **The default stack is every effect but the lens one, and a view that
-    /// wants the lens can still get it.**
+    /// **The default stack is every effect but the two a view has to ask for,
+    /// and a view that wants them can still get them.**
     ///
     /// Two claims, and the second is what keeps the first from being a way of
     /// switching bloom off for good. The camera layer is a *request*, not a
@@ -443,22 +467,23 @@ mod tests {
     /// consumer that does exactly that.
     ///
     /// What it guards is the claim [`RenderEffects::DEFAULT_STACK`]'s docs make:
-    /// the lens is the effect a view has to ask for, and it is the **only** one.
-    /// A default that quietly included it would have re-blessed every golden
-    /// image in the tree, and each of them would still have been a plausible
-    /// picture — which is the whole difficulty: a wrongly-defaulted post pass
-    /// does not look like a bug.
+    /// the lens and the froxel volume are what a view has to ask for, and they
+    /// are the **only** two. A default that quietly included one would have
+    /// re-blessed every golden image in the tree, and each of them would still
+    /// have been a plausible picture — which is the whole difficulty: a
+    /// wrongly-defaulted post pass does not look like a bug.
     ///
     /// The antialiasing resolve was held out on the same terms for exactly one
     /// change, which is what re-blessed the suite; it is in the default now, and
-    /// this asserts that the lens did not follow it in.
+    /// this asserts that neither of the other two followed it in.
     #[test]
     fn the_default_stack_is_the_light_transport_effects_and_a_view_can_still_ask() {
         assert_eq!(
             RenderEffects::DEFAULT_STACK,
-            RenderEffects::all().difference(RenderEffects::BLOOM),
+            RenderEffects::all()
+                .difference(RenderEffects::BLOOM.union(RenderEffects::VOLUMETRIC_FOG)),
         );
-        let post = RenderEffects::BLOOM;
+        let post = RenderEffects::BLOOM.union(RenderEffects::VOLUMETRIC_FOG);
         assert!(!EffectRequest::default().camera.contains(post));
         assert!(
             !EffectRequest::default()
@@ -479,7 +504,8 @@ mod tests {
         let forced = EffectRequest {
             programmatic: EffectOverride::none()
                 .force(RenderEffects::BLOOM, Some(true))
-                .force(RenderEffects::ANTIALIASING, Some(true)),
+                .force(RenderEffects::ANTIALIASING, Some(true))
+                .force(RenderEffects::VOLUMETRIC_FOG, Some(true)),
             ..EffectRequest::default()
         };
         assert_eq!(forced.resolve(RenderEffects::all()), RenderEffects::all());

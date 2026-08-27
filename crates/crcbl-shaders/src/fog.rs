@@ -265,6 +265,24 @@ pub fn transmittance(optical_depth: f32) -> f32 {
 mod tests {
     use super::*;
 
+    /// Every shader source carrying a copy of this module's arithmetic.
+    ///
+    /// Enumerated rather than globbed so a reader can see the whole list, and
+    /// checked against the directory by
+    /// `every_shader_that_spells_the_exponential_is_guarded` so the list
+    /// cannot fall behind it.
+    const SHADERS_WITH_A_COPY: [(&str, &str); 3] = [
+        ("mesh.slang", include_str!("../shaders/mesh.slang")),
+        (
+            "volumetric.slang",
+            include_str!("../shaders/volumetric.slang"),
+        ),
+        (
+            "volumetric_composite.slang",
+            include_str!("../shaders/volumetric_composite.slang"),
+        ),
+    ];
+
     /// `f64::exp` is the oracle throughout: a test is not shading, so the rule
     /// this module exists to satisfy does not bind here.
     fn oracle(x: f32) -> f64 {
@@ -319,54 +337,120 @@ mod tests {
             .collect()
     }
 
-    /// Every constant this module fixes, against what `mesh.slang` spells.
+    /// Every constant this module fixes, against what every shader carrying a
+    /// copy spells.
     ///
     /// There is no `#include` in these shaders, so the fog arithmetic exists
-    /// twice and nothing but this holds the copies together. It is the guard
-    /// `crate::tonemap`'s `the_shader_spells_the_same_constants` is, for the
-    /// same reason: a slip in one digit compiles, renders a plausible frame and
-    /// passes every golden blessed after the slip.
+    /// three times and nothing but this holds the copies together. It is the
+    /// guard `crate::tonemap`'s `the_shader_spells_the_same_constants` is, for
+    /// the same reason: a slip in one digit compiles, renders a plausible frame
+    /// and passes every golden blessed after the slip.
+    ///
+    /// **Every source is enumerated here**, and adding a fourth copy without
+    /// adding it to this list is the way the guard silently stops covering it —
+    /// which is why `every_shader_that_spells_the_exponential_is_guarded` counts
+    /// the copies in the directory rather than trusting this list to be whole.
     #[test]
     fn the_shader_spells_the_same_constants() {
-        let source = include_str!("../shaders/mesh.slang");
-        for (value, name) in [
-            (LOG2_E, "FOG_LOG2_E"),
-            (LN2_HI, "FOG_LN2_HI"),
-            (LN2_LO, "FOG_LN2_LO"),
-            (MAX_ARGUMENT, "FOG_MAX_ARGUMENT"),
-            (MAX_OPTICAL_DEPTH, "FOG_MAX_OPTICAL_DEPTH"),
-            (SERIES_CUTOFF, "FOG_SERIES_CUTOFF"),
-        ] {
+        for (file, source) in SHADERS_WITH_A_COPY {
+            for (value, name) in [
+                (LOG2_E, "FOG_LOG2_E"),
+                (LN2_HI, "FOG_LN2_HI"),
+                (LN2_LO, "FOG_LN2_LO"),
+                (MAX_ARGUMENT, "FOG_MAX_ARGUMENT"),
+                (MAX_OPTICAL_DEPTH, "FOG_MAX_OPTICAL_DEPTH"),
+                (SERIES_CUTOFF, "FOG_SERIES_CUTOFF"),
+            ] {
+                assert_eq!(
+                    shader_scalar(source, name),
+                    value,
+                    "{file}'s {name} is not this module's"
+                );
+            }
             assert_eq!(
-                shader_scalar(source, name),
-                value,
-                "mesh.slang's {name} is not this module's"
+                shader_array(source, "FOG_KERNEL"),
+                KERNEL.to_vec(),
+                "{file}'s FOG_KERNEL is not this module's KERNEL"
+            );
+            assert_eq!(
+                shader_array(source, "FOG_RATIO_KERNEL"),
+                RATIO_KERNEL.to_vec(),
+                "{file}'s FOG_RATIO_KERNEL is not this module's RATIO_KERNEL"
+            );
+
+            // And that the copy is still *run*: a constant table the shader
+            // stopped reading would pass every comparison above.
+            assert!(
+                source.contains("float fog_exp_neg(float x)"),
+                "{file} no longer defines fog_exp_neg, so its constants feed nothing"
             );
         }
-        assert_eq!(
-            shader_array(source, "FOG_KERNEL"),
-            KERNEL.to_vec(),
-            "mesh.slang's FOG_KERNEL is not this module's KERNEL"
-        );
-        assert_eq!(
-            shader_array(source, "FOG_RATIO_KERNEL"),
-            RATIO_KERNEL.to_vec(),
-            "mesh.slang's FOG_RATIO_KERNEL is not this module's RATIO_KERNEL"
-        );
 
-        // And that the fragment stage still *runs* it: a constant table the
-        // shader stopped reading would pass every comparison above.
-        for spelling in [
-            "float fog_exp_neg(float x)",
-            "fog_optical_depth(frame.fog_params.x, frame.fog_params.y,",
-            "lit = lit * fog_survives + frame.fog_color.rgb * (1.0 - fog_survives);",
+        // Each source's own call site, which is a different line in each of
+        // them and is what says the exponential reaches a colour there.
+        for (file, source, spelling) in [
+            (
+                "mesh.slang",
+                include_str!("../shaders/mesh.slang"),
+                "lit = lit * fog_survives + frame.fog_color.rgb * (1.0 - fog_survives);",
+            ),
+            (
+                "volumetric.slang",
+                include_str!("../shaders/volumetric.slang"),
+                "return float4(params.fog_color.rgb * (1.0 - survives), survives);",
+            ),
+            (
+                "volumetric_composite.slang",
+                include_str!("../shaders/volumetric_composite.slang"),
+                "float partial_survives = fog_exp_neg(tau);",
+            ),
         ] {
             assert!(
                 source.contains(spelling),
-                "mesh.slang no longer contains `{spelling}`, so the constants \
-                 here are feeding nothing"
+                "{file} no longer contains `{spelling}`, so the constants here \
+                 are feeding nothing"
             );
         }
+    }
+
+    /// Every shader in the directory that spells the exponential is one this
+    /// guard reads.
+    ///
+    /// The list above is hand-written, and a hand-written list of copies is
+    /// exactly the thing that goes stale the day someone adds a fourth. This
+    /// counts the definitions on disk instead: a copy that nobody added to
+    /// [`SHADERS_WITH_A_COPY`] fails here rather than going unguarded.
+    #[test]
+    fn every_shader_that_spells_the_exponential_is_guarded() {
+        let listed: Vec<&str> = SHADERS_WITH_A_COPY.iter().map(|(file, _)| *file).collect();
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders"))
+            .expect("the shader directory")
+        {
+            let path = entry.expect("a directory entry").path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "slang")
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("a readable shader");
+            if source.contains("float fog_exp_neg(float x)") {
+                found.push(
+                    path.file_name()
+                        .expect("a file name")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        found.sort();
+        let mut listed = listed;
+        listed.sort_unstable();
+        assert_eq!(
+            found, listed,
+            "the shaders defining fog_exp_neg are not the ones this module guards"
+        );
     }
 
     #[test]

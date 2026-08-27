@@ -15,28 +15,36 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
-### The froxel volumetric pass has its arithmetic and no frame (2026-08-27)
+### The froxel column is built and has no light in it (2026-08-27)
 
-`crcbl_shaders::volumetric` is built and proved — `phase` and `integrate_slice`,
-with six sabotages red-checked against eight tests — and **nothing on a GPU
-reads it**. What the frame still owes, rung by rung, is
-`docs/plan/51-volumetrics.md`, written the same day: the target, the two compute
-passes, the composite, and the drift guard the second copy of the light loop
-will need.
+`crcbl_render::volumetric`'s three passes are built, switched by
+`RenderEffects::VOLUMETRIC_FOG`, and proved against the closed form on radv.
+What is left, rung by rung, is `docs/plan/51-volumetrics.md`; rung 1b — the
+cascade lookup inside `scatterMain`, and the drift guard the second copy of the
+light loop will need — is the next one.
 
-Two things belong here rather than there, because they are gaps rather than
+Three things belong here rather than there, because they are gaps rather than
 plans:
 
-- **Nothing is verified on hardware.** Every claim `crcbl_shaders::volumetric`
-  makes is host arithmetic checked against `f64` oracles and Simpson quadrature.
-  How it composites on four backends is unknown until a pass exists to bless,
-  and the six sabotages say nothing about that.
-- **The two media double-charge for absorption, and no test would catch it
-  today.** Height fog's `optical_depth` in `mesh.slang` and a froxel column's
-  accumulated transmittance are the same air integrated twice. `51-volumetrics`
-  states the rule — the column owns the transmittance when it is present — but
-  the frame has no switch for it and the mesh goldens absorb a whole-frame
-  darkening of a few per cent, which is measured further down this file.
+- **Only Vulkan on radv has run it.** The two pipelines are built on every frame
+  whatever the effect bit says, so a WGSL, MSL or DXIL artifact that no backend
+  could compile reds CI immediately — but nothing _dispatches_ them outside
+  `mesh_e2e` on Vulkan, because the effect is off by default and no sample or
+  demo asks for it. The browser gate in particular runs the composite through no
+  pixel. A demo that switches it on is what closes this, and `51-volumetrics`
+  rung 1b is when it will be worth looking at.
+- **The composite is before the reflection resolve, so a reflection arrives
+  unfogged.** The same ordering gap `mesh.slang`'s closed form has, recorded
+  further down this file, and the froxel path inherited it deliberately: it sits
+  where the analytic fog sat so the two paths are comparable. `51-volumetrics`
+  argues both should move after `ssr_blur.slang` together.
+- **Nothing checks the buffer per froxel.** The rung-1a gate is a frame-level
+  equality against the closed form, which is exact enough to have caught a
+  one-cell slice-boundary disagreement between the two shaders. It cannot
+  separate a wrong scatter from a wrong scan, because at an albedo of one the
+  two compose to the same answer. A readback compared against
+  `crcbl_shaders::volumetric` on the CPU is what will, and it is worth writing
+  when rung 1b breaks that equality.
 
 ### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
 
