@@ -60,6 +60,7 @@ does these, and it is answered in one place:
 | Antialiasing rung 1: **FXAA 3.11**                                                                                                            | P7 — built, in `DEFAULT_STACK`, and the whole of the stack's AA row today                                                                                                                                                                                                                       |
 | Sun CSM (culling-integrated, 3×3 PCF)                                                                                                         | P7 — built. The **cascade debug overlay** is not                                                                                                                                                                                                                                                |
 | ~~Shadow ladder rung 1: **normal-offset bias**~~                                                                                              | P7 — **built 2026-08-28**: `shadow_normal_offset` replaced `shadow_slope`, and it bought back exactly what the fifth decision said it would — the constant term fell from three texels to one. [45-shadows.md](45-shadows.md)'s seventh decision                                                |
+| ~~Shadow ladder rung 2: **cascade cross-fade**~~                                                                                              | P7 — **built 2026-08-28**: a band a tenth of a cascade's reach where both cascades are sampled and mixed. The switch's own luma step across lantern's boundary fell from 33.7 to 5.8. [45-shadows.md](45-shadows.md)'s eighth decision                                                          |
 | Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes                                                                           | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`                                                                                                                                                                                                                |
 | Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats`                                                                         | P7C                                                                                                                                                                                                                                                                                             |
 | Ray-traced shadows + AO                                                                                                                       | P7C                                                                                                                                                                                                                                                                                             |
@@ -86,17 +87,18 @@ under both paths side by side. Exit criteria of the other samples inherit
 ## Risks
 
 - **CSM artifact whack-a-mole** (peter-panning, acne, cascade seams): this risk
-  arrived, and the fifth, sixth and seventh decisions above are the record of
+  arrived, and the fifth through eighth decisions above are the record of
   fighting it — bias denominated in tile texels, slope read off the geometric
-  normal rather than the shading one, and then the slope term moved off the
-  light's axis onto the receiver's own normal. Stable snapping and the golden
-  frames did the work; the debug overlay that was supposed to help is still
-  unbuilt. **It has not finished arriving**: the seventh decision traded
-  lantern's wall-foot strip for a scalloped fringe at one silhouette, and the
-  `cube` browser-path golden that has failed on linux and windows since the
-  2026-08-26 re-tiling was re-blessed by that decision without anything yet
-  saying whether the failure survived it — only a CI run decides, because the
-  runners are SwiftShader and this machine is not.
+  normal rather than the shading one, the slope term moved off the light's axis
+  onto the receiver's own normal, and then the cascade switch itself blended
+  over a band rather than taken as a step. Stable snapping and the golden frames
+  did the work; the debug overlay that was supposed to help is still unbuilt.
+  **It has not finished arriving**: the seventh decision traded lantern's
+  wall-foot strip for a scalloped fringe at one silhouette, and the `cube`
+  browser-path golden that has failed on linux and windows since the 2026-08-26
+  re-tiling was re-blessed by that decision without anything yet saying whether
+  the failure survived it — only a CI run decides, because the runners are
+  SwiftShader and this machine is not.
 - **Post-stack perf in a browser**: each pass is simple, but measure — the horde
   web demo budget (S3) includes the stack. The quality pass adds passes to it:
   SMAA 1x is three where FXAA is one, and a Hi-Z march builds a pyramid before

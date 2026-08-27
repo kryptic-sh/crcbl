@@ -648,6 +648,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `point_shadow`, and `apps/lantern`'s `room.png` and `live.png`. Nothing
   outside a shadow moved.
 
+- **The sun's cascades cross-fade instead of switching.** `mesh.slang`'s cascade
+  lookup is now `cascade_visibility`, and `sun_visibility` calls it for both
+  cascades over a band at the outer edge of the one it selected — a tenth of
+  that cascade's reach — mixing the two by distance. Where the switch used to
+  fall, a shadow edge jumped sideways and a surface biased out of its own shadow
+  on one side was back in it on the other, because a near cascade's texel is a
+  sixth of the outer one's here and both biases are counted in texels.
+
+  Measured on radv along the circle where the two cascades meet on
+  `apps/lantern`'s floor, 4.088 m from the eye: the luma step across the
+  boundary, on the samples the switch owns rather than a shadow edge crossing
+  it, fell from 33.7 to 5.8 on average and from 63.6 to 17.7 at worst, while
+  control circles at 3.6 m and 4.5 m came back byte-identical.
+
+  It costs a second nine-tap PCF for fragments inside the band and nothing for
+  the ones outside it; the outermost cascade has nothing to fade into and never
+  pays. Goldens re-blessed: `apps/lantern`'s `room.png` and `live.png`. Every
+  golden in `crates/crcbl/tests/golden/` still matches.
+
 ### Breaking
 
 - **`GpuInstance` gained `base_vertex` and `INSTANCE_STRIDE` is 96 bytes**,

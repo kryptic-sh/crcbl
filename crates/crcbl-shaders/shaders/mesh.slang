@@ -1599,48 +1599,61 @@ float tile_pcf(uint tile, float2 tile_uv, float reference)
     return visibility / 9.0;
 }
 
-/// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
-/// shadowed, and the values between are the PCF filter.
+/// What fraction of a cascade's reach the fade into the next one takes up.
 ///
-/// `to_light` is the unit vector towards the sun and `n_dot_l` the *unclamped*
-/// Lambert term. A surface facing away from the light is already black from the
-/// diffuse term, and asking the shadow map about it is both wasted work and the
-/// place self-shadowing acne is worst, so it returns early — the caller
-/// multiplies the result into a diffuse term that is zero there anyway.
+/// # Why there is a band at all
 ///
-/// `geometric_normal` is `geometric_normal_of`'s and drives the slope term
-/// alone. The early return above stays on `n_dot_l`, which is the *shading*
-/// normal's: what it says is "this fragment's diffuse term is already zero", and
-/// that is a fact about the normal the shading used.
-float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
-                     float3 geometric_normal)
+/// Cascade selection is a step function of distance to the eye, and everything
+/// a cascade decides changes across that step: the map's resolution — a texel of
+/// the near cascade is a sixth of the outer one's here — and therefore both
+/// biases, which are denominated in texels and so are six times larger on the
+/// far side. Two cascades asked about the same fragment do not answer the same,
+/// and where the step falls that difference is a visible ring: a shadow edge
+/// jumps sideways, and a surface biased out of its own shadow on one side is
+/// back in it on the other.
+///
+/// The fifth decision's texel denomination made that ring *sharper*, not
+/// blunter, and knowingly: it is the price of biasing a near cascade
+/// proportionally less than a far one, which is the whole point of denominating
+/// in texels. So the band is what pays it back — over the last tenth of a
+/// cascade's reach both cascades are sampled and the two answers are mixed by
+/// distance, and the ring becomes a gradient no wider than the band.
+///
+/// # What it costs, and where
+///
+/// A second `cascade_visibility`, which is a second `tile_pcf` — nine more
+/// comparison taps — for the fragments inside the band and nothing at all for
+/// the ones outside it. A tenth of a cascade's reach is a shell, not a volume,
+/// so the fraction of the frame that pays is smaller than a tenth; and the last
+/// cascade has nothing to fade into, so it never pays.
+///
+/// # The number
+///
+/// A tenth. Measured on lantern's fixed camera at 1280×960, walking the floor
+/// circle where cascade 0 meets cascade 1 — an eye-distance of 4.088 m — and
+/// reading the luma either side of it six centimetres apart: the step averaged
+/// **11.28** over the ring with no band, against **2.82** and **3.70** on
+/// control circles at 3.6 m and 4.5 m where no boundary falls, so the seam was
+/// four times the scene's own contrast at that scale. The sweep is in
+/// `docs/plan/45-shadows.md`'s eighth decision.
+static const float CASCADE_FADE_FRACTION = 0.1;
+
+/// One cascade's answer about one fragment: `1.0` outside its box, and the PCF
+/// filter over its map inside it.
+///
+/// Split out of `sun_visibility` so the cross-fade there can ask two cascades
+/// the same question and mix the answers. Everything that depends on *which*
+/// cascade is here, and everything that depends on the *fragment* is in the
+/// caller — which is what makes calling it twice with a different first
+/// argument the whole of the fade.
+float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
+                         float3 geometric_normal)
 {
-    if (n_dot_l <= 0.0)
-    {
-        return 1.0;
-    }
-
-    // The first cascade whose reach covers this fragment. Distance to the eye
-    // rather than view-space z: the splits are radii around the camera, so a
-    // fragment at the edge of the screen and one straight ahead at the same
-    // distance land in the same cascade and the seam is a sphere rather than a
-    // plane the camera can rotate.
-    float eye_distance = length(world_position - frame.camera_position.xyz);
-    uint cascade = SHADOW_CASCADES - 1;
-    for (uint index = 0; index < SHADOW_CASCADES; ++index)
-    {
-        if (eye_distance < frame.cascade_far[index])
-        {
-            cascade = index;
-            break;
-        }
-    }
-
     // The bias, and it is `punctual_visibility`'s exactly: two moves of the
     // world position before it is projected, each a multiple of the world
     // footprint of one texel of *this cascade's* map. A cascade is an
     // orthographic box of `2 * radius` fitted to `SHADOW_TILE` texels, and its
-    // radius is the split distance the selection above read — the same
+    // radius is the split distance the caller's selection read — the same
     // arithmetic `crcbl_render::shadow::cascade_matrix` snaps its origin to.
     //
     // **A number in texels rather than in shadow-clip depth**, which is the
@@ -1698,6 +1711,74 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
     // texel this fragment reads. That is the difference between raising a
     // comparison and taking a different one.
     return tile_pcf(cascade, tile_uv, ndc.z);
+}
+
+/// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
+/// shadowed, and the values between are the PCF filter and the cascade fade.
+///
+/// `to_light` is the unit vector towards the sun and `n_dot_l` the *unclamped*
+/// Lambert term. A surface facing away from the light is already black from the
+/// diffuse term, and asking the shadow map about it is both wasted work and the
+/// place self-shadowing acne is worst, so it returns early — the caller
+/// multiplies the result into a diffuse term that is zero there anyway.
+///
+/// `geometric_normal` is `geometric_normal_of`'s and drives the slope term
+/// alone. The early return above stays on `n_dot_l`, which is the *shading*
+/// normal's: what it says is "this fragment's diffuse term is already zero", and
+/// that is a fact about the normal the shading used.
+float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
+                     float3 geometric_normal)
+{
+    if (n_dot_l <= 0.0)
+    {
+        return 1.0;
+    }
+
+    // The first cascade whose reach covers this fragment. Distance to the eye
+    // rather than view-space z: the splits are radii around the camera, so a
+    // fragment at the edge of the screen and one straight ahead at the same
+    // distance land in the same cascade and the seam is a sphere rather than a
+    // plane the camera can rotate.
+    float eye_distance = length(world_position - frame.camera_position.xyz);
+    uint cascade = SHADOW_CASCADES - 1;
+    for (uint index = 0; index < SHADOW_CASCADES; ++index)
+    {
+        if (eye_distance < frame.cascade_far[index])
+        {
+            cascade = index;
+            break;
+        }
+    }
+
+    float visibility = cascade_visibility(cascade, world_position, to_light, geometric_normal);
+    if (cascade + 1 >= SHADOW_CASCADES)
+    {
+        // The last cascade has nothing to fade into. Everything past its reach
+        // selects it too — the loop's fallback — and gets its answer unmixed,
+        // which the box test inside turns into "lit" soon enough.
+        return visibility;
+    }
+
+    // The band, at the outer edge of this cascade's reach. `reach` is strictly
+    // positive here: the loop only leaves a cascade selected whose far distance
+    // *exceeds* this fragment's, and the one case where it does not — nothing
+    // matched — returned above.
+    float reach = frame.cascade_far[cascade];
+    float band = reach * CASCADE_FADE_FRACTION;
+    float blend = saturate((eye_distance - (reach - band)) / band);
+    if (blend <= 0.0)
+    {
+        return visibility;
+    }
+
+    // The next cascade is guaranteed to contain this fragment, which is what
+    // makes the mix well defined rather than a blend with the `1.0` an outside
+    // fragment gets: the cascades are spheres about the same eye with strictly
+    // growing radii — `crcbl_render::shadow::cascade_matrix` fits every one of
+    // them to `eye` — so anything inside cascade `i` is inside cascade `i + 1`
+    // by construction, not by a margin someone has to maintain.
+    float next = cascade_visibility(cascade + 1, world_position, to_light, geometric_normal);
+    return lerp(visibility, next, blend);
 }
 
 /// How far a punctual light's shadow comparison is moved towards the light, in

@@ -2979,7 +2979,7 @@ mod tests {
         let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
         for (function, offset, constant) in [
             (
-                "sun_visibility",
+                "cascade_visibility",
                 "frame.shadow_params.w",
                 "frame.shadow_params.z",
             ),
@@ -3006,6 +3006,45 @@ mod tests {
             "mesh.slang has grown a slope-scaled depth bias again, and with it the unbounded \
              tangent the clamp existed to cover"
         );
+    }
+
+    /// **The cascade fade grows towards the cascade behind it, over a band at
+    /// the outer edge of the one in front.**
+    ///
+    /// Two ways of writing this draw a plausible frame and neither is the fade:
+    /// a `lerp` with its ends swapped mixes *away* from the outer cascade as a
+    /// fragment leaves the inner one, so the seam moves to the inner edge of the
+    /// band rather than going away; and a band measured from the *near* end of
+    /// the cascade blends across the whole of it, which trades one ring for a
+    /// frame lit by the coarser map throughout. A golden holds neither to
+    /// account — both are smooth, and a re-bless takes whichever it is given.
+    ///
+    /// What it does hold to account is the seam itself, and that is measured
+    /// rather than asserted: `docs/plan/45-shadows.md`'s eighth decision has the
+    /// luma steps either side of lantern's cascade boundary, with and without
+    /// the band, and the sweep that picked `CASCADE_FADE_FRACTION`'s tenth.
+    #[test]
+    fn the_cascade_fade_grows_towards_the_outer_cascade() {
+        let source = include_str!("../shaders/mesh.slang");
+        let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expected in [
+            // The band sits at the outer edge: `blend` is zero until the
+            // fragment is within `band` of this cascade's reach, and one at it.
+            "float band = reach * CASCADE_FADE_FRACTION;",
+            "float blend = saturate((eye_distance - (reach - band)) / band);",
+            // And what it grows towards is the next cascade out, which is the
+            // half a swapped `lerp` would keep silent.
+            "float next = cascade_visibility(cascade + 1, world_position, to_light, \
+             geometric_normal); return lerp(visibility, next, blend);",
+        ] {
+            let wanted = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                squeezed.contains(&wanted),
+                "sun_visibility no longer fades towards the outer cascade over a band at the \
+                 inner one's own outer edge, so the seam the eighth decision measured is back \
+                 or has moved:\n{wanted}"
+            );
+        }
     }
 
     /// **A normal taken through `normal_basis` stays perpendicular to its

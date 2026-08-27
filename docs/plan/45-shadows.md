@@ -307,6 +307,80 @@ was left alone, which is the evidence that nothing outside a shadow moved.
 `crcbl_shaders::mesh`'s `both_shadow_lookups_offset_along_the_facet_normal` is
 what holds the direction after the re-bless, because a re-blessed golden cannot.
 
+### An eighth, taken 2026-08-28: the cascade switch is a band, not an edge
+
+**Where two cascades meet, both are sampled and the answers are mixed by
+distance.** `mesh.slang`'s cascade lookup is now `cascade_visibility`, which
+answers for one named cascade, and `sun_visibility` calls it twice inside a band
+at the outer edge of the cascade it selected: `CASCADE_FADE_FRACTION` of that
+cascade's reach, a tenth, over which `lerp` walks the answer from the near
+cascade's to the far one's.
+
+**Everything a cascade decides changes across the switch**, which is why the
+switch was visible. The near cascade's texel is a sixth of the outer one's here
+— 10.6 mm against 62.5 mm — so both biases, denominated in texels since the
+fifth decision, are six times larger on the far side; and the maps are different
+maps, so a shadow edge lands in a different place. The fifth decision made this
+_sharper_ knowingly: biasing a near cascade proportionally less than a far one
+is the whole point of denominating in texels, and the seam is its bill.
+
+**The seam was measured before it was fixed, and it is not the scene's own
+contrast.** The cascades are spheres about the eye, so cascade 0 meets cascade 1
+in a circle on `apps/lantern`'s floor at an eye-distance of 4.088 m. Walking
+that circle in the fixed-camera frame at 1280×960 and reading the luma 6 cm
+either side of it, 51 samples:
+
+| Circle                  | Mean step | p90   |
+| ----------------------- | --------- | ----- |
+| 3.6 m (no boundary)     | 2.82      | 4.74  |
+| **4.088 m (the split)** | **11.28** | 41.04 |
+| 4.5 m (no boundary)     | 3.70      | 16.22 |
+
+Eight of those 51 samples are the switch's own — a step the band moves, as
+against a shadow edge that crosses the circle and steps either way. On those
+eight the step **fell from 33.70 to 5.76 on average, and from 63.56 to 17.74 at
+worst**; the single largest step on the circle, 78.0 at 279°, is a shadow edge
+and is unmoved, which is what says the metric is reading the right thing. Both
+control circles came back **byte-identical**: the band changes nothing away from
+the boundary.
+
+**The tenth is a knee, not a guess.** Two metrics over the same eight angles —
+the residual step across the boundary, and the steepest centimetre of a radial
+walk from 3.1 m to 4.6 m, which is what sees a gradient that is merely narrower
+rather than gone:
+
+| Fraction | Residual step, mean / max | Steepest cm, mean / max |
+| -------- | ------------------------- | ----------------------- |
+| 0        | 33.70 / 63.56             | 14.91 / 22.59           |
+| 0.05     | 5.95 / 13.89              | 7.82 / 12.56            |
+| **0.1**  | **5.76 / 17.74**          | **6.76 / 12.56**        |
+| 0.2      | 7.52 / 19.56              | 6.82 / 11.07            |
+| 0.3      | 8.17 / 20.19              | 6.74 / 11.07            |
+
+A twentieth already removes the step but leaves the ramp steeper; a fifth and
+above flatten the ramp no further and start giving the residual step back, since
+a wider band hands more of the near cascade's frame to the coarser map. The
+tenth is where both curves stop moving. The 0.3 row is the one to trust least:
+its band opens at 2.86 m and the floor only comes into frame between 2.83 m and
+3.05 m at these angles, so part of its ramp is off the bottom of the image.
+
+**What it costs is a second `tile_pcf` — nine more comparison taps — for the
+fragments inside the band, and nothing at all for the ones outside it.** A band
+is a shell rather than a volume, so the share of the frame that pays is smaller
+than the fraction suggests, and the outermost cascade has nothing to fade into
+and never pays. That share was not measured; there is no shadow-pass timing in
+the tree to measure it against yet.
+
+Goldens re-blessed: `room.png` and `live.png` in `apps/lantern/tests/golden/`,
+at 674 of 49 152 pixels differing (SSIM 0.995797) and 8714 of 691 200 (SSIM
+0.997066). **Every golden in `crates/crcbl/tests/golden/` still matches** — 32
+of 32 render-e2e scenes, unchanged — which is the shape of a fix that only
+touches a cascade boundary: those scenes are small enough that the boundary
+falls outside them. `crcbl_shaders::mesh`'s
+`the_cascade_fade_grows_towards_the_outer_cascade` is what holds the band's
+direction and its position, both of which draw a plausible frame when they are
+wrong.
+
 ### The quality ladder, taken 2026-08-27
 
 What ships, first, because the ladder is only readable against it: **stable
@@ -317,8 +391,9 @@ origin to whole texels — **3×3 hardware PCF through a comparison sampler**,
 which is `mesh.slang`'s `tile_pcf` taking nine `SampleCmpLevelZero` taps one
 atlas texel apart and dividing by nine, the texel-denominated bias of the fifth
 decision, the geometric normal of the sixth, the **normal-offset** direction of
-the seventh, and the **2026-08-26 re-tiling** that bought a second point light
-by shrinking `SHADOW_TILE` rather than growing the image.
+the seventh, the **cascade cross-fade** of the eighth, and the **2026-08-26
+re-tiling** that bought a second point light by shrinking `SHADOW_TILE` rather
+than growing the image.
 
 **The re-tiling has a measured cost, and it is not hypothetical.** Since that
 change the `cube` browser-path golden fails on linux and windows: **64 grossly
@@ -344,11 +419,10 @@ The ladder, in the order it should be climbed:
   has the frames and the two sweeps. It earned back exactly what the fifth
   decision's closing line said it would: the constant term fell from three
   texels to one, and lantern's wall-foot strip went with it.
-- **Cascade cross-fade.** The switch between cascades is hard today, so wherever
-  two cascades meet there is a seam — and the fifth decision made it _more_
-  visible, not less, by biasing a near cascade proportionally less than a far
-  one. A band of overlap blended by the split distance is the standard answer,
-  and it costs a second `tile_pcf` inside the band and nothing outside it.
+- ~~**Cascade cross-fade.**~~ **Built 2026-08-28** — the eighth decision above
+  has the seam's measurement and the sweep that sized the band. It cost what
+  this rung said it would: a second `tile_pcf` inside the band and nothing
+  outside it.
 - **A rotated Poisson-disc PCF kernel.** A wider penumbra at the same tap count,
   which a 3×3 box cannot trade for at any price. **The rotation must be an
   integer-indexed constant table**, for the reason the AO section gives at
