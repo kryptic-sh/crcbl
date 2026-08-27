@@ -478,37 +478,6 @@ container image matching the runner's is the only way to hold the variable still
 from two toward the ceiling is visible without reading the log. Neither was
 attempted.
 
-### `check-doc-citations.sh` does not see relative Markdown links (2026-08-27)
-
-The gate checks **backtick-quoted** paths that begin with one of the
-repository's top-level directories, and its header is honest that bare symbol
-names are out of scope because they are not decidable without a compiler.
-
-**Relative Markdown links are a third category it also misses, and they _are_
-decidable.** `docs/plan/ROADMAP.md` alone carries 16 of them —
-`[15-windowing.md](15-windowing.md)`,
-`[../specs/crcbl/pix.md](../specs/crcbl/pix.md)`,
-`[sample/03-horde.md](sample/03-horde.md)` and so on. Verified by hand on
-2026-08-27: all 16 resolve. Verified by the gate: nothing — appending
-`[99-nonexistent.md](99-nonexistent.md)` to ROADMAP.md left the run at exit 0
-with an unchanged path count.
-
-This matters now rather than in the abstract: the plan docs under `docs/plan/`
-cross-link each other heavily by relative path, so deleting or renaming one
-leaves dead links that no gate catches, and
-`docs/plan/sample/00-samples-overview.md` plus `ROADMAP.md` are both indexes
-made almost entirely of them.
-
-**What it would take:** extend the existing script — for each `](target)` in a
-Markdown file where `target` has no scheme and no leading `#`, resolve it
-against the file's own directory and require it to exist, stripping any
-`#anchor` first. The `allowed()` escape hatch already there covers the
-deliberate exceptions.
-
-**Red-check note:** the sabotage must be an _in-scope_ citation. A markdown link
-does not fire this gate today, which is the whole point of the entry — the first
-red-check of it read as a pass because the sabotage was out of scope.
-
 ### Unfinished work from the rendering plans
 
 Found auditing `docs/plan/`'s eight rendering documents on 2026-08-27. Those
