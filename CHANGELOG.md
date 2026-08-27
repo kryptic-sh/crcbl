@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A missed reflection falls back to the sky.** A screen-space ray that leaves
+  the frame or finds no geometry took the irradiance probes' environment and
+  nothing else, so a scene with an empty probe volume reflected black. It now
+  adds the gradient sky along the reflected ray. Three `float4` rows at the end
+  of `ssr::SsrParams`, which grows from 256 to 304 bytes.
+
+  It carries the **gradient** rather than the L1 projection
+  `mesh::FrameUniforms` holds, which is the one place the two blocks
+  deliberately disagree about how to hold one sky: an ambient term wants the
+  environment's cosine-weighted integral and L1 is that integral, while a
+  reflection wants the radiance along one direction, and rebuilding that from
+  four irradiance coefficients would blur a gradient the pass can evaluate
+  exactly.
+
+  `Sky::NONE` writes three zero rows and adds nothing, so this rung landed
+  switched off like the ambient one and no golden moved.
+
 - **A gradient sky lights the scene.** `ForwardRenderer::set_sky` takes a
   `crcbl_render::Sky` — three linear-RGB radiances for zenith, horizon and
   ground — and `mesh.slang` adds the irradiance that gradient delivers to the

@@ -4771,6 +4771,17 @@ impl ForwardRenderer {
                 // frame too small to halve gets zero, and the march walks the
                 // prepass at full resolution.
                 hiz_levels: crate::hiz::levels_for(extent),
+                // The gradient itself rather than the projection the frame
+                // block carries: this pass wants the radiance along one
+                // direction and `Sky::gradient` is what has it exactly. A
+                // renderer nobody called `set_sky` on writes three zero rows,
+                // which the march adds to its probe fallback and changes
+                // nothing.
+                sky: [
+                    self.sky.zenith.extend(0.0).to_array(),
+                    self.sky.horizon.extend(0.0).to_array(),
+                    self.sky.ground.extend(0.0).to_array(),
+                ],
             },
         )?;
         // The bloom chain's blocks, one row per step: each step needs the texel

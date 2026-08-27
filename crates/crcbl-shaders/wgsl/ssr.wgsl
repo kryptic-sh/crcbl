@@ -16,6 +16,7 @@ struct SsrParams_std140_0
     @align(16) probe_inv_spacing_0 : vec4<f32>,
     @align(16) probe_counts_0 : vec4<u32>,
     @align(16) hiz_0 : vec4<u32>,
+    @align(16) sky_0 : array<vec4<f32>, i32(3)>,
 };
 
 @binding(0) @group(0) var<uniform> camera_0 : SsrParams_std140_0;
@@ -206,6 +207,23 @@ fn probe_environment_0( world_position_0 : vec3<f32>,  direction_0 : vec3<f32>) 
     return max(vec3<f32>(dot(_S34.xyz / _S37, direction_0) + _S34.w / 3.14159274101257324f, dot(_S35.xyz / _S37, direction_0) + _S35.w / 3.14159274101257324f, dot(_S36.xyz / _S37, direction_0) + _S36.w / 3.14159274101257324f), _S16);
 }
 
+fn sky_radiance_0( direction_1 : vec3<f32>) -> vec3<f32>
+{
+    var up_1 : f32 = clamp(direction_1.y, -1.0f, 1.0f);
+    var far_0 : vec3<f32>;
+    if(up_1 >= 0.0f)
+    {
+        far_0 = camera_0.sky_0[i32(0)].xyz;
+    }
+    else
+    {
+        far_0 = camera_0.sky_0[i32(2)].xyz;
+    }
+    var u_0 : f32 = abs(up_1);
+    var blend_0 : f32 = u_0 * u_0 * (3.0f - 2.0f * u_0);
+    return camera_0.sky_0[i32(1)].xyz * vec3<f32>((1.0f - blend_0)) + far_0 * vec3<f32>(blend_0);
+}
+
 fn pixel_of_0( ndc_0 : vec2<f32>,  size_1 : vec2<f32>) -> vec2<f32>
 {
     return vec2<f32>((ndc_0.x * 0.5f + 0.5f) * size_1.x, (0.5f - ndc_0.y * 0.5f) * size_1.y);
@@ -360,7 +378,8 @@ fn fragmentMain( _S44 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
     var towards_0 : vec3<f32> = normalize(origin_0);
     var ray_0 : vec3<f32> = reflect(towards_0, normal_0);
     var _S52 : vec4<f32> = vec4<f32>(ray_0, 0.0f);
-    var environment_0 : vec3<f32> = probe_environment_0((((vec4<f32>(origin_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz, normalize((((_S52) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz));
+    var reflection_direction_0 : vec3<f32> = normalize((((_S52) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz);
+    var environment_0 : vec3<f32> = probe_environment_0((((vec4<f32>(origin_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz, reflection_direction_0) + sky_radiance_0(reflection_direction_0);
     var _S53 : vec3<f32> = (vec3<f32>(0) - towards_0);
     var f0_0 : vec3<f32> = surface_0.xyz;
     var grazing_0 : f32 = 1.0f - saturate(dot(normal_0, _S53));

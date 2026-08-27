@@ -1076,6 +1076,58 @@ pub fn aa_forward(
     })
 }
 
+/// [`Scene::Ssr`]'s build, with the sky a parameter.
+///
+/// The cube as the floor and the pyramid standing on it, and nothing else —
+/// [`Scene::Spot`]'s reason: what this frame is about is one flat reflective
+/// surface and one thing for it to reflect.
+///
+/// **The cube is placed through `DEMO_TINTED` rather than through
+/// `place_cube`.** It is still the first insertion, so it still holds the pool
+/// slot every other scene gives it; what differs is the row, and that row's
+/// roughness is the only one in the demo scene the reflection pass can see.
+///
+/// **Public, and both the sky and the effect set are parameters, for
+/// [`aa_forward`]'s reason**: the claim this fixture supports is a comparison
+/// against itself.
+///
+/// A ray that leaves the floor and finds no geometry falls back to the
+/// environment, and what that environment *is* cannot be read off one frame — a
+/// sky and a brighter floor look alike. Worse, a sky is not only the
+/// reflection's fallback: it lights the ambient term too, and the floor's
+/// normal points the same way its reflected rays go, so switching a sky on
+/// brightens that floor twice for two different reasons.
+///
+/// **Which is why the effect set is here.** `tests/render_e2e.rs` renders this
+/// scene four ways — each sky with the reflection pass on and with it off — and
+/// reads the difference between the pair. The ambient half is identical inside
+/// a pair and cancels, leaving the reflection alone.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built.
+pub fn ssr_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    sky: crcbl_render::Sky,
+    effects: crcbl_render::RenderEffects,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut renderer = ForwardRenderer::new(device, queue, format)?;
+    renderer.set_effect_request(EffectRequest {
+        camera: effects,
+        ..EffectRequest::default()
+    });
+    renderer.set_sky(sky);
+    place(&mut renderer, DEMO_CUBE, DEMO_TINTED, spot_floor());
+    place(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, ssr_pyramid());
+    Ok(ForwardScene {
+        camera: ssr_camera(),
+        sun: ssr_sun(),
+        renderer: Box::new(renderer),
+    })
+}
+
 /// How much [`Scene::Ssr`] scales the pyramid by.
 ///
 /// Large enough that its reflection is tens of pixels across at the golden
@@ -2105,24 +2157,19 @@ impl SceneState {
                 }
             }
             Scene::Ssr => {
-                // The cube as the floor and the pyramid standing on it, and
-                // nothing else — `Scene::Spot`'s reason: what this frame is
-                // about is one flat reflective surface and one thing for it to
-                // reflect.
-                //
-                // **The cube is placed through `DEMO_TINTED` rather than
-                // through `place_cube`.** It is still the first insertion, so it
-                // still holds the pool slot every other scene gives it; what
-                // differs is the row, and that row's roughness is the only one
-                // in the demo scene the reflection pass can see.
-                let mut renderer = ForwardRenderer::new(device, queue, format)?;
-                place(&mut renderer, DEMO_CUBE, DEMO_TINTED, spot_floor());
-                place(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, ssr_pyramid());
-                Self::Forward {
-                    camera: ssr_camera(),
-                    light: ssr_sun(),
-                    renderer: Box::new(renderer),
-                }
+                // The whole of it is in `ssr_forward`, on `Scene::Aa`'s terms
+                // below: `tests/render_e2e.rs` builds the same scene through
+                // that function under three different skies, because what the
+                // sky adds to a reflection is only recognisable against the
+                // same frame without it.
+                ssr_forward(
+                    device,
+                    queue,
+                    format,
+                    crcbl_render::Sky::NONE,
+                    RenderEffects::DEFAULT_STACK,
+                )?
+                .into()
             }
             Scene::Bloom => {
                 // The floor every other overhead fixture stands on, and the

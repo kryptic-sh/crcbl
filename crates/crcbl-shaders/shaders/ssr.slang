@@ -117,6 +117,22 @@ struct SsrParams
     /// pyramid at all, the march never leaves level 0, and what it walks is the
     /// full-resolution prepass one texel at a time.
     uint4 hiz;
+    /// The gradient sky a ray that hit nothing sees: zenith, horizon and
+    /// ground, each a linear RGB radiance in `xyz` with `w` unread.
+    ///
+    /// **The gradient and not its L1 projection**, which is where this block
+    /// and `mesh.slang`'s deliberately disagree about how to carry one sky.
+    /// The ambient term wants the environment's cosine-weighted integral and
+    /// L1 *is* that integral; a reflection wants the radiance along one
+    /// direction, and rebuilding that from four irradiance coefficients would
+    /// blur a gradient this pass can evaluate exactly.
+    ///
+    /// `crcbl_shaders::sky::SkyGradient` is the host side, `sky_radiance`
+    /// below is the mirror, and a zeroed sky adds nothing to the probe
+    /// environment a missed ray already had.
+    ///
+    /// **Last in the block**, so no member above it moves.
+    float4 sky[3];
 };
 
 struct GpuProbe
@@ -544,6 +560,27 @@ static const float PROBE_TRANSFER_L1 = 2.0943951023931954923;
 /// direction. The stored coefficients are irradiance: undo the clamped-cosine
 /// transfer per band before evaluating them. A zero volume addresses row zero of
 /// the zeroed table and returns exactly zero.
+/// The gradient sky's radiance along `direction`.
+///
+/// `crcbl_shaders::sky::SkyGradient::radiance`, and the one place in this file
+/// that spells arithmetic another crate also spells — `crcbl_shaders::sky`'s
+/// `the_shader_spells_the_same_gradient` is what keeps the two from drifting,
+/// since Slang has no `#include` for either side to share.
+///
+/// A smoothstep and not a `pow`: `docs/plan/44-lighting.md`'s rule forbids a
+/// transcendental reaching a colour, and a sky is nothing but colour. The blend
+/// is written `horizon * (1 - t) + far * t` rather than `horizon + (far -
+/// horizon) * t` so that both ends return their band exactly, which is what
+/// makes a uniform sky one radiance everywhere and a black sky exactly zero.
+float3 sky_radiance(float3 direction)
+{
+    float up = clamp(direction.y, -1.0, 1.0);
+    float3 far = up >= 0.0 ? camera.sky[0].rgb : camera.sky[2].rgb;
+    float u = abs(up);
+    float blend = u * u * (3.0 - 2.0 * u);
+    return camera.sky[1].rgb * (1.0 - blend) + far * blend;
+}
+
 float3 probe_environment(float3 world_position, float3 direction)
 {
     float3 last = max(float3(camera.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
@@ -637,7 +674,14 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 
     float3 world_position = mul(camera.inv_view, float4(origin, 1.0)).xyz;
     float3 reflection_direction = normalize(mul(camera.inv_view, float4(ray, 0.0)).xyz);
-    float3 environment = probe_environment(world_position, reflection_direction);
+    // The probe grid and the sky, **added**: both are what a ray leaving this
+    // surface would find, and a scene may have bounce light around it and a sky
+    // above it. A zeroed probe volume leaves the sky alone and a black sky
+    // leaves the probes alone, which is what made each of them land switched
+    // off. `docs/plan/43-render-standards.md` §8 is why the sky is here at all:
+    // the environment a missed ray falls back to is the term a sky provides.
+    float3 environment = probe_environment(world_position, reflection_direction)
+                       + sky_radiance(reflection_direction);
 
     // Schlick, and it is `mesh.slang`'s expansion rather than a `pow`: the same
     // fragment evaluated the same Fresnel term for its lights, and a reflection

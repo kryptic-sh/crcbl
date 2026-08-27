@@ -44,6 +44,32 @@ take the derivative route for tangents and pay nothing — which
 gradient sky. All three read the row as it stands, which is why `44-lighting.md`
 ranks them first.
 
+### No fixture reflects a ray downward, so the sky's ground band is untested on a GPU (2026-08-27)
+
+`ssr.slang`'s `sky_radiance` picks between the gradient's zenith and its ground
+on the sign of the ray's `y`. Every reflective surface in this tree is a floor
+whose normal is `+Y`, so every reflected ray leaves it upward and the ground arm
+is never the right answer for any pixel in any suite.
+
+**Measured, not suspected.** Replacing the branch with `far = camera.sky[0].rgb`
+outright — the zenith always, the ground band read by nothing — leaves the whole
+render e2e suite green,
+`a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` included. Three
+other sabotages of the same function do fail it: dropping the sky from the
+environment sum, swapping the two poles, and collapsing the gradient to the mean
+of its bands.
+
+**What covers it today** is `crcbl_shaders::sky`'s host-side
+`the_three_bands_are_returned_exactly_at_their_own_directions`, which pins all
+three bands including the ground. So the arithmetic is checked and its
+appearance in a frame is not.
+
+**What would close it:** a reflective surface facing down — an underside, or a
+ceiling above the floor — in `screenshot`'s `ssr_forward` scene or a new one
+beside it. `Scene::Ssr` is deliberately one floor and one pyramid, so this is a
+second fixture rather than a change to that one, and it would also give the
+march its first downward ray, which nothing else in the suite has either.
+
 ### Fog is composited before the reflections, so a reflection is unfogged (2026-08-27)
 
 `mesh.slang`'s fragment stage applies exponential height fog to the radiance it

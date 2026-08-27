@@ -1210,6 +1210,147 @@ fn the_ssr_scene_reflects_its_pyramid_and_matches_its_golden() {
     );
 }
 
+/// How bright the pole this test lights its sky with is.
+///
+/// Large, and in red alone. The reflection reaches the floor through a Fresnel
+/// term that is a fraction even at this scene's grazing angle, and the floor is
+/// deliberately poor in red — [`SSR_CHANNEL`] says why — so a modest sky would
+/// arrive as a level or two and be indistinguishable from the rasteriser's own
+/// drift. Red alone for the same reason the fog tests scatter red: it puts the
+/// whole of the effect in the channel every other constant here is measured on.
+const SKY_POLE: f32 = 12.0;
+
+/// How many levels of [`SSR_CHANNEL`] the sky must add to a missed ray before
+/// this test believes the fallback reached it.
+///
+/// The run this was set against measures **12.0** with a sky bright above, and
+/// **0.0** both with no sky and with the same sky turned upside down — so this
+/// sits at half the effect with the two ways of being wrong pinned at zero. It
+/// is also well above `crcbl_golden::Tolerance::RASTERISER`'s single-digit
+/// drift, which is what a difference between two frames of one scene has to
+/// clear to mean anything.
+const SKY_FALLBACK_FLOOR: f32 = 6.0;
+
+/// How much a **missed** ray may move when there is no environment for it to
+/// fall back to.
+///
+/// The march finds nothing off the floor beside the pyramid, the probe volume
+/// in this scene is empty, and a black sky adds nothing to an empty volume — so
+/// switching the reflection pass on and off must leave those bands where they
+/// are. `RASTERISER`'s drift is what this allows and nothing more; the run this
+/// was set against measures exactly zero.
+const SKY_UNTOUCHED: f32 = 2.0;
+
+/// **The sky is the environment a missed ray falls back to**, and it is read
+/// along the ray rather than applied as a constant.
+///
+/// `docs/plan/43-render-standards.md` §8 ranks a sky above scenery for exactly
+/// this: the environment SSR falls back to and the ambient a metal needs are
+/// one term. The ambient half landed first; this is the reflection half.
+///
+/// **The comparison is between the pass being on and off, not between two
+/// skies.** A sky lights the ambient term as well, and this floor's normal
+/// points the same way its reflected rays go, so switching a sky on brightens
+/// it twice over for two unrelated reasons. Inside one pair the ambient is
+/// identical and cancels, and what is left is the reflection alone.
+///
+/// Three pairs, and each answers a different way of being wrong:
+///
+/// * **No sky.** A missed ray has nothing to fall back to here — the probe
+///   volume is empty — so the pass must move these bands by nothing. A
+///   fallback that returned a constant, or read uninitialised rows, fails here
+///   and nowhere else.
+/// * **Bright above.** The floor's rays leave it upward, so the fallback must
+///   arrive. A block that declared the rows and never read them fails here.
+/// * **Bright below.** The same radiance, pointed where these rays do not
+///   look. A `sky_radiance` that collapsed the gradient to an average of its
+///   bands, or took the two poles in the wrong order, brightens this pair
+///   instead of leaving it alone; both were run and both fail here.
+///
+/// **What this scene cannot see, stated rather than implied:** every reflected
+/// ray in it leaves the floor *upward*, so the branch that picks the ground
+/// below the horizon is never the right answer for any pixel here. A shader
+/// that dropped that branch and always took the zenith renders this frame
+/// correctly — it was run, and it passes. What covers that arm is
+/// `crcbl_shaders::sky`'s own
+/// `the_three_bands_are_returned_exactly_at_their_own_directions` on the host
+/// side, and `docs/backlog.md` carries the gap: no fixture in this tree
+/// reflects a ray downward.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
+    crcbl_core::log::init_logging();
+
+    let frame = |sky: crcbl::render::Sky, effects| {
+        let setup =
+            OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
+                crcbl::screenshot::ssr_forward(device, queue, format, sky, effects)
+            })
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the ssr scene: {why}"));
+        let mut setup = Offscreen::guard(SUITE, setup);
+        let format = setup.format();
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        setup.finish();
+        Image::from_readback(width, height, &pixels, channel_order(format))
+            .expect("the readback is exactly one image")
+    };
+
+    // The floor beside the pyramid, where `the_floor_reflects_the_pyramid_and_
+    // only_under_it` establishes the march finds nothing. Both sides averaged:
+    // the scene is symmetric about the axis and one number is quieter than two.
+    let missed = |image: &Image| {
+        let axis = EXTENT.0 / 2;
+        let band =
+            |column: u32| block_channel(image, (column, SSR_BAND_ROW), SSR_BAND, SSR_CHANNEL);
+        (band(axis - SSR_ASIDE) + band(axis + SSR_ASIDE)) / 2.0
+    };
+
+    let pole = crcbl::math::Vec3::new(SKY_POLE, 0.0, 0.0);
+    let dark = crcbl::math::Vec3::ZERO;
+    // A horizon of zero in both, so the only thing separating the two skies is
+    // which pole is lit — and so a ray that looks along the horizon gets
+    // nothing from either, which is what makes the pair a clean contrast.
+    let above = crcbl::render::Sky {
+        zenith: pole,
+        horizon: dark,
+        ground: dark,
+    };
+    let below = crcbl::render::Sky {
+        zenith: dark,
+        horizon: dark,
+        ground: pole,
+    };
+
+    let with_reflections = RenderEffects::DEFAULT_STACK;
+    let without = RenderEffects::DEFAULT_STACK.difference(RenderEffects::REFLECTIONS);
+    let contribution = |sky| missed(&frame(sky, with_reflections)) - missed(&frame(sky, without));
+
+    let unlit = contribution(crcbl::render::Sky::NONE);
+    let from_above = contribution(above);
+    let from_below = contribution(below);
+    eprintln!(
+        "crcbl render e2e: ssr sky fallback — no sky {unlit:.1}, bright above {from_above:.1}, \
+         bright below {from_below:.1}"
+    );
+
+    assert!(
+        unlit.abs() <= SKY_UNTOUCHED,
+        "with no sky and an empty probe volume the reflection pass moved a missed ray by \
+         {unlit:.1}, so it is compositing something that is not an environment"
+    );
+    assert!(
+        from_above >= SKY_FALLBACK_FLOOR,
+        "a sky bright above added only {from_above:.1} to a floor whose rays leave it upward, so \
+         the fallback is not reaching a missed ray"
+    );
+    assert!(
+        from_above > from_below + SKY_FALLBACK_FLOOR,
+        "a sky bright above added {from_above:.1} and the same sky turned upside down added \
+         {from_below:.1}; these rays look up, so a fallback that read its direction would not \
+         confuse the two"
+    );
+}
+
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_ssr_scene_draws_the_same_frame_on_every_geometry_path() {

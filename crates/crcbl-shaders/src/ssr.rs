@@ -20,7 +20,7 @@
 ///
 /// `std140` gives each row sixteen-byte alignment, so the three matrices, the
 /// probe-volume header and the pyramid row fill the block without tail padding.
-pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 16;
+pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 16 + 48;
 
 /// The roughness at which SSR's sharpness ramp reaches zero, matching
 /// `static const float ROUGHNESS_CUTOFF` in both shader sources.
@@ -86,6 +86,25 @@ pub struct SsrParams {
     /// `MAX_LEVELS` is the Rust mirror of that number, and this field is what
     /// the frame actually has.
     pub hiz_levels: u32,
+    /// The gradient sky a ray that hit nothing sees, one row per band —
+    /// zenith, horizon, ground, each a linear RGB radiance in `xyz` with `w`
+    /// unread padding.
+    ///
+    /// **The gradient itself and not its L1 projection**, which is the one
+    /// place this block and `mesh::FrameUniforms` deliberately disagree about
+    /// how to carry the same sky. The ambient term wants the cosine-weighted
+    /// integral of the environment and L1 *is* that integral; a reflection
+    /// wants the radiance along one direction, and reconstructing that from
+    /// four irradiance coefficients would blur a gradient this side can
+    /// evaluate exactly for three multiplies. [`crate::sky::SkyGradient`] owns
+    /// the arithmetic and `ssr.slang`'s `sky_radiance` is its mirror.
+    ///
+    /// **Zero is exactly off**: a black sky adds nothing to the probe
+    /// environment a missed ray already fell back to, so this rung arrived
+    /// switched off like the ambient half did.
+    ///
+    /// **Last in the block**, so no existing member's offset moves.
+    pub sky: [[f32; 4]; 3],
 }
 
 impl SsrParams {
@@ -114,9 +133,15 @@ impl SsrParams {
         // initialised to.
         bytes[at..at + 4].copy_from_slice(&self.hiz_levels.to_le_bytes());
         at += 16;
+        for row in self.sky {
+            for value in row {
+                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                at += 4;
+            }
+        }
         debug_assert_eq!(
             at, PARAMS_SIZE,
-            "the matrices, probe volume and pyramid row fill the block exactly"
+            "the matrices, probe volume, pyramid row and sky fill the block exactly"
         );
         bytes
     }
@@ -410,8 +435,15 @@ mod tests {
         let hiz = source
             .find("uint4 hiz;")
             .expect("ssr.slang declares `uint4 hiz;`");
+        let sky = source
+            .find("float4 sky[3];")
+            .expect("ssr.slang declares `float4 sky[3];`");
         assert!(
-            inv_proj < proj && proj < inv_view && inv_view < probe_origin && probe_origin < hiz,
+            inv_proj < proj
+                && proj < inv_view
+                && inv_view < probe_origin
+                && probe_origin < hiz
+                && hiz < sky,
             "ssr.slang declares the block in a different order than `to_bytes` writes it"
         );
     }
@@ -435,6 +467,15 @@ mod tests {
             inv_view,
             probe_volume,
             hiz_levels: 3,
+            // A different number in every lane of every row: the three bands
+            // are the same width and would permute silently, and a sky whose
+            // ground colour reached the zenith is a picture rather than an
+            // error.
+            sky: [
+                [13.0, 14.0, 15.0, 16.0],
+                [17.0, 18.0, 19.0, 20.0],
+                [21.0, 22.0, 23.0, 24.0],
+            ],
         }
         .to_bytes();
 
@@ -447,6 +488,16 @@ mod tests {
         // The pyramid row, which is the last sixteen bytes: the level count in
         // `x` and nothing in the three lanes `std140` padded it out to.
         assert_eq!(&bytes[240..244], &3u32.to_le_bytes());
-        assert_eq!(&bytes[244..PARAMS_SIZE], &[0u8; 12]);
+        assert_eq!(&bytes[244..256], &[0u8; 12]);
+        // And the sky's three rows past it, which is where the block now ends.
+        for (lane, expected) in (13u32..=24).enumerate() {
+            let at = 256 + lane * 4;
+            assert_eq!(
+                &bytes[at..at + 4],
+                &(expected as f32).to_le_bytes(),
+                "the sky's lane {lane} at offset {at}"
+            );
+        }
+        assert_eq!(256 + 48, PARAMS_SIZE);
     }
 }

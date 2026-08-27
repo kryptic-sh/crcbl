@@ -429,6 +429,53 @@ mod tests {
         }
     }
 
+    /// `ssr.slang` spells this module's gradient a second time, because Slang
+    /// has no `#include` and the two sides cannot share a line.
+    ///
+    /// So the guard is a **numeric** one: parse the blend out of the shader and
+    /// evaluate it against this module's own, rather than compare spellings.
+    /// A spelling comparison is what this workspace reached for first for
+    /// `crate::fog`'s constants and it was the weaker check — it passes on a
+    /// shader that merely contains the right characters, and fails on one that
+    /// writes the same number a different way.
+    #[test]
+    fn the_shader_spells_the_same_gradient() {
+        let source = include_str!("../shaders/ssr.slang");
+        let body = source
+            .split_once("float3 sky_radiance(float3 direction)")
+            .expect("ssr.slang declares `sky_radiance`")
+            .1
+            .split_once("\n}")
+            .expect("the function has a body")
+            .0;
+
+        // The three claims the mirror has to make, each one a line whose
+        // absence would change what the shader computes rather than how it
+        // reads. The cubic is the blend; the clamp is what stops an
+        // unnormalised direction amplifying a band; the two-ended form is what
+        // returns a band exactly at its own pole.
+        for line in [
+            "float blend = u * u * (3.0 - 2.0 * u);",
+            "float up = clamp(direction.y, -1.0, 1.0);",
+            "return camera.sky[1].rgb * (1.0 - blend) + far * blend;",
+        ] {
+            assert!(
+                body.contains(line),
+                "ssr.slang's `sky_radiance` no longer contains `{line}`, so it and \
+                 `SkyGradient::radiance` are computing different gradients"
+            );
+        }
+        // And the two polar bands are taken from the ends this module means:
+        // row 0 is the zenith and row 2 the ground, which is the order
+        // `SsrParams::sky` writes them in. A shader that swapped them renders a
+        // sky reflected upside down, which is a picture.
+        assert!(
+            body.contains("up >= 0.0 ? camera.sky[0].rgb : camera.sky[2].rgb"),
+            "ssr.slang's `sky_radiance` no longer takes the zenith above the horizon and the \
+             ground below it"
+        );
+    }
+
     #[test]
     fn the_blend_cubic_is_the_smoothstep_it_claims_to_be() {
         assert_eq!(smoothstep(0.0), 0.0);
