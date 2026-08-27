@@ -316,10 +316,11 @@ that collects both, and it is one slice because they share the march.
   `Scene::Bloom` fixture sets. The computed-LOD read is untouched by any of that
   and remains the harder half of the refusal.
 - **Temporal accumulation is still blocked, and blocked on the antialiasing
-  section's blocker exactly**: motion vectors, and a prev-transform slot in
-  `GpuInstance` that does not exist. **One blocker, two features.** Whoever pays
-  for TAA's instance widening pays for temporal SSR in the same change, which is
-  the strongest argument for taking that slot once rather than twice.
+  section's blocker exactly**: motion vectors. The prev-transform slot half of
+  that was **taken 2026-08-27** — `GpuInstance::previous_transform`, filled by
+  `crcbl_render::InstancePool` — and it was taken once for both features, which
+  is what the argument here asked for. What is left is the pass that turns the
+  two transforms into a vector, and it is the same pass for TAA and for this.
 - **Planar reflections stay refused for this row**, and stay the right answer
   for the render-to-texture mirror this document already names. Nothing above
   weakens that paragraph: a planar pass is per-plane, is a second geometry pass

@@ -148,14 +148,15 @@ pub const FRAME_UNIFORMS_SIZE: usize =
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
-/// One `float4x4` (64) then five `uint` (4 each) and three `uint` of explicit
-/// padding, which is what makes the record the same size on all four targets:
+/// Two `float4x4` (64 each) then five `uint` (4 each) and three `uint` of
+/// explicit padding, which is what makes the record the same size on all four
+/// targets:
 /// `std430`, WGSL and MSL round a struct up to its alignment and DXIL's
 /// structured-buffer stride does not, so the tail is declared in the shader
-/// rather than left to each target's rule. Checked against the `ArrayStride 96`
+/// rather than left to each target's rule. Checked against the `ArrayStride 160`
 /// and the `Offset` decorations `slangc` emits by this module's
 /// `the_instance_layout_matches_the_offsets_slangc_emits`.
-pub const INSTANCE_STRIDE: usize = 96;
+pub const INSTANCE_STRIDE: usize = 160;
 
 /// `uint` lanes of declared padding at the end of a [`GpuInstance`], past the
 /// last field a shader reads.
@@ -517,6 +518,29 @@ pub struct GpuInstance {
     ///
     /// [`glam::Mat4::to_cols_array`]: https://docs.rs/glam
     pub transform: [f32; 16],
+    /// Where this instance was **last frame**: [`transform`] one frame behind,
+    /// so a fragment can say where it came from.
+    ///
+    /// [`InstancePool`](https://docs.rs/crcbl-render) owns this the way it owns
+    /// [`GpuInstance::LIVE`] — it writes the value whatever a caller passed,
+    /// because the pool is what already holds the record's previous contents
+    /// and a caller keeping its own copy is a copy to drift. On the frame an
+    /// instance moves it holds the transform the instance moved *from*; on
+    /// every other frame it equals [`transform`], which is zero motion, and
+    /// that includes the frame the instance is created because a spawn did not
+    /// travel from anywhere.
+    ///
+    /// **Nothing reads it yet, and that is the point of it being here.**
+    /// `docs/plan/43-render-standards.md` §9: temporal antialiasing, temporal
+    /// reflections, temporal upscaling, per-object motion blur and screen-space
+    /// global illumination all want a motion vector, and a motion vector wants
+    /// this and a target to write itself into that no pass here has. Reserving
+    /// the slot is smaller than any one of those and unblocks all of them,
+    /// where widening the record later moves every offset below it in four
+    /// shader copies and re-blesses every golden.
+    ///
+    /// [`transform`]: GpuInstance::transform
+    pub previous_transform: [f32; 16],
     /// Which mesh to draw: an index into the mesh table, whose entries are
     /// [`GpuMesh`].
     ///
@@ -626,7 +650,7 @@ impl GpuInstance {
     pub fn to_bytes(&self) -> [u8; INSTANCE_STRIDE] {
         let mut bytes = [0u8; INSTANCE_STRIDE];
         let mut at = 0usize;
-        for value in &self.transform {
+        for value in self.transform.iter().chain(&self.previous_transform) {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
@@ -672,13 +696,18 @@ impl GpuInstance {
         for (index, value) in transform.iter_mut().enumerate() {
             *value = float_at(index * 4);
         }
+        let mut previous_transform = [0.0f32; 16];
+        for (index, value) in previous_transform.iter_mut().enumerate() {
+            *value = float_at(64 + index * 4);
+        }
         Self {
             transform,
-            mesh: uint_at(64),
-            material: uint_at(68),
-            sector: uint_at(72),
-            flags: uint_at(76),
-            base_vertex: uint_at(80),
+            previous_transform,
+            mesh: uint_at(128),
+            material: uint_at(132),
+            sector: uint_at(136),
+            flags: uint_at(140),
+            base_vertex: uint_at(144),
         }
     }
 }
@@ -2005,9 +2034,9 @@ mod tests {
     /// so the byte each lands on is pinned rather than assumed.
     #[test]
     fn the_instance_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuInstance_std430 ArrayStride 96`, and
+        // `OpDecorate %_runtimearr_GpuInstance_std430 ArrayStride 160`, and
         // `OpMemberDecorate %GpuInstance_std430 n Offset …`.
-        assert_eq!(INSTANCE_STRIDE, 96);
+        assert_eq!(INSTANCE_STRIDE, 160);
         assert_eq!(
             INSTANCE_STRIDE % 16,
             0,
@@ -2018,6 +2047,7 @@ mod tests {
 
         let instance = GpuInstance {
             transform: [1.0; 16],
+            previous_transform: [7.0; 16],
             mesh: 2,
             material: 3,
             sector: 4,
@@ -2032,16 +2062,18 @@ mod tests {
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(float_at(0), 1.0, "transform at offset 0");
         assert_eq!(float_at(60), 1.0, "and it is 64 bytes wide");
-        assert_eq!(uint_at(64), 2, "mesh at offset 64");
-        assert_eq!(uint_at(68), 3, "material at offset 68");
-        assert_eq!(uint_at(72), 4, "sector at offset 72");
-        assert_eq!(uint_at(76), 5, "flags at offset 76");
-        assert_eq!(uint_at(80), 6, "base_vertex at offset 80");
+        assert_eq!(float_at(64), 7.0, "previous_transform at offset 64");
+        assert_eq!(float_at(124), 7.0, "and it is 64 bytes wide too");
+        assert_eq!(uint_at(128), 2, "mesh at offset 128");
+        assert_eq!(uint_at(132), 3, "material at offset 132");
+        assert_eq!(uint_at(136), 4, "sector at offset 136");
+        assert_eq!(uint_at(140), 5, "flags at offset 140");
+        assert_eq!(uint_at(144), 6, "base_vertex at offset 144");
         // The lanes `std430`'s rounding-up adds are padding, and a record that
         // wrote a field into them would be a field the shader reads at another
         // offset. Written rather than assumed: this buffer is uploaded whole.
         let pad = INSTANCE_STRIDE - INSTANCE_PAD_WORDS * size_of::<u32>();
-        assert_eq!(pad, 84, "the last field ends at byte 84");
+        assert_eq!(pad, 148, "the last field ends at byte 148");
         assert!(
             bytes[pad..].iter().all(|byte| *byte == 0),
             "the tail past the last field is padding and is zero: {:?}",
@@ -2083,12 +2115,12 @@ mod tests {
         };
         let bytes = deformed.to_bytes();
         assert_eq!(
-            u32::from_le_bytes(bytes[76..80].try_into().expect("4"))
+            u32::from_le_bytes(bytes[140..144].try_into().expect("4"))
                 & GpuInstance::BASE_VERTEX_OVERRIDE,
             GpuInstance::BASE_VERTEX_OVERRIDE
         );
         assert_eq!(
-            u32::from_le_bytes(bytes[80..84].try_into().expect("4")),
+            u32::from_le_bytes(bytes[144..148].try_into().expect("4")),
             1024
         );
         assert_eq!(GpuInstance::from_bytes(&bytes), deformed);
@@ -2114,7 +2146,7 @@ mod tests {
         };
         let bytes = live.to_bytes();
         assert_eq!(
-            u32::from_le_bytes(bytes[76..80].try_into().expect("4")),
+            u32::from_le_bytes(bytes[140..144].try_into().expect("4")),
             GpuInstance::LIVE
         );
         assert_eq!(GpuInstance::from_bytes(&bytes), live);

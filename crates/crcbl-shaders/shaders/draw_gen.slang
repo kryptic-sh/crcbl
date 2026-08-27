@@ -177,6 +177,11 @@ struct GpuInstance
     /// included**: the raster stages carry a normal through `normal_basis`, the
     /// upper-left 3×3's cofactor matrix, rather than through the 3×3 itself.
     float4x4 transform;
+    /// Where this instance was **last frame**, matching `mesh.slang`'s copy —
+    /// the same model → sector matrix, one frame behind. `InstancePool` writes
+    /// it; nothing reads it yet, and this pass never will: where a pixel came
+    /// from is a raster-stage question.
+    float4x4 previous_transform;
     /// Which mesh to draw: an index into `meshes` below. The vertex stage
     /// resolves this instance's base vertex through it, which is what lets one
     /// draw cover instances of different meshes.

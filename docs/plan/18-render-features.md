@@ -109,8 +109,11 @@ under both paths side by side. Exit criteria of the other samples inherit
   is what had to absorb it, and it was written before this rung was scheduled.
   **Landed 2026-08-27 and it held**: one re-blessed golden, `Scene::Ssr`, and
   one constant re-measured on two adapters that agree.
-- **TAA later ≠ never**: reserving the prev-transform slot now was the cheap
-  insurance and it was not taken — see the AA row above. What has changed is the
-  price of not taking it: **temporal SSR is blocked on the same slot**, so the
-  widening is owed to two features rather than one, and `SkinnedRegion`'s
-  double-buffered half of the reservation goes on costing memory nothing reads.
+- **TAA later ≠ never**: reserving the prev-transform slot was the cheap
+  insurance, and it was **taken 2026-08-27** —
+  `GpuInstance::previous_transform`, a 160-byte `INSTANCE_STRIDE`, and an
+  `InstancePool` that fills it without the caller. Two features were owed it
+  rather than one, since temporal SSR is blocked on the same slot, and
+  `SkinnedRegion`'s double-buffered half of the reservation now has its
+  instance-side counterpart. What is left for both is a motion-vector pass,
+  which is work either of them would have done anyway.

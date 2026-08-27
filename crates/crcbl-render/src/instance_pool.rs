@@ -51,6 +51,32 @@
 //! size of the array — and [`InstancePool::begin_frame`] writes nothing at all
 //! once every slot has caught up.
 //!
+//! # Where each instance was last frame
+//!
+//! [`GpuInstance::previous_transform`] is the pool's field, not the caller's,
+//! the way the liveness bit is. [`InstancePool::set`] fills it from what the
+//! record already holds, [`InstancePool::insert`] fills it from the new
+//! transform — a spawn did not travel from anywhere — and
+//! [`InstancePool::rotate`] puts back at rest whatever moved a frame ago and
+//! has not moved again.
+//!
+//! That last step is what makes the field mean *last frame* rather than *the
+//! last time anyone wrote this*. An instance that moves for a while and then
+//! stands still is written on the frames it moves and not after; without the
+//! carry-forward its record would go on naming the transform it left, and every
+//! temporal consumer would go on smearing it along a journey that finished.
+//!
+//! It is the frame *before* the one being assembled that settles, because a
+//! caller writes a frame's instances and then calls
+//! [`InstancePool::begin_frame`] — so the moves of the frame about to be drawn
+//! have already happened by the time the rotate runs, and settling those would
+//! erase each one before it was ever drawn.
+//!
+//! The cost is one comparison per element per frame after the last write to it,
+//! and one extra upload of that element on the first frame it stands still.
+//! Nothing reads the field yet — `docs/plan/43-render-standards.md` §9 is why
+//! it is here before its readers are.
+//!
 //! # The pool never grows
 //!
 //! Capacity is fixed by [`InstancePoolDesc`] and [`InstancePool::insert`] fails
@@ -183,6 +209,17 @@ pub struct InstancePool {
     /// `mirror`. Reusing the crate's pool rather than writing a second
     /// allocator that gets the generation-retirement rule subtly different.
     slots: Pool<()>,
+    /// Elements a caller has written since the last [`InstancePool::rotate`],
+    /// which is what the frame being assembled now moves.
+    written_this_frame: Vec<u32>,
+    /// `written_this_frame` as it stood at the last [`InstancePool::rotate`]:
+    /// what the frame already drawn moved, and so what the next rotate has to
+    /// put back at rest. See the [module docs](self) on the previous transform.
+    written_last_frame: Vec<u32>,
+    /// Whether each element is already in `written_this_frame`, so a caller
+    /// that writes one instance repeatedly in a frame enrols it once. Indexed
+    /// by element, `capacity` long.
+    moved_mark: Vec<bool>,
     capacity: u32,
     /// One past the highest element [`InstancePool::insert`] has ever handed
     /// out — what [`InstancePool::slot_count`] reports.
@@ -269,6 +306,9 @@ impl InstancePool {
             frame: 0,
             mirror: vec![0; desc.capacity as usize * INSTANCE_STRIDE],
             slots: Pool::new(),
+            written_this_frame: Vec::new(),
+            written_last_frame: Vec::new(),
+            moved_mark: vec![false; desc.capacity as usize],
             capacity: desc.capacity,
             high_water: 0,
         })
@@ -345,7 +385,11 @@ impl InstancePool {
         }
         let handle: InstanceHandle = self.slots.insert(()).cast();
         self.high_water = self.high_water.max(handle.index() + 1);
-        self.write_live(handle.index(), instance);
+        // **A spawn did not travel from anywhere**, so the record is created
+        // already at rest: whatever the slot held before belonged to another
+        // instance, and carrying it forward would give the new one a motion
+        // vector across the gap between them.
+        self.write_live(handle.index(), instance, instance.transform);
         Ok(handle)
     }
 
@@ -367,7 +411,10 @@ impl InstancePool {
         if !self.slots.contains(handle.cast()) {
             return false;
         }
-        self.write_live(handle.index(), instance);
+        // Where it was is what the record already holds, which is why the
+        // caller does not pass it — see [`GpuInstance::previous_transform`].
+        let previous = self.read(handle.index()).transform;
+        self.write_live(handle.index(), instance, previous);
         true
     }
 
@@ -448,7 +495,14 @@ impl InstancePool {
     ///
     /// [`flush`](Self::flush) must follow it, or this frame draws whatever the
     /// frame before last left in this buffer.
-    pub const fn rotate(&mut self) -> usize {
+    ///
+    /// **This is also the frame boundary the previous transform is measured
+    /// against**: an element the frame before last wrote and this one did not
+    /// is put back at rest here, so an instance that stopped moving stops
+    /// reporting a move. See [`GpuInstance::previous_transform`] and the
+    /// [module docs](self).
+    pub fn rotate(&mut self) -> usize {
+        self.carry_forward();
         self.frame = (self.frame + 1) % self.buffers.len();
         self.frame
     }
@@ -505,16 +559,77 @@ impl InstancePool {
         GpuInstance::from_bytes(bytes)
     }
 
-    /// [`InstancePool::write`] with [`GpuInstance::LIVE`] forced on, which is
-    /// what every caller-supplied record goes through.
-    fn write_live(&mut self, index: u32, instance: &GpuInstance) {
+    /// [`InstancePool::write`] with [`GpuInstance::LIVE`] forced on and
+    /// `previous_transform` set to `previous`, which is what every
+    /// caller-supplied record goes through.
+    ///
+    /// Both fields are the pool's rather than the caller's, for the same
+    /// reason: the pool is what knows the answer — that the record is live, and
+    /// what it held a moment ago — and a caller asked for either would be
+    /// keeping a second copy of what this one already has.
+    ///
+    /// It also enrols the element in the carry-forward the next
+    /// [`InstancePool::rotate`] performs, which is what stops a moving instance
+    /// that stopped from reporting the move it made forever.
+    fn write_live(&mut self, index: u32, instance: &GpuInstance, previous: [f32; 16]) {
         self.write(
             index,
             &GpuInstance {
                 flags: instance.flags | GpuInstance::LIVE,
+                previous_transform: previous,
                 ..*instance
             },
         );
+        if !self.moved_mark[index as usize] {
+            self.moved_mark[index as usize] = true;
+            self.written_this_frame.push(index);
+        }
+    }
+
+    /// Puts every element a caller wrote last frame at rest: its
+    /// `previous_transform` becomes its `transform`, so a frame in which it is
+    /// not written again reports no motion.
+    ///
+    /// **This is the half that makes the field mean "last frame" rather than
+    /// "the last time anyone touched it".** Without it, an instance that moved
+    /// once and then stood still would go on carrying the transform it moved
+    /// from, and every temporal consumer would go on smearing it along a
+    /// journey that finished.
+    ///
+    /// **It carries forward the frame *before* the one being assembled**, and
+    /// that is the whole subtlety. A caller writes the instances for frame `n`
+    /// and *then* calls [`InstancePool::begin_frame`], so by the time this runs
+    /// the moves of frame `n` have already happened and each already carries
+    /// where it came from — putting those at rest would erase the move before
+    /// it was ever drawn. What is left to settle is frame `n - 1`'s writes that
+    /// frame `n` did not repeat, which is exactly "it moved, and then it
+    /// stopped".
+    ///
+    /// A record already at rest is skipped, so the cost of standing still is
+    /// one comparison in the frame after the last move and nothing after that.
+    /// The write goes through [`InstancePool::write`] rather than
+    /// [`InstancePool::write_live`]: it must not enrol the element again, or a
+    /// pool that had ever moved anything would re-examine it every frame
+    /// forever.
+    fn carry_forward(&mut self) {
+        for index in core::mem::take(&mut self.written_last_frame) {
+            if self.moved_mark[index as usize] {
+                // Written again for the frame about to be drawn, so it is
+                // moving rather than stopping and its own write said where
+                // from.
+                continue;
+            }
+            let mut record = self.read(index);
+            if record.previous_transform == record.transform {
+                continue;
+            }
+            record.previous_transform = record.transform;
+            self.write(index, &record);
+        }
+        self.written_last_frame = core::mem::take(&mut self.written_this_frame);
+        for index in &self.written_last_frame {
+            self.moved_mark[*index as usize] = false;
+        }
     }
 
     /// Puts `instance` into the mirror at `index` and marks it dirty in every
@@ -621,6 +736,11 @@ mod tests {
     fn instance(n: u32) -> GpuInstance {
         GpuInstance {
             transform: [n as f32; 16],
+            // The pool overwrites this, and a value here that the pool would
+            // also have chosen could not tell that apart from it being passed
+            // through. Every `n` the tests use is non-zero, so this is a
+            // transform no caller record carries.
+            previous_transform: [0.0; 16],
             mesh: n,
             material: n + 1,
             sector: n + 2,
@@ -629,11 +749,15 @@ mod tests {
         }
     }
 
-    /// [`instance`] as the pool stores it: the caller's record, live.
+    /// [`instance`] as the pool stores it when it is **inserted**: the
+    /// caller's record, live, and at rest.
     ///
     /// Refuses an `n` whose flags happen to carry the bit already, because a
     /// comparison against such a record would pass whether or not the pool set
-    /// it — which is the one way an assertion about the bit can be vacuous.
+    /// it — which is the one way an assertion about the bit can be vacuous. The
+    /// same refusal covers the previous transform: `n` is non-zero for every
+    /// caller this module builds, so `instance(n)`'s zeroed one is a value the
+    /// pool has to have replaced.
     fn stored(n: u32) -> GpuInstance {
         let caller = instance(n);
         assert_eq!(
@@ -641,9 +765,23 @@ mod tests {
             0,
             "instance({n}) already carries the live bit; pick another n"
         );
+        assert_ne!(
+            n, 0,
+            "instance(0)'s transform is its own zeroed previous one"
+        );
         GpuInstance {
             flags: caller.flags | GpuInstance::LIVE,
+            previous_transform: caller.transform,
             ..caller
+        }
+    }
+
+    /// [`stored`] as the pool holds it after a **rewrite** from `was`: live,
+    /// and carrying where it came from.
+    fn stored_after(n: u32, was: u32) -> GpuInstance {
+        GpuInstance {
+            previous_transform: instance(was).transform,
+            ..stored(n)
         }
     }
 
@@ -1010,6 +1148,152 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// **Where an instance was last frame, across the three cases that decide
+    /// it**: a spawn is at rest, a move carries where it moved from, and a
+    /// frame with no move puts it back at rest.
+    ///
+    /// The third is the one the carry-forward exists for and the one a pool
+    /// without it would fail: `set` alone leaves the record naming the
+    /// transform it left, so an instance that moved once and then stood still
+    /// would report that move on every frame afterwards, forever.
+    ///
+    /// The order is a frame's real one — write the instances, *then*
+    /// `begin_frame` — because that is what decides which frame a move belongs
+    /// to.
+    ///
+    /// Read back off the device rather than out of the mirror: this is what a
+    /// shader would fetch.
+    #[test]
+    fn an_instance_carries_where_it_was_last_frame() {
+        let (recorder, device) = open();
+        let mut pool = pool(device.as_ref(), 16);
+        let handle = pool.insert(&instance(7)).expect("room");
+        settle(&mut pool, device.as_ref());
+        let index = pool.index(handle).expect("live");
+        let slot = pool.frame;
+        assert_eq!(
+            on_device(&recorder, &pool, slot, index).previous_transform,
+            instance(7).transform,
+            "a spawn did not travel from anywhere"
+        );
+
+        // The frame it moves: the record names both ends of the move.
+        assert!(pool.set(handle, &instance(11)));
+        let slot = pool
+            .begin_frame(device.as_ref())
+            .expect("the null device writes");
+        let moved = on_device(&recorder, &pool, slot, index);
+        assert_eq!(moved.transform, instance(11).transform, "it arrived");
+        assert_eq!(
+            moved.previous_transform,
+            instance(7).transform,
+            "and it says where from"
+        );
+
+        // The next frame, with nothing written: back at rest.
+        let slot = pool
+            .begin_frame(device.as_ref())
+            .expect("the null device writes");
+        let stopped = on_device(&recorder, &pool, slot, index);
+        assert_eq!(
+            stopped.transform,
+            instance(11).transform,
+            "it has not moved"
+        );
+        assert_eq!(
+            stopped.previous_transform, stopped.transform,
+            "so it must report no motion"
+        );
+
+        // And it stays at rest without being written again, in every buffer of
+        // the ring rather than only the one the last frame rotated to.
+        settle(&mut pool, device.as_ref());
+        for slot in 0..FRAMES {
+            let resting = on_device(&recorder, &pool, slot, index);
+            assert_eq!(
+                resting.previous_transform, resting.transform,
+                "buffer {slot} still has it moving"
+            );
+        }
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **An instance that keeps moving is never put at rest.** The
+    /// carry-forward runs a frame behind, so the case it must not touch is the
+    /// one where the caller wrote the instance again — settling that would
+    /// erase a move before the frame holding it was ever drawn.
+    #[test]
+    fn an_instance_still_moving_is_not_put_at_rest() {
+        let (recorder, device) = open();
+        let mut pool = pool(device.as_ref(), 16);
+        let handle = pool.insert(&instance(1)).expect("room");
+        settle(&mut pool, device.as_ref());
+        let index = pool.index(handle).expect("live");
+
+        for step in 2..6u32 {
+            assert!(pool.set(handle, &instance(step)));
+            let slot = pool
+                .begin_frame(device.as_ref())
+                .expect("the null device writes");
+            let moving = on_device(&recorder, &pool, slot, index);
+            assert_eq!(
+                (moving.previous_transform, moving.transform),
+                (instance(step - 1).transform, instance(step).transform),
+                "the frame that moved it to {step} lost one end of the move"
+            );
+        }
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **Standing still costs one upload per buffer and then nothing.** That is
+    /// the claim delta upload is here to make, and an unconditional
+    /// carry-forward would break it — every instance would be dirty in every
+    /// frame forever.
+    ///
+    /// The first assertion is what keeps the second from being vacuous: a
+    /// carry-forward that never reached the device would also produce no
+    /// uploads at rest.
+    #[test]
+    fn an_instance_at_rest_is_uploaded_once_and_then_never() {
+        let (recorder, device) = open();
+        let mut pool = pool(device.as_ref(), 16);
+        let handle = pool.insert(&instance(7)).expect("room");
+        settle(&mut pool, device.as_ref());
+
+        assert!(pool.set(handle, &instance(11)));
+        settle(&mut pool, device.as_ref());
+
+        // The move has reached every buffer and the last of those frames
+        // carried it forward, which marked the element dirty everywhere again.
+        recorder.clear();
+        pool.begin_frame(device.as_ref())
+            .expect("the null device writes");
+        let carried = writes(&recorder).len();
+        assert_eq!(
+            carried, 1,
+            "the buffer that had not seen the carry-forward yet should have taken it, \
+             and {carried} write(s) says the carry-forward never reached the device"
+        );
+
+        recorder.clear();
+        for _ in 0..FRAMES * 2 {
+            pool.begin_frame(device.as_ref())
+                .expect("the null device writes");
+        }
+        assert_eq!(
+            writes(&recorder),
+            [],
+            "an instance nobody has written costs no upload"
+        );
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
     /// What goes in comes out, field for field, and a removed handle stops
     /// resolving. The four ids are the same width and would permute silently,
     /// so the round trip is checked rather than assumed.
@@ -1021,7 +1305,11 @@ mod tests {
         assert_eq!(pool.get(handle), Some(stored(7)));
 
         assert!(pool.set(handle, &instance(11)));
-        assert_eq!(pool.get(handle), Some(stored(11)));
+        assert_eq!(
+            pool.get(handle),
+            Some(stored_after(11, 7)),
+            "a rewrite keeps where the instance was"
+        );
 
         assert!(pool.remove(handle));
         assert_eq!(

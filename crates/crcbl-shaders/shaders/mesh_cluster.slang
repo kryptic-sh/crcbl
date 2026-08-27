@@ -229,6 +229,11 @@ struct GpuProbe
 struct GpuInstance
 {
     float4x4 transform;
+    /// Where this instance was **last frame**, matching `mesh.slang`'s copy —
+    /// the same model → sector matrix, one frame behind. `InstancePool` writes
+    /// it, and the stage that will read it is the one that emits motion
+    /// vectors, which is this one and `mesh.slang`'s vertex stage together.
+    float4x4 previous_transform;
     uint mesh;
     uint material;
     uint sector;

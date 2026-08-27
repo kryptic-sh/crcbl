@@ -16,6 +16,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every instance now says where it was last frame.**
+  `crcbl_shaders::mesh::GpuInstance` carries `previous_transform` beside
+  `transform` and `INSTANCE_STRIDE` grows from 96 to 160 bytes — a **format
+  change**: `mesh.slang`, `mesh_cluster.slang`, `cull.slang` and
+  `draw_gen.slang` all declare the wider record, so a host that writes the
+  instance buffer itself has to move every field past the transform.
+
+  `crcbl_render::InstancePool` fills the field, and callers do not pass it — the
+  pool owns it the way it owns the liveness bit. `set` carries the transform the
+  record already held, `insert` starts at rest because a spawn did not travel
+  from anywhere, and `rotate` puts back at rest whatever moved a frame ago and
+  has not moved again, so an instance that stops moving stops reporting a move
+  instead of repeating it forever. Standing still costs one upload per buffer of
+  the ring and nothing after that.
+
+  **Nothing reads it yet and no frame moved.** It is here because
+  `docs/plan/43-render-standards.md` §9 asks for it before its readers arrive:
+  temporal antialiasing, temporal reflections, temporal upscaling, per-object
+  motion blur and SSGI accumulation all want a motion vector, and widening the
+  record is cheap while four shader copies declare it and expensive once more
+  shaders index past the stride. What those five still owe is the pass — a
+  motion-vector target, the subtraction, and the previous frame's
+  view-projection in the frame block.
+
 - **The split-sum `DFG` table, and the energy a GGX lobe loses without it.**
   `crcbl_shaders::dfg` is a committed 64-square table over `(N·V, roughness)` —
   `crates/crcbl-shaders/tables/dfg.bin` — with `directional_albedo` and

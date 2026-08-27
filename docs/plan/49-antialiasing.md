@@ -159,16 +159,20 @@ TAA needs four things this tree does not have:
   [47-reflections.md](47-reflections.md) already refuses in writing for SSR
   history, and [50-irradiance-probes.md](50-irradiance-probes.md) again for
   DDGI.
-- **A prev-transform slot in `GpuInstance`, which does not exist.** The AA row
-  in [48-post-processing.md](48-post-processing.md) carries that correction and
-  the arithmetic behind it, and nothing here repeats it.
+- **A motion-vector pass.** The prev-transform slot this list used to name is in
+  the record as of 2026-08-27 — `GpuInstance::previous_transform`, filled by
+  `crcbl_render::InstancePool` — so what is left is the target, the subtraction
+  and the previous frame's view-projection. The AA row in
+  [48-post-processing.md](48-post-processing.md) carries the history of that
+  correction and nothing here repeats it.
 
-`crcbl_render::skinning`'s `SkinnedRegion::previous_base` is the half of the
-reservation that **was** taken: topic 17's 2026-07-27 correction double-buffers
-the skinned-output pool region from day one and a frame alternates which run it
-writes. It has no reader outside that module's tests, because there is no pass
-to read it. So the animation side of TAA is paid for and the instance side is
-not, which is the honest state of the row.
+`crcbl_render::skinning`'s `SkinnedRegion::previous_base` was the half of the
+reservation taken first: topic 17's 2026-07-27 correction double-buffers the
+skinned-output pool region from day one and a frame alternates which run it
+writes. The instance side followed on 2026-08-27. Neither has a reader outside
+its module's tests, because there is still no pass to read them — so both sides
+of TAA's data are paid for and the pass is not, which is the honest state of the
+row.
 
 ### A seventh, taken 2026-08-27: MSAA is reopened, priced, and still not the default
 

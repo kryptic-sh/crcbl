@@ -436,6 +436,22 @@ struct GpuInstance
     /// included**: the raster stages carry a normal through `normal_basis`, the
     /// upper-left 3×3's cofactor matrix, rather than through the 3×3 itself.
     float4x4 transform;
+    /// Where this instance was **last frame**: the same model → sector matrix,
+    /// one frame behind, so a fragment can say where it came from.
+    ///
+    /// Written by `InstancePool` rather than by the caller, exactly as the
+    /// liveness bit is. On the frame an instance moves this holds the transform
+    /// it moved *from*; on every other frame it equals `transform`, which is
+    /// zero motion — including the frame an instance is created, because a
+    /// spawn did not travel from anywhere.
+    ///
+    /// **Nothing reads it yet.** Temporal antialiasing, temporal reflections,
+    /// temporal upscaling and per-object motion blur each need a motion vector,
+    /// and a motion vector needs this and a motion-vector target that no pass
+    /// here writes. The slot is here ahead of them because widening the record
+    /// later moves every offset below it in four shader copies and re-blesses
+    /// every golden, and none of that gets cheaper by waiting.
+    float4x4 previous_transform;
     /// Which mesh to draw: an index into `meshes` below. The vertex stage
     /// resolves this instance's base vertex through it, which is what lets one
     /// draw cover instances of different meshes.
@@ -469,8 +485,8 @@ struct GpuInstance
     /// **Spelled out rather than left to the layout rules**, because the four
     /// targets do not agree about the tail: `std430` and Metal round the struct
     /// up to that alignment and DXIL's structured-buffer stride does not, so a
-    /// record ending at the field above is 96 bytes in SPIR-V, WGSL and MSL and
-    /// 84 in DXIL — one buffer, two element sizes, and nothing that reports it.
+    /// record ending at the field above is 160 bytes in SPIR-V, WGSL and MSL and
+    /// 148 in DXIL — one buffer, two element sizes, and nothing that reports it.
     /// `DrawConstants` below carries the same pair for `std140`'s version of the
     /// same rule.
     uint pad0;

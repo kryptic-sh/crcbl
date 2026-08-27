@@ -77,13 +77,13 @@ test calls it.
   `DEFAULT_STACK` — so every frame this engine draws is resolved. SMAA 1x is the
   next rung and is not built.
 
-  **The prev-transform slot is not reserved**, whatever this row claimed until
-  2026-08-27. `crcbl_shaders::mesh::GpuInstance` carries `transform`, `mesh`,
-  `material`, `sector`, `flags` and `base_vertex` and nothing else, so the
-  instance format is a widening TAA still has to pay for. The cheap insurance
-  was never taken; the reason to take it — that `INSTANCE_STRIDE` is cheap to
-  extend now and expensive once §3.3's shaders index past it — is the one
-  `GpuInstance::sector` is already in the record on.
+  **The prev-transform slot is reserved as of 2026-08-27**, which this row
+  claimed for a year before it was true. `crcbl_shaders::mesh::GpuInstance`
+  carries `previous_transform` beside `transform`, `INSTANCE_STRIDE` is 160, and
+  `crcbl_render::InstancePool` fills it without the caller — so the instance
+  format is no longer a widening TAA has to pay for. What TAA still owes is the
+  pass: a motion-vector target, the subtraction that writes it, and the previous
+  frame's view-projection in the frame block.
 
 - **Bloom (P10)**: physically-plausible threshold-free downsample chain (Karis
   average), 5–6 mips, tent upsample, additive with scalar. Cheap, huge

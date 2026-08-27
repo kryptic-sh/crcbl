@@ -564,26 +564,6 @@ field; `the_tonemap_block_carries_the_curve_a_caller_selected` in
 and `the_aces_curve_keeps_the_shading_the_clamp_flattens` in
 `crates/crcbl/tests/mesh_e2e/hdr.rs` is what proves the branch runs on a device.
 
-### The prev-transform slot for TAA was never reserved (2026-08-27)
-
-**Not built, and the plan claimed otherwise.** `18-render-features.md`'s AA row
-said "the instance format reserves the prev-transform slot **now** so TAA is
-additive later", and its risk list called that "the cheap insurance".
-`crcbl_shaders::mesh::GpuInstance` carries `transform`, `mesh`, `material`,
-`sector`, `flags` and `base_vertex`. There is no previous transform.
-
-**What it would take.** One more `[f32; 16]` in `GpuInstance`, a wider
-`INSTANCE_STRIDE`, and the `std430` mirrors on both sides of `mesh.slang` and
-`mesh_cluster.slang` moved with it. Cheap today; the reason
-`GpuInstance::sector` is already reserved is precisely that it is expensive once
-§3.3's shaders index past it.
-
-**Blocks.** TAA, which is post-MVP, and motion vectors generally — so also
-motion blur and any temporal upsampler.
-
-**Evidence.** `GpuInstance` and `GpuInstance::to_bytes` in
-`crates/crcbl-shaders/src/mesh.rs`. Corrected in the doc rather than deleted.
-
 ### §3.6's debug draw layer is unbuilt (2026-08-27)
 
 **Not built.** `03-gpu-driven-rendering.md` §3.6 asks for "line/AABB/sphere

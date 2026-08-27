@@ -374,12 +374,20 @@ rather than filed as scenery.
 
 ## 9. The one blocker that gates five features
 
-**Motion vectors, and the previous-frame transform they need.**
-`crcbl_shaders::mesh::GpuInstance` carries `transform`, `mesh`, `material`,
-`sector`, `flags` and `base_vertex` — no previous transform, verified
-2026-08-27. Nothing in the engine can say where a pixel was last frame.
+**Motion vectors, and the previous-frame transform they need.** The transform
+half was **built 2026-08-27**: `crcbl_shaders::mesh::GpuInstance` now carries
+`previous_transform` beside `transform`, `INSTANCE_STRIDE` is 160, and
+`crcbl_render::InstancePool` fills it — a rewrite carries where the instance
+came from, an insert is at rest because a spawn did not travel from anywhere,
+and a rotate puts back at rest whatever moved a frame ago and has not moved
+again. So every instance can now say where it was last frame.
 
-That single absence blocks, in the order they would be wanted:
+What is still missing is the **pass**: a motion-vector target, the subtraction
+that writes it, and the previous frame's view-projection in the frame block.
+Until those exist the five features below are still blocked — but on a pass each
+of them needs anyway rather than on a format nothing could change cheaply.
+
+That absence blocks, in the order they would be wanted:
 
 1. **TAA** — [49-antialiasing.md](49-antialiasing.md)'s ladder names it exactly.
 2. **Temporal SSR**, which is what makes a rough reflection quiet.
@@ -389,12 +397,17 @@ That single absence blocks, in the order they would be wanted:
 4. **Per-object motion blur.**
 5. **SSGI's accumulation**, per §5.
 
-**The cheap insurance was never taken and the price only goes up.** Widening
-`GpuInstance` is cheap now and expensive once more shaders index past
-`INSTANCE_STRIDE` — the same argument `GpuInstance::sector` is already in the
-record on. **Reserving the slot is a smaller decision than any of the five
-features and unblocks all of them**, and it is the recommendation this document
-makes most strongly.
+**The cheap insurance was taken on 2026-08-27**, which is what this section
+recommended most strongly and for the reason it gave: widening `GpuInstance` is
+cheap while four shader copies declare it and expensive once more shaders index
+past `INSTANCE_STRIDE` — the same argument `GpuInstance::sector` is already in
+the record on. The record grew by 64 bytes an instance and no frame moved, which
+is the shape a reservation is supposed to have.
+
+The field is **populated rather than reserved**, and deliberately: a slot
+holding whatever the slot held last is a slot whose first reader debugs the
+pool. The pool owns it the way it owns the liveness bit, so no caller can leave
+it stale.
 
 ## 10. What this document refuses to re-open
 
@@ -426,20 +439,20 @@ listed here so a survey of gaps does not read as a list of things to build.
 Ordered by benefit per unit of work, which is not the order of the sections
 above.
 
-| Rung                                                     | Why here                                                                                                      |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| **Reserve the previous-transform slot in `GpuInstance`** | §9 — smallest change on this page, unblocks five features, gets more expensive with time                      |
-| **Exponential height fog**                               | §4 — one term, no new pass, but `exp` needs a determinism answer first                                        |
-| ~~Multi-scatter energy compensation~~                    | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                         |
-| **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road                           |
-| **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                                       |
-| **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                                                    |
-| ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                              |
-| **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time                                                                       |
-| **Froxel volumetric fog**                                | §4 — the culling is already paid for                                                                          |
-| **Auto-exposure**                                        | §6 — a histogram and a reduce                                                                                 |
-| **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                   |
-| **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table |
-| **Specular antialiasing (roughness regularisation)**     | §2's normal maps first — the aliasing it removes is the one no AA rung can                                    |
-| Colour grading, DOF, lens artefacts                      | §6 — polish, after the curve exists to grade against                                                          |
-| SSGI, temporal SSR, TAA, temporal upscaling              | §9's slot first; each is its own rung after it                                                                |
+| Rung                                                     | Why here                                                                                                        |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| ~~Reserve the previous-transform slot in `GpuInstance`~~ | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved |
+| **Exponential height fog**                               | §4 — one term, no new pass, but `exp` needs a determinism answer first                                          |
+| ~~Multi-scatter energy compensation~~                    | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                           |
+| **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road                             |
+| **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                                         |
+| **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                                                      |
+| ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                |
+| **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time                                                                         |
+| **Froxel volumetric fog**                                | §4 — the culling is already paid for                                                                            |
+| **Auto-exposure**                                        | §6 — a histogram and a reduce                                                                                   |
+| **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                     |
+| **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table   |
+| **Specular antialiasing (roughness regularisation)**     | §2's normal maps first — the aliasing it removes is the one no AA rung can                                      |
+| Colour grading, DOF, lens artefacts                      | §6 — polish, after the curve exists to grade against                                                            |
+| SSGI, temporal SSR, TAA, temporal upscaling              | §9's slot first; each is its own rung after it                                                                  |
