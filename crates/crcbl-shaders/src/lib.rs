@@ -297,6 +297,9 @@ pub mod fxaa;
 // this file's scope rather than its own.
 pub mod fog;
 
+// `sky` carries its own `//!` header, for `fog`'s reason above.
+pub mod sky;
+
 /// The uniform block `tonemap.slang` reads, in the layout that shader declares.
 pub mod tonemap;
 

@@ -394,8 +394,28 @@ FSR 3 or TSR later replaces the pass without moving the seam around it.
 gradient, usually a physically-based atmosphere — that also feeds the ambient
 and specular IBL terms.
 
-**Where this one is:** nothing. The background is the scene target's clear
-colour, and ambient is a flat constant plus probes.
+**Where this one is:** the gradient exists and nothing draws it. The background
+is still the scene target's clear colour, and ambient is still a flat constant
+plus probes.
+
+**Built 2026-08-27:** `crcbl_shaders::sky::SkyGradient` — zenith, horizon and
+ground blended by a smoothstep in the direction's `y` — with `radiance` for what
+a ray leaving the scene sees and `irradiance` for the same field as an L1
+`GpuProbe`, which is the record `mesh.slang` already unpacks for probes. The
+projection is closed form: azimuthal symmetry collapses the sphere integral to
+two moments of the blend, and the horizontal bands are zero.
+
+**The blend is a cubic and not a `pow`, deliberately.** A hand-tuned sky usually
+tightens its horizon band with an exponent, and §4's rule forbids a
+transcendental that reaches a colour — a sky being nothing but colour. A
+smoothstep is multiplies and adds, so this rung needed neither
+`crcbl_shaders::fog`'s construction nor `dfg`'s cooked table. A gradient wanting
+a tighter horizon than a cubic gives spends a colour band on it.
+
+**What is left here** is the half that shows: a pass that draws the gradient
+where the depth prepass wrote nothing, the frame rows that carry it, and the two
+consumers §5 names — `mesh.slang`'s ambient term and the environment
+`ssr.slang`'s `probe_environment` falls back to.
 
 This matters more than it sounds because of §5: **the environment term SSR falls
 back to and the ambient term a metal needs are the same term a sky would
@@ -479,7 +499,7 @@ above.
 | **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                                                                    |
 | **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                 |
 | ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                           |
-| **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time                                                                                                    |
+| **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time. **The gradient and its L1 projection are built (2026-08-27)**; nothing draws or reads them yet    |
 | **Froxel volumetric fog**                                | §4 — the culling is already paid for                                                                                                       |
 | **Auto-exposure**                                        | §6 — a histogram and a reduce                                                                                                              |
 | **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                                                |

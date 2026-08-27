@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A gradient sky, and the environment it lights with.**
+  `crcbl_shaders::sky::SkyGradient` is three linear-RGB radiances — zenith,
+  horizon, ground — blended by a smoothstep in a direction's `y`. `radiance`
+  gives what a ray leaving the scene sees; `irradiance` gives the same field
+  projected onto the L1 spherical-harmonic basis this engine's probes already
+  speak, as a `crcbl_shaders::probe::GpuProbe`, so a sky's ambient contribution
+  and a probe volume's add through one convention rather than two.
+
+  The projection is a closed form rather than a quadrature: the gradient is a
+  function of `y` alone, so the sphere integral collapses to two moments of the
+  blend, and the `x` and `z` bands are zero by symmetry.
+
+  `SkyGradient::BLACK` projects to `GpuProbe::ZERO` exactly, which is what will
+  let the sky arrive switched off. Nothing renders it yet —
+  `docs/plan/43-render-standards.md` §8 is what this is the first half of.
+
 - **Exponential height fog.** `ForwardRenderer::set_fog` takes a
   `crcbl_render::Fog` — density, falloff, reference height and a scattered
   radiance — and `mesh.slang` composites it over every shaded surface, so
