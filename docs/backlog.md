@@ -15,16 +15,16 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
-### The froxel column scatters the sun and nothing occludes it (2026-08-27)
+### The froxel column casts its shaft and no demo turns it on (2026-08-28)
 
-`crcbl_render::volumetric`'s three passes are built, switched by
-`RenderEffects::VOLUMETRIC_FOG`, proved against the closed form on radv, and the
-sun scatters into them through a Henyey-Greenstein lobe. What is left, rung by
-rung, is `docs/plan/51-volumetrics.md`; rung 1b-ii — the cascade lookup inside
-`scatterMain`, and the drift guard the second copy of the shadow lookup will
-need — is the next one.
+Rung 1 of `docs/plan/51-volumetrics.md` is closed: `crcbl_render::volumetric`'s
+three passes are switched by `RenderEffects::VOLUMETRIC_FOG`, proved against the
+closed form on radv, the sun scatters into them through a Henyey-Greenstein lobe
+and the cascades occlude it per froxel. Rungs 2 to 4 — punctual lights, a 3D
+target with temporal reprojection, a density field — are argued there and none
+is scheduled.
 
-Three things belong here rather than there, because they are gaps rather than
+Four things belong here rather than there, because they are gaps rather than
 plans:
 
 - **Only Vulkan on radv has run it.** The two pipelines are built on every frame
@@ -32,8 +32,10 @@ plans:
   could compile reds CI immediately — but nothing _dispatches_ them outside
   `mesh_e2e` on Vulkan, because the effect is off by default and no sample or
   demo asks for it. The browser gate in particular runs the composite through no
-  pixel. A demo that switches it on is what closes this, and `51-volumetrics`
-  rung 1b-ii is when it will be worth looking at.
+  pixel — and the scatter pass now binds a **comparison sampler to a compute
+  stage**, which is the one thing in this feature that a driver could refuse
+  where the artifact still compiles. A demo that switches the effect on is what
+  closes this, and it is the largest open gap in the feature.
 - **The composite is before the reflection resolve, so a reflection arrives
   unfogged.** The same ordering gap `mesh.slang`'s closed form has, recorded
   further down this file, and the froxel path inherited it deliberately: it sits
@@ -44,10 +46,21 @@ plans:
   one-cell slice-boundary disagreement between the two shaders. It cannot
   separate a wrong scatter from a wrong scan, because at an albedo of one the
   two compose to the same answer. A readback compared against
-  `crcbl_shaders::volumetric` on the CPU is what will. Rung 1b-i broke the
-  equality only when a caller sets `Fog::sun_scattering`, which no sample does,
-  so the frame-level gate still holds everywhere it ran; a readback becomes
-  worth writing when rung 1b-ii puts an occluder in the column.
+  `crcbl_shaders::volumetric` on the CPU is what will. The equality still holds
+  wherever a caller leaves `Fog::sun_scattering` at zero, which every sample
+  does, so the rung-1a gate has not stopped being evidence.
+- **No rendered frame checks that the composite sources its partial slice from
+  the froxel's own visibility.** Replacing `visibilities[froxel]` with `1.0` in
+  `volumetric_composite.slang` leaves all 28 `mesh_e2e` tests green to the digit
+  — verified, not assumed. The reason is structural: those tests measure
+  background texels, where the partial slice is the tail of a column whose
+  transmittance has already gone to nothing, and the texels where the partial
+  slice does carry the frame are the ones a surface was drawn into, where
+  switching the cascades also moves that surface's own shading. What would catch
+  it is the per-froxel readback above. `crcbl_shaders::volumetric`'s
+  `the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility` is
+  a text guard standing in for it, and it is worth exactly what it says: the
+  read is written down, not that it is right.
 
 ### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
 

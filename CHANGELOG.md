@@ -55,10 +55,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `anisotropy`, how forward that scattering leans. Both default to zero, so a
   caller that sets neither gets exactly the column that shipped without them.
 
-  **Nothing occludes the sun yet.** Every froxel is lit as though it saw it, so
-  what this draws is the glow around a light rather than the dark between the
-  shafts. Rung 1b-ii of `docs/plan/51-volumetrics.md` is the cascade lookup
-  inside the scatter pass.
+  **And the cascades occlude it.** The scatter pass looks each froxel's midpoint
+  up in the sun's shadow atlas and scales the sun term of its source by what
+  comes back, so the air behind an occluder keeps its ambient glow and loses the
+  beam — a shaft rather than a dimmer. The environment term is untouched by it,
+  which is what stops a shadowed column going to black.
+
+  The lookup is `mesh.slang`'s, copied once into the scatter pass and held to
+  the original by a drift guard; the atlas and its comparison sampler are bound
+  to a compute stage, which is new. Neither of that file's receiver biases came
+  with it and neither did its `n_dot_l` early return: all three are about a
+  facet, and a froxel is a volume of air.
 
 - **The sky is drawn behind the frame.** The gradient already lit the scene and
   was what a missed reflection fell back to, but nothing put it on screen — a

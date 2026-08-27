@@ -15,7 +15,9 @@
 //! of its own.
 
 use crate::harness::Headless;
-use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh, render_mesh_lit};
+use crate::mesh_scene::{
+    MESH_EXTENT, mesh_camera, place_cube, place_cube_at, render_mesh, render_mesh_lit,
+};
 use crcbl::render::{
     DirectionalLight, EffectOverride, EffectRequest, Fog, ForwardRenderer, Projection,
     RenderEffects, Sky, TransientPool,
@@ -515,6 +517,44 @@ const SUN_ANISOTROPY: f32 = 0.8;
 /// driver's arithmetic, and far above the 1.0 a direction-blind source gives.
 const SUN_LOBE_RATIO: f32 = 50.0;
 
+/// How much of its unshadowed radiance a background texel has to keep to count
+/// as being outside the shaft.
+///
+/// **Measured, not chosen.** radv puts 12804 of the 39110 background texels
+/// under this and 31798 under `0.7`, so the threshold sits on the shoulder of
+/// the distribution rather than in its tail — a shaft that lost a third of its
+/// depth would still clear it, and one that vanished could not.
+const SHAFT_DARKENING: f32 = 0.6;
+
+/// How many background texels have to clear [`SHAFT_DARKENING`].
+///
+/// **Measured, not chosen**: 12804 do. Set well under that so the count is a
+/// claim about a region of the frame rather than about a particular driver's
+/// rounding, and well over zero so an occluder that shadowed a single tile
+/// could not pass.
+const SHAFT_TEXELS: usize = 8_000;
+
+/// How far apart the deepest and the shallowest darkening over the background
+/// have to be.
+///
+/// **This is the assertion that says "a shaft" and not "a dimmer".** A term
+/// that scaled the whole medium — a visibility folded into the density, an
+/// exposure that moved with the effect bit — darkens every texel by the same
+/// factor and lands a spread of zero. **Measured**: radv's background runs from
+/// `0.459` to `0.713`, a spread of `0.253`, because the slab covers the near
+/// column of some rays and the far column of others.
+const SHAFT_CONTRAST: f32 = 0.15;
+
+/// How much brighter than its unshadowed self a texel may be before that counts
+/// as brighter.
+///
+/// Not zero, because the two frames are two dispatches: an occluder that
+/// shadows nothing at a texel still runs the whole PCF kernel there, and the
+/// nine taps sum in an order the hardware picks. This is a rounding step at the
+/// radiances these tests work in, well under the darkening they are looking
+/// for.
+const SHAFT_TOLERANCE: f32 = 1e-3;
+
 /// The direction [`mesh_camera`] looks in, which is the axis the sun is put on
 /// and against.
 ///
@@ -851,11 +891,22 @@ fn sun_fog(anisotropy: f32) -> Fog {
 }
 
 /// The fixture cube under a medium that scatters a sun pointing whichever way
-/// the caller says, through the froxel path.
+/// the caller says, through the froxel path, with the cascades on or off.
+///
+/// **`shadows` is a parameter and not a constant** because the two things this
+/// fixture is asked are opposites. The lobe tests want no occluder at all — a
+/// shadow moves when the sun does, and would answer "the frame changed" for a
+/// reason that is not the phase function. The shaft tests want the shadow and
+/// nothing else to be the difference between two frames.
 ///
 /// [`fogged_cube_hdr_via`]'s scene and its refusals; the light is the caller's
 /// because the whole claim here is about the angle between it and the view ray.
-fn sun_scattered_cube_hdr(fog: Fog, to_sun: crcbl::math::Vec3) -> HdrTarget {
+fn sun_scattered_cube_hdr(
+    fog: Fog,
+    to_sun: crcbl::math::Vec3,
+    shadows: bool,
+    wall: bool,
+) -> HdrTarget {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
@@ -865,11 +916,15 @@ fn sun_scattered_cube_hdr(fog: Fog, to_sun: crcbl::math::Vec3) -> HdrTarget {
         programmatic: EffectOverride::none()
             .force(RenderEffects::ANTIALIASING, Some(false))
             .force(RenderEffects::REFLECTIONS, Some(false))
+            .force(RenderEffects::SHADOWS, Some(shadows))
             .force(RenderEffects::VOLUMETRIC_FOG, Some(true)),
         ..EffectRequest::default()
     });
     renderer.set_fog(fog);
     place_cube(&mut renderer);
+    if wall {
+        place_cube_at(&mut renderer, occluder_transform());
+    }
     let light = DirectionalLight {
         direction: to_sun,
         ..DirectionalLight::default()
@@ -900,8 +955,16 @@ fn sun_scattered_cube_hdr(fog: Fog, to_sun: crcbl::math::Vec3) -> HdrTarget {
 /// a fogged background is no longer the clear colour and the old `green <= floor`
 /// test for "the mesh is not here" would call the whole frame covered.
 fn background_texels() -> Vec<(u32, u32)> {
+    background_of(&fogged_cube_hdr_via(uniform_fog(0.0), false))
+}
+
+/// The texels `clear` did not draw geometry into.
+///
+/// `clear` has to be a frame of the **same scene** with no medium in it: the
+/// mask says "no fragment wrote here", and a frame with fog in it no longer
+/// carries the clear colour to recognise that by.
+fn background_of(clear: &HdrTarget) -> Vec<(u32, u32)> {
     const LIT_FLOOR: f32 = 0.05;
-    let clear = fogged_cube_hdr_via(uniform_fog(0.0), false);
     (0..MESH_EXTENT.1)
         .flat_map(|y| (0..MESH_EXTENT.0).map(move |x| (x, y)))
         .filter(|(x, y)| clear.pixel(*x, *y)[1] <= LIT_FLOOR)
@@ -924,8 +987,8 @@ fn background_texels() -> Vec<(u32, u32)> {
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn an_isotropic_medium_scatters_the_sun_the_same_way_whichever_way_it_points() {
-    let ahead = sun_scattered_cube_hdr(sun_fog(0.0), camera_forward());
-    let behind = sun_scattered_cube_hdr(sun_fog(0.0), -camera_forward());
+    let ahead = sun_scattered_cube_hdr(sun_fog(0.0), camera_forward(), false, false);
+    let behind = sun_scattered_cube_hdr(sun_fog(0.0), -camera_forward(), false, false);
 
     let background = background_texels();
     for (x, y) in &background {
@@ -963,8 +1026,8 @@ fn an_isotropic_medium_scatters_the_sun_the_same_way_whichever_way_it_points() {
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn a_forward_lobe_brightens_the_frame_the_sun_is_ahead_of() {
-    let ahead = sun_scattered_cube_hdr(sun_fog(SUN_ANISOTROPY), camera_forward());
-    let behind = sun_scattered_cube_hdr(sun_fog(SUN_ANISOTROPY), -camera_forward());
+    let ahead = sun_scattered_cube_hdr(sun_fog(SUN_ANISOTROPY), camera_forward(), false, false);
+    let behind = sun_scattered_cube_hdr(sun_fog(SUN_ANISOTROPY), -camera_forward(), false, false);
 
     let background = background_texels();
     let mut weakest = f32::INFINITY;
@@ -1000,6 +1063,145 @@ fn a_forward_lobe_brightens_the_frame_the_sun_is_ahead_of() {
     assert!(
         dimmest_ahead > 0.0,
         "the sun scattered nothing anywhere, so this compared two black frames"
+    );
+}
+
+/// Where the sun is put for the shaft tests: straight down the world `+x` axis,
+/// which is the axis [`occluder_transform`]'s slab faces.
+const SHAFT_TO_SUN: crcbl::math::Vec3 = crcbl::math::Vec3::X;
+
+/// A slab standing between the sun and half the scene.
+///
+/// **Behind the camera and thin along the sun's axis**, which is what makes it
+/// an occluder and not a second thing in the picture: it sits at `x = 2` facing
+/// the sun's `+x`, while [`mesh_camera`] stands at `x = 1.6` looking the other
+/// way, so no fragment of it is ever drawn and the *only* thing it does to the
+/// frame is take the sun out of the air behind it.
+///
+/// **It covers `z > 0` and not `z < 0`**, and that asymmetry is the test. A slab
+/// over the whole scene would darken every background texel by about the same
+/// amount, which is a picture a global dimmer draws just as well; a half-covered
+/// frustum has an edge in it, and the test asserts both sides of that edge.
+fn occluder_transform() -> crcbl::math::Mat4 {
+    crcbl::math::Mat4::from_scale_rotation_translation(
+        crcbl::math::Vec3::new(0.4, 40.0, 40.0),
+        crcbl::math::Quat::IDENTITY,
+        crcbl::math::Vec3::new(2.0, 0.0, 20.0),
+    )
+}
+
+/// The fixture cube and the slab above it, under a sun the slab faces.
+fn shafted_hdr(fog: Fog, shadows: bool) -> HdrTarget {
+    sun_scattered_cube_hdr(fog, SHAFT_TO_SUN, shadows, true)
+}
+
+/// **The medium behind an occluder goes dark, and only the sun goes with it.**
+///
+/// The observable that separates a real shaft from a uniform glow, and the one
+/// `docs/plan/51-volumetrics.md` names as rung 1b-ii's: the same scene, the same
+/// medium and the same sun, drawn once with the cascades on and once with them
+/// off, so the **only** difference between the two frames is whether a froxel
+/// is allowed to see what is standing in front of it.
+///
+/// Three claims, and each rules out a different way of being wrong:
+///
+/// * **No background texel is brighter with shadows on.** A visibility that
+///   was added rather than multiplied, or read from the wrong froxel, brightens
+///   somewhere.
+/// * **A large patch is meaningfully darker.** A lookup that always returned
+///   `1.0` — the wrong cascade, an atlas never bound, a projection off the tile —
+///   draws a perfectly plausible frame and fails only this.
+/// * **The darkening is not the same everywhere.** The slab covers the near
+///   column of some rays and the far column of others, so the frame has an edge
+///   in it; a factor applied to the whole medium has none. This is the
+///   difference between a shaft and a dimmer, and nothing else here asks it.
+/// * **Nothing goes to black.** The environment term is not occluded, so a
+///   fully shadowed column still glows; a visibility multiplied into the whole
+///   source instead of the sun term alone puts holes in the fog.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_medium_behind_an_occluder_loses_the_sun_and_keeps_the_sky() {
+    let lit = shafted_hdr(sun_fog(SUN_ANISOTROPY), false);
+    let shadowed = shafted_hdr(sun_fog(SUN_ANISOTROPY), true);
+
+    let background = background_of(&shafted_hdr(Fog::NONE, false));
+    let mut darkened = 0usize;
+    let mut deepest = f32::INFINITY;
+    let mut shallowest = 0.0f32;
+    let mut floor = f32::INFINITY;
+    for (x, y) in &background {
+        let open = lit.pixel(*x, *y)[1];
+        let behind = shadowed.pixel(*x, *y)[1];
+        assert!(
+            behind <= open + SHAFT_TOLERANCE,
+            "shadowing the froxels made ({x}, {y}) brighter — {behind} against {open} — \
+             so the visibility is not multiplying the sun term"
+        );
+        let ratio = behind / open.max(1e-9);
+        if ratio < SHAFT_DARKENING {
+            darkened += 1;
+        }
+        deepest = deepest.min(ratio);
+        shallowest = shallowest.max(ratio);
+        floor = floor.min(behind);
+    }
+
+    let contrast = shallowest - deepest;
+    eprintln!(
+        "crcbl mesh e2e: volumetrics — {darkened} of {} background texel(s) under \
+         {SHAFT_DARKENING} of their unshadowed radiance, deepest {deepest:.4}, \
+         shallowest {shallowest:.4}, dimmest shadowed radiance {floor:.4}",
+        background.len()
+    );
+    assert!(
+        darkened >= SHAFT_TEXELS,
+        "only {darkened} background texels dropped below {SHAFT_DARKENING} of their \
+         unshadowed radiance, so the slab is casting no shaft worth the name"
+    );
+    assert!(
+        contrast >= SHAFT_CONTRAST,
+        "the darkening runs from {deepest} to {shallowest}, a spread of {contrast} — \
+         under the {SHAFT_CONTRAST} an occluder with an edge in it gives, which is what \
+         a term that dimmed the whole medium equally would look like"
+    );
+    assert!(
+        floor > 0.0,
+        "a shadowed column went to exactly nothing, so the occlusion is reaching the \
+         environment term and not only the sun"
+    );
+}
+
+/// **A medium with no sun in it does not notice the cascades at all.**
+///
+/// The off-switch, and the exactness is the point: with `sun_scattering` at zero
+/// the froxel volume is the environment term alone, which no occluder may touch,
+/// so the two frames have to agree byte for byte. It is what says the visibility
+/// multiplies the sun and only the sun — a factor that reached the environment
+/// term, or the transmittance, moves a bit here while still drawing a shaft that
+/// looks right in the test above.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn shadowing_the_froxels_leaves_a_sunless_medium_exactly_alone() {
+    let sunless = Fog {
+        sun_scattering: 0.0,
+        ..sun_fog(SUN_ANISOTROPY)
+    };
+    let open = shafted_hdr(sunless, false);
+    let occluded = shafted_hdr(sunless, true);
+
+    let background = background_of(&shafted_hdr(Fog::NONE, false));
+    for (x, y) in &background {
+        assert_eq!(
+            open.pixel(*x, *y),
+            occluded.pixel(*x, *y),
+            "the cascades moved ({x}, {y}) in a medium with no sun in it, so the \
+             occlusion is reaching something other than the sun term"
+        );
+    }
+    assert!(
+        background.len() > 1000,
+        "only {} texels were background, so this compared almost nothing",
+        background.len()
     );
 }
 

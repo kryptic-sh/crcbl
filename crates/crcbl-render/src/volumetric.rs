@@ -2,10 +2,11 @@
 //! integrated in, and the pass that composites it over the frame.
 //!
 //! ```text
-//!  begin_frame ──▶ camera + medium ──▶ params[frame]
+//!  begin_frame ──▶ camera + medium + cascades ──▶ params[frame]
 //!
-//!  add_passes ── compute "volumetric-scatter"   ──▶ froxels[frame]  (per slice)
-//!             ── compute "volumetric-integrate" ──▶ froxels[frame]  (per tile)
+//!  add_passes ── compute "volumetric-scatter"   ──▶ froxels[frame]     (per slice)
+//!                                       shadow-atlas ──▶ visibility[frame]
+//!             ── compute "volumetric-integrate" ──▶ froxels[frame]     (per tile)
 //!             ── render  "volumetric-composite" scene-color ──▶ fogged
 //! ```
 //!
@@ -41,10 +42,24 @@
 //! `mesh.slang` composites the same exponential height fog analytically. Both
 //! running is the medium charged twice, so [`ForwardRenderer::add_passes`] zeroes
 //! the frame block's density on a frame that adds these passes — the froxel path
-//! owns the medium when it exists. That is also this rung's observable: with a
-//! single-scattering albedo of one and no light loop yet, the whole column is
-//! algebraically the closed form the fragment stage was computing, so the two
-//! frames have to agree.
+//! owns the medium when it exists. That is also the rung's observable: the
+//! environment term's single-scattering albedo is one, so a column with no sun
+//! in it is algebraically the closed form the fragment stage was computing and
+//! the two frames have to agree. The sun is added on top of that and is zero
+//! until a caller sets [`Fog::sun_scattering`], which keeps the equality as this
+//! feature's off-switch rather than as a stage it has left behind.
+//!
+//! # The sun is occluded per froxel, in a buffer of its own
+//!
+//! The scatter pass looks each froxel's midpoint up in the cascades
+//! [`crate::shadow`] filled, and scales the *sun* term of its scattering source
+//! by what comes back — the environment term is what reaches the medium from
+//! every direction, and an occluder in front of the sun does not remove it. The
+//! answer is written to a second buffer the scan does not touch, because
+//! `volumetric_composite.slang` integrates the last partial slice for itself and
+//! needs the same source this pass used;
+//! [`VISIBILITY_STRIDE`] carries
+//! the argument for why that is a buffer rather than a second cascade walk.
 //!
 //! [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
 
@@ -53,16 +68,19 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ClearValue, ColorTargetState, ComputePipelineHandle, Device, Format,
     GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType, LoadOp, MemoryLocation,
-    PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, SampleType, ShaderStages, StoreOp,
-    check_portable_storage_buffers,
+    PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, SampleType, SamplerHandle,
+    ShaderStages, StoreOp, check_portable_storage_buffers,
 };
-use crcbl_shaders::volumetric::{FROXEL_STRIDE, PARAMS_SIZE, VolumetricParams, WORKGROUP_SIZE};
+use crcbl_shaders::volumetric::{
+    FROXEL_STRIDE, PARAMS_SIZE, VISIBILITY_STRIDE, VolumetricParams, WORKGROUP_SIZE,
+};
 use crcbl_shaders::{VOLUMETRIC, VOLUMETRIC_COMPOSITE};
 
 use crate::camera::{DirectionalLight, Fog};
 use crate::draw_gen::{bound, compute_pipeline_entry, storage, uniform};
 use crate::graph::{ImageId, ImportedBuffer, RenderGraph};
 use crate::light_grid::{FrameView, Grid};
+use crate::shadow::{self, Cascades};
 use crate::ssao::cached_group;
 
 /// Vertices in the over-sized full-screen triangle `volumetric_composite.slang`
@@ -85,6 +103,34 @@ pub(crate) struct VolumetricImages {
     /// Where the composite writes, and the image the caller must go on to use
     /// in [`VolumetricImages::color`]'s place.
     pub(crate) composited: ImageId,
+    /// The sun's cascades, as [`crate::shadow`] left them.
+    ///
+    /// Read by the **scatter** pass, which is what puts a shaft in the column:
+    /// declaring it is what moves the atlas from the depth attachment the
+    /// shadow pass wrote into a layout a compute stage can sample.
+    pub(crate) shadow_atlas: ImageId,
+}
+
+/// What lights the medium on this frame.
+///
+/// One struct rather than three more arguments, on [`VolumetricImages`]' terms:
+/// the three are read together and mean nothing apart. The medium's own
+/// properties are [`Fog`]; the sun and its cascades are what a shaft is cast
+/// by, and they have to be the frame's own — `Cascades::new` builds the
+/// matrices from the camera and the light, so a block carrying one frame's
+/// light with another's cascades would shadow a shaft against boxes that are no
+/// longer where it is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Medium<'a> {
+    /// The medium: its density, its falloff, its colour and how it scatters the
+    /// sun.
+    pub(crate) fog: Fog,
+    /// The sun, whose radiance the medium scatters and whose direction the
+    /// phase function is evaluated against.
+    pub(crate) sun: &'a DirectionalLight,
+    /// The cascades that sun was shadowed through, which is what occludes the
+    /// shaft.
+    pub(crate) cascades: &'a Cascades,
 }
 
 /// Everything the froxel volume owns.
@@ -98,6 +144,13 @@ pub(crate) struct Volumetric {
     /// all — [`crate::draw_gen`]'s module docs carry the full account.
     /// `TRANSFER_SRC` so a test can read back what the GPU decided.
     froxels: Vec<BufferHandle>,
+    /// `[frame]`: one `f32` per froxel, how much of the sun that froxel sees.
+    ///
+    /// Written by the scatter pass and read by the composite, and untouched by
+    /// the scan between them — which is the whole reason it is a second buffer
+    /// rather than a component of the first, argued at
+    /// [`VISIBILITY_STRIDE`].
+    visibility: Vec<BufferHandle>,
     compute_layout: BindGroupLayoutHandle,
     compute_pipeline_layout: PipelineLayoutHandle,
     scatter: ComputePipelineHandle,
@@ -145,6 +198,8 @@ impl Volumetric {
         device: &dyn Device,
         frames: usize,
         froxels: u32,
+        shadow_atlas: ImageViewHandle,
+        shadow_sampler: SamplerHandle,
         build_fullscreen: impl Fn(
             &dyn Device,
             &str,
@@ -160,7 +215,36 @@ impl Volumetric {
         }
         // `volumetric.slang`'s declaration order, which is the only order Metal
         // and D3D12 agree about — see `crcbl_shaders::declaration_order`.
-        let compute_entries = [uniform(0), storage(1, false)];
+        let compute_entries = [
+            uniform(0),
+            storage(1, false),
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    // `Depth`, for the reason the composite's own depth binding
+                    // gives: WebGPU binds a `D32Float` view only through a depth
+                    // sample type, and the WGSL declares `texture_depth_2d`.
+                    sample_type: SampleType::Depth,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                // **A comparison sampler in a compute stage**, which is what is
+                // new at this rung. The shader asks with `SampleCmpLevelZero`,
+                // which needs no derivatives and is legal outside a fragment
+                // shader on all four targets — unlike the implicit-LOD form the
+                // forward pass uses.
+                kind: BindingKind::Sampler { comparison: true },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            storage(4, false),
+        ];
         let compute_desc = BindGroupLayoutDesc {
             label: Some("volumetric"),
             entries: &compute_entries,
@@ -238,6 +322,18 @@ impl Volumetric {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            BindGroupLayoutEntry {
+                binding: 4,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::StorageBuffer {
+                    // Each froxel's share of the sun, as the scatter pass
+                    // measured it. Read and never written here.
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let composite_desc = BindGroupLayoutDesc {
             label: Some("volumetric composite"),
@@ -265,6 +361,7 @@ impl Volumetric {
 
         let mut params = Vec::with_capacity(frames);
         let mut volumes = Vec::with_capacity(frames);
+        let mut visibility = Vec::with_capacity(frames);
         let mut compute_groups = Vec::with_capacity(frames);
         for frame in 0..frames {
             let block = device.create_buffer(&BufferDesc {
@@ -279,10 +376,34 @@ impl Volumetric {
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::DeviceLocal,
             })?;
+            let seen = device.create_buffer(&BufferDesc {
+                label: Some(&format!("volumetric visibility {frame}")),
+                size: u64::from(froxels) * VISIBILITY_STRIDE as u64,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })?;
+            // **Built once rather than cached against the graph**, which the
+            // shadow atlas is what makes possible: the renderer owns that image
+            // for its whole life and hands the graph the same view every frame,
+            // so this group names nothing a frame can change.
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some(&format!("volumetric {frame}")),
                 layout: compute_layout,
-                entries: &[bound(0, block), bound(1, volume)],
+                entries: &[
+                    bound(0, block),
+                    bound(1, volume),
+                    BindGroupEntry {
+                        binding: 2,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(shadow_atlas),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        array_index: 0,
+                        resource: BindingResource::Sampler(shadow_sampler),
+                    },
+                    bound(4, seen),
+                ],
                 // No binding here is an array, so nothing has a runtime length
                 // to declare — the same `None` every other pass in this crate
                 // passes.
@@ -290,12 +411,14 @@ impl Volumetric {
             })?;
             params.push(block);
             volumes.push(volume);
+            visibility.push(seen);
             compute_groups.push(group);
         }
 
         Ok(Self {
             params,
             froxels: volumes,
+            visibility,
             compute_layout,
             compute_pipeline_layout,
             scatter,
@@ -328,15 +451,19 @@ impl Volumetric {
         frame: usize,
         grid: Grid,
         view: FrameView,
-        fog: Fog,
-        sun: &DirectionalLight,
+        medium: Medium<'_>,
     ) -> Result<(), HalError> {
+        let Medium { fog, sun, cascades } = medium;
         // Row 3 of the view-projection, so a shader can take a point's view
         // depth with one dot product — [`crate::light_grid`]'s block carries the
         // same row for the same reason, and both come from this one matrix so
         // the two passes cut the frustum at the same depths.
         let columns = view.view_projection.to_cols_array();
         let depth_row = [columns[3], columns[7], columns[11], columns[15]];
+        let mut shadow_view_proj = [[0.0f32; 16]; shadow::CASCADES];
+        for (matrix, cascade) in shadow_view_proj.iter_mut().zip(&cascades.view_proj) {
+            *matrix = cascade.to_cols_array();
+        }
         device.write_buffer(
             self.params[frame],
             0,
@@ -360,6 +487,14 @@ impl Volumetric {
                 // Zero unless a caller asked for it, which is what keeps the
                 // column algebraically the closed form until they do.
                 sun_radiance: (sun.color * fog.sun_scattering).extend(0.0).to_array(),
+                // **The cascades the frame block already carries**, handed to
+                // the scatter pass so a froxel and the surface behind it are
+                // shadowed by one set of matrices. `Cascades::new` builds them
+                // from the camera and the light alone, so there is no version
+                // of this where the two could be a frame apart.
+                shadow_view_proj,
+                cascade_far: cascades.far,
+                shadow_params: Cascades::params(),
                 grid_x: grid.x,
                 grid_y: grid.y,
                 slices: grid.slices,
@@ -392,6 +527,7 @@ impl Volumetric {
             depth,
             color,
             composited,
+            shadow_atlas,
         } = images;
         // The volume arrives in the state the previous frame that used this slot
         // left it in, which is the state declared as final: the composite reads
@@ -401,6 +537,17 @@ impl Volumetric {
             "volumetric-froxels",
             ImportedBuffer {
                 buffer: self.froxels[frame],
+                initial: ResourceState::ShaderRead,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+        // The same import the column gets, and for its reason: the composite is
+        // the last pass to read it, which is the state the next frame in this
+        // slot will find it in.
+        let seen = graph.import_buffer(
+            "volumetric-visibility",
+            ImportedBuffer {
+                buffer: self.visibility[frame],
                 initial: ResourceState::ShaderRead,
                 final_state: ResourceState::ShaderRead,
             },
@@ -420,6 +567,11 @@ impl Volumetric {
             // grid's terms: a storage-buffer descriptor permits reads whatever
             // the shader does with it.
             .use_buffer(volume, ResourceState::ShaderReadWrite)
+            .use_buffer(seen, ResourceState::ShaderReadWrite)
+            // The cascades this pass looks a froxel up in. A read rather than a
+            // write, and it is what orders this dispatch after the shadow pass
+            // that filled them.
+            .read_image(shadow_atlas)
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_compute_pipeline(scatter);
@@ -453,6 +605,7 @@ impl Volumetric {
         let layout = self.composite_layout;
         let params = self.params[frame];
         let froxels = self.froxels[frame];
+        let visibility = self.visibility[frame];
         let cached = &mut self.composite_groups[frame];
         graph
             .add_render_pass("volumetric-composite")
@@ -471,6 +624,7 @@ impl Volumetric {
             .read_image(color)
             .read_image(depth)
             .read_buffer(volume)
+            .read_buffer(seen)
             .execute(move |ctx| {
                 let color_view = ctx.image_view(color);
                 let depth_view = ctx.image_view(depth);
@@ -498,6 +652,11 @@ impl Volumetric {
                         binding: 3,
                         array_index: 0,
                         resource: BindingResource::whole_buffer(froxels),
+                    },
+                    BindGroupEntry {
+                        binding: 4,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(visibility),
                     },
                 ];
                 let Some(group) = cached_group(
@@ -532,7 +691,12 @@ impl Volumetric {
             device.destroy_bind_group(group);
         }
         device.destroy_bind_group_layout(self.compute_layout);
-        for buffer in self.params.into_iter().chain(self.froxels) {
+        for buffer in self
+            .params
+            .into_iter()
+            .chain(self.froxels)
+            .chain(self.visibility)
+        {
             device.destroy_buffer(buffer);
         }
     }

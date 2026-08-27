@@ -187,7 +187,7 @@ use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
-use crate::volumetric::{Volumetric, VolumetricImages};
+use crate::volumetric::{Medium, Volumetric, VolumetricImages};
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -3905,6 +3905,8 @@ impl ForwardRenderer {
             device,
             instance_buffers.len(),
             crate::light_grid::FROXEL_CAPACITY,
+            shadow_atlas_view,
+            shadow_sampler,
             Self::build_fullscreen,
         )?);
 
@@ -4798,8 +4800,11 @@ impl ForwardRenderer {
                 eye: camera.eye,
                 perspective,
             },
-            self.fog,
-            light,
+            Medium {
+                fog: self.fog,
+                sun: light,
+                cascades: &cascades,
+            },
         )?;
 
         // The frame's gradient, resolved once and handed to all three of the
@@ -6416,6 +6421,7 @@ impl ForwardRenderer {
                         depth: scene_depth,
                         color: scene_color,
                         composited,
+                        shadow_atlas,
                     },
                 );
                 composited

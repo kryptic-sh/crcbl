@@ -3,6 +3,11 @@ struct _MatrixStorage_float4x4_ColMajorstd140_0
     @align(16) data_0 : array<vec4<f32>, i32(4)>,
 };
 
+struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E2_0
+{
+    @align(16) data_1 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(2)>,
+};
+
 struct VolumetricParams_std140_0
 {
     @align(16) inverse_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,
@@ -12,6 +17,9 @@ struct VolumetricParams_std140_0
     @align(16) fog_color_0 : vec4<f32>,
     @align(16) sun_direction_0 : vec4<f32>,
     @align(16) sun_radiance_0 : vec4<f32>,
+    @align(16) shadow_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E2_0,
+    @align(16) cascade_far_0 : vec4<f32>,
+    @align(16) shadow_params_0 : vec4<f32>,
     @align(16) grid_x_0 : u32,
     @align(4) grid_y_0 : u32,
     @align(8) slices_0 : u32,
@@ -23,6 +31,12 @@ struct VolumetricParams_std140_0
 };
 
 @binding(0) @group(0) var<uniform> params_0 : VolumetricParams_std140_0;
+@binding(2) @group(0) var shadow_atlas_0 : texture_depth_2d;
+
+@binding(3) @group(0) var shadow_sampler_0 : sampler_comparison;
+
+@binding(4) @group(0) var<storage, read_write> visibilities_0 : array<f32>;
+
 @binding(1) @group(0) var<storage, read_write> volumetrics_0 : array<vec4<f32>>;
 
 var<private> FOG_RATIO_KERNEL_0 : array<f32, i32(5)> = array<f32, i32(5)>( 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f );
@@ -62,11 +76,91 @@ fn volumetric_slice_start_0( index_0 : u32) -> f32
     return start_0;
 }
 
-fn fog_exp_neg_0( x_0 : f32) -> f32
+fn atlas_uv_0( tile_0 : u32,  tile_uv_0 : vec2<f32>) -> vec2<f32>
 {
-    var clamped_0 : f32 = clamp(x_0, -87.0f, 87.0f);
+    return (vec2<f32>(f32(tile_0 % u32(4)), f32(tile_0 / u32(4))) + tile_uv_0) / vec2<f32>(4.0f, 4.0f);
+}
+
+fn tile_pcf_0( tile_1 : u32,  tile_uv_1 : vec2<f32>,  reference_0 : f32) -> f32
+{
+    var texel_0 : vec2<f32> = params_0.shadow_params_0.xy;
+    const grid_0 : vec2<f32> = vec2<f32>(4.0f, 4.0f);
+    var _S2 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_0 * grid_0;
+    var y_0 : i32 = i32(-1);
+    var visibility_0 : f32 = 0.0f;
+    for(;;)
+    {
+        if(y_0 <= i32(1))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var x_0 : i32 = i32(-1);
+        for(;;)
+        {
+            if(x_0 <= i32(1))
+            {
+            }
+            else
+            {
+                break;
+            }
+            var visibility_1 : f32 = visibility_0 + (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (atlas_uv_0(tile_1, clamp(tile_uv_1 + vec2<f32>(f32(x_0), f32(y_0)) * texel_0 * grid_0, _S2, vec2<f32>(1.0f) - _S2))), (reference_0)));
+            x_0 = x_0 + i32(1);
+            visibility_0 = visibility_1;
+        }
+        y_0 = y_0 + i32(1);
+    }
+    return visibility_0 / 9.0f;
+}
+
+fn volumetric_sun_visibility_0( world_position_0 : vec3<f32>) -> f32
+{
+    var cascade_0 : u32;
+    var _S3 : f32 = length(world_position_0 - params_0.eye_0.xyz);
+    var index_1 : u32 = u32(0);
+    for(;;)
+    {
+        if(index_1 < u32(2))
+        {
+        }
+        else
+        {
+            cascade_0 = u32(1);
+            break;
+        }
+        if(_S3 < (params_0.cascade_far_0[index_1]))
+        {
+            cascade_0 = index_1;
+            break;
+        }
+        index_1 = index_1 + u32(1);
+    }
+    var clip_0 : vec4<f32> = (((vec4<f32>(world_position_0, 1.0f)) * (mat4x4<f32>(params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(0)][i32(0)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(1)][i32(0)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(2)][i32(0)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(3)][i32(0)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(0)][i32(1)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(1)][i32(1)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(2)][i32(1)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(3)][i32(1)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(0)][i32(2)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(1)][i32(2)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(2)][i32(2)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(3)][i32(2)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(0)][i32(3)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(1)][i32(3)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(2)][i32(3)], params_0.shadow_view_proj_0.data_1[cascade_0].data_0[i32(3)][i32(3)]))));
+    var ndc_1 : vec3<f32> = clip_0.xyz / vec3<f32>(clip_0.w);
+    var _S4 : bool;
+    if((any(((abs(ndc_1.xy)) > vec2<f32>(1.0f)))))
+    {
+        _S4 = true;
+    }
+    else
+    {
+        _S4 = (ndc_1.z) <= 0.0f;
+    }
+    if(_S4)
+    {
+        return 1.0f;
+    }
+    return tile_pcf_0(cascade_0, vec2<f32>(ndc_1.x * 0.5f + 0.5f, 0.5f - ndc_1.y * 0.5f), ndc_1.z);
+}
+
+fn fog_exp_neg_0( x_1 : f32) -> f32
+{
+    var clamped_0 : f32 = clamp(x_1, -87.0f, 87.0f);
     var n_0 : f32 = floor(clamped_0 * 1.4426950216293335f + 0.5f);
-    var _S2 : f32 = - (clamped_0 - n_0 * 0.693115234375f - n_0 * 0.00003194618329871f);
+    var _S5 : f32 = - (clamped_0 - n_0 * 0.693115234375f - n_0 * 0.00003194618329871f);
     var kernel_0 : f32 = 0.0001984127011383f;
     var term_0 : i32 = i32(6);
     for(;;)
@@ -78,9 +172,9 @@ fn fog_exp_neg_0( x_0 : f32) -> f32
         {
             break;
         }
-        var _S3 : f32 = kernel_0 * _S2 + FOG_KERNEL_0[term_0];
+        var _S6 : f32 = kernel_0 * _S5 + FOG_KERNEL_0[term_0];
         var term_1 : i32 = term_0 - i32(1);
-        kernel_0 = _S3;
+        kernel_0 = _S6;
         term_0 = term_1;
     }
     return kernel_0 * (bitcast<f32>(((u32(i32(127) - i32(n_0)) << (u32(23))))));
@@ -90,7 +184,7 @@ fn fog_one_minus_exp_over_0( d_0 : f32) -> f32
 {
     if((abs(d_0)) < 0.125f)
     {
-        var _S4 : f32 = - d_0;
+        var _S7 : f32 = - d_0;
         var series_0 : f32 = 0.00833333376795053f;
         var term_2 : i32 = i32(3);
         for(;;)
@@ -102,9 +196,9 @@ fn fog_one_minus_exp_over_0( d_0 : f32) -> f32
             {
                 break;
             }
-            var _S5 : f32 = series_0 * _S4 + FOG_RATIO_KERNEL_0[term_2];
+            var _S8 : f32 = series_0 * _S7 + FOG_RATIO_KERNEL_0[term_2];
             var term_3 : i32 = term_2 - i32(1);
-            series_0 = _S5;
+            series_0 = _S8;
             term_2 = term_3;
         }
         return series_0;
@@ -124,22 +218,22 @@ fn fog_optical_depth_0( density_0 : f32,  falloff_0 : f32,  height_a_0 : f32,  h
 fn volumetric_phase_0( g_0 : f32,  cos_theta_0 : f32) -> f32
 {
     var a_0 : f32 = clamp(g_0, -0.99000000953674316f, 0.99000000953674316f);
-    var _S6 : f32 = a_0 * a_0;
-    var d_1 : f32 = 1.0f + _S6 - 2.0f * a_0 * clamp(cos_theta_0, -1.0f, 1.0f);
-    return 0.07957746833562851f * (1.0f - _S6) / (d_1 * sqrt(d_1));
+    var _S9 : f32 = a_0 * a_0;
+    var d_1 : f32 = 1.0f + _S9 - 2.0f * a_0 * clamp(cos_theta_0, -1.0f, 1.0f);
+    return 0.07957746833562851f * (1.0f - _S9) / (d_1 * sqrt(d_1));
 }
 
-fn volumetric_source_0( view_direction_0 : vec3<f32>) -> vec3<f32>
+fn volumetric_source_0( view_direction_0 : vec3<f32>,  visibility_2 : f32) -> vec3<f32>
 {
-    return params_0.fog_color_0.xyz + params_0.sun_radiance_0.xyz * vec3<f32>(volumetric_phase_0(params_0.sun_direction_0.w, dot(params_0.sun_direction_0.xyz, view_direction_0)));
+    return params_0.fog_color_0.xyz + params_0.sun_radiance_0.xyz * vec3<f32>(volumetric_phase_0(params_0.sun_direction_0.w, dot(params_0.sun_direction_0.xyz, view_direction_0))) * vec3<f32>(visibility_2);
 }
 
-fn volumetric_slice_0( from_0 : vec3<f32>,  to_0 : vec3<f32>) -> vec4<f32>
+fn volumetric_slice_0( from_0 : vec3<f32>,  to_0 : vec3<f32>,  visibility_3 : f32) -> vec4<f32>
 {
-    var reference_0 : f32 = params_0.fog_params_0.z;
+    var reference_1 : f32 = params_0.fog_params_0.z;
     var segment_0 : vec3<f32> = to_0 - from_0;
     var length_of_0 : f32 = length(segment_0);
-    var survives_0 : f32 = fog_exp_neg_0(fog_optical_depth_0(params_0.fog_params_0.x, params_0.fog_params_0.y, from_0.y - reference_0, to_0.y - reference_0, length_of_0));
+    var survives_0 : f32 = fog_exp_neg_0(fog_optical_depth_0(params_0.fog_params_0.x, params_0.fog_params_0.y, from_0.y - reference_1, to_0.y - reference_1, length_of_0));
     var view_direction_1 : vec3<f32>;
     if(length_of_0 > 9.99999997475242708e-07f)
     {
@@ -149,7 +243,7 @@ fn volumetric_slice_0( from_0 : vec3<f32>,  to_0 : vec3<f32>) -> vec4<f32>
     {
         view_direction_1 = vec3<f32>(0.0f, 0.0f, 1.0f);
     }
-    return vec4<f32>(volumetric_source_0(view_direction_1) * vec3<f32>((1.0f - survives_0)), survives_0);
+    return vec4<f32>(volumetric_source_0(view_direction_1, visibility_3) * vec3<f32>((1.0f - survives_0)), survives_0);
 }
 
 @compute
@@ -158,23 +252,23 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
 {
     var froxel_0 : u32 = thread_0.x;
     var tiles_0 : u32 = max(params_0.grid_x_0, u32(1)) * max(params_0.grid_y_0, u32(1));
-    var _S7 : u32 = max(params_0.slices_0, u32(1));
-    var _S8 : bool;
-    if(froxel_0 >= (tiles_0 * _S7))
+    var _S10 : u32 = max(params_0.slices_0, u32(1));
+    var _S11 : bool;
+    if(froxel_0 >= (tiles_0 * _S10))
     {
-        _S8 = true;
+        _S11 = true;
     }
     else
     {
-        _S8 = froxel_0 >= (params_0.froxel_count_0);
+        _S11 = froxel_0 >= (params_0.froxel_count_0);
     }
-    if(_S8)
+    if(_S11)
     {
         return;
     }
     var tile_x_1 : u32 = froxel_0 % max(params_0.grid_x_0, u32(1));
-    var _S9 : u32 = froxel_0 / max(params_0.grid_x_0, u32(1));
-    var tile_y_1 : u32 = _S9 % max(params_0.grid_y_0, u32(1));
+    var _S12 : u32 = froxel_0 / max(params_0.grid_x_0, u32(1));
+    var tile_y_1 : u32 = _S12 % max(params_0.grid_y_0, u32(1));
     var slice_0 : u32 = froxel_0 / tiles_0;
     var near_point_1 : vec3<f32>;
     var near_depth_1 : f32;
@@ -189,17 +283,21 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         from_depth_0 = volumetric_slice_start_0(slice_0);
     }
-    var _S10 : u32 = slice_0 + u32(1);
+    var _S13 : u32 = slice_0 + u32(1);
     var to_depth_0 : f32;
-    if(_S10 == _S7)
+    if(_S13 == _S10)
     {
         to_depth_0 = 1000.0f;
     }
     else
     {
-        to_depth_0 = volumetric_slice_start_0(_S10);
+        to_depth_0 = volumetric_slice_start_0(_S13);
     }
-    volumetrics_0[froxel_0] = volumetric_slice_0(params_0.eye_0.xyz + along_0 * vec3<f32>(from_depth_0), params_0.eye_0.xyz + along_0 * vec3<f32>(to_depth_0));
+    var from_1 : vec3<f32> = params_0.eye_0.xyz + along_0 * vec3<f32>(from_depth_0);
+    var to_1 : vec3<f32> = params_0.eye_0.xyz + along_0 * vec3<f32>(to_depth_0);
+    var visibility_4 : f32 = volumetric_sun_visibility_0((from_1 + to_1) * vec3<f32>(0.5f));
+    visibilities_0[froxel_0] = visibility_4;
+    volumetrics_0[froxel_0] = volumetric_slice_0(from_1, to_1, visibility_4);
     return;
 }
 
@@ -207,27 +305,27 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
 @workgroup_size(64, 1, 1)
 fn integrateMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
 {
-    var tile_0 : u32 = thread_1.x;
+    var tile_2 : u32 = thread_1.x;
     var tiles_1 : u32 = max(params_0.grid_x_0, u32(1)) * max(params_0.grid_y_0, u32(1));
-    if(tile_0 >= tiles_1)
+    if(tile_2 >= tiles_1)
     {
         return;
     }
-    var _S11 : u32 = max(params_0.slices_0, u32(1));
-    const _S12 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
+    var _S14 : u32 = max(params_0.slices_0, u32(1));
+    const _S15 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
     var slice_1 : u32 = u32(0);
-    var accumulated_0 : vec3<f32> = _S12;
+    var accumulated_0 : vec3<f32> = _S15;
     var through_0 : f32 = 1.0f;
     for(;;)
     {
-        if(slice_1 < _S11)
+        if(slice_1 < _S14)
         {
         }
         else
         {
             break;
         }
-        var froxel_1 : u32 = tile_0 + slice_1 * tiles_1;
+        var froxel_1 : u32 = tile_2 + slice_1 * tiles_1;
         if(froxel_1 >= (params_0.froxel_count_0))
         {
             break;

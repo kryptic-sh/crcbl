@@ -152,8 +152,9 @@ pub fn integrate_slice(source: f32, extinction: f32, thickness: f32) -> SliceInt
 /// `struct VolumetricParams` in `shaders/volumetric.slang` and the identical
 /// declaration in `shaders/volumetric_composite.slang`.
 ///
-/// One `float4x4` (64), six `float4` (16 each) and eight `uint`s (32).
-pub const PARAMS_SIZE: usize = 64 + 6 * 16 + 8 * 4;
+/// One `float4x4` (64), [`crate::mesh::SHADOW_CASCADES`] more of them, eight
+/// `float4` (16 each) and eight `uint`s (32).
+pub const PARAMS_SIZE: usize = 64 + crate::mesh::SHADOW_CASCADES * 64 + 8 * 16 + 8 * 4;
 
 /// Bytes one froxel occupies in the column buffer: one `float4`.
 ///
@@ -161,6 +162,22 @@ pub const PARAMS_SIZE: usize = 64 + 6 * 16 + 8 * 4;
 /// radiance and transmittance after `scatterMain`, the column in front of that
 /// slice after `integrateMain` — which `volumetric.slang`'s header argues.
 pub const FROXEL_STRIDE: usize = 16;
+
+/// Bytes one froxel occupies in the visibility buffer: one `float`.
+///
+/// **A second buffer rather than a component of the first**, and the reason is
+/// what each of the two is for. The column buffer's four components are all
+/// spoken for twice over — a slice's radiance and transmittance before the
+/// scan, the prefix and its transmittance after — so there is nowhere in it to
+/// put a number that has to survive the scan.
+///
+/// And it has to survive the scan because `volumetric_composite.slang`
+/// integrates the last partial slice along the pixel's own ray, which needs the
+/// same scattering source `scatterMain` used for the whole froxel. Reading a
+/// scalar back is what lets the cascade lookup exist in exactly one shader:
+/// the alternative is a second copy of the atlas walk in the composite, run
+/// per pixel, which is the cost the froxel grid exists to avoid.
+pub const VISIBILITY_STRIDE: usize = 4;
 
 /// Invocations per workgroup in both of `volumetric.slang`'s entry points.
 pub const WORKGROUP_SIZE: u32 = 64;
@@ -210,6 +227,31 @@ pub struct VolumetricParams {
     /// rather than linked, this crate having no dependencies at all — and it is
     /// what lets the column stay algebraically equal to the closed form.
     pub sun_radiance: [f32; 4],
+    /// World → cascade `i`'s shadow clip, column-major, one matrix per cascade
+    /// — `crcbl_shaders::mesh::FrameUniforms::shadow_view_proj`, handed to the
+    /// scatter pass so a froxel and a fragment ask the same atlas the same
+    /// question.
+    ///
+    /// The scatter pass reads these and the composite does not: the whole point
+    /// of the buffer [`VISIBILITY_STRIDE`] measures is that the shadow lookup
+    /// happens once per froxel rather than once per pixel. They are in the
+    /// shared block anyway because there is one block, and a second one
+    /// declared by one shader alone is a layout the two could disagree about.
+    pub shadow_view_proj: [[f32; 16]; crate::mesh::SHADOW_CASCADES],
+    /// Component `i` is how far from the eye cascade `i` reaches, in world
+    /// units — `FrameUniforms::cascade_far`, and the same walk picks the first
+    /// cascade that covers a point.
+    pub cascade_far: [f32; 4],
+    /// `xy`: one shadow-atlas texel in `u` and in `v`, which is what the PCF
+    /// kernel steps by. `zw` are the receiver biases `mesh.slang` applies and
+    /// **the medium does not**: a bias exists to stop a facet shadowing itself,
+    /// and a froxel is a volume with no facet in it.
+    ///
+    /// Carried whole rather than trimmed to the two components read, because
+    /// the row is `crcbl_render::shadow::Cascades::params`' own and a second
+    /// spelling of an atlas's texel size is a thing that can drift from the
+    /// first.
+    pub shadow_params: [f32; 4],
     /// Tiles across.
     pub grid_x: u32,
     /// Tiles down.
@@ -242,6 +284,9 @@ impl VolumetricParams {
             .chain(self.fog_color)
             .chain(self.sun_direction)
             .chain(self.sun_radiance)
+            .chain(self.shadow_view_proj.into_iter().flatten())
+            .chain(self.cascade_far)
+            .chain(self.shadow_params)
         {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
@@ -608,6 +653,9 @@ mod tests {
             fog_color: [4.5; 4],
             sun_direction: [5.5; 4],
             sun_radiance: [6.5; 4],
+            shadow_view_proj: [[7.5; 16], [8.5; 16]],
+            cascade_far: [9.5; 4],
+            shadow_params: [10.5; 4],
             grid_x: 7,
             grid_y: 11,
             slices: 13,
@@ -633,21 +681,25 @@ mod tests {
             (112, 4.5),
             (128, 5.5),
             (144, 6.5),
+            (160, 7.5),
+            (224, 8.5),
+            (288, 9.5),
+            (304, 10.5),
         ] {
             assert_eq!(float_at(offset), value, "the row at byte {offset}");
         }
         for (offset, value) in [
-            (160, 7),
-            (164, 11),
-            (168, 13),
-            (172, 17),
-            (176, 19),
-            (180, 23),
-            (184, 29),
+            (320, 7),
+            (324, 11),
+            (328, 13),
+            (332, 17),
+            (336, 19),
+            (340, 23),
+            (344, 29),
         ] {
             assert_eq!(uint_at(offset), value, "the word at byte {offset}");
         }
-        assert_eq!(uint_at(188), 0, "the pad word is not written");
+        assert_eq!(uint_at(348), 0, "the pad word is not written");
     }
 
     /// Both shaders spell this module's phase function, with this module's
@@ -692,6 +744,141 @@ mod tests {
                 "{file}'s phase lobe is not this module's, or reaches for `pow`"
             );
         }
+    }
+
+    /// The shadow constants `volumetric.slang` and its composite carry are this
+    /// workspace's, and `volumetric.slang`'s cascade lookup is `mesh.slang`'s.
+    ///
+    /// The atlas is one image with one layout, read by a fragment stage through
+    /// `mesh.slang` and by a compute stage through `volumetric.slang`, and there
+    /// is no `#include` to share the walk. A copy that drifted would put a
+    /// shaft's edge somewhere other than the shadow it belongs to — two pictures
+    /// that each look plausible alone and disagree where they meet.
+    ///
+    /// The two files are allowed to differ in **one** thing: the name of the
+    /// uniform block the atlas's texel size is read from, which is `frame` in
+    /// one and `params` in the other. That substitution is made on both sides
+    /// before the comparison; everything else is compared letter for letter,
+    /// with runs of whitespace collapsed so a reformat is not a failure.
+    #[test]
+    fn both_shaders_spell_the_same_atlas_walk() {
+        const MESH: &str = include_str!("../shaders/mesh.slang");
+        const VOLUMETRIC: &str = include_str!("../shaders/volumetric.slang");
+
+        // The cascade count is a *layout* number — it sizes the matrix array in
+        // the shared block — so both files carry it whether they walk a cascade
+        // or not. The grid is only the walk's, and only one file walks.
+        let cascades = u32::try_from(crate::mesh::SHADOW_CASCADES).expect("a handful of cascades");
+        for (file, source) in SHADERS {
+            let spelling = format!("static const uint SHADOW_CASCADES = {cascades};");
+            assert!(
+                source.contains(&spelling),
+                "{file} does not declare `{spelling}`, so the block it binds is a \
+                 different size from the one the other shader binds"
+            );
+        }
+        for (value, name) in [
+            (crate::mesh::SHADOW_ATLAS_COLUMNS, "SHADOW_ATLAS_COLUMNS"),
+            (crate::mesh::SHADOW_ATLAS_ROWS, "SHADOW_ATLAS_ROWS"),
+        ] {
+            let spelling = format!("static const uint {name} = {value};");
+            assert!(
+                VOLUMETRIC.contains(&spelling),
+                "volumetric.slang does not declare `{spelling}`, so its shadow \
+                 atlas is not the one `crcbl_render::shadow` fills"
+            );
+        }
+
+        for signature in [
+            "float2 atlas_uv(uint tile, float2 tile_uv)",
+            "float tile_pcf(uint tile, float2 tile_uv, float reference)",
+        ] {
+            assert_eq!(
+                one_function(MESH, signature, "frame."),
+                one_function(VOLUMETRIC, signature, "params."),
+                "`{signature}` has drifted between mesh.slang and volumetric.slang"
+            );
+        }
+    }
+
+    /// The body of the function `signature` opens: its code, with `//` comments
+    /// dropped and runs of whitespace collapsed to one space.
+    ///
+    /// **Comments are dropped deliberately.** What has to agree between two
+    /// copies of a function is the arithmetic; a copy that explains itself in
+    /// its own terms — one file saying why the grid scales an atlas texel, the
+    /// other saying which file it came from — is a copy doing its job, and a
+    /// guard that failed on it would be a guard authors route around.
+    ///
+    /// `block` is the name the file gives its uniform block, with the dot —
+    /// `frame.` in one shader and `params.` in the other — and it is replaced
+    /// wherever a token *starts* with it. Starts, rather than anywhere: the
+    /// field these two read is `shadow_params`, so a plain substring
+    /// replacement turns `params.shadow_params.xy` into nonsense that then
+    /// compares unequal for a reason that is not drift.
+    ///
+    /// Braces are counted rather than matched against a grammar, which is
+    /// enough for these two: neither has a brace inside a string, and a copy
+    /// that grew one would fail the comparison above rather than pass it
+    /// silently.
+    fn one_function(source: &str, signature: &str, block: &str) -> String {
+        let at = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("no `{signature}` in this shader"));
+        let body = &source[at + signature.len()..];
+        let open = body.find('{').expect("a function has a body");
+        let mut depth = 0i32;
+        let mut end = None;
+        for (offset, character) in body[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + offset + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.expect("a function body closes");
+        body[open..end]
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .flat_map(str::split_whitespace)
+            .map(|token| match token.strip_prefix(block) {
+                Some(rest) => format!("BLOCK.{rest}"),
+                None => token.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The composite scatters its partial slice through the froxel's own
+    /// visibility rather than through a constant.
+    ///
+    /// **A text guard, and it is here because no rendered frame catches this.**
+    /// Replacing `visibilities[froxel]` with `1.0` leaves every GPU test in
+    /// `crcbl`'s `mesh_e2e` green to the digit: those tests measure background
+    /// texels, whose partial slice is the tail of a column whose transmittance
+    /// has already gone to nothing, and the texels where the partial slice
+    /// *does* carry the frame are the ones a surface was drawn into — where
+    /// turning the cascades on or off moves the surface's own shading too, so a
+    /// two-frame comparison cannot attribute the difference to the medium.
+    ///
+    /// What would catch it is the per-froxel readback `docs/backlog.md` carries
+    /// as a gap. Until that exists this is what stands between the composite and
+    /// a seam at every slice boundary, and it is worth exactly what it says: the
+    /// read is written down, not that it is right.
+    #[test]
+    fn the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility() {
+        const COMPOSITE: &str = include_str!("../shaders/volumetric_composite.slang");
+        assert!(
+            COMPOSITE.contains("volumetric_source(view_direction, visibilities[froxel])"),
+            "volumetric_composite.slang no longer sources its partial slice from the \
+             froxel's own visibility, so the shadow ends at the slice boundary"
+        );
     }
 
     /// Every shader that spells the phase function is in [`SHADERS`].

@@ -83,6 +83,14 @@ static const float FOG_RATIO_KERNEL[5] = {
     1.0, 0.5, 0.16666667, 0.041666668, 0.008333334
 };
 
+/// How many cascades the sun's shadow map is split into, matching
+/// `crcbl_shaders::mesh::SHADOW_CASCADES`.
+///
+/// Read here only to size the block's matrix array: nothing in this file walks
+/// a cascade, because `scatterMain` already did it once per froxel and left the
+/// answer in `visibilities`.
+static const uint SHADOW_CASCADES = 2;
+
 /// The block `volumetric.slang` declares, bound here unchanged so a pixel's
 /// froxel and the froxel the column was written into are one arithmetic.
 struct VolumetricParams
@@ -96,6 +104,16 @@ struct VolumetricParams
     float4 sun_direction;
     /// What the medium scatters out of the sun per unit length, in `rgb`.
     float4 sun_radiance;
+    /// World → cascade `i`'s shadow clip. Declared and not read — see
+    /// `SHADOW_CASCADES` above; the block is one layout, so both files carry
+    /// every row of it whether they use it or not.
+    float4x4 shadow_view_proj[SHADOW_CASCADES];
+    /// How far each cascade reaches. Declared and not read, for the same
+    /// reason.
+    float4 cascade_far;
+    /// The atlas's texel size and `mesh.slang`'s receiver biases. Declared and
+    /// not read, for the same reason.
+    float4 shadow_params;
     uint grid_x;
     uint grid_y;
     uint slices;
@@ -126,6 +144,15 @@ Texture2D<float4> scene_color;
 /// writes against this pass's reads rather than leaving them in one state.
 [[vk::binding(3, 0)]]
 StructuredBuffer<float4> volumetrics;
+
+/// What fraction of the sun each froxel could see, as `scatterMain` measured
+/// it — untouched by the scan, which is over `volumetrics` alone.
+///
+/// The partial slice below is a piece of one froxel, so it owes that froxel's
+/// scattering source; reading the number back is what keeps the cascade walk in
+/// one shader instead of running it again for every pixel on screen.
+[[vk::binding(4, 0)]]
+StructuredBuffer<float> visibilities;
 
 struct FullscreenOutput
 {
@@ -234,14 +261,15 @@ float volumetric_phase(float g, float cos_theta)
 /// leaves `fog_color` untouched bit for bit, and the column stays the closed
 /// form the fragment stage was computing.
 ///
-/// No shadow is asked of it yet. Rung 1b of `docs/plan/51-volumetrics.md` is
-/// the cascade lookup that occludes this term, and until it lands a shaft
-/// reaches through whatever is standing in it.
-float3 volumetric_source(float3 view_direction)
+/// `visibility` scales the sun term alone, because the environment term is what
+/// reaches the medium from every direction and an occluder in front of the sun
+/// does not remove it. It arrives from `visibilities` rather than from a
+/// cascade walk of this file's own — `volumetric.slang` has the only copy.
+float3 volumetric_source(float3 view_direction, float visibility)
 {
     float cos_theta = dot(params.sun_direction.xyz, view_direction);
     float3 sun = params.sun_radiance.rgb
-               * volumetric_phase(params.sun_direction.w, cos_theta);
+               * volumetric_phase(params.sun_direction.w, cos_theta) * visibility;
     return params.fog_color.rgb + sun;
 }
 
@@ -344,7 +372,12 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // degenerate segment scatters nothing, so its fallback axis is
     // unobservable.
     float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
-    float3 partial_radiance = volumetric_source(view_direction) * (1.0 - partial_survives);
+    // The froxel's own visibility, not a second lookup: this segment is inside
+    // the slice `scatterMain` measured, so charging it a different fraction of
+    // the sun than the froxel around it would put a seam at every slice
+    // boundary — the one place the composite is meant to be exact.
+    float3 partial_radiance =
+        volumetric_source(view_direction, visibilities[froxel]) * (1.0 - partial_survives);
 
     float3 lit = scene.rgb * (prefix.a * partial_survives) + prefix.rgb
                + prefix.a * partial_radiance;

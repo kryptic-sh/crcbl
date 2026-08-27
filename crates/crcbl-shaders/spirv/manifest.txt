@@ -408,30 +408,30 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [volumetric]
 source = shaders/volumetric.slang
-source-sha256 = a1afd1e34ef60e4212a239bf4a2c006443d2ca208a4ae6bf8541c6457d85669e
+source-sha256 = c695ac2b3862ac7e07599459205ab4c07beee241532e5a76e7ec817f17bd957c
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric.spv
-spirv-sha256 = 0b34d07cf9fb2c4781ce215afaaf14cbac09a3d4d759677f7eb8990a05b9d9db
+spirv-sha256 = caa75bda7ef9812dbdf339279a38998729f3a182e0f16a9192aa8801117f4567
 wgsl = wgsl/volumetric.wgsl
-wgsl-sha256 = 404626a054931fba50e630c3c3cde78e398d7bbb21734e2a913f08631aa259c6
+wgsl-sha256 = 2b8426897486f8110a6cb4b754790ff657026ba02b840579b1822aa0d42bd273
 msl = msl/volumetric.metal
-msl-sha256 = 2afa86d31bdbddf7f3ca47b15f632e268664b1b3debbf9b469c93bf80395916d
-dxil = scatterMain:dxil/volumetric.scatterMain.dxil:fa3e07667d79397edcf0f7a733b17960188788e8d4472fb6b2d597f44782c39e
-dxil = integrateMain:dxil/volumetric.integrateMain.dxil:4655a39867c4f17b329da8f70012de555728faa6409e5ccffb8af21b7679f078
+msl-sha256 = f286d1d0ac2e9bc7abb639825fe277b01f3573f0bf5b3ee321a8dad5a78f0f36
+dxil = scatterMain:dxil/volumetric.scatterMain.dxil:5b566f3a6d48e613318b0fa6831200077031dca6ed4d68c39f89442579213041
+dxil = integrateMain:dxil/volumetric.integrateMain.dxil:b1f68f9677c4768513280bac717e660f0078e8e8e39ebebc3d7eb1314e5e8b81
 entry-points = scatterMain:glcompute, integrateMain:glcompute
 
 [volumetric_composite]
 source = shaders/volumetric_composite.slang
-source-sha256 = f84f9c9c1dd19b4c2c56e97ab9fe036691e498d29144273484d3f6db94384104
+source-sha256 = 4e1b1bcd6f91ce83ebfdf4e1f9a03a0191edf13e9349395507e8a1a1a759c63f
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric_composite.spv
-spirv-sha256 = da07c4bf728d2aeb26d6b612a810af869e2256dedcbcd0b1e6f9274a40f5461d
+spirv-sha256 = 8c271f4a79ddc43e1cb60c7f820de8209e2e44ff5e2ef5a48a372d1d8c7837ee
 wgsl = wgsl/volumetric_composite.wgsl
-wgsl-sha256 = 3ce7ea4d1577f73ebb3b32a91f1d2ef38843dcb8643d44daa64c5fa3fdc85b96
+wgsl-sha256 = 6ae722b01e434ba70f16c4f76f2b9f9e95187ee347b2ca945854a278e9d7483b
 msl = msl/volumetric_composite.metal
-msl-sha256 = a034b2996e0ae58fc53138076c7d1dd3baee3033428d8632b81f0a2c3cfb8d2d
+msl-sha256 = 27c3db1985dfbfffb05f4045510e5128a489e75e8a7d33ec62f16228528c4ad0
 dxil = vertexMain:dxil/volumetric_composite.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/volumetric_composite.fragmentMain.dxil:e4c33081423d84958ff01900fbded724d5eab1d8318ae8955ee6c565b8058fa3
+dxil = fragmentMain:dxil/volumetric_composite.fragmentMain.dxil:1bfebc99dcedd6f0f59a4dbb8b343b044d1c1ba8b4092ba0de168c3e1ba018d3
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [zero_dispatch_probe]

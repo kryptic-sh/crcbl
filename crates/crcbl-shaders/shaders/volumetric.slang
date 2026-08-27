@@ -8,9 +8,9 @@
 //
 // * `scatterMain` owns **one froxel** and answers two questions about the slab
 //   of air in it — how much radiance it scatters towards the eye, and how much
-//   of what is behind it gets through. That is where a light's contribution
-//   goes when rung 2 of topic 51 arrives; today the medium scatters the frame's
-//   fog colour and nothing else.
+//   of what is behind it gets through, with the sun's own contribution shadowed
+//   through the cascade atlas. That is where a punctual light's contribution
+//   goes when rung 2 of topic 51 arrives.
 // * `integrateMain` owns **one screen tile** and walks its column from the eye
 //   outward, turning each slice's own pair into the running pair in front of
 //   it. `volumetric_composite.slang` then reads one froxel per pixel.
@@ -100,6 +100,21 @@ static const float FOG_RATIO_KERNEL[5] = {
     1.0, 0.5, 0.16666667, 0.041666668, 0.008333334
 };
 
+/// How many cascades the sun's shadow map is split into, matching
+/// `crcbl_shaders::mesh::SHADOW_CASCADES` and `mesh.slang`'s own copy.
+///
+/// The froxel volume asks the same atlas the same question a fragment does, so
+/// a disagreement here would light a shaft against a cascade the surfaces in it
+/// were never shadowed by.
+static const uint SHADOW_CASCADES = 2;
+
+/// Tiles across the shadow atlas, matching
+/// `crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS`.
+static const uint SHADOW_ATLAS_COLUMNS = 4;
+
+/// Tiles down it, matching `crcbl_shaders::mesh::SHADOW_ATLAS_ROWS`.
+static const uint SHADOW_ATLAS_ROWS = 4;
+
 /// What neither dispatch can derive for itself, matching
 /// `crcbl_shaders::volumetric::VolumetricParams`.
 ///
@@ -139,6 +154,18 @@ struct VolumetricParams
     /// with no sun in it algebraically the closed form, and is the state every
     /// frame is in until a caller sets `Fog::sun_scattering`.
     float4 sun_radiance;
+    /// World → cascade `i`'s shadow clip, one matrix per cascade — the same
+    /// rows `mesh.slang`'s `FrameUniforms` carries, so a froxel and a fragment
+    /// project into the same atlas tile.
+    float4x4 shadow_view_proj[SHADOW_CASCADES];
+    /// Component `i` is how far from the eye cascade `i` reaches, in world
+    /// units; the first one that covers a point is the one it is looked up in.
+    float4 cascade_far;
+    /// `xy`: one atlas texel in `u` and in `v`, which is what the PCF kernel
+    /// steps by. `zw` are `mesh.slang`'s receiver biases and **nothing here
+    /// reads them**: a bias exists to stop a facet shadowing itself, and a
+    /// froxel is a volume with no facet in it.
+    float4 shadow_params;
     uint grid_x;
     uint grid_y;
     /// `CLUSTER_DEPTH_SLICES` for a perspective camera, `1` for an orthographic
@@ -167,6 +194,37 @@ ConstantBuffer<VolumetricParams> params;
 /// that slice and `a` is the transmittance through all of it.
 [[vk::binding(1, 0)]]
 RWStructuredBuffer<float4> volumetrics;
+
+/// The sun's cascades, in the atlas `crcbl_render::shadow` fills — the same
+/// image `mesh.slang` reads at its own binding 15.
+///
+/// `DepthTexture2D` for that file's reason: WebGPU binds a `D32Float` view only
+/// through a depth sample type, and the WGSL artifact declares
+/// `texture_depth_2d`.
+[[vk::binding(2, 0)]]
+DepthTexture2D shadow_atlas;
+
+/// `SamplerComparisonState`, so a tap returns the *fraction* the hardware
+/// filtered rather than a depth to compare on this side.
+///
+/// **Bound to a compute stage**, which is what is new here: `SampleCmpLevelZero`
+/// asks for no derivatives and is allowed outside a fragment shader on all four
+/// targets, where the implicit-LOD `SampleCmp` is not.
+[[vk::binding(3, 0)]]
+SamplerComparisonState shadow_sampler;
+
+/// What fraction of the sun each froxel can see, written by `scatterMain` and
+/// read by `volumetric_composite.slang`.
+///
+/// **The cascade walk happens once per froxel and this is how the answer
+/// leaves.** The composite integrates the partial slice a pixel sits inside
+/// along that pixel's own ray, and it needs the same scattering source this
+/// pass gave the whole froxel; without a number to read it would have to walk
+/// the atlas again, per pixel, which is the cost the froxel grid exists to
+/// avoid. `integrateMain` neither reads nor writes it — the scan is over the
+/// column buffer alone, and this survives it untouched.
+[[vk::binding(4, 0)]]
+RWStructuredBuffer<float> visibilities;
 
 /// `e^-x`, without calling a transcendental.
 /// `crcbl_shaders::fog::exp_neg`; see `mesh.slang`'s copy for the derivation.
@@ -310,29 +368,116 @@ float volumetric_phase(float g, float cos_theta)
 /// leaves `fog_color` untouched bit for bit, and the column stays the closed
 /// form the fragment stage was computing.
 ///
-/// No shadow is asked of it yet. Rung 1b of `docs/plan/51-volumetrics.md` is
-/// the cascade lookup that occludes this term, and until it lands a shaft
-/// reaches through whatever is standing in it.
-float3 volumetric_source(float3 view_direction)
+/// `visibility` is what `volumetric_sun_visibility` gave this froxel: it scales
+/// the sun term alone, because the environment term is what reaches the medium
+/// from everywhere and an occluder in front of the sun does not remove it.
+/// **That is what makes this a shaft rather than a dimmer**: the shadowed air
+/// keeps its ambient glow and loses the beam.
+float3 volumetric_source(float3 view_direction, float visibility)
 {
     float cos_theta = dot(params.sun_direction.xyz, view_direction);
     float3 sun = params.sun_radiance.rgb
-               * volumetric_phase(params.sun_direction.w, cos_theta);
+               * volumetric_phase(params.sun_direction.w, cos_theta) * visibility;
     return params.fog_color.rgb + sun;
+}
+
+/// Where tile `tile` puts `tile_uv` in the whole atlas.
+///
+/// `mesh.slang`'s function of the same name, letter for letter — the grid is
+/// row-major and the cascades are its first tiles, which is the arithmetic
+/// `crcbl_render::shadow::tile_origin` performs on the host.
+/// `crcbl_shaders::volumetric`'s `both_shaders_spell_the_same_atlas_walk` is
+/// what holds the two copies together, there being no `#include` here.
+float2 atlas_uv(uint tile, float2 tile_uv)
+{
+    float2 cell = float2(float(tile % SHADOW_ATLAS_COLUMNS), float(tile / SHADOW_ATLAS_COLUMNS));
+    return (cell + tile_uv) / float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
+}
+
+/// 3×3 PCF over tile `tile`, at `tile_uv` in that tile's own `0..1` space.
+///
+/// `mesh.slang`'s kernel, and the clamp is half a texel inside the tile for its
+/// reason: the comparison sampler filters a 2×2 neighbourhood around each tap,
+/// so a tap exactly on the edge reads the neighbouring map's depths as if they
+/// were this one's.
+float tile_pcf(uint tile, float2 tile_uv, float reference)
+{
+    float2 texel = params.shadow_params.xy;
+    float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
+    float2 tile_min = float2(0.5, 0.5) * texel * grid;
+    float visibility = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            float2 offset = float2(float(x), float(y)) * texel * grid;
+            float2 tap = clamp(tile_uv + offset, tile_min, 1.0 - tile_min);
+            visibility +=
+                shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
+        }
+    }
+    return visibility / 9.0;
+}
+
+/// The fraction of the sun a point in the medium can see: `1.0` fully lit,
+/// `0.0` fully shadowed, the values between being the PCF filter.
+///
+/// `mesh.slang`'s `sun_visibility` with **both of its biases dropped and its
+/// early return with them**. Each of the three is about a receiving *surface*:
+/// the depth and slope offsets exist so a facet does not shadow itself across
+/// one texel of the map, and the `n_dot_l` return is "this fragment's diffuse
+/// term is already zero". A froxel is a volume of air. It has no facet to
+/// self-shadow and no normal to face away, and biasing it would push the
+/// scattering it reports *out* of the shadow it is standing in — which is
+/// visible as a lit rim along every shaft.
+///
+/// Outside the last cascade's box it is lit, which is that function's answer
+/// and for its reason: a shadow map knows nothing about what it never
+/// rendered, and inventing an occluder there is a black wall across everything
+/// past the last split.
+float volumetric_sun_visibility(float3 world_position)
+{
+    // Distance to the eye rather than view-space depth, because the splits are
+    // radii around the camera — the same selection a fragment runs, so a
+    // froxel and the surface behind it land in the same cascade.
+    float eye_distance = length(world_position - params.eye.xyz);
+    uint cascade = SHADOW_CASCADES - 1;
+    for (uint index = 0; index < SHADOW_CASCADES; ++index)
+    {
+        if (eye_distance < params.cascade_far[index])
+        {
+            cascade = index;
+            break;
+        }
+    }
+
+    float4 clip = mul(params.shadow_view_proj[cascade], float4(world_position, 1.0));
+    // Orthographic, so `w` is one and the divide is a formality — written out
+    // because nothing here may assume which constructor built a matrix.
+    float3 ndc = clip.xyz / clip.w;
+    if (any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0)
+    {
+        return 1.0;
+    }
+
+    // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
+    // push into the viewport rather than into the matrix.
+    float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    return tile_pcf(cascade, tile_uv, ndc.z);
 }
 
 /// What one slice of the medium does, given the segment of the tile's centre
 /// ray it occupies.
 ///
 /// `radiance` is what the slice scatters towards the eye and `transmittance` is
-/// what survives it. **The medium's single-scattering albedo is one here** —
-/// every unit of radiance the slab takes out of the view ray is a unit it puts
-/// back in from the environment — which is what makes the whole column
-/// algebraically the closed form `mesh.slang` composites, and is the property
-/// `crcbl`'s `mesh_e2e` measures. Rung 2 of `docs/plan/51-volumetrics.md` is
-/// where a light's own contribution joins `radiance` and the two stop being
-/// equal.
-float4 volumetric_slice(float3 from, float3 to)
+/// what survives it. **The environment term's single-scattering albedo is one**
+/// — every unit of radiance the slab takes out of the view ray is a unit it
+/// puts back in from every direction alike — which is what makes a column with
+/// no sun in it algebraically the closed form `mesh.slang` composites, and is
+/// the property `crcbl`'s `mesh_e2e` measures. The sun is added on top of that
+/// and is zero until a caller asks for it, so the equality is an off-switch
+/// rather than a rung that has been left behind.
+float4 volumetric_slice(float3 from, float3 to, float visibility)
 {
     float reference = params.fog_params.z;
     float3 segment = to - from;
@@ -344,7 +489,7 @@ float4 volumetric_slice(float3 from, float3 to)
     // degenerate segment cannot be normalised, and its `1 - survives` is zero
     // anyway, so the axis it falls back to is unobservable.
     float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
-    return float4(volumetric_source(view_direction) * (1.0 - survives), survives);
+    return float4(volumetric_source(view_direction, visibility) * (1.0 - survives), survives);
 }
 
 /// Invocations per workgroup, matching
@@ -384,8 +529,19 @@ void scatterMain(uint3 thread: SV_DispatchThreadID)
     float from_depth = slice == 0 ? 0.0 : volumetric_slice_start(slice);
     float to_depth = slice + 1 == slices ? CLUSTER_FAR : volumetric_slice_start(slice + 1);
 
-    volumetrics[froxel] = volumetric_slice(params.eye.xyz + along * from_depth,
-                                           params.eye.xyz + along * to_depth);
+    float3 from = params.eye.xyz + along * from_depth;
+    float3 to = params.eye.xyz + along * to_depth;
+
+    // **The slice's midpoint, and one lookup for the whole of it.** A slab of
+    // air has no single place the sun does or does not reach it, and the
+    // alternative to picking one is marching the segment — which at 24 slices a
+    // column is the shadow cost of a ray march, and is what rung 3's temporal
+    // reprojection buys instead. The midpoint is where the error is smallest for
+    // a slice that is entirely in or entirely out, which is what almost every
+    // slice is: a shaft's edge is one froxel wide either way.
+    float visibility = volumetric_sun_visibility((from + to) * 0.5);
+    visibilities[froxel] = visibility;
+    volumetrics[froxel] = volumetric_slice(from, to, visibility);
 }
 
 /// One invocation per screen tile: the exclusive prefix scan down its column.
