@@ -15,6 +15,49 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
+### Code comments still cite `18-render-features.md` by a section it no longer holds (2026-08-27)
+
+That topic was split into one document per technique — `44-lighting.md` through
+`50-irradiance-probes.md`, with `18-render-features.md` kept as the index that
+holds the interactions, the delivery table and the risks. Roughly a hundred and
+eighty doc comments, shader headers and test headers across `crcbl-shaders`,
+`crcbl-render`, `crcbl`, `crcbl-vk`, `apps/lantern`, `apps/shard` and
+`apps/breach` name `docs/plan/18-render-features.md` and then name a section —
+"'s shadow section", "'s screen-space reflections", "'s irradiance grid" — that
+now lives elsewhere.
+
+**Nothing is broken**: the path still resolves, `tools/check-doc-citations.sh`
+passes, and topic 18's index table is one hop from any of those citations to the
+document it meant. They were left alone deliberately, on the rule that a move
+commit should be reviewable as a move: repointing them is a ~180-file diff whose
+every hunk is a string, and mixing it into the split would have buried the
+split.
+
+**What it would take:** a mechanical pass mapping each citation's named section
+to the new topic number. The mapping is topic 18's own index table. Worth doing
+in one commit that touches nothing else, and worth doing before the next
+technique's ladder lands, because each new rung adds citations to the old path.
+
+### The rendering-gap survey has no owner per row (2026-08-27)
+
+`docs/plan/43-render-standards.md` enumerates what a current engine ships and
+where this one stands, and its delivery table orders the gaps by benefit per
+unit of work. The rows above **blended transparency** each have a section
+arguing them; the rows below have a paragraph and no decision record.
+
+Specifically un-argued, and each needing its own topic before it is built:
+order-independent transparency and whether an approximation can be blessed at
+all under this workspace's golden discipline; the froxel volumetric-fog pass and
+what it does to the light-cluster grid's lifetime; specular IBL's prefiltered
+radiance cube and where its BRDF LUT is generated; and colour grading's LUT
+format and authoring path.
+
+**The one row that is a decision rather than a design** is reserving the
+previous-transform slot in `crcbl_shaders::mesh::GpuInstance`. It blocks TAA,
+temporal SSR, temporal upscaling, per-object motion blur and SSGI's
+accumulation, it gets more expensive as more shaders index past the instance
+stride, and it needs the user's call on when to spend the re-bless.
+
 ### `registers_are_assigned_per_class_in_declaration_order` covers half the shaders (2026-08-27)
 
 That test in `crates/crcbl-dx12/src/dxil.rs` says "Every shader is listed, not
