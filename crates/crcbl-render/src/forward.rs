@@ -4799,6 +4799,7 @@ impl ForwardRenderer {
                 perspective,
             },
             self.fog,
+            light,
         )?;
 
         // The frame's gradient, resolved once and handed to all three of the

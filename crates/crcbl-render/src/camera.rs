@@ -417,6 +417,30 @@ pub struct Fog {
     /// reason: the scene target is `Rgba16Float` and this is a radiance rather
     /// than a display colour, so a bright sky's haze is allowed to bloom.
     pub color: Vec3,
+    /// What fraction of the sun's radiance the medium scatters towards the eye,
+    /// per unit length.
+    ///
+    /// **Read only by the froxel path** — [`RenderEffects::VOLUMETRIC_FOG`] —
+    /// and zero everywhere else. `mesh.slang`'s closed form integrates
+    /// absorption along the view ray and has no direction in it at all, so
+    /// there is nowhere for a phase function to go; a caller who sets this
+    /// without switching the effect on gets the frame they had.
+    ///
+    /// Zero is exactly off: the scattering source is a sum, so a zero term
+    /// leaves [`color`](Self::color)'s environment term bit for bit.
+    ///
+    /// [`RenderEffects::VOLUMETRIC_FOG`]: crate::RenderEffects::VOLUMETRIC_FOG
+    pub sun_scattering: f32,
+    /// How the medium redistributes what it scatters: positive forward, zero
+    /// evenly, negative back.
+    ///
+    /// The `g` of [`crcbl_shaders::volumetric::phase`], clamped there to
+    /// [`MAX_ANISOTROPY`](crcbl_shaders::volumetric::MAX_ANISOTROPY). Mie
+    /// scattering in fog is around `0.8`, which is what makes looking towards
+    /// the sun through it bright and looking away from it flat; smoke is
+    /// lower. Read only by the froxel path, on
+    /// [`sun_scattering`](Self::sun_scattering)'s terms.
+    pub anisotropy: f32,
 }
 
 impl Fog {
@@ -432,6 +456,8 @@ impl Fog {
         falloff: 0.0,
         reference_height: 0.0,
         color: Vec3::ZERO,
+        sun_scattering: 0.0,
+        anisotropy: 0.0,
     };
 }
 

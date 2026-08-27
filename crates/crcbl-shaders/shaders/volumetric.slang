@@ -124,8 +124,21 @@ struct VolumetricParams
     /// `crcbl_render::volumetric`, and `docs/plan/51-volumetrics.md` on why
     /// charging both squares the transmittance.
     float4 fog_params;
-    /// The radiance the medium scatters towards the eye, in `rgb`; `w` unused.
+    /// The radiance the medium scatters towards the eye from every direction
+    /// alike, in `rgb`; `w` unused. The environment term, and the whole of what
+    /// `mesh.slang`'s closed form can answer.
     float4 fog_color;
+    /// The unit vector **towards** the sun in `xyz` — `mesh.slang`'s
+    /// `to_light` — and the medium's anisotropy in `w`.
+    float4 sun_direction;
+    /// What the medium scatters out of the sun per unit length, in `rgb`; `w`
+    /// unused.
+    ///
+    /// **Zero is exactly no sun.** The source below is a sum, so a zero here
+    /// leaves the environment term bit for bit — which is what keeps a column
+    /// with no sun in it algebraically the closed form, and is the state every
+    /// frame is in until a caller sets `Fog::sun_scattering`.
+    float4 sun_radiance;
     uint grid_x;
     uint grid_y;
     /// `CLUSTER_DEPTH_SLICES` for a perspective camera, `1` for an orthographic
@@ -255,6 +268,59 @@ void volumetric_tile_ray(uint tile_x, uint tile_y, out float3 near_point, out fl
     near_depth = max(dot(params.depth_row, float4(near_point, 1.0)), 1e-6);
 }
 
+/// `1 / (4 pi)`. `crcbl_shaders::volumetric::INV_FOUR_PI`.
+static const float VOLUMETRIC_INV_FOUR_PI = 0.079577470;
+
+/// The largest anisotropy the phase function accepts, in either direction.
+/// `crcbl_shaders::volumetric::MAX_ANISOTROPY`.
+///
+/// At `|g| = 1` the lobe is a delta function and the denominator is exactly
+/// zero straight ahead, so this keeps a division by zero out of a colour rather
+/// than being a tuning knob.
+static const float VOLUMETRIC_MAX_ANISOTROPY = 0.99;
+
+/// The Henyey-Greenstein phase function.
+/// `crcbl_shaders::volumetric::phase`, whose tests are the proof this is right:
+/// it integrates to one over the sphere at every anisotropy, so the medium
+/// redistributes light rather than creating it.
+///
+/// `cos_theta` is the cosine between the direction the light **was travelling**
+/// and the direction it leaves in, so `1.0` is straight on. Light from the sun
+/// travels along `-sun_direction` and leaves towards the eye along
+/// `-view_direction`, which makes the cosine `dot(sun_direction, view_direction)`
+/// — a camera looking into the sun sees the forward lobe, which is what a shaft
+/// is.
+///
+/// The three-halves power is `d * sqrt(d)` and not `pow(d, 1.5)`: IEEE-754
+/// requires a correctly rounded `sqrt` and specifies nothing at all about
+/// `pow`, and this result reaches a colour. See `docs/plan/44-lighting.md`.
+float volumetric_phase(float g, float cos_theta)
+{
+    float a = clamp(g, -VOLUMETRIC_MAX_ANISOTROPY, VOLUMETRIC_MAX_ANISOTROPY);
+    float d = 1.0 + a * a - 2.0 * a * clamp(cos_theta, -1.0, 1.0);
+    return VOLUMETRIC_INV_FOUR_PI * (1.0 - a * a) / (d * sqrt(d));
+}
+
+/// What the medium sends towards the eye from a froxel whose view ray runs
+/// along the unit vector `view_direction`.
+///
+/// A **sum**: the environment term `fog_color`, which is what the closed form
+/// answers, plus the sun redistributed by the phase function. The sum is what
+/// makes the sun an off-switch rather than a mode — `sun_radiance` at zero
+/// leaves `fog_color` untouched bit for bit, and the column stays the closed
+/// form the fragment stage was computing.
+///
+/// No shadow is asked of it yet. Rung 1b of `docs/plan/51-volumetrics.md` is
+/// the cascade lookup that occludes this term, and until it lands a shaft
+/// reaches through whatever is standing in it.
+float3 volumetric_source(float3 view_direction)
+{
+    float cos_theta = dot(params.sun_direction.xyz, view_direction);
+    float3 sun = params.sun_radiance.rgb
+               * volumetric_phase(params.sun_direction.w, cos_theta);
+    return params.fog_color.rgb + sun;
+}
+
 /// What one slice of the medium does, given the segment of the tile's centre
 /// ray it occupies.
 ///
@@ -269,10 +335,16 @@ void volumetric_tile_ray(uint tile_x, uint tile_y, out float3 near_point, out fl
 float4 volumetric_slice(float3 from, float3 to)
 {
     float reference = params.fog_params.z;
+    float3 segment = to - from;
+    float length_of = length(segment);
     float tau = fog_optical_depth(params.fog_params.x, params.fog_params.y, from.y - reference,
-                                  to.y - reference, length(to - from));
+                                  to.y - reference, length_of);
     float survives = fog_exp_neg(tau);
-    return float4(params.fog_color.rgb * (1.0 - survives), survives);
+    // The direction the slice is looked along, for the phase function. A
+    // degenerate segment cannot be normalised, and its `1 - survives` is zero
+    // anyway, so the axis it falls back to is unobservable.
+    float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
+    return float4(volumetric_source(view_direction) * (1.0 - survives), survives);
 }
 
 /// Invocations per workgroup, matching

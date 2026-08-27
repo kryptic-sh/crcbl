@@ -484,6 +484,48 @@ fn fogged_cube_hdr_via(fog: Fog, froxels: bool) -> HdrTarget {
 /// with no knowledge of the fog colour at all.
 const FOG_SCATTER: [f32; 3] = [8.0, 0.0, 0.0];
 
+/// The medium the sun-scattering tests run in.
+///
+/// Thick enough that a background column is nearly opaque, so what a background
+/// texel carries is the scattering source rather than a fraction of it — which
+/// is what lets those tests compare two frames without knowing the column's
+/// transmittance.
+const SUN_DENSITY: f32 = 0.15;
+
+/// What fraction of the sun's radiance that medium scatters per unit length.
+///
+/// Large, because these tests are about a ratio between two frames and not about
+/// a magnitude: it keeps the green channel well clear of `Rgba16Float`'s floor
+/// in the *backward* frame, which is the one the ratio divides by.
+const SUN_SCATTERING: f32 = 4.0;
+
+/// The medium's anisotropy where the lobe is meant to be visible. Mie scattering
+/// in fog is about this.
+const SUN_ANISOTROPY: f32 = 0.8;
+
+/// The smallest forward-to-backward ratio
+/// [`a_forward_lobe_brightens_the_frame_the_sun_is_ahead_of`] accepts at **any**
+/// background texel.
+///
+/// **Measured, not chosen.** radv gives 56.9 at the frame's worst texel, and a
+/// density sweep from 0.05 to 0.40 moved it not at all: a background column runs
+/// to `CLUSTER_FAR` and is opaque at every density in that range, so what a
+/// background texel carries is the scattering source itself and the ratio is the
+/// phase function's alone. This sits under the measurement with room for another
+/// driver's arithmetic, and far above the 1.0 a direction-blind source gives.
+const SUN_LOBE_RATIO: f32 = 50.0;
+
+/// The direction [`mesh_camera`] looks in, which is the axis the sun is put on
+/// and against.
+///
+/// Derived from the camera rather than written down, so it cannot drift from the
+/// fixture it has to agree with — a sun that was only nearly on the view axis
+/// would weaken the lobe without failing anything.
+fn camera_forward() -> crcbl::math::Vec3 {
+    let camera = mesh_camera(Projection::default());
+    (camera.target - camera.eye).normalize()
+}
+
 /// How far the froxel column's transmittance may sit from the closed form's at
 /// this fixture's extent — see
 /// [`the_froxel_volume_integrates_the_same_medium_the_closed_form_does`].
@@ -521,6 +563,7 @@ fn uniform_fog(density: f32) -> Fog {
         falloff: 0.0,
         reference_height: 0.0,
         color: crcbl::math::Vec3::from_array(FOG_SCATTER),
+        ..Fog::NONE
     }
 }
 
@@ -791,6 +834,175 @@ fn doubling_the_density_squares_the_transmittance_through_the_froxel_volume() {
     );
 }
 
+/// A medium that scatters the sun as well as the environment.
+///
+/// `FOG_SCATTER` is the environment term and is red alone, so **green measures
+/// the sun term and nothing else**: `DirectionalLight::default`'s colour has all
+/// three channels, and the environment contributes exactly zero to this one.
+/// That is the same trick `doubling_the_fog_density_squares_the_transmittance`
+/// plays with the other channel, for the same reason — a quantity recovered with
+/// no knowledge of what else is in the frame.
+fn sun_fog(anisotropy: f32) -> Fog {
+    Fog {
+        anisotropy,
+        sun_scattering: SUN_SCATTERING,
+        ..uniform_fog(SUN_DENSITY)
+    }
+}
+
+/// The fixture cube under a medium that scatters a sun pointing whichever way
+/// the caller says, through the froxel path.
+///
+/// [`fogged_cube_hdr_via`]'s scene and its refusals; the light is the caller's
+/// because the whole claim here is about the angle between it and the view ray.
+fn sun_scattered_cube_hdr(fog: Fog, to_sun: crcbl::math::Vec3) -> HdrTarget {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::REFLECTIONS, Some(false))
+            .force(RenderEffects::VOLUMETRIC_FOG, Some(true)),
+        ..EffectRequest::default()
+    });
+    renderer.set_fog(fog);
+    place_cube(&mut renderer);
+    let light = DirectionalLight {
+        direction: to_sun,
+        ..DirectionalLight::default()
+    };
+    let mut hdr = Vec::new();
+    let _ = render_mesh_lit(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(Projection::default()),
+        &light,
+        Some(&mut hdr),
+    );
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    HdrTarget(hdr)
+}
+
+/// Which texels the mesh does not cover, taken off a frame with no medium in it
+/// at all.
+///
+/// The background is where the sun term is measurable on its own: no fragment of
+/// `mesh.slang` wrote it, so what is there is the scene clear colour behind a
+/// full column of air. The mask has to come from an **unfogged** frame, because
+/// a fogged background is no longer the clear colour and the old `green <= floor`
+/// test for "the mesh is not here" would call the whole frame covered.
+fn background_texels() -> Vec<(u32, u32)> {
+    const LIT_FLOOR: f32 = 0.05;
+    let clear = fogged_cube_hdr_via(uniform_fog(0.0), false);
+    (0..MESH_EXTENT.1)
+        .flat_map(|y| (0..MESH_EXTENT.0).map(move |x| (x, y)))
+        .filter(|(x, y)| clear.pixel(*x, *y)[1] <= LIT_FLOOR)
+        .collect()
+}
+
+/// **An isotropic medium does not care which way the sun points.**
+///
+/// The exact half of the phase function's claim, and the one that says the sun's
+/// direction reaches the picture through `volumetric_phase` and through nothing
+/// else. At `g = 0` the lobe is the constant `INV_FOUR_PI`, so reversing the sun
+/// must leave every background texel byte for byte — a scatter that leaked the
+/// direction into the source any other way (a Lambert term, a dot product folded
+/// into the radiance) fails this while still drawing a picture that looks like
+/// fog. The mesh's own texels are excluded because the same light shades the
+/// cube, and that surface *should* change when the sun moves.
+///
+/// It is also what makes the test below evidence: that one shows a frame moving
+/// when the sun turns, and this one shows the movement is the lobe's.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn an_isotropic_medium_scatters_the_sun_the_same_way_whichever_way_it_points() {
+    let ahead = sun_scattered_cube_hdr(sun_fog(0.0), camera_forward());
+    let behind = sun_scattered_cube_hdr(sun_fog(0.0), -camera_forward());
+
+    let background = background_texels();
+    for (x, y) in &background {
+        assert_eq!(
+            ahead.pixel(*x, *y),
+            behind.pixel(*x, *y),
+            "an isotropic medium scattered differently at ({x}, {y}) for two sun \
+             directions, so the direction is reaching the scattering source outside \
+             the phase function"
+        );
+    }
+    assert!(
+        background.len() > 1000,
+        "only {} texels were background, so this compared almost nothing",
+        background.len()
+    );
+}
+
+/// **A forward lobe makes looking into the sun bright and looking away flat.**
+///
+/// What anyone means by a shaft, in the one form this rung can state: the sun is
+/// put along the camera's own forward axis and then reversed, so every
+/// background texel's scattering angle flips from near zero to near `pi`. A
+/// forward-scattering medium has to brighten in the first and not the second, at
+/// **every** background texel rather than on average — a term that brightened the
+/// whole frame equally would pass a mean comparison and fail this.
+///
+/// The lobe is the Henyey-Greenstein one at [`SUN_ANISOTROPY`], where
+/// `p(g, 1) / p(g, -1)` is in the hundreds, so the ratio asserted is far below
+/// what the model gives and still far above anything a direction-blind term
+/// could produce.
+///
+/// Green alone, per [`sun_fog`]: the environment term is red, so this channel is
+/// the sun's contribution with nothing else folded into it.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_forward_lobe_brightens_the_frame_the_sun_is_ahead_of() {
+    let ahead = sun_scattered_cube_hdr(sun_fog(SUN_ANISOTROPY), camera_forward());
+    let behind = sun_scattered_cube_hdr(sun_fog(SUN_ANISOTROPY), -camera_forward());
+
+    let background = background_texels();
+    let mut weakest = f32::INFINITY;
+    let mut dimmest_ahead = f32::INFINITY;
+    for (x, y) in &background {
+        let into = ahead.pixel(*x, *y)[1];
+        let away = behind.pixel(*x, *y)[1];
+        assert!(
+            into > away,
+            "the sun ahead of the camera scattered {into} at ({x}, {y}) and the same \
+             sun behind it scattered {away} — a forward lobe cannot do that"
+        );
+        weakest = weakest.min(into / away.max(1e-9));
+        dimmest_ahead = dimmest_ahead.min(into);
+    }
+
+    eprintln!(
+        "crcbl mesh e2e: volumetrics — {} background texel(s), weakest forward ratio \
+         {weakest:.1}, dimmest forward radiance {dimmest_ahead:.4}",
+        background.len()
+    );
+    assert!(
+        background.len() > 1000,
+        "only {} texels were background, so this measured almost nothing",
+        background.len()
+    );
+    assert!(
+        weakest >= SUN_LOBE_RATIO,
+        "the weakest forward-to-backward ratio over the background is {weakest}, under \
+         the {SUN_LOBE_RATIO} a lobe this anisotropic gives even at the corners of the \
+         frame — the direction is reaching the source too weakly to be the phase function"
+    );
+    assert!(
+        dimmest_ahead > 0.0,
+        "the sun scattered nothing anywhere, so this compared two black frames"
+    );
+}
+
 /// **The reference height is a height: raising the plane thickens the fog.**
 ///
 /// Uniform fog above says nothing about the *height* half of exponential height
@@ -812,6 +1024,7 @@ fn raising_the_reference_plane_thickens_the_fog() {
         falloff: FALLOFF,
         reference_height,
         color: crcbl::math::Vec3::from_array(FOG_SCATTER),
+        ..Fog::NONE
     };
     let low = fogged_cube_hdr(height(-FALLOFF));
     let high = fogged_cube_hdr(height(FALLOFF));

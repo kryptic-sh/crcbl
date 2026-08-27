@@ -92,6 +92,10 @@ struct VolumetricParams
     float4 depth_row;
     float4 fog_params;
     float4 fog_color;
+    /// Towards the sun in `xyz`, the anisotropy in `w`.
+    float4 sun_direction;
+    /// What the medium scatters out of the sun per unit length, in `rgb`.
+    float4 sun_radiance;
     uint grid_x;
     uint grid_y;
     uint slices;
@@ -188,6 +192,59 @@ float3 volumetric_unproject(float2 ndc, float depth)
     return world.xyz / world.w;
 }
 
+/// `1 / (4 pi)`. `crcbl_shaders::volumetric::INV_FOUR_PI`.
+static const float VOLUMETRIC_INV_FOUR_PI = 0.079577470;
+
+/// The largest anisotropy the phase function accepts, in either direction.
+/// `crcbl_shaders::volumetric::MAX_ANISOTROPY`.
+///
+/// At `|g| = 1` the lobe is a delta function and the denominator is exactly
+/// zero straight ahead, so this keeps a division by zero out of a colour rather
+/// than being a tuning knob.
+static const float VOLUMETRIC_MAX_ANISOTROPY = 0.99;
+
+/// The Henyey-Greenstein phase function.
+/// `crcbl_shaders::volumetric::phase`, whose tests are the proof this is right:
+/// it integrates to one over the sphere at every anisotropy, so the medium
+/// redistributes light rather than creating it.
+///
+/// `cos_theta` is the cosine between the direction the light **was travelling**
+/// and the direction it leaves in, so `1.0` is straight on. Light from the sun
+/// travels along `-sun_direction` and leaves towards the eye along
+/// `-view_direction`, which makes the cosine `dot(sun_direction, view_direction)`
+/// — a camera looking into the sun sees the forward lobe, which is what a shaft
+/// is.
+///
+/// The three-halves power is `d * sqrt(d)` and not `pow(d, 1.5)`: IEEE-754
+/// requires a correctly rounded `sqrt` and specifies nothing at all about
+/// `pow`, and this result reaches a colour. See `docs/plan/44-lighting.md`.
+float volumetric_phase(float g, float cos_theta)
+{
+    float a = clamp(g, -VOLUMETRIC_MAX_ANISOTROPY, VOLUMETRIC_MAX_ANISOTROPY);
+    float d = 1.0 + a * a - 2.0 * a * clamp(cos_theta, -1.0, 1.0);
+    return VOLUMETRIC_INV_FOUR_PI * (1.0 - a * a) / (d * sqrt(d));
+}
+
+/// What the medium sends towards the eye from a froxel whose view ray runs
+/// along the unit vector `view_direction`.
+///
+/// A **sum**: the environment term `fog_color`, which is what the closed form
+/// answers, plus the sun redistributed by the phase function. The sum is what
+/// makes the sun an off-switch rather than a mode — `sun_radiance` at zero
+/// leaves `fog_color` untouched bit for bit, and the column stays the closed
+/// form the fragment stage was computing.
+///
+/// No shadow is asked of it yet. Rung 1b of `docs/plan/51-volumetrics.md` is
+/// the cascade lookup that occludes this term, and until it lands a shaft
+/// reaches through whatever is standing in it.
+float3 volumetric_source(float3 view_direction)
+{
+    float cos_theta = dot(params.sun_direction.xyz, view_direction);
+    float3 sun = params.sun_radiance.rgb
+               * volumetric_phase(params.sun_direction.w, cos_theta);
+    return params.fog_color.rgb + sun;
+}
+
 [shader("vertex")]
 FullscreenOutput vertexMain(uint index: SV_VertexID)
 {
@@ -276,10 +333,18 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float3 to = params.eye.xyz + along * max(view_depth, slice_start);
 
     float reference = params.fog_params.z;
+    float3 segment = to - from;
+    float length_of = length(segment);
     float tau = fog_optical_depth(params.fog_params.x, params.fog_params.y, from.y - reference,
-                                  to.y - reference, length(to - from));
+                                  to.y - reference, length_of);
     float partial_survives = fog_exp_neg(tau);
-    float3 partial_radiance = params.fog_color.rgb * (1.0 - partial_survives);
+    // The same source `volumetric.slang` gives a whole slice, along this
+    // pixel's own ray — which is the direction it is already looking, so the
+    // phase function is evaluated per pixel here and per tile there. A
+    // degenerate segment scatters nothing, so its fallback axis is
+    // unobservable.
+    float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
+    float3 partial_radiance = volumetric_source(view_direction) * (1.0 - partial_survives);
 
     float3 lit = scene.rgb * (prefix.a * partial_survives) + prefix.rgb
                + prefix.a * partial_radiance;

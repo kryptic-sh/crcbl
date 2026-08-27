@@ -10,6 +10,8 @@ struct VolumetricParams_std140_0
     @align(16) depth_row_0 : vec4<f32>,
     @align(16) fog_params_0 : vec4<f32>,
     @align(16) fog_color_0 : vec4<f32>,
+    @align(16) sun_direction_0 : vec4<f32>,
+    @align(16) sun_radiance_0 : vec4<f32>,
     @align(16) grid_x_0 : u32,
     @align(4) grid_y_0 : u32,
     @align(8) slices_0 : u32,
@@ -119,11 +121,35 @@ fn fog_optical_depth_0( density_0 : f32,  falloff_0 : f32,  height_a_0 : f32,  h
     return clamp(density_0 * distance_0 * fog_exp_neg_0(height_a_0 / falloff_0) * fog_one_minus_exp_over_0((height_b_0 - height_a_0) / falloff_0), 0.0f, 32.0f);
 }
 
+fn volumetric_phase_0( g_0 : f32,  cos_theta_0 : f32) -> f32
+{
+    var a_0 : f32 = clamp(g_0, -0.99000000953674316f, 0.99000000953674316f);
+    var _S6 : f32 = a_0 * a_0;
+    var d_1 : f32 = 1.0f + _S6 - 2.0f * a_0 * clamp(cos_theta_0, -1.0f, 1.0f);
+    return 0.07957746833562851f * (1.0f - _S6) / (d_1 * sqrt(d_1));
+}
+
+fn volumetric_source_0( view_direction_0 : vec3<f32>) -> vec3<f32>
+{
+    return params_0.fog_color_0.xyz + params_0.sun_radiance_0.xyz * vec3<f32>(volumetric_phase_0(params_0.sun_direction_0.w, dot(params_0.sun_direction_0.xyz, view_direction_0)));
+}
+
 fn volumetric_slice_0( from_0 : vec3<f32>,  to_0 : vec3<f32>) -> vec4<f32>
 {
     var reference_0 : f32 = params_0.fog_params_0.z;
-    var survives_0 : f32 = fog_exp_neg_0(fog_optical_depth_0(params_0.fog_params_0.x, params_0.fog_params_0.y, from_0.y - reference_0, to_0.y - reference_0, length(to_0 - from_0)));
-    return vec4<f32>(params_0.fog_color_0.xyz * vec3<f32>((1.0f - survives_0)), survives_0);
+    var segment_0 : vec3<f32> = to_0 - from_0;
+    var length_of_0 : f32 = length(segment_0);
+    var survives_0 : f32 = fog_exp_neg_0(fog_optical_depth_0(params_0.fog_params_0.x, params_0.fog_params_0.y, from_0.y - reference_0, to_0.y - reference_0, length_of_0));
+    var view_direction_1 : vec3<f32>;
+    if(length_of_0 > 9.99999997475242708e-07f)
+    {
+        view_direction_1 = segment_0 / vec3<f32>(length_of_0);
+    }
+    else
+    {
+        view_direction_1 = vec3<f32>(0.0f, 0.0f, 1.0f);
+    }
+    return vec4<f32>(volumetric_source_0(view_direction_1) * vec3<f32>((1.0f - survives_0)), survives_0);
 }
 
 @compute
@@ -132,23 +158,23 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
 {
     var froxel_0 : u32 = thread_0.x;
     var tiles_0 : u32 = max(params_0.grid_x_0, u32(1)) * max(params_0.grid_y_0, u32(1));
-    var _S6 : u32 = max(params_0.slices_0, u32(1));
-    var _S7 : bool;
-    if(froxel_0 >= (tiles_0 * _S6))
+    var _S7 : u32 = max(params_0.slices_0, u32(1));
+    var _S8 : bool;
+    if(froxel_0 >= (tiles_0 * _S7))
     {
-        _S7 = true;
+        _S8 = true;
     }
     else
     {
-        _S7 = froxel_0 >= (params_0.froxel_count_0);
+        _S8 = froxel_0 >= (params_0.froxel_count_0);
     }
-    if(_S7)
+    if(_S8)
     {
         return;
     }
     var tile_x_1 : u32 = froxel_0 % max(params_0.grid_x_0, u32(1));
-    var _S8 : u32 = froxel_0 / max(params_0.grid_x_0, u32(1));
-    var tile_y_1 : u32 = _S8 % max(params_0.grid_y_0, u32(1));
+    var _S9 : u32 = froxel_0 / max(params_0.grid_x_0, u32(1));
+    var tile_y_1 : u32 = _S9 % max(params_0.grid_y_0, u32(1));
     var slice_0 : u32 = froxel_0 / tiles_0;
     var near_point_1 : vec3<f32>;
     var near_depth_1 : f32;
@@ -163,15 +189,15 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         from_depth_0 = volumetric_slice_start_0(slice_0);
     }
-    var _S9 : u32 = slice_0 + u32(1);
+    var _S10 : u32 = slice_0 + u32(1);
     var to_depth_0 : f32;
-    if(_S9 == _S6)
+    if(_S10 == _S7)
     {
         to_depth_0 = 1000.0f;
     }
     else
     {
-        to_depth_0 = volumetric_slice_start_0(_S9);
+        to_depth_0 = volumetric_slice_start_0(_S10);
     }
     volumetrics_0[froxel_0] = volumetric_slice_0(params_0.eye_0.xyz + along_0 * vec3<f32>(from_depth_0), params_0.eye_0.xyz + along_0 * vec3<f32>(to_depth_0));
     return;
@@ -187,14 +213,14 @@ fn integrateMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
     {
         return;
     }
-    var _S10 : u32 = max(params_0.slices_0, u32(1));
-    const _S11 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
+    var _S11 : u32 = max(params_0.slices_0, u32(1));
+    const _S12 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
     var slice_1 : u32 = u32(0);
-    var accumulated_0 : vec3<f32> = _S11;
+    var accumulated_0 : vec3<f32> = _S12;
     var through_0 : f32 = 1.0f;
     for(;;)
     {
-        if(slice_1 < _S10)
+        if(slice_1 < _S11)
         {
         }
         else

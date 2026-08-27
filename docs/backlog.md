@@ -15,13 +15,14 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
-### The froxel column is built and has no light in it (2026-08-27)
+### The froxel column scatters the sun and nothing occludes it (2026-08-27)
 
 `crcbl_render::volumetric`'s three passes are built, switched by
-`RenderEffects::VOLUMETRIC_FOG`, and proved against the closed form on radv.
-What is left, rung by rung, is `docs/plan/51-volumetrics.md`; rung 1b — the
-cascade lookup inside `scatterMain`, and the drift guard the second copy of the
-light loop will need — is the next one.
+`RenderEffects::VOLUMETRIC_FOG`, proved against the closed form on radv, and the
+sun scatters into them through a Henyey-Greenstein lobe. What is left, rung by
+rung, is `docs/plan/51-volumetrics.md`; rung 1b-ii — the cascade lookup inside
+`scatterMain`, and the drift guard the second copy of the shadow lookup will
+need — is the next one.
 
 Three things belong here rather than there, because they are gaps rather than
 plans:
@@ -32,7 +33,7 @@ plans:
   `mesh_e2e` on Vulkan, because the effect is off by default and no sample or
   demo asks for it. The browser gate in particular runs the composite through no
   pixel. A demo that switches it on is what closes this, and `51-volumetrics`
-  rung 1b is when it will be worth looking at.
+  rung 1b-ii is when it will be worth looking at.
 - **The composite is before the reflection resolve, so a reflection arrives
   unfogged.** The same ordering gap `mesh.slang`'s closed form has, recorded
   further down this file, and the froxel path inherited it deliberately: it sits
@@ -43,8 +44,10 @@ plans:
   one-cell slice-boundary disagreement between the two shaders. It cannot
   separate a wrong scatter from a wrong scan, because at an albedo of one the
   two compose to the same answer. A readback compared against
-  `crcbl_shaders::volumetric` on the CPU is what will, and it is worth writing
-  when rung 1b breaks that equality.
+  `crcbl_shaders::volumetric` on the CPU is what will. Rung 1b-i broke the
+  equality only when a caller sets `Fog::sun_scattering`, which no sample does,
+  so the frame-level gate still holds everywhere it ran; a readback becomes
+  worth writing when rung 1b-ii puts an occluder in the column.
 
 ### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
 

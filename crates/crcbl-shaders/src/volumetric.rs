@@ -152,8 +152,8 @@ pub fn integrate_slice(source: f32, extinction: f32, thickness: f32) -> SliceInt
 /// `struct VolumetricParams` in `shaders/volumetric.slang` and the identical
 /// declaration in `shaders/volumetric_composite.slang`.
 ///
-/// One `float4x4` (64), four `float4` (16 each) and eight `uint`s (32).
-pub const PARAMS_SIZE: usize = 64 + 4 * 16 + 8 * 4;
+/// One `float4x4` (64), six `float4` (16 each) and eight `uint`s (32).
+pub const PARAMS_SIZE: usize = 64 + 6 * 16 + 8 * 4;
 
 /// Bytes one froxel occupies in the column buffer: one `float4`.
 ///
@@ -187,7 +187,29 @@ pub struct VolumetricParams {
     /// exactly one of the two paths.
     pub fog_params: [f32; 4],
     /// The radiance the medium scatters towards the eye in `rgb`; `w` unused.
+    ///
+    /// The environment term: what the medium sends towards the eye from every
+    /// direction alike, which is the whole of what the closed form in
+    /// `mesh.slang` can answer. [`VolumetricParams::sun_radiance`] is what the
+    /// froxel path adds to it.
     pub fog_color: [f32; 4],
+    /// The unit vector **towards** the sun in `xyz` — `mesh.slang`'s `to_light`
+    /// — and the medium's anisotropy in `w`.
+    ///
+    /// The two ride one row because a phase function is not evaluable without
+    /// both, and a frame that had one from this camera and the other from the
+    /// last would light a shaft that points nowhere.
+    pub sun_direction: [f32; 4],
+    /// What the medium scatters out of the sun, per unit length, in `rgb`; `w`
+    /// unused.
+    ///
+    /// **Zero is exactly no sun**, which is what makes this row an off-switch:
+    /// the scattering source is a sum, and a zero term leaves the environment
+    /// term it is added to bit for bit. That is the state every frame is in
+    /// until a caller sets `crcbl_render::Fog`'s `sun_scattering` — named
+    /// rather than linked, this crate having no dependencies at all — and it is
+    /// what lets the column stay algebraically equal to the closed form.
+    pub sun_radiance: [f32; 4],
     /// Tiles across.
     pub grid_x: u32,
     /// Tiles down.
@@ -218,6 +240,8 @@ impl VolumetricParams {
             .chain(self.depth_row)
             .chain(self.fog_params)
             .chain(self.fog_color)
+            .chain(self.sun_direction)
+            .chain(self.sun_radiance)
         {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
@@ -582,6 +606,8 @@ mod tests {
             depth_row: [2.5; 4],
             fog_params: [3.5; 4],
             fog_color: [4.5; 4],
+            sun_direction: [5.5; 4],
+            sun_radiance: [6.5; 4],
             grid_x: 7,
             grid_y: 11,
             slices: 13,
@@ -599,20 +625,108 @@ mod tests {
         let uint_at = |offset: usize| {
             u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
         };
-        for (offset, value) in [(0, 0.5), (64, 1.5), (80, 2.5), (96, 3.5), (112, 4.5)] {
+        for (offset, value) in [
+            (0, 0.5),
+            (64, 1.5),
+            (80, 2.5),
+            (96, 3.5),
+            (112, 4.5),
+            (128, 5.5),
+            (144, 6.5),
+        ] {
             assert_eq!(float_at(offset), value, "the row at byte {offset}");
         }
         for (offset, value) in [
-            (128, 7),
-            (132, 11),
-            (136, 13),
-            (140, 17),
-            (144, 19),
-            (148, 23),
-            (152, 29),
+            (160, 7),
+            (164, 11),
+            (168, 13),
+            (172, 17),
+            (176, 19),
+            (180, 23),
+            (184, 29),
         ] {
             assert_eq!(uint_at(offset), value, "the word at byte {offset}");
         }
-        assert_eq!(uint_at(156), 0, "the pad word is not written");
+        assert_eq!(uint_at(188), 0, "the pad word is not written");
+    }
+
+    /// Both shaders spell this module's phase function, with this module's
+    /// constants.
+    ///
+    /// It exists twice because there is no `#include` in these shaders and both
+    /// passes need it: `scatterMain` shades a whole slice along its tile's
+    /// centre ray, and the composite shades the partial slice along the pixel's
+    /// own. A copy edited in one file and not the other lights a shaft that
+    /// changes shape at every slice boundary — a picture, and a wrong one.
+    ///
+    /// The numbers are compared as values rather than as text, for
+    /// `shader_scalar`'s reason; the signature is compared as text, because
+    /// what it pins is that the copy is the same *function* and takes its
+    /// arguments in the same order.
+    #[test]
+    fn both_shaders_spell_this_module_s_phase_function() {
+        for (file, source) in SHADERS {
+            for (value, name) in [
+                (INV_FOUR_PI, "VOLUMETRIC_INV_FOUR_PI"),
+                (MAX_ANISOTROPY, "VOLUMETRIC_MAX_ANISOTROPY"),
+            ] {
+                assert_eq!(
+                    shader_scalar(source, name),
+                    value,
+                    "{file}'s {name} is not this module's"
+                );
+            }
+            assert!(
+                source.contains("float volumetric_phase(float g, float cos_theta)"),
+                "{file} does not declare this module's phase function"
+            );
+            // The lobe itself: the numerator, the denominator, and the
+            // three-halves power written as a multiply by a square root rather
+            // than as `pow` — which is the shading rule, not a style choice.
+            assert!(
+                source.contains("float d = 1.0 + a * a - 2.0 * a * clamp(cos_theta, -1.0, 1.0);"),
+                "{file}'s phase denominator is not this module's"
+            );
+            assert!(
+                source.contains("return VOLUMETRIC_INV_FOUR_PI * (1.0 - a * a) / (d * sqrt(d));"),
+                "{file}'s phase lobe is not this module's, or reaches for `pow`"
+            );
+        }
+    }
+
+    /// Every shader that spells the phase function is in [`SHADERS`].
+    ///
+    /// [`the_two_shaders_declare_one_block`] and the test above both walk a
+    /// hand-written list, and a hand-written list is exactly what a third copy
+    /// would not be added to. This reads the shader directory instead, so a new
+    /// file carrying the copy fails here rather than drifting unguarded —
+    /// `crate::fog`'s `every_shader_that_spells_the_exponential_is_guarded` is
+    /// the same guard over the same hazard.
+    #[test]
+    fn every_shader_that_spells_the_phase_function_is_guarded() {
+        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders");
+        let mut found: Vec<String> = std::fs::read_dir(directory)
+            .expect("the shader directory is beside this crate")
+            .map(|entry| entry.expect("a readable directory entry").path())
+            .filter(|path| path.extension().is_some_and(|kind| kind == "slang"))
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .expect("a readable shader")
+                    .contains("float volumetric_phase(float g, float cos_theta)")
+            })
+            .map(|path| {
+                path.file_name()
+                    .expect("a shader has a file name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        found.sort();
+        let mut guarded: Vec<String> = SHADERS.iter().map(|(name, _)| (*name).to_owned()).collect();
+        guarded.sort();
+        assert_eq!(
+            found, guarded,
+            "the shaders carrying the phase function are not the ones this module guards"
+        );
     }
 }

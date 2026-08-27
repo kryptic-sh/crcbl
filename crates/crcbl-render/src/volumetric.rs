@@ -59,7 +59,7 @@ use crcbl_hal::{
 use crcbl_shaders::volumetric::{FROXEL_STRIDE, PARAMS_SIZE, VolumetricParams, WORKGROUP_SIZE};
 use crcbl_shaders::{VOLUMETRIC, VOLUMETRIC_COMPOSITE};
 
-use crate::camera::Fog;
+use crate::camera::{DirectionalLight, Fog};
 use crate::draw_gen::{bound, compute_pipeline_entry, storage, uniform};
 use crate::graph::{ImageId, ImportedBuffer, RenderGraph};
 use crate::light_grid::{FrameView, Grid};
@@ -329,6 +329,7 @@ impl Volumetric {
         grid: Grid,
         view: FrameView,
         fog: Fog,
+        sun: &DirectionalLight,
     ) -> Result<(), HalError> {
         // Row 3 of the view-projection, so a shader can take a point's view
         // depth with one dot product — [`crate::light_grid`]'s block carries the
@@ -345,6 +346,20 @@ impl Volumetric {
                 depth_row,
                 fog_params: [fog.density, fog.falloff, fog.reference_height, 0.0],
                 fog_color: fog.color.extend(0.0).to_array(),
+                // Towards the sun, which is `mesh.slang`'s `to_light` and the
+                // opposite of the direction its light travels — the phase
+                // function's own convention, spelled out on
+                // `volumetric_phase`. Normalised here rather than trusted: a
+                // caller may hand the renderer any vector, and a longer one
+                // would scale a cosine past the clamp and flatten the lobe.
+                sun_direction: sun
+                    .direction
+                    .normalize_or_zero()
+                    .extend(fog.anisotropy)
+                    .to_array(),
+                // Zero unless a caller asked for it, which is what keeps the
+                // column algebraically the closed form until they do.
+                sun_radiance: (sun.color * fog.sun_scattering).extend(0.0).to_array(),
                 grid_x: grid.x,
                 grid_y: grid.y,
                 slices: grid.slices,

@@ -30,13 +30,24 @@ last partial slice along the pixel's own ray and composites over the frame.
 `RenderEffects::VOLUMETRIC_FOG` switches them on — off by default, and the frame
 block's fog density is zeroed when they run, so the medium is charged once.
 
-**Not built.** The light loop — rung 1b. Nothing in `scatterMain` reads a light
-or a shadow cascade yet, so the column's single-scattering albedo is one against
-an isotropic environment, which is algebraically the closed form `mesh.slang`
-was already compositing. That equality is what `crcbl`'s `mesh_e2e` measures,
-and it is the only reason a rung with no shaft in it is worth landing: it proves
-the buffer, the two dispatches, the scan and the composite are wired to each
-other before a light is asked of them.
+**Built.** The sun in the medium — rung 1b-i. `scatterMain` and the composite's
+partial slice both add `sun_radiance * phase(anisotropy, cos_theta)` to the
+environment term, along the segment each is integrating, with the sun's
+direction and the medium's anisotropy carried in the params block.
+`crcbl_render::Fog` gained `sun_scattering` and `anisotropy` and both default to
+zero, so the term is additive over rung 1a rather than a mode: a scene that sets
+neither renders bit for bit what it did before, which is what makes rung 1a's
+three tests this feature's off-switch.
+
+**Not built.** The occlusion — rung 1b-ii. Nothing in `scatterMain` reads a
+shadow cascade, so every froxel is lit as though it saw the sun. That draws the
+glow around a light without the shafts between the things blocking it, which is
+the half of the effect anyone actually means by the word. What it needs is the
+cascade atlas and a comparison sampler bound to a compute pass, and five
+functions copied out of `mesh.slang` — `atlas_uv`, `light_tile`, `tile_pcf`, the
+cascade walk and the `SHADOW_*` constants — under a drift guard that enumerates
+the copy. `shadow_slope` does not come with them: a participating medium has no
+facet to bias against.
 
 ## The decisions
 
@@ -141,7 +152,8 @@ sunlight through a window is the thing anyone means by volumetrics.
 | Rung                                                  | What it buys                                                                     | What it costs                                                                                                   |
 | ----------------------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | **1a — the column** _(built)_                         | The frame a shaft will be drawn into, proved against the closed form             | The froxel buffer, a scatter pass, an integrate pass and a composite pass                                       |
-| **1b — the sun's shaft**                              | Light shafts from the directional light, the effect anyone means by the word     | The cascade lookup copied once into `scatterMain`, and the drift guard that enumerates the copy                 |
+| **1b-i — the sun in the medium** _(built)_            | The sun's glow through the air, and the forward lobe that makes it a direction   | The phase function copied into both shaders, and the sun's direction in the params block                        |
+| **1b-ii — the shaft**                                 | The dark between the shafts: the sun occluded per froxel, not per pixel          | The cascade lookup copied once into `scatterMain`, and the drift guard that enumerates the copy                 |
 | **2 — punctual lights**                               | Glow around every point and spot light, cones made visible                       | The froxel light list in the scatter pass, and the attenuation and cone copy that goes with it                  |
 | **3 — a 3D target and temporal reprojection**         | The filtered lookup, and enough samples per froxel to stop a shaft from crawling | A volume in the transient pool, the engine's first 3D image on four backends, and a history buffer to reproject |
 | **4 — a density field rather than a constant medium** | Fog banks, ground mist, a medium that is somewhere rather than everywhere        | A source for the field, which is a content question and not only a rendering one                                |
@@ -185,6 +197,22 @@ What the passes owe on top of that is the part the host cannot see:
   same thing and is what rung 1a shipped with; a per-froxel readback is what
   will separate a wrong scatter from a wrong scan once the two stop being
   algebraically equal at rung 1b.
+- **An isotropic medium does not care which way the sun points.** _Built_ —
+  `an_isotropic_medium_scatters_the_sun_the_same_way_whichever_way_it_points`
+  reverses the sun at `g = 0` and demands every background texel come back byte
+  for byte. It is what says the sun's direction reaches the picture through the
+  phase function and through nothing else; a Lambert term or a dot product
+  folded into the radiance draws a picture that still looks like fog and fails
+  this. The mesh's own texels are excluded, because the same light shades the
+  cube and that surface should change.
+- **A forward lobe brightens the frame the sun is ahead of.** _Built_ —
+  `a_forward_lobe_brightens_the_frame_the_sun_is_ahead_of` puts the sun on the
+  camera's own forward axis and then reverses it, so every background texel's
+  scattering angle flips from near zero to near `pi`, and demands the first be
+  brighter at **every** texel rather than on average. The ratio it holds to was
+  swept rather than chosen, and it does not move with density: a background
+  column runs to `CLUSTER_FAR` and is opaque, so what those texels carry is the
+  scattering source itself.
 - **A froxel in shadow scatters nothing.** The observable that separates a real
   shaft from a uniform glow: the same medium, the same light, an occluder moved
   in and out, and the column behind the occluder going dark. Without it the pass

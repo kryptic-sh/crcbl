@@ -49,11 +49,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Fog::NONE` draws identically either way, byte for byte.
   `[engine.video] volumetric_fog` is the settings key.
 
-  **No light scatters into the column yet** — the single-scattering albedo is
-  one against an isotropic environment, which is algebraically the closed form
-  the fragment stage was already computing, and that equality is what `crcbl`'s
-  `mesh_e2e` measures. Rung 1b of `docs/plan/51-volumetrics.md` is the cascade
-  lookup that makes it a shaft.
+  **The sun scatters into it**, through the Henyey-Greenstein lobe
+  `crcbl_shaders::volumetric::phase` pins: `Fog` gained `sun_scattering` — what
+  fraction of the sun's radiance the medium sends out per unit length — and
+  `anisotropy`, how forward that scattering leans. Both default to zero, so a
+  caller that sets neither gets exactly the column that shipped without them.
+
+  **Nothing occludes the sun yet.** Every froxel is lit as though it saw it, so
+  what this draws is the glow around a light rather than the dark between the
+  shafts. Rung 1b-ii of `docs/plan/51-volumetrics.md` is the cascade lookup
+  inside the scatter pass.
 
 - **The sky is drawn behind the frame.** The gradient already lit the scene and
   was what a missed reflection fell back to, but nothing put it on screen — a

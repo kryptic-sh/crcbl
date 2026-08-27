@@ -397,7 +397,7 @@ mod tests {
             (
                 "volumetric.slang",
                 include_str!("../shaders/volumetric.slang"),
-                "return float4(params.fog_color.rgb * (1.0 - survives), survives);",
+                "return float4(volumetric_source(view_direction) * (1.0 - survives), survives);",
             ),
             (
                 "volumetric_composite.slang",
