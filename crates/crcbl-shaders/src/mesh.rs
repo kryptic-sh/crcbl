@@ -3365,6 +3365,128 @@ mod tests {
         );
     }
 
+    /// **The filter's probe is a ring about a centre, and every index in it is
+    /// a tap the disc has.**
+    ///
+    /// `tile_pcf` returns a flat `0.0` or `1.0` the moment
+    /// `SHADOW_PROBE_INDEX`'s taps agree, so what that list is *shaped* like is
+    /// the whole of the early-out's accuracy — and every way it can be wrong is
+    /// quiet. Four taps bunched on one side of the disc is a probe that reads a
+    /// direction rather than a neighbourhood, and it calls a fragment lit with a
+    /// caster sitting in the half it never looked at. A list with no near-centre
+    /// tap misses any caster small enough to fall inside the ring. An index past
+    /// `SHADOW_TAPS` reads off the end of `SHADOW_DISC`. None of the three
+    /// changes a frame in a way a golden attributes to the probe rather than to
+    /// the filter.
+    ///
+    /// So the list is re-derived against the disc it indexes: in range, without
+    /// repeats, one tap inside a quarter of the disc's reach, and the rest out
+    /// past four fifths of it with no angular gap wider than a third of a turn.
+    /// The bounds are the loose ones the shape needs, not a pin on the four
+    /// indices shipped — a different four that were still a ring would pass, and
+    /// that is the property being asserted.
+    #[test]
+    fn the_shadow_probe_is_a_ring_about_a_centre() {
+        const SOURCE: &str = include_str!("../shaders/mesh.slang");
+
+        assert!(
+            SOURCE.contains("SHADOW_DISC[SHADOW_PROBE_INDEX[spot]]"),
+            "tile_pcf no longer takes its probe through the index list this test is about"
+        );
+        assert!(
+            SOURCE.contains("if (probe >= float(SHADOW_PROBE_TAPS))"),
+            "tile_pcf no longer returns early on a unanimously lit neighbourhood, so the \
+             probe is five taps nothing reads"
+        );
+
+        let declaration = SOURCE
+            .split_once("static const uint SHADOW_PROBE_INDEX[SHADOW_PROBE_TAPS] = {")
+            .expect("mesh.slang has no probe index list")
+            .1;
+        let probe = declaration[..declaration.find("};").expect("an unterminated list")]
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .trim_end_matches('u')
+                    .parse::<usize>()
+                    .expect("a probe index that is not a number")
+            })
+            .collect::<Vec<_>>();
+
+        let count = probe.len();
+        assert!(
+            SOURCE.contains(&format!("static const uint SHADOW_PROBE_TAPS = {count};")),
+            "SHADOW_PROBE_INDEX holds {count} indices and SHADOW_PROBE_TAPS declares another \
+             number, so the probe loop reads past the list or stops short of it"
+        );
+
+        let disc = shader_table("SHADOW_DISC");
+        let mut seen = probe.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            count,
+            "SHADOW_PROBE_INDEX repeats a tap, so the probe is narrower than its count: \
+             {probe:?}"
+        );
+        for &index in &probe {
+            assert!(
+                index < disc.len(),
+                "SHADOW_PROBE_INDEX names tap {index} and SHADOW_DISC has {}, so the probe \
+                 reads off the end of the table",
+                disc.len()
+            );
+        }
+
+        let radius = |index: usize| {
+            let (x, y) = disc[index];
+            x.hypot(y)
+        };
+        let (centre, ring): (Vec<usize>, Vec<usize>) =
+            probe.iter().partition(|&&index| radius(index) < 0.25);
+        assert_eq!(
+            centre.len(),
+            1,
+            "the probe has {} taps inside a quarter of the disc where it wants exactly one: \
+             a caster smaller than the ring falls on that tap and on nothing else",
+            centre.len()
+        );
+        assert!(
+            ring.len() >= 4,
+            "the probe's ring is {} taps, and fewer than four cannot surround a fragment",
+            ring.len()
+        );
+
+        let mut angles = ring
+            .iter()
+            .map(|&index| {
+                assert!(
+                    radius(index) > 0.8,
+                    "SHADOW_PROBE_INDEX's tap {index} sits at radius {} and is neither the \
+                     centre tap nor out on the rim",
+                    radius(index)
+                );
+                let (x, y) = disc[index];
+                y.atan2(x).rem_euclid(std::f64::consts::TAU)
+            })
+            .collect::<Vec<_>>();
+        angles.sort_by(f64::total_cmp);
+        let widest = (0..angles.len())
+            .map(|at| {
+                (angles[(at + 1) % angles.len()] - angles[at]).rem_euclid(std::f64::consts::TAU)
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            widest < std::f64::consts::TAU / 3.0,
+            "the probe's ring leaves a gap of {} radians, which is a third of the disc it \
+             never looks at",
+            widest
+        );
+    }
+
     /// **A normal taken through `normal_basis` stays perpendicular to its
     /// surface under a non-uniform scale; one taken through the bare 3×3 does
     /// not.**

@@ -50,22 +50,24 @@ can only run out of wall clock, which is what it did.
 the per-step caps bound a _hanging_ demo and cannot bound a total; this is the
 first time the total was the thing that moved.
 
-Two commits of main have therefore not deployed, and the failing job is the one
-that builds and publishes the site.
+Two commits of main did not deploy on that; the caps for quarry and lantern were
+raised to 20 minutes on 2026-08-28 and the gate has run inside them since. The
+cap change bought the site back and priced nothing.
 
 What is not yet known: whether the cost is the 48 taps themselves or the branch
 divergence they add on a CPU rasteriser, since a SwiftShader lane runs every tap
 the widest fragment in it takes.
 
+**The first answer below shipped 2026-08-28** — `docs/plan/45-shadows.md`'s
+eleventh decision — and it removed taps rather than measuring them: a five-tap
+probe decides whether the disc is worth taking, so a fragment away from a shadow
+edge costs 5 taps rather than 32 and a sun-lit one 21 rather than 48. It moved
+no golden on either of the two adapters run against it. What it did **not** do
+is answer this entry's actual question, which is what a tap costs; the three
+below are still the whole of that.
+
 What would settle it, in order of cost:
 
-0. **An early-out on a unanimous neighbourhood**, which is the standard
-   optimisation for exactly this filter and is missing: a handful of cheap taps
-   first, and the full disc only where they disagree. Most of a frame is wholly
-   lit or wholly shadowed, so it is where nearly all of the 48 taps go to waste.
-   It is not free of visual change — a small probe can be unanimous where the
-   wide one is not — so it needs the goldens re-blessed and the penumbra crops
-   re-read, which is why it is a slice rather than a patch.
 1. **A timestamp around the forward pass**, which the HAL already has the
    primitives for, reported by the sample the way the froxel pass's dispatch
    counts are. That prices this and every later rung.
@@ -75,6 +77,27 @@ What would settle it, in order of cost:
    search of eight is a coarser estimate rather than no estimate. The two tables
    say exactly what each tier looks like.
 3. Nothing, and accept it, which is where it stands.
+
+What the early-out left owed:
+
+- **Nothing measures what it saved.** The claim "5 taps rather than 32" is
+  arithmetic off the shader, not a frame time. The Pages browser gate's own
+  per-step durations are the only instrument that has ever noticed this filter,
+  and they are wall clock for a whole demo — the table above is the shape any
+  future comparison has to take.
+- **The probe is a branch on a filtered comparison, and that is a new
+  cross-driver surface.** `tile_pcf` returns flat only where five
+  `SampleCmpLevelZero` taps come back exactly 0 or exactly 1, which is the
+  driver-independent case; a tap landing within an ulp of a texel boundary could
+  round to unanimity on one rasteriser and not on another, and there the two
+  answers differ by the whole penumbra rather than by a last bit. Radv and
+  llvmpipe agree on every golden in the tree today. Nothing bounds it in
+  general, and `path_lsb_channels` is the mechanism that would have to absorb it
+  if a runner disagrees.
+- **`SHADOW_PROBE_INDEX`'s five are not fitted.** They are a ring plus a centre
+  and the guard asserts only that shape. Whether four rim taps is the right
+  number — three would cost less and leave a wider blind gap, six more and leave
+  less — was not swept, because no scene in the tree distinguishes them.
 
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 

@@ -649,6 +649,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The shadow filter takes its 32 taps only at a shadow edge.** `tile_pcf`, in
+  both `mesh.slang` and `volumetric.slang`, now probes five of the disc's taps
+  first — one near the centre and four about a quarter turn apart near the rim —
+  and returns a flat lit or shadowed the moment those five agree. A fragment
+  away from any shadow edge costs 5 taps rather than 32, a sun-lit one 21 rather
+  than 48, and a froxel 5 rather than 32; a fragment the probe cannot decide
+  costs 37 and is shaded exactly as it was before. Every golden in the tree
+  still matches, on both a discrete GPU and a software rasteriser — the probe
+  and the disc agree everywhere the shipped scenes look.
+
 - **Ambient occlusion is GTAO, a horizon integral, not a hemisphere of depth
   comparisons.** `ssao.slang`'s `occlusion_at` takes two slices through the eye
   per pixel — the second the first turned an exact quarter turn — marches four

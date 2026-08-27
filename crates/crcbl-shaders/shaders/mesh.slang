@@ -1618,6 +1618,10 @@ float shadow_normal_offset(float3 geometric_normal, float3 to_light)
 /// thirty-two taps against nine, so the count was chosen on the picture alone;
 /// `docs/backlog.md` carries that as the gap it is, and this is the first
 /// constant a graphics-quality setting should reach for.
+///
+/// What a frame actually pays is lower than this count, and it is
+/// [`SHADOW_PROBE_TAPS`] that decides where: the disc is taken in full only
+/// where a shorter probe of it could not settle the fragment.
 static const uint SHADOW_TAPS = 32;
 
 /// How far the filter reaches from the fragment's own texel, in tile texels.
@@ -1671,6 +1675,49 @@ static const float2 SHADOW_DISC[SHADOW_TAPS] = {
     float2(-0.319407, -0.888034), float2(+0.849909, +0.446688),
     float2(-0.944035, +0.248845), float2(+0.536596, -0.834530),
 };
+
+/// How many of [`SHADOW_DISC`]'s taps the filter reads before it decides whether
+/// to read the rest.
+///
+/// # Why there is a probe at all
+///
+/// Thirty-two taps is what a **penumbra** costs, and almost none of a frame is
+/// penumbra. A shadowed surface away from any edge answers zero at all
+/// thirty-two; a lit one answers one at all thirty-two; both spend the whole
+/// filter to learn what five taps already said. So the disc is preceded by a
+/// probe of five taps spread over that same disc, and taken in full only where
+/// the five disagree.
+///
+/// The five are **read again** by the loop rather than carried into its sum.
+/// That costs five taps on a penumbra fragment and buys the property that makes
+/// the change reviewable: where the probe disagrees, this filter returns
+/// bit-for-bit what it returned before the probe existed, so every frame that
+/// moved is a frame the probe called unanimous.
+///
+/// # What it changes
+///
+/// A probe of five can be unanimous where the disc of thirty-two is not — a
+/// caster thinner than the gap between two probe taps that also misses the
+/// middle one — and there the filter answers a flat zero or one where it
+/// answered a fraction. That is a visual change rather than a free
+/// optimisation, and `docs/plan/45-shadows.md`'s eleventh decision is where the
+/// frames it moved are recorded.
+static const uint SHADOW_PROBE_TAPS = 5;
+
+/// Which of [`SHADOW_DISC`]'s taps the probe reads: the innermost, and four
+/// near the rim.
+///
+/// The four rim taps are chosen for their **angles**. The spiral turns by the
+/// golden angle at each step, so every *second* tap turns by twice it, which is
+/// 85 degrees short of a whole turn — taps 23, 25, 27 and 29 therefore sit at
+/// 283, 198, 113 and 28 degrees, three gaps of 85 degrees and one of 105, at
+/// radii from 0.857 to 0.960. Four taps a quarter turn apart is what makes the
+/// probe a ring rather than a direction, and tap 0 at radius 0.125 is what a
+/// caster small enough to sit inside that ring falls on.
+///
+/// `crcbl_shaders::mesh`'s `the_shadow_probe_is_a_ring_about_a_centre`
+/// re-derives both halves from the disc rather than pinning a copy of the list.
+static const uint SHADOW_PROBE_INDEX[SHADOW_PROBE_TAPS] = { 0u, 23u, 25u, 27u, 29u };
 
 /// The sixteen rotations the disc is taken through, as `(cos, sin)` pairs of
 /// `2π k / 16`.
@@ -1850,25 +1897,19 @@ float2 shadow_rotation(float2 pixel)
     return SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
 }
 
-/// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
-/// space, dithered by the fragment's pixel coordinate.
+/// One tap of the shadow filter: `spoke` turned by `rotation`, clamped into
+/// tile `tile`, and compared against `reference`.
 ///
-/// One kernel for the cascades and for the light maps, which is what keeps "a
-/// tap never leaves its own tile" a property of one function. The clamp is half
-/// a texel inside the tile: the comparison sampler filters a 2×2 neighbourhood
+/// One tap for the cascades and for the light maps, which is what keeps "a tap
+/// never leaves its own tile" a property of one function. The clamp is half a
+/// texel inside the tile: the comparison sampler filters a 2×2 neighbourhood
 /// around each tap, so a tap exactly on the edge would still reach across it and
 /// read the neighbouring map's depths as if they were this one's.
 ///
-/// `radius` is the disc's reach in tile texels, and it is a parameter rather
-/// than [`SHADOW_FILTER_TEXELS`] because the sun's penumbra is not a constant
-/// width — `sun_penumbra_texels` measures one per fragment. Everything that
-/// reads a map the sun does not own passes the constant, which is what it was
-/// before this became a parameter.
-///
-/// `pixel` is the fragment's `SV_Position.xy`, and it is a parameter for
-/// `geometric_normal_of`'s reason: a shader stage that has no such thing must
-/// not be able to call this by accident.
-float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float radius)
+/// It is a function rather than four lines written twice because
+/// [`tile_pcf`]'s probe and its disc take exactly the same tap; two copies of
+/// this arithmetic would be two places a clamp could be fixed in one of.
+float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, float reference)
 {
     float2 texel = frame.shadow_params.xy;
     // The grid's two extents, which is what turns an *atlas* texel into a step
@@ -1877,19 +1918,59 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
     // exactly one shadow-map texel on either axis.
     float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
     float2 tile_min = float2(0.5, 0.5) * texel * grid;
+    // The rotation, written out: a complex multiply by `(cos, sin)`.
+    float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
+                           spoke.x * rotation.y + spoke.y * rotation.x);
+    float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
+    return shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
+}
 
+/// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
+/// space, dithered by the fragment's pixel coordinate.
+///
+/// [`SHADOW_PROBE_TAPS`] taps decide whether the other twenty-seven are worth
+/// taking: a neighbourhood the probe finds wholly lit or wholly shadowed
+/// returns without them. That is where nearly all of this filter's cost goes
+/// on a real frame, and it is the only part of this function that is not what
+/// the ninth and tenth decisions shipped.
+///
+/// `radius` is the disc's reach in tile texels, and it is a parameter rather
+/// than [`SHADOW_FILTER_TEXELS`] because the sun's penumbra is not a constant
+/// width — `sun_penumbra_texels` measures one per fragment. Everything that
+/// reads a map the sun does not own passes the constant, which is what it was
+/// before this became a parameter. The probe reaches as far as the disc does,
+/// so a wide penumbra is probed wide and a contact is probed tight.
+///
+/// `pixel` is the fragment's `SV_Position.xy`, and it is a parameter for
+/// `geometric_normal_of`'s reason: a shader stage that has no such thing must
+/// not be able to call this by accident.
+float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float radius)
+{
     float2 rotation = shadow_rotation(pixel);
+
+    float probe = 0.0;
+    for (uint spot = 0u; spot < SHADOW_PROBE_TAPS; ++spot)
+    {
+        probe += tile_tap(tile, tile_uv, SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius,
+                          rotation, reference);
+    }
+    // Unanimity, tested at both ends rather than by a tolerance: a comparison
+    // sampler returns exactly zero or exactly one wherever the four texels it
+    // filters agree, whatever weights it gave them, so the sum of five is an
+    // exact integer on every fragment this early-out is meant for.
+    if (probe <= 0.0)
+    {
+        return 0.0;
+    }
+    if (probe >= float(SHADOW_PROBE_TAPS))
+    {
+        return 1.0;
+    }
 
     float visibility = 0.0;
     for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        float2 spoke = SHADOW_DISC[index] * radius;
-        // The rotation, written out: a complex multiply by `(cos, sin)`.
-        float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
-                               spoke.x * rotation.y + spoke.y * rotation.x);
-        float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
-        visibility +=
-            shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
+        visibility += tile_tap(tile, tile_uv, SHADOW_DISC[index] * radius, rotation, reference);
     }
     return visibility / float(SHADOW_TAPS);
 }

@@ -790,12 +790,14 @@ mod tests {
         }
 
         // The filter's shape, which `tile_pcf` reads and neither file computes:
-        // a tap count, a reach and two tables. Compared as text, because what
-        // has to agree is every digit — a shaft of light filtered on a different
+        // two tap counts, a reach and three tables. Compared as text, because
+        // what has to agree is every digit — a shaft of light filtered on a different
         // disc from the surface behind it has two penumbrae where the scene has
         // one, and no assertion about the *walk* would see it.
         for (name, terminator) in [
             ("uint SHADOW_TAPS", ";"),
+            ("uint SHADOW_PROBE_TAPS", ";"),
+            ("uint SHADOW_PROBE_INDEX", "};"),
             ("float SHADOW_FILTER_TEXELS", ";"),
             ("float2 SHADOW_DISC", "};"),
             ("float2 SHADOW_ROTATIONS", "};"),
@@ -811,6 +813,8 @@ mod tests {
         for signature in [
             "float2 atlas_uv(uint tile, float2 tile_uv)",
             "float2 shadow_rotation(float2 pixel)",
+            "float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, \
+             float reference)",
             "float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, \
              float radius)",
         ] {

@@ -598,6 +598,84 @@ every browser-path golden.
 **Nothing in the tree times this either.** Sixteen taps on top of thirty-two, on
 the fragment path only; `docs/backlog.md` carries the gap.
 
+### An eleventh, taken 2026-08-28: the disc is taken only at an edge
+
+The ninth and tenth decisions left a sun-lit fragment reading **48 texels of the
+atlas** where it read 9, and a froxel reading 32. Both counts were chosen on the
+picture, and the Pages browser gate — the only instrument in the tree that
+touches this — ran out of wall clock on two demos rather than reporting a
+number. `docs/backlog.md` carried four ways to answer that, and this is the
+first of them: **the filter's own early-out**, which is the standard
+optimisation for a wide PCF kernel and was simply missing.
+
+**The shape.** `tile_pcf` now takes `SHADOW_PROBE_TAPS` taps first —
+`SHADOW_PROBE_INDEX` names which of the disc's thirty-two — and returns a flat
+`0.0` or `1.0` the moment those agree. So a fragment away from any shadow edge
+costs 5 taps rather than 32, a sun-lit one 21 rather than 48, and a froxel 5
+rather than 32. Where the probe disagrees the disc is taken in full and the
+probe's five are **read again** rather than carried into the sum: that costs
+five taps at an edge, 37 against 32, and it buys the property that makes the
+change reviewable — a fragment the probe could not decide is shaded bit for bit
+as it was before the probe existed, so every texel that could move is a texel
+the probe called unanimous.
+
+**Which five, and why those.** The four rim taps are chosen for their _angles_.
+The disc is a Vogel spiral, so consecutive taps turn by the golden angle and
+every _second_ tap turns by twice it — 85 degrees short of a whole turn. Taps
+23, 25, 27 and 29 therefore sit at 283, 198, 113 and 28 degrees, three gaps of
+85 and one of 105, at radii from 0.857 to 0.960 of the disc's reach. Four taps
+about a quarter turn apart is what makes the probe a _ring_ rather than a
+direction: a probe bunched on one side calls a fragment lit with a caster
+standing in the half it never looked at. Tap 0, at radius 0.125, is what a
+caster small enough to fit inside that ring falls on.
+
+The probe scales with `radius`, so a wide penumbra is probed wide and a contact
+is probed tight — the tenth decision's per-fragment width is what sizes both.
+
+**Unanimity is an exact test, not a tolerance.** A comparison sampler filters a
+2×2 neighbourhood, so a tap can return a fraction; but wherever those four
+texels _agree_ the weighted sum is exactly 0 or exactly 1 whatever weights the
+driver chose, and a sum of five such taps is an exact integer. So the two arms
+are `probe <= 0.0` and `probe >= float(SHADOW_PROBE_TAPS)` and neither carries a
+margin.
+
+**What it changed on the shipped scenes: nothing.** Every golden in the tree
+still matches, on two adapters that rasterise differently — radv on an RX 7900
+XTX and llvmpipe, the CI-class software rasteriser. `render_e2e`'s 32,
+`mesh_e2e`'s 29, `forward_e2e`'s 15, `apps/lantern`'s 7, `apps/quarry`'s 23 and
+every app golden beside them, none re-blessed. `lantern` also drew its 42
+browser checks green through the WGSL path. So on these frames the probe and the
+disc agree everywhere, and the entry this closes was right that it _could_
+differ — a caster thinner than the gap between two rim taps that also misses the
+middle one — and wrong that it would.
+
+**Both arms were sabotage-verified on hardware**, with the artifacts regenerated
+inside the loop so that what fired was a golden and not `build.rs`'s manifest
+check. Returning `0.5` from the shadowed arm reddens four `render_e2e` goldens —
+`cube`, `lights`, and the two shadow scenes' path comparisons — and returning
+`0.5` from the lit arm reddens four others — `spot`, `bloom`, the resolve check
+and `point_shadow`. Neither arm is dead code, and the suite can see both.
+
+**`tile_tap` is new and is a move, not a change.** The rotate, the clamp and the
+compare were four lines the probe and the disc would otherwise each carry; they
+are one function now, called from both, and
+`both_shaders_spell_the_same_atlas_walk` holds its text against
+`volumetric.slang`'s copy the way it already held `tile_pcf`'s.
+
+Guard: `the_shadow_probe_is_a_ring_about_a_centre` re-derives the index list
+against the disc it indexes — in range, no repeats, exactly one tap inside a
+quarter of the reach, the rest past four fifths of it, and no angular gap wider
+than a third of a turn — rather than pinning the four indices shipped. Every one
+of those failures is quiet: a bunched probe, a missing centre tap and an index
+past the end of the table all draw a frame, and none of them draws one a golden
+attributes to the probe.
+
+**This still does not time anything.** It removes taps a frame was demonstrably
+not using; what a tap costs is unmeasured, and the backlog's remaining three
+answers — a timestamp around the forward pass, the tap counts as quality
+settings, or nothing — are unchanged by it. The Pages run for this commit is the
+only instrument, and it reports wall clock per demo, not a pass.
+
 ### The quality ladder, taken 2026-08-27
 
 What ships, first, because the ladder is only readable against it: **stable

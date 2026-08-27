@@ -424,6 +424,16 @@ static const float2 SHADOW_DISC[SHADOW_TAPS] = {
     float2(-0.944035, +0.248845), float2(+0.536596, -0.834530),
 };
 
+/// The probe the filter takes before its disc, and which of the disc's taps it
+/// reads. `mesh.slang`'s, and why a probe exists at all lives there.
+///
+/// A froxel column pays this the same way a fragment does: most of the medium
+/// is wholly lit or wholly in shadow, and the shaft's edge is the only place
+/// the disc is what answers.
+static const uint SHADOW_PROBE_TAPS = 5;
+
+static const uint SHADOW_PROBE_INDEX[SHADOW_PROBE_TAPS] = { 0u, 23u, 25u, 27u, 29u };
+
 static const float2 SHADOW_ROTATIONS[16] = {
     float2(+1.000000, +0.000000), float2(+0.923880, +0.382683),
     float2(+0.707107, +0.707107), float2(+0.382683, +0.923880),
@@ -450,13 +460,30 @@ float2 shadow_rotation(float2 pixel)
     return SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
 }
 
+/// One tap of the filter, `mesh.slang`'s letter for letter: the spoke turned,
+/// clamped half a texel inside the tile so the sampler's own 2×2 cannot reach
+/// the neighbouring map, and compared.
+float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, float reference)
+{
+    float2 texel = params.shadow_params.xy;
+    // The grid's two extents, which is what turns an *atlas* texel into a step
+    // in tile space: a tile is `1 / SHADOW_ATLAS_COLUMNS` of the atlas wide and
+    // `1 / SHADOW_ATLAS_ROWS` of it tall, so scaling back up by them lands on
+    // exactly one shadow-map texel on either axis.
+    float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
+    float2 tile_min = float2(0.5, 0.5) * texel * grid;
+    // The rotation, written out: a complex multiply by `(cos, sin)`.
+    float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
+                           spoke.x * rotation.y + spoke.y * rotation.x);
+    float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
+    return shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
+}
+
 /// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
 /// space, dithered by `pixel`.
 ///
-/// `mesh.slang`'s kernel, and the clamp is half a texel inside the tile for its
-/// reason: the comparison sampler filters a 2×2 neighbourhood around each tap,
-/// so a tap exactly on the edge reads the neighbouring map's depths as if they
-/// were this one's.
+/// `mesh.slang`'s kernel, probe and all: [`SHADOW_PROBE_TAPS`] taps first, the
+/// remaining twenty-seven only where those disagree.
 ///
 /// `radius` is a parameter there because the sun's penumbra is measured per
 /// fragment; the one caller here passes [`SHADOW_FILTER_TEXELS`] and always
@@ -469,26 +496,31 @@ float2 shadow_rotation(float2 pixel)
 /// changes between neighbours.
 float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float radius)
 {
-    float2 texel = params.shadow_params.xy;
-    // The grid's two extents, which is what turns an *atlas* texel into a step
-    // in tile space: a tile is `1 / SHADOW_ATLAS_COLUMNS` of the atlas wide and
-    // `1 / SHADOW_ATLAS_ROWS` of it tall, so scaling back up by them lands on
-    // exactly one shadow-map texel on either axis.
-    float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
-    float2 tile_min = float2(0.5, 0.5) * texel * grid;
-
     float2 rotation = shadow_rotation(pixel);
+
+    float probe = 0.0;
+    for (uint spot = 0u; spot < SHADOW_PROBE_TAPS; ++spot)
+    {
+        probe += tile_tap(tile, tile_uv, SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius,
+                          rotation, reference);
+    }
+    // Unanimity, tested at both ends rather than by a tolerance: a comparison
+    // sampler returns exactly zero or exactly one wherever the four texels it
+    // filters agree, whatever weights it gave them, so the sum of five is an
+    // exact integer on every fragment this early-out is meant for.
+    if (probe <= 0.0)
+    {
+        return 0.0;
+    }
+    if (probe >= float(SHADOW_PROBE_TAPS))
+    {
+        return 1.0;
+    }
 
     float visibility = 0.0;
     for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        float2 spoke = SHADOW_DISC[index] * radius;
-        // The rotation, written out: a complex multiply by `(cos, sin)`.
-        float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
-                               spoke.x * rotation.y + spoke.y * rotation.x);
-        float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
-        visibility +=
-            shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
+        visibility += tile_tap(tile, tile_uv, SHADOW_DISC[index] * radius, rotation, reference);
     }
     return visibility / float(SHADOW_TAPS);
 }
