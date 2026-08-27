@@ -529,30 +529,6 @@ motion blur and any temporal upsampler.
 **Evidence.** `GpuInstance` and `GpuInstance::to_bytes` in
 `crates/crcbl-shaders/src/mesh.rs`. Corrected in the doc rather than deleted.
 
-### `crcbl-render` has no upscale path (2026-08-27)
-
-**Not built, on the renderer's side of a seam whose other side is.**
-`15-windowing.md` defines borderless as an internal render target
-upscale-blitted to the native surface, `18-render-features.md` orders the whole
-post chain around a `[upscale]` stage, and `ShellCaps::HW_UPSCALE` reports what
-a window system will do for free. `crcbl-render` has no upscale pass, no
-render-scale setting, and no internal target whose extent differs from the
-swapchain's — `grep -rni "upscale|render_scale"` over `crates/crcbl-render/src/`
-returns nothing; every hit is in `crcbl-shell`.
-
-**What it would take.** An internal colour target sized by a scale factor, a
-blit or fullscreen sample into the swapchain after tonemap and AA, and the UI
-pass moved to native resolution behind it (the ordering `18-render-features.md`
-already fixes). The `RenderEffects`/`EffectRequest` resolution point is where
-the scale knob would join the other three layers.
-
-**Blocks.** The whole point of render scale — post-chain cost scaling with
-internal resolution — and topic 15's borderless story. Also
-`29-fp-rendering.md`'s PiP budget, whose first knob is an RTT resolution
-setting.
-
-**Evidence.** Verified 2026-08-27 by search over `crates/crcbl-render/src/`.
-
 ### §3.6's debug draw layer is unbuilt (2026-08-27)
 
 **Not built.** `03-gpu-driven-rendering.md` §3.6 asks for "line/AABB/sphere
@@ -792,24 +768,6 @@ still ship on D3D12 undetected.
 
 **Note:** this sits inside the deferral in `docs/plan/09-backends-metal-dx12.md`
 — it is parked, not owed.
-
-### `crcbl-render` still has no render-scale path (2026-08-27)
-
-**Not built, and already recorded in `docs/plan/15-windowing.md`'s 2026-08-09
-corrections** — re-verified, and it still holds. `ShellCaps::HW_UPSCALE` is
-reported by the Wayland and web backends and withheld by Win32 for a stated
-reason, `docs/plan/18-render-features.md` orders the post chain around an
-upscale, and nothing in `crates/crcbl-render/src` mentions render scale or an
-upscale pass at all. Borderless therefore renders at native size and the caps
-bit describes a mechanism nothing can ask for.
-
-**What it would take:** a render-scale request on the `Shell` seam plus an
-offscreen-target-and-upscale pass in `crcbl-render`. The seam addition is a
-decision above `crcbl-shell`.
-
-**Evidence:**
-`grep -rn 'render_scale\|RenderScale\|upscale' crates/crcbl-render/src` returns
-nothing.
 
 ### XDND is still absent on X11 (2026-08-27)
 
@@ -1680,21 +1638,32 @@ them.
 
 ## Overview (`docs/plan/00-overview.md`)
 
-### Render scale is unbuilt on both sides, not just the renderer (2026-08-27)
+### Render scale has no seam above the renderer (2026-08-27)
 
-**Not built.** The overview said the _renderer half_ of render scale was
-missing, implying the shell had its half. Neither does: `render_scale` appears
-nowhere under `crates/`, in `crcbl-shell` or `crcbl-render`. The two window
-modes do exist in `crcbl-shell` (windowed and borderless on a named monitor).
-The fractional scale `crcbl-shell` handles is the compositor's HiDPI factor — a
-different quantity, and mistaking it for this is how the doc got optimistic.
+**Half built.** The renderer half landed on 2026-08-27:
+`crcbl_render::ForwardRenderer::set_render_scale` sizes the internal target,
+`MIN_RENDER_SCALE` is its floor, and `shaders/upscale.slang` reconstructs that
+target into the caller's own after the tonemap and FXAA. Everything above the
+renderer is still missing — no settings key named `render_scale` is read
+anywhere, no `Shell` carries a render-scale request, and no window system is
+asked to do the resample instead of the shader. The knob is a method call whose
+only caller is `crates/crcbl/tests/mesh_e2e/render_scale.rs`.
 
-**What it would take:** a scale factor on the swapchain-sized render target plus
-an upscale blit at present, and a settings key to drive it; the shell needs
-nothing except to keep reporting real surface size.
+The two window modes do exist in `crcbl-shell` (windowed and borderless on a
+named monitor). The fractional scale `crcbl-shell` handles is the compositor's
+HiDPI factor — a different quantity, and mistaking it for this is how the
+overview got optimistic about this row once already.
+
+**What it would take:** a `render_scale` key in `crcbl::settings`' video block
+alongside the ones already spelled there, plumbed to `set_render_scale` the way
+`GpuContext::effect_request` plumbs the effect layer; and, separately, a
+render-scale request on the `Shell` seam so a compositor that advertises
+`ShellCaps::HW_UPSCALE` can do the resample for free instead. The second is a
+decision above `crcbl-shell` and is not needed for the settings menu.
 
 **What it blocks:** the MVP feature row "Own windowing (2 modes, render scale)",
-and every low-end-device story that assumes a resolution knob exists.
+and the resolution slider in the settings-menu work — the renderer will answer
+it, nothing carries the answer yet.
 
 ### Wasm game modules: no `crcbl-mod`, no host (2026-08-27)
 

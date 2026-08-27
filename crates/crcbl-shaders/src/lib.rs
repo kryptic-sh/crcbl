@@ -294,6 +294,7 @@ pub mod fxaa;
 
 /// The uniform block `tonemap.slang` reads, in the layout that shader declares.
 pub mod tonemap;
+pub mod upscale;
 
 use std::sync::OnceLock;
 

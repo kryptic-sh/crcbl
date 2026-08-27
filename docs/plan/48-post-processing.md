@@ -15,15 +15,27 @@ render-scale upscale; UI composites after, at native resolution):
 scene (HDR RGBA16F) → bloom (down/upsample chain) → exposure + tonemap → FXAA → [upscale] → UI
 ```
 
-**`[upscale]` has no implementation on either side of the seam, verified
-2026-08-27.** [15-windowing.md](15-windowing.md) defines borderless as an
-internal render target upscale-blitted to the native surface, and
-`ShellCaps::HW_UPSCALE` reports what a window system will do for free — but
-`crcbl-render` has no upscale pass, no render-scale knob and no internal target
-whose extent differs from the swapchain's. So every stage of this chain runs at
-native resolution today, and the ordering is a contract for a pass that does not
-exist rather than a description of a frame. Whoever builds it inherits the two
-interactions below unchanged.
+**`[upscale]` was built on 2026-08-27**, and the order above stopped being a
+contract for a pass that does not exist. `ForwardRenderer::set_render_scale`
+sizes an internal target at a fraction of the caller's extent — the cluster
+grid, the level-of-detail pixel budget, the Hi-Z pyramid, bloom and FXAA all
+follow it there — and `shaders/upscale.slang` reconstructs that target into the
+caller's own as the last pass of the frame. Every stage of this chain now
+genuinely costs what the internal extent says, which is the whole reason the
+order is written this way.
+
+**At full scale there is no pass and no second image**: the stage before it
+writes the caller's target directly, the same additive-zero shape the FXAA rung
+landed in, so a frame that asked for no scaling is what it was before the pass
+existed. The filter is Catmull-Rom, sixteen taps, priced against bilinear in
+[43-render-standards.md](43-render-standards.md)'s §7.
+
+**The seam above the renderer is still missing.**
+[15-windowing.md](15-windowing.md) defines borderless as an internal render
+target upscale-blitted to the native surface and `ShellCaps::HW_UPSCALE` reports
+what a window system will do for free, but no settings key reads `render_scale`
+and no `Shell` carries a request for it. The knob is a method and nothing but a
+test calls it.
 
 - **HDR (MVP, lands with P7)**: scene renders to RGBA16F; lighting in linear HDR
   from the start (retrofitting HDR is repainting every material — do it the

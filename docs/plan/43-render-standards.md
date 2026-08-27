@@ -290,20 +290,36 @@ show what it costs.
 **What a current engine ships:** an internal render resolution decoupled from
 the window, and a temporal upscaler — DLSS, FSR 3, XeSS, or Unreal's TSR.
 
-**Where this one is:** [48-post-processing.md](48-post-processing.md) documents
-an `[upscale]` stage between the resolve and the UI, and verified 2026-08-27
-there is **no upscale pass, no render-scale knob, and no internal target whose
-extent differs from the swapchain's**. The ordering is a contract for a pass
-that does not exist.
+**Where this one is:** the spatial half is **built (2026-08-27)** and the
+temporal half is blocked. `ForwardRenderer::set_render_scale` sizes an internal
+target at a fraction of the caller's extent — down to `MIN_RENDER_SCALE`, a
+quarter in each dimension — and `shaders/upscale.slang` reconstructs it into the
+caller's own target as the last pass of the frame, after the tonemap and after
+FXAA. Every stage of [48-post-processing.md](48-post-processing.md)'s chain now
+genuinely runs at the internal extent, which is the whole point of the ordering
+that document had been asserting for a pass that did not exist. At full scale
+there is no second image and no pass: the earlier stage writes the caller's
+target directly, the same additive-zero shape the FXAA rung landed in.
 
-**Render scale without an upscaler is still worth having** — a bilinear or
-Catmull-Rom blit from a smaller internal target is the single largest
-performance knob a settings menu can offer, it is one pass, and it is what
-[15-windowing.md](15-windowing.md)'s borderless definition already assumes.
-**That should land with the settings work**, because a graphics settings menu
-whose resolution slider does nothing is the wrong first impression.
+**The filter is Catmull-Rom**, sixteen taps, and it is Mitchell-Netravali at
+`B = 0, C = 0.5` — interpolating, so a texel that survives the scale reaches the
+frame unchanged, and a partition of unity by exact identity rather than by
+tolerance. Its outer lobes are negative, which is what buys the acutance back
+and is also why the reconstructed frame carries _more_ neighbour-to-neighbour
+difference than the full-resolution render on a scene whose detail is one hard
+silhouette. Multiplies and adds only, so no transcendental reaches a colour and
+the pass can be blessed on all four backends.
 
-A _temporal_ upscaler is §9's blocker again and is not a near-term row.
+**Bilinear was the alternative and is the worse one at the same cost class**: a
+blit is one tap against sixteen, but a settings menu's resolution slider is
+judged entirely on how the frame looks at 0.5, and bilinear at 0.5 is visibly
+mushy where Catmull-Rom is merely soft. The tap count is on an image, not a
+scene — it does not scale with anything the game does.
+
+A _temporal_ upscaler is §9's blocker again and is not a near-term row. What
+this rung deliberately does **not** do is jitter, accumulate, or ask for a
+history buffer; it is a spatial reconstruction of one frame, and swapping it for
+FSR 3 or TSR later replaces the pass without moving the seam around it.
 
 ## 8. Sky, atmosphere and environment
 
@@ -374,7 +390,7 @@ above.
 | **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road      |
 | **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                  |
 | **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                               |
-| **Render scale and a blit**                              | §7 — the settings menu's largest knob, one pass                                          |
+| ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                         |
 | **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time                                                  |
 | **Froxel volumetric fog**                                | §4 — the culling is already paid for                                                     |
 | **Auto-exposure**                                        | §6 — a histogram and a reduce                                                            |

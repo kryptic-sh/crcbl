@@ -180,6 +180,7 @@ use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
 use crate::transient::{TransientImageDesc, TransientPool};
+use crate::upscale::Upscale;
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -569,8 +570,8 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
 /// atlas's, the depth prepass, the forward pass, the tonemap, the ground grid
-/// and the culling-statistics copy — plus [`Ssao::PASSES`], [`Ssr::PASSES`] and
-/// [`Bloom::MAX_PASSES`] beside them.
+/// and the culling-statistics copy — plus [`Ssao::PASSES`], [`Ssr::PASSES`],
+/// [`Bloom::MAX_PASSES`] and [`Upscale::PASSES`] beside them.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
@@ -584,7 +585,9 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// The ground grid is counted on the same terms, even though it is off by
 /// default and is not a [`RenderEffects`] bit: a caller that switches it on
 /// records one more pass, and a bound short of that would silently stop timing
-/// the last pass of every frame it drew.
+/// the last pass of every frame it drew. The render-scale upscale is the second
+/// of those — see [`ForwardRenderer::set_render_scale`], which is `1.0` and
+/// therefore absent until a caller moves it.
 ///
 /// **The bloom and Hi-Z terms are ceilings where the others are counts**,
 /// because a chain's length is a function of the target's extent — see
@@ -592,11 +595,28 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// extent is known. The frame that lands on
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
-const RENDER_PASSES: u32 =
-    6 + Ssao::PASSES + Hiz::PASSES + Ssr::PASSES + Bloom::MAX_PASSES + Fxaa::PASSES;
+const RENDER_PASSES: u32 = 6
+    + Ssao::PASSES
+    + Hiz::PASSES
+    + Ssr::PASSES
+    + Bloom::MAX_PASSES
+    + Fxaa::PASSES
+    + Upscale::PASSES;
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
+/// The smallest fraction of the target extent a frame may be drawn at.
+///
+/// A quarter in each dimension, which is a sixteenth of the pixels — below that
+/// the internal frame is small enough that a Catmull-Rom reconstruction of it
+/// stops being a picture of the scene and starts being a picture of the filter,
+/// and the Hi-Z pyramid and the bloom chain both run out of levels. Every
+/// engine's resolution slider bottoms out somewhere; this is where this one
+/// does, and [`ForwardRenderer::set_render_scale`] clamps to it rather than
+/// refusing, so a settings slider cannot hand the renderer a frame it cannot
+/// draw.
+pub const MIN_RENDER_SCALE: f32 = 0.25;
+
 /// Named rather than written into [`ForwardRenderer::counters`]'s arithmetic,
 /// because these are the only draws in this file whose instance and triangle
 /// counts the CPU knows exactly — everything else here goes through an indirect
@@ -615,9 +635,19 @@ const FULLSCREEN_DRAWS: u64 = 1;
 /// **`extent` is here because the bloom chain's length depends on it** — see
 /// [`crate::bloom`] — where the two pairs above are the same two passes at every
 /// size. A frame too small for even one chain level records none of them, which
-/// is the same arithmetic as the toggle being off.
-fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32)) -> u64 {
+/// is the same arithmetic as the toggle being off. It is the **internal** render
+/// extent for the same reason: that is the extent every one of these passes runs
+/// at.
+///
+/// `upscaling` is not a [`RenderEffects`] bit and could not be one — it is a
+/// resolution, not an effect — so it arrives as its own argument, on the ground
+/// grid's terms. It is false on every frame at full render scale, which is the
+/// frame this function counted before the knob existed.
+fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32), upscaling: bool) -> u64 {
     let mut passes = 1;
+    if upscaling {
+        passes += Upscale::PASSES as u64;
+    }
     if effects.contains(RenderEffects::AMBIENT_OCCLUSION) {
         passes += Ssao::PASSES as u64;
     }
@@ -1220,6 +1250,12 @@ pub struct ForwardRenderer {
     /// `docs/plan/18-render-features.md`'s antialiasing resolve — see
     /// [`crate::fxaa`].
     fxaa: Fxaa,
+    /// [`crate::upscale`], and it draws nothing at a
+    /// [`render_scale`](Self::render_scale) of `1.0`.
+    upscale: Upscale,
+    /// How large the internal render target is as a fraction of the extent a
+    /// caller hands `begin_frame` — see [`set_render_scale`](Self::set_render_scale).
+    render_scale: f32,
 
     /// The three layers a caller supplies — see [`crate::effects`].
     effect_request: EffectRequest,
@@ -1320,6 +1356,7 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s antialiasing resolve, which owns one
     /// pipeline, one layout, a sampler and a ring of blocks.
     fxaa: Option<Fxaa>,
+    upscale: Option<Upscale>,
 }
 
 impl Rollback {
@@ -1361,6 +1398,9 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
+        }
+        if let Some(upscale) = self.upscale {
+            upscale.destroy(device);
         }
         if let Some(fxaa) = self.fxaa {
             fxaa.destroy(device);
@@ -3734,6 +3774,19 @@ impl ForwardRenderer {
             Self::build_fullscreen,
         )?);
 
+        // --- the render-scale upscale ---
+        //
+        // The second pass that writes the caller's target rather than a
+        // transient of its own, and the last built for `Rollback::run`'s reverse
+        // order. It draws on no frame at a render scale of `1.0`, which is every
+        // frame until a caller moves it — see [`crate::upscale`].
+        rollback.upscale = Some(Upscale::new(
+            device,
+            instance_buffers.len(),
+            target_format,
+            Self::build_fullscreen,
+        )?);
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -3897,6 +3950,13 @@ impl ForwardRenderer {
                 .fxaa
                 .take()
                 .unwrap_or_else(|| unreachable!("the resolve was placed in the rollback above")),
+            upscale: rollback
+                .upscale
+                .take()
+                .unwrap_or_else(|| unreachable!("the upscale was placed in the rollback above")),
+            // Full resolution, which is the frame every caller of this type drew
+            // before there was a knob — see [`Self::set_render_scale`].
+            render_scale: 1.0,
             // The default stack the view wants, no quality clamp and no
             // override, which resolves to every effect this device permits but
             // the lens one — the frame every caller of this type drew before
@@ -4346,6 +4406,14 @@ impl ForwardRenderer {
             stats.begin_frame(device);
         }
 
+        // **The aspect is the target's and everything below it is the internal
+        // render extent's.** What a viewer sees is the target: the upscale maps
+        // the whole internal image onto the whole of it, so a frame composed for
+        // the internal extent's own aspect would be composed for a rectangle
+        // nobody looks at. What the rounding of the two extents leaves is a
+        // sub-pixel non-squareness in the internal target, which the upscale
+        // undoes on the way out.
+        //
         // A minimised window reports a zero extent in *either* dimension, and
         // `Projection::matrix` asserts a finite positive aspect. Guarding only
         // the height left `extent.0 == 0` producing `0.0`, which trips that
@@ -4355,6 +4423,13 @@ impl ForwardRenderer {
         } else {
             extent.0 as f32 / extent.1 as f32
         };
+        // From here down `extent` is the extent this frame is *drawn* at, which
+        // is the caller's at a render scale of `1.0` and smaller below it. Every
+        // use of it beneath this line sizes something — the cluster grid, the
+        // LOD metric's pixel budget, the Hi-Z pyramid's height, the bloom chain,
+        // the resolve's texel size — and every one of those wants the extent the
+        // pixels are actually at. See [`Self::set_render_scale`].
+        let extent = self.internal_extent(extent);
         let direction = light.direction.normalize_or_zero();
         // One matrix, used twice. Recomputing it for the frustum below would be
         // two chances to pass a different aspect ratio, and the failure that
@@ -4567,6 +4642,11 @@ impl ForwardRenderer {
         // that use it is a block that is stale on the frame a caller switches
         // the effect on.
         self.fxaa.begin_frame(device, self.frame, extent)?;
+        // The upscale's block: the internal extent and its reciprocal. Written
+        // on the two above's terms — a frame at full scale adds no upscale pass
+        // and pays for sixteen bytes nobody reads, and a block written only on
+        // the frames that use it is stale on the frame a caller moves the knob.
+        self.upscale.begin_frame(device, self.frame, extent)?;
 
         // Every element the pool has ever handed out, not its live count: a
         // removed instance leaves a hole and the live ones above it still have
@@ -5389,6 +5469,22 @@ impl ForwardRenderer {
         extent: (u32, u32),
         skinning: Option<&Skinning>,
     ) -> ImageId {
+        // **From here down `extent` is the extent the frame is *drawn* at**,
+        // which is the caller's at a render scale of `1.0` and smaller below it.
+        // Every use of it in this function sizes a transient, and every one of
+        // those transients belongs to the internal frame; `target` is the only
+        // thing here at the caller's extent, and it is an id whose image already
+        // knows how big it is. `begin_frame_body` shadows it the same way and
+        // for the same reason, so the two halves of a frame cannot disagree.
+        //
+        // `upscaling` is derived from the two extents rather than from the scale
+        // itself, which is what makes it exact: a target small enough that the
+        // scaled extent rounds back onto it adds no pass, because there would be
+        // nothing for the pass to do.
+        let target_extent = extent;
+        let extent = self.internal_extent(target_extent);
+        let upscaling = extent != target_extent;
+
         // **The skinning dispatch, before anything else is added.** It imports
         // the vertex pool and hands back that node's id; every pass below that
         // pulls vertices declares a read of it, and the graph is what turns the
@@ -5612,13 +5708,33 @@ impl ForwardRenderer {
         // the resolve writes the target; with it off the tonemap writes the
         // target and there is no second image at all, which is what makes this
         // effect's off-switch bit-identical on the three above's terms.
+        // Where the last pass of the internal frame writes, and it is the
+        // caller's `target` on every frame drawn at full render scale.
+        //
+        // **This is the second effect in the frame that changes its shape rather
+        // than adding a pass to it** — see [`crate::upscale`], and the resolve
+        // below for the first. The upscale reads what the internal frame ended
+        // with, so that last write has to go somewhere it can sample, and a
+        // swapchain image at the caller's own extent is not it. So with the
+        // scale below one the chain ends in a transient at the *internal*
+        // extent and the upscale writes the target; at full scale there is no
+        // second image at all, which is what makes the knob's off position
+        // bit-identical.
+        let present = if upscaling {
+            graph.create_image(
+                "render-scale-color",
+                TransientImageDesc::display_color(extent, self.target_format),
+            )
+        } else {
+            target
+        };
         let display = if effects.contains(RenderEffects::ANTIALIASING) {
             graph.create_image(
                 "display-color",
                 TransientImageDesc::display_color(extent, self.target_format),
             )
         } else {
-            target
+            present
         };
 
         let group = self.mesh_groups[self.frame];
@@ -5671,7 +5787,7 @@ impl ForwardRenderer {
         // default — so what decides it is the field and not this frame's
         // effects.
         self.recorded_fullscreen =
-            fullscreen_passes(effects, extent) + u64::from(self.ground_grid().is_some());
+            fullscreen_passes(effects, extent, upscaling) + u64::from(self.ground_grid().is_some());
         self.recorded_draws = shadow_draws
             + 2 * bucket_draws.calls.len() as u64
             + self.recorded_fullscreen * FULLSCREEN_DRAWS;
@@ -6090,11 +6206,28 @@ impl ForwardRenderer {
         // the caller after this, so its glyphs are never filtered — topic 18
         // refuses to antialias text in as many words.
         //
-        // `display` is `target` when the bit is off, and this is the branch that
-        // makes that true: no pass, no second image, and the frame the tonemap
-        // wrote is already in the caller's target.
-        if display != target {
-            self.fxaa.add_pass(graph, frame, display, target);
+        // `display` is `present` when the bit is off, and this is the branch
+        // that makes that true: no pass, no second image, and the frame the
+        // tonemap wrote is already where the frame ends.
+        if display != present {
+            self.fxaa.add_pass(graph, frame, display, present);
+        }
+
+        // --- the render-scale upscale ---
+        //
+        // **After the resolve, and that ordering is not interchangeable.** FXAA
+        // filters the edges the renderer actually drew; run the other way round
+        // it would be filtering an interpolation of them, which is both more
+        // expensive — the resolve would run at the target's extent rather than
+        // the internal one — and worse, because the edge it is looking for has
+        // already been spread across several target texels.
+        //
+        // The UI goes the other way and is composited onto `target` by the
+        // caller after this, at native resolution. That is the whole reason a
+        // render-scale knob is usable: the 3D frame gets cheap and the text does
+        // not get soft.
+        if present != target {
+            self.upscale.add_pass(graph, frame, present, target);
         }
 
         // **Last, and that is the point.** Three passes add to the statistics
@@ -6575,6 +6708,68 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn tonemap_curve(&self) -> tonemap::TonemapCurve {
         self.tonemap_curve
+    }
+
+    /// How large the internal render target is as a fraction of the extent
+    /// [`begin_frame`](Self::begin_frame) is handed, clamped to
+    /// `MIN_RENDER_SCALE..=1.0`.
+    ///
+    /// **This is the largest performance knob this renderer has.** Every pass
+    /// before the upscale costs what its extent costs, so a scale of `0.7` is
+    /// roughly half the shading work of `1.0`; the UI is composited onto the
+    /// target afterwards at native resolution, so text stays sharp while the 3D
+    /// frame gets cheap. `docs/plan/43-render-standards.md` is where that trade
+    /// is written down.
+    ///
+    /// **`1.0` is not a special case with a fast path, it is the absence of the
+    /// feature.** At full scale the internal extent *is* the caller's, the post
+    /// chain writes the target directly, and no upscale pass is recorded — which
+    /// is what makes a renderer nobody has called this on draw the frame it drew
+    /// before the knob existed, bit for bit.
+    ///
+    /// **Above `1.0` is clamped away rather than supported.** Supersampling
+    /// wants a box or Lanczos reduction and `upscale.slang` is a Catmull-Rom
+    /// *reconstruction*; running it as a minification filter would alias, which
+    /// is the opposite of what a caller asking for it wants. A non-finite scale
+    /// is clamped to `1.0` for the same reason a `NaN` extent would be refused:
+    /// the failure it produces is a zero-sized target somewhere downstream.
+    ///
+    /// Takes effect on the next [`begin_frame`](Self::begin_frame), on
+    /// [`set_exposure`](Self::set_exposure)'s terms exactly — a frame already
+    /// recorded is drawn at the scale it was recorded with.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        self.render_scale = if scale.is_finite() {
+            scale.clamp(MIN_RENDER_SCALE, 1.0)
+        } else {
+            1.0
+        };
+    }
+
+    /// The render scale in force, after the clamp
+    /// [`set_render_scale`](Self::set_render_scale) applied.
+    ///
+    /// The read-back half, on [`exposure`](Self::exposure)'s terms.
+    #[must_use]
+    pub const fn render_scale(&self) -> f32 {
+        self.render_scale
+    }
+
+    /// The extent a frame handed `target` is actually drawn at.
+    ///
+    /// Rounds rather than truncates, and floors at one texel in each dimension:
+    /// a zero here would reach a transient image description, and an image of
+    /// zero extent is a device error rather than a small frame. A caller who
+    /// minimised the window already hands a zero extent through, and that path
+    /// is unchanged — `max(1)` on a zero is one either way.
+    fn internal_extent(&self, target: (u32, u32)) -> (u32, u32) {
+        if self.render_scale >= 1.0 {
+            return target;
+        }
+        let scale = f64::from(self.render_scale);
+        (
+            ((f64::from(target.0) * scale).round() as u32).max(1),
+            ((f64::from(target.1) * scale).round() as u32).max(1),
+        )
     }
 
     /// The exposure in force, after the clamp
@@ -7275,6 +7470,7 @@ impl ForwardRenderer {
         if let Some(grid) = self.ground_grid {
             grid.destroy(device);
         }
+        self.upscale.destroy(device);
         self.fxaa.destroy(device);
         self.bloom.destroy(device);
         self.ssr.destroy(device);
@@ -9676,7 +9872,8 @@ mod tests {
         // Derived from what the frame resolved rather than from a constant, so
         // this is still the every-effect frame's count and would follow a frame
         // that switched one off.
-        let fullscreen = fullscreen_passes(renderer.effects(), TEST_EXTENT) * FULLSCREEN_DRAWS;
+        let fullscreen =
+            fullscreen_passes(renderer.effects(), TEST_EXTENT, false) * FULLSCREEN_DRAWS;
         assert!(
             counters.draws > fullscreen,
             "a frame that recorded only its full-screen passes drew no scene",
@@ -9748,7 +9945,7 @@ mod tests {
         let counters = renderer.counters();
         assert_eq!(
             counters.drawn,
-            Some(fullscreen_passes(renderer.effects(), TEST_EXTENT) * FULLSCREEN_DRAWS),
+            Some(fullscreen_passes(renderer.effects(), TEST_EXTENT, false) * FULLSCREEN_DRAWS),
             "the survivor count the null backend produced is zero, plus one instance per \
              full-screen pass — which is on both sides of the row",
         );
@@ -10958,6 +11155,185 @@ mod tests {
         })
     }
 
+    /// The knob clamps to the range it documents, in both directions and on a
+    /// value that is neither.
+    ///
+    /// **The `NaN` arm is the one worth having.** A slider that divided by a
+    /// zero, or a settings file that carried a nonsense string, reaches this
+    /// with a value that fails every comparison it is put through — so a naive
+    /// `clamp` would keep it, `internal_extent` would multiply by it, and the
+    /// `as u32` below would produce a zero extent and a device error a long way
+    /// from here.
+    #[test]
+    fn the_render_scale_is_clamped_to_the_range_it_documents() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+
+        assert!(
+            (renderer.render_scale() - 1.0).abs() < f32::EPSILON,
+            "a renderer nobody has called the setter on draws at full scale"
+        );
+
+        renderer.set_render_scale(0.5);
+        assert!((renderer.render_scale() - 0.5).abs() < f32::EPSILON);
+
+        // Above one is supersampling, which this filter is the wrong one for.
+        renderer.set_render_scale(2.0);
+        assert!((renderer.render_scale() - 1.0).abs() < f32::EPSILON);
+
+        renderer.set_render_scale(0.01);
+        assert!((renderer.render_scale() - MIN_RENDER_SCALE).abs() < f32::EPSILON);
+
+        renderer.set_render_scale(f32::NAN);
+        assert!((renderer.render_scale() - 1.0).abs() < f32::EPSILON);
+        renderer.set_render_scale(f32::INFINITY);
+        assert!((renderer.render_scale() - 1.0).abs() < f32::EPSILON);
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// The internal extent is the target rounded, never zero, and is the target
+    /// itself at full scale.
+    ///
+    /// **The floor is not decoration.** A transient image of zero extent is a
+    /// device error rather than a small frame, and a 4×3 target at the minimum
+    /// scale is exactly the arithmetic that would produce one.
+    #[test]
+    fn the_internal_extent_rounds_and_never_reaches_zero() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+
+        assert_eq!(
+            renderer.internal_extent((1920, 1080)),
+            (1920, 1080),
+            "full scale is the absence of the feature, not a resize by one"
+        );
+
+        renderer.set_render_scale(0.5);
+        assert_eq!(renderer.internal_extent((1920, 1080)), (960, 540));
+
+        // Rounds rather than truncating: 1920 * 0.7 is 1344, and 1080 * 0.7 is
+        // 756 — both exact — so a target that does *not* divide evenly is what
+        // shows the rounding. 1281 * 0.7 = 896.7.
+        renderer.set_render_scale(0.7);
+        assert_eq!(renderer.internal_extent((1281, 1080)), (897, 756));
+
+        renderer.set_render_scale(MIN_RENDER_SCALE);
+        assert_eq!(renderer.internal_extent((4, 3)), (1, 1));
+        assert_eq!(
+            renderer.internal_extent((0, 0)),
+            (1, 1),
+            "a minimised window is the caller's zero extent, and this may not \
+             pass it through as one"
+        );
+
+        renderer.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **The upscale is a pass below full scale and is not there above it**, and
+    /// the frame is otherwise the same list.
+    ///
+    /// This is the observable the knob is: everything else about it — the
+    /// clamps, the rounding — is arithmetic that could be right while the frame
+    /// went on being drawn at the caller's extent. What says the feature works
+    /// is that the pass appears, that it appears **last**, and that switching it
+    /// off leaves the frame that was there before it existed.
+    #[test]
+    fn the_upscale_is_the_last_pass_and_only_below_full_scale() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image_at(device, TEST_EXTENT);
+        let pool = crate::TransientPool::new();
+
+        let full = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        assert!(
+            !full.contains(&"upscale".to_string()),
+            "a frame at full scale has no upscale in it: {full:?}"
+        );
+
+        renderer.set_render_scale(0.5);
+        let scaled = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        assert_eq!(
+            scaled.iter().filter(|label| *label == "upscale").count(),
+            1,
+            "a scaled frame records exactly one upscale: {scaled:?}"
+        );
+        // Last of the passes that draw. The statistics copy is genuinely after
+        // it and says so — see the comment on `add_copy_pass`'s placement.
+        let upscale = scaled
+            .iter()
+            .position(|label| label == "upscale")
+            .expect("the assertion above");
+        let tonemap = scaled
+            .iter()
+            .position(|label| label == "tonemap")
+            .expect("every frame tonemaps");
+        assert!(
+            upscale > tonemap,
+            "the upscale carries what the post chain ended with: {scaled:?}"
+        );
+
+        // **The pyramid gets shorter, and that is the evidence the rest of the
+        // frame really is smaller.** Everything above this is about the last
+        // pass; a knob that added an upscale while going on rendering at the
+        // caller's extent would pass every one of those assertions and save
+        // nothing. `crate::hiz`'s chain is as long as the extent allows, so the
+        // level count is a number read out of the frame that can only be the
+        // internal extent's.
+        let levels = |passes: &[String]| {
+            passes
+                .iter()
+                .filter(|label| label.starts_with("hiz-"))
+                .count()
+        };
+        let internal = renderer.internal_extent(TEST_EXTENT);
+        assert_eq!(levels(&full), crate::hiz::levels_for(TEST_EXTENT) as usize);
+        assert_eq!(levels(&scaled), crate::hiz::levels_for(internal) as usize);
+        assert!(
+            levels(&scaled) < levels(&full),
+            "at this extent the halved frame has to lose a level, or this \
+             assertion is not looking at anything: {scaled:?}"
+        );
+
+        // And nothing else moved: an upscale is a pass added to the frame, not a
+        // frame rebuilt around one. The pyramid is the one part that is a
+        // function of the extent, so it is compared by the count above and
+        // dropped from the list here.
+        let without_hiz = |passes: &[String]| -> Vec<String> {
+            passes
+                .iter()
+                .filter(|label| !label.starts_with("hiz-") && *label != "upscale")
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            without_hiz(&scaled),
+            without_hiz(&full),
+            "the scaled frame is the full-scale frame, one pass longer and one \
+             pyramid shorter"
+        );
+
+        renderer.set_render_scale(1.0);
+        let back = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        assert_eq!(
+            back, full,
+            "the knob goes back, which is what a settings slider does"
+        );
+
+        renderer.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
     /// **[`ForwardRenderer::MAX_PASSES`] bounds the frame, and lands on it.**
     ///
     /// It is what a caller sizes [`PassTimers`](crate::PassTimers) with, so both
@@ -10973,21 +11349,35 @@ mod tests {
     /// [`RenderEffects`] bit, so nothing else here would put its pass in.
     ///
     /// **And the frames are drawn at [`WIDEST_EXTENT`] rather than at
-    /// [`TEST_EXTENT`], with every effect forced on.** The bloom chain's length
-    /// is a function of the target's extent — see [`crate::bloom`] — so the
-    /// widest frame this renderer records is a *large* one, and a bound checked
-    /// against a 64×48 frame would sit six passes above what that frame runs and
-    /// this assertion would have to be a `<=`. It is an `==` on purpose: a bound
-    /// well over the widest frame buys query sets nothing writes, and only an
-    /// exact comparison notices.
+    /// [`TEST_EXTENT`], with every effect forced on and the render scale off
+    /// full.** The bloom chain's length is a function of the extent the frame is
+    /// drawn at — see [`crate::bloom`] — so the widest frame this renderer
+    /// records is a *large* one, and a bound checked against a 64×48 frame would
+    /// sit six passes above what that frame runs and this assertion would have
+    /// to be a `<=`. It is an `==` on purpose: a bound well over the widest
+    /// frame buys query sets nothing writes, and only an exact comparison
+    /// notices.
+    ///
+    /// **The render scale is what makes those two requirements compose.** The
+    /// upscale is a pass only below full scale, and below full scale the chain
+    /// runs at the *internal* extent — so a frame with both is one whose
+    /// internal extent is the longest chain's, and whose target is larger than
+    /// that. Halving a target of 2048×1024 is what arranges it, and the two
+    /// assertions below check the arrangement rather than trusting it.
     ///
     /// [`WIDEST_EXTENT`]: fn@the_pass_bound_is_the_widest_frame_the_renderer_records
     #[test]
     fn the_pass_bound_is_the_widest_frame_the_renderer_records() {
-        /// An extent whose bloom chain is the longest [`crate::bloom`] will
+        /// The extent whose bloom chain is the longest [`crate::bloom`] will
         /// build: six halvings of 512 leave sixteen by eight, which is still at
-        /// or above that module's floor.
-        const WIDEST_EXTENT: (u32, u32) = (1024, 512);
+        /// or above that module's floor. The widest frame is drawn at this,
+        /// which is why it is the internal one and not the target.
+        const WIDEST_INTERNAL: (u32, u32) = (1024, 512);
+        /// Half, so the frame records an upscale and draws at
+        /// [`WIDEST_INTERNAL`].
+        const WIDEST_SCALE: f32 = 0.5;
+        /// The caller's extent: twice [`WIDEST_INTERNAL`] in each dimension.
+        const WIDEST_EXTENT: (u32, u32) = (WIDEST_INTERNAL.0 * 2, WIDEST_INTERNAL.1 * 2);
 
         let (recorder, device, queue) = open();
         let device = device.as_ref();
@@ -10996,6 +11386,14 @@ mod tests {
         renderer
             .set_ground_grid(device, Some(GridStyle::default()))
             .expect("the null backend builds every pipeline");
+        renderer.set_render_scale(WIDEST_SCALE);
+        assert_eq!(
+            renderer.internal_extent(WIDEST_EXTENT),
+            WIDEST_INTERNAL,
+            "the scale has to take the target to the extent whose chain is the \
+             longest one, or the bound below is checked against a frame that \
+             could not reach it"
+        );
         // **Both post effects forced on.** Neither is in the default camera
         // stack — see [`RenderEffects::DEFAULT_STACK`], which leaves the lens out
         // for one reason and the resolve out for another — and the widest frame
@@ -11011,7 +11409,7 @@ mod tests {
         let bare =
             passes_in_a_frame(device, queue, &mut renderer, imported, &pool, WIDEST_EXTENT).len();
         assert_eq!(
-            crate::bloom::mips_for(WIDEST_EXTENT),
+            crate::bloom::mips_for(WIDEST_INTERNAL),
             crate::bloom::MAX_MIPS,
             "the widest frame has to be one whose chain is the longest one there \
              is, or the bound below is checked against a frame that could not \
@@ -11598,7 +11996,8 @@ mod tests {
         );
         assert_eq!(
             control.instances,
-            instances + fullscreen_passes(RenderEffects::all(), TEST_EXTENT) * FULLSCREEN_DRAWS,
+            instances
+                + fullscreen_passes(RenderEffects::all(), TEST_EXTENT, false) * FULLSCREEN_DRAWS,
             "the control frame submits one triangle per full-screen pass"
         );
 
@@ -11630,7 +12029,7 @@ mod tests {
             assert_eq!(
                 counters.instances,
                 instances
-                    + fullscreen_passes(RenderEffects::all().difference(off), TEST_EXTENT)
+                    + fullscreen_passes(RenderEffects::all().difference(off), TEST_EXTENT, false)
                         * FULLSCREEN_DRAWS,
                 "{off:?}: and must not report as submitted a triangle it never submitted"
             );

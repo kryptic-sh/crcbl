@@ -78,6 +78,7 @@ pub(crate) const SUITE: &str = "crcbl mesh e2e";
 mod goldens;
 mod hdr;
 mod lod;
+mod render_scale;
 mod resize;
 mod two_dags;
 

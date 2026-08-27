@@ -157,6 +157,7 @@ pub mod texture;
 pub mod timing;
 pub mod transient;
 pub mod ui_pass;
+mod upscale;
 
 pub use button_skin::{ButtonSkin, screen_rect_to_target};
 pub use camera::{Camera, DirectionalLight, Projection};
@@ -187,7 +188,8 @@ pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use effects::{EffectOverride, EffectRequest, RenderEffects};
 pub use fly::{Flyer, LOOK, SPEED, TURN};
 pub use forward::{
-    DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, SHADOW_LOD_BIAS, SkinnedInstanceDesc,
+    DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, MIN_RENDER_SCALE, SHADOW_LOD_BIAS,
+    SkinnedInstanceDesc,
 };
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,

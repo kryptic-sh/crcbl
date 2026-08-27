@@ -16,6 +16,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Render scale: the frame can be drawn at fewer pixels than the window.**
+  `crcbl_render::ForwardRenderer::set_render_scale` sizes an internal colour
+  target at a fraction of the caller's extent — down to `MIN_RENDER_SCALE`, a
+  quarter in each dimension — and `crates/crcbl-shaders/shaders/upscale.slang`
+  reconstructs it into the caller's own target as the last pass of the frame.
+  The cluster grid, the level-of-detail pixel budget, the Hi-Z pyramid, bloom
+  and FXAA all follow the internal extent, so the post chain finally costs what
+  `docs/plan/48-post-processing.md` has been ordering it to cost.
+
+  **At full scale nothing changes**: the stage before it writes the caller's
+  target directly, so there is no second image and no pass, and a frame that
+  asked for no scaling is bit-identical to one from before this existed. Not one
+  golden moved.
+
+  **The filter is Catmull-Rom**, sixteen taps — Mitchell-Netravali at
+  `B = 0, C = 0.5`, so a surviving texel reaches the frame unchanged and the
+  weights are a partition of unity by exact identity. Multiplies and adds only,
+  no transcendental near a colour, which is what lets it be blessed on all four
+  backends. It is spatial, not temporal: no jitter, no history, no motion
+  vectors, so swapping it for an FSR-class upscaler later replaces the pass
+  without moving the seam around it.
+
+  **Nothing above the renderer can ask for it yet** — no settings key and no
+  `Shell` request; see `docs/backlog.md`.
+
 - **Materials emit light.** `crcbl_shaders::mesh::GpuMaterial` grew an
   `emissive` triple — a linear radiance added to the shaded colour and scaled by
   nothing, so a lamp reads the same in a corner as in the open and a black

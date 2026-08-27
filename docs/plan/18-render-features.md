@@ -39,9 +39,9 @@ does these, and it is answered in one place:
 ## Interactions (kept honest)
 
 - Render-scale upscale (topic 15) happens **after** tonemap+AA: post chain costs
-  scale with internal res (the whole point of render scale). Both of these first
-  two bullets are ordering rules for an upscale that does not exist — see the
-  note under the pipeline order above.
+  scale with internal res (the whole point of render scale). **Built
+  2026-08-27**, so this bullet now describes a pass that runs; the UI bullet
+  below still binds whoever composites at native resolution.
 - UI renders after upscale at native res (crisp text regardless of 3D scale) —
   this ordering is the reason the UI pass was kept separate in stage 7.
 - Debug overlays (debug draw, gizmos) render pre-tonemap in HDR (they're in the
