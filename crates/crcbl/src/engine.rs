@@ -725,6 +725,32 @@ impl SettingsSource<'_> {
             Self::None => RenderEffects::all(),
         }
     }
+
+    /// The bus gains the player has set, read now.
+    ///
+    /// Unity for every bus whenever there is nothing to read, on
+    /// `video_effects`' terms and for the mirror of its reason: an audio key **is** the gain, so "the player has said nothing"
+    /// and "the player wants it at full" are the same answer.
+    ///
+    /// **Public where `video_effects` is not**, and the asymmetry is the state
+    /// of the engine rather than a choice about the API: a
+    /// [`GpuContext`] owns the renderer and reads the video layer without being
+    /// asked, and nothing here owns a mixer. A game builds its own, so a game is
+    /// what has to hand these to it — see
+    /// [`Mixer::set_bus_gain`](crcbl_audio::mixer::Mixer::set_bus_gain).
+    #[must_use]
+    pub fn audio_gains(
+        self,
+        app_name: &str,
+    ) -> [(crcbl_audio::mixer::Bus, f32); crcbl_audio::mixer::Bus::ALL.len()] {
+        match self {
+            Self::Platform => crate::settings::audio_gains(&SettingsStack::platform(app_name)),
+            Self::Source(storage) => {
+                crate::settings::audio_gains(&SettingsStack::from_storage(storage))
+            }
+            Self::None => crcbl_audio::mixer::Bus::ALL.map(|bus| (bus, 1.0)),
+        }
+    }
 }
 
 impl From<GpuOptions> for GpuContextDesc<'_> {
@@ -11616,5 +11642,45 @@ mod tests {
             "the loop and the game disagree about how much simulation ran",
         );
         assert_eq!(summary.run.backend, crcbl_shell::ShellBackend::Headless);
+    }
+
+    /// **A settings source hands a game the player's bus gains, and
+    /// [`SettingsSource::None`] hands it unity.**
+    ///
+    /// The seam a game reaches audio settings through, and the pair is what
+    /// makes it a test: a `Source` arm wired to nothing answers unity too, and
+    /// would pass the second half alone.
+    ///
+    /// `None` answering unity is what keeps a golden run and a determinism
+    /// harness off whoever's home directory they execute in — the same reason
+    /// that arm exists for the video layer.
+    #[test]
+    fn a_settings_source_carries_the_players_bus_gains() {
+        use crcbl_audio::mixer::Bus;
+        use crcbl_store::StorageSource;
+        use crcbl_store::settings::SETTINGS_FILE;
+
+        let storage = crcbl_store::MemoryStorage::new();
+        storage
+            .write(
+                std::path::Path::new(SETTINGS_FILE),
+                b"[engine.audio]\nmusic_volume = 0.25\n",
+            )
+            .expect("memory storage accepts every write");
+
+        let read = SettingsSource::Source(&storage).audio_gains("test");
+        let music = read
+            .into_iter()
+            .find(|(bus, _)| *bus == Bus::Music)
+            .expect("every bus is answered for")
+            .1;
+        assert!((music - 0.25).abs() < f32::EPSILON, "read {music}");
+
+        for (bus, gain) in SettingsSource::None.audio_gains("test") {
+            assert!(
+                (gain - 1.0).abs() < f32::EPSILON,
+                "no source must leave {bus:?} at unity, and it reads {gain}"
+            );
+        }
     }
 }

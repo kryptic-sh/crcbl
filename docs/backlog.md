@@ -81,13 +81,12 @@ What would settle it, in order of cost:
 `docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. Two halves of
 it are not, both deliberately out of that slice:
 
-- **Nothing reads `[engine.audio]`.** The six keys are named by
-  `Bus::settings_key` and no code maps one to `Mixer::set_bus_gain`.
-  `crates/crcbl/src/settings.rs` is the join module that would do it — it is
-  where `video_effects` reads `[engine.video]` — but that module is written as
-  the video layer, and an audio key resolves through two layers where a video
-  key resolves through four, so the two do not share a resolution path. Until it
-  lands, a player's volume settings are a file nothing loads.
+- **Only one sample reads `[engine.audio]`.** `crcbl::settings::audio_gains` and
+  `SettingsSource::audio_gains` landed 2026-08-28 and `apps/breakout` is their
+  only caller; `asteroids`, `flappy` and `horde` each build a `Mixer` in their
+  own `Audio::new` and none of them applies a gain. It is three copies of four
+  lines rather than a design question, and the right moment to do it is when
+  sample 20 exists to say what a settings screen writes.
 - **`AudioEvent` carries no bus.** The plan already prices this: a 28-byte wire
   format gaining a route becomes 29 or 32, and `WIRE_SIZE` plus both round-trip
   tests move with it. It is worth doing rather than deriving the bus from the

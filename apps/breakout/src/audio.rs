@@ -13,6 +13,22 @@
 //! convention of this sample is that one line. Only the emitter's X moves, so
 //! the grammar answers with a pan and a distance and nothing else varies.
 //!
+//! # Where the player's volumes come in
+//!
+//! [`Audio::new`] reads the `[engine.audio]` section once and sets the mixer's
+//! bus gains from it, so a player who has turned the master or the effects
+//! volume down in their settings file hears this sample quieter. It is read
+//! from [`crcbl::engine::SettingsSource::Platform`] on a real run and from
+//! [`None`](crcbl::engine::SettingsSource::None) headless, on the same rule
+//! `crate::high_score` uses and for the same reason: a golden frame or a
+//! determinism harness must not depend on whose home directory it is running
+//! in.
+//!
+//! Every voice this sample raises is a gameplay cue, so all of them take the
+//! default [`Bus::Sfx`](crcbl::audio::mixer::Bus::Sfx) route. [`MASTER_GAIN`] stays where it is rather than
+//! becoming the master bus gain: it is a level this sample chose so its own
+//! overlapping cues do not clip, and the master bus is the player's.
+//!
 //! # What this file used to be
 //!
 //! Its own `Sound`, `Voice`, `VoiceQueue` and `MixerSource`, copied into all
@@ -53,6 +69,15 @@ const LISTENER_STANDOFF: f32 = 1.0;
 /// The camera, at the screen centre. See the module docs.
 const LISTENER: Listener = Listener::new([0.0, 0.0, -LISTENER_STANDOFF]);
 
+/// The settings directory this sample reads its volumes out of.
+///
+/// The same spelling `crate::gpu` hands
+/// [`GpuContextDesc::label`](crcbl::engine::GpuContextDesc::label), because it
+/// is the same directory: a player has one settings file per game, and two
+/// spellings of the name would be a video section and an audio section in
+/// different files.
+const APP_NAME: &str = "breakout";
+
 /// Manages sound loading and playback. Voices are created on the game thread
 /// from the bank and played into the mixer the audio thread drains.
 #[derive(Debug)]
@@ -75,6 +100,17 @@ impl Audio {
         // than pushed every frame. Set before any cue can be raised, so no cue
         // is ever computed against the mixer's default.
         mixer.set_listener(LISTENER);
+        // Before any cue can be raised, for the listener's reason: a voice
+        // started against the default gains would be the one sound in the run
+        // the player's settings did not reach.
+        let settings = if headless {
+            crcbl::engine::SettingsSource::None
+        } else {
+            crcbl::engine::SettingsSource::Platform
+        };
+        for (bus, gain) in settings.audio_gains(APP_NAME) {
+            mixer.set_bus_gain(bus, gain);
+        }
         let stream: Option<AudioStream> = if headless {
             Some(AudioStream::open_null(Arc::clone(&mixer)))
         } else {

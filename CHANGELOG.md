@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::settings::audio_gains`: the `[engine.audio]` bus volumes a player
+  can set.** One key per bus — `master_volume`, `music_volume`, `sfx_volume`,
+  `ui_volume`, `voice_volume`, `ambience_volume` — each a linear gain clamped to
+  `[0, 1]`, with an absent key meaning unity. `SettingsSource::audio_gains` is
+  the seam a game reads them through, and it is public where the video layer's
+  is not, because a `GpuContext` owns the renderer and nothing in the engine
+  owns a mixer. `apps/breakout` is the first consumer: it applies them in
+  `Audio::new`, from the platform settings file on a real run and from nothing
+  headless.
+
 - **`crcbl_audio::mixer::Bus`: six fixed gain stages, so a player can turn the
   music down without turning the gunfire down.** `master`, `music`, `sfx`, `ui`,
   `voice` and `ambience`, each one linear gain reachable through
