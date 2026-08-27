@@ -274,9 +274,9 @@ struct GpuMaterial
     float roughness;
     uint tiling;
     float tile_metres;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    float emissive_r;
+    float emissive_g;
+    float emissive_b;
 };
 
 /// One cluster, matching `crcbl_shaders::meshlet::Meshlet`.

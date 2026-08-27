@@ -566,6 +566,7 @@ const GLTF_DEFAULT_ROW: mesh::GpuMaterial = mesh::GpuMaterial {
     roughness: 1.0,
     tiling: mesh::GpuMaterial::TILING_AUTHORED,
     tile_metres: 1.0,
+    emissive: [0.0; 3],
 };
 
 /// The material table: the glTF default first, then the document's own rows with

@@ -207,6 +207,13 @@ const PROBE_MATERIALS: [crcbl::shaders::mesh::GpuMaterial; 2] = [
         // no page, so physical tiling has nothing to tile.
         tiling: crcbl::shaders::mesh::GpuMaterial::TILING_AUTHORED,
         tile_metres: crcbl::shaders::mesh::GpuMaterial::UNTINTED.tile_metres,
+        // **Emitting nothing, and that matters here.** Emission is added to the
+        // lit colour and is not part of `F0`, so a row that emitted would leave
+        // the reflectivity attachment alone and change only the frame this probe
+        // does not read — which would make a difference this test cannot see. It
+        // is the row above's value, so the two rows still differ only where the
+        // assertion looks.
+        emissive: [0.0; 3],
     },
 ];
 

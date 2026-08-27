@@ -1096,6 +1096,7 @@ fn build(
                 base_color: pbr.base_color_factor(),
                 metallic: pbr.metallic_factor(),
                 roughness: pbr.roughness_factor(),
+                emissive: emissive_radiance(&material),
                 // **The factors only; `base_color_texture` is left untextured.**
                 // This column is a *page layer*, and which layer an image lands
                 // in is known only to whoever builds the page. The document's
@@ -1194,6 +1195,23 @@ fn warn_dropped_features(document: &gltf::Document, key: &Path) {
             key.display(),
         );
     }
+}
+
+/// The linear radiance a material emits, as `GpuMaterial::emissive` wants it.
+///
+/// **glTF stores two things and this engine stores their product.**
+/// `emissiveFactor` is a colour in `0..=1`, which cannot express a surface
+/// brighter than white, and `KHR_materials_emissive_strength` is the multiplier
+/// that lifts it — so the pair is one radiance split in two, and a shader wants
+/// it whole. The scene target is `Rgba16Float`, so the product is representable
+/// however large the strength is.
+///
+/// **A document with no extension multiplies by one**, which is what the
+/// extension's own specification says its absence means, so an ordinary
+/// emissive material imports at exactly its factor.
+fn emissive_radiance(material: &gltf::Material<'_>) -> [f32; 3] {
+    let strength = material.emissive_strength().unwrap_or(1.0);
+    material.emissive_factor().map(|channel| channel * strength)
 }
 
 /// Whether texture `index` names an image this document actually carries.
@@ -1718,6 +1736,8 @@ mod tests {
         roughness: 1.0,
         tiling: GpuMaterial::TILING_AUTHORED,
         tile_metres: 1.0,
+        // glTF's own default `emissiveFactor`, which is no emission.
+        emissive: [0.0; 3],
     };
 
     /// The `animations` array a `KHR_animation_pointer` document carries: a
@@ -2480,6 +2500,44 @@ mod tests {
              a tree in which they are equal again is one where this test says nothing"
         );
         assert_eq!(scene.meshes()[0].primitives()[0].material(), None);
+    }
+
+    /// **Emission imports as one radiance, not as a factor and a multiplier.**
+    ///
+    /// glTF splits it: `emissiveFactor` is capped at one per channel, and
+    /// `KHR_materials_emissive_strength` is what lifts a surface above white.
+    /// `GpuMaterial::emissive` is their product, so an importer that read only
+    /// the factor would clamp every bright emitter to at most one and produce a
+    /// document that loads, renders and is dimmer than it says — which is why
+    /// the second half of this asserts a value above one specifically.
+    #[test]
+    fn an_emissive_material_imports_the_factor_times_the_strength() {
+        const FACTOR: &str = "\"emissiveFactor\": [0.5, 0.25, 0.125]";
+        let with_factor = replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            "\"pbrMetallicRoughness\"",
+            &format!("{FACTOR}, \"pbrMetallicRoughness\""),
+        );
+        assert_eq!(
+            import_glb(&with_factor).unwrap().materials()[0].emissive,
+            [0.5, 0.25, 0.125],
+            "a document with no strength extension multiplies by one, which is what the \
+             extension's own absence means",
+        );
+
+        let with_strength = replacing(
+            &with_factor,
+            FACTOR,
+            &format!(
+                "{FACTOR}, \"extensions\": {{ \"KHR_materials_emissive_strength\": \
+                 {{ \"emissiveStrength\": 8.0 }} }}"
+            ),
+        );
+        assert_eq!(
+            import_glb(&with_strength).unwrap().materials()[0].emissive,
+            [4.0, 2.0, 1.0],
+            "the strength must multiply the factor, and the result must be allowed above one",
+        );
     }
 
     /// `docs/plan/06-assets-scenes.md`'s risk section: unsupported features

@@ -16,6 +16,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Materials emit light.** `crcbl_shaders::mesh::GpuMaterial` grew an
+  `emissive` triple — a linear radiance added to the shaded colour and scaled by
+  nothing, so a lamp reads the same in a corner as in the open and a black
+  emissive surface is still black. `shaders/mesh.slang` adds it last, unclamped,
+  so a value above one reaches the `Rgba16Float` scene target and the bloom
+  chain turns it into a glow.
+
+  **It cost no stride and moved no offset.** The three words it occupies were
+  the row's `pad0`/`pad1`/`pad2`, so `MATERIAL_STRIDE` is still 48 and every
+  earlier member is where it was — verified against the offsets `slangc`
+  decorates the struct with. `[0.0; 3]` is the default, zero added to a colour
+  is that colour exactly, and not one golden in the tree moved.
+
+  **glTF import fills it.** `emissiveFactor` is capped at one per channel, so
+  the `KHR_materials_emissive_strength` feature is now enabled on the `gltf`
+  dependency and the importer stores the product — without it every emitter
+  above white would load silently dimmed.
+
 - **The tonemap has a filmic curve, and it is off by default.**
   `crates/crcbl-shaders/shaders/tonemap.slang` carries a second operator behind
   a `uint curve` lane of its uniform block: Stephen Hill's fit of the ACES RRT

@@ -896,6 +896,25 @@ pub struct GpuMaterial {
     /// `0.0` collapses the whole surface onto one texel rather than dividing by
     /// zero.
     pub tile_metres: f32,
+    /// Linear radiance this surface emits, added to the shaded colour and
+    /// scaled by nothing.
+    ///
+    /// **`[0.0; 3]` is a surface that emits nothing**, and that is what makes
+    /// this additive in the strict sense: it landed in the three words the row
+    /// already padded with, so no earlier member's offset moved, and zero added
+    /// to a colour is that colour exactly on every target. Not one golden in the
+    /// tree moved when it arrived.
+    ///
+    /// **A radiance, not a factor and a strength.** glTF splits it — an
+    /// `emissiveFactor` in `0..=1` and `KHR_materials_emissive_strength`'s
+    /// multiplier over it — and their product is what a shader wants. The scene
+    /// target is `Rgba16Float`, so a value above one is representable and is
+    /// what the bloom chain reads as a glow.
+    ///
+    /// Three scalars on the shader side rather than a `float3`, for the reason
+    /// `shaders/mesh.slang` gives on `GpuMaterial::emissive_r`: `std430` aligns
+    /// a `float3` to sixteen and would have taken the row to 64 bytes.
+    pub emissive: [f32; 3],
 }
 
 impl GpuMaterial {
@@ -922,6 +941,7 @@ impl GpuMaterial {
         roughness: 0.5,
         tiling: Self::TILING_AUTHORED,
         tile_metres: 1.0,
+        emissive: [0.0; 3],
     };
 
     /// [`tiling`](Self::tiling): sample the base-colour texture at the vertex's
@@ -940,8 +960,9 @@ impl GpuMaterial {
 
     /// The bytes one material-table element holds, in `std430` order.
     ///
-    /// The three trailing `uint`s of padding the shader's struct spells out are
-    /// left as the zero the array starts as; nothing reads them.
+    /// The row has no padding left: the three trailing words it used to spell
+    /// out are [`emissive`](Self::emissive), which is why adding emission cost
+    /// no stride and moved no offset.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; MATERIAL_STRIDE] {
         let mut bytes = [0u8; MATERIAL_STRIDE];
@@ -960,7 +981,11 @@ impl GpuMaterial {
         at += 4;
         bytes[at..at + 4].copy_from_slice(&self.tile_metres.to_le_bytes());
         at += 4;
-        debug_assert_eq!(at + 12, MATERIAL_STRIDE);
+        for value in &self.emissive {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        debug_assert_eq!(at, MATERIAL_STRIDE);
         bytes
     }
 
@@ -992,6 +1017,7 @@ impl GpuMaterial {
             roughness: float_at(24),
             tiling: uint_at(28),
             tile_metres: float_at(32),
+            emissive: [float_at(36), float_at(40), float_at(44)],
         }
     }
 }
@@ -2367,10 +2393,14 @@ mod tests {
     fn the_material_layout_matches_the_offsets_slangc_emits() {
         // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 48`, and
         // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0` / `1 Offset 16` /
-        // `2 Offset 20` / `3 Offset 24` / `4 Offset 28` / `5 Offset 32`.
+        // `2 Offset 20` / `3 Offset 24` / `4 Offset 28` / `5 Offset 32` /
+        // `6 Offset 36` / `7 Offset 40` / `8 Offset 44`.
         // Forty-eight rather than thirty-six: the row's alignment is the
-        // `float4`'s sixteen, so the last member is followed by twelve bytes the
-        // shader's own struct spells out as `pad0`/`pad1`/`pad2`.
+        // `float4`'s sixteen, so the members after `tile_metres` sit in bytes
+        // the row would have been padded to anyway. That is what made the
+        // emissive triple free — and it is also why it is three scalars rather
+        // than a `float3`, which `std430` would have aligned to 48 and taken the
+        // stride to 64.
         assert_eq!(MATERIAL_STRIDE, 48);
 
         let material = GpuMaterial {
@@ -2380,6 +2410,7 @@ mod tests {
             roughness: 0.375,
             tiling: GpuMaterial::TILING_PHYSICAL,
             tile_metres: 2.0,
+            emissive: [1.5, 2.5, 3.5],
         };
         let bytes = material.to_bytes();
         assert_eq!(bytes.len(), MATERIAL_STRIDE);
@@ -2412,11 +2443,13 @@ mod tests {
             "tiling at offset 28"
         );
         assert_eq!(float_at(32), 2.0, "tile_metres at offset 32");
-        assert_eq!(
-            bytes[36..MATERIAL_STRIDE],
-            [0u8; 12],
-            "the three pad words the shader declares must stay zero"
-        );
+        // **And the emissive triple is the three words that used to be
+        // padding**, which is what says the row grew emission without any
+        // earlier member moving. Three scalars, so their offsets are the sum of
+        // their sizes rather than a vector's alignment.
+        assert_eq!(float_at(36), 1.5, "emissive[0] at offset 36");
+        assert_eq!(float_at(40), 2.5, "emissive[1] at offset 40");
+        assert_eq!(float_at(44), 3.5, "emissive[2] at offset 44");
         assert_eq!(GpuMaterial::from_bytes(&bytes), material);
 
         // A row nothing has written is black, not untinted — the contract the

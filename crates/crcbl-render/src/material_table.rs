@@ -411,10 +411,11 @@ mod tests {
     /// row index, from the material number and from every factor in the row: an
     /// index read out of the wrong word cannot come out right by coincidence.
     ///
-    /// The shading factors and the tiling pair are on the same scheme, and they
-    /// are the ones the scheme most has to cover: they sit past the texture
-    /// index, so a writer that still stops there leaves them zero and this is
-    /// what says so.
+    /// The shading factors, the tiling pair and the emissive triple are on the
+    /// same scheme, and they are the ones the scheme most has to cover: they sit
+    /// past the texture index, so a writer that still stops there leaves them
+    /// zero and this is what says so. Every fraction is distinct and inside
+    /// `0..1`, so no value of one row can coincide with a value of another.
     fn material(n: u32) -> GpuMaterial {
         let base = n as f32;
         GpuMaterial {
@@ -424,6 +425,9 @@ mod tests {
             roughness: base + 0.625,
             tiling: n % 2,
             tile_metres: base + 0.75,
+            // The last three words of the row, and the ones a writer that
+            // stopped at the old padding leaves zero.
+            emissive: [base + 0.8125, base + 0.875, base + 0.9375],
         }
     }
 

@@ -576,18 +576,39 @@ struct GpuMaterial
     /// left at zero collapses the surface onto one texel rather than dividing by
     /// zero.
     float tile_metres;
-    /// Pads the row to 48 bytes, which is what `std430` rounds it to anyway: the
-    /// struct's alignment is the `float4`'s 16, so a 36-byte row would be read
-    /// at a stride of 48 by a shader while the CPU wrote it at 36. Spelled out
-    /// rather than implied, exactly as `DrawConstants` below spells its own.
+    /// Linear radiance this surface emits, in `r`, `g` and `b` — added to the
+    /// shaded colour and scaled by nothing.
     ///
-    /// **There was one of these**, and it plus the twelve bytes `std430` rounds
-    /// the size up by is where `tiling` and `tile_metres` went — so the row
-    /// gained physical tiling without any earlier member's offset moving.
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    /// **Three scalars rather than a `float3`**, for the reason the padding they
+    /// replaced spelled out: under `std430` a `float3` is 16-byte aligned, so one
+    /// declared here would sit at offset 48 and take the row to 64 while the CPU
+    /// wrote it at 36. Scalars keep every earlier member's offset and keep the
+    /// stride at `crcbl_shaders::mesh::MATERIAL_STRIDE`. `emissive_of` is what
+    /// reads them back as a vector.
+    ///
+    /// **The three words this occupies were the row's padding**, which is why
+    /// nothing moved and why a material nobody has written emits nothing: zero
+    /// added to a colour is that colour, on every target, exactly.
+    ///
+    /// Not a factor and a separate strength, which is how glTF splits it
+    /// (`emissiveFactor` and `KHR_materials_emissive_strength`): their product is
+    /// a linear radiance and this is that product, because the scene target is
+    /// `Rgba16Float` and has the range to hold it. The bloom chain is what turns
+    /// a value above one into a glow.
+    float emissive_r;
+    float emissive_g;
+    float emissive_b;
 };
+
+/// The emissive radiance of a material row, as a vector.
+///
+/// The three scalars exist for the layout reason `GpuMaterial::emissive_r`
+/// gives; every reader wants them together, and this is the one place that
+/// reassembles them so no caller reorders the channels by hand.
+float3 emissive_of(GpuMaterial material)
+{
+    return float3(material.emissive_r, material.emissive_g, material.emissive_b);
+}
 
 /// `GpuMaterial::tiling`: sample the base-colour texture at the vertex's own UV.
 ///
@@ -2060,6 +2081,18 @@ FragmentOutput fragmentMain(VertexOutput input)
     // can see is what modulates the environment reaching it, and the grid is an
     // environment.
     float3 lit = diffuse_albedo * (irradiance * occluded + direct) + gloss;
+
+    // **Emission is added last and scaled by nothing.** Not by the occlusion,
+    // which asks how much of the room reaches a surface and has no bearing on
+    // what the surface produces; not by the albedo, which is what a surface does
+    // to light arriving at it. A lamp's filament is as bright in a corner as in
+    // the open, and a black emissive surface is still black — the two are
+    // independent, which is why this is a sum and not a factor.
+    //
+    // Unclamped for `output.lit`'s reason below: a value above one is what the
+    // bloom chain reads as a glow, and clamping here would throw exactly that
+    // away.
+    lit += emissive_of(material);
 
     FragmentOutput output;
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap

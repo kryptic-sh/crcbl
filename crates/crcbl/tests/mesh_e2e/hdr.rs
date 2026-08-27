@@ -304,3 +304,118 @@ fn the_aces_curve_keeps_the_shading_the_clamp_flattens() {
         "and the frame's hottest texel must still read as a highlight, got {peak_pixel:?}"
     );
 }
+
+/// The cube scene's neutral material row, made to emit `emissive`, rendered
+/// with only the effects that could disturb the comparison taken off.
+///
+/// **The reflections are off and the resolve is off**, and each for its own
+/// reason. A resolve blends neighbouring texels, so a per-texel difference
+/// would be a filtered one; and screen-space reflections sample the scene
+/// colour, which is exactly the thing emission changes, so leaving them on
+/// would let a difference reach a pixel the emitting surface does not cover.
+/// Occlusion is left alone deliberately: it scales the environment term and not
+/// this one, so it must cancel — and it is the only effect in the stack that
+/// touches the same sum.
+fn emitting_cube_hdr(emissive: [f32; 3]) -> HdrTarget {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut scene = crcbl::render::scene::demo();
+    scene.materials[crcbl::render::scene::DEMO_UNTINTED].emissive = emissive;
+    let mut renderer = ForwardRenderer::with_scene(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+        &scene,
+    )
+    .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    place_cube(&mut renderer);
+    let mut hdr = Vec::new();
+    let _ = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(Projection::default()),
+        Some(&mut hdr),
+    );
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    HdrTarget(hdr)
+}
+
+/// **An emissive material adds its radiance to the surface and to nothing
+/// else.**
+///
+/// `GpuMaterial::emissive` landed in three words the row already padded with,
+/// so every way of getting it wrong leaves a frame that still looks right: a
+/// field the CPU writes and the shader reads at another offset, a term folded
+/// into the albedo instead of added after it, a term the occlusion scales. None
+/// of those are visible in a picture, and the first is not visible in a
+/// round-trip test either, because both sides would agree.
+///
+/// So the observable is a *difference between two frames of the same scene*.
+/// Only the emissive triple changes, so on every texel the emitting surface
+/// covers the linear red must rise by exactly what was asked for, on every
+/// other texel it must not move at all, and green and blue must not move
+/// anywhere — which is what says the value went into the channel it was written
+/// to and was added rather than multiplied.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn an_emissive_material_adds_its_radiance_and_scales_nothing() {
+    // Above one, so it is a value only the `Rgba16Float` target can hold and a
+    // clamp anywhere in the path would truncate.
+    const EMITTED: f32 = 2.0;
+    // Half a per cent of the value, which is well inside `Rgba16Float`'s
+    // precision at this magnitude and well outside any rounding the shader does.
+    const TOLERANCE: f32 = 0.01;
+
+    let dark = emitting_cube_hdr([0.0; 3]);
+    let lit = emitting_cube_hdr([EMITTED, 0.0, 0.0]);
+
+    let mut emitting = 0usize;
+    let mut unchanged = 0usize;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let [dr, dg, db, _] = dark.pixel(x, y);
+            let [lr, lg, lb, _] = lit.pixel(x, y);
+            assert!(
+                (lg - dg).abs() < TOLERANCE && (lb - db).abs() < TOLERANCE,
+                "emission in red moved green or blue at ({x}, {y}): {:?} against {:?}",
+                [lr, lg, lb],
+                [dr, dg, db],
+            );
+            let risen = lr - dr;
+            if risen.abs() < TOLERANCE {
+                unchanged += 1;
+            } else {
+                assert!(
+                    (risen - EMITTED).abs() < TOLERANCE,
+                    "a texel of the emitting surface at ({x}, {y}) rose by {risen}, not \
+                     by {EMITTED} — so the term is scaled by something rather than added"
+                );
+                emitting += 1;
+            }
+        }
+    }
+    eprintln!(
+        "{}: {emitting} texel(s) rose by {EMITTED} and {unchanged} did not move",
+        crate::SUITE
+    );
+    assert!(
+        emitting > 1000,
+        "the cube must cover a meaningful part of the frame, or this asserts \
+         nothing about a surface; only {emitting} texels changed"
+    );
+    assert!(
+        unchanged > 1000,
+        "and the background must not emit: only {unchanged} texels held still"
+    );
+}
