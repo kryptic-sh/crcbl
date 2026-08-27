@@ -150,7 +150,9 @@ use crcbl_hal::{
     ShaderModuleHandle, ShaderStages, StoreOp, Viewport, check_portable_storage_buffers,
 };
 use crcbl_shaders::meshlet::MeshClusters;
-use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr, tonemap};
+use crcbl_shaders::{
+    MESH, MESH_CLUSTER, Stage, TONEMAP, dfg, level_select, mesh, ssao, ssr, tonemap,
+};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
@@ -360,6 +362,33 @@ const PROBE_TABLE_BINDING: u32 = 23;
 /// an overlay can shade a cluster by how close its producing group is to the
 /// budget.
 const LEVEL_GROUP_TABLE_BINDING: u32 = 24;
+
+/// The bind-group slot the split-sum `DFG` table is fetched through — how much
+/// of the light arriving at a GGX lobe that lobe hands back.
+///
+/// **Appended past [`LEVEL_GROUP_TABLE_BINDING`], never inserted**, for
+/// [`PROBE_TABLE_BINDING`]'s reason exactly, and 25 is past everything
+/// `mesh_cluster.slang` declares as well — that file reaches 24 — so it needs no
+/// mirror there and no index it already owns moves. The evidence rather than the
+/// argument: `msl/mesh.metal` takes `specular_albedo [[texture(3)]]` and
+/// `ambient_occlusion [[texture(2)]]`, which are the numbers this backend
+/// computes for bindings 25 and 22 by counting the sampled-image entries of this
+/// layout.
+///
+/// **An image rather than a storage buffer, and that is forced.** The table is
+/// 4096 pairs and a buffer would carry it exactly; but the raster path's layout
+/// is at the WebGPU storage-buffer ceiling in its *vertex* stage, and Slang's
+/// Metal backend materialises every global into every entry point — so a row
+/// bound to the fragment stage alone would be a global the vertex stage names
+/// and nothing fills. See [`crcbl_hal::check_portable_storage_buffers`] and
+/// binding 7's `geometry` visibility.
+const SPECULAR_ALBEDO_BINDING: u32 = 25;
+
+/// [`crcbl_shaders::dfg::DFG_SIZE`] as an image extent.
+///
+/// The table is square, and its size is a compile-time constant, so the
+/// conversion belongs here rather than as a fallible one at the upload.
+const DFG_SIZE_U32: u32 = dfg::DFG_SIZE as u32;
 
 /// The radius `ssao.slang` gathers occlusion within, in **world units**.
 ///
@@ -1173,6 +1202,16 @@ pub struct ForwardRenderer {
     /// [`ResourceState::ShaderRead`] from the moment it exists and no pass has to
     /// declare it to give it a layout.
     ambient_occlusion_placeholder: UploadedTexture,
+    /// The split-sum `DFG` table as an `Rg8Unorm` image — binding
+    /// [`SPECULAR_ALBEDO_BINDING`], and the whole of multi-scatter energy
+    /// compensation's input.
+    ///
+    /// Uploaded once from `crcbl_shaders::dfg::albedo_texels` and never written
+    /// again: it is a property of the GGX lobe rather than of a scene, a view or
+    /// a frame. Unlike [`ForwardRenderer::ambient_occlusion_placeholder`] beside
+    /// it this is not a stand-in for anything — there is no path on which the
+    /// table is absent, because there is no path on which the lobe is.
+    specular_albedo: UploadedTexture,
     /// `[frame]`: the entries [`ForwardRenderer::mesh_groups`] was built from.
     ///
     /// Kept because the occlusion image is a graph transient: its view is known
@@ -1479,6 +1518,14 @@ struct SharedBindings<'a> {
     /// them is the *budget* the mesh stage projects against, and that rides in
     /// each pass's own frame block.
     tables: BufferHandle,
+    /// Binding [`SPECULAR_ALBEDO_BINDING`], the split-sum `DFG` table's
+    /// directional albedo — see [`ForwardRenderer::specular_albedo`].
+    ///
+    /// Shared rather than per-group for the probe grid's reason and more
+    /// strongly: it is cooked into the binary, uploaded once at build and
+    /// identical for every view this engine will ever draw. A cascade names it
+    /// and never looks.
+    specular_albedo: ImageViewHandle,
 }
 
 /// The half of a mesh-layout bind group that differs between the colour pass and
@@ -1737,6 +1784,14 @@ impl MeshGroup {
                 resource: BindingResource::whole_buffer(shared.tables),
             });
         }
+        // The `DFG` table above all of them, on the same ascending terms — see
+        // [`SPECULAR_ALBEDO_BINDING`]. Unconditional, because unlike the row
+        // below it this one is read by the fragment stage of every path.
+        entries.push(BindGroupEntry {
+            binding: SPECULAR_ALBEDO_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(shared.specular_albedo),
+        });
         entries
     }
 }
@@ -3115,6 +3170,24 @@ impl ForwardRenderer {
             });
         }
 
+        // The `DFG` table, above everything — see [`SPECULAR_ALBEDO_BINDING`].
+        //
+        // `geometry` beside `FRAGMENT` for binding 7's reason exactly: Slang's
+        // Metal backend materialises every global into every entry point, so
+        // `msl/mesh.metal`'s `vertexMain` takes `specular_albedo [[texture(3)]]`
+        // whether it reads it or not.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: SPECULAR_ALBEDO_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+                // `Float`, as the occlusion channel above: an `Rg8Unorm` colour
+                // image, declared `texture_2d<f32>` by the WGSL artifact.
+                sample_type: SampleType::Float,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
         let mesh_desc = BindGroupLayoutDesc {
             label: Some(MESH_LAYOUT_LABEL),
             entries: &mesh_entries,
@@ -3287,6 +3360,28 @@ impl ForwardRenderer {
         )?;
         rollback.textures.push(ambient_occlusion_placeholder);
 
+        // The split-sum `DFG` table, uploaded once and read by every frame this
+        // renderer will draw — `crcbl_shaders::dfg` is where it is integrated,
+        // committed and encoded, and `SPECULAR_ALBEDO_BINDING` is where it lands.
+        //
+        // **Cooked bytes rather than a computed image**: the integrator
+        // importance-samples a lobe, which is `sin`, `cos` and a `powf`, and this
+        // engine's goldens are compared across four backends with no tolerance.
+        // Baking here would be four slightly different tables.
+        let specular_albedo = upload_texture(
+            device,
+            queue,
+            "dfg table",
+            // Two bytes of fixed point per texel, high byte in red — see
+            // `crcbl_shaders::dfg::ALBEDO_TEXEL_BYTES`, which argues why this is
+            // not the `Rg16Float` the format's own doc anticipated.
+            Format::Rg8Unorm,
+            DFG_SIZE_U32,
+            DFG_SIZE_U32,
+            &dfg::albedo_texels(),
+        )?;
+        rollback.textures.push(specular_albedo);
+
         // **A comparison sampler, and that is the PCF.** Each
         // `SampleCmpLevelZero` returns the filtered fraction of four texels that
         // passed the test, so the shader's 3×3 kernel is nine hardware-bilinear
@@ -3421,6 +3516,7 @@ impl ForwardRenderer {
                 light_grid: lights.grid(frame),
                 probes: probe_buffer,
                 tables: draws.tables(),
+                specular_albedo: specular_albedo.view,
             };
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some("mesh frame uniforms"),
@@ -3922,6 +4018,7 @@ impl ForwardRenderer {
             tonemap_curve: tonemap::TonemapCurve::Clamp,
             target_format,
             ambient_occlusion_placeholder,
+            specular_albedo,
             mesh_group_entries,
             ambient_occlusion_groups: vec![None; instance_buffers.len()],
             prepass_groups,
@@ -7480,6 +7577,7 @@ impl ForwardRenderer {
         self.hiz.destroy(device);
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
+        self.specular_albedo.destroy(device);
 
         device.destroy_graphics_pipeline(self.mesh_pipeline);
         // The one place the wireframe twin is released — `set_wireframe(.., false)`

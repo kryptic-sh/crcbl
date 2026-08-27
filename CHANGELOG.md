@@ -25,9 +25,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   when fully rough**, so a rough conductor renders short by more than two thirds
   until the factor puts it back.
 
-  **Nothing shades with it yet.** No shader samples it and no frame has moved;
-  the pass that multiplies it into the specular lobe is a separate change,
-  because that one re-blesses every golden holding a rough metal.
+  **Every rough conductor now shades with it.** `mesh.slang` binds the table as
+  an `Rg8Unorm` image, filters it in the shader at `(N·V, roughness)` and
+  multiplies the summed specular lobe by `1 + f0 (1 / E - 1)`. Two of
+  `apps/lantern`'s goldens moved and were re-blessed; the frame is net brighter
+  and the metal ball is where the change is visible. The diffuse term is
+  untouched, because the light the lobe dropped went on bouncing inside the
+  microsurface and left it as specular.
+
+  **A polished surface is unchanged, exactly.** `E` is one where roughness is
+  small, so the factor is one and every dielectric in the tree — which is most
+  of it — draws the frame it drew before. The albedo is clamped to one before it
+  is inverted, so the table's Monte Carlo noise cannot turn the term into a
+  dimming.
+
+  **Filtered in the shader rather than by a sampler**: four `Load`s and the
+  bilinear blend written out. A hardware filter's weights are computed
+  independently by four rasterisers and these goldens are compared with no
+  tolerance, where multiplies and adds agree everywhere. The image is two bytes
+  of fixed point per texel rather than the `Rg16Float` a BRDF table usually
+  takes — the value is a share of arriving light, so `1 / 65535` over `[0, 1]`
+  is finer than half precision is near one.
 
   **Baked once and committed, not computed.** The integrator importance-samples
   the lobe, which takes a `sin` and a `cos` per sample, and four platforms'

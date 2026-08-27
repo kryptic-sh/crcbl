@@ -117,6 +117,70 @@ pub const fn bytes() -> &'static [u8; DFG_BYTES] {
     TABLE
 }
 
+/// Bytes one texel of [`albedo_texels`] occupies: an `Rg8Unorm` pair holding
+/// one 16-bit fixed-point number, high byte in red and low byte in green.
+///
+/// **A split byte pair rather than a half float**, which is the format
+/// `crcbl_hal::Format::Rg16Float`'s own doc comment anticipates for a BRDF
+/// table — not a link, because this crate does not depend on that one. Two
+/// reasons, and neither is style. The value stored is a *share of
+/// arriving light*, so it lives in `[0, 1]`, where a fixed-point step of
+/// `1 / 65535` is finer everywhere than half precision's — which near one is
+/// `2^-11`, thirty times coarser. And the conversion is an integer split rather
+/// than IEEE 754 binary16 rounding, which this crate would otherwise have to
+/// transcribe: [`DFG_ENTRY_BYTES`] says in as many words that it cannot perform
+/// that rounding without a dependency.
+pub const ALBEDO_TEXEL_BYTES: usize = 2;
+
+/// The length of [`albedo_texels`], one [`ALBEDO_TEXEL_BYTES`] per texel of a
+/// [`DFG_SIZE`]-square image.
+pub const ALBEDO_BYTES: usize = DFG_SIZE * DFG_SIZE * ALBEDO_TEXEL_BYTES;
+
+/// The committed table reduced to the one number a specular lobe's energy
+/// compensation needs, encoded for upload as an `Rg8Unorm` image.
+///
+/// [`directional_albedo`] at every texel centre — `scale + bias`, the table at
+/// `f0 = 1` — rather than the two channels the entry holds. Compensation is the
+/// only reader today and it wants the sum; the second split-sum consumer,
+/// image-based specular lighting, wants the pair and will upload its own image
+/// from the same [`bytes`], so nothing is lost by keeping this one at what its
+/// caller reads.
+///
+/// Row-major with `roughness` slow and `N·V` fast, which is [`entry`]'s order
+/// and the order a 2D image upload expects.
+#[must_use]
+pub fn albedo_texels() -> Vec<u8> {
+    let mut texels = Vec::with_capacity(ALBEDO_BYTES);
+    for roughness in 0..DFG_SIZE {
+        for n_dot_v in 0..DFG_SIZE {
+            let [scale, bias] = entry(n_dot_v, roughness);
+            // Clamped before quantising, not after: the table is a Monte Carlo
+            // estimate and its smoothest row lands a few parts in a hundred
+            // thousand above one, which would wrap the high byte to zero.
+            let quantised = ((scale + bias).clamp(0.0, 1.0) * 65535.0).round() as u32;
+            texels.push((quantised >> 8) as u8);
+            texels.push((quantised & 0xff) as u8);
+        }
+    }
+    texels
+}
+
+/// One texel of [`albedo_texels`] as the value a shader reads back out of it.
+///
+/// `red` and `green` are what a sampled `Rg8Unorm` hands a fragment: the stored
+/// bytes over 255, a conversion every API defines exactly. Multiplying each
+/// back by 255 recovers the two bytes, and `high * 256 + low` over 65535 is the
+/// fixed-point number [`albedo_texels`] wrote.
+///
+/// **This is the shader's arithmetic, transcribed**, so that
+/// `the_texels_decode_to_the_table_they_were_baked_from` is a test of what the
+/// GPU will compute rather than of a second encoding that happens to agree.
+/// `shaders/mesh.slang`'s `decode_specular_albedo` is the other copy.
+#[must_use]
+pub fn decode_albedo(red: f32, green: f32) -> f32 {
+    (red * 65280.0 + green * 255.0) / 65535.0
+}
+
 /// The table sampled bilinearly, the way a shader's linear filter reads it.
 ///
 /// Clamped at both edges rather than wrapped, again matching the sampler: a
@@ -152,6 +216,37 @@ pub fn sample(n_dot_v: f32, roughness: f32) -> [f32; 2] {
 pub fn directional_albedo(n_dot_v: f32, roughness: f32) -> f32 {
     let [scale, bias] = sample(n_dot_v, roughness);
     scale + bias
+}
+
+/// [`directional_albedo`] as the shader computes it: bilinear over
+/// [`albedo_texels`]' quantised image rather than over the committed `f32`s.
+///
+/// The same four-tap filter [`sample`] performs, on decoded texels, with the
+/// same clamped addressing. It exists so the quantisation has a number attached
+/// — `the_texels_decode_to_the_table_they_were_baked_from` measures this
+/// against [`directional_albedo`] — and so a caller that must agree with the
+/// GPU exactly has something to agree with.
+#[must_use]
+pub fn sampled_albedo(n_dot_v: f32, roughness: f32) -> f32 {
+    let axis = |value: f32| {
+        let scaled = value.clamp(0.0, 1.0) * DFG_SIZE as f32 - 0.5;
+        let low = scaled.floor().clamp(0.0, (DFG_SIZE - 1) as f32);
+        let high = (low + 1.0).min((DFG_SIZE - 1) as f32);
+        (low as usize, high as usize, (scaled - low).clamp(0.0, 1.0))
+    };
+    let texels = albedo_texels();
+    let at = |x: usize, y: usize| {
+        let index = (y * DFG_SIZE + x) * ALBEDO_TEXEL_BYTES;
+        decode_albedo(
+            f32::from(texels[index]) / 255.0,
+            f32::from(texels[index + 1]) / 255.0,
+        )
+    };
+    let (x0, x1, fx) = axis(n_dot_v);
+    let (y0, y1, fy) = axis(roughness);
+    let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+    let bottom = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+    top * (1.0 - fy) + bottom * fy
 }
 
 /// The factor the specular lobe is multiplied by to put the multiply-scattered
@@ -571,6 +666,89 @@ mod tests {
             largest > 3.0,
             "the largest correction is {largest}, where the committed table \
              measures 3.157 — a table this flat is not the GGX lobe's"
+        );
+    }
+
+    /// How far one encoded texel may sit from the number it was baked from.
+    ///
+    /// Half a step of the 16-bit fixed point the encoding uses, `1 / 131070`,
+    /// which is `7.63e-6` — and that is exactly what the whole table measures,
+    /// because rounding to nearest cannot do worse and every row has a texel
+    /// that lands on the half. Stated as the bound rather than as the
+    /// measurement so a change of encoding is what moves it.
+    const TEXEL_TOLERANCE: f32 = 1.0 / 131_070.0;
+
+    /// How far the image, filtered, may sit from the committed table filtered.
+    ///
+    /// Wider than [`TEXEL_TOLERANCE`] and not because filtering compounds the
+    /// error — a convex combination cannot exceed its inputs' bound. It is the
+    /// clamp: [`albedo_texels`] stores `min(scale + bias, 1)` where [`sample`]
+    /// interpolates the raw pair, and the smoothest row of a Monte Carlo table
+    /// sits a few parts in a hundred thousand above one. Measured worst over a
+    /// 257-square sweep of both axes: `4.8e-5`. Twice that.
+    const SAMPLE_TOLERANCE: f32 = 1e-4;
+
+    /// The two axes of a sweep dense enough to land between texel centres.
+    ///
+    /// Odd, so that the midpoint of every texel pair is visited and the filter's
+    /// worst case — both weights at a half — is actually sampled rather than
+    /// stepped over.
+    const SWEEP_STEPS: usize = 257;
+
+    #[test]
+    fn the_texels_encode_the_committed_table_to_a_quantisation_step() {
+        let texels = albedo_texels();
+        assert_eq!(
+            texels.len(),
+            ALBEDO_BYTES,
+            "an Rg8Unorm image of a {DFG_SIZE}-square table is {ALBEDO_BYTES} bytes"
+        );
+        let mut worst = 0.0f32;
+        for roughness in 0..DFG_SIZE {
+            for n_dot_v in 0..DFG_SIZE {
+                let [scale, bias] = entry(n_dot_v, roughness);
+                let want = (scale + bias).clamp(0.0, 1.0);
+                let index = (roughness * DFG_SIZE + n_dot_v) * ALBEDO_TEXEL_BYTES;
+                let got = decode_albedo(
+                    f32::from(texels[index]) / 255.0,
+                    f32::from(texels[index + 1]) / 255.0,
+                );
+                worst = worst.max((got - want).abs());
+            }
+        }
+        assert!(
+            worst <= TEXEL_TOLERANCE,
+            "a texel is {worst} from the entry it was baked from, past the {TEXEL_TOLERANCE} \
+             half-step rounding to nearest allows"
+        );
+    }
+
+    #[test]
+    fn the_image_filters_to_the_albedo_the_table_does() {
+        let mut worst = 0.0f32;
+        let mut highest = f32::NEG_INFINITY;
+        for i in 0..SWEEP_STEPS {
+            for j in 0..SWEEP_STEPS {
+                let n_dot_v = i as f32 / (SWEEP_STEPS - 1) as f32;
+                let roughness = j as f32 / (SWEEP_STEPS - 1) as f32;
+                let sampled = sampled_albedo(n_dot_v, roughness);
+                worst = worst.max((sampled - directional_albedo(n_dot_v, roughness)).abs());
+                highest = highest.max(sampled);
+            }
+        }
+        // The guarantee the shader's compensation rests on, and the reason the
+        // encoding clamps before it quantises rather than after: an albedo above
+        // one inverts to a gain below one, which is a mirror *dimmed* by the term
+        // that exists to brighten a rough surface.
+        assert!(
+            highest <= 1.0,
+            "the filtered image reaches {highest}, and a share of arriving light above one is a \
+             negative energy gain"
+        );
+        assert!(
+            worst <= SAMPLE_TOLERANCE,
+            "the encoded image filters to {worst} away from the committed table, past \
+             {SAMPLE_TOLERANCE}"
         );
     }
 }

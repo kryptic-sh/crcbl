@@ -210,18 +210,45 @@ lobe's directional albedo:
 **Take Fdez-Agüera**, for that last reason: one table serves both rungs, and a
 table that two features read is a table somebody will keep correct.
 
-**The table is built (2026-08-27) and nothing shades with it yet.**
-`crcbl_shaders::dfg` holds the committed `tables/dfg.bin` — 64 square, two `f32`
-channels, `DFG_SAMPLES` samples a texel — with `directional_albedo` and
-`energy_compensation` over it, and `crates/crcbl-shaders/tools/cook-dfg.rs`
-regenerates or checks it the way `cook-clusters` does the DAG. What it measures:
-a head-on surface hands back all of the light at the smoothest row and **0.317
-of it at the roughest**, so a fully rough conductor in this engine is short by
-more than two thirds until the factor puts it back. The table is cross-checked
-against an independent uniform quadrature of the same integral, which is what
-says it is right rather than merely self-consistent. What is still owed is the
-shader half: a sampler binding in `mesh.slang`, the multiply on `gloss`, and the
-re-bless of every golden holding a rough conductor.
+**Built 2026-08-27, both halves.** `crcbl_shaders::dfg` holds the committed
+`tables/dfg.bin` — 64 square, two `f32` channels, `DFG_SAMPLES` samples a texel
+— with `directional_albedo` and `energy_compensation` over it, and
+`crates/crcbl-shaders/tools/cook-dfg.rs` regenerates or checks it the way
+`cook-clusters` does the DAG. What it measures: a head-on surface hands back all
+of the light at the smoothest row and **0.317 of it at the roughest**, so a
+fully rough conductor in this engine is short by more than two thirds until the
+factor puts it back. The table is cross-checked against an independent uniform
+quadrature of the same integral, which is what says it is right rather than
+merely self-consistent.
+
+The shader half landed with it. `mesh.slang` binds the table as an `Rg8Unorm`
+image at binding 25, decodes each texel's byte pair as one 16-bit fixed-point
+number, filters four of them itself, and multiplies the summed specular lobe by
+`1 + f0 (1 / E - 1)` once outside the light loop — the factor depends on the
+material and the view and on nothing a light carries. Two of `apps/lantern`'s
+goldens moved and were re-blessed.
+
+**The filter is written out rather than asked of a sampler**, which is the same
+determinism argument one line down: a hardware filter's weights are
+fixed-function arithmetic four rasterisers compute independently, and these
+goldens have no tolerance. It also costs no sampler and therefore moves no index
+of Metal's sampler argument table.
+
+**Fixed point rather than the `Rg16Float` rung 3 names below.** The stored value
+is a share of arriving light and lives in `[0, 1]`, where a step of `1 / 65535`
+is finer everywhere than half precision — which near one is `2^-11`, thirty
+times coarser — and the split is an integer one this crate can perform without a
+dependency. Rung 3 wants the scale and bias pair rather than their sum and will
+upload its own image from the same committed bytes.
+
+**What darkened, and why it is not this term taking light away.** Re-blessing
+`room.png` moved 16113 channels up and 11470 down. Every darkened pixel sits on
+a hard edge: the scene target is pointwise brighter by construction — the factor
+is never below one — and FXAA's edge resolve is what turns a brighter
+neighbourhood into a different blend. Measured by rendering the same frame with
+the multiply neutralised and with reflections both on and off: 689 darkened
+channels of 102045 changed at 960×720, present with reflections off, and each
+one on a 173-against-203 silhouette.
 
 **It is legal here, and the reason generalises.** The compensation term is
 multiplies and divides over a sampled table, so no transcendental reaches a

@@ -954,6 +954,38 @@ Texture2D<float> ambient_occlusion;
 [[vk::binding(23, 0)]]
 StructuredBuffer<GpuProbe> probes;
 
+/// The split-sum `DFG` table, reduced to the one number multi-scatter energy
+/// compensation reads: how much of the light arriving at a GGX lobe that lobe
+/// hands back. `crcbl_shaders::dfg` is where it is integrated and committed, and
+/// `crcbl_shaders::dfg::albedo_texels` is the image `crcbl_render::forward`
+/// uploads into this slot.
+///
+/// # Two bytes of fixed point, not a half float
+///
+/// `Rg8Unorm`, red the high byte and green the low, decoded by
+/// `decode_specular_albedo` below. The stored number is a *share of arriving
+/// light* and therefore lives in `[0, 1]`, where a step of `1 / 65535` is finer
+/// everywhere than half precision — which near one is `2^-11`, thirty times
+/// coarser. `crcbl_shaders::dfg::ALBEDO_TEXEL_BYTES` argues the rest of it.
+///
+/// # Fetched by texel and filtered here, not by a sampler
+///
+/// Four `Load`s and a bilinear blend written out, rather than a `SampleLevel`
+/// with a linear filter. A filter is fixed-function arithmetic whose weights
+/// four rasterisers compute independently, and this engine's goldens are
+/// compared across all four with no tolerance; the blend below is ordinary
+/// float multiplies and adds, which they agree on. It also costs no sampler,
+/// and therefore moves no index of Metal's sampler argument table.
+///
+/// **Last of the set, for the reason `ambient_occlusion` and `probes` both
+/// give**: `crcbl-mtl` numbers a resource by counting the same-table entries of
+/// the layout list below it, and Slang numbers a stage's arguments by
+/// declaration order, so the two agree only while both ascend. 25 is past
+/// everything `mesh_cluster.slang` declares — that file reaches 24 — so it needs
+/// no mirror there and no index it already owns moves.
+[[vk::binding(25, 0)]]
+Texture2D<float2> specular_albedo;
+
 /// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
 /// space, built out of that transform's own upper-left 3×3.
 ///
@@ -1170,6 +1202,86 @@ float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_d
     float3 fresnel = f0 + (float3(1.0, 1.0, 1.0) - f0) * (grazing2 * grazing2 * grazing);
 
     return d * visibility * fresnel;
+}
+
+/// The smallest directional albedo `specular_compensation` will divide by.
+///
+/// The table never comes near it — its floor is a rough conductor seen head on,
+/// which hands back about a third — so this is not a tuning constant but a
+/// guard: it is what stops an unbound, unwritten or corrupt image from turning
+/// one multiply into an infinity that survives the tonemap as a white pixel.
+/// `crcbl_shaders::dfg::energy_compensation` clamps to the same value, and its
+/// doc says why the *upper* half of that clamp is the load-bearing one.
+static const float MIN_DIRECTIONAL_ALBEDO = 1e-4;
+
+/// One texel of `specular_albedo` as the number it encodes.
+///
+/// `red` and `green` arrive as the stored bytes over 255, a conversion every
+/// backend defines exactly; multiplying back by 255 recovers the bytes, and
+/// `high * 256 + low` over 65535 is the fixed point the cook wrote.
+/// `crcbl_shaders::dfg::decode_albedo` is the same arithmetic on the CPU, and
+/// `the_texels_encode_the_committed_table_to_a_quantisation_step` is what holds
+/// the pair together.
+float decode_specular_albedo(float2 texel)
+{
+    return (texel.r * 65280.0 + texel.g * 255.0) / 65535.0;
+}
+
+/// The share of arriving light a single-scatter GGX lobe hands back, read out of
+/// `specular_albedo` at `(n_dot_v, roughness)`.
+///
+/// Bilinear over the four texels around the point, with the addressing a clamped
+/// sampler would use: the table is baked on texel *centres*, so the axis maps to
+/// `value * size - 0.5` and both ends clamp to the edge texel rather than
+/// wrapping. `crcbl_shaders::dfg::sampled_albedo` is the same filter on the CPU.
+///
+/// The extent comes from `GetDimensions` rather than from a constant mirrored
+/// out of Rust: there is exactly one image this ever reads and its size is a
+/// property of that image, so asking it is one fewer number for two files to
+/// disagree about.
+float specular_albedo_at(float n_dot_v, float roughness)
+{
+    uint width;
+    uint height;
+    specular_albedo.GetDimensions(width, height);
+    float2 extent = float2(float(width), float(height));
+    float2 scaled = float2(saturate(n_dot_v), saturate(roughness)) * extent - 0.5;
+    float2 low = clamp(floor(scaled), float2(0.0, 0.0), extent - 1.0);
+    float2 high = min(low + 1.0, extent - 1.0);
+    float2 weight = clamp(scaled - low, 0.0, 1.0);
+
+    int2 lo = int2(low);
+    int2 hi = int2(high);
+    float top = lerp(decode_specular_albedo(specular_albedo.Load(int3(lo.x, lo.y, 0))),
+                     decode_specular_albedo(specular_albedo.Load(int3(hi.x, lo.y, 0))),
+                     weight.x);
+    float bottom = lerp(decode_specular_albedo(specular_albedo.Load(int3(lo.x, hi.y, 0))),
+                        decode_specular_albedo(specular_albedo.Load(int3(hi.x, hi.y, 0))),
+                        weight.x);
+    return lerp(top, bottom, weight.y);
+}
+
+/// What the specular lobe is multiplied by to put back the light a single
+/// scatter dropped.
+///
+/// `1 + f0 * (1 / E - 1)` per channel, where `E` is `specular_albedo_at`. A GGX
+/// lobe follows light off the microsurface once and loses everything that bounces
+/// again, so it returns `E` of what arrived and the shortfall grows with
+/// roughness — two thirds of it on the roughest conductor this table holds. The
+/// missing `1 - E` leaves after further bounces, each tinting it by the
+/// surface's own reflectance, so the total wanted is `E + f0 (1 - E)` and this
+/// is that over `E`. `crcbl_shaders::dfg::energy_compensation` carries the same
+/// derivation and the same clamp.
+///
+/// **At most one below, never a dimming**: the albedo is clamped to one before
+/// it is inverted, so a polished surface — where `E` is one and the table's
+/// Monte Carlo noise can put it a hair above — comes back with the factor
+/// exactly one and the smooth half of every material set is untouched.
+float3 specular_compensation(float3 f0, float n_dot_v, float roughness)
+{
+    float albedo = clamp(specular_albedo_at(n_dot_v, roughness), MIN_DIRECTIONAL_ALBEDO, 1.0);
+    float gain = 1.0 / albedo - 1.0;
+    return float3(1.0, 1.0, 1.0) + f0 * gain;
 }
 
 /// Ceiling on the slope factor every shadow bias in this file is scaled by.
@@ -2034,6 +2146,19 @@ FragmentOutput fragmentMain(VertexOutput input)
         direct += light.color.rgb * diffuse;
         gloss += light.color.rgb * specular;
     }
+
+    // **Multi-scatter energy compensation, applied to the summed lobe rather
+    // than inside the loop.** The factor depends on the material and on the view
+    // — `f0`, `roughness`, `N·V` — and on nothing a light carries, so it is the
+    // same number for every light in the froxel and one multiply outside the
+    // loop is the whole of it. `specular_compensation` carries the derivation;
+    // `docs/plan/44-lighting.md`'s rung 1 is what asked for it.
+    //
+    // **The diffuse term is left alone**, and that is the model rather than an
+    // omission: what the lobe dropped is light that went on bouncing *within the
+    // microsurface* and left it as specular, so putting it back anywhere else
+    // would be inventing energy in a term that never lost any.
+    gloss *= specular_compensation(f0, n_dot_v, roughness);
 
     // **Screen-space occlusion scales the ambient term and nothing else**, and
     // the refusal is as load-bearing as the multiply. Ambient stands in for every

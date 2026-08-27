@@ -941,13 +941,18 @@ mod tests {
                 // 22, and therefore `t9`: an ordinary `Texture2D<float>` read by
                 // `Load`, so it takes no sampler beside it.
                 //
-                // Last is the same topic's irradiance probe table at binding 23,
+                // Then the same topic's irradiance probe table at binding 23,
                 // and therefore `t10` — a read-only `StructuredBuffer` like the
                 // light list, appended past the occlusion channel because this
                 // whole list only ever grows at its top.
+                //
+                // Last is the split-sum `DFG` table at binding 25, and therefore
+                // `t11`: an `Rg8Unorm` `Texture2D<float2>` read by `Load`, so it
+                // takes no sampler beside it either. Binding 24 belongs to
+                // `mesh_cluster.slang` and is another gap D3D12 does not see.
                 &[
                     Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
-                    Srv,
+                    Srv, Srv,
                 ],
             ),
             (

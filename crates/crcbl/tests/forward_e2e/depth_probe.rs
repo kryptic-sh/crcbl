@@ -43,6 +43,7 @@ use crcbl::hal::{
     Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
     SampleType, SubmitInfo,
 };
+use crcbl::shaders::dfg;
 
 /// Two overlapping quads, the **near one drawn first**, so the depth test is the
 /// only thing deciding what is visible.
@@ -116,6 +117,13 @@ struct DepthProbe {
     /// shader has to clamp its fetch to reach this texel at all, and every frame
     /// this file renders is drawn through it.
     occlusion: crcbl::render::UploadedTexture,
+    /// `mesh.slang`'s split-sum `DFG` table, the cooked one the engine binds.
+    ///
+    /// Bound because the shader declares it and a layout that leaves a declared
+    /// binding out is refused at pipeline creation; the *real* table rather than
+    /// a stand-in because the probe's frames are compared against what the
+    /// renderer draws, and a different table is a different lobe.
+    specular_albedo: crcbl::render::UploadedTexture,
     base_color_sampler: crcbl::hal::SamplerHandle,
     /// A 1×1 `D32Float` image standing in for topic 18's shadow atlas, and its
     /// **comparison** sampler.
@@ -594,6 +602,21 @@ impl DepthProbe {
         )
         .expect("a one-texel white image");
 
+        // `mesh.slang`'s split-sum `DFG` table, the real one rather than a
+        // stand-in: it is what the engine binds and it is cooked into the
+        // binary, so a probe that fabricated its own would be shading with a
+        // different lobe than the renderer it exists to speak for.
+        let specular_albedo = crcbl::render::upload_texture(
+            device,
+            headless.queue,
+            "probe dfg table",
+            Format::Rg8Unorm,
+            dfg::DFG_SIZE as u32,
+            dfg::DFG_SIZE as u32,
+            &dfg::albedo_texels(),
+        )
+        .expect("the cooked DFG table uploads");
+
         let entries = [
             crcbl::hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -766,6 +789,17 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl::hal::BindingFlags::empty(),
             },
+            crcbl::hal::BindGroupLayoutEntry {
+                binding: 25,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2,
+                    sample_type: crcbl::hal::SampleType::Float,
+                },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
@@ -849,6 +883,11 @@ impl DepthProbe {
                 array_index: 0,
                 resource: crcbl::hal::BindingResource::whole_buffer(probes),
             },
+            crcbl::hal::BindGroupEntry {
+                binding: 25,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::ImageView(specular_albedo.view),
+            },
         ];
         let group = device
             .create_bind_group(&crcbl::hal::BindGroupDesc {
@@ -931,6 +970,7 @@ impl DepthProbe {
             visible_instances,
             base_color_page,
             occlusion,
+            specular_albedo,
             base_color_sampler,
             shadow_atlas,
             shadow_atlas_view,
@@ -953,6 +993,7 @@ impl DepthProbe {
         device.destroy_sampler(self.base_color_sampler);
         self.base_color_page.destroy(device);
         self.occlusion.destroy(device);
+        self.specular_albedo.destroy(device);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
         device.destroy_buffer(self.probes);

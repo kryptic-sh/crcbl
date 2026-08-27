@@ -236,14 +236,15 @@ the right first rung.
   Baking a transcendental into a table is the general escape, and
   [44-lighting.md](44-lighting.md)'s rung 3 is where it is written down.
 
-- **No multi-scatter energy compensation in the frame**, though its table is
-  built: `crcbl_shaders::dfg` and `tables/dfg.bin` shipped 2026-08-27 and
-  nothing samples them yet. Single-scatter GGX drops every microfacet bounce
-  after the first, so a rough conductor renders too dark, by an amount that
-  varies with roughness and `N·V` and that no constant factor can absorb.
-  Fdez-Agüera's closed form reads it back out of the same `DFG` table the rung
-  above needs, so one table serves both. [44-lighting.md](44-lighting.md)'s
-  rung 1.
+- **Multi-scatter energy compensation is in the frame (2026-08-27)**, and this
+  entry stays on the page because the rung above still reads its table.
+  Single-scatter GGX drops every microfacet bounce after the first, so a rough
+  conductor rendered too dark by an amount that varies with roughness and `N·V`
+  and that no constant factor could absorb — 0.317 of the light at the roughest
+  row, seen head on. `crcbl_shaders::dfg` cooks `tables/dfg.bin`, `mesh.slang`
+  binds it at binding 25 and multiplies the specular lobe by
+  `1 + f0 (1 / E - 1)`. Fdez-Agüera's closed form, so the same table serves the
+  specular-IBL rung above unchanged. [44-lighting.md](44-lighting.md)'s rung 1.
 - **No screen-space GI.** The engine already marches screen space for
   reflections and already has a Hi-Z pyramid to march it with, so SSGI is closer
   than it looks: the same march with a cosine-distributed ray instead of a
@@ -429,7 +430,7 @@ above.
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | **Reserve the previous-transform slot in `GpuInstance`** | §9 — smallest change on this page, unblocks five features, gets more expensive with time                      |
 | **Exponential height fog**                               | §4 — one term, no new pass, but `exp` needs a determinism answer first                                        |
-| **Multi-scatter energy compensation**                    | §5 — a table fetch and a few multiplies; the cheapest realism rung here, blocked on nothing                   |
+| ~~Multi-scatter energy compensation~~                    | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                         |
 | **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road                           |
 | **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                                       |
 | **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                                                    |
