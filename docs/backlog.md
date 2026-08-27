@@ -561,27 +561,18 @@ crate depending on another.
 ### The settings catalogue is mostly keys with no reader
 
 `crates/crcbl/src/settings.rs` reads four boolean keys and maps each to a
-`RenderEffects` bit. Everything else the catalogue names — display mode,
-resolution, render scale, present mode, frame cap, the quality tiers, every
-audio bus — has a defined home in the TOML convention and nothing that reads it.
-The storage half is not the gap: `crates/crcbl-store/src/settings.rs` ships the
-layered stack, `set`, `save`, and a per-platform backend that is the config
-directory natively and OPFS on wasm. **The gap is that no application in the
-workspace has ever written a setting** — the only writer is
-`crates/crcbl-cli/src/settings_cmd.rs`.
+`RenderEffects` bit, and since 2026-08-28 the six `[engine.audio]` bus volumes
+through `audio_gains`. Everything else the catalogue names — display mode,
+resolution, render scale, present mode, frame cap, the quality tiers — has a
+defined home in the TOML convention and nothing that reads it. The storage half
+is not the gap: `crates/crcbl-store/src/settings.rs` ships the layered stack,
+`set`, `save`, and a per-platform backend that is the config directory natively
+and OPFS on wasm. **The gap is that no application in the workspace has ever
+written a setting** — the only writer is `crates/crcbl-cli/src/settings_cmd.rs`.
 
 Related and unowned: `crates/crcbl-store/src/lib.rs` records that an IndexedDB
 fallback for the browser is still to come, so OPFS is the only web backend and
 the no-store case silently does not persist.
-
-### `crcbl-audio` has no bus concept at all
-
-`crates/crcbl-audio/src/mixer.rs` has a per-voice gain and **nothing above it**
-— `Mixer` holds `voices`, `releasing`, `listener` and `next_id`, and
-`AudioSource::fill` sums the voices and clamps, applying no gain of its own. So
-a player cannot turn music down without turning gunfire down, and cannot turn
-the whole thing down either. The plan for a small fixed bus set is in
-`docs/plan/13-audio.md`; nothing is built.
 
 ## Recovered from the plan docs during the 2026-08-27 pruning pass
 
@@ -794,6 +785,27 @@ container image matching the runner's is the only way to hold the variable still
 — or have the job print the measured counts as a build annotation so a drift
 from two toward the ceiling is visible without reading the log. Neither was
 attempted.
+
+### `cargo doc` without `--all-features` does not build (2026-08-28)
+
+CI's rustdoc gate is `cargo doc --workspace --all-features --no-deps --locked`
+and it is green. The **bare** form — `cargo doc --workspace --no-deps`, which is
+what a contributor types and what this session's own instructions name — fails
+with six
+`unresolved link to `crate::bake``errors, all in`crcbl-sprite`: `crpix.rs`once and`load.rs`five times, including`crate::bake::duration_ms`and`crate::bake::aseprite_json`. `bake`is behind the crate's`bake`feature,`load`is behind`load`, and the default resolution enables `load`
+without it.
+
+Nothing about the shipped documentation is wrong — with every feature on, every
+link resolves. What is wrong is that the crate's docs assume a feature its own
+default build does not have.
+
+**Not fixed, and the fix is a convention decision rather than an edit.** Three
+routes: spell the six links as plain code, which loses them when `bake` is on;
+gate each with `cfg_attr(feature = "bake", doc = …)`, which is six multi-line
+doc comments split in half; or make `bake` non-optional and drop the feature,
+which is the simplest and changes what the crate compiles for everyone. Only
+`crcbl-sprite` was checked — whether another crate has the same shape under a
+different feature was not.
 
 ### Unfinished work from the rendering plans
 
