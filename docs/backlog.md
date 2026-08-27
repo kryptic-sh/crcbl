@@ -44,7 +44,7 @@ take the derivative route for tangents and pay nothing — which
 gradient sky. All three read the row as it stands, which is why `44-lighting.md`
 ranks them first.
 
-### No fixture reflects a ray downward, so the sky's ground band is untested on a GPU (2026-08-27)
+### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
 
 `ssr.slang`'s `sky_radiance` picks between the gradient's zenith and its ground
 on the sign of the ray's `y`. Every reflective surface in this tree is a floor
@@ -59,10 +59,15 @@ other sabotages of the same function do fail it: dropping the sky from the
 environment sum, swapping the two poles, and collapsing the gradient to the mean
 of its bands.
 
-**What covers it today** is `crcbl_shaders::sky`'s host-side
-`the_three_bands_are_returned_exactly_at_their_own_directions`, which pins all
-three bands including the ground. So the arithmetic is checked and its
-appearance in a frame is not.
+**What covers it today.** `crcbl_shaders::sky`'s host-side
+`the_three_bands_are_returned_exactly_at_their_own_directions` pins all three
+bands including the ground, and — since the background pass landed — `crcbl`'s
+`mesh_e2e` `the_background_is_the_gradient_the_ray_through_it_sees` draws the
+ground band on a GPU and compares it per texel: that scene camera looks down, so
+every one of its background rays leaves below the horizon. So the gradient's
+ground arm is now covered where it is _drawn_. What is still uncovered is the
+same arm where it is _reflected_, which is a different copy of the arithmetic in
+`ssr.slang` and the one the sabotage above left green.
 
 **What would close it:** a reflective surface facing down — an underside, or a
 ceiling above the floor — in `screenshot`'s `ssr_forward` scene or a new one

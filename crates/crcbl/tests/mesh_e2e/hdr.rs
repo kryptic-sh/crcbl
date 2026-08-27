@@ -666,7 +666,7 @@ fn raising_the_reference_plane_thickens_the_fog() {
 /// which fog did not need — the sky's whole claim is about a surface's normal,
 /// so the three visible faces are the axis-aligned `+X`, `+Y` and `+Z` rather
 /// than three arbitrary ones.
-fn sky_cube_hdr(sky: Sky, light: &DirectionalLight) -> HdrTarget {
+fn sky_cube_hdr(camera: &crcbl::render::Camera, sky: Sky, light: &DirectionalLight) -> HdrTarget {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
@@ -686,7 +686,7 @@ fn sky_cube_hdr(sky: Sky, light: &DirectionalLight) -> HdrTarget {
         &headless,
         &mut renderer,
         &mut pool,
-        &mesh_camera(Projection::default()),
+        camera,
         light,
         Some(&mut hdr),
     );
@@ -722,9 +722,15 @@ const SKY_UNIFORM: [f32; 3] = [0.05, 0.11, 0.23];
 /// driver — not because anything here needed the slack.
 const SKY_TOLERANCE: f32 = 1.0e-3;
 
-/// Below this the texel is background, which no sky reaches: nothing draws the
-/// gradient yet, so the clear colour is the same in every frame here and
-/// including it would dilute every comparison with texels that cannot differ.
+/// The scale floor a relative comparison is taken against, so that two texels
+/// which are both nearly black are not called different by a ratio of two very
+/// small numbers.
+///
+/// **It is not a background mask and must not be used as one.** It was, before
+/// `crcbl_render::sky_pass` existed and the background was a single dark clear
+/// colour; the sky now paints that background with radiances well above this,
+/// and what separates the cube from the sky is a normals-view frame — see
+/// [`unit_normals`].
 const SKY_LIT_FLOOR: f32 = 0.02;
 
 /// **A uniform sky is exactly a brighter flat ambient**, and by `π` times its
@@ -745,8 +751,10 @@ const SKY_LIT_FLOOR: f32 = 0.02;
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn a_uniform_sky_is_exactly_a_brighter_flat_ambient() {
+    let camera = mesh_camera(Projection::default());
     let uniform = crcbl::math::Vec3::from_array(SKY_UNIFORM);
     let lit_by_sky = sky_cube_hdr(
+        &camera,
         Sky {
             zenith: uniform,
             horizon: uniform,
@@ -756,6 +764,7 @@ fn a_uniform_sky_is_exactly_a_brighter_flat_ambient() {
     );
     let default_light = DirectionalLight::default();
     let lit_by_ambient = sky_cube_hdr(
+        &camera,
         Sky::NONE,
         &DirectionalLight {
             ambient: default_light.ambient + uniform * std::f32::consts::PI,
@@ -763,10 +772,20 @@ fn a_uniform_sky_is_exactly_a_brighter_flat_ambient() {
         },
     );
 
+    // **Surfaces only.** The claim is about the ambient term a sky delivers to
+    // geometry, and the two frames deliberately disagree everywhere else: one
+    // has a uniform sky painted across its background and the other has the
+    // clear colour, because `Sky::NONE` adds no background pass at all. The
+    // mask is a normals-view frame of the same scene, so no part of this knows
+    // where the cube is.
+    let normals = unit_normals(&normals_view_hdr(&camera));
     let mut compared = 0usize;
     let mut worst = 0.0f32;
     for y in 0..MESH_EXTENT.1 {
         for x in 0..MESH_EXTENT.0 {
+            if normals[(y * MESH_EXTENT.0 + x) as usize].is_none() {
+                continue;
+            }
             let through_sky = lit_by_sky.pixel(x, y);
             let through_ambient = lit_by_ambient.pixel(x, y);
             for channel in 0..3 {
@@ -851,7 +870,9 @@ fn the_skys_linear_band_moves_only_the_surfaces_facing_it() {
     let bright = crcbl::math::Vec3::new(0.10, 0.22, 0.46);
     let dim = crcbl::math::Vec3::splat(0.02);
     let horizon = crcbl::math::Vec3::splat(0.12);
+    let camera = mesh_camera(Projection::default());
     let sky_above = sky_cube_hdr(
+        &camera,
         Sky {
             zenith: bright,
             horizon,
@@ -860,6 +881,7 @@ fn the_skys_linear_band_moves_only_the_surfaces_facing_it() {
         &DirectionalLight::default(),
     );
     let sky_below = sky_cube_hdr(
+        &camera,
         Sky {
             zenith: dim,
             horizon,
@@ -867,7 +889,7 @@ fn the_skys_linear_band_moves_only_the_surfaces_facing_it() {
         },
         &DirectionalLight::default(),
     );
-    let normals = unit_normals(&normals_view_hdr());
+    let normals = unit_normals(&normals_view_hdr(&camera));
 
     let mut facing_up = 0usize;
     let mut facing_up_still = 0usize;
@@ -918,7 +940,7 @@ fn the_skys_linear_band_moves_only_the_surfaces_facing_it() {
 }
 
 /// The same scene drawn as encoded normals, for [`unit_normals`] to read.
-fn normals_view_hdr() -> HdrTarget {
+fn normals_view_hdr(camera: &crcbl::render::Camera) -> HdrTarget {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
@@ -933,17 +955,187 @@ fn normals_view_hdr() -> HdrTarget {
     renderer.set_normals_view(true);
     crate::mesh_scene::place_cube_at(&mut renderer, crcbl::math::Mat4::IDENTITY);
     let mut hdr = Vec::new();
-    let _ = render_mesh(
-        &headless,
-        &mut renderer,
-        &mut pool,
-        &mesh_camera(Projection::default()),
-        Some(&mut hdr),
-    );
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, camera, Some(&mut hdr));
     let device = headless.device.as_ref();
     device.wait_idle().expect("idle");
     renderer.destroy(device);
     pool.destroy(device);
     headless.finish();
     HdrTarget(hdr)
+}
+
+/// The gradient sky the background reads as, chosen so no two bands and no two
+/// channels are equal.
+///
+/// A frame drawn with this cannot pass by accident: a pass that took the wrong
+/// band, swapped two of them, dropped the blend or wrote one channel's radiance
+/// into another lands on a number that is nothing like the one predicted for
+/// that pixel.
+const SKY_ASYMMETRIC: Sky = Sky {
+    zenith: crcbl::math::Vec3::new(0.18, 0.32, 0.75),
+    horizon: crcbl::math::Vec3::new(0.62, 0.68, 0.80),
+    ground: crcbl::math::Vec3::new(0.11, 0.09, 0.07),
+};
+
+/// The world-space direction the camera looks along through a pixel's centre.
+///
+/// The inverse of a projection applied to two depths and subtracted, which is
+/// the one reconstruction that is right under a perspective *and* an
+/// orthographic camera — see `sky.slang`, which makes the same argument for the
+/// same reason. `Mat4::project_point3` is glam's own perspective divide rather
+/// than a hand-written one, so the arithmetic under test and the arithmetic
+/// checking it are not the same code written twice.
+fn ray_through(camera: &crcbl::render::Camera, x: u32, y: u32) -> crcbl::math::Vec3 {
+    let (width, height) = MESH_EXTENT;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a 256 by 192 frame is exact in f32"
+    )]
+    let aspect = width as f32 / height as f32;
+    let inv_proj = camera.projection.matrix(aspect).inverse();
+    let inv_view = camera.view().inverse();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "pixel coordinates inside a 256 by 192 frame are exact in f32"
+    )]
+    let ndc = crcbl::math::Vec2::new(
+        (x as f32 + 0.5) / width as f32 * 2.0 - 1.0,
+        1.0 - (y as f32 + 0.5) / height as f32 * 2.0,
+    );
+    // The reversed-Z near plane, and a depth between the planes. Both are
+    // `sky.slang`'s `NDC_NEAR` and `NDC_MID`.
+    let near = inv_proj.project_point3(ndc.extend(1.0));
+    let beyond = inv_proj.project_point3(ndc.extend(0.5));
+    inv_view.transform_vector3(beyond - near).normalize()
+}
+
+/// A camera pointed **up** at the sky rather than down at the scene.
+///
+/// [`mesh_camera`]'s own looks down at the origin from above, so every ray
+/// through its frame leaves below the horizon — measured, not assumed: that
+/// frame carries 38790 background texels and not one of them has a positive
+/// `y`. One camera therefore cannot exercise both halves of the gradient, and
+/// the zenith band is the half a scene camera never sees.
+fn sky_camera_looking_up(projection: Projection) -> crcbl::render::Camera {
+    crcbl::render::Camera {
+        eye: crcbl::math::Vec3::new(0.0, 0.5, 3.0),
+        target: crcbl::math::Vec3::new(0.0, 3.5, 0.0),
+        up: crcbl::math::Vec3::Y,
+        projection,
+    }
+}
+
+/// **The background is the gradient the ray through it sees**, evaluated on the
+/// host and compared texel by texel, from a camera aimed at each hemisphere.
+///
+/// `docs/plan/43-render-standards.md` §8's second half. The sky already reached
+/// the ambient term and the reflection fallback; what this asks is whether the
+/// pass that *draws* it puts the right radiance at the right pixel. Every part
+/// of `sky.slang` is load-bearing for that: the unprojection, the view rotation,
+/// the clamp, the cubic and which band sits at which end.
+///
+/// **Which texels are background comes out of a normals-view frame** of the same
+/// scene through the same camera, so nothing here knows where the cube is — and
+/// the cube's own texels are excluded rather than tested, since the sky pass is
+/// depth-tested away from them.
+///
+/// **Two cameras, and each is required to deliver its own hemisphere.** The
+/// scene camera looks down and sees only sky below the horizon; the second
+/// looks up and sees only sky above it. Asserting the count per camera is what
+/// stops this passing while one of the gradient's two arms is never entered —
+/// which is the gap `docs/backlog.md` recorded when the march's fallback was the
+/// only thing evaluating a sky on a GPU.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_background_is_the_gradient_the_ray_through_it_sees() {
+    let gradient = crcbl_shaders::sky::SkyGradient {
+        zenith: SKY_ASYMMETRIC.zenith.to_array(),
+        horizon: SKY_ASYMMETRIC.horizon.to_array(),
+        ground: SKY_ASYMMETRIC.ground.to_array(),
+    };
+    // `true` for the camera whose rays must leave above the horizon.
+    for (aimed_up, camera) in [
+        (false, mesh_camera(Projection::default())),
+        (true, sky_camera_looking_up(Projection::default())),
+    ] {
+        let drawn = sky_cube_hdr(&camera, SKY_ASYMMETRIC, &DirectionalLight::default());
+        let normals = unit_normals(&normals_view_hdr(&camera));
+
+        let mut wanted = 0usize;
+        let mut worst = 0.0f32;
+        let mut worst_at = (0u32, 0u32);
+        for y in 0..MESH_EXTENT.1 {
+            for x in 0..MESH_EXTENT.0 {
+                if normals[(y * MESH_EXTENT.0 + x) as usize].is_some() {
+                    continue;
+                }
+                let direction = ray_through(&camera, x, y);
+                if (direction.y >= 0.0) == aimed_up {
+                    wanted += 1;
+                }
+                let expected = gradient.radiance(direction.to_array());
+                let drawn = drawn.pixel(x, y);
+                for channel in 0..3 {
+                    let error = (drawn[channel] - expected[channel]).abs()
+                        / expected[channel].max(SKY_LIT_FLOOR);
+                    if error > worst {
+                        worst = error;
+                        worst_at = (x, y);
+                    }
+                }
+            }
+        }
+
+        let half = if aimed_up { "above" } else { "below" };
+        assert!(
+            wanted > 1_000,
+            "the camera aimed {half} the horizon found only {wanted} background texels on that \
+             side, so that arm of the gradient is not being exercised"
+        );
+        assert!(
+            worst <= SKY_TOLERANCE,
+            "the drawn background and the gradient disagree by {worst} at worst, at texel \
+             {worst_at:?}, on the camera aimed {half} the horizon"
+        );
+    }
+}
+
+/// **A renderer nobody gave a sky draws no background pass at all**, and the
+/// frame behind its geometry is exactly [`crcbl::render::SCENE_CLEAR`].
+///
+/// The off switch, checked where it lands. `crcbl_render::sky_pass` argues that
+/// a black gradient drawn over the clear colour would be a *change* to every
+/// frame this workspace has ever blessed rather than an absence, so the pass is
+/// conditional on the sky and not on a shader branch — and this is what says the
+/// condition holds. It is also what would catch the pass drawing over geometry
+/// in the other direction: the clear colour has to survive on exactly the texels
+/// the gradient test found were background.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn no_sky_leaves_the_background_at_the_clear_colour() {
+    let camera = mesh_camera(Projection::default());
+    let drawn = sky_cube_hdr(&camera, Sky::NONE, &DirectionalLight::default());
+    let normals = unit_normals(&normals_view_hdr(&camera));
+
+    let mut background = 0usize;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            if normals[(y * MESH_EXTENT.0 + x) as usize].is_some() {
+                continue;
+            }
+            background += 1;
+            let texel = drawn.pixel(x, y);
+            for channel in 0..3 {
+                assert!(
+                    (texel[channel] - crcbl::render::SCENE_CLEAR[channel]).abs() <= 1.0e-4,
+                    "texel ({x}, {y}) is {texel:?} where no sky should have left it {:?}",
+                    crcbl::render::SCENE_CLEAR
+                );
+            }
+        }
+    }
+    assert!(
+        background > 1_000,
+        "only {background} texels were background, so this asserted almost nothing"
+    );
 }

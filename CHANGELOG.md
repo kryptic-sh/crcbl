@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The sky is drawn behind the frame.** The gradient already lit the scene and
+  was what a missed reflection fell back to, but nothing put it on screen — a
+  frame lit by a bright sky still had `crcbl_render::SCENE_CLEAR` behind it.
+  `sky.slang` and `crcbl_render::sky_pass` now draw it, between the forward pass
+  and everything that reads the scene colour, so the reflection composite, the
+  bloom chain and the tonemap all work on a frame that has a sky in it.
+
+  It is **depth-tested rather than masked**: the full-screen triangle is emitted
+  at the reversed-Z far plane and the pipeline compares `GreaterOrEqual` with
+  depth writes off, so the hardware that rejected the hidden fragments is what
+  selects the background. The pass binds no depth texture, no sampler, and has
+  no `discard` in it.
+
+  `crcbl_render::SCENE_CLEAR` is now re-exported from the crate root. A frame
+  whose sky is `Sky::NONE` adds no pass at all, so this landed without moving a
+  golden.
+
 - **A missed reflection falls back to the sky.** A screen-space ray that leaves
   the frame or finds no geometry took the irradiance probes' environment and
   nothing else, so a scene with an empty probe volume reflected black. It now

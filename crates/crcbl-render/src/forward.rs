@@ -181,6 +181,7 @@ use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
+use crate::sky_pass::SkyPass;
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
@@ -1314,6 +1315,10 @@ pub struct ForwardRenderer {
     /// [`crate::upscale`], and it draws nothing at a
     /// [`render_scale`](Self::render_scale) of `1.0`.
     upscale: Upscale,
+    /// `docs/plan/43-render-standards.md` §8's background pass — see
+    /// [`crate::sky_pass`]. It draws on no frame whose sky is [`Sky::NONE`],
+    /// which is every frame until a caller calls [`set_sky`](Self::set_sky).
+    sky_pass: SkyPass,
     /// How large the internal render target is as a fraction of the extent a
     /// caller hands `begin_frame` — see [`set_render_scale`](Self::set_render_scale).
     render_scale: f32,
@@ -1418,6 +1423,9 @@ struct Rollback {
     /// pipeline, one layout, a sampler and a ring of blocks.
     fxaa: Option<Fxaa>,
     upscale: Option<Upscale>,
+    /// The background pass, which owns one pipeline, one layout and a ring of
+    /// blocks and groups.
+    sky_pass: Option<SkyPass>,
 }
 
 impl Rollback {
@@ -1459,6 +1467,9 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
+        }
+        if let Some(sky_pass) = self.sky_pass {
+            sky_pass.destroy(device);
         }
         if let Some(upscale) = self.upscale {
             upscale.destroy(device);
@@ -3905,6 +3916,21 @@ impl ForwardRenderer {
             Self::build_fullscreen,
         )?);
 
+        // --- the background ---
+        //
+        // Built last, so `Rollback::run` releases it first. It writes the scene
+        // target rather than the caller's — it is scene content, drawn before
+        // the operator, unlike the ground grid — and takes the depth format as
+        // well, because it is the one full-screen pass in this frame that tests
+        // against an attachment. See [`crate::sky_pass`].
+        rollback.sky_pass = Some(SkyPass::new(
+            device,
+            instance_buffers.len(),
+            Format::Rgba16Float,
+            Format::D32Float,
+            Self::build_tested_fullscreen,
+        )?);
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -4078,6 +4104,10 @@ impl ForwardRenderer {
                 .upscale
                 .take()
                 .unwrap_or_else(|| unreachable!("the upscale was placed in the rollback above")),
+            sky_pass: rollback
+                .sky_pass
+                .take()
+                .unwrap_or_else(|| unreachable!("the sky was placed in the rollback above")),
             // Full resolution, which is the frame every caller of this type drew
             // before there was a knob — see [`Self::set_render_scale`].
             render_scale: 1.0,
@@ -4096,10 +4126,11 @@ impl ForwardRenderer {
     /// Builds a full-screen-triangle pipeline out of `shader`'s vertex and
     /// fragment entry points.
     ///
-    /// One helper because there are now four of these — the tonemap's, `ssao`'s,
-    /// `ssao-blur`'s and `ssr`'s — differing in the module, the layout and the target
-    /// format alone. The tonemap's stays written out where it is: it is the one
-    /// that carries the *why* of the shape, and this is the shape repeated.
+    /// One helper because every post pass in this crate wants the same
+    /// pipeline — the tonemap's, `ssao`'s, `ssao-blur`'s, `ssr`'s and the rest —
+    /// differing in the module, the layout and the target format alone. The
+    /// tonemap's stays written out where it is: it is the one that carries the
+    /// *why* of the shape, and this is the shape repeated.
     ///
     /// The module is destroyed before the pipeline result is unwrapped, so a
     /// failing creation leaks nothing.
@@ -4113,6 +4144,53 @@ impl ForwardRenderer {
         shader: &crcbl_shaders::Shader,
         layout: PipelineLayoutHandle,
         color_targets: &[ColorTargetState],
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        Self::build_fullscreen_with(device, label, shader, layout, color_targets, None)
+    }
+
+    /// [`Self::build_fullscreen`] for a pass that **depth-tests** what it draws
+    /// against an attachment it does not write.
+    ///
+    /// The state is [`DepthStencilState::equal_depth_read_only`], whose
+    /// [`CompareOp::GreaterOrEqual`] is the reversed-Z pair for "the fragment's
+    /// depth must equal what is already there". One caller, [`crate::sky_pass`],
+    /// which emits its triangle at the far plane so that the test selects
+    /// exactly the pixels no geometry covered — see that module.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the manifest lookup, the module or the pipeline.
+    fn build_tested_fullscreen(
+        device: &dyn Device,
+        label: &str,
+        shader: &crcbl_shaders::Shader,
+        layout: PipelineLayoutHandle,
+        color_targets: &[ColorTargetState],
+        depth_format: Format,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        Self::build_fullscreen_with(
+            device,
+            label,
+            shader,
+            layout,
+            color_targets,
+            Some(DepthStencilState::equal_depth_read_only(depth_format)),
+        )
+    }
+
+    /// The body of the two above, which differ in their depth state and in
+    /// nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the manifest lookup, the module or the pipeline.
+    fn build_fullscreen_with(
+        device: &dyn Device,
+        label: &str,
+        shader: &crcbl_shaders::Shader,
+        layout: PipelineLayoutHandle,
+        color_targets: &[ColorTargetState],
+        depth_stencil: Option<DepthStencilState>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
         let vertex = entry(shader, Stage::Vertex)?;
         let fragment = entry(shader, Stage::Fragment)?;
@@ -4138,7 +4216,7 @@ impl ForwardRenderer {
             // The triangle is deliberately oversized, so two of its vertices are
             // outside the viewport and its winding is not worth reasoning about.
             primitive: PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil,
             multisample: MultisampleState::default(),
             color_targets,
         });
@@ -4666,10 +4744,17 @@ impl ForwardRenderer {
             },
         )?;
 
+        // The frame's gradient, resolved once and handed to all three of the
+        // things that want a sky: the L1 projection below for the ambient term,
+        // the march's block for a reflection that hit nothing, and the pass that
+        // draws the background. One `SkyGradient` rather than three readings of
+        // the field, so the sky a surface is lit by cannot differ from the one
+        // behind it.
+        let gradient = self.sky.gradient();
         // Projected once per frame on the host, which is also why the shading
         // rule that governs `mesh.slang` has nothing to say about it: these
         // coefficients reach every backend as uploaded numbers.
-        let sky = self.sky.gradient().irradiance();
+        let sky = gradient.irradiance();
         let uniforms = mesh::FrameUniforms {
             view_proj: view_projection.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
@@ -4777,12 +4862,21 @@ impl ForwardRenderer {
                 // renderer nobody called `set_sky` on writes three zero rows,
                 // which the march adds to its probe fallback and changes
                 // nothing.
-                sky: [
-                    self.sky.zenith.extend(0.0).to_array(),
-                    self.sky.horizon.extend(0.0).to_array(),
-                    self.sky.ground.extend(0.0).to_array(),
-                ],
+                sky: gradient.rows(),
             },
+        )?;
+        // The background pass's block: the same two inverses `SsrParams` above
+        // carries and the same three gradient rows, so a reflection that missed
+        // and the sky behind it cannot be looking at two different skies.
+        // Written whether or not this frame adds the pass, on the blocks below's
+        // terms — a block written only on the frames that draw one is stale on
+        // the frame a caller first calls `set_sky`.
+        self.sky_pass.begin_frame(
+            device,
+            self.frame,
+            inv_projection.to_cols_array(),
+            camera.view().inverse().to_cols_array(),
+            &gradient,
         )?;
         // The bloom chain's blocks, one row per step: each step needs the texel
         // size of the image it reads, and the chain's shape is a function of the
@@ -5744,6 +5838,10 @@ impl ForwardRenderer {
         // see [`crate::effects`]. Read once here so every conditional below is
         // about one value rather than about four reads of a field.
         let effects = self.frame_effects;
+        // Read here for `effects`' reason and for one more: the passes below
+        // borrow `self` field by field, and a `&self` method called between
+        // them would borrow the whole of it.
+        let draws_sky = self.draws_sky();
 
         let (shadow_atlas, shadow_draws) = self.add_shadow_pass(
             graph,
@@ -5939,8 +6037,9 @@ impl ForwardRenderer {
         // resolved by the toggle order — it is a caller's opt-in, off by
         // default — so what decides it is the field and not this frame's
         // effects.
-        self.recorded_fullscreen =
-            fullscreen_passes(effects, extent, upscaling) + u64::from(self.ground_grid().is_some());
+        self.recorded_fullscreen = fullscreen_passes(effects, extent, upscaling)
+            + u64::from(self.ground_grid().is_some())
+            + if draws_sky { SkyPass::PASSES } else { 0 };
         self.recorded_draws = shadow_draws
             + 2 * bucket_draws.calls.len() as u64
             + self.recorded_fullscreen * FULLSCREEN_DRAWS;
@@ -6196,6 +6295,29 @@ impl ForwardRenderer {
             bucket_draws.open(encoder);
             bucket_draws.record(encoder, group, &generated);
         });
+
+        // --- the background ---
+        //
+        // **After the forward pass and before everything that reads the scene
+        // colour**, which is what makes the sky the background of the frame the
+        // reflection composite, the bloom chain and the tonemap all work on
+        // rather than a colour added at the end.
+        //
+        // It does not disturb the reflection itself. The march reads the scene
+        // colour only at a crossing it found in the depth prepass, and the far
+        // plane has no surface to cross to — `ssr.slang` returns before it
+        // marches on a pixel whose depth is the clear value — so nothing this
+        // pass writes is ever tapped as a reflected colour. A ray that leaves
+        // the frame still falls back to the analytic gradient rather than to
+        // these texels, which is the same sky evaluated exactly.
+        //
+        // Conditional on the sky and not on [`RenderEffects`], on the ground
+        // grid's terms: see [`crate::sky_pass`] for why the off position has to
+        // be no pass at all.
+        if draws_sky {
+            self.sky_pass
+                .add_pass(graph, frame, scene_color, scene_depth);
+        }
 
         // `docs/plan/18-render-features.md`'s reflection march and its blur, and
         // **the second of them is the composite**: the march reads the scene
@@ -6808,6 +6930,17 @@ impl ForwardRenderer {
             .as_ref()
             .filter(|_| self.ground_grid_on)
             .map(GroundGrid::style)
+    }
+
+    /// Whether this frame adds [`crate::sky_pass`]'s background pass.
+    ///
+    /// [`Sky::NONE`] is the value a renderer nobody called
+    /// [`set_sky`](Self::set_sky) on holds, and it is checked here rather than
+    /// left to the shader for the reason [`crate::sky_pass`] gives: a black
+    /// gradient drawn over [`SCENE_CLEAR`] would *change* those frames, where
+    /// adding no pass leaves them exactly as they were.
+    fn draws_sky(&self) -> bool {
+        self.sky != Sky::NONE
     }
 
     /// Sets the multiplier the tonemap pass applies before its clamp, clamped
@@ -7691,6 +7824,7 @@ impl ForwardRenderer {
         if let Some(grid) = self.ground_grid {
             grid.destroy(device);
         }
+        self.sky_pass.destroy(device);
         self.upscale.destroy(device);
         self.fxaa.destroy(device);
         self.bloom.destroy(device);

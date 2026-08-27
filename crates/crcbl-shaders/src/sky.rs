@@ -102,6 +102,19 @@ impl SkyGradient {
         ground: [0.0; 3],
     };
 
+    /// The gradient as the three `float4` rows every shader block that carries
+    /// one spells: zenith, horizon, ground, each padded with a `w` no shader
+    /// reads.
+    ///
+    /// **One function because two blocks want it** — [`SkyParams::sky`] and
+    /// [`crate::ssr::SsrParams::sky`] — and the order is the load-bearing part:
+    /// a block filled in the other order draws a sky reflected upside down,
+    /// which is a picture rather than an error.
+    #[must_use]
+    pub fn rows(&self) -> [[f32; 4]; 3] {
+        [self.zenith, self.horizon, self.ground].map(|band| [band[0], band[1], band[2], 0.0])
+    }
+
     /// The radiance a ray leaving the scene along `direction` sees, in linear
     /// RGB.
     ///
@@ -186,6 +199,55 @@ impl SkyGradient {
 /// factored form on both sides is one thing to compare.
 fn smoothstep(u: f32) -> f32 {
     u * u * (3.0 - 2.0 * u)
+}
+
+/// Bytes of the uniform block `shaders/sky.slang` reads.
+///
+/// Two `float4x4`s and three `float4`s, which is the whole of what a pass that
+/// samples nothing needs: the two matrices turn a pixel into a world-space ray
+/// and the three rows are the gradient that ray is evaluated against.
+pub const PARAMS_SIZE: usize = 64 + 64 + 48;
+
+/// The uniform block, matching `struct SkyParams` in `shaders/sky.slang`.
+///
+/// Every matrix is **column-major**, which is the layout the seam's other
+/// blocks use and the one Slang reads a `float4x4` in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SkyParams {
+    /// Clip → view, reversed-Z and possibly infinite.
+    pub inv_proj: [f32; 16],
+    /// View → world.
+    pub inv_view: [f32; 16],
+    /// The gradient: zenith, horizon, ground, each in `xyz` with `w` unread.
+    ///
+    /// The same three rows and the same order as
+    /// [`crate::ssr::SsrParams::sky`] — [`SkyGradient::rows`] is what both of
+    /// them get their contents from, so the two blocks cannot disagree about
+    /// which end is up.
+    pub sky: [[f32; 4]; 3],
+}
+
+impl SkyParams {
+    /// The block, in the byte layout the shader declares.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
+        let mut bytes = [0u8; PARAMS_SIZE];
+        let mut at = 0;
+        for value in self
+            .inv_proj
+            .into_iter()
+            .chain(self.inv_view)
+            .chain(self.sky.into_iter().flatten())
+        {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        debug_assert_eq!(
+            at, PARAMS_SIZE,
+            "the two matrices and the three gradient rows fill the block exactly"
+        );
+        bytes
+    }
 }
 
 #[cfg(test)]
@@ -440,40 +502,97 @@ mod tests {
     /// writes the same number a different way.
     #[test]
     fn the_shader_spells_the_same_gradient() {
-        let source = include_str!("../shaders/ssr.slang");
-        let body = source
-            .split_once("float3 sky_radiance(float3 direction)")
-            .expect("ssr.slang declares `sky_radiance`")
-            .1
-            .split_once("\n}")
-            .expect("the function has a body")
-            .0;
-
-        // The three claims the mirror has to make, each one a line whose
-        // absence would change what the shader computes rather than how it
-        // reads. The cubic is the blend; the clamp is what stops an
-        // unnormalised direction amplifying a band; the two-ended form is what
-        // returns a band exactly at its own pole.
-        for line in [
-            "float blend = u * u * (3.0 - 2.0 * u);",
-            "float up = clamp(direction.y, -1.0, 1.0);",
-            "return camera.sky[1].rgb * (1.0 - blend) + far * blend;",
+        // Every shader source carrying a copy of this gradient. A pass that
+        // copied `sky_radiance` and was not listed here is a copy this guard
+        // does not hold, which is the state the guard exists to end.
+        for (name, source) in [
+            ("ssr.slang", include_str!("../shaders/ssr.slang")),
+            ("sky.slang", include_str!("../shaders/sky.slang")),
         ] {
+            let body = source
+                .split_once("float3 sky_radiance(float3 direction)\n{")
+                .unwrap_or_else(|| panic!("{name} declares `sky_radiance`"))
+                .1
+                .split_once("\n}")
+                .expect("the function has a body")
+                .0;
+
+            // The three claims the mirror has to make, each one a line whose
+            // absence would change what the shader computes rather than how it
+            // reads. The cubic is the blend; the clamp is what stops an
+            // unnormalised direction amplifying a band; the two-ended form is
+            // what returns a band exactly at its own pole.
+            for line in [
+                "float blend = u * u * (3.0 - 2.0 * u);",
+                "float up = clamp(direction.y, -1.0, 1.0);",
+                "return camera.sky[1].rgb * (1.0 - blend) + far * blend;",
+            ] {
+                assert!(
+                    body.contains(line),
+                    "{name}'s `sky_radiance` no longer contains `{line}`, so it and \
+                     `SkyGradient::radiance` are computing different gradients"
+                );
+            }
+            // And the two polar bands are taken from the ends this module
+            // means: row 0 is the zenith and row 2 the ground, which is the
+            // order `SkyGradient::rows` writes them in. A shader that swapped
+            // them renders a sky upside down, which is a picture.
             assert!(
-                body.contains(line),
-                "ssr.slang's `sky_radiance` no longer contains `{line}`, so it and \
-                 `SkyGradient::radiance` are computing different gradients"
+                body.contains("up >= 0.0 ? camera.sky[0].rgb : camera.sky[2].rgb"),
+                "{name}'s `sky_radiance` no longer takes the zenith above the horizon and the \
+                 ground below it"
             );
         }
-        // And the two polar bands are taken from the ends this module means:
-        // row 0 is the zenith and row 2 the ground, which is the order
-        // `SsrParams::sky` writes them in. A shader that swapped them renders a
-        // sky reflected upside down, which is a picture.
+    }
+
+    /// The order [`SkyParams::to_bytes`] writes the block in is the order
+    /// `sky.slang` declares it in.
+    #[test]
+    fn the_uniform_block_matches_the_struct_sky_slang_declares() {
+        let source = include_str!("../shaders/sky.slang");
+        let inv_proj = source
+            .find("float4x4 inv_proj;")
+            .expect("sky.slang declares `float4x4 inv_proj;`");
+        let inv_view = source
+            .find("float4x4 inv_view;")
+            .expect("sky.slang declares `float4x4 inv_view;`");
+        let sky = source
+            .find("float4 sky[3];")
+            .expect("sky.slang declares `float4 sky[3];`");
         assert!(
-            body.contains("up >= 0.0 ? camera.sky[0].rgb : camera.sky[2].rgb"),
-            "ssr.slang's `sky_radiance` no longer takes the zenith above the horizon and the \
-             ground below it"
+            inv_proj < inv_view && inv_view < sky,
+            "sky.slang declares the block in a different order than `to_bytes` writes it"
         );
+    }
+
+    /// The block serializes as two column-major matrices followed by the three
+    /// gradient rows, with nothing between them.
+    #[test]
+    fn the_block_serializes_two_matrices_and_the_gradient() {
+        let mut inv_proj = [0.0f32; 16];
+        inv_proj[0] = 1.0;
+        let mut inv_view = [0.0f32; 16];
+        inv_view[15] = 2.0;
+        let bytes = SkyParams {
+            inv_proj,
+            inv_view,
+            sky: DAYLIGHT.rows(),
+        }
+        .to_bytes();
+
+        let lane = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().expect("four"));
+        assert_eq!(lane(0), 1.0, "inv_proj starts the block");
+        assert_eq!(lane(64 + 60), 2.0, "inv_view follows it");
+        for (row, band) in [DAYLIGHT.zenith, DAYLIGHT.horizon, DAYLIGHT.ground]
+            .into_iter()
+            .enumerate()
+        {
+            let base = 128 + row * 16;
+            for (channel, expected) in band.into_iter().enumerate() {
+                assert_eq!(lane(base + channel * 4), expected);
+            }
+            assert_eq!(lane(base + 12), 0.0, "the row's `w` is unread padding");
+        }
     }
 
     #[test]
