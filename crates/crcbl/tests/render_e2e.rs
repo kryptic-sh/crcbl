@@ -2835,7 +2835,7 @@ fn draw_scene_on_every_geometry_path(
 /// How many channels the two geometry paths may disagree about on `scene`, and
 /// even then only ever by one.
 ///
-/// **Zero for every scene but the three that march, and that is the point.** The
+/// **Zero for every scene but the four that march, and that is the point.** The
 /// two paths are meant to draw the same picture, so a budget handed to every
 /// scene would be slack nobody measured — the exact comparison is what has
 /// caught a path drawing something else, and it keeps its teeth everywhere it
@@ -2879,7 +2879,22 @@ fn draw_scene_on_every_geometry_path(
 /// Arch's Mesa 26.2.1 / LLVM 22.1.8 answers zero at the same 256-bit vector
 /// width, the Windows lavapipe job answers zero, and radv and wgpu answer zero.
 ///
-/// All three budgets are two orders of magnitude under anything a level that
+/// `Probes` is the fourth, and it is the ambient occlusion pass that marches
+/// rather than a reflection ray. `ssao.slang`'s horizon integral takes a **max**
+/// over sixteen depth taps per pixel, so a depth differing in the last place can
+/// flip which tap wins a horizon and move the angle by a step — the same
+/// exposure the three above have, arriving through the term this scene is built
+/// around: occlusion scales the ambient, and this scene's ambient is the probe
+/// irradiance under test. It read zero until 2026-08-28 and the hemisphere it
+/// replaced is what kept it there — a threshold count of eight samples rounds a
+/// last-bit disagreement away where a max does not. Measured at **two**
+/// channels, each off by one, out of the frame's 196608: the red channel of
+/// `(137, 17)` and of `(138, 17)`, adjacent, `150` against `149`. On llvmpipe
+/// alone — radv answers zero — and the same two channels on the Ubuntu runner's
+/// Mesa 25.2.8 / LLVM 20.1.2 and on Arch's Mesa 26.2.1 / LLVM 22.1.8, which is
+/// the first of these four to reproduce off the runner.
+///
+/// All four budgets are two orders of magnitude under anything a level that
 /// failed to draw would produce — the failure this exists for moves whole
 /// clusters, not one channel. `worst <= 1` is the other half and is not budgeted
 /// at all: a reflection that landed on the wrong surface moves a channel by far
@@ -2889,6 +2904,7 @@ const fn path_lsb_channels(scene: Scene) -> usize {
         Scene::Dunes => 16,
         Scene::PointShadow => 16,
         Scene::Ssr => 16,
+        Scene::Probes => 16,
         _ => 0,
     }
 }

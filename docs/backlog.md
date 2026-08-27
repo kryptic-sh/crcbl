@@ -100,6 +100,17 @@ the evidence. What the slice deferred or turned up:
   sixteen, and added an `acos_approx` and a `sqrt` per tap. The shadow-filter
   entry above is the same gap and the same missing timestamp; a browser gate
   already on a timeout cap is the only instrument in the tree that will notice.
+- **GTAO made the depth buffer's last bits visible on a fourth scene.**
+  `Scene::Probes` now needs an LSB budget in `path_lsb_channels`, joining
+  `Dunes`, `PointShadow` and `Ssr` — two adjacent red channels, one level, on
+  llvmpipe. The horizon integral takes a `max` over sixteen depth taps, so a
+  depth differing in the last place can flip which tap wins; the hemisphere's
+  threshold count rounded that away. The reason it is here rather than closed is
+  that **it is the first of the four to reproduce off a runner** — Arch's Mesa
+  26.2.1 answers the same two channels as the Ubuntu runner's 25.2.8, where the
+  other three are runner-only — which makes it the one a determinism
+  investigation could actually be run against, if the two paths' vertex
+  positions ought to agree bit for bit at all.
 - **`SLICE_COUNT` is 2 and `SLICE_STEPS` is 4, chosen to sit near the eight taps
   the hemisphere took, not fitted.** Reference implementations run more slices
   with a temporal filter to hide the noise; this one has no temporal filter and
