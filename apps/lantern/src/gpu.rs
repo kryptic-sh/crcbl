@@ -605,6 +605,17 @@ impl Gpu {
         self.paths.monitor_effects = self.monitor.resolved_effects();
     }
 
+    /// Draw the main view's ambient-occlusion channel as grey instead of the
+    /// shaded picture — `crcbl_render::ForwardRenderer::set_occlusion_view`.
+    ///
+    /// **The main view only, and the monitor deliberately keeps shading.** The
+    /// two are the same room from two poses, so leaving one of them lit is what
+    /// makes the grey one readable: a reviewer has the shaded frame to hold the
+    /// occlusion against without pressing the row twice.
+    pub fn set_occlusion_view(&mut self, on: bool) {
+        self.renderer.set_occlusion_view(on);
+    }
+
     /// The context, for a caller arming `--screenshot` before the first frame.
     pub const fn context_mut(&mut self) -> &mut GpuContext {
         &mut self.ctx

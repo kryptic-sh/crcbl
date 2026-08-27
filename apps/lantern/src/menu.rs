@@ -86,6 +86,17 @@ pub enum LanternAction {
     /// Always a single flag: the only source of these is the row table, and a
     /// several-effect action would have no one state to flip.
     ToggleEffect(RenderEffects),
+    /// Swap between the shaded picture and the ambient-occlusion channel drawn
+    /// as grey — `crcbl_render::ForwardRenderer::set_occlusion_view`.
+    ///
+    /// **Not a [`ToggleEffect`](Self::ToggleEffect)**, and the distinction is
+    /// the point of the row: the `AO` row above turns the occlusion pass off,
+    /// which changes the picture the room is lit by, while this one changes
+    /// which picture is drawn and leaves the lighting alone. Standing the two
+    /// beside each other is also what makes the second legible — with `AO` off
+    /// this view is white everywhere, because that is the image the renderer
+    /// binds when nothing computed a channel.
+    ToggleOcclusionView,
 }
 
 /// The id carrying [`LanternAction::ToggleCamera`]. The first id a game may use,
@@ -100,6 +111,12 @@ pub const AO_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 2;
 
 /// The screen-space reflection row's, on [`SHADOWS_ID`]'s terms.
 pub const REFLECTIONS_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 3;
+
+/// The id carrying [`LanternAction::ToggleOcclusionView`].
+///
+/// Outside [`EFFECT_ROWS`] because it is not an effect: that table pairs an id
+/// with a [`RenderEffects`] bit, and this row has no bit to pair with.
+pub const AO_VIEW_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 4;
 
 /// The effect rows, in the order the panel draws them: the id one fires, the
 /// bit it flips, and the word it prints.
@@ -122,6 +139,9 @@ pub(crate) const EFFECT_ROWS: [(crcbl::ui::WidgetId, RenderEffects, &str); 3] = 
 pub fn action_for(id: crcbl::ui::WidgetId) -> Option<LanternAction> {
     if id == CAMERA_ID {
         return Some(LanternAction::ToggleCamera);
+    }
+    if id == AO_VIEW_ID {
+        return Some(LanternAction::ToggleOcclusionView);
     }
     EFFECT_ROWS
         .iter()
@@ -190,7 +210,12 @@ fn effect_state(
 /// `request` is the three layers a caller supplies and `device` the fourth, so
 /// the labels are `request.resolve(device)` — see this module's second section.
 #[must_use]
-pub fn pause_menu(camera: CameraMode, request: EffectRequest, device: RenderEffects) -> Menu {
+pub fn pause_menu(
+    camera: CameraMode,
+    request: EffectRequest,
+    device: RenderEffects,
+    occlusion_view: bool,
+) -> Menu {
     use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     let resolved = request.resolve(device);
     let mut items = vec![
@@ -203,6 +228,14 @@ pub fn pause_menu(camera: CameraMode, request: EffectRequest, device: RenderEffe
         let state = effect_state(effect, resolved, device);
         MenuItem::new(id, format!("{name}: {state}"), "ENTER")
     }));
+    // Last, and under the effect rows on purpose: it is the row that says what
+    // the `AO` row above it is doing, so it reads as that row's companion rather
+    // than as a fourth effect.
+    items.push(MenuItem::new(
+        AO_VIEW_ID,
+        format!("AO VIEW: {}", if occlusion_view { "ON" } else { "OFF" }),
+        "ENTER",
+    ));
     Menu::new("PAUSED", items)
 }
 
@@ -228,6 +261,7 @@ pub fn menus() -> Menus {
                 CameraMode::default(),
                 EffectRequest::default(),
                 RenderEffects::all(),
+                false,
             ),
         )],
     )
@@ -258,6 +292,7 @@ mod tests {
             CameraMode::default(),
             request,
             RenderEffects::all(),
+            false,
         ))
     }
 
@@ -312,6 +347,43 @@ mod tests {
         }
     }
 
+    /// **The AO-view row is a view switch, not a fourth effect.**
+    ///
+    /// Two halves, and the second is the one worth guarding: it labels its own
+    /// state like every other row, and pressing it fires an action that is not
+    /// a [`LanternAction::ToggleEffect`]. Wired to a `ToggleEffect` instead it
+    /// would read plausibly on the panel and turn the occlusion *pass* off,
+    /// which is the row above it.
+    #[test]
+    fn the_ambient_occlusion_view_row_switches_the_view_not_the_pass() {
+        let rows = |on| {
+            labels(&pause_menu(
+                CameraMode::default(),
+                EffectRequest::default(),
+                RenderEffects::all(),
+                on,
+            ))
+        };
+        assert!(
+            rows(false).contains(&"AO VIEW: OFF".to_string()),
+            "{:?}",
+            rows(false)
+        );
+        assert!(
+            rows(true).contains(&"AO VIEW: ON".to_string()),
+            "{:?}",
+            rows(true)
+        );
+        assert_eq!(
+            action_for(AO_VIEW_ID),
+            Some(LanternAction::ToggleOcclusionView),
+        );
+        assert!(
+            !EFFECT_ROWS.iter().any(|&(id, _, _)| id == AO_VIEW_ID),
+            "the view row must not sit in the effect table",
+        );
+    }
+
     /// The camera row labels the mode it is set to, so a reviewer can read it
     /// off the panel rather than guessing from the picture.
     #[test]
@@ -321,6 +393,7 @@ mod tests {
                 mode,
                 EffectRequest::default(),
                 RenderEffects::all(),
+                false,
             ))
             .into_iter()
             .find(|label| label.starts_with("CAMERA: "))
@@ -442,7 +515,7 @@ mod tests {
     fn a_row_the_device_cannot_draw_reads_as_unavailable() {
         let device = RenderEffects::all().difference(RenderEffects::REFLECTIONS);
         let request = toggled_effect(EffectRequest::default(), device, RenderEffects::SHADOWS);
-        let rows = labels(&pause_menu(CameraMode::default(), request, device));
+        let rows = labels(&pause_menu(CameraMode::default(), request, device, false));
         assert!(rows.contains(&"SHADOWS: OFF".to_string()), "{rows:?}");
         assert!(rows.contains(&"AO: ON".to_string()), "{rows:?}");
         assert!(

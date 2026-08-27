@@ -111,6 +111,32 @@ the evidence. What the slice deferred or turned up:
   turned away from the frame's centre, so it cannot see a vignette; `Scene::Ao`
   growing one would be the right home for the check.
 
+### What the occlusion view left owed (2026-08-28)
+
+`docs/plan/46-ambient-occlusion.md`'s occlusion-view section holds what shipped.
+What it did not cover:
+
+- **No cross-backend evidence.** The view is checked by
+  `the_occlusion_view_draws_the_channel_and_not_a_constant` in `mesh_e2e`, which
+  runs on one adapter under `CRCBL_GPU=vk`. It is a debug view rather than a
+  shipped picture, so a golden per backend would be four frames of a fifth
+  branch of `mesh.slang` — the normals view sits in the same position and has
+  the same gap. What would close it cheaply is folding the check into the
+  cross-backend suite rather than blessing an image: the assertions are already
+  structural (uniformly white without the pass, not uniformly white with it) and
+  neither half needs a reference frame.
+- **`lantern`'s `AO VIEW` row is not exercised by anything that runs.** Its
+  wiring is covered by
+  `the_ambient_occlusion_view_row_switches_the_view_not_the_pass`, which reads
+  labels and actions on the host; no golden and no browser gate presses it. That
+  is the same standing as the panel's other rows, and it is written down here
+  because the row is the only place a reviewer actually reaches this view.
+- **Nothing sets the AO radius or intensity from outside.** `SSAO_RADIUS` is a
+  `forward.rs` constant and there is no intensity term at all, so the two live
+  controls `docs/plan/sample/19-alcove.md` puts in milestone 1 beside this view
+  have nothing to drive. They want the same graphics-quality seam the entry
+  above wants for `SHADOW_TAPS` and for a re-introduced SSAO tier.
+
 ### The normal offset scallops one silhouette's foot (2026-08-28)
 
 `docs/plan/45-shadows.md`'s seventh decision replaced the sun's and the punctual

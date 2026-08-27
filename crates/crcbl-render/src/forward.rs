@@ -247,9 +247,9 @@ const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 
 /// Which picture the colour pass draws instead of the shaded one.
 ///
-/// The engine's debug views, as one value rather than as three independent
-/// booleans, because they are not independent: all three ride in a single lane
-/// of the frame's uniform block and the shaders test the thresholds outermost
+/// The engine's debug views, as one value rather than as independent booleans,
+/// because they are not independent: every one of them rides in a single lane of
+/// the frame's uniform block and the shaders test the thresholds outermost
 /// first, so a renderer with two of them set draws exactly one.
 /// [`ForwardRenderer::debug_view`] is where that order lives, and this is what it
 /// answers with — so a menu row, a debug panel and the picture cannot disagree
@@ -272,6 +272,9 @@ pub enum DebugView {
     LodTint,
     /// World-space surface normals — [`ForwardRenderer::set_normals_view`].
     Normals,
+    /// The ambient-occlusion channel alone, as grey —
+    /// [`ForwardRenderer::set_occlusion_view`].
+    AmbientOcclusion,
 }
 
 impl DebugView {
@@ -283,6 +286,7 @@ impl DebugView {
             Self::Heatmap => "heatmap",
             Self::LodTint => "lod tint",
             Self::Normals => "normals",
+            Self::AmbientOcclusion => "ambient occlusion",
         }
     }
 }
@@ -1045,6 +1049,18 @@ pub struct ForwardRenderer {
     /// `the_three_debug_views_resolve_in_one_order_however_they_are_set` is what
     /// holds this side to it.
     heatmap: bool,
+
+    /// Whether the colour pass draws the ambient-occlusion channel as grey
+    /// instead of shading — see
+    /// [`set_occlusion_view`](ForwardRenderer::set_occlusion_view).
+    ///
+    /// **Wins over every other view**, on [`heatmap`](Self::heatmap)'s terms and
+    /// for its reason: one uniform lane, outermost threshold first.
+    /// `crcbl_shaders`' `the_occlusion_view_threshold_lies_above_the_heatmap` is
+    /// what keeps that order true, and
+    /// `the_debug_views_resolve_in_one_order_however_they_are_set` is what holds
+    /// this side to it.
+    occlusion_view: bool,
 
     /// Where [`begin_frame`](ForwardRenderer::begin_frame) projects
     /// `docs/plan/25-lod.md`'s selection from, when that is not the camera's own
@@ -4056,6 +4072,7 @@ impl ForwardRenderer {
             sky: Sky::NONE,
             lod_view: false,
             heatmap: false,
+            occlusion_view: false,
             // Following the camera, on the line above's terms: the selection eye
             // is the camera's until a caller pins it, so a renderer nobody calls
             // `set_frozen_selection_eye` on hands `begin_frame` exactly what it
@@ -7468,6 +7485,47 @@ impl ForwardRenderer {
         self.heatmap
     }
 
+    /// Draws the ambient-occlusion channel alone, as grey, instead of shading.
+    ///
+    /// One is white and fully occluded is black — the buffer the forward pass
+    /// multiplies its ambient term by, shown as itself. **This is how the AO
+    /// ladder in `docs/plan/46-ambient-occlusion.md` is compared at all:** a
+    /// composited frame shows occlusion times albedo times ambient, and a
+    /// difference in the first is not separable from a difference in the other
+    /// two by looking at the result.
+    ///
+    /// # What it draws with occlusion switched off
+    ///
+    /// White, everywhere. A frame without
+    /// [`RenderEffects::AMBIENT_OCCLUSION`] binds a 1×1 white image in place of
+    /// a computed channel, and this view shows that image rather than pretending
+    /// to a channel nothing computed — "no occlusion was computed" and "nothing
+    /// occludes here" are the same value to the shading, and the view does not
+    /// get to disagree with the shading about it.
+    ///
+    /// # It builds nothing and adds no pass
+    ///
+    /// One lane of the frame's uniform block, on
+    /// [`set_normals_view`](Self::set_normals_view)'s terms exactly. Unlike the
+    /// tint and the heatmap it needs nothing from the geometry stage, so it
+    /// draws on every [`GeometryPath`] rather than on
+    /// the mesh-shader one alone.
+    ///
+    /// **Wins over every other view when several are on**; see
+    /// [`debug_view`](Self::debug_view), which is that order stated once.
+    pub const fn set_occlusion_view(&mut self, on: bool) {
+        self.occlusion_view = on;
+    }
+
+    /// Whether the colour pass draws the occlusion channel instead of shading.
+    ///
+    /// **What was asked for, not what is drawn**, on
+    /// [`lod_view`](Self::lod_view)'s terms.
+    #[must_use]
+    pub const fn occlusion_view(&self) -> bool {
+        self.occlusion_view
+    }
+
     /// Pins the eye `docs/plan/25-lod.md`'s selection is projected from, so the
     /// cut stops following the camera.
     ///
@@ -7564,8 +7622,8 @@ impl ForwardRenderer {
     /// Which of the debug views the next frame will actually draw.
     ///
     /// **The one place the precedence is decided**, and every other statement of
-    /// it in this crate reads it back from here. The three switches ride in one
-    /// float lane of the frame block — see
+    /// it in this crate reads it back from here. The switches ride in one float
+    /// lane of the frame block — see
     /// [`FrameUniforms::HEATMAP_VIEW_ON`](crcbl_shaders::mesh::FrameUniforms::HEATMAP_VIEW_ON)
     /// — and the shaders test the outermost threshold first, so a sentinel for
     /// an outer view clears every threshold below it. Resolving here rather than
@@ -7573,7 +7631,9 @@ impl ForwardRenderer {
     /// differently by a menu row, a debug panel and the picture.
     #[must_use]
     pub const fn debug_view(&self) -> DebugView {
-        if self.heatmap {
+        if self.occlusion_view {
+            DebugView::AmbientOcclusion
+        } else if self.heatmap {
             DebugView::Heatmap
         } else if self.lod_view {
             DebugView::LodTint
@@ -7588,6 +7648,7 @@ impl ForwardRenderer {
     /// carries.
     const fn debug_view_lane(&self) -> f32 {
         match self.debug_view() {
+            DebugView::AmbientOcclusion => mesh::FrameUniforms::OCCLUSION_VIEW_ON,
             DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
             DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
             DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
@@ -8598,21 +8659,21 @@ mod tests {
         renderer.destroy(device.as_ref());
     }
 
-    /// **The three debug views resolve in one order, however they are set.**
+    /// **The debug views resolve in one order, however they are set.**
     ///
-    /// All three ride in one float lane and the shaders test the outermost
-    /// threshold first, so a renderer with two switches on draws exactly one
-    /// picture — and which one has to be a rule rather than whichever branch a
-    /// caller's setter happened to run last. Every one of the eight combinations
-    /// is walked, because a precedence written as an `if` chain is right for
-    /// most of them by accident: a chain in the wrong order agrees with this one
-    /// on the five combinations where at most one switch is set.
+    /// Every one of them rides in one float lane and the shaders test the
+    /// outermost threshold first, so a renderer with two switches on draws
+    /// exactly one picture — and which one has to be a rule rather than
+    /// whichever branch a caller's setter happened to run last. All sixteen
+    /// combinations are walked, because a precedence written as an `if` chain is
+    /// right for most of them by accident: a chain in the wrong order agrees
+    /// with this one on every combination where at most one switch is set.
     ///
     /// [`ForwardRenderer::debug_view`] is asserted beside the lane, so the value
     /// a panel reads back and the value the shader branches on cannot drift —
     /// they are the same function.
     #[test]
-    fn the_three_debug_views_resolve_in_one_order_however_they_are_set() {
+    fn the_debug_views_resolve_in_one_order_however_they_are_set() {
         // `w` of the second `float4` of the block — the lane
         // `the_normals_view_moves_the_ambients_last_lane_and_no_other_byte`
         // spells out, and for its reason.
@@ -8624,60 +8685,67 @@ mod tests {
         let camera = Camera::default();
         let light = DirectionalLight::default();
 
-        for heatmap in [false, true] {
-            for lod in [false, true] {
-                for normals in [false, true] {
-                    renderer.set_heatmap(heatmap);
-                    renderer.set_lod_view(lod);
-                    renderer.set_normals_view(normals);
-                    // Each switch reads back what it was set to, whatever the
-                    // others are: a caller's toggle is about the caller's
-                    // setting, and only `debug_view` is about the picture.
-                    assert_eq!(renderer.heatmap(), heatmap);
-                    assert_eq!(renderer.lod_view(), lod);
-                    assert_eq!(renderer.normals_view(), normals);
+        for occlusion in [false, true] {
+            for heatmap in [false, true] {
+                for lod in [false, true] {
+                    for normals in [false, true] {
+                        renderer.set_occlusion_view(occlusion);
+                        renderer.set_heatmap(heatmap);
+                        renderer.set_lod_view(lod);
+                        renderer.set_normals_view(normals);
+                        // Each switch reads back what it was set to, whatever the
+                        // others are: a caller's toggle is about the caller's
+                        // setting, and only `debug_view` is about the picture.
+                        assert_eq!(renderer.occlusion_view(), occlusion);
+                        assert_eq!(renderer.heatmap(), heatmap);
+                        assert_eq!(renderer.lod_view(), lod);
+                        assert_eq!(renderer.normals_view(), normals);
 
-                    let expected = if heatmap {
-                        DebugView::Heatmap
-                    } else if lod {
-                        DebugView::LodTint
-                    } else if normals {
-                        DebugView::Normals
-                    } else {
-                        DebugView::Shaded
-                    };
-                    assert_eq!(
-                        renderer.debug_view(),
-                        expected,
-                        "heatmap={heatmap} lod={lod} normals={normals}"
-                    );
+                        let expected = if occlusion {
+                            DebugView::AmbientOcclusion
+                        } else if heatmap {
+                            DebugView::Heatmap
+                        } else if lod {
+                            DebugView::LodTint
+                        } else if normals {
+                            DebugView::Normals
+                        } else {
+                            DebugView::Shaded
+                        };
+                        assert_eq!(
+                            renderer.debug_view(),
+                            expected,
+                            "occlusion={occlusion} heatmap={heatmap} lod={lod} normals={normals}"
+                        );
 
-                    renderer
-                        .begin_frame(device.as_ref(), &camera, &light, (64, 48))
-                        .expect("write");
-                    let block = recorder
-                        .buffer_bytes(renderer.uniforms[renderer.frame])
-                        .expect("begin_frame wrote the block");
-                    let sentinel = match expected {
-                        DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
-                        DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
-                        DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
-                        DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
-                    };
-                    assert_eq!(
-                        &block[AMBIENT_W..AMBIENT_W + 4],
-                        &sentinel.to_le_bytes(),
-                        "heatmap={heatmap} lod={lod} normals={normals} resolved to {expected:?}, \
-                         and the lane says otherwise"
-                    );
-                    // And the resolve comes off for all three of them: these
-                    // frames are read back as data, so their colours have to
-                    // stay the ones the shader wrote — see `resolved_effects`.
-                    assert_eq!(
-                        renderer.effects().contains(RenderEffects::ANTIALIASING),
-                        expected == DebugView::Shaded,
-                        "heatmap={heatmap} lod={lod} normals={normals}"
-                    );
+                        renderer
+                            .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                            .expect("write");
+                        let block = recorder
+                            .buffer_bytes(renderer.uniforms[renderer.frame])
+                            .expect("begin_frame wrote the block");
+                        let sentinel = match expected {
+                            DebugView::AmbientOcclusion => mesh::FrameUniforms::OCCLUSION_VIEW_ON,
+                            DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
+                            DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
+                            DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
+                            DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+                        };
+                        assert_eq!(
+                            &block[AMBIENT_W..AMBIENT_W + 4],
+                            &sentinel.to_le_bytes(),
+                            "occlusion={occlusion} heatmap={heatmap} lod={lod} \
+                         normals={normals} resolved to {expected:?}, and the lane says otherwise"
+                        );
+                        // And the resolve comes off for all three of them: these
+                        // frames are read back as data, so their colours have to
+                        // stay the ones the shader wrote — see `resolved_effects`.
+                        assert_eq!(
+                            renderer.effects().contains(RenderEffects::ANTIALIASING),
+                            expected == DebugView::Shaded,
+                            "occlusion={occlusion} heatmap={heatmap} lod={lod} normals={normals}"
+                        );
+                    }
                 }
             }
         }

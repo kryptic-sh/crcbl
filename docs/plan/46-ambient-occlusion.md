@@ -314,3 +314,40 @@ carries it.
 **Bent normals are still owed**, and they are the half that makes this more than
 a quality bump. They need the `R8Unorm` target widened, so they are their own
 slice.
+
+### The occlusion view, built 2026-08-28
+
+The buffer is now something a reviewer can look at. `mesh.slang`'s fragment
+stage takes a fourth debug branch — `OCCLUSION_VIEW`, outermost, above the
+heatmap on the sentinel lane `frame.ambient.w` already carried — and writes the
+blurred channel into all three colour channels.
+`ForwardRenderer::set_occlusion_view` arms it; `lantern`'s pause panel has an
+`AO VIEW` row, deliberately below its `AO` row and deliberately not a
+`RenderEffects` toggle, because the two are different questions: the row above
+turns the pass off, this one changes which picture is drawn.
+
+**Grey, not a false-colour ramp.** A ramp puts a visible edge where the hue
+changes and none where the occlusion steps, so it reads as structure the pass
+did not compute. Luminance has the gradient the eye is being asked about.
+
+**A frame with the pass switched off draws white, and that is the honest
+answer.** What the branch samples is whatever occupies the binding, which on
+such a frame is the 1×1 white image the renderer substitutes for a computed
+channel — so "no occlusion was computed" and "nothing occludes here" are the
+same value by construction, exactly as they are for the ambient term that
+multiplies by it. That coincidence is what the device test turns into evidence:
+`the_occlusion_view_draws_the_channel_and_not_a_constant` renders one scene
+twice, separated by `RenderEffects::AMBIENT_OCCLUSION` alone, and needs the
+first frame uniformly white **and** the second not — a branch returning a
+literal white passes the first half and fails the second, and a
+`set_occlusion_view` wired to nothing fails it too.
+
+**The cube alone was not a scene worth measuring.** With nothing under it the
+only occluded texels are the rim of its own silhouette — four of them in a
+256×192 frame, measured — so the probe puts a slab under the cube and reads 4755
+occluded texels out of 32425 drawn. A population that thin cannot tell a working
+pass from a rounding step.
+
+This is milestone 1 of [sample/19-alcove.md](sample/19-alcove.md)'s three parts,
+and the one that document says to build first. The scene and the live radius and
+intensity controls are the other two, and neither exists.

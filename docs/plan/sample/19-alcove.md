@@ -60,22 +60,33 @@ for it, and this sample must not quietly imply otherwise.
 flat untextured surfaces are the point. **Exempt from rules 2 and 10**, on the
 viewer's: no game state, no `World`, no `GameModule`.
 
-## Status: unbuilt
+## Status: the view mode ships, the sample does not
 
-Nothing exists. One rung ships: `crates/crcbl-shaders/shaders/ssao.slang` and
-its depth-weighted blur, gated by a golden. GTAO is owed by
-[18-render-features.md](../18-render-features.md), and as with sample 17 a
-comparison demo with one technique in it is not a comparison.
+**The AO-only view mode was built 2026-08-28** and is the part this document
+said to build first, for the reason it gave: the occlusion buffer was a texture
+nothing outside the forward pass ever displayed, and a buffer nobody can look at
+is a buffer whose defects are found by reading the shader. That prediction was
+paid out before the view even landed — the tilt-sign bug in
+[46-ambient-occlusion.md](../46-ambient-occlusion.md)'s delivery section drew a
+plausible vignette and was caught by an assertion, not by an eye.
 
-The AO-only view mode is the part worth building first regardless of how many
-rungs exist, because the occlusion buffer is currently a texture nothing outside
-the forward pass ever displays — and a buffer nobody can look at is a buffer
-whose defects are found by reading the shader.
+It ships in the engine rather than here: `ForwardRenderer::set_occlusion_view`,
+`mesh.slang`'s `OCCLUSION_VIEW` branch, and an `AO VIEW` row on `lantern`'s
+pause panel. So the view mode this sample owes is **reachable today in a demo
+that exists**, and what is left for this one is the scene and the comparison.
+
+The technique rung it displays is now GTAO, not SSAO: the eight-tap hemisphere
+was replaced rather than kept as a cheap tier, because a tier needs a selector
+to choose it and there is none. That makes the technique selector below a
+prerequisite for milestone 2 rather than a convenience.
+
+Nothing else exists.
 
 ## Milestones
 
 1. **The scene, the AO-only view mode, and the shipped technique.** Radius and
-   intensity controls land here.
+   intensity controls land here. **The view mode is done** — see the status
+   above; the scene and the two controls are what is left of this milestone.
 2. **GTAO**, side by side with SSAO, with the silhouette-rim comparison the
    escalation clause cares about.
 3. **Bent-normal visualisation**, once GTAO produces one.

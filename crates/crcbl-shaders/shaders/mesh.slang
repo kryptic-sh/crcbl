@@ -465,6 +465,23 @@ static const float NORMALS_VIEW = 0.5;
 /// picks between the overlays is the one that knows the cluster.
 static const float LOD_VIEW = 1.5;
 
+/// The switch for the **occlusion view**, which draws the ambient-occlusion
+/// channel alone as grey.
+///
+/// The same lane again, one sentinel further out:
+/// `crcbl_shaders::mesh::FrameUniforms::OCCLUSION_VIEW_ON` is the `4.0` the host
+/// writes, and this threshold has to lie above the heatmap's `3.0` so the
+/// outermost test wins. `the_occlusion_view_threshold_lies_above_the_heatmap` is
+/// what holds the interleaving.
+///
+/// **A `4.0` also clears `LOD_VIEW`, and the vertex and mesh stages act on
+/// that** — they write the tint or heatmap overlay into `output.color`. Nothing
+/// reads it: this view's fragment branch returns before the interpolated colour
+/// is touched. The overlay is computed and discarded, which costs one lerp per
+/// vertex on a view that exists to be looked at, and is the price of one lane
+/// carrying five states instead of a second lane carrying one.
+static const float OCCLUSION_VIEW = 3.5;
+
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.2's "transform, mesh id, material
@@ -2629,6 +2646,26 @@ float2 physical_tile_uv(float3 world_position, float3 normal, float tile_metres)
     return planar / max(tile_metres, 1e-4);
 }
 
+/// The occlusion channel under `position`, in `0..=1`, one meaning unoccluded.
+///
+/// **The fetch is clamped to the image's extent**, which is what makes the
+/// renderer's 1×1 white off-switch read as "nothing occludes" instead of as
+/// total occlusion — `ambient_occlusion`'s own declaration argues that at
+/// length. It costs nothing on a frame-sized channel, where every fragment is
+/// inside the image already.
+///
+/// Shared by the shading below and by the occlusion view, so the view is the
+/// buffer the shading multiplies by rather than a second reading of it that
+/// could clamp differently.
+float occlusion_at(float2 position)
+{
+    uint width;
+    uint height;
+    ambient_occlusion.GetDimensions(width, height);
+    int2 texel = min(int2(position), int2(width, height) - 1);
+    return ambient_occlusion.Load(int3(texel, 0));
+}
+
 [shader("fragment")]
 FragmentOutput fragmentMain(VertexOutput input)
 {
@@ -2654,6 +2691,39 @@ FragmentOutput fragmentMain(VertexOutput input)
     // The branch is on a **uniform**, so it is wave-uniform on every target and
     // returning before the texture fetch below costs no derivative anything else
     // needs.
+
+    // **The occlusion view, outermost because its sentinel is.** The
+    // ambient-occlusion channel drawn as grey and nothing else — one is white,
+    // fully occluded is black — which is how the two techniques in
+    // `docs/plan/46-ambient-occlusion.md`'s ladder are actually compared. A
+    // composited frame shows occlusion times albedo times ambient, and a
+    // difference in the first is not separable from a difference in the other
+    // two by looking.
+    //
+    // **On a frame drawing without `RenderEffects::AMBIENT_OCCLUSION` this is
+    // white everywhere**, because that is the 1×1 image the renderer binds
+    // instead of a computed channel. That is the honest picture and not a bug to
+    // paper over: "no occlusion was computed" and "nothing occludes here" are the
+    // same value by construction, and the ambient term multiplies by it either
+    // way.
+    if (frame.ambient.w >= OCCLUSION_VIEW)
+    {
+        FragmentOutput occlusion;
+        float value = occlusion_at(input.position.xy);
+        // Straight into the `Rgba16Float` scene target, on the normals view's
+        // terms: the tonemap resolves it as `saturate(colour * exposure)`, the
+        // identity on `[0, 1]` at the default exposure, so the channel reaches
+        // the swapchain unchanged. Grey rather than a ramp, because the eye
+        // reads a gradient in luminance and a false-colour ramp would put a
+        // visible edge where the ramp changes hue and none where the occlusion
+        // steps.
+        occlusion.lit = float4(value, value, value, 1.0);
+        // Not reflective, for the normals view's reason: `ssr.slang` must march
+        // nothing off a debug picture.
+        occlusion.reflectivity = float4(0.0, 0.0, 0.0, 0.0);
+        return occlusion;
+    }
+
     if (frame.ambient.w >= LOD_VIEW)
     {
         FragmentOutput tint;
@@ -2878,12 +2948,7 @@ FragmentOutput fragmentMain(VertexOutput input)
     // total occlusion — the binding's own declaration argues that at length. It
     // costs nothing on a frame-sized channel, where every fragment is inside the
     // image already.
-    uint occlusion_width;
-    uint occlusion_height;
-    ambient_occlusion.GetDimensions(occlusion_width, occlusion_height);
-    int2 occlusion_texel = min(int2(input.position.xy),
-                               int2(occlusion_width, occlusion_height) - 1);
-    float occluded = ambient_occlusion.Load(int3(occlusion_texel, 0));
+    float occluded = occlusion_at(input.position.xy);
 
     // Ambient is not the sun and keeps its full value in shadow, which is what
     // stops a shadowed surface from being black. The association here is the one

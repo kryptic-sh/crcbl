@@ -117,9 +117,13 @@ pub struct Lantern {
     /// The fourth layer, copied once for the reason [`Paths`] is: a row is built
     /// where there is no GPU to ask, and it cannot say "unavailable" without it.
     device_effects: RenderEffects,
+    /// Whether the main view draws its occlusion channel as grey rather than the
+    /// shaded picture, edited by the panel's `AO VIEW` row and handed to the GPU
+    /// in [`HostedGame::draw`] for the reason [`Lantern::effect_request`] is.
+    occlusion_view: bool,
     /// The values the pause panel was last built for — `None` until the first
     /// pause, so the panel is always rebuilt once with the real ones.
-    shown: Option<(CameraMode, EffectRequest)>,
+    shown: Option<(CameraMode, EffectRequest, bool)>,
     /// Whether the loop has the simulation stopped, recorded in
     /// [`HostedGame::menu_kind`].
     ///
@@ -148,6 +152,7 @@ impl Lantern {
             paths,
             effect_request: effects,
             device_effects,
+            occlusion_view: false,
             shown: None,
             paused: false,
             ticks: 0,
@@ -449,6 +454,12 @@ impl HostedGame for Lantern {
                 self.effect_request =
                     menu::toggled_effect(self.effect_request, self.device_effects, effect);
             }
+            // Not routed through `effect_request`: this picks which image the
+            // forward pass writes, and every layer of that request is about
+            // which passes run at all.
+            LanternAction::ToggleOcclusionView => {
+                self.occlusion_view = !self.occlusion_view;
+            }
         }
     }
 
@@ -458,7 +469,7 @@ impl HostedGame for Lantern {
         // frame, or the cursor comes back one frame into a menu the reviewer is
         // already trying to click.
         self.paused = paused;
-        if paused && self.shown != Some((self.camera, self.effect_request)) {
+        if paused && self.shown != Some((self.camera, self.effect_request, self.occlusion_view)) {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
             // on a row does not throw the reviewer back to the top.
@@ -468,7 +479,12 @@ impl HostedGame for Lantern {
                 .map(|item| item.id);
             menus.replace(
                 true,
-                menu::pause_menu(self.camera, self.effect_request, self.device_effects),
+                menu::pause_menu(
+                    self.camera,
+                    self.effect_request,
+                    self.device_effects,
+                    self.occlusion_view,
+                ),
             );
             if let Some(id) = selected {
                 menus
@@ -476,7 +492,7 @@ impl HostedGame for Lantern {
                     .expect("the pause menu is in the set")
                     .select_id(id);
             }
-            self.shown = Some((self.camera, self.effect_request));
+            self.shown = Some((self.camera, self.effect_request, self.occlusion_view));
         }
         paused
     }
@@ -491,6 +507,7 @@ impl HostedGame for Lantern {
         // behind it. `set_effect_request` lands on this frame — `begin_frame`
         // has not run yet — and the frame in flight never moves.
         gpu.set_effect_request(self.effect_request);
+        gpu.set_occlusion_view(self.occlusion_view);
         // Re-read rather than recomputed: the device clamps last, so what the
         // panel and the summary report comes back off the renderer.
         self.paths = gpu.paths();

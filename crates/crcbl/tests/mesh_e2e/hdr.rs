@@ -1565,6 +1565,66 @@ fn normals_view_hdr(camera: &crcbl::render::Camera) -> HdrTarget {
     HdrTarget(hdr)
 }
 
+/// Where the slab under [`occlusion_probe_hdr`]'s cube sits.
+///
+/// **The cube alone is not a scene occlusion has anything to say about.** With
+/// nothing under it the only occluded pixels are the rim its own silhouette
+/// casts — four texels of this frame, measured — which is a population too thin
+/// to tell a working pass from a rounding step. A floor gives the cube a contact
+/// to close over, which is the same arrangement `crcbl::screenshot`'s
+/// `Scene::Ao` uses and for the same reason.
+///
+/// Wide enough to fill the frame under the cube and thin enough that its own
+/// sides are edge-on to this camera, and its top sits at `y = -0.5` — against
+/// the unit cube's own underside, so the contact is a corner rather than a gap.
+const OCCLUSION_FLOOR: (crcbl::math::Vec3, crcbl::math::Vec3) = (
+    crcbl::math::Vec3::new(0.0, -0.55, 0.0),
+    crcbl::math::Vec3::new(6.0, 0.1, 6.0),
+);
+
+/// One frame of a cube on a floor, drawn as a debug view rather than shaded.
+///
+/// [`normals_view_hdr`]'s two refusals, for its reasons, and one scene for all
+/// three callers: the occlusion frames and the normals frame that says which of
+/// their texels are geometry have to be the same arrangement, or the mask names
+/// pixels the measurement never drew.
+fn occlusion_probe_hdr(
+    camera: &crcbl::render::Camera,
+    normals: bool,
+    occlusion: bool,
+) -> HdrTarget {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::REFLECTIONS, Some(false))
+            .force(RenderEffects::AMBIENT_OCCLUSION, Some(occlusion)),
+        ..EffectRequest::default()
+    });
+    renderer.set_normals_view(normals);
+    renderer.set_occlusion_view(!normals);
+    crate::mesh_scene::place_cube_at(&mut renderer, crcbl::math::Mat4::IDENTITY);
+    let (at, scale) = OCCLUSION_FLOOR;
+    crate::mesh_scene::place(
+        &mut renderer,
+        crcbl::render::scene::DEMO_CUBE,
+        crcbl::render::scene::DEMO_UNTINTED,
+        crcbl::math::Mat4::from_scale(scale) * crcbl::math::Mat4::from_translation(at / scale),
+    );
+    let mut hdr = Vec::new();
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, camera, Some(&mut hdr));
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    HdrTarget(hdr)
+}
+
 /// The gradient sky the background reads as, chosen so no two bands and no two
 /// channels are equal.
 ///
@@ -1740,3 +1800,85 @@ fn no_sky_leaves_the_background_at_the_clear_colour() {
         "only {background} texels were background, so this asserted almost nothing"
     );
 }
+
+/// **The occlusion view draws the channel the occlusion pass wrote**, and draws
+/// the placeholder honestly when no pass wrote one.
+///
+/// Two frames of one scene, separated by `RenderEffects::AMBIENT_OCCLUSION`
+/// alone, and the claim is a pair rather than either half:
+///
+/// * With the pass **off** every drawn texel is exactly one. That is the 1×1
+///   white image the renderer binds in place of a computed channel, and it is
+///   what says the branch reached the bound texture at all — a branch that
+///   returned a literal white would pass this half and fail the other.
+/// * With the pass **on** some drawn texels are below one. That is what says
+///   the view reads the *computed* channel rather than the placeholder — a
+///   `set_occlusion_view` wired to nothing leaves the two frames identical.
+///
+/// Which texels are drawn comes out of a normals-view frame of the same scene,
+/// so no part of this test knows where the cube is: the background is the sky
+/// pass's pixels and `mesh.slang`'s branch never runs on them.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_occlusion_view_draws_the_channel_and_not_a_constant() {
+    let camera = mesh_camera(Projection::default());
+    let normals = unit_normals(&occlusion_probe_hdr(&camera, true, false));
+    let without = occlusion_probe_hdr(&camera, false, false);
+    let with = occlusion_probe_hdr(&camera, false, true);
+
+    let mut drawn = 0usize;
+    let mut placeholder = 0usize;
+    let mut occluded = 0usize;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            if normals[(y * MESH_EXTENT.0 + x) as usize].is_none() {
+                continue;
+            }
+            drawn += 1;
+            let off = without.pixel(x, y);
+            // Grey, not a channel: the branch writes one value into all three,
+            // so a frame that put the occlusion in red alone is not this frame.
+            assert!(
+                off[0] == off[1] && off[1] == off[2],
+                "the occlusion view is grey by construction, and ({x}, {y}) reads {off:?}",
+            );
+            if (off[0] - 1.0).abs() <= OCCLUSION_VIEW_TOLERANCE {
+                placeholder += 1;
+            }
+            if with.pixel(x, y)[0] < 1.0 - OCCLUSION_VIEW_STEP {
+                occluded += 1;
+            }
+        }
+    }
+    eprintln!(
+        "crcbl mesh e2e: occlusion view — {drawn} drawn texels, {placeholder} white without the \
+         pass, {occluded} occluded with it"
+    );
+    assert!(
+        drawn > 0,
+        "the normals frame found no geometry, so neither half of this has a population"
+    );
+    assert_eq!(
+        placeholder, drawn,
+        "with the occlusion pass off every drawn texel must read the 1x1 white placeholder"
+    );
+    assert!(
+        occluded > 0,
+        "with the pass on the view is still uniformly white, so it is not reading the channel"
+    );
+}
+
+/// How far a texel of the occlusion view may sit from one and still count as the
+/// placeholder.
+///
+/// The value travels as an `R8Unorm` texel through an `Rgba16Float` target and a
+/// tonemap that is the identity at the default exposure, so an exact one is what
+/// this should measure; the tolerance is there for the float target's own
+/// rounding and is far under [`OCCLUSION_VIEW_STEP`].
+const OCCLUSION_VIEW_TOLERANCE: f32 = 1e-3;
+
+/// How far below one a texel must fall to count as occluded.
+///
+/// An `R8Unorm` channel steps by 1/255, so this is several of its steps: what it
+/// separates is a surface the pass darkened from one the pass rounded.
+const OCCLUSION_VIEW_STEP: f32 = 0.02;

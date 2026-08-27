@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **An ambient-occlusion debug view.**
+  `crcbl_render::ForwardRenderer::set_occlusion_view` draws the blurred
+  occlusion channel as grey in place of the shaded picture, on the sentinel lane
+  the normals, LOD-tint and heatmap views already share — and outermost on it,
+  so it wins over all three. `lantern`'s pause panel gains an `AO VIEW` row for
+  it, which is **not** the `AO` row above it: that one turns the occlusion pass
+  off, this one changes which picture is drawn. On a frame with the pass off the
+  view is white everywhere, because that is the 1×1 image the renderer binds in
+  place of a computed channel.
+
 - **`crcbl_shaders::volumetric`: the arithmetic a froxel volumetric pass runs
   on.** `phase` is Henyey-Greenstein — the angular half, which is what makes fog
   glow around a light rather than uniformly — and `integrate_slice` is what one

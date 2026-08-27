@@ -490,6 +490,25 @@ impl FrameUniforms {
     /// `crcbl_render::ForwardRenderer::set_heatmap` is what writes it.
     pub const HEATMAP_VIEW_ON: f32 = 3.0;
 
+    /// [`ambient`](Self::ambient)`.w` for the **occlusion view**: `mesh.slang`'s
+    /// fragment stage draws the ambient-occlusion channel alone as grey instead
+    /// of shading, one white and fully occluded black.
+    ///
+    /// **Four sentinels in one lane now**, and this is the outermost — a `4.0`
+    /// clears every threshold below it, so the shader has to test this one
+    /// first. `the_occlusion_view_threshold_lies_above_the_heatmap` holds the
+    /// interleaving.
+    ///
+    /// Unlike the tint and the heatmap this is a **fragment**-stage view and
+    /// costs the geometry stages nothing to produce, so it works on every
+    /// `GeometryPath` rather than on the mesh-shader one alone. What it draws on
+    /// a frame without `RenderEffects::AMBIENT_OCCLUSION` is white, because that
+    /// is the 1×1 image the renderer binds in place of a computed channel — the
+    /// shader's own branch says why that is the honest answer rather than a gap.
+    ///
+    /// `crcbl_render::ForwardRenderer::set_occlusion_view` is what writes it.
+    pub const OCCLUSION_VIEW_ON: f32 = 4.0;
+
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; FRAME_UNIFORMS_SIZE] {
@@ -1792,6 +1811,56 @@ mod tests {
             .unwrap_or_else(|_| panic!("`{literal}` is not a float"))
     }
 
+    /// **The occlusion view's threshold lies above the heatmap's**, so one lane
+    /// can carry five states.
+    ///
+    /// The lane holds off, normals, tint, heatmap and occlusion, and the
+    /// sentinels ascend — so a `4.0` clears every threshold and only the *order*
+    /// of the tests keeps it out of the four lower branches. That order is
+    /// asserted here rather than left to a reader, exactly as
+    /// [`the_heatmap_view_threshold_lies_above_the_lod_view`] asserts the pair
+    /// below it.
+    ///
+    /// The occlusion view is `mesh.slang`'s alone: it reads a screen-space
+    /// channel by `SV_Position`, which the geometry stages neither produce nor
+    /// need, so `mesh_cluster.slang` declares no `OCCLUSION_VIEW`. The absence
+    /// is asserted, because one appearing there later would be a second place
+    /// the interleaving has to hold.
+    ///
+    /// [`the_heatmap_view_threshold_lies_above_the_lod_view`]: fn@the_heatmap_view_threshold_lies_above_the_lod_view
+    #[test]
+    fn the_occlusion_view_threshold_lies_above_the_heatmap() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let occlusion = shader_float(mesh, "OCCLUSION_VIEW");
+        assert!(
+            FrameUniforms::HEATMAP_VIEW_ON < occlusion
+                && occlusion < FrameUniforms::OCCLUSION_VIEW_ON,
+            "mesh.slang switches at {occlusion}, which does not separate the heatmap's {} from \
+             the occlusion view's {}",
+            FrameUniforms::HEATMAP_VIEW_ON,
+            FrameUniforms::OCCLUSION_VIEW_ON,
+        );
+
+        let occlusion_at = mesh
+            .find("if (frame.ambient.w >= OCCLUSION_VIEW)")
+            .expect("mesh.slang's fragment stage tests the occlusion view");
+        let lod_at = mesh
+            .find("if (frame.ambient.w >= LOD_VIEW)")
+            .expect("mesh.slang's fragment stage tests the LOD view");
+        assert!(
+            occlusion_at < lod_at,
+            "the occlusion test must come first, or a frame asking for it is caught by the LOD \
+             threshold and draws an unshaded vertex colour instead"
+        );
+
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        assert!(
+            !cluster.contains("OCCLUSION_VIEW"),
+            "mesh_cluster.slang has grown an OCCLUSION_VIEW; the interleaving now has to hold in \
+             two files and this test only checks one"
+        );
+    }
+
     /// **The heatmap's threshold lies above the LOD view's**, so one lane can
     /// carry four states.
     ///
@@ -1801,6 +1870,9 @@ mod tests {
     /// `mesh_cluster.slang` is asserted here rather than left to a reader,
     /// exactly as `the_lod_view_threshold_lies_above_the_normals_view` asserts
     /// the pair below it.
+    ///
+    /// The occlusion view sits one sentinel further out again and is tested
+    /// ahead of both — see `the_occlusion_view_threshold_lies_above_the_heatmap`.
     ///
     /// `mesh.slang` deliberately has **no** `HEATMAP_VIEW`: its fragment stage
     /// treats every overlay the same way — pass the colour through unshaded —
