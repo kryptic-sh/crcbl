@@ -1100,7 +1100,7 @@ pub fn key_light(camera: &Camera) -> DirectionalLight {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl::render::{OrbitCamera, Projection};
+    use crcbl::render::{EffectOverride, EffectRequest, OrbitCamera, Projection};
     use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 
     /// The frame the grid proof below is drawn at.
@@ -1301,6 +1301,28 @@ mod tests {
     /// The light is this application's own [`key_light`], so the cube is lit from
     /// wherever the camera stands and no face of it can come out equal to the
     /// clear colour by accident.
+    /// Takes the antialiasing resolve off a proof frame's renderer.
+    ///
+    /// **A resolve is a filter over the thing these frames measure.** Every
+    /// helper below reads individual texels back and compares them — against a
+    /// normal encoding, against the same texel of a second frame, against the
+    /// background — and a blend along every silhouette moves exactly those
+    /// texels. `crcbl_render::ForwardRenderer::resolved_effects` already takes
+    /// the bit off for the debug views that are readouts rather than pictures,
+    /// and that argument is this one; these frames are the same kind of thing
+    /// and are not covered by it, because two of them read a *shaded* frame as
+    /// the comparand.
+    ///
+    /// Programmatic rather than the camera layer, so it wins over whatever a
+    /// settings file asked for — see
+    /// [`EffectRequest`](crcbl::render::EffectRequest).
+    fn without_the_resolve(renderer: &mut ForwardRenderer) {
+        renderer.set_effect_request(EffectRequest {
+            programmatic: EffectOverride::none().force(RenderEffects::ANTIALIASING, Some(false)),
+            ..EffectRequest::default()
+        });
+    }
+
     fn wireframe_proof_frame(on: bool) -> (u32, u32, Vec<u8>) {
         let camera = Camera {
             eye: Vec3::new(2.6, 2.0, 3.4),
@@ -1328,6 +1350,7 @@ mod tests {
                         transform: crcbl::math::Mat4::IDENTITY,
                     })
                     .expect("one instance fits in any pool");
+                without_the_resolve(&mut renderer);
                 if on {
                     renderer.set_wireframe(device, true)?;
                 }
@@ -1375,6 +1398,7 @@ mod tests {
                         transform: crcbl::math::Mat4::IDENTITY,
                     })
                     .expect("one instance fits in any pool");
+                without_the_resolve(&mut renderer);
                 if let Some(exposure) = exposure {
                     renderer.set_exposure(exposure);
                 }
@@ -1662,6 +1686,7 @@ mod tests {
                         transform: crcbl::math::Mat4::IDENTITY,
                     })
                     .expect("one instance fits in any pool");
+                without_the_resolve(&mut renderer);
                 renderer.set_normals_view(on);
                 Ok(ForwardScene {
                     camera,
