@@ -214,8 +214,8 @@ fn a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry() {
 
     // And somewhere in the left third there is a hue the cube does not own. The
     // check is on the *ratios* between channels rather than on an exact colour,
-    // because the value that reaches the swapchain has been through Lambert,
-    // Blinn and a tonemap; what survives all three is which channel leads.
+    // because the value that reaches the swapchain has been through Lambert, a
+    // GGX lobe and a tonemap; what survives all three is which channel leads.
     // `PYRAMID_SIDE_COLORS`' visible sides are the `+Z` violet and the `+X`
     // teal, and no cube face is either.
     let violet = (0..MESH_EXTENT.1)
@@ -256,7 +256,7 @@ const OPEN_BOX_AT: Vec3 = PYRAMID_AT;
 ///
 /// Ratios between channels rather than an exact colour, for the reason
 /// [`a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry`] gives: what
-/// survives Lambert, Blinn and the tonemap is which channel leads.
+/// survives Lambert, the GGX lobe and the tonemap is which channel leads.
 fn leading_channel_texels(image: &crcbl_golden::Image, channel: usize, margin: u32) -> usize {
     (0..MESH_EXTENT.1)
         .flat_map(|y| (0..MESH_EXTENT.0 / 3).map(move |x| (x, y)))

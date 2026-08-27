@@ -2,7 +2,16 @@
 
 // Milestones 3 and 4 of `docs/plan/02-vulkan-backend.md`'s ladder: a
 // depth-tested mesh with a perspective camera in a uniform buffer, lit by a
-// single directional light with Lambert diffuse and Blinn-Phong specular.
+// clustered light list.
+//
+// **The shading model is physically based, not the rung's Blinn-Phong.** Rung 4
+// asks for "Lambert+Blinn — enough to see geometry properly; real material model
+// comes with stage 3/5", and the real one arrived: Lambert diffuse plus one
+// Cook-Torrance GGX lobe — Trowbridge-Reitz `D`, Smith height-correlated `V`,
+// Schlick `F` — driven by a glTF metallic-roughness material row. `ggx_lobe` is
+// the lobe and carries the derivation; `GpuMaterial` is the row. Blinn's
+// exponent-and-strength pair is what this replaced and appears in this file only
+// where a comment says so.
 //
 // Milestone 5 — the orthographic camera — needs **nothing** from this file. That
 // is the point of rung 5: "proving the 2D story (z = z-index) is just a

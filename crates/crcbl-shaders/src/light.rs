@@ -206,7 +206,8 @@ pub struct GpuLight {
     /// `Rgba16Float` and the tonemap pass is what maps it into the swapchain.
     pub color: [f32; 4],
     /// For [`KIND_DIRECTIONAL`], the unit vector **towards** the light in `xyz`
-    /// — the vector both the Lambert and the Blinn half-vector terms want. For
+    /// — the vector both the Lambert term and the specular lobe's half-vector
+    /// want. For
     /// [`KIND_SPOT`], the unit vector the cone points **along**, away from the
     /// light. Unread for [`KIND_POINT`].
     ///

@@ -210,8 +210,8 @@ fn the_hdr_target_carries_values_an_eight_bit_target_could_not() {
     );
     assert!(
         peak > 1.0,
-        "the Blinn highlight must exceed 1.0 somewhere, or the RGBA16F target is \
-         carrying nothing an Rgba8 one could not; peak was {peak}"
+        "the specular highlight must exceed 1.0 somewhere, or the RGBA16F target \
+         is carrying nothing an Rgba8 one could not; peak was {peak}"
     );
     assert!(
         peak.is_finite() && peak < 100.0,

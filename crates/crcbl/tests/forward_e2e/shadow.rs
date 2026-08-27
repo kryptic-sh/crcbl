@@ -542,7 +542,7 @@ fn the_shadow_atlas_is_written_rather_than_left_at_its_clear_value() {
 ///
 /// Measured as a ratio between two bands of the same frame rather than as an
 /// absolute colour, for the reason the mesh suite's own light test gives: what
-/// survives Lambert, Blinn and the tonemap is which side leads.
+/// survives Lambert, the GGX lobe and the tonemap is which side leads.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn a_wall_darkens_the_floor_it_stands_on_and_the_sun_decides_which_half() {

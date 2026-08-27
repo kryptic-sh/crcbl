@@ -21,7 +21,10 @@
 //! `docs/plan/02-vulkan-backend.md`'s ladder rungs 3–5, and nothing beyond:
 //!
 //! * **3** — depth-tested spinning mesh, perspective camera in a uniform buffer.
-//! * **4** — one directional light, Lambert + Blinn (in `mesh.slang`).
+//! * **4** — one directional light (in `mesh.slang`). The rung's own wording is
+//!   "Lambert+Blinn"; what shipped is Lambert plus a Cook-Torrance GGX lobe over
+//!   a glTF metallic-roughness row, which is that rung's "real material model"
+//!   arriving early rather than a different rung.
 //! * **5** — orthographic mode, which is [`Camera::projection`] and *nothing
 //!   else*: no second pipeline, no branch in this file, no shader permutation.
 //!
@@ -7650,7 +7653,7 @@ impl MeshModules {
             Some((cluster_mesh, task)) => {
                 // **The mesh stage's module is `mesh_cluster.slang`; the
                 // fragment stage's is still `mesh.slang`'s.** A pipeline takes a
-                // module per stage, so the shading — Lambert, Blinn, the
+                // module per stage, so the shading — Lambert, the GGX lobe, the
                 // material row, the page sample — is the same code both paths
                 // run rather than a copy that agrees today.
                 // `mesh_cluster.slang`'s header carries the argument, and its

@@ -325,15 +325,18 @@ impl Camera {
 /// One light, no shadows, no attenuation. `docs/plan/02-vulkan-backend.md` rung
 /// 4 is "single directional light, Lambert+Blinn — enough to see geometry
 /// properly; real material model comes with stage 3/5", and cascaded shadow maps
-/// are explicitly P7 (topic 18).
+/// are explicitly P7 (topic 18). The real material model arrived: `mesh.slang`
+/// shades with a Cook-Torrance GGX lobe against a glTF metallic-roughness row,
+/// and the rung's Blinn wording is what it replaced.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectionalLight {
     /// Direction **towards** the light, in render space. Normalised on the way
     /// into the uniform block.
     ///
     /// Towards, not "the direction the light travels": that is the vector both
-    /// the Lambert term and the Blinn half-vector want, and storing the other
-    /// one means every consumer negates it and one of them eventually forgets.
+    /// the Lambert term and the specular lobe's half-vector want, and storing
+    /// the other one means every consumer negates it and one of them eventually
+    /// forgets.
     pub direction: Vec3,
     /// Colour premultiplied by intensity. **May exceed 1.0** — the scene target
     /// is `Rgba16Float` precisely so that it can.

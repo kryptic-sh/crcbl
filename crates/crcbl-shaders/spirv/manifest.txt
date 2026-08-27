@@ -180,26 +180,26 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 13565d74a184b9cb778214a0bbb060bb2043fa964233d9e0a52c40fa823e24ae
+source-sha256 = 0e3dc27a35912a94fd59821c545eda5ce740edb25f1060fd6dc8a7f0f80aa544
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 59aa3d69eef5a60c21e3ac45f40448618e8d70ff54847d98b78b5c20e1b9fb78
 wgsl = wgsl/mesh.wgsl
 wgsl-sha256 = 01520b05251a25d73e805d5648f4baaa414166c5e73fafa2f68c497bf9b67a39
 msl = msl/mesh.metal
-msl-sha256 = 5081448d95318cb8c6e6d2db528b61648d3d73f1fe79c86b0d65070912b27a18
+msl-sha256 = a13440347f9bd7021886cfb8af3be1762c19d8e13bb5b4e56986414d2dc9ab27
 dxil = vertexMain:dxil/mesh.vertexMain.dxil:f21d6377138d35b1e61aab38574b5a372da0724978adffba7b4e1b3c5459ad55
 dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:57d2be07ae4dd46da02ac994f6db679afc9456b24799f8b6d6a54d8be3df5843
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = 4e84c0865ceb697b5ae93e38a9b8e8e63b7141fd7fb6d0cb22c8aab75b92985f
+source-sha256 = 8f4b9dc607eff5f0eff7d2b48271dd5996ac72310e49ffdc16cb62e54888e752
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
 spirv-sha256 = 35ab6f30dd4a81d54e665274e15a7063386522f429e1c7cbb34c25099ba690b9
 msl = msl/mesh_cluster.metal
-msl-sha256 = b6a86e8302f2b4c4c8993c24d236dcca2a03113a26f6ccaae45efe1fdd37cae7
+msl-sha256 = 0c74535467ed2322d96195fa16a321c6c1e15e0e22b3f64d3122135bee8bd2a2
 dxil = meshMain:dxil/mesh_cluster.meshMain.dxil:d0d3e5a00748473089fbb2a0a693964bb4f13c6d337ea9c942ccb392a56013b6
 dxil = taskMain:dxil/mesh_cluster.taskMain.dxil:9e1119f7f0f90577ac0f95fb3e475be4890bbee7830bbee4745b696e68f3e325
 dxil = amplifiedMeshMain:dxil/mesh_cluster.amplifiedMeshMain.dxil:5c9fa7dc14a8a9a78a250285c7cdcc81fe7ccb02852cc2b44ddaa1d413978913
@@ -338,7 +338,7 @@ entry-points = writingTaskMain:taskext
 
 [tonemap]
 source = shaders/tonemap.slang
-source-sha256 = 384a16dc383500bbf9c9601417616072af98fbec7cfa16336371718219606f30
+source-sha256 = 411af74962f6ff9718c49e48c19f6624d218d36cee0fb3a5a226e0b615a8e0f5
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/tonemap.spv
 spirv-sha256 = fd57c8276e9b271d00538aaa136fb4a2870ecf9d481dafadb17bb6394e934488

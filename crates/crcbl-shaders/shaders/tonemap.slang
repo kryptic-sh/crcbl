@@ -30,7 +30,7 @@
 // caller who moves it has asked for the picture to change. What it rules out is
 // a curve that would shift every display-referred colour whatever the exposure.
 //
-// It is still a tonemap and not a no-op: the lit pass's Blinn highlight
+// It is still a tonemap and not a no-op: the lit pass's specular highlight
 // genuinely exceeds 1.0, and this is where that stops being representable. The
 // `crcbl-vk` e2e suite reads the HDR target back and asserts a value above 1.0
 // is in it, which is what makes "the RGBA16F path is real" a test result rather

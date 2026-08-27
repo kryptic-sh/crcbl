@@ -18,7 +18,8 @@
 // deliberately identical, and where it could drift it is not duplicated at all:
 // **the fragment stage of the mesh pipeline is `mesh.slang`'s own
 // `fragmentMain`**, named as a second module at pipeline creation. So the
-// shading — Lambert, Blinn, the material row, the page sample — exists once. A
+// shading — Lambert, the GGX lobe, the material row, the page sample — exists
+// once. A
 // copy of it here would be the drift this arrangement exists to prevent, and it
 // would be invisible: two shading models that agree today and differ after one
 // of them is edited.
