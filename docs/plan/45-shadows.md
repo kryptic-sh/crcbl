@@ -368,8 +368,9 @@ its band opens at 2.86 m and the floor only comes into frame between 2.83 m and
 fragments inside the band, and nothing at all for the ones outside it.** A band
 is a shell rather than a volume, so the share of the frame that pays is smaller
 than the fraction suggests, and the outermost cascade has nothing to fade into
-and never pays. That share was not measured; there is no shadow-pass timing in
-the tree to measure it against yet.
+and never pays. That share was not measured on its own, though the pass it lives
+in now is — see the eleventh decision, which prices the whole forward pass with
+`crcbl_render::PassTimers`.
 
 Goldens re-blessed: `room.png` and `live.png` in `apps/lantern/tests/golden/`,
 at 674 of 49 152 pixels differing (SSIM 0.995797) and 8714 of 691 200 (SSIM
@@ -595,8 +596,10 @@ Every scene in `crates/crcbl/tests/render_e2e.rs` still matches at 256×192 — 
 penumbra change falls under the rasteriser tolerance at that size — and so does
 every browser-path golden.
 
-**Nothing in the tree times this either.** Sixteen taps on top of thirty-two, on
-the fragment path only; `docs/backlog.md` carries the gap.
+**Sixteen taps on top of thirty-two, on the fragment path only.** What that
+costs was not separated out, but the pass it is in is timed: the eleventh
+decision below has the forward pass's own milliseconds on two adapters, and the
+instrument was in the tree the whole time this said otherwise.
 
 ### An eleventh, taken 2026-08-28: the disc is taken only at an edge
 
@@ -670,11 +673,45 @@ of those failures is quiet: a bunched probe, a missing centre tap and an index
 past the end of the table all draw a frame, and none of them draws one a golden
 attributes to the probe.
 
-**This still does not time anything.** It removes taps a frame was demonstrably
-not using; what a tap costs is unmeasured, and the backlog's remaining three
-answers — a timestamp around the forward pass, the tap counts as quality
-settings, or nothing — are unchanged by it. The Pages run for this commit is the
-only instrument, and it reports wall clock per demo, not a pass.
+#### What it saved, measured
+
+**The instrument was already in the tree.** `crcbl_render::PassTimers` brackets
+every pass in the graph with a GPU timestamp pair, `apps/lantern` builds one,
+and `crcbl::engine`'s `finish` logs the whole per-pass report at `info`. The
+backlog's first answer — "a timestamp around the forward pass" — did not need
+building; it needed running. `lantern --headless --frames N --size WxH` under
+`RUST_LOG=info` prints it, and the shadow filter's cost is in the **`forward`**
+row, not the `shadow` one: `shadow` is the atlas draw, which this decision does
+not touch and which did not move.
+
+Five runs each on an RX 7900 XTX (radv, Mesa 26.2.1),
+`--size 1920x1080 --frames 400`, and three each on that machine's llvmpipe (LLVM
+22.1.8) at `--size 960x720 --frames 120`. The figure is the room view's
+`forward` row; lantern draws a second view for the wall monitor, which is small
+and moved with it. Medians:
+
+| Adapter           | `forward`, disc only | `forward`, with the probe | Cut |
+| ----------------- | -------------------- | ------------------------- | --- |
+| radv, 1920×1080   | 0.303 ms             | 0.221 ms                  | 27% |
+| llvmpipe, 960×720 | 11.281 ms            | 8.135 ms                  | 28% |
+
+**The two agree to a percentage point, and that answers the open question.** The
+backlog asked whether the 48 taps cost what they cost because they are taps or
+because of the branch divergence they add on a CPU rasteriser, where a lane runs
+every tap the widest fragment in its group takes. A SIMD GPU and a scalar
+software rasteriser cutting by the same share says taps, not divergence.
+
+For scale, the same frame's whole report on radv at 1920×1080 — frame 397, 53
+passes over both views, 0.986 ms of GPU time — puts `ssao` at 0.255 ms and 25.9%
+of it, `forward` at 0.199 ms, `ssr` at 0.099 ms, `shadow` at 0.070 ms and the
+five Hi-Z levels at 0.018 ms between them. **GTAO is the most expensive pass in
+this frame**, which is a finding for
+[46-ambient-occlusion.md](46-ambient-occlusion.md) rather than for this page.
+
+What is still true is that **nothing runs this on its own**: the numbers above
+came from a hand-run binary, there is no harness that records a pass's cost and
+fails on a regression, and the browser gate still reports wall clock per demo
+rather than per pass. `docs/backlog.md` carries that as what is left.
 
 ### The quality ladder, taken 2026-08-27
 

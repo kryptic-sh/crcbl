@@ -27,9 +27,12 @@ says what 16, 24 and 32 filter taps leave on a smooth shadowed surface, and the
 wobble table in the tenth says what the search buys on a quantised edge. Neither
 says what any of it costs.
 
-There is no shadow-pass timing in the tree to measure it with — no GPU timestamp
-around the lighting draw, no profiler HUD row for it. So the filter shipped on
-quality evidence alone.
+**That sentence used to continue "and there is no shadow-pass timing in the tree
+to measure it with", and it was wrong.** `crcbl_render::PassTimers` brackets
+every pass in the graph with a GPU timestamp pair, `apps/lantern` builds one,
+and `crcbl::engine`'s `finish` logs the whole per-pass report at `info`. The
+instrument was there for both decisions; nobody ran it. What was true is that
+the filter shipped on quality evidence alone.
 
 **Something timed it anyway, and it went red.** The Pages workflow's browser
 gate runs each demo against SwiftShader with a `timeout-minutes: 10` cap per
@@ -54,29 +57,39 @@ Two commits of main did not deploy on that; the caps for quarry and lantern were
 raised to 20 minutes on 2026-08-28 and the gate has run inside them since. The
 cap change bought the site back and priced nothing.
 
-What is not yet known: whether the cost is the 48 taps themselves or the branch
-divergence they add on a CPU rasteriser, since a SwiftShader lane runs every tap
-the widest fragment in it takes.
+**Two of the four answers below are now taken.** The first —
+`docs/plan/45-shadows.md`'s eleventh decision, 2026-08-28 — put a five-tap probe
+in front of the disc, so a fragment away from a shadow edge costs 5 taps rather
+than 32 and a sun-lit one 21 rather than 48, moving no golden on either adapter.
+The second was to run the timer that already existed, and it did:
+`lantern --headless --frames N --size WxH` under `RUST_LOG=info` prints the
+per-pass report, and the filter's cost is in the **`forward`** row rather than
+the `shadow` one — `shadow` is the atlas draw and did not move.
 
-**The first answer below shipped 2026-08-28** — `docs/plan/45-shadows.md`'s
-eleventh decision — and it removed taps rather than measuring them: a five-tap
-probe decides whether the disc is worth taking, so a fragment away from a shadow
-edge costs 5 taps rather than 32 and a sun-lit one 21 rather than 48. It moved
-no golden on either of the two adapters run against it. What it did **not** do
-is answer this entry's actual question, which is what a tap costs; the three
-below are still the whole of that.
+| Adapter           | `forward`, disc only | `forward`, with the probe | Cut |
+| ----------------- | -------------------- | ------------------------- | --- |
+| radv, 1920×1080   | 0.303 ms             | 0.221 ms                  | 27% |
+| llvmpipe, 960×720 | 11.281 ms            | 8.135 ms                  | 28% |
 
-What would settle it, in order of cost:
+Medians of five runs and of three. **This also settles what was not yet known**:
+a SIMD GPU and a scalar software rasteriser cut by the same share, so the 48
+taps cost what they cost because they are taps, not because of the branch
+divergence a SwiftShader lane adds by running every tap the widest fragment in
+its group takes.
 
-1. **A timestamp around the forward pass**, which the HAL already has the
-   primitives for, reported by the sample the way the froxel pass's dispatch
-   counts are. That prices this and every later rung.
+What is left, in order of cost:
+
+1. **A harness that records a pass's cost and fails on a regression.** The
+   numbers above came from a hand-run binary read out of a log. Nothing in the
+   tree would notice a rung doubling the forward pass, and the browser gate —
+   the only automated instrument that has ever reacted to this — reports wall
+   clock per demo, not per pass.
 2. **`SHADOW_TAPS` and `SHADOW_SEARCH_TAPS` as graphics-quality settings**
    rather than constants — the natural first entries for the settings seam,
    since 16 filter taps is a real quality tier rather than a broken one and a
    search of eight is a coarser estimate rather than no estimate. The two tables
    say exactly what each tier looks like.
-3. Nothing, and accept it, which is where it stands.
+3. Nothing, and accept it, which is where the remaining two stand.
 
 What the early-out left owed:
 
@@ -141,10 +154,16 @@ the evidence. What the slice deferred or turned up:
   been a second technique nothing could reach. It is one `git show` away when
   the seam exists; the entry above on `SHADOW_TAPS` as a quality setting is the
   same question for shadows and the two want answering together.
-- **Nothing times GTAO either.** It doubled the AO pass's depth taps, eight to
-  sixteen, and added an `acos_approx` and a `sqrt` per tap. The shadow-filter
-  entry above is the same gap and the same missing timestamp; a browser gate
-  already on a timeout cap is the only instrument in the tree that will notice.
+- **GTAO is the most expensive pass in lantern's frame, and that was measured
+  2026-08-28.** It doubled the AO pass's depth taps, eight to sixteen, and added
+  an `acos_approx` and a `sqrt` per tap. `crcbl_render::PassTimers` — which was
+  in the tree the whole time this entry said nothing could time it — puts `ssao`
+  at **0.255 ms, 25.9% of a 0.986 ms frame** on an RX 7900 XTX at 1920×1080,
+  against `forward`'s 0.199 ms, `ssr`'s 0.099 ms and `shadow`'s 0.070 ms. What
+  is **not** measured is GTAO against the eight-tap hemisphere it replaced,
+  because that code is gone; recovering it is the `git show` the tier bullet
+  above already describes, and it is what a quality seam would need in order to
+  offer the cheaper rung honestly.
 - **GTAO made the depth buffer's last bits visible on a fourth scene.**
   `Scene::Probes` now needs an LSB budget in `path_lsb_channels`, joining
   `Dunes`, `PointShadow` and `Ssr` — two adjacent red channels, one level, on

@@ -315,6 +315,20 @@ carries it.
 a quality bump. They need the `R8Unorm` target widened, so they are their own
 slice.
 
+**What the pass costs, measured 2026-08-28.** `crcbl_render::PassTimers` times
+every pass in the graph and `apps/lantern` builds one, so the report comes out
+of `lantern --headless --frames 400 --size 1920x1080` under `RUST_LOG=info`. On
+an RX 7900 XTX (radv, Mesa 26.2.1) that frame is 0.986 ms of GPU time across 53
+passes and both of lantern's views, and **`ssao` is the most expensive pass in
+it**: 0.255 ms, 25.9%, against `forward`'s 0.199 ms, `ssr`'s 0.099 ms,
+`shadow`'s 0.070 ms and `ssao-blur`'s 0.032 ms. Sixteen depth taps, an
+`acos_approx` and a `sqrt` per tap at 1920×1080 is what that buys.
+
+**It is not a comparison.** The eight-tap hemisphere is deleted, so what GTAO
+costs _against what it replaced_ is not measurable from this tree — recovering
+it is the `git show` the tier note above describes, and a quality seam that
+offered the cheaper rung would need exactly that number to be honest about it.
+
 ### The occlusion view, built 2026-08-28
 
 The buffer is now something a reviewer can look at. `mesh.slang`'s fragment

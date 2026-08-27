@@ -1614,10 +1614,14 @@ float shadow_normal_offset(float3 geometric_normal, float3 to_light)
 /// number — 24 taps over a 1.5-texel disc measured 1.129, slightly worse than
 /// the same taps over two texels — so the count is the only knob it has.
 ///
-/// **Nothing in the tree times this.** There is no shadow-pass timing to price
-/// thirty-two taps against nine, so the count was chosen on the picture alone;
-/// `docs/backlog.md` carries that as the gap it is, and this is the first
-/// constant a graphics-quality setting should reach for.
+/// **The count was chosen on the picture alone**, and it stays that way: what
+/// moved once it was measured is the *pass*, not the count. `crcbl_render`'s
+/// `PassTimers` prices the forward pass this filter runs in — 0.221 ms at
+/// 1920x1080 on an RX 7900 XTX against 0.303 ms without the probe below — and
+/// `docs/plan/45-shadows.md`'s eleventh decision has both adapters. Nothing
+/// prices thirty-two taps against sixteen, which is what a graphics-quality
+/// tier would need, and this is still the first constant such a setting should
+/// reach for.
 ///
 /// What a frame actually pays is lower than this count, and it is
 /// [`SHADOW_PROBE_TAPS`] that decides where: the disc is taken in full only
