@@ -14730,12 +14730,6 @@ The command-list, render-pass and clear slice. All in `crates/crcbl-dx12`.
   `crcbl_dx12::command`'s module docs say what it does rather than what it
   should do.
 
-- **Read-only depth attachments are refused.** `create_image_view` builds one
-  writable DSV per view, and the seam has no field asking for
-  `D3D12_DSV_FLAG_READ_ONLY_DEPTH`, so a view cannot know which pass will only
-  read it. **Needs a decision**: a second descriptor per depth view, or a field
-  on `ImageViewDesc`.
-
 - **Descriptor-heap slots are not retired, and the belief behind that is
   unverified.** The encoder retains an attachment's _resource_ but not its
   RTV/DSV slot, on the reading that D3D12 consumes those descriptors at record

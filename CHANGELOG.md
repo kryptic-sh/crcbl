@@ -583,6 +583,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The DX12 backend can bind a read-only depth attachment.** `depth_read` on a
+  render graph pass — what the sky pass and the ground grid both declare — was
+  refused outright with `invalid descriptor`, because an image view owned
+  exactly one depth descriptor and it was the writable one. A DSV's read-only
+  flags are part of the descriptor rather than something chosen at bind time, so
+  `create_image_view` now builds both and the render pass picks by what the
+  caller declared; the stencil flag rides along only for a format that has a
+  stencil plane. Clearing a read-only attachment is now refused at the seam,
+  which D3D12 itself only reports through the debug layer.
+
 - **Only one point light could ever cast a shadow, in any scene, on any
   backend.** `mesh.slang` admits a point light's cube only where its whole run
   of six faces is inside the atlas's light region, and that region was seven

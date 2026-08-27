@@ -146,8 +146,8 @@ pub(crate) fn check_view_type(
 /// Builds every descriptor an image view needs, or says which one D3D12 has
 /// no member for.
 ///
-/// The four are built *before* any heap slot is taken, so a combination
-/// D3D12 cannot express costs nothing and leaks nothing.
+/// They are built *before* any heap slot is taken, so a combination D3D12
+/// cannot express costs nothing and leaks nothing.
 pub(crate) fn build_views(
     entry_format: Format,
     usage: ImageUsage,
@@ -186,9 +186,18 @@ pub(crate) fn build_views(
         );
     }
     if usage.contains(ImageUsage::DEPTH_STENCIL_ATTACHMENT) {
+        // Both flag sets, because a DSV's read-only flags are baked into the
+        // descriptor and the render pass says which it wants only at bind
+        // time. See `view::depth_stencil`.
+        let format = conv::dxgi_format(desc.format);
+        let stencil = desc.format.has_stencil();
         built.depth_stencil = Some(
-            view::depth_stencil(conv::dxgi_format(desc.format), desc.view_type, sub)
+            view::depth_stencil(format, desc.view_type, sub, false, stencil)
                 .ok_or_else(|| refuse("depth stencil view"))?,
+        );
+        built.depth_stencil_read_only = Some(
+            view::depth_stencil(format, desc.view_type, sub, true, stencil)
+                .ok_or_else(|| refuse("read-only depth stencil view"))?,
         );
     }
     if built.is_empty() {
@@ -203,7 +212,7 @@ pub(crate) fn build_views(
 
 /// The view descriptors an image view will write, before any heap slot exists.
 ///
-/// No `Debug`: the four D3D12 structs are unions, and a derived formatter would
+/// No `Debug`: the D3D12 structs are unions, and a derived formatter would
 /// have to pick a member to print without knowing which one is live.
 #[derive(Default)]
 pub(crate) struct BuiltViews {
@@ -211,6 +220,7 @@ pub(crate) struct BuiltViews {
     pub(crate) unordered_access: Option<D3D12_UNORDERED_ACCESS_VIEW_DESC>,
     pub(crate) render_target: Option<D3D12_RENDER_TARGET_VIEW_DESC>,
     pub(crate) depth_stencil: Option<D3D12_DEPTH_STENCIL_VIEW_DESC>,
+    pub(crate) depth_stencil_read_only: Option<D3D12_DEPTH_STENCIL_VIEW_DESC>,
 }
 
 impl BuiltViews {
@@ -219,5 +229,6 @@ impl BuiltViews {
             && self.unordered_access.is_none()
             && self.render_target.is_none()
             && self.depth_stencil.is_none()
+            && self.depth_stencil_read_only.is_none()
     }
 }

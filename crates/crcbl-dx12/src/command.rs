@@ -1702,23 +1702,30 @@ impl CommandEncoder for Dx12CommandEncoder {
         let depth_stencil = match desc.depth_stencil_attachment {
             None => None,
             Some(attachment) => {
-                if attachment.read_only {
-                    // A read-only depth attachment is a DSV created with
-                    // `D3D12_DSV_FLAG_READ_ONLY_DEPTH`/`_STENCIL`, and
-                    // `crate::device`'s `create_image_view` creates neither —
-                    // the seam has no field to ask for one, so a view cannot
-                    // know which pass will read it. Binding the writable
-                    // descriptor instead would be the silent version: the pass
-                    // reads correctly and the image is in the wrong state.
+                let clears = matches!(attachment.depth_load, LoadOp::Clear)
+                    || matches!(attachment.stencil_load, LoadOp::Clear);
+                if attachment.read_only && clears {
+                    // `ClearDepthStencilView` writes the plane, and a read-only
+                    // DSV is the descriptor that says this pass will not. D3D12
+                    // reports that as a debug-layer message and nothing else,
+                    // so the clear is dropped on a driver with no debug layer
+                    // and the pass tests whatever the last one left.
                     self.fail(HalError::InvalidDescriptor(
-                        "a read-only depth/stencil attachment needs a DSV created with \
-                         D3D12_DSV_FLAG_READ_ONLY_DEPTH, and this backend creates one writable \
-                         descriptor per view (the DX12 pipeline slice)"
+                        "a read-only depth/stencil attachment cannot be cleared: the pass \
+                         declared it will only test the plane it is asking to overwrite"
                             .to_string(),
                     ));
                     return;
                 }
-                match self.device.depth_attachment(attachment.view) {
+                // `read_only` picks the DSV whose flags say this pass only
+                // tests depth; `create_image_view` builds both. Binding the
+                // writable descriptor for a read-only pass would be the silent
+                // version: the pass reads correctly and the image is in the
+                // wrong state.
+                match self
+                    .device
+                    .depth_attachment(attachment.view, attachment.read_only)
+                {
                     Ok(reference) => {
                         self.retain(&reference.image);
                         Some(reference)

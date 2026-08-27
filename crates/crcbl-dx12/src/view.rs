@@ -34,7 +34,8 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, D3D12_DEPTH_STENCIL_VIEW_DESC,
     D3D12_DEPTH_STENCIL_VIEW_DESC_0, D3D12_DSV_DIMENSION_TEXTURE1D, D3D12_DSV_DIMENSION_TEXTURE2D,
     D3D12_DSV_DIMENSION_TEXTURE2DARRAY, D3D12_DSV_DIMENSION_TEXTURE2DMS,
-    D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY, D3D12_DSV_FLAG_NONE, D3D12_RENDER_TARGET_VIEW_DESC,
+    D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY, D3D12_DSV_FLAG_NONE, D3D12_DSV_FLAG_READ_ONLY_DEPTH,
+    D3D12_DSV_FLAG_READ_ONLY_STENCIL, D3D12_RENDER_TARGET_VIEW_DESC,
     D3D12_RENDER_TARGET_VIEW_DESC_0, D3D12_RTV_DIMENSION_TEXTURE1D, D3D12_RTV_DIMENSION_TEXTURE2D,
     D3D12_RTV_DIMENSION_TEXTURE2DARRAY, D3D12_RTV_DIMENSION_TEXTURE2DMS,
     D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY, D3D12_RTV_DIMENSION_TEXTURE3D,
@@ -359,15 +360,27 @@ pub(crate) fn render_target(
 /// `None` for a volume: D3D12's `D3D12_DSV_DIMENSION` has no 3D member at all,
 /// because depth testing runs against a 2D attachment.
 ///
-/// [`D3D12_DSV_FLAG_NONE`] is always the flag set. The two flags that exist —
-/// `READ_ONLY_DEPTH` and `READ_ONLY_STENCIL` — declare that a pass will sample
-/// the attachment while it is bound, and the seam has no vocabulary for that
-/// intent; guessing it from [`ImageUsage`](crcbl_hal::ImageUsage) would make
-/// every sampled depth target read-only and silently stop it being written.
+/// `read_only` selects the flag set: [`D3D12_DSV_FLAG_NONE`] for a pass that
+/// writes depth, and [`D3D12_DSV_FLAG_READ_ONLY_DEPTH`] — with
+/// [`D3D12_DSV_FLAG_READ_ONLY_STENCIL`] beside it when `stencil` says the
+/// format has a stencil plane — for one that only tests it.
+///
+/// **Two descriptors, not one chosen at bind time.** A DSV's flags are baked
+/// into the descriptor, so a view that is sometimes tested and sometimes
+/// written needs one of each; `crate::device` allocates both whenever an image
+/// is a depth attachment, and the render pass picks by what the caller
+/// declared. Guessing the flag from [`ImageUsage`](crcbl_hal::ImageUsage)
+/// instead would make every sampled depth target read-only and silently stop it
+/// being written.
+///
+/// The stencil flag is conditional because D3D12 rejects a DSV that marks a
+/// plane the format does not have.
 pub(crate) fn depth_stencil(
     format: DXGI_FORMAT,
     view: ImageViewType,
     sub: Subresource,
+    read_only: bool,
+    stencil: bool,
 ) -> Option<D3D12_DEPTH_STENCIL_VIEW_DESC> {
     let (dimension, anonymous) = match view {
         ImageViewType::D1 => (
@@ -419,10 +432,19 @@ pub(crate) fn depth_stencil(
         ),
         ImageViewType::D3 => return None,
     };
+    let flags = if read_only {
+        if stencil {
+            D3D12_DSV_FLAG_READ_ONLY_DEPTH | D3D12_DSV_FLAG_READ_ONLY_STENCIL
+        } else {
+            D3D12_DSV_FLAG_READ_ONLY_DEPTH
+        }
+    } else {
+        D3D12_DSV_FLAG_NONE
+    };
     Some(D3D12_DEPTH_STENCIL_VIEW_DESC {
         Format: format,
         ViewDimension: dimension,
-        Flags: D3D12_DSV_FLAG_NONE,
+        Flags: flags,
         Anonymous: anonymous,
     })
 }
@@ -431,7 +453,7 @@ pub(crate) fn depth_stencil(
 mod tests {
     use super::*;
     use windows::Win32::Graphics::Dxgi::Common::{
-        DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_R16G16B16A16_FLOAT,
     };
 
     /// Every view type the seam declares, so the properties below cover all of
@@ -559,7 +581,14 @@ mod tests {
     fn the_views_d3d12_does_not_have_are_refused() {
         let volume = flat(1);
         assert!(
-            depth_stencil(DXGI_FORMAT_D32_FLOAT, ImageViewType::D3, volume).is_none(),
+            depth_stencil(
+                DXGI_FORMAT_D32_FLOAT,
+                ImageViewType::D3,
+                volume,
+                false,
+                false
+            )
+            .is_none(),
             "D3D12_DSV_DIMENSION has no 3D member"
         );
         let multisampled = Subresource {
@@ -590,7 +619,14 @@ mod tests {
         // And the ones D3D12 does have are still built, so the refusals above
         // are about the combination and not about the function.
         assert!(
-            depth_stencil(DXGI_FORMAT_D32_FLOAT, ImageViewType::D2, multisampled).is_some(),
+            depth_stencil(
+                DXGI_FORMAT_D32_FLOAT,
+                ImageViewType::D2,
+                multisampled,
+                false,
+                false
+            )
+            .is_some(),
             "a multisampled depth attachment is ordinary"
         );
         assert!(
@@ -627,9 +663,54 @@ mod tests {
             .expect("a multisampled RTV");
         assert_eq!(rtv.ViewDimension, D3D12_RTV_DIMENSION_TEXTURE2DMS);
 
-        let dsv = depth_stencil(DXGI_FORMAT_D32_FLOAT, ImageViewType::D2Array, sub)
-            .expect("a multisampled array DSV");
+        let dsv = depth_stencil(
+            DXGI_FORMAT_D32_FLOAT,
+            ImageViewType::D2Array,
+            sub,
+            false,
+            false,
+        )
+        .expect("a multisampled array DSV");
         assert_eq!(dsv.ViewDimension, D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY);
+    }
+
+    /// A read-only DSV carries the depth flag, and the stencil flag only when
+    /// the format has a stencil plane.
+    ///
+    /// The flags are the whole difference between the two descriptors a depth
+    /// attachment owns: a read-only pass bound through a `FLAG_NONE` DSV reads
+    /// the right values and leaves the image in the wrong state, which nothing
+    /// downstream can see. And a stencil flag on a depth-only format is a DSV
+    /// D3D12 refuses to create, with no return value to say so.
+    #[test]
+    fn a_read_only_dsv_flags_the_planes_the_format_has() {
+        let sub = flat(1);
+        let flags = |format, read_only, stencil| {
+            depth_stencil(format, ImageViewType::D2, sub, read_only, stencil)
+                .expect("an ordinary 2D DSV")
+                .Flags
+        };
+
+        assert_eq!(
+            flags(DXGI_FORMAT_D32_FLOAT, false, false),
+            D3D12_DSV_FLAG_NONE,
+            "a writing pass flags nothing"
+        );
+        assert_eq!(
+            flags(DXGI_FORMAT_D32_FLOAT, true, false),
+            D3D12_DSV_FLAG_READ_ONLY_DEPTH,
+            "a depth-only format has no stencil plane to mark"
+        );
+        assert_eq!(
+            flags(DXGI_FORMAT_D32_FLOAT_S8X24_UINT, true, true),
+            D3D12_DSV_FLAG_READ_ONLY_DEPTH | D3D12_DSV_FLAG_READ_ONLY_STENCIL,
+            "a depth-stencil format marks both planes"
+        );
+        assert_eq!(
+            flags(DXGI_FORMAT_D32_FLOAT_S8X24_UINT, false, true),
+            D3D12_DSV_FLAG_NONE,
+            "the stencil plane is only read-only when the whole view is"
+        );
     }
 
     /// An attachment addresses one mip and the requested layers, and the

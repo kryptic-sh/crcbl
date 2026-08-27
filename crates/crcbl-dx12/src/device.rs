@@ -216,25 +216,31 @@ struct ImageEntry {
 
 /// The descriptors one image view owns.
 ///
-/// Up to four, because D3D12 has no view object: a texture that is sampled and
+/// Several, because D3D12 has no view object: a texture that is sampled and
 /// rendered to needs a shader resource view *and* a render target view, written
 /// into two different heaps. See [`crate::view`].
+///
+/// A depth attachment owns two descriptors of the same kind, differing only in
+/// their read-only flags, because those flags are part of the descriptor and
+/// the render pass declares its intent only when it binds.
 #[derive(Clone, Copy, Debug, Default)]
 struct ViewDescriptors {
     shader_resource: Option<Slot>,
     unordered_access: Option<Slot>,
     render_target: Option<Slot>,
     depth_stencil: Option<Slot>,
+    depth_stencil_read_only: Option<Slot>,
 }
 
 impl ViewDescriptors {
-    /// Every slot, so freeing cannot miss one the way four `if let`s can.
+    /// Every slot, so freeing cannot miss one the way a chain of `if let`s can.
     fn slots(&self) -> impl Iterator<Item = Slot> {
         [
             self.shader_resource,
             self.unordered_access,
             self.render_target,
             self.depth_stencil,
+            self.depth_stencil_read_only,
         ]
         .into_iter()
         .flatten()
@@ -942,11 +948,15 @@ impl DeviceInner {
         &self,
         view: ImageViewHandle,
     ) -> Result<AttachmentRef, HalError> {
-        self.attachment(view, false)
+        self.attachment(view, None)
     }
 
     /// Resolves a depth/stencil attachment's view. See
     /// [`color_attachment`](Self::color_attachment).
+    ///
+    /// `read_only` picks the descriptor whose flags say the pass will test
+    /// depth without writing it, which is what lets the same image be sampled
+    /// while it is bound.
     ///
     /// # Errors
     ///
@@ -955,23 +965,30 @@ impl DeviceInner {
     pub(crate) fn depth_attachment(
         &self,
         view: ImageViewHandle,
+        read_only: bool,
     ) -> Result<AttachmentRef, HalError> {
-        self.attachment(view, true)
+        self.attachment(view, Some(read_only))
     }
 
-    fn attachment(&self, view: ImageViewHandle, depth: bool) -> Result<AttachmentRef, HalError> {
+    /// `depth` is `None` for a colour attachment, and otherwise says whether
+    /// the depth descriptor wanted is the read-only one.
+    fn attachment(
+        &self,
+        view: ImageViewHandle,
+        depth: Option<bool>,
+    ) -> Result<AttachmentRef, HalError> {
         let mut state = self.state();
         let (slot, image, attached) = {
             let entry = handle::lookup(&state.views, "image view", view, self.owner)?;
-            let slot = if depth {
-                entry.descriptors.depth_stencil
-            } else {
-                entry.descriptors.render_target
+            let slot = match depth {
+                Some(true) => entry.descriptors.depth_stencil_read_only,
+                Some(false) => entry.descriptors.depth_stencil,
+                None => entry.descriptors.render_target,
             };
             (slot, entry.image.clone(), entry.attached)
         };
         let Some(slot) = slot else {
-            let usage = if depth {
+            let usage = if depth.is_some() {
                 "ImageUsage::DEPTH_STENCIL_ATTACHMENT"
             } else {
                 "ImageUsage::COLOR_ATTACHMENT"
@@ -2923,6 +2940,11 @@ impl Device for Dx12Device {
                 Kind::DepthStencil,
                 &mut descriptors.depth_stencil,
             ),
+            (
+                built.depth_stencil_read_only.is_some(),
+                Kind::DepthStencil,
+                &mut descriptors.depth_stencil_read_only,
+            ),
         ] {
             if !wanted || failure.is_some() {
                 continue;
@@ -2978,7 +3000,16 @@ impl Device for Dx12Device {
                     .CreateRenderTargetView(&image, Some(&view_desc), at);
             }
         }
-        if let (Some(view_desc), Some(slot)) = (built.depth_stencil, descriptors.depth_stencil) {
+        for (view_desc, slot) in [
+            (built.depth_stencil, descriptors.depth_stencil),
+            (
+                built.depth_stencil_read_only,
+                descriptors.depth_stencil_read_only,
+            ),
+        ] {
+            let (Some(view_desc), Some(slot)) = (view_desc, slot) else {
+                continue;
+            };
             let at = state.descriptors.cpu_handle(slot);
             // SAFETY: as above, into a `DSV` heap.
             unsafe {
