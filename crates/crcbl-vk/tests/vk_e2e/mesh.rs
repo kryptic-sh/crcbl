@@ -467,6 +467,44 @@ fn render_open_box(optional: Features) -> OpenBoxFrame {
     }
 }
 
+/// How far apart the two geometry paths may draw one frame, which is **one
+/// 8-bit step and no further**.
+///
+/// Not byte equality, which is what this comparison asked for until 2026-08-27.
+/// The two paths run the same fragment stage over the same scene on one
+/// adapter, but their vertices reach it from two separately compiled modules —
+/// `mesh.slang`'s vertex stage and `mesh_cluster.slang`'s mesh stage — and a
+/// driver is free to contract or reassociate one expression differently in
+/// each. That leaves the interpolated position and normal agreeing to the last
+/// bit or two of a `float`, which stays invisible until a shaded value happens
+/// to sit on an 8-bit rounding boundary.
+///
+/// One sat on one when the multi-scatter compensation term landed: on lavapipe
+/// (Mesa 26.2.1, LLVM 22.1.8) **one pixel of 49 152 came out 156 against 157 in
+/// red, at (151, 100)** — the interior of a wall where the shading gradient
+/// crosses that boundary, not an edge, and radv drew the two paths identically.
+/// Which pixels land on a boundary is not something a renderer can choose, so
+/// the bound moved to where the claim is defensible rather than lucky.
+///
+/// The teeth are `max_failing_ratio: 0.0`: **no** pixel may differ by more than
+/// that one step, anywhere, however few — so this still refuses everything the
+/// byte comparison refused except its last bit. What the test exists to catch,
+/// a mesh stage that ignored the per-cluster offsets and drew face zero five
+/// times over, moves whole faces.
+///
+/// The structural floor is [`Tolerance::RASTERISER`]'s, unchanged: SSIM is
+/// answering the same "wrong picture" question here that it answers there, and
+/// nothing about two paths on one adapter calls for a different answer.
+///
+/// [`Tolerance::RASTERISER`]: crcbl_golden::Tolerance::RASTERISER
+const PATHS_AGREE: crcbl_golden::Tolerance = crcbl_golden::Tolerance {
+    max_channel_delta: 1,
+    max_failing_ratio: 0.0,
+    gross_channel_delta: 1,
+    max_gross_ratio: 0.0,
+    min_ssim: 0.99,
+};
+
 /// **A mesh of several clusters draws the same frame through both geometry
 /// paths**, and the per-cluster cull in front of the mesh stage does not move
 /// it.
@@ -495,11 +533,12 @@ fn render_open_box(optional: Features) -> OpenBoxFrame {
 ///
 /// # What each assertion rules out
 ///
-/// * **The two paths agree byte for byte.** One adapter, one driver, one scene:
-///   every differing pixel would be a difference the two submissions made. This
-///   is the comparison that gives the mesh path something to be wrong against,
-///   because the indirect path reads the index buffer and never touches a
-///   cluster record at all.
+/// * **The two paths agree to within one 8-bit step.** One adapter, one driver,
+///   one scene: every pixel further apart than that would be a difference the
+///   two submissions made. This is the comparison that gives the mesh path
+///   something to be wrong against, because the indirect path reads the index
+///   buffer and never touches a cluster record at all. [`PATHS_AGREE`] is where
+///   the one step comes from, and why it is not zero.
 /// * **The frame is not blank.** Two empty frames agree byte for byte too, so
 ///   the comparison above means nothing until something is in the picture. The
 ///   count is measured rather than assumed — every face of both meshes is
@@ -552,10 +591,15 @@ fn a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths() {
          against another frame like it proves nothing"
     );
 
-    assert_eq!(
-        through_mesh_stage.pixels(),
-        through_index_buffer.pixels(),
-        "{mesh_path:?} and {indirect_path:?} draw the open box differently"
+    let paths = crcbl_golden::compare(&through_index_buffer, &through_mesh_stage, &PATHS_AGREE);
+    eprintln!(
+        "vk e2e: the two geometry paths against each other — {}",
+        paths.summary()
+    );
+    assert!(
+        paths.is_match(),
+        "{mesh_path:?} and {indirect_path:?} draw the open box differently — {}",
+        paths.summary()
     );
 
     // The third arm: the same frame with §3.5's per-cluster cull in front of

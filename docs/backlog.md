@@ -474,6 +474,32 @@ so `impl_polled_bundle!` takes `desc` by name and all five tests still run.
 The general form: **a copy in every sample is a bug that can be present in only
 some of them** — but generating the copy can cost you the test that finds it.
 
+### Two geometry paths agree to the last bit only by luck (2026-08-27)
+
+`a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths` in
+`crates/crcbl-vk/tests/vk_e2e/mesh.rs` compared the mesh-shader and
+indirect-count frames byte for byte, and had done since it was written. The
+multi-scatter compensation term reddened it on lavapipe — one pixel of 49 152,
+red 156 against 157, in the interior of a wall rather than on an edge. radv
+still draws the two paths identically.
+
+The cause is not the term. The two paths run the same fragment stage, but the
+interpolated position and normal reach it from `mesh.slang`'s vertex stage and
+`mesh_cluster.slang`'s mesh stage — two separately compiled modules, which a
+driver may contract or reassociate differently. Any shading change moves which
+pixels sit on an 8-bit rounding boundary, so the byte claim was one edit away
+from failing whatever the edit was. The comparison now allows one 8-bit step and
+no pixel beyond it (`PATHS_AGREE` in that file).
+
+**Not tried: `precise` on both position outputs.** HLSL/Slang's `precise`
+forbids the reassociation and contraction that would explain the drift, and
+would restore byte equality if that is the whole cause. It was not attempted
+because it constrains the hot vertex path on every backend to fix one pixel on
+one software rasteriser, and because the mesh path also assembles its triangles
+from cluster corners rather than from the index buffer — so a corner ordering
+that differs from the index buffer's would move the barycentric evaluation and
+`precise` would not touch it. Whether the two orderings agree was not checked.
+
 ### Read the `map_err` call sites, not the declaration (2026-08-27)
 
 A blocker recorded on the sample→engine seam sweep said each game had its own
