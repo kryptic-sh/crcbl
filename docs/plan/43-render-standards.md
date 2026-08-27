@@ -236,13 +236,14 @@ the right first rung.
   Baking a transcendental into a table is the general escape, and
   [44-lighting.md](44-lighting.md)'s rung 3 is where it is written down.
 
-- **No multi-scatter energy compensation**, which is the cheapest realism rung
-  on this page and is blocked on nothing. Single-scatter GGX drops every
-  microfacet bounce after the first, so a rough conductor renders too dark, by
-  an amount that varies with roughness and `N·V` and that no constant factor can
-  absorb. Fdez-Agüera's closed form reads it back out of the same `DFG` table
-  the rung above needs, so one table serves both.
-  [44-lighting.md](44-lighting.md)'s rung 1.
+- **No multi-scatter energy compensation in the frame**, though its table is
+  built: `crcbl_shaders::dfg` and `tables/dfg.bin` shipped 2026-08-27 and
+  nothing samples them yet. Single-scatter GGX drops every microfacet bounce
+  after the first, so a rough conductor renders too dark, by an amount that
+  varies with roughness and `N·V` and that no constant factor can absorb.
+  Fdez-Agüera's closed form reads it back out of the same `DFG` table the rung
+  above needs, so one table serves both. [44-lighting.md](44-lighting.md)'s
+  rung 1.
 - **No screen-space GI.** The engine already marches screen space for
   reflections and already has a Hi-Z pyramid to march it with, so SSGI is closer
   than it looks: the same march with a cosine-distributed ray instead of a

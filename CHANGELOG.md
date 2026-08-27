@@ -16,6 +16,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The split-sum `DFG` table, and the energy a GGX lobe loses without it.**
+  `crcbl_shaders::dfg` is a committed 64-square table over `(N·V, roughness)` —
+  `crates/crcbl-shaders/tables/dfg.bin` — with `directional_albedo` and
+  `energy_compensation` over it. A single-scatter GGX lobe drops every
+  microfacet bounce after the first, and the table measures the shortfall: a
+  head-on surface hands back all of the light when polished and **0.317 of it
+  when fully rough**, so a rough conductor renders short by more than two thirds
+  until the factor puts it back.
+
+  **Nothing shades with it yet.** No shader samples it and no frame has moved;
+  the pass that multiplies it into the specular lobe is a separate change,
+  because that one re-blesses every golden holding a rough metal.
+
+  **Baked once and committed, not computed.** The integrator importance-samples
+  the lobe, which takes a `sin` and a `cos` per sample, and four platforms'
+  `libm` disagree in the last place — so a table each machine computed would be
+  four tables under goldens compared with no tolerance. `cook-dfg` regenerates
+  it and `cook-dfg --check` holds it to its integrator in CI, on the same terms
+  as `cook-clusters` and the committed cluster DAG.
+
 - **Render scale: the frame can be drawn at fewer pixels than the window.**
   `crcbl_render::ForwardRenderer::set_render_scale` sizes an internal colour
   target at a fraction of the caller's extent — down to `MIN_RENDER_SCALE`, a

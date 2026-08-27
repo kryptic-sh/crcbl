@@ -294,7 +294,14 @@ pub mod fxaa;
 
 /// The uniform block `tonemap.slang` reads, in the layout that shader declares.
 pub mod tonemap;
+
+// `upscale` and `dfg` carry their own `//!` headers rather than a line here.
+// Both forms on one module makes rustdoc resolve the module's inner intra-doc
+// links in *this* file's scope, where its own items are not — six broken links
+// in one commit, all of them naming functions the module does define.
 pub mod upscale;
+
+pub mod dfg;
 
 use std::sync::OnceLock;
 

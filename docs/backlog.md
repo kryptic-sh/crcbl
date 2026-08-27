@@ -15,6 +15,32 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
+### The DFG table has no shader half yet (2026-08-27)
+
+**Half built.** `crcbl_shaders::dfg` and `crates/crcbl-shaders/tables/dfg.bin`
+shipped on 2026-08-27 with twelve tests and a CI `--check`, and nothing samples
+them: no shader binding, no image upload, no multiply on the specular lobe. So
+every rough conductor in the tree still renders short by up to two thirds of its
+light, and `energy_compensation` is a function only the tests call.
+
+**What the second half is.** A `Rg32Float` 64-square image uploaded from
+`dfg::bytes()` beside the base-colour page; a `Texture2D` plus its sampler
+declared in `mesh.slang` — **at the end of the declaration list**, because
+declaration order is binding order and `crcbl_shaders::declaration_order` lints
+it; a `SampleLevel` at `(n_dot_v, roughness)`; and `gloss` multiplied by
+`1 + f0 * (1 / min(E, 1) - 1)`. The `min` is not optional: the table's smoothest
+row lands a few parts in a hundred thousand above one and an unclamped inversion
+dims a mirror. `dfg::energy_compensation` clamps for the same reason and is the
+CPU mirror to check the shader against.
+
+**Why it is its own slice.** It moves every golden that holds a rough conductor
+— `apps/lantern`'s `ROUGH_METAL` row first, and `Scene::Ssr`'s — so it is a
+re-bless, and a re-bless wants to be the only thing in its commit.
+
+**Not affected:** dielectrics at low roughness, which is most of the tree.
+`GpuMaterial::UNTINTED` is `metallic 0.0`, and the compensation is exactly one
+wherever `f0` is small and the surface is smooth.
+
 ### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
 
 `docs/plan/43-render-standards.md` §2 and `44-lighting.md`'s rung 2 both stop at

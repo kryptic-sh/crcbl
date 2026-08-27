@@ -210,6 +210,19 @@ lobe's directional albedo:
 **Take Fdez-Agüera**, for that last reason: one table serves both rungs, and a
 table that two features read is a table somebody will keep correct.
 
+**The table is built (2026-08-27) and nothing shades with it yet.**
+`crcbl_shaders::dfg` holds the committed `tables/dfg.bin` — 64 square, two `f32`
+channels, `DFG_SAMPLES` samples a texel — with `directional_albedo` and
+`energy_compensation` over it, and `crates/crcbl-shaders/tools/cook-dfg.rs`
+regenerates or checks it the way `cook-clusters` does the DAG. What it measures:
+a head-on surface hands back all of the light at the smoothest row and **0.317
+of it at the roughest**, so a fully rough conductor in this engine is short by
+more than two thirds until the factor puts it back. The table is cross-checked
+against an independent uniform quadrature of the same integral, which is what
+says it is right rather than merely self-consistent. What is still owed is the
+shader half: a sampler binding in `mesh.slang`, the multiply on `gloss`, and the
+re-bless of every golden holding a rough conductor.
+
 **It is legal here, and the reason generalises.** The compensation term is
 multiplies and divides over a sampled table, so no transcendental reaches a
 colour. That is the general escape this workspace has from its own determinism

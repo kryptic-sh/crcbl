@@ -613,6 +613,15 @@ jobs:
       - name: Check the committed cluster DAG against its builder
         run:
           cargo run --locked -p crcbl-shaders --example cook-clusters -- --check
+      # The split-sum table, on the same terms and in the same job. **Linux
+      # only, deliberately**: its integrator takes a `sin` and a `cos` per
+      # sample and a platform's `libm` is not the next platform's, so an exact
+      # match is a claim only one runner can make. The tool compares within a
+      # tolerance far below anything that reads the table and far above any
+      # last-place disagreement — the tool carries the numbers, in
+      # `crates/crcbl-shaders/tools/cook-dfg.rs`.
+      - name: Check the committed DFG table against its integrator
+        run: cargo run --locked -p crcbl-shaders --example cook-dfg -- --check
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7

@@ -64,3 +64,10 @@ glam = { workspace = true }
 [[example]]
 name = "cook-clusters"
 path = "tools/cook-clusters.rs"
+
+# The split-sum table's generator, beside the DAG's and for the same reason: an
+# artifact with no producer next to it is one nobody can regenerate. This one
+# needs nothing but the crate itself.
+[[example]]
+name = "cook-dfg"
+path = "tools/cook-dfg.rs"
