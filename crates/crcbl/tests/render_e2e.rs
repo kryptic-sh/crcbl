@@ -2694,12 +2694,12 @@ fn draw_scene_on_every_geometry_path(
 /// How many channels the two geometry paths may disagree about on `scene`, and
 /// even then only ever by one.
 ///
-/// **Zero for every scene but one, and that is the point.** The two paths are
-/// meant to draw the same picture, so a budget handed to every scene would be
-/// slack nobody measured — the exact comparison is what has caught a path
-/// drawing something else, and it keeps its teeth everywhere it still holds.
-/// Verified rather than assumed: radv and wgpu answer zero on every scene, and
-/// llvmpipe answers zero on every scene but the dunes patch.
+/// **Zero for every scene but the three that march, and that is the point.** The
+/// two paths are meant to draw the same picture, so a budget handed to every
+/// scene would be slack nobody measured — the exact comparison is what has
+/// caught a path drawing something else, and it keeps its teeth everywhere it
+/// still holds. Verified rather than assumed: radv and wgpu answer zero on every
+/// scene, and llvmpipe answers zero on every scene but the three named below.
 ///
 /// `Dunes` is the exception because its two arms **deliberately draw different
 /// geometry** — see `crcbl-vk`'s
@@ -2726,15 +2726,28 @@ fn draw_scene_on_every_geometry_path(
 /// the obvious question: a sixteen-tap denominator makes a disagreement smaller
 /// and does not make the tap the ray landed on the same one.
 ///
-/// Both budgets are two orders of magnitude under anything a level that failed to
-/// draw would produce — the failure this exists for moves whole clusters, not
-/// one channel. `worst <= 1` is the other half and is not budgeted at all: a
-/// reflection that landed on the wrong surface moves a channel by far more than
-/// one, so it fails here whatever the count.
+/// `Ssr` is the third, and it is the same exposure as `PointShadow` on the scene
+/// built to have it: every pixel of the reflected band is decided by where a
+/// march over the depth buffer crossed, so a world position differing in the
+/// last place taps the neighbouring pixel at the crossing. It read zero until
+/// 2026-08-27 and that was the luckier kind of equality, the way `Dunes`' was
+/// before the GGX move — `mesh.slang` gaining the emissive add is what ran the
+/// luck out, by moving nothing in the picture and enough in llvmpipe's codegen.
+/// Measured at **two** channels, each off by one, out of the frame's 196608, and
+/// on one llvmpipe alone: the Ubuntu runner's Mesa 25.2.8 / LLVM 20.1.2 build.
+/// Arch's Mesa 26.2.1 / LLVM 22.1.8 answers zero at the same 256-bit vector
+/// width, the Windows lavapipe job answers zero, and radv and wgpu answer zero.
+///
+/// All three budgets are two orders of magnitude under anything a level that
+/// failed to draw would produce — the failure this exists for moves whole
+/// clusters, not one channel. `worst <= 1` is the other half and is not budgeted
+/// at all: a reflection that landed on the wrong surface moves a channel by far
+/// more than one, so it fails here whatever the count.
 const fn path_lsb_channels(scene: Scene) -> usize {
     match scene {
         Scene::Dunes => 16,
         Scene::PointShadow => 16,
+        Scene::Ssr => 16,
         _ => 0,
     }
 }

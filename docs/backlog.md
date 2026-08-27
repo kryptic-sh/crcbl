@@ -454,6 +454,30 @@ sample's error type is in fact a type alias for
 
 ## Coverage gap found while doing this work
 
+### The geometry-path LSB budgets can only be re-measured on CI (2026-08-27)
+
+`path_lsb_channels` in `crates/crcbl/tests/render_e2e.rs` hands three scenes —
+`Dunes`, `PointShadow` and `Ssr` — a budget of 16 channels each off by at most
+one, and each number was measured on the Ubuntu runner's llvmpipe. **No local
+run can reproduce any of them.** This machine's lavapipe is Arch's Mesa 26.2.1
+on LLVM 22.1.8 and answers zero on all three; the runner's is Mesa 25.2.8 on
+LLVM 20.1.2 and is the only build in the matrix that answers non-zero. The
+vector width is not the variable — both report 256 bits, and forcing
+`LP_NATIVE_VECTOR_WIDTH=256` locally changes nothing. The Windows lavapipe job
+answers zero too, so it is that one Mesa/LLVM pair.
+
+**What this costs:** a future change that pushes one of those scenes from two
+channels to twenty is caught, because 16 is the ceiling — but a change that
+pushes it from two to twelve is absorbed silently, and nothing local will say
+so. The honest reading of a green local render-e2e run is "this did not break
+the paths", never "this did not move the last bits".
+
+**What would close it:** run the render e2e against a pinned older Mesa/LLVM — a
+container image matching the runner's is the only way to hold the variable still
+— or have the job print the measured counts as a build annotation so a drift
+from two toward the ceiling is visible without reading the log. Neither was
+attempted.
+
 ### `check-doc-citations.sh` does not see relative Markdown links (2026-08-27)
 
 The gate checks **backtick-quoted** paths that begin with one of the
