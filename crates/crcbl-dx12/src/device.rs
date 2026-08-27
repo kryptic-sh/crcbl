@@ -7366,6 +7366,11 @@ pub(crate) mod tests {
             // density is zero and is written as such.
             fog_params: [0.0; 4],
             fog_color: [0.0; 4],
+            // And no sky: three zero rows make three zero dot products, so the
+            // ambient this probe reads is `ambient.rgb` and nothing else.
+            sky_sh_r: [0.0; 4],
+            sky_sh_g: [0.0; 4],
+            sky_sh_b: [0.0; 4],
         };
 
         // One triangle over the centre of the target and neither corner, in

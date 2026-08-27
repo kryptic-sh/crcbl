@@ -407,6 +407,26 @@ struct FrameUniforms
     /// a radiance rather than a display colour, so a bright sky's fog may sit
     /// above one and the bloom chain may see it.
     float4 fog_color;
+    /// The red channel of the sky's L1 irradiance, packed as `GpuProbe::sh_r`
+    /// is: the linear band in `xyz` and the constant band in `w`, so
+    /// `sky_irradiance` evaluates it as `dot(row, float4(N, 1))`.
+    ///
+    /// A distant environment reaches a diffuse surface in exactly this shape,
+    /// which is why the sky and the irradiance grid share it. The two are
+    /// **added** rather than chosen between: a scene may have a sky above it
+    /// and bounce light around it, and both are the same term.
+    ///
+    /// **Zero is exactly off.** Three zero rows make three zero dot products,
+    /// so the sum the ambient term starts from is the one it was before a sky
+    /// existed. `crcbl_shaders::sky::SkyGradient::irradiance` is the host side
+    /// that fills these, and `SkyGradient::BLACK` projects to exactly zero.
+    ///
+    /// **Last in the block**, on `lod_params`' terms.
+    float4 sky_sh_r;
+    /// The green channel of the same. See `sky_sh_r`.
+    float4 sky_sh_g;
+    /// The blue channel of the same. See `sky_sh_r`.
+    float4 sky_sh_b;
 };
 
 /// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
@@ -2034,6 +2054,27 @@ float3 probe_irradiance(float3 world_position, float3 normal)
                float3(0.0, 0.0, 0.0));
 }
 
+/// The irradiance the gradient sky gives a surface facing `normal`.
+///
+/// `probe_irradiance`'s last three lines with the frame's rows in place of a
+/// cell's, because the sky is the same kind of thing: a distant environment
+/// projected onto L1. `crcbl_shaders::sky::SkyGradient::irradiance` is the host
+/// side that fills the rows, in closed form.
+///
+/// The `max` is `probe_irradiance`'s and is not defensive: L1 is a truncation
+/// and a truncated series rings, so an environment concentrated in one
+/// direction evaluates negative on the far side — a surface that would subtract
+/// light. It costs nothing here, since a sky with no rows evaluates to exactly
+/// zero and `max(0, 0)` is zero.
+float3 sky_irradiance(float3 normal)
+{
+    float4 basis = float4(normal, 1.0);
+    return max(float3(dot(frame.sky_sh_r, basis),
+                      dot(frame.sky_sh_g, basis),
+                      dot(frame.sky_sh_b, basis)),
+               float3(0.0, 0.0, 0.0));
+}
+
 /// The forward pass's two colour attachments, one field per target.
 ///
 /// This was a bare `float4` until `docs/plan/18-render-features.md`'s
@@ -2371,7 +2412,13 @@ FragmentOutput fragmentMain(VertexOutput input)
     // nothing contributes exactly zero, so the whole feature is data and there
     // is no branch anywhere selecting it. An author who wants the probes to be
     // the whole of the environment sets `DirectionalLight::ambient` to zero.
-    float3 irradiance = frame.ambient.rgb + probe_irradiance(input.world_position, normal);
+    //
+    // The gradient sky is a third term on those same terms — `docs/plan/43-render-standards.md`
+    // §8. It is added and not chosen between, because a scene may have a sky
+    // above it and bounce light around it, and both reach a diffuse surface as
+    // an L1 environment. A frame with no sky adds exactly zero.
+    float3 irradiance = frame.ambient.rgb + sky_irradiance(normal)
+                      + probe_irradiance(input.world_position, normal);
 
     // **The ambient scales the diffuse albedo, so a metal has no ambient
     // term** — and that is the model rather than an omission. A conductor

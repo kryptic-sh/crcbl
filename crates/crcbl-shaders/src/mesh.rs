@@ -141,10 +141,11 @@ const _: () = assert!(
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
 /// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
 /// `float4x4`, the irradiance grid's [`PROBE_VOLUME_SIZE`] header, and the LOD
-/// and fog rows. Checked against the `Offset` decorations `slangc` emits by
-/// this module's `the_uniform_block_matches_the_offsets_slangc_emits`.
+/// and fog rows, and the sky's three spherical-harmonic rows. Checked against
+/// the `Offset` decorations `slangc` emits by this module's
+/// `the_uniform_block_matches_the_offsets_slangc_emits`.
 pub const FRAME_UNIFORMS_SIZE: usize =
-    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE + 16 + 32;
+    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE + 16 + 32 + 48;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -378,6 +379,27 @@ pub struct FrameUniforms {
     /// Read only through [`fog_params`](Self::fog_params)'s density, so its
     /// value is unobservable while that density is zero.
     pub fog_color: [f32; 4],
+    /// The red channel of the sky's L1 irradiance, as
+    /// [`GpuProbe::sh_r`](crate::probe::GpuProbe::sh_r) packs one: the linear
+    /// band in `xyz` and the constant band in `w`, so the shader evaluates it
+    /// as `dot(row, float4(N, 1))` with no shuffle.
+    ///
+    /// A distant environment reaches a diffuse surface in exactly this shape,
+    /// which is why the sky and the irradiance grid share it — `mesh.slang`
+    /// adds the two, rather than choosing between them.
+    /// [`crate::sky::SkyGradient::irradiance`] is what produces the three rows
+    /// and `crcbl_render::ForwardRenderer::set_sky` is what writes them.
+    ///
+    /// **Zero is exactly off**, on [`fog_params`](Self::fog_params)' terms: the
+    /// three dot products are zero, so the sum the ambient term starts from is
+    /// the one it was before a sky existed, bit for bit.
+    ///
+    /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms.
+    pub sky_sh_r: [f32; 4],
+    /// The green channel of the same, on [`sky_sh_r`](Self::sky_sh_r)'s terms.
+    pub sky_sh_g: [f32; 4],
+    /// The blue channel of the same, on [`sky_sh_r`](Self::sky_sh_r)'s terms.
+    pub sky_sh_b: [f32; 4],
 }
 
 impl FrameUniforms {
@@ -493,6 +515,9 @@ impl FrameUniforms {
         put(&mut bytes, &mut at, &self.lod_params);
         put(&mut bytes, &mut at, &self.fog_params);
         put(&mut bytes, &mut at, &self.fog_color);
+        put(&mut bytes, &mut at, &self.sky_sh_r);
+        put(&mut bytes, &mut at, &self.sky_sh_g);
+        put(&mut bytes, &mut at, &self.sky_sh_b);
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -1622,6 +1647,53 @@ mod tests {
     /// The cascade count is a number in three files and a compiler sees none of
     /// the disagreements.
     ///
+    /// The sky's rows are written by this crate and read only by arithmetic in
+    /// `mesh.slang`'s fragment stage, so nothing but this test stands between
+    /// the two.
+    ///
+    /// A `mesh.slang` that declared the rows and never added them would leave
+    /// `set_sky` writing into a lane nothing reads — a caller who asked for a
+    /// sky and got the frame they had before, with no error anywhere. The
+    /// widened block would still match `slangc`'s offsets, so the layout test
+    /// above cannot see it.
+    #[test]
+    fn the_fragment_stage_still_adds_the_sky_it_declares() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        // Both files declare the three rows, because they are one buffer and a
+        // block short of a row on one side is one whose size the two stages
+        // disagree about.
+        for row in ["sky_sh_r", "sky_sh_g", "sky_sh_b"] {
+            for (name, source) in [("mesh.slang", mesh), ("mesh_cluster.slang", cluster)] {
+                assert!(
+                    source.contains(&format!("float4 {row};")),
+                    "{name} does not declare `{row}`"
+                );
+            }
+            // And the reader evaluates every one of them. Two channels read
+            // from one row is a sky of the wrong colour, which is a picture.
+            assert!(
+                mesh.contains(&format!("dot(frame.{row}, basis)")),
+                "mesh.slang declares `{row}` and never evaluates it"
+            );
+        }
+        // The basis is the normal and a one, which is what makes the packing
+        // this crate's `sky::SkyGradient::irradiance` writes — linear band in
+        // `xyz`, constant in `w` — the packing the shader unpacks.
+        assert!(
+            mesh.contains("float3 sky_irradiance(float3 normal)"),
+            "mesh.slang no longer has the evaluator the frame rows exist for"
+        );
+        // And the ambient term sums it. Named against `probe_irradiance`
+        // beside it: the two are the same kind of environment and the sum is
+        // what makes them add rather than one replacing the other.
+        assert!(
+            mesh.contains("frame.ambient.rgb + sky_irradiance(normal)"),
+            "mesh.slang's ambient term no longer adds the sky, so `set_sky` writes a lane \
+             nothing reads"
+        );
+    }
+
     /// A shader whose `shadow_view_proj` array is longer than the CPU's reads
     /// `cascade_far` as the tail of a matrix and `shadow_params` as a split
     /// distance; one that is shorter leaves the last cascade's matrix
@@ -1905,16 +1977,18 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1264,
+            FRAME_UNIFORMS_SIZE, 1312,
             "at two cascades and fourteen light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272, 1168, 1184, 1200, 1216, 1232, 1248 — and
+        // 224, 240, 256, 272, 1168, 1184, 1200, 1216, 1232, 1248, 1264, 1280,
+        // 1296 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
         // `%_arr_mat4v4float_int_14`, which is the light array's own length.
         // Three of the middle rows are the grid header's, which this side
-        // writes as one group, and the last two are the fog's. Read out of `spirv/mesh.spv` with `spirv-dis`,
-        // not derived from the arithmetic below — that is the point of them.
+        // writes as one group; then the fog's two and the sky's three. Read out
+        // of `spirv/mesh.spv` with `spirv-dis`, not derived from the arithmetic
+        // below — that is the point of them.
         let cascades = 64 * SHADOW_CASCADES;
         let lights = 64 * SHADOW_LIGHT_TILES;
         let offsets = [
@@ -1930,6 +2004,9 @@ mod tests {
             144 + cascades + lights + PROBE_VOLUME_SIZE,
             160 + cascades + lights + PROBE_VOLUME_SIZE,
             176 + cascades + lights + PROBE_VOLUME_SIZE,
+            192 + cascades + lights + PROBE_VOLUME_SIZE,
+            208 + cascades + lights + PROBE_VOLUME_SIZE,
+            224 + cascades + lights + PROBE_VOLUME_SIZE,
         ];
         let sizes = [
             64usize,
@@ -1941,6 +2018,9 @@ mod tests {
             16,
             lights,
             PROBE_VOLUME_SIZE,
+            16,
+            16,
+            16,
             16,
             16,
             16,
@@ -1988,6 +2068,9 @@ mod tests {
             lod_params: [70.0, 71.0, 72.0, 73.0],
             fog_params: [80.0, 81.0, 82.0, 83.0],
             fog_color: [90.0, 91.0, 92.0, 93.0],
+            sky_sh_r: [100.0, 101.0, 102.0, 103.0],
+            sky_sh_g: [110.0, 111.0, 112.0, 113.0],
+            sky_sh_b: [120.0, 121.0, 122.0, 123.0],
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -2077,6 +2160,21 @@ mod tests {
             [90.0, 91.0, 92.0, 93.0],
             "the fog colour"
         );
+        // And the sky's three rows past them, which is where the block now
+        // ends. Every lane once more, and here the reason is sharper than
+        // elsewhere: all twelve numbers are coefficients of one basis, so a
+        // channel written into the wrong row is a sky of the wrong colour and a
+        // lane written into the wrong slot is a sky lit from the wrong
+        // direction. Neither is an error anything would raise.
+        let sky = fog + 32;
+        for (row, base) in [(0usize, 100.0f32), (1, 110.0), (2, 120.0)] {
+            let at_row = sky + row * 16;
+            assert_eq!(
+                [at(at_row), at(at_row + 4), at(at_row + 8), at(at_row + 12)],
+                [base, base + 1.0, base + 2.0, base + 3.0],
+                "the sky's spherical-harmonic row {row}"
+            );
+        }
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the

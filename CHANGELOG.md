@@ -16,6 +16,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A gradient sky lights the scene.** `ForwardRenderer::set_sky` takes a
+  `crcbl_render::Sky` — three linear-RGB radiances for zenith, horizon and
+  ground — and `mesh.slang` adds the irradiance that gradient delivers to the
+  ambient term, so a surface facing up is lit by the sky and one facing down by
+  the ground's bounce. No new pass and no new binding: three `float4` rows at
+  the end of `mesh::FrameUniforms`, which grows from 1264 to 1312 bytes. A host
+  that writes that block itself has three rows to add; every existing member
+  keeps its offset.
+
+  It is **added** to the flat ambient and to the irradiance grid rather than
+  chosen between them — all three are the same term, what a diffuse surface
+  receives from an environment it is not looking at. An author who wants the sky
+  to be the whole of it sets `DirectionalLight::ambient` to zero.
+
+  **`Sky::NONE` is the default and is exactly off.** A black gradient projects
+  to coefficients that are all zero, so the fragment stage adds `max(0, 0)` and
+  every golden blessed before a sky existed still matches.
+
+  Known gap: **nothing draws the sky.** The background is still the scene
+  target's clear colour, and the environment `ssr.slang` falls back to on a
+  missed ray is still the probe grid's — see `docs/plan/43-render-standards.md`
+  §8.
+
 - **A gradient sky, and the environment it lights with.**
   `crcbl_shaders::sky::SkyGradient` is three linear-RGB radiances — zenith,
   horizon, ground — blended by a smoothstep in a direction's `y`. `radiance`

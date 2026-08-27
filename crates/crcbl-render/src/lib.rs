@@ -160,7 +160,7 @@ pub mod ui_pass;
 mod upscale;
 
 pub use button_skin::{ButtonSkin, screen_rect_to_target};
-pub use camera::{Camera, DirectionalLight, Fog, Projection};
+pub use camera::{Camera, DirectionalLight, Fog, Projection, Sky};
 pub use cluster_pool::{ClusterPool, ClusterRange};
 pub use counters::{FrameCounters, INDIRECT, UNKNOWN};
 /// Re-exported because [`SheetDesc::sample`] is spelled in it: a crate whose

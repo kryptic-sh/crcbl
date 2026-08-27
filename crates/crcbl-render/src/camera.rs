@@ -442,6 +442,82 @@ impl Default for Fog {
     }
 }
 
+/// A gradient sky: three radiances, and the environment they light with.
+///
+/// `docs/plan/43-render-standards.md` §8. The sky is a smoothstep blend from
+/// [`ground`](Self::ground) through [`horizon`](Self::horizon) to
+/// [`zenith`](Self::zenith) in a direction's `y`, and what reaches the scene is
+/// that field projected onto the L1 spherical-harmonic basis the irradiance
+/// grid already speaks — so a surface facing up is lit by the sky and one
+/// facing down by the ground, from three colours and no extra pass.
+///
+/// **It is added to the flat ambient and to the probe grid, not chosen between
+/// them**, because all three are the same term: what a diffuse surface receives
+/// from an environment it is not looking at directly. An author who wants the
+/// sky to be the whole of the environment sets [`DirectionalLight::ambient`] to
+/// zero.
+///
+/// **[`Sky::NONE`] is the default and is exactly no sky.** A black gradient
+/// projects to coefficients that are all zero, so the three dot products the
+/// fragment stage adds are zero, and every golden blessed before a sky existed
+/// still matches.
+///
+/// Nothing draws the sky yet — this lights with it, and the background is still
+/// the scene target's clear colour. [`ForwardRenderer::set_sky`] is what a
+/// caller hands this to, and [`crcbl_shaders::sky`] is the projection.
+///
+/// [`ForwardRenderer::set_sky`]: crate::forward::ForwardRenderer::set_sky
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sky {
+    /// Radiance straight up.
+    ///
+    /// **May exceed 1.0**, like [`DirectionalLight::color`] and [`Fog::color`]
+    /// and for their reason: the scene target is `Rgba16Float` and this is a
+    /// radiance rather than a display colour.
+    pub zenith: Vec3,
+    /// Radiance at the horizon, where a direction's `y` is zero.
+    ///
+    /// The band both hemispheres blend away from, so it carries more weight in
+    /// the ambient than either pole does.
+    pub horizon: Vec3,
+    /// Radiance straight down — the ground's bounce, not the ground itself.
+    ///
+    /// This engine traces nothing to find it, so it is an author's estimate of
+    /// what the surface below sends back up.
+    pub ground: Vec3,
+}
+
+impl Sky {
+    /// No sky, which is what a renderer nobody has called
+    /// [`ForwardRenderer::set_sky`] on carries.
+    ///
+    /// Black in every direction, and its projection is every coefficient zero,
+    /// so it adds nothing rather than nearly nothing.
+    ///
+    /// [`ForwardRenderer::set_sky`]: crate::forward::ForwardRenderer::set_sky
+    pub const NONE: Self = Self {
+        zenith: Vec3::ZERO,
+        horizon: Vec3::ZERO,
+        ground: Vec3::ZERO,
+    };
+
+    /// This sky in the form [`crcbl_shaders::sky`] projects.
+    pub(crate) fn gradient(self) -> crcbl_shaders::sky::SkyGradient {
+        crcbl_shaders::sky::SkyGradient {
+            zenith: self.zenith.to_array(),
+            horizon: self.horizon.to_array(),
+            ground: self.ground.to_array(),
+        }
+    }
+}
+
+impl Default for Sky {
+    /// [`Sky::NONE`].
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

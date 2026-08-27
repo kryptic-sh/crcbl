@@ -155,7 +155,7 @@ use crcbl_shaders::{
 };
 use glam::{Mat4, Quat, Vec3};
 
-use crate::camera::{Camera, DirectionalLight, Fog};
+use crate::camera::{Camera, DirectionalLight, Fog, Sky};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::counters::FrameCounters;
 use crate::cull::Frustum;
@@ -1013,6 +1013,15 @@ pub struct ForwardRenderer {
     /// composite is an identity at zero density rather than an interpolation
     /// that nearly is.
     fog: Fog,
+
+    /// The gradient sky whose irradiance the colour pass adds to the ambient
+    /// term — see [`set_sky`](ForwardRenderer::set_sky).
+    ///
+    /// **[`Sky::NONE`] by default**, on [`fog`](Self::fog)'s terms: a black
+    /// gradient projects to coefficients that are all zero, so the three dot
+    /// products the fragment stage adds are zero and no frame drawn before a
+    /// sky existed moves.
+    sky: Sky,
 
     /// Whether the colour pass tints each cluster by its DAG level instead of
     /// shading — see [`set_lod_view`](ForwardRenderer::set_lod_view).
@@ -3994,6 +4003,7 @@ impl ForwardRenderer {
             // shader's composite is exactly the identity there, so a caller who
             // never calls `set_fog` gets the frame byte for byte.
             fog: Fog::NONE,
+            sky: Sky::NONE,
             lod_view: false,
             heatmap: false,
             // Following the camera, on the line above's terms: the selection eye
@@ -4656,6 +4666,10 @@ impl ForwardRenderer {
             },
         )?;
 
+        // Projected once per frame on the host, which is also why the shading
+        // rule that governs `mesh.slang` has nothing to say about it: these
+        // coefficients reach every backend as uploaded numbers.
+        let sky = self.sky.gradient().irradiance();
         let uniforms = mesh::FrameUniforms {
             view_proj: view_projection.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
@@ -4696,6 +4710,9 @@ impl ForwardRenderer {
                 0.0,
             ],
             fog_color: self.fog.color.extend(0.0).to_array(),
+            sky_sh_r: sky.sh_r,
+            sky_sh_g: sky.sh_g,
+            sky_sh_b: sky.sh_b,
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -7081,6 +7098,40 @@ impl ForwardRenderer {
     /// the reflection composite is one pass later.
     pub const fn set_fog(&mut self, fog: Fog) {
         self.fog = fog;
+    }
+
+    /// Lights the scene with a gradient sky, on top of whatever ambient and
+    /// irradiance grid it already has.
+    ///
+    /// `docs/plan/43-render-standards.md` §8's rung. [`Sky`] is three
+    /// radiances — zenith, horizon, ground — and what reaches a surface is that
+    /// gradient projected onto the L1 basis the probe grid already uses, so a
+    /// surface facing up receives the sky and one facing down the ground's
+    /// bounce. Three colours, no extra pass.
+    ///
+    /// # It adds no pass and cannot fail
+    ///
+    /// On [`set_fog`](Self::set_fog)'s terms exactly — three rows of the
+    /// frame's uniform block and three dot products in a fragment stage every
+    /// device already runs. Nothing to build, so nothing to refuse and no
+    /// `supports_` probe beside it.
+    ///
+    /// # Off is exactly off
+    ///
+    /// [`Sky::NONE`] is the default and a black gradient projects to every
+    /// coefficient zero — each is a product with a zero factor — so the
+    /// fragment stage adds `max(0, 0)` and the ambient sum is the one it was
+    /// before this existed, bit for bit.
+    ///
+    /// # What it does not do
+    ///
+    /// **Draw anything.** The background is still the scene target's clear
+    /// colour, and a scene lit by a sky it cannot see is what this rung leaves
+    /// behind until the pass that draws the gradient lands. The environment
+    /// `ssr.slang` falls back to on a missed ray is still the probe grid's, so
+    /// a mirror under a sky still reflects whatever the probes hold.
+    pub const fn set_sky(&mut self, sky: Sky) {
+        self.sky = sky;
     }
 
     /// Draws each cluster tinted by the DAG level it was decimated to, instead

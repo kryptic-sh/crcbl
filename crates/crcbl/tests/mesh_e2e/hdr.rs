@@ -15,9 +15,10 @@
 //! of its own.
 
 use crate::harness::Headless;
-use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh};
+use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh, render_mesh_lit};
 use crcbl::render::{
-    EffectOverride, EffectRequest, Fog, ForwardRenderer, Projection, RenderEffects, TransientPool,
+    DirectionalLight, EffectOverride, EffectRequest, Fog, ForwardRenderer, Projection,
+    RenderEffects, Sky, TransientPool,
 };
 use crcbl_shaders::tonemap::TonemapCurve;
 
@@ -654,4 +655,295 @@ fn raising_the_reference_plane_thickens_the_fog() {
         "only {dimmed} texels moved, so the reference height reached almost \
          nothing and this would pass on a shader that ignored it"
     );
+}
+
+/// One frame of the cube under a chosen sky and a chosen light, with the
+/// screen-space passes forced off.
+///
+/// [`fogged_cube_hdr`]'s scene and its two refusals, for its reasons:
+/// antialiasing would blend a texel with its neighbours and reflections would
+/// add a term after the one under test. **And the cube is placed unspun**,
+/// which fog did not need — the sky's whole claim is about a surface's normal,
+/// so the three visible faces are the axis-aligned `+X`, `+Y` and `+Z` rather
+/// than three arbitrary ones.
+fn sky_cube_hdr(sky: Sky, light: &DirectionalLight) -> HdrTarget {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::REFLECTIONS, Some(false))
+            .force(RenderEffects::AMBIENT_OCCLUSION, Some(false)),
+        ..EffectRequest::default()
+    });
+    renderer.set_sky(sky);
+    crate::mesh_scene::place_cube_at(&mut renderer, crcbl::math::Mat4::IDENTITY);
+    let mut hdr = Vec::new();
+    let _ = render_mesh_lit(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(Projection::default()),
+        light,
+        Some(&mut hdr),
+    );
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    HdrTarget(hdr)
+}
+
+/// The uniform sky these tests raise the ambient with, one value per channel.
+///
+/// Three different numbers, so a projection that wrote one channel's
+/// coefficients into another row is a colour cast rather than a brightness that
+/// happens to match.
+const SKY_UNIFORM: [f32; 3] = [0.05, 0.11, 0.23];
+
+/// How far apart two texels may be before this file calls them different, as a
+/// fraction of the brighter one.
+///
+/// One step of the storage format, near enough: the scene target is
+/// `Rgba16Float`, so a texel carries eleven bits of mantissa and a step is
+/// about `1e-3` of the value. Two sums that are equal in exact arithmetic but
+/// were added in a different order can land on either side of a rounding
+/// boundary, and this is what absorbs that and nothing larger.
+///
+/// **Measured, and the measurement was stronger than this**: the two frames of
+/// `a_uniform_sky_is_exactly_a_brighter_flat_ambient` came back bit-identical
+/// on this workstation's Vulkan adapter, worst disagreement exactly zero over
+/// 69876 texel channels. The tolerance stays because that is one adapter's f32
+/// summation order and the goldens' standing rule is not to re-bless per
+/// driver — not because anything here needed the slack.
+const SKY_TOLERANCE: f32 = 1.0e-3;
+
+/// Below this the texel is background, which no sky reaches: nothing draws the
+/// gradient yet, so the clear colour is the same in every frame here and
+/// including it would dilute every comparison with texels that cannot differ.
+const SKY_LIT_FLOOR: f32 = 0.02;
+
+/// **A uniform sky is exactly a brighter flat ambient**, and by `π` times its
+/// radiance.
+///
+/// The law the projection exists to satisfy, checked where it lands rather than
+/// where it is computed. A sky with all three bands equal has no linear band,
+/// so what it adds is its constant band alone — `π · L`, the irradiance a
+/// constant environment of radiance `L` delivers — and that is the same number
+/// `DirectionalLight::ambient` carries. Raise the ambient by it and drop the
+/// sky, and the frames must agree.
+///
+/// **This is what pins the `π`.** Nothing else in the GPU path does: the
+/// layout test says which lane each coefficient lands in and the shader guard
+/// says the fragment stage evaluates it, but both would pass a projection off
+/// by any constant factor. A frame that has to match one built the other way
+/// cannot be.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_uniform_sky_is_exactly_a_brighter_flat_ambient() {
+    let uniform = crcbl::math::Vec3::from_array(SKY_UNIFORM);
+    let lit_by_sky = sky_cube_hdr(
+        Sky {
+            zenith: uniform,
+            horizon: uniform,
+            ground: uniform,
+        },
+        &DirectionalLight::default(),
+    );
+    let default_light = DirectionalLight::default();
+    let lit_by_ambient = sky_cube_hdr(
+        Sky::NONE,
+        &DirectionalLight {
+            ambient: default_light.ambient + uniform * std::f32::consts::PI,
+            ..default_light
+        },
+    );
+
+    let mut compared = 0usize;
+    let mut worst = 0.0f32;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let through_sky = lit_by_sky.pixel(x, y);
+            let through_ambient = lit_by_ambient.pixel(x, y);
+            for channel in 0..3 {
+                let a = through_sky[channel];
+                let b = through_ambient[channel];
+                let scale = a.max(b);
+                if scale < SKY_LIT_FLOOR {
+                    continue;
+                }
+                compared += 1;
+                worst = worst.max((a - b).abs() / scale);
+            }
+        }
+    }
+    // The floor could match nothing at all — a frame that rendered black would
+    // pass every comparison above by making none of them.
+    assert!(
+        compared > 1_000,
+        "only {compared} texel channels were above the lit floor, so this compared almost nothing"
+    );
+    assert!(
+        worst <= SKY_TOLERANCE,
+        "a uniform sky and the ambient it should equal disagree by {worst} at worst, over \
+         {compared} texel channels; the projection's constant band is not π times the radiance"
+    );
+}
+
+/// The scene's own normals, decoded from a normals-view frame.
+///
+/// `set_normals_view` writes `normal * 0.5 + 0.5` straight into the
+/// `Rgba16Float` target, so this is that encoding undone. The length check is
+/// what separates the cube from the background without knowing where either is:
+/// a drawn texel carries a unit vector and the clear colour does not.
+fn unit_normals(frame: &HdrTarget) -> Vec<Option<[f32; 3]>> {
+    let mut out = Vec::with_capacity((MESH_EXTENT.0 * MESH_EXTENT.1) as usize);
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let encoded = frame.pixel(x, y);
+            let normal = [
+                encoded[0] * 2.0 - 1.0,
+                encoded[1] * 2.0 - 1.0,
+                encoded[2] * 2.0 - 1.0,
+            ];
+            let length = normal
+                .iter()
+                .fold(0.0f32, |sum, axis| sum + axis * axis)
+                .sqrt();
+            out.push(((length - 1.0).abs() <= 0.02).then_some(normal));
+        }
+    }
+    out
+}
+
+/// **The sky's linear band scales with the surface's own `y`**: swap the zenith
+/// and the ground, and an upward-facing surface changes while a sideways-facing
+/// one does not move at all.
+///
+/// The constant band cannot see the swap — it is the two hemispheres' means
+/// added, and addition does not care which order they arrive in — so the whole
+/// difference between these two frames is the `y` coefficient evaluated against
+/// each surface's normal. That makes the claim structural rather than a
+/// magnitude: a fragment stage that read only `w`, or dropped the linear band
+/// between the host and the dot product, moves *nothing*; one that took the
+/// dot against the wrong lane, or against a constant, moves the sideways faces
+/// too.
+///
+/// **Which texels are which comes out of a normals-view frame of the same
+/// scene**, so no part of this test knows where the cube is or which way it
+/// faces. The cube is placed unspun precisely so that both populations exist:
+/// this camera sees its `+Y` face and its `+X` and `+Z` ones.
+///
+/// Ambient occlusion is forced off along with antialiasing and reflections,
+/// which fog did not need: occlusion scales the ambient term and nothing else,
+/// so leaving it on would put a per-texel factor on the very quantity under
+/// test.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_skys_linear_band_moves_only_the_surfaces_facing_it() {
+    // Bright above, dim below, and a horizon high enough that the constant band
+    // stays above the linear one — otherwise the `max` in `sky_irradiance`
+    // clamps a downward-facing surface and this stops being a clean swap.
+    let bright = crcbl::math::Vec3::new(0.10, 0.22, 0.46);
+    let dim = crcbl::math::Vec3::splat(0.02);
+    let horizon = crcbl::math::Vec3::splat(0.12);
+    let sky_above = sky_cube_hdr(
+        Sky {
+            zenith: bright,
+            horizon,
+            ground: dim,
+        },
+        &DirectionalLight::default(),
+    );
+    let sky_below = sky_cube_hdr(
+        Sky {
+            zenith: dim,
+            horizon,
+            ground: bright,
+        },
+        &DirectionalLight::default(),
+    );
+    let normals = unit_normals(&normals_view_hdr());
+
+    let mut facing_up = 0usize;
+    let mut facing_up_still = 0usize;
+    let mut sideways = 0usize;
+    let mut sideways_moved = 0usize;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let Some(normal) = normals[(y * MESH_EXTENT.0 + x) as usize] else {
+                continue;
+            };
+            let up = sky_above.pixel(x, y);
+            let down = sky_below.pixel(x, y);
+            let moved = (0..3).any(|channel| {
+                let scale = up[channel].max(down[channel]).max(SKY_LIT_FLOOR);
+                (up[channel] - down[channel]).abs() > scale * SKY_TOLERANCE
+            });
+            if normal[1] > 0.9 {
+                facing_up += 1;
+                if !moved {
+                    facing_up_still += 1;
+                }
+            } else if normal[1].abs() < 0.05 {
+                sideways += 1;
+                if moved {
+                    sideways_moved += 1;
+                }
+            }
+        }
+    }
+
+    // Both populations have to exist, or each assertion below is a loop over
+    // nothing dressed up as a check.
+    assert!(
+        facing_up > 500 && sideways > 500,
+        "the normals frame found {facing_up} upward-facing and {sideways} sideways-facing texels; \
+         this camera is supposed to see the cube's +Y face and its +X and +Z ones"
+    );
+    assert_eq!(
+        facing_up_still, 0,
+        "{facing_up_still} of {facing_up} upward-facing texels did not move when the sky was \
+         turned upside down, so the linear band is not reaching them"
+    );
+    assert_eq!(
+        sideways_moved, 0,
+        "{sideways_moved} of {sideways} sideways-facing texels moved when the sky was turned \
+         upside down, and a surface with no `y` in its normal has no linear band to receive"
+    );
+}
+
+/// The same scene drawn as encoded normals, for [`unit_normals`] to read.
+fn normals_view_hdr() -> HdrTarget {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::REFLECTIONS, Some(false)),
+        ..EffectRequest::default()
+    });
+    renderer.set_normals_view(true);
+    crate::mesh_scene::place_cube_at(&mut renderer, crcbl::math::Mat4::IDENTITY);
+    let mut hdr = Vec::new();
+    let _ = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(Projection::default()),
+        Some(&mut hdr),
+    );
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    HdrTarget(hdr)
 }

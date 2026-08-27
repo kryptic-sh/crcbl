@@ -1161,6 +1161,11 @@ fn render_probe(
         // unobservable while the density is zero and is written as such.
         fog_params: [0.0; 4],
         fog_color: [0.0; 4],
+        // And no sky, for the same reason the probe volume above is empty:
+        // three zero rows add exactly nothing to `PROBE_AMBIENT`.
+        sky_sh_r: [0.0; 4],
+        sky_sh_g: [0.0; 4],
+        sky_sh_b: [0.0; 4],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

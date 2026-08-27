@@ -152,6 +152,33 @@ pub(crate) fn render_mesh(
     camera: &Camera,
     hdr: Option<&mut Vec<u8>>,
 ) -> crcbl_golden::Image {
+    render_mesh_lit(
+        headless,
+        renderer,
+        pool,
+        camera,
+        &crcbl::render::DirectionalLight::default(),
+        hdr,
+    )
+}
+
+/// The same frame under a light of the caller's choosing.
+///
+/// [`render_mesh`] is this with [`DirectionalLight::default`], which is what
+/// every golden in these suites is blessed under. The only callers that reach
+/// past it are the ones whose claim is *about* the light — a test that says a
+/// term equals raising the ambient by a known amount has to be able to raise
+/// the ambient.
+///
+/// [`DirectionalLight::default`]: crcbl::render::DirectionalLight
+pub(crate) fn render_mesh_lit(
+    headless: &Headless,
+    renderer: &mut ForwardRenderer,
+    pool: &mut TransientPool,
+    camera: &Camera,
+    light: &crcbl::render::DirectionalLight,
+    hdr: Option<&mut Vec<u8>>,
+) -> crcbl_golden::Image {
     let device = headless.device.as_ref();
     let (width, height) = MESH_EXTENT;
     let acquired = device
@@ -184,12 +211,7 @@ pub(crate) fn render_mesh(
     });
 
     renderer
-        .begin_frame(
-            device,
-            camera,
-            &crcbl::render::DirectionalLight::default(),
-            MESH_EXTENT,
-        )
+        .begin_frame(device, camera, light, MESH_EXTENT)
         .expect("the uniform buffer is writable");
 
     // Where the graph's realised HDR handle lands, so the copy below can name

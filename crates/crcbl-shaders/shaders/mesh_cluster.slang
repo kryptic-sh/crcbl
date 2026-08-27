@@ -200,6 +200,18 @@ struct FrameUniforms
     float4 fog_params;
     /// The fog's scattered radiance in `rgb`; `w` unread. See `fog_params`.
     float4 fog_color;
+    /// The sky's L1 irradiance, one row per channel, packed as `GpuProbe`
+    /// packs one. `mesh.slang` documents them and its fragment stage is the
+    /// only thing that reads them.
+    ///
+    /// **Read by nothing in this file**, and declared for `fog_params`' reason
+    /// exactly: a block short of a row here is one whose size the two stages
+    /// disagree about.
+    float4 sky_sh_r;
+    /// The green channel of the same. See `sky_sh_r`.
+    float4 sky_sh_g;
+    /// The blue channel of the same. See `sky_sh_r`.
+    float4 sky_sh_b;
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.
