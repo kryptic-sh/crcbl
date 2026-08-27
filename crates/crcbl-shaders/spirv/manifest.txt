@@ -180,16 +180,16 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 128eeb5a5dd796141c486b9756cad6c042e828c7681c465185dd0b3979fe691f
+source-sha256 = 53842857f80df53401b707e56c3a7967ab4e30e2513b42ce429d9edb5405b82f
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = d131790ced71952b0c2e36323b3aa1d9364a3b768389242aafd62ae5272e833f
+spirv-sha256 = 49faa407d24f7c68ea797506b67dfcef313ae3345b3c7d3ef22ba79950695d6e
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 351bda66d4ad0316e8fcd1a6e01769d34c920cd7ab6d6aa78312c1fc25e0ffd1
+wgsl-sha256 = 0e9571517dd36e78a3a464b8fb0529bb9161f3604101ef01098e535223481491
 msl = msl/mesh.metal
-msl-sha256 = c3ff348a0270fdc3bfa517386514a62f94dd2ea7367a8d366fdbedb39c964e6e
+msl-sha256 = 6375dc15e8398aaad30b5dcd154d21b91d93a504a552d2eea4de74c29184027a
 dxil = vertexMain:dxil/mesh.vertexMain.dxil:0fb4de15f386daf2e20f2d61f74d94f931c1d990417ab0247391e47192a09503
-dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:85f42d13c27230a857bc4a58ba6d96e6bfde45a2cd77b79f57b09d4e999bf0ac
+dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:3bff3ca5f0d843361207987700bb6cfab6f3b2b5f6290e728a2c22aefd7b9b62
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [mesh_cluster]

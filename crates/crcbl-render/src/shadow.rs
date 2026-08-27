@@ -254,60 +254,102 @@ const CASTER_REACH: f32 = 40.0;
 /// consequence was `apps/lantern`'s room: a lit strip 0.60 m wide along the foot
 /// of a wall, and a band down the left of the back wall three times too bright.
 ///
-/// # This is the term the *slope* cannot predict, and one scene sets it
+/// # This is the term the offset cannot predict, and one scene sets it
 ///
 /// Depth quantisation is not what it covers: a cascade's range is tens of metres
-/// over a `D32Float`, so that error is micrometres and [`SLOPE_BIAS_TEXELS`]
-/// covers what a texel's footprint explains on the facet the fragment is on. What
-/// is left over is the **seam between two facets**: adjacent triangles of a
-/// tessellated surface climb at different rates, so each is biased by its own
-/// slope and the texel their shared edge falls in stores the steeper one's depth.
-/// No slope read off either facet predicts the other's, and this is what covers
-/// the difference.
+/// over a `D32Float`, so that error is micrometres, and what a texel's footprint
+/// explains on the facet the fragment is actually on is
+/// [`NORMAL_OFFSET_TEXELS`]' job — it walks the lookup sideways until it reads a
+/// texel the receiver owns. What is left over is the **seam between two
+/// facets**: adjacent triangles of a tessellated surface climb at different
+/// rates, and the texel their shared edge falls in stores the steeper one's
+/// depth wherever the lookup lands. No offset read off either facet predicts the
+/// other's, and this is what covers the difference.
 ///
 /// `crcbl_render::scene::demo`'s dunes patch is the surface that sets it — an
 /// analytic height field sampled onto one-metre quads, so a facet's neighbours
-/// are as far from it in slope as anything in the tree. At three of these texels
-/// its valley floors show no seam at either extent it is drawn at; at two a
-/// dotted line reappears along one edge run, and below one it is a line on most
-/// of them. Three is where the frame stops showing it and there is **no margin
-/// above it**, which is a deliberate difference from what this number used to be:
-/// what it now covers is a bounded, understood quantity rather than a cover for
-/// an unknown, so buying margin in it is buying `apps/lantern`'s wall-foot strip
+/// are as far from it in slope as anything in the tree. Counting the pixels in
+/// its lit valley floor that sit more than ten luma below the median of their
+/// own neighbourhood, at [`NORMAL_OFFSET_TEXELS`] held at two, on radv at
+/// 1280×960:
+///
+/// | Constant, in texels | Dark pixels in the valley |
+/// | ------------------- | ------------------------- |
+/// | 0                   | 173                       |
+/// | 0.5                 | 45                        |
+/// | 1 (shipped)         | 24                        |
+/// | 1.5                 | 24                        |
+/// | 2                   | 24                        |
+/// | 3                   | 24                        |
+///
+/// One is where the count stops falling, and there is **no margin above it**:
+/// what it covers is a bounded, understood quantity rather than a cover for an
+/// unknown, so buying margin in it is buying `apps/lantern`'s wall-foot strip
 /// back for nothing.
 ///
-/// Six was the number before `sun_visibility` read the slope off the geometric
-/// normal — the facet the rasteriser drew — rather than off the interpolated
-/// shading one. `geometric_normal_of` in `shaders/mesh.slang` is that change and
-/// argues it; what it removed was a *broad cross-hatch* over the dunes' whole
-/// valley floor, which was the artefact six texels were paying for. Measured
-/// through `apps/lantern`'s review frames, the strip at the `-x` wall's foot went
-/// 0.382 m → 0.256 and the band down the back wall's left edge 0.373 → 0.244.
+/// # Three was the number while the second term was a depth bias
 ///
-/// Measured on radv, at 1280×960 for `apps/lantern` and at both 1280×960 and the
-/// golden's 256×192 for the dunes patch.
-const DEPTH_BIAS_TEXELS: f32 = 3.0;
+/// It fell to one when [`NORMAL_OFFSET_TEXELS`] replaced a slope-scaled *depth*
+/// bias — the same count, but moving the receiver towards the light rather than
+/// across its own map. That term is what the wall-foot strip was made of:
+/// `apps/lantern`'s floor lies at a slope of 3.17, so two texels per unit of
+/// `tan` was six and a half texels of depth slack wherever the sun grazes, on
+/// top of this constant's three.
+///
+/// Measured through `apps/lantern`'s 1280×960 review frame on radv, walking the
+/// floor out from the `-x` wall at `room::SHADED_FLOOR`'s own line:
+///
+/// | Artefact                                | Depth-biased slope | Normal offset |
+/// | --------------------------------------- | ------------------ | ------------- |
+/// | Peak luma in the strip at the wall's foot | 140.3             | 51.0          |
+/// | Lit strip's half-fall width             | 0.391 m            | none          |
+/// | Cornice lift over the shadowed back wall | 78.3 luma          | 11.7 luma     |
+/// | Dark pixels in the dunes' valley floor  | 60                 | 24            |
+///
+/// **51.0 is the shadowed floor's own value**, which is what makes the second
+/// column say the leak is gone rather than narrowed: the profile never rises
+/// above the shadow it is walking through, so there is no half-fall to measure.
+/// `crcbl_render::scene::demo`'s dunes patch reads 5 dark pixels before and 3
+/// after at the golden's own 256×192.
+///
+/// What it cost is recorded rather than hidden: the brass block's foot picks up
+/// a scalloped fringe a couple of pixels deep, on the period of the shadow
+/// texel, where the offset walks a receiver near a silhouette across the edge of
+/// its own caster. It is the standard cost of this direction, it is bounded by
+/// the offset itself, and it is a tenth the size of the strip it replaced.
+const DEPTH_BIAS_TEXELS: f32 = 1.0;
 
-/// The slope-scaled part, per unit of `tan(acos(Ng·L))`, in the same texels.
+/// How far along its own geometric normal a receiver is moved before the sun's
+/// shadow lookup, per unit of `sin(acos(Ng·L))`, in the same texels.
 ///
-/// `Ng` and not `N`: the slope is read off the rasterised facet, which is
-/// `geometric_normal_of` in `shaders/mesh.slang` and its own reason.
+/// `Ng` and not `N`: the offset is read off the rasterised facet, which is
+/// `geometric_normal_of` in `shaders/mesh.slang` and its own reason. Why the
+/// direction is the normal and not the light, and why a sine bounds it where the
+/// tangent it replaced had to be clamped, is `shadow_normal_offset` in that file.
 ///
-/// A surface nearly edge-on to the light spans many times its own depth across
-/// one shadow texel, so a constant bias that suits a face pointing at the sun is
-/// nowhere near enough there. The shader clamps how far this can go
-/// (`SHADOW_SLOPE_BIAS_CLAMP`), because the unbounded version detaches a shadow
-/// from its caster.
+/// # What sets it, and what caps it
 ///
-/// The 3×3 kernel's taps reach one texel out and each is a hardware-bilinear
-/// comparison over a 2×2 neighbourhood, so the furthest a comparison is made is
-/// a texel and a half from the receiver's own. `apps/lantern`'s floor is the
-/// fixture that pins it: it lies at a slope of 3.17, and with the constant term
-/// held at a half texel its sunlit stretch is exactly as bright as an unshadowed
-/// one from two of these and dims measurably below — a couple of percent at one
-/// and a half, near a tenth at a half. Which is the kernel's reach, arrived at from a
-/// frame rather than from the arithmetic above.
-const SLOPE_BIAS_TEXELS: f32 = 2.0;
+/// The dunes patch again, at [`DEPTH_BIAS_TEXELS`] held at one, counted the same
+/// way, on radv at 1280×960:
+///
+/// | Offset, in texels | Dark pixels in the valley |
+/// | ----------------- | ------------------------- |
+/// | 0                 | 1159                      |
+/// | 1                 | 74                        |
+/// | 2 (shipped)       | 24                        |
+/// | 3                 | 22                        |
+/// | 4                 | 22                        |
+///
+/// Two is where the count reaches its floor — the last two rows are two pixels
+/// apart, which is the noise in this measurement — and the ceiling above it is
+/// **the thinnest wall in the tree**. An offset moves a receiver bodily, so one
+/// larger than the geometry it stands against moves it through: at
+/// [`DISTANCE`]'s outer cascade a texel is 62.5 mm of world, so two of them is
+/// 125 mm and `apps/lantern`'s walls are a shell of `room::SHELL`, which is
+/// 150 mm. Three would be 187.5 mm and past it. That bound is a property
+/// of the scene rather than of this number, so it is the *reason* two is shipped
+/// rather than three and not a claim that a leak was seen — none was.
+const NORMAL_OFFSET_TEXELS: f32 = 2.0;
 
 /// The cascade matrices a frame shades and culls with.
 ///
@@ -410,7 +452,12 @@ impl Cascades {
             reason = "an atlas extent is a few thousand texels"
         )]
         let inverse = [1.0 / width as f32, 1.0 / height as f32];
-        [inverse[0], inverse[1], DEPTH_BIAS_TEXELS, SLOPE_BIAS_TEXELS]
+        [
+            inverse[0],
+            inverse[1],
+            DEPTH_BIAS_TEXELS,
+            NORMAL_OFFSET_TEXELS,
+        ]
     }
 }
 

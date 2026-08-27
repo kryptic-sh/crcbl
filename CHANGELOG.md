@@ -617,6 +617,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   are the OS-adjusted ones; the capability's docs and `docs/backlog.md` both say
   so rather than claiming more than the code delivers.
 
+### Changed
+
+- **The sun's and every punctual light's shadow bias is a normal offset, not a
+  slope-scaled depth bias.** `mesh.slang`'s `shadow_slope` is gone;
+  `shadow_normal_offset` moves the receiver **along its own geometric normal**
+  by `sin(acos(Ng·L))` texels before the lookup, so a grazing surface reads a
+  texel it owns instead of comparing a depth that was raised until the acne went
+  away. Only the constant term still moves towards the light.
+
+  `SHADOW_SLOPE_BIAS_CLAMP` went with it and is not replaced: `tan` runs to
+  infinity as a surface turns edge-on and needed a ceiling, and `sin` is bounded
+  by one.
+
+  `crcbl_render::shadow::SLOPE_BIAS_TEXELS` is now `NORMAL_OFFSET_TEXELS` and
+  `FrameUniforms::shadow_params.w` carries the new meaning. `DEPTH_BIAS_TEXELS`
+  fell from three texels to one, which is what the offset earned back. Measured
+  on radv through `apps/lantern`'s review frame: the lit strip at the `-x`
+  wall's foot went from 0.391 m wide, peaking 89 luma above the shadow it sat
+  in, to nothing at all — the profile never leaves the shadow's own value — and
+  the cornice lift over the shadowed back wall went 78.3 luma to 11.7. The dunes
+  patch's self-shadowing dots went 60 to 24.
+
+  It costs a scalloped fringe a couple of pixels deep at a silhouette's foot,
+  where the offset walks a receiver across the edge of its own caster. That is
+  the standard cost of this direction and `docs/plan/45-shadows.md` records it
+  beside the numbers above.
+
+  Goldens re-blessed: `cube`, `cube_97x61`, `dunes`, `spot_shadow`,
+  `point_shadow`, and `apps/lantern`'s `room.png` and `live.png`. Nothing
+  outside a shadow moved.
+
 ### Breaking
 
 - **`GpuInstance` gained `base_vertex` and `INSTANCE_STRIDE` is 96 bytes**,

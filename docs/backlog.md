@@ -15,6 +15,39 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
+### The normal offset scallops one silhouette's foot (2026-08-28)
+
+`docs/plan/45-shadows.md`'s seventh decision replaced the sun's and the punctual
+lights' slope-scaled depth bias with a normal offset, and the frames it bought
+are recorded there. What it cost is here, because it is a finding that was not
+fixed: `apps/lantern`'s brass block picks up a **scalloped fringe a couple of
+pixels deep along its foot**, on the period of the shadow texel, where the
+offset walks a receiver near a silhouette across the edge of its own caster. It
+is visible in `target/lantern/fixed-camera-1280x960.png` at roughly `(800, 745)`
+and it is absent from the frame before the change.
+
+**It is a bounded cost and it was taken deliberately**, against a 0.391 m lit
+strip at every wall's foot and a 78-luma cornice lift, both of which are gone.
+It is the standard artefact of this direction rather than a defect of this
+implementation.
+
+Three things could address it and none was tried: the ladder's next two rungs —
+a rotated Poisson kernel and then PCSS — soften every shadow edge including this
+one; scaling the offset down where the receiver's own depth derivative says it
+is near a silhouette is the targeted fix and costs two more derivatives; and
+projecting the offset into the plane perpendicular to the light would decouple
+it from the depth entirely, which is cleaner but moves _more_ shadow onto the
+face rather than less, so it is the wrong direction for this artefact
+specifically.
+
+**How the numbers in that decision were taken**, so they can be reproduced: a
+1280×960 `apps/lantern` review frame off radv, the floor walked outward from
+`room::SHADED_FLOOR`'s line through the same `Camera::view_projection` the frame
+was drawn with, and the strip reported as the crossing of the midpoint between
+the lit plateau and the settled shadow; the dunes count is pixels in the lit
+valley more than ten luma below the median of a 9×9 neighbourhood. The scripts
+were scratch and are not in the tree.
+
 ### The froxel column casts its shaft and no demo turns it on (2026-08-28)
 
 Rung 1 of `docs/plan/51-volumetrics.md` is closed: `crcbl_render::volumetric`'s
@@ -303,14 +336,17 @@ and the residual is a fade constant rather than a wrong pixel.
 
 ### The `cube` browser golden fails and nothing has decided what to do (2026-08-27)
 
-**Unresolved on CI, and it is the reason the Pages workflow is red — but the
-antialiasing flip may have taken it.** With the resolve in the default stack the
-whole golden suite was re-blessed, and `web/run-render-harness-e2e.sh` then
-passed `cube` **locally**, where before it failed: 11 of 13 scenes matched, with
-only the two excused ones left. That is not the CI answer. The local browser
-gate runs on this machine's adapter and the runners are SwiftShader, so only a
-Pages run decides whether the noise below survives the filter. If it does, the
-three options are still the options.
+**Unresolved on CI, and it is the reason the Pages workflow is red — and the
+frame has now been re-blessed twice underneath it.** The antialiasing flip
+re-blessed the whole suite, and 2026-08-28's normal-offset bias
+(`docs/plan/45-shadows.md`'s seventh decision) re-blessed `cube` again — that
+one moved the shadow edges the diff below is made of, so it is the change most
+likely to have taken the failure with it. Both times
+`web/run-render-harness-e2e.sh` passed `cube` **locally** afterwards: 11 of 13
+scenes matched, with only the two excused ones — `ssr` and `ui` — left. That is
+not the CI answer. The local browser gate runs on this machine's adapter and the
+runners are SwiftShader, so only a Pages run decides whether the noise below
+survives the filter. If it does, the three options are still the options.
 
 The failure as it was measured: the `cube` scene fails the browser-path golden
 identically on the linux and windows runners — both are SwiftShader, so they

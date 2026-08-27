@@ -298,8 +298,9 @@ struct FrameUniforms
     float4 cascade_far;
     /// `x`: one shadow-atlas texel in `u`. `y`: one texel in `v`. `z`: how many
     /// **cascade texels** the sun's shadow comparison is moved towards the
-    /// light. `w`: how many more of them it moves per unit of `tan(acos(Ng·L))`,
-    /// the rasterised facet's slope — see `shadow_slope`.
+    /// light. `w`: how many of them it is moved along the receiver's own
+    /// geometric normal, per unit of `sin(acos(Ng·L))` — the normal-offset
+    /// bias, and `shadow_normal_offset` is what argues the direction.
     ///
     /// Both texel sizes are carried even where the grid is square and they are
     /// equal: the kernel below steps in tile space and scales back by the grid's
@@ -1481,27 +1482,6 @@ float fog_transmittance(float optical_depth)
     return fog_exp_neg(max(optical_depth, 0.0));
 }
 
-/// Ceiling on the slope factor every shadow bias in this file is scaled by.
-///
-/// `tan(acos(Ng·L))` runs to infinity as a surface turns edge-on to the light,
-/// and an unbounded bias there is peter-panning — the contact point of a shadow
-/// slides away from its caster. Bounded rather than removed because the same
-/// term is what keeps a *steeply* lit surface free of acne; the clamp is the
-/// standard pairing.
-///
-/// It binds more often now that the slope is read off the facet rather than off
-/// the shading normal: a fragment whose triangle faces away from the light while
-/// its interpolated normal still faces it gets the clamp, where before it got a
-/// finite slope. `shadow_slope` argues why that is the answer wanted there.
-///
-/// **A bound on the tangent, and on nothing else** — it is not denominated in
-/// depth, in texels or in world units, which is why one number serves
-/// `sun_visibility` and `punctual_visibility` even though what each multiplies
-/// it by is different. Five is a surface about 79° from the light: past that the
-/// diffuse term this multiplies is under a fifth of its peak, so a shadow that
-/// detaches there costs less picture than the acne the unclamped term prevents.
-static const float SHADOW_SLOPE_BIAS_CLAMP = 5.0;
-
 /// The normal of the triangle the rasteriser actually drew, from the
 /// screen-space derivatives of the world position.
 ///
@@ -1547,23 +1527,46 @@ float3 geometric_normal_of(float3 world_position, float3 shading_normal)
     return dot(facet, shading_normal) < 0.0 ? -facet : facet;
 }
 
-/// How far the rasterised surface climbs across one shadow texel, per texel of
-/// footprint: `tan(acos(Ng·L))`, bounded by `SHADOW_SLOPE_BIAS_CLAMP`.
+/// How far along its own normal a receiver is moved before its shadow lookup,
+/// per texel of footprint: `sin(acos(Ng·L))`.
+///
+/// # Sideways across the map, not towards the light
+///
+/// This is the **normal-offset bias**, and the direction is the whole of it. A
+/// bias along `to_light` raises the depth a fragment compares with, so enough of
+/// it to clear acne on a grazing surface is also enough to lift the contact
+/// point of a shadow off its caster — peter-panning, and the two are the same
+/// number pulling in opposite directions. Moving along the *normal* instead
+/// leaves the compared depth where it was and moves which texel is read, so what
+/// it buys is a sample that belongs to the receiver rather than to the facet
+/// climbing across it, and a contact shadow keeps its contact.
+///
+/// # Why the sine, and why nothing clamps it
+///
+/// A surface square to the light has no depth slope across a texel and needs no
+/// offset; one edge-on to it needs a full texel of lateral travel, and the
+/// lateral component of a step along the normal is `sin` of the angle between
+/// them. So the term is `sin(acos(Ng·L))`, which is **bounded by one** — and
+/// that is the second thing this direction buys. `tan`, which is what a
+/// slope-scaled *depth* bias is denominated in, runs to infinity as a surface
+/// turns edge-on and had to be clamped; the clamp is gone with it, and the
+/// worst case is now a bounded quantity rather than a number chosen to stop an
+/// unbounded one.
 ///
 /// One function for the sun and for the punctual lights, because it is one piece
-/// of knowledge — what a bias in texels has to be multiplied by — and the clamp
-/// belongs with it rather than at each call site.
+/// of knowledge: what an offset in texels has to be multiplied by.
 ///
 /// `geometric_normal` is `geometric_normal_of`'s, and passing the *shading*
-/// normal here is the defect that function exists to remove. A facet turned away
-/// from the light gives a non-positive cosine and therefore the clamp, which is
-/// the conservative answer: such a fragment is at or past the terminator of the
-/// surface that shadows it, and it is where acne is worst.
-float shadow_slope(float3 geometric_normal, float3 to_light)
+/// normal here is the defect that function exists to remove: the lateral travel
+/// that escapes a texel is a fact about the triangle the rasteriser drew into
+/// the map, not about the field the corners interpolate. A facet turned away
+/// from the light saturates to a zero cosine and therefore to a full texel of
+/// offset, which is the conservative answer: such a fragment is at or past the
+/// terminator of the surface that shadows it, and it is where acne is worst.
+float shadow_normal_offset(float3 geometric_normal, float3 to_light)
 {
     float cosine = saturate(dot(geometric_normal, to_light));
-    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
-    return min(slope, SHADOW_SLOPE_BIAS_CLAMP);
+    return sqrt(saturate(1.0 - cosine * cosine));
 }
 
 /// 3×3 PCF over tile `tile`, at `tile_uv` in that tile's own `0..1` space.
@@ -1633,8 +1636,8 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
         }
     }
 
-    // The bias, and it is `punctual_visibility`'s exactly: the world position is
-    // moved towards the light before projecting, by a multiple of the world
+    // The bias, and it is `punctual_visibility`'s exactly: two moves of the
+    // world position before it is projected, each a multiple of the world
     // footprint of one texel of *this cascade's* map. A cascade is an
     // orthographic box of `2 * radius` fitted to `SHADOW_TILE` texels, and its
     // radius is the split distance the selection above read — the same
@@ -1649,19 +1652,26 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
     // same number meant 0.83 m of world slack on the outer cascade and lit a
     // strip along the foot of every wall.
     //
+    // **The two moves are in different directions and cover different things.**
+    // Along the normal is `shadow_normal_offset`'s, and it is what the slope
+    // costs: it walks the lookup sideways across the map instead of raising the
+    // depth it compares, so a grazing surface is read where it belongs and a
+    // contact shadow keeps its contact. Along the light is the constant, and it
+    // is the facet *seam* — two triangles of different slope biased by different
+    // amounts, where the texel their shared edge falls in stores the steeper
+    // one's depth and no offset read off either facet predicts the other's.
+    //
     // What the two counts are and why they are what they are lives on the host,
-    // in `crcbl_render::shadow`: the slope term is this kernel's reach, and the
-    // constant is what a texel's own quantisation costs on top of it. The slope
-    // is read off the **facet**, so a surface shaded with a normal its triangles
-    // do not have gets the bias its triangles need — which is what let that
-    // constant halve. `crcbl_render::shadow::DEPTH_BIAS_TEXELS` has the numbers.
+    // in `crcbl_render::shadow`: `DEPTH_BIAS_TEXELS` and `NORMAL_OFFSET_TEXELS`
+    // have the numbers and the frames they were read off.
     float texel_world = 2.0 * frame.cascade_far[cascade] / SHADOW_TILE;
-    float offset = texel_world
-                 * (frame.shadow_params.z
-                    + frame.shadow_params.w * shadow_slope(geometric_normal, to_light));
+    float3 biased = world_position
+                  + geometric_normal
+                        * (texel_world * frame.shadow_params.w
+                           * shadow_normal_offset(geometric_normal, to_light))
+                  + to_light * (texel_world * frame.shadow_params.z);
 
-    float4 clip = mul(frame.shadow_view_proj[cascade],
-                      float4(world_position + to_light * offset, 1.0));
+    float4 clip = mul(frame.shadow_view_proj[cascade], float4(biased, 1.0));
     // Orthographic, so `w` is 1 and the divide is a formality — written out
     // anyway because nothing in this file may assume which constructor built a
     // matrix, which is `Projection`'s whole point on the CPU side.
@@ -1678,13 +1688,15 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
     // projections push into the viewport rather than into the matrix.
     float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 
-    // The offset is already in `ndc.z`, and it moved the reference *up* —
-    // reversed-Z, so a larger depth is nearer the light, which is the direction
-    // that stops a surface shadowing itself. Moving the world position along
-    // `to_light` cannot move `tile_uv`: the projection's own depth axis is that
-    // direction, so the sample stays in the texel it belonged to and only the
-    // depth compared there changes. That is what makes this the same thing a
-    // clip-space bias did, denominated in something that means a distance.
+    // Both moves are already in `ndc`, and they land in different components.
+    // The one along `to_light` moved the reference *up* — reversed-Z, so a
+    // larger depth is nearer the light, which is the direction that stops a
+    // surface shadowing itself — and it cannot move `tile_uv`, because the
+    // projection's own depth axis is that direction. The one along the normal is
+    // the opposite: it is perpendicular to that axis in the amount
+    // `shadow_normal_offset` returns, so what it moves is `tile_uv` and the
+    // texel this fragment reads. That is the difference between raising a
+    // comparison and taking a different one.
     return tile_pcf(cascade, tile_uv, ndc.z);
 }
 
@@ -1753,9 +1765,22 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
 /// unchanged.
 static const float PUNCTUAL_DEPTH_BIAS_TEXELS = 2.0;
 
-/// The slope-scaled part, per unit of `tan(acos(N·L))`. See
-/// `PUNCTUAL_DEPTH_BIAS_TEXELS` for how it was chosen.
-static const float PUNCTUAL_SLOPE_BIAS_TEXELS = 4.0;
+/// The **normal-offset** part, per unit of `sin(acos(Ng·L))` — how far along its
+/// own normal a receiver is moved, in the same texels.
+///
+/// It replaces a slope-scaled *depth* bias of the same count, for
+/// `shadow_normal_offset`'s reasons. **The count was carried over rather than
+/// re-swept**, and what says it is still enough is the observable
+/// `PUNCTUAL_DEPTH_BIAS_TEXELS` describes: `Scene::SpotShadow`'s and
+/// `Scene::PointShadow`'s two geometry paths still agree pixel for pixel at
+/// four, where a bias too small makes them disagree by however much acne there
+/// is. Both goldens moved and were re-blessed after the frames were compared;
+/// the shadows stayed attached to their casters, which is the other end.
+///
+/// `sin` is smaller than the `tan` it replaced at every angle, so this is not a
+/// number that grew when its meaning changed. Whether a smaller one would now
+/// do is unmeasured.
+static const float PUNCTUAL_NORMAL_OFFSET_TEXELS = 4.0;
 
 /// The fraction of a punctual light's map this fragment can see: `1.0` fully
 /// lit, `0.0` fully shadowed, the values between the PCF filter.
@@ -1767,7 +1792,7 @@ static const float PUNCTUAL_SLOPE_BIAS_TEXELS = 4.0;
 /// `to_light` is the unit vector towards the light and `n_dot_l` the unclamped
 /// Lambert term, both already computed by the shading loop.
 ///
-/// **`geometric_normal` drives the slope here for the same reason it does in
+/// **`geometric_normal` drives the offset here for the same reason it does in
 /// `sun_visibility`, and the consistency is deliberate.** Acne is a property of
 /// the triangle that was rasterised into the map, and a punctual map rasterises
 /// the same triangles the sun's does — so a light type reading a different normal
@@ -1778,11 +1803,16 @@ static const float PUNCTUAL_SLOPE_BIAS_TEXELS = 4.0;
 float punctual_visibility(uint tile, float3 world_position, float3 to_light, float n_dot_l,
                           float texel_world, float3 geometric_normal)
 {
-    float offset = texel_world
-                 * (PUNCTUAL_DEPTH_BIAS_TEXELS
-                    + PUNCTUAL_SLOPE_BIAS_TEXELS * shadow_slope(geometric_normal, to_light));
+    // Two moves, in two directions, on `sun_visibility`'s terms exactly: along
+    // the normal by what the receiver's slope costs in lateral travel, and along
+    // the light by the constant that covers a facet seam.
+    float3 biased = world_position
+                  + geometric_normal
+                        * (texel_world * PUNCTUAL_NORMAL_OFFSET_TEXELS
+                           * shadow_normal_offset(geometric_normal, to_light))
+                  + to_light * (texel_world * PUNCTUAL_DEPTH_BIAS_TEXELS);
 
-    float4 clip = mul(frame.light_view_proj[tile], float4(world_position + to_light * offset, 1.0));
+    float4 clip = mul(frame.light_view_proj[tile], float4(biased, 1.0));
     // **`w` first, and this is the difference from the cascades.** An
     // orthographic matrix has `w == 1` everywhere; a perspective one has `w`
     // equal to the depth in front of the light, so a receiver *behind* the light

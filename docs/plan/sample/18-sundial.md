@@ -83,7 +83,11 @@ hold in their head, and the only honest way to set them is to look.
    atlas viewer land here — they are the diagnostic half and they are worth more
    than a second filter.
 2. **Normal-offset bias and the acne/peter-panning pair**, checkable at the
-   contact points the scene was built for.
+   contact points the scene was built for. The bias itself **shipped
+   2026-08-28** — `docs/plan/45-shadows.md`'s seventh decision — so what is left
+   here is the comparison, not the rung: a scene that shows the pair moving
+   against each other as the two counts change, where that decision could only
+   measure one fixture's strip and one patch's dots.
 3. **Cascade cross-fade**, against the seam the colonnade crosses.
 4. **The Poisson kernel and PCSS**, with the penumbra-versus-distance claim.
 5. **Ray-traced shadows**, gated on P7C, and the device clamp.

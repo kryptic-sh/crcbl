@@ -258,18 +258,19 @@ pub struct FrameUniforms {
     /// units. Components past [`SHADOW_CASCADES`] are unread.
     pub cascade_far: [f32; 4],
     /// `x`, `y`: one shadow-atlas texel in `u` and in `v`. `z`: the constant
-    /// depth bias the **cascades** compare with. `w`: the slope-scaled
-    /// coefficient on top of it.
+    /// depth bias the **cascades** compare with. `w`: the normal-offset
+    /// coefficient beside it — how far along its own geometric normal a
+    /// receiver is moved before the lookup, per unit of `sin(acos(Ng·L))`.
     ///
     /// Both texel sizes are carried even where the grid is square and they are
     /// equal: the shader's kernel steps in tile space and scales back by
     /// [`SHADOW_ATLAS_COLUMNS`] and [`SHADOW_ATLAS_ROWS`], and the grid stops
     /// being square the moment a point light's six tiles arrive.
     ///
-    /// The two biases are the sun's alone. A spot's map is a perspective
-    /// projection whose depth precision is distributed nothing like a cascade's,
-    /// so it biases in world units before projecting instead — see
-    /// `spot_visibility` in `shaders/mesh.slang`, which is where that is argued.
+    /// The two are the sun's alone. A spot's map is a perspective projection
+    /// whose depth precision is distributed nothing like a cascade's, so it
+    /// carries its own pair as shader constants — see `punctual_visibility` in
+    /// `shaders/mesh.slang`, which is where that is argued.
     pub shadow_params: [f32; 4],
     /// The froxel grid's extent: `x` froxels across the screen, `y` down it, `z`
     /// depth slices, `w` unread padding `std140` aligns a vector to sixteen
@@ -2948,6 +2949,63 @@ mod tests {
                  tangent takes and not the one a normal takes"
             );
         }
+    }
+
+    /// **Both shadow lookups move the receiver along its own facet normal, and
+    /// only the constant term moves it towards the light.**
+    ///
+    /// The normal-offset bias is a claim about a *direction*, and a direction is
+    /// the one thing a re-blessed golden cannot hold anyone to: a lookup offset
+    /// towards the light instead draws a perfectly plausible frame with a lit
+    /// strip along the foot of every wall, and somebody would bless it. The two
+    /// counts and the frames they were read off are
+    /// `crcbl_render::shadow::DEPTH_BIAS_TEXELS` and its `NORMAL_OFFSET_TEXELS`;
+    /// `shadow_normal_offset` in `shaders/mesh.slang` is why they travel in
+    /// different directions.
+    ///
+    /// The two expressions are matched whole rather than by their parts, which
+    /// is what makes each of them a claim about *one* of the two functions:
+    /// nothing else in the file spells `frame.shadow_params.w` beside
+    /// `to_light`, and nothing else spells `PUNCTUAL_NORMAL_OFFSET_TEXELS` at
+    /// all.
+    ///
+    /// The last assertion is what stops the tangent form coming back beside the
+    /// sine: `shadow_slope` and the ceiling it needed are gone, and a `tan` that
+    /// runs to infinity as a surface turns edge-on is a bias with no bound
+    /// again — which is the artefact `SHADOW_SLOPE_BIAS_CLAMP` existed for.
+    #[test]
+    fn both_shadow_lookups_offset_along_the_facet_normal() {
+        let source = include_str!("../shaders/mesh.slang");
+        let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (function, offset, constant) in [
+            (
+                "sun_visibility",
+                "frame.shadow_params.w",
+                "frame.shadow_params.z",
+            ),
+            (
+                "punctual_visibility",
+                "PUNCTUAL_NORMAL_OFFSET_TEXELS",
+                "PUNCTUAL_DEPTH_BIAS_TEXELS",
+            ),
+        ] {
+            let expected = format!(
+                "float3 biased = world_position + geometric_normal * (texel_world * {offset} \
+                 * shadow_normal_offset(geometric_normal, to_light)) + to_light * (texel_world \
+                 * {constant});"
+            );
+            assert!(
+                squeezed.contains(&expected),
+                "{function} no longer offsets its receiver along the facet normal by {offset} \
+                 and towards the light by {constant}, so the bias is not the one the two counts \
+                 were measured for:\n{expected}"
+            );
+        }
+        assert!(
+            !source.contains("shadow_slope") && !source.contains("SLOPE_BIAS_CLAMP"),
+            "mesh.slang has grown a slope-scaled depth bias again, and with it the unbounded \
+             tangent the clamp existed to cover"
+        );
     }
 
     /// **A normal taken through `normal_basis` stays perpendicular to its

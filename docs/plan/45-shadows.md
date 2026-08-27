@@ -240,6 +240,73 @@ within tolerance and was left alone.
   tail the device selected; nothing in the shadow path depends on the binding
   model.
 
+### A seventh, taken 2026-08-28: the slope moves the receiver sideways, not towards the light
+
+The ladder's first rung, built. `mesh.slang`'s `shadow_slope` is gone and
+`shadow_normal_offset` stands in its place: where the slope term used to scale a
+move **towards the light** by `tan(acos(Ng·L))`, the receiver is now moved
+**along its own geometric normal** by `sin(acos(Ng·L))`, and only the constant
+term still travels light-ward. Both `sun_visibility` and `punctual_visibility`
+carry the change, on the sixth decision's terms exactly — acne is a property of
+the triangle rasterised into a map, and a light type biased differently for the
+same surface would need constants of its own for no reason anyone could state.
+
+**Sideways is the whole of it.** A move towards the light raises the depth the
+fragment compares with, so enough of it to clear acne on a grazing surface is
+also enough to lift a shadow off its caster; the two are one number pulled in
+opposite directions, and the fifth decision's table is a schedule of that trade.
+A move along the normal leaves the compared depth alone and changes _which
+texel_ is read, so what it buys is a sample belonging to the receiver rather
+than to the facet climbing across it.
+
+**And the sine is bounded where the tangent was not.** `tan` runs to infinity as
+a surface turns edge-on and needed `SHADOW_SLOPE_BIAS_CLAMP` — a number chosen
+to stop an unbounded one. `sin` is at most one by construction, so the clamp
+went with it and the worst case is now a quantity rather than a choice.
+
+Measured on radv through `apps/lantern`'s 1280×960 review frame, walking the
+floor out from the `-x` wall along `room::SHADED_FLOOR`'s own line, and through
+`crcbl_render::scene::demo`'s dunes patch:
+
+| Artefact                                  | Depth-biased slope | Normal offset |
+| ----------------------------------------- | ------------------ | ------------- |
+| Peak luma in the strip at the wall's foot | 140.3              | 51.0          |
+| Lit strip's half-fall width               | 0.391 m            | none          |
+| Cornice lift over the shadowed back wall  | 78.3 luma          | 11.7 luma     |
+| Dark pixels in the dunes' valley floor    | 60                 | 24            |
+
+**51.0 is the shadowed floor's own value**, which is what makes the second
+column say the leak is _gone_ rather than narrowed: the profile never rises
+above the shadow it is walking through, so there is no half-fall left to
+measure. The dunes count is pixels sitting more than ten luma below the median
+of their own neighbourhood, which is what a self-shadowing dot is and a smooth
+Lambert gradient is not; at the golden's own 256×192 it reads 5 before and 3
+after.
+
+**The two counts moved, and both were swept rather than kept.**
+`crcbl_render::shadow::NORMAL_OFFSET_TEXELS` is two and `DEPTH_BIAS_TEXELS` fell
+from three to one — the constant is what the offset earned back, which is what
+the fifth decision's closing line predicted it would. Each doc carries its own
+sweep. The ceiling on the offset is the thinnest wall in the tree rather than a
+frame: an offset moves a receiver bodily, and two texels of the outer cascade is
+125 mm against `apps/lantern`'s 150 mm shell, where three would be 187.5 mm and
+through it. No leak was seen at two; the bound is why three is not shipped.
+
+**What it cost is recorded rather than hidden.** The brass block's foot in
+`apps/lantern` picks up a scalloped fringe a couple of pixels deep, on the
+period of the shadow texel, where the offset walks a receiver near a silhouette
+across the edge of its own caster. That is the standard cost of this direction,
+it is bounded by the offset itself, and it is a tenth the size of the strip it
+replaced. The rungs above — a rotated Poisson kernel, then PCSS — are what
+soften it.
+
+Goldens re-blessed: `cube`, `cube_97x61`, `dunes`, `spot_shadow` and
+`point_shadow` in `crates/crcbl/tests/golden/`, and `room.png` and `live.png` in
+`apps/lantern/tests/golden/`. Every other golden in the tree still matches and
+was left alone, which is the evidence that nothing outside a shadow moved.
+`crcbl_shaders::mesh`'s `both_shadow_lookups_offset_along_the_facet_normal` is
+what holds the direction after the re-bless, because a re-blessed golden cannot.
+
 ### The quality ladder, taken 2026-08-27
 
 What ships, first, because the ladder is only readable against it: **stable
@@ -249,9 +316,9 @@ the camera cannot change a cascade's extent, and quantises the light-space
 origin to whole texels — **3×3 hardware PCF through a comparison sampler**,
 which is `mesh.slang`'s `tile_pcf` taking nine `SampleCmpLevelZero` taps one
 atlas texel apart and dividing by nine, the texel-denominated bias of the fifth
-decision, the geometric-normal slope of the sixth, and the **2026-08-26
-re-tiling** that bought a second point light by shrinking `SHADOW_TILE` rather
-than growing the image.
+decision, the geometric normal of the sixth, the **normal-offset** direction of
+the seventh, and the **2026-08-26 re-tiling** that bought a second point light
+by shrinking `SHADOW_TILE` rather than growing the image.
 
 **The re-tiling has a measured cost, and it is not hypothetical.** Since that
 change the `cube` browser-path golden fails on linux and windows: **64 grossly
@@ -266,14 +333,17 @@ and it is recorded here as evidence that the tile is now the binding constraint
 on shadow quality — every map is 768 texels a side where it was 1024 — not as a
 defect with a fix attached.
 
+**Those numbers are from before the seventh decision**, which re-blessed `cube`
+and moved exactly the shadow edges the diff is made of. Whether the failure
+survived it is a question only a Pages run answers — this machine's adapter is
+not SwiftShader — and `docs/backlog.md` is where that is tracked.
+
 The ladder, in the order it should be climbed:
 
-- **Normal-offset bias.** The fifth decision's own closing line named it and it
-  is still the cheapest real win: offsetting the receiver **along its normal**
-  before projecting moves the sample sideways across the map rather than moving
-  the surface towards the light, so it removes acne without buying the
-  peter-panning a depth bias buys. What it earns back is the constant term the
-  sixth decision's table prices in centimetres of lantern's lit strip.
+- ~~**Normal-offset bias.**~~ **Built 2026-08-28** — the seventh decision above
+  has the frames and the two sweeps. It earned back exactly what the fifth
+  decision's closing line said it would: the constant term fell from three
+  texels to one, and lantern's wall-foot strip went with it.
 - **Cascade cross-fade.** The switch between cascades is hard today, so wherever
   two cascades meet there is a seam — and the fifth decision made it _more_
   visible, not less, by biasing a near cascade proportionally less than a far

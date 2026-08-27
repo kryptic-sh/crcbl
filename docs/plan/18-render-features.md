@@ -59,7 +59,7 @@ does these, and it is answered in one place:
 | HDR target + exposure/tonemap pass                                                                                                            | P7 — built at P1. The **filmic curve** is still owed; see the post stack                                                                                                                                                                                                                        |
 | Antialiasing rung 1: **FXAA 3.11**                                                                                                            | P7 — built, in `DEFAULT_STACK`, and the whole of the stack's AA row today                                                                                                                                                                                                                       |
 | Sun CSM (culling-integrated, 3×3 PCF)                                                                                                         | P7 — built. The **cascade debug overlay** is not                                                                                                                                                                                                                                                |
-| Shadow ladder rung 1: **normal-offset bias**                                                                                                  | P7 — the fifth decision named it and the sixth's constants are what it buys back                                                                                                                                                                                                                |
+| ~~Shadow ladder rung 1: **normal-offset bias**~~                                                                                              | P7 — **built 2026-08-28**: `shadow_normal_offset` replaced `shadow_slope`, and it bought back exactly what the fifth decision said it would — the constant term fell from three texels to one. [45-shadows.md](45-shadows.md)'s seventh decision                                                |
 | Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes                                                                           | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`                                                                                                                                                                                                                |
 | Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats`                                                                         | P7C                                                                                                                                                                                                                                                                                             |
 | Ray-traced shadows + AO                                                                                                                       | P7C                                                                                                                                                                                                                                                                                             |
@@ -86,14 +86,17 @@ under both paths side by side. Exit criteria of the other samples inherit
 ## Risks
 
 - **CSM artifact whack-a-mole** (peter-panning, acne, cascade seams): this risk
-  arrived, and the fifth and sixth decisions above are the record of fighting it
-  — bias denominated in tile texels, slope read off the geometric normal rather
-  than the shading one. Stable snapping and the golden frames did the work; the
-  debug overlay that was supposed to help is still unbuilt. **It has not
-  finished arriving**: the shadow ladder's own decision records a `cube` golden
-  that has failed on linux and windows since the 2026-08-26 re-tiling and is
-  unresolved, which is why normal-offset bias is a P7 row above rather than part
-  of the P10 quality pass.
+  arrived, and the fifth, sixth and seventh decisions above are the record of
+  fighting it — bias denominated in tile texels, slope read off the geometric
+  normal rather than the shading one, and then the slope term moved off the
+  light's axis onto the receiver's own normal. Stable snapping and the golden
+  frames did the work; the debug overlay that was supposed to help is still
+  unbuilt. **It has not finished arriving**: the seventh decision traded
+  lantern's wall-foot strip for a scalloped fringe at one silhouette, and the
+  `cube` browser-path golden that has failed on linux and windows since the
+  2026-08-26 re-tiling was re-blessed by that decision without anything yet
+  saying whether the failure survived it — only a CI run decides, because the
+  runners are SwiftShader and this machine is not.
 - **Post-stack perf in a browser**: each pass is simple, but measure — the horde
   web demo budget (S3) includes the stack. The quality pass adds passes to it:
   SMAA 1x is three where FXAA is one, and a Hi-Z march builds a pyramid before
