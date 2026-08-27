@@ -15,6 +15,35 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
+### The froxel volumetric pass has its arithmetic and no frame (2026-08-27)
+
+`crcbl_shaders::volumetric` is built and proved — `phase` and `integrate_slice`,
+with six sabotages red-checked against eight tests — and **nothing on a GPU
+reads it**. What is left for `docs/plan/43-render-standards.md` §4's froxel row:
+
+- **A 3D scattering target** over the view frustum, on the froxel grid
+  `light_cluster.slang` already builds. The grid's `z` slicing is exponential
+  (`froxel_of`), so the slice thicknesses `integrate_slice` is handed are not
+  uniform and the pass has to compute each one rather than assume it.
+- **The scattering pass**: one dispatch per froxel, reading that froxel's light
+  list — the culling this row was ranked cheap for is already paid for by the
+  opaque shading — and writing `source` and `extinction` per froxel.
+- **The integration along `z`**: the front-to-back accumulation
+  `splitting_a_slice_composites_to_the_same_radiance` spells out, in place, so
+  each froxel holds the column in front of it.
+- **The composite** over the finished radiance, and its interaction with the
+  height fog already applied in `mesh.slang`'s fragment stage — the two are the
+  same medium seen two ways and must not both be charged for the same
+  absorption.
+- **The Slang mirror and its drift guard.** There is no `#include` in these
+  shaders, so `phase`, `integrate_slice` and `INV_FOUR_PI` will exist twice; the
+  guard has to enumerate every source carrying the copy, on
+  `crcbl_shaders::sky`'s `the_shader_spells_the_same_gradient` pattern.
+
+**Not verified on hardware.** Everything above the line is host arithmetic
+checked against `f64` oracles and Simpson quadrature. No claim is made about how
+it composites on four backends until a pass exists to bless.
+
 ### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
 
 `docs/plan/43-render-standards.md` §2 and `44-lighting.md`'s rung 2 both stop at

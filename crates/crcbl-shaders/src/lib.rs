@@ -297,6 +297,9 @@ pub mod fxaa;
 // this file's scope rather than its own.
 pub mod fog;
 
+// `volumetric` carries its own `//!` header, for `fog`'s reason above.
+pub mod volumetric;
+
 // `sky` carries its own `//!` header, for `fog`'s reason above.
 pub mod sky;
 

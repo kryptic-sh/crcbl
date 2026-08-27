@@ -238,6 +238,33 @@ sabotage on real hardware rather than assumed.
 The froxel row below still buys the scattering the closed form cannot, and it
 now inherits a transmittance function rather than needing one.
 
+**The froxel row's arithmetic landed 2026-08-27**, on height fog's pattern: the
+model and its proof first, the passes after. `crcbl_shaders::volumetric` is
+`phase` — Henyey-Greenstein, the angular half that makes fog glow around a light
+rather than uniformly — and `integrate_slice`, which is what one slice of a
+froxel column owes the composite: the radiance it adds and the fraction it
+transmits, in one closed form.
+
+Neither reaches for a transcendental. The exponential is `fog::exp_neg`, and the
+phase function's three-halves power is written `d * sqrt(d)`, because IEEE-754
+requires a correctly rounded `sqrt` and specifies nothing about `pow` — a fourth
+escape from the shading rule, beside the cooked table (`crcbl_shaders::dfg`),
+the IEEE construction (`crcbl_shaders::fog`) and the host-side projection (the
+sky's spherical harmonics).
+
+**The observable is that slicing does not change the picture.**
+`splitting_a_slice_composites_to_the_same_radiance` cuts a homogeneous column
+into 1, 2, 7, 64 and 512 slices and holds them all to the same radiance and the
+same transmittance. That is what the self-attenuation term inside the slice buys
+and it is the only test in the module the naive `source * thickness` fails —
+which matters, because that form reads correctly and is what a froxel pass
+reaches for first. Its failure direction is the visible one: more slices, more
+light.
+
+What is left is the frame — a 3D scattering target, the pass that fills it from
+the froxel light lists, the integration along `z`, and the composite — plus the
+Slang mirror of both functions and the drift guard that holds it to this module.
+
 ## 5. Global illumination
 
 **What a current engine ships:** at minimum a probe-based irradiance volume with
@@ -516,20 +543,20 @@ listed here so a survey of gaps does not read as a list of things to build.
 Ordered by benefit per unit of work, which is not the order of the sections
 above.
 
-| Rung                                                     | Why here                                                                                                                                                                                      |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ~~Reserve the previous-transform slot in `GpuInstance`~~ | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved                                                                               |
-| ~~Exponential height fog~~                               | §4 — **built 2026-08-27**: `crcbl_shaders::fog` answers the `exp` question, two rows of the frame block carry it, `set_fog` switches it on                                                    |
-| ~~Multi-scatter energy compensation~~                    | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                                                                                                         |
-| **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                           |
-| **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                                                                                                                       |
-| **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                    |
-| ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                              |
-| ~~A gradient sky feeding ambient and the SSR fallback~~  | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame |
-| **Froxel volumetric fog**                                | §4 — the culling is already paid for                                                                                                                                                          |
-| **Auto-exposure**                                        | §6 — a histogram and a reduce                                                                                                                                                                 |
-| **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                                                                                                   |
-| **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                 |
-| **Specular antialiasing (roughness regularisation)**     | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                    |
-| Colour grading, DOF, lens artefacts                      | §6 — polish, after the curve exists to grade against                                                                                                                                          |
-| SSGI, temporal SSR, TAA, temporal upscaling              | §9's slot first; each is its own rung after it                                                                                                                                                |
+| Rung                                                         | Why here                                                                                                                                                                                      |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ~~Reserve the previous-transform slot in `GpuInstance`~~     | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved                                                                               |
+| ~~Exponential height fog~~                                   | §4 — **built 2026-08-27**: `crcbl_shaders::fog` answers the `exp` question, two rows of the frame block carry it, `set_fog` switches it on                                                    |
+| ~~Multi-scatter energy compensation~~                        | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                                                                                                         |
+| **Normal maps: tangent, page, sampling**                     | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                           |
+| **Emissive page** (the factor shipped 2026-08-27)            | §2 — rides the second texture page rung                                                                                                                                                       |
+| **Alpha-mask materials**                                     | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                    |
+| ~~Render scale and a blit~~                                  | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                              |
+| ~~A gradient sky feeding ambient and the SSR fallback~~      | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame |
+| **Froxel volumetric fog** (the arithmetic landed 2026-08-27) | §4 — `crcbl_shaders::volumetric` is the model and its proof; the culling was already paid for, and what is left is the three passes                                                           |
+| **Auto-exposure**                                            | §6 — a histogram and a reduce                                                                                                                                                                 |
+| **Blended transparency with GPU-sorted keys**                | §3 — the first rung here that touches the frame's structure                                                                                                                                   |
+| **Specular IBL: prefiltered radiance and a BRDF LUT**        | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                 |
+| **Specular antialiasing (roughness regularisation)**         | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                    |
+| Colour grading, DOF, lens artefacts                          | §6 — polish, after the curve exists to grade against                                                                                                                                          |
+| SSGI, temporal SSR, TAA, temporal upscaling                  | §9's slot first; each is its own rung after it                                                                                                                                                |

@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_shaders::volumetric`: the arithmetic a froxel volumetric pass runs
+  on.** `phase` is Henyey-Greenstein — the angular half, which is what makes fog
+  glow around a light rather than uniformly — and `integrate_slice` is what one
+  slice of a froxel column owes the composite: the radiance it adds and the
+  fraction of what is behind it that gets through, in one closed form.
+
+  Neither reaches for a transcendental, per the shading rule in
+  `docs/plan/44-lighting.md`. The exponential is `crcbl_shaders::fog::exp_neg`,
+  and the phase function's three-halves power is written `d * sqrt(d)`, because
+  IEEE-754 requires a correctly rounded `sqrt` and specifies nothing about
+  `pow`.
+
+  The slice integral carries the self-attenuation term, so cutting a column into
+  more slices does not brighten it — 1, 2, 7, 64 and 512 slices of a homogeneous
+  column all composite to the same radiance. `fog::SERIES_CUTOFF` and
+  `fog::one_minus_exp_over` are public now, the latter being the shape of every
+  homogeneous-medium integral rather than only height fog's.
+
+  **No pass reads this yet.** The 3D scattering target, the integration along
+  `z` and the composite are the next slice, along with the Slang mirror.
+
 - **The sky is drawn behind the frame.** The gradient already lit the scene and
   was what a missed reflection fell back to, but nothing put it on screen — a
   frame lit by a bright sky still had `crcbl_render::SCENE_CLEAR` behind it.

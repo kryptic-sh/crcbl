@@ -123,12 +123,12 @@ pub const MAX_ARGUMENT: f32 = 87.0;
 /// from turning a frame into infinities.
 pub const MAX_OPTICAL_DEPTH: f32 = 32.0;
 
-/// Below this reduced height difference, [`optical_depth`] takes the series.
+/// Below this argument, [`one_minus_exp_over`] takes the series.
 ///
 /// `(1 - exp(-d)) / d` cancels to nothing as `d` does, and the series is what
 /// it cancels to. The cutoff is where the two forms agree from both sides —
 /// `the_two_forms_meet_at_the_cutoff`.
-const SERIES_CUTOFF: f32 = 0.125;
+pub const SERIES_CUTOFF: f32 = 0.125;
 
 /// Reciprocal factorials, `1/i!`, index `i`, as Horner consumes them.
 const KERNEL: [f32; KERNEL_DEGREE + 1] = [
@@ -193,7 +193,13 @@ pub fn exp_neg(x: f32) -> f32 {
 /// numerator is a difference of two nearly equal numbers; below
 /// [`SERIES_CUTOFF`] this takes the series that difference converges to, which
 /// has no cancellation in it at all.
-fn one_minus_exp_over(d: f32) -> f32 {
+///
+/// Public because it is the shape of every homogeneous-medium integral, not
+/// only this module's: [`crate::volumetric::integrate_slice`] is the second
+/// caller, and a slice of fog whose thickness goes to zero cancels exactly the
+/// way a level ray through height fog does.
+#[must_use]
+pub fn one_minus_exp_over(d: f32) -> f32 {
     if d.abs() < SERIES_CUTOFF {
         let u = -d;
         let mut series = RATIO_KERNEL[RATIO_KERNEL.len() - 1];
