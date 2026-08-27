@@ -15,6 +15,33 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
+### The shadow filter costs 32 taps and nothing times it (2026-08-28)
+
+`docs/plan/45-shadows.md`'s ninth decision replaced the 3×3 box filter with a
+32-tap rotated disc, in `tile_pcf` in both `mesh.slang` and `volumetric.slang`.
+That is three and a half times the taps, on the fragment path and on the froxel
+scatter pass, and **the count was chosen entirely on the picture**: the grain
+measurement in that decision says what 16, 24 and 32 taps leave on a smooth
+shadowed surface, and nothing says what any of them cost.
+
+There is no shadow-pass timing in the tree to measure it with — no GPU timestamp
+around the lighting draw, no profiler HUD row for it. So the honest statement is
+that a filter three and a half times more expensive shipped on quality evidence
+alone, and whether it is affordable on a weaker adapter than this machine's RX
+7900 XTX is unknown. CI's runners are software rasterisers and time nothing
+comparable.
+
+What would settle it, in order of cost:
+
+1. **A timestamp around the forward pass**, which the HAL already has the
+   primitives for, reported by the sample the way the froxel pass's dispatch
+   counts are. That prices this and every later rung.
+2. **`SHADOW_TAPS` as a graphics-quality setting** rather than a constant — it
+   is the natural first entry for the settings seam, since 16 taps is a real
+   quality tier rather than a broken one, and the grain table says exactly what
+   each tier looks like.
+3. Nothing, and accept it, which is where it stands.
+
 ### The normal offset scallops one silhouette's foot (2026-08-28)
 
 `docs/plan/45-shadows.md`'s seventh decision replaced the sun's and the punctual

@@ -394,29 +394,89 @@ float2 atlas_uv(uint tile, float2 tile_uv)
     return (cell + tile_uv) / float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
 }
 
-/// 3×3 PCF over tile `tile`, at `tile_uv` in that tile's own `0..1` space.
+/// The shadow filter's tap count, reach, disc and rotations, which are
+/// `mesh.slang`'s and are compared against it by
+/// `crcbl_shaders::volumetric`'s `both_shaders_spell_the_same_atlas_walk`.
+///
+/// Why each is what it is lives in that file beside its own copy; a froxel
+/// filters the atlas the same way a fragment does so that a shaft of light and
+/// the surface behind it share one penumbra rather than two.
+static const uint SHADOW_TAPS = 32;
+
+static const float SHADOW_FILTER_TEXELS = 2.0;
+
+static const float2 SHADOW_DISC[SHADOW_TAPS] = {
+    float2(+0.125000, +0.000000), float2(-0.159645, +0.146248),
+    float2(+0.024436, -0.278438), float2(+0.201222, +0.262459),
+    float2(-0.369268, -0.065318), float2(+0.349802, -0.222516),
+    float2(-0.117002, +0.435242), float2(-0.223136, -0.429634),
+    float2(+0.484115, +0.176798), float2(-0.503641, +0.207896),
+    float2(+0.242788, -0.518824), float2(+0.179414, +0.572001),
+    float2(-0.540757, -0.313380), float2(+0.634370, -0.139464),
+    float2(-0.387146, +0.550675), float2(-0.089440, -0.690200),
+    float2(+0.549072, +0.462758), float2(-0.738878, +0.030555),
+    float2(+0.538955, -0.536332), float2(-0.036058, +0.779792),
+    float2(-0.512818, -0.614527), float2(+0.812360, +0.109302),
+    float2(-0.688311, +0.478909), float2(+0.188086, -0.836061),
+    float2(+0.435033, +0.759191), float2(-0.850448, -0.271316),
+    float2(+0.826102, -0.381680), float2(-0.357888, +0.855156),
+    float2(-0.319407, -0.888034), float2(+0.849909, +0.446688),
+    float2(-0.944035, +0.248845), float2(+0.536596, -0.834530),
+};
+
+static const float2 SHADOW_ROTATIONS[16] = {
+    float2(+1.000000, +0.000000), float2(+0.923880, +0.382683),
+    float2(+0.707107, +0.707107), float2(+0.382683, +0.923880),
+    float2(+0.000000, +1.000000), float2(-0.382683, +0.923880),
+    float2(-0.707107, +0.707107), float2(-0.923880, +0.382683),
+    float2(-1.000000, +0.000000), float2(-0.923880, -0.382683),
+    float2(-0.707107, -0.707107), float2(-0.382683, -0.923880),
+    float2(-0.000000, -1.000000), float2(+0.382683, -0.923880),
+    float2(+0.707107, -0.707107), float2(+0.923880, -0.382683),
+};
+
+static const uint SHADOW_DITHER[16] = {
+    0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u,
+};
+
+/// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
+/// space, dithered by `pixel`.
 ///
 /// `mesh.slang`'s kernel, and the clamp is half a texel inside the tile for its
 /// reason: the comparison sampler filters a 2×2 neighbourhood around each tap,
 /// so a tap exactly on the edge reads the neighbouring map's depths as if they
 /// were this one's.
-float tile_pcf(uint tile, float2 tile_uv, float reference)
+///
+/// `pixel` is the froxel's column index where a fragment passes its own pixel
+/// coordinate. It stands in for one exactly: the froxel grid is a tiling of the
+/// screen, so neighbouring columns are neighbouring pixels made coarse, and the
+/// lattice that picks a rotation wants nothing finer than an integer that
+/// changes between neighbours.
+float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)
 {
     float2 texel = params.shadow_params.xy;
+    // The grid's two extents, which is what turns an *atlas* texel into a step
+    // in tile space: a tile is `1 / SHADOW_ATLAS_COLUMNS` of the atlas wide and
+    // `1 / SHADOW_ATLAS_ROWS` of it tall, so scaling back up by them lands on
+    // exactly one shadow-map texel on either axis.
     float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
     float2 tile_min = float2(0.5, 0.5) * texel * grid;
+
+    uint2 cell = uint2(pixel) & 3u;
+    float2 rotation = SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
+
     float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y)
+    for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        for (int x = -1; x <= 1; ++x)
-        {
-            float2 offset = float2(float(x), float(y)) * texel * grid;
-            float2 tap = clamp(tile_uv + offset, tile_min, 1.0 - tile_min);
-            visibility +=
-                shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
-        }
+        float2 spoke = SHADOW_DISC[index] * SHADOW_FILTER_TEXELS;
+        // The rotation, written out: a complex multiply by `(cos, sin)`.
+        float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
+                               spoke.x * rotation.y + spoke.y * rotation.x);
+        float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
+        visibility +=
+            shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
     }
-    return visibility / 9.0;
+    return visibility / float(SHADOW_TAPS);
 }
 
 /// The fraction of the sun a point in the medium can see: `1.0` fully lit,
@@ -435,7 +495,7 @@ float tile_pcf(uint tile, float2 tile_uv, float reference)
 /// and for its reason: a shadow map knows nothing about what it never
 /// rendered, and inventing an occluder there is a black wall across everything
 /// past the last split.
-float volumetric_sun_visibility(float3 world_position)
+float volumetric_sun_visibility(float3 world_position, float2 pixel)
 {
     // Distance to the eye rather than view-space depth, because the splits are
     // radii around the camera — the same selection a fragment runs, so a
@@ -463,7 +523,7 @@ float volumetric_sun_visibility(float3 world_position)
     // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
     // push into the viewport rather than into the matrix.
     float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    return tile_pcf(cascade, tile_uv, ndc.z);
+    return tile_pcf(cascade, tile_uv, ndc.z, pixel);
 }
 
 /// What one slice of the medium does, given the segment of the tile's centre
@@ -539,7 +599,12 @@ void scatterMain(uint3 thread: SV_DispatchThreadID)
     // reprojection buys instead. The midpoint is where the error is smallest for
     // a slice that is entirely in or entirely out, which is what almost every
     // slice is: a shaft's edge is one froxel wide either way.
-    float visibility = volumetric_sun_visibility((from + to) * 0.5);
+    // The column's own grid position stands in for a pixel coordinate, which is
+    // what dithers the filter's rotation. Every slice of one column takes the
+    // same rotation and neighbouring columns take different ones, which is the
+    // property the lattice is built for.
+    float visibility =
+        volumetric_sun_visibility((from + to) * 0.5, float2(float(tile_x), float(tile_y)));
     visibilities[froxel] = visibility;
     volumetrics[froxel] = volumetric_slice(from, to, visibility);
 }

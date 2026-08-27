@@ -1569,14 +1569,152 @@ float shadow_normal_offset(float3 geometric_normal, float3 to_light)
     return sqrt(saturate(1.0 - cosine * cosine));
 }
 
-/// 3×3 PCF over tile `tile`, at `tile_uv` in that tile's own `0..1` space.
+/// How many taps the shadow filter takes.
+///
+/// Thirty-two, against the nine a 3×3 box took, and the count is **not** what
+/// widened the penumbra — `SHADOW_FILTER_TEXELS` is. What it buys is the number
+/// of values the filter can return: `SHADOW_TAPS + 1` of them, and the rotation
+/// below turns the gap between two of those values into a dither pattern rather
+/// than a band. So the count is what sets how coarse that dither is, and the
+/// two scenes that see it disagree about how many are enough.
+///
+/// `apps/lantern`'s wall shaft is a penumbra magnified across a hundred pixels:
+/// twelve taps put a plain 4-pixel stipple through it, sixteen still showed one,
+/// and by twenty-four it was gone. The dunes terrain is the harder case — one
+/// large smooth surface in partial shadow, where a dither reads as texture — and
+/// there it is measured rather than looked at, as the RMS of each pixel about
+/// its own 5×5 neighbourhood over a patch that is one gradient:
+///
+/// | Taps          | Grain over the dunes patch |
+/// | ------------- | -------------------------- |
+/// | 9 (the box)   | 0.827                      |
+/// | 16            | 1.459                      |
+/// | 24            | 1.099                      |
+/// | 32 (shipped)  | 0.918                      |
+///
+/// Thirty-two is where what this filter adds falls back to what the box it
+/// replaced already had. Widening or narrowing the disc does not move that
+/// number — 24 taps over a 1.5-texel disc measured 1.129, slightly worse than
+/// the same taps over two texels — so the count is the only knob it has.
+///
+/// **Nothing in the tree times this.** There is no shadow-pass timing to price
+/// thirty-two taps against nine, so the count was chosen on the picture alone;
+/// `docs/backlog.md` carries that as the gap it is, and this is the first
+/// constant a graphics-quality setting should reach for.
+static const uint SHADOW_TAPS = 32;
+
+/// How far the filter reaches from the fragment's own texel, in tile texels.
+///
+/// The tap positions below are a unit disc, so this is the disc's radius and
+/// the whole of the penumbra's width. Two texels against the box's one, which on
+/// the outer cascade is 125 mm of penumbra and on the near one 21 mm.
+///
+/// **A wider reach buys acne back**, because a tap two texels out reads a depth
+/// two texels' worth of slope away from the receiver's own. Three texels put the
+/// dunes patch's self-shadowing dots up from 24 to 155; two put them at 47,
+/// which is what `crcbl_render::shadow::DEPTH_BIAS_TEXELS`' half-texel rise
+/// paid back.
+static const float SHADOW_FILTER_TEXELS = 2.0;
+
+/// The tap positions, a **Vogel disc** of [`SHADOW_TAPS`] points on the unit
+/// disc.
+///
+/// # The formula, because a table of magic numbers is not checkable
+///
+/// Tap `i` of `n` is at radius `sqrt((i + 0.5) / n)` and angle
+/// `i * π (3 - sqrt 5)` — the sunflower spiral, whose radius is the one that
+/// gives every tap the same share of the disc's area and whose angle is the
+/// golden angle. Each literal below is that expression evaluated, and
+/// `crcbl_shaders::mesh`'s `the_shadow_disc_is_the_vogel_spiral_it_claims_to_be`
+/// re-derives every one of them rather than trusting the transcription.
+///
+/// **It is not a Poisson disc**, which is what
+/// `docs/plan/45-shadows.md`'s ladder asked for, and the difference is
+/// deliberate. A Poisson set has no closed form: it comes out of dart-throwing
+/// or best-candidate, so it arrives as two dozen constants whose provenance is a
+/// program nobody kept. A Vogel spiral has slightly worse spectral behaviour and
+/// a generator any reader can evaluate, and with the rotation below it is what
+/// the technique actually needs — taps that do not line up between neighbouring
+/// fragments.
+static const float2 SHADOW_DISC[SHADOW_TAPS] = {
+    float2(+0.125000, +0.000000), float2(-0.159645, +0.146248),
+    float2(+0.024436, -0.278438), float2(+0.201222, +0.262459),
+    float2(-0.369268, -0.065318), float2(+0.349802, -0.222516),
+    float2(-0.117002, +0.435242), float2(-0.223136, -0.429634),
+    float2(+0.484115, +0.176798), float2(-0.503641, +0.207896),
+    float2(+0.242788, -0.518824), float2(+0.179414, +0.572001),
+    float2(-0.540757, -0.313380), float2(+0.634370, -0.139464),
+    float2(-0.387146, +0.550675), float2(-0.089440, -0.690200),
+    float2(+0.549072, +0.462758), float2(-0.738878, +0.030555),
+    float2(+0.538955, -0.536332), float2(-0.036058, +0.779792),
+    float2(-0.512818, -0.614527), float2(+0.812360, +0.109302),
+    float2(-0.688311, +0.478909), float2(+0.188086, -0.836061),
+    float2(+0.435033, +0.759191), float2(-0.850448, -0.271316),
+    float2(+0.826102, -0.381680), float2(-0.357888, +0.855156),
+    float2(-0.319407, -0.888034), float2(+0.849909, +0.446688),
+    float2(-0.944035, +0.248845), float2(+0.536596, -0.834530),
+};
+
+/// The sixteen rotations the disc is taken through, as `(cos, sin)` pairs of
+/// `2π k / 16`.
+///
+/// **A table rather than a `sincos`, and integer-indexed rather than hashed.**
+/// The usual spelling of this technique hashes the pixel coordinate to a float
+/// angle and rotates by its sine and cosine. Both halves of that are wrong here:
+/// a hash multiplies a large coordinate by a large constant and keeps the
+/// fraction, which is arithmetic whose low bits differ between drivers by
+/// construction, and `sin`/`cos` are specified to no accuracy anyone can quote.
+/// This file's shading rule refuses a transcendental for exactly that reason,
+/// and a shadow comparison is binary — a tap that lands the other side of an
+/// edge is a whole tap of difference, not a rounding one. So the angles are
+/// constants and the index is an integer.
+static const float2 SHADOW_ROTATIONS[16] = {
+    float2(+1.000000, +0.000000), float2(+0.923880, +0.382683),
+    float2(+0.707107, +0.707107), float2(+0.382683, +0.923880),
+    float2(+0.000000, +1.000000), float2(-0.382683, +0.923880),
+    float2(-0.707107, +0.707107), float2(-0.923880, +0.382683),
+    float2(-1.000000, +0.000000), float2(-0.923880, -0.382683),
+    float2(-0.707107, -0.707107), float2(-0.382683, -0.923880),
+    float2(-0.000000, -1.000000), float2(+0.382683, -0.923880),
+    float2(+0.707107, -0.707107), float2(+0.923880, -0.382683),
+};
+
+/// Which rotation each pixel of a 4×4 cell takes: the **ordered-dither matrix**,
+/// read row-major.
+///
+/// The point of a permutation rather than a straight lattice is that
+/// neighbouring pixels must land far apart in the rotation table *without* the
+/// difference being the same everywhere. `(3x + 4y) mod 16` keeps neighbours
+/// three and four apart and was tried first; because that difference is
+/// constant, the dither it leaves on a large smooth surface is a set of diagonal
+/// stripes, and it measured a fifth grainier than this matrix on the dunes
+/// terrain — 1.187 against 1.099. The ordered matrix's differences vary, so what
+/// it leaves is a texture with no direction to it.
+///
+/// This is the classic recursive construction, in which each quadrant's entries
+/// are placed as far from its neighbours' as the level above allows.
+///
+/// `crcbl_shaders::mesh`'s `the_shadow_dither_covers_every_rotation` is what
+/// holds the properties this rests on.
+static const uint SHADOW_DITHER[16] = {
+    0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u,
+};
+
+/// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
+/// space, dithered by the fragment's pixel coordinate.
 ///
 /// One kernel for the cascades and for the light maps, which is what keeps "a
 /// tap never leaves its own tile" a property of one function. The clamp is half
 /// a texel inside the tile: the comparison sampler filters a 2×2 neighbourhood
 /// around each tap, so a tap exactly on the edge would still reach across it and
 /// read the neighbouring map's depths as if they were this one's.
-float tile_pcf(uint tile, float2 tile_uv, float reference)
+///
+/// `pixel` is the fragment's `SV_Position.xy`, and it is a parameter for
+/// `geometric_normal_of`'s reason: a shader stage that has no such thing must
+/// not be able to call this by accident. Only its low two bits per axis are
+/// read, so the value's magnitude and its sub-pixel fraction never enter the
+/// arithmetic.
+float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)
 {
     float2 texel = frame.shadow_params.xy;
     // The grid's two extents, which is what turns an *atlas* texel into a step
@@ -1585,18 +1723,22 @@ float tile_pcf(uint tile, float2 tile_uv, float reference)
     // exactly one shadow-map texel on either axis.
     float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
     float2 tile_min = float2(0.5, 0.5) * texel * grid;
+
+    uint2 cell = uint2(pixel) & 3u;
+    float2 rotation = SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
+
     float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y)
+    for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        for (int x = -1; x <= 1; ++x)
-        {
-            float2 offset = float2(float(x), float(y)) * texel * grid;
-            float2 tap = clamp(tile_uv + offset, tile_min, 1.0 - tile_min);
-            visibility +=
-                shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
-        }
+        float2 spoke = SHADOW_DISC[index] * SHADOW_FILTER_TEXELS;
+        // The rotation, written out: a complex multiply by `(cos, sin)`.
+        float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
+                               spoke.x * rotation.y + spoke.y * rotation.x);
+        float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
+        visibility +=
+            shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
     }
-    return visibility / 9.0;
+    return visibility / float(SHADOW_TAPS);
 }
 
 /// What fraction of a cascade's reach the fade into the next one takes up.
@@ -1647,7 +1789,7 @@ static const float CASCADE_FADE_FRACTION = 0.1;
 /// caller — which is what makes calling it twice with a different first
 /// argument the whole of the fade.
 float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
-                         float3 geometric_normal)
+                         float3 geometric_normal, float2 pixel)
 {
     // The bias, and it is `punctual_visibility`'s exactly: two moves of the
     // world position before it is projected, each a multiple of the world
@@ -1710,7 +1852,7 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
     // `shadow_normal_offset` returns, so what it moves is `tile_uv` and the
     // texel this fragment reads. That is the difference between raising a
     // comparison and taking a different one.
-    return tile_pcf(cascade, tile_uv, ndc.z);
+    return tile_pcf(cascade, tile_uv, ndc.z, pixel);
 }
 
 /// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
@@ -1727,7 +1869,7 @@ float cascade_visibility(uint cascade, float3 world_position, float3 to_light,
 /// normal's: what it says is "this fragment's diffuse term is already zero", and
 /// that is a fact about the normal the shading used.
 float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
-                     float3 geometric_normal)
+                     float3 geometric_normal, float2 pixel)
 {
     if (n_dot_l <= 0.0)
     {
@@ -1750,7 +1892,8 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
         }
     }
 
-    float visibility = cascade_visibility(cascade, world_position, to_light, geometric_normal);
+    float visibility =
+        cascade_visibility(cascade, world_position, to_light, geometric_normal, pixel);
     if (cascade + 1 >= SHADOW_CASCADES)
     {
         // The last cascade has nothing to fade into. Everything past its reach
@@ -1777,7 +1920,8 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
     // growing radii — `crcbl_render::shadow::cascade_matrix` fits every one of
     // them to `eye` — so anything inside cascade `i` is inside cascade `i + 1`
     // by construction, not by a margin someone has to maintain.
-    float next = cascade_visibility(cascade + 1, world_position, to_light, geometric_normal);
+    float next =
+        cascade_visibility(cascade + 1, world_position, to_light, geometric_normal, pixel);
     return lerp(visibility, next, blend);
 }
 
@@ -1882,7 +2026,7 @@ static const float PUNCTUAL_NORMAL_OFFSET_TEXELS = 4.0;
 /// `Scene::SpotShadow` and `Scene::PointShadow` receive on a flat floor, where
 /// the facet and the shading normal are the same vector.
 float punctual_visibility(uint tile, float3 world_position, float3 to_light, float n_dot_l,
-                          float texel_world, float3 geometric_normal)
+                          float texel_world, float3 geometric_normal, float2 pixel)
 {
     // Two moves, in two directions, on `sun_visibility`'s terms exactly: along
     // the normal by what the receiver's slope costs in lateral travel, and along
@@ -1918,7 +2062,7 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
     // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
     // push into the viewport rather than into the matrix.
     float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    return tile_pcf(light_tile(tile), tile_uv, ndc.z);
+    return tile_pcf(light_tile(tile), tile_uv, ndc.z, pixel);
 }
 
 /// The fraction of a shadowed spot this fragment can see.
@@ -1926,7 +2070,7 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
 /// `tile` is the light's `shadow_tile` and the caller has already checked it
 /// names a real light tile. The rest is `punctual_visibility`'s.
 float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 to_light,
-                      float n_dot_l, float3 geometric_normal)
+                      float n_dot_l, float3 geometric_normal, float2 pixel)
 {
     if (n_dot_l <= 0.0)
     {
@@ -1947,7 +2091,7 @@ float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 t
     // too large at the rim.
     float axial = max(dot(world_position - light.position.xyz, normalize(light.direction.xyz)), 0.0);
     return punctual_visibility(tile, world_position, to_light, n_dot_l,
-                               2.0 * tan_outer * axial / SHADOW_TILE, geometric_normal);
+                               2.0 * tan_outer * axial / SHADOW_TILE, geometric_normal, pixel);
 }
 
 /// Which of a point light's six faces `from_light` — the direction from the
@@ -1984,7 +2128,7 @@ uint point_face(float3 from_light)
 /// light tiles it holds, and the face selected below is added to it. The caller
 /// has already checked that the whole run is inside the light region.
 float point_visibility(GpuLight light, uint base, float3 world_position, float3 to_light,
-                       float n_dot_l, float3 geometric_normal)
+                       float n_dot_l, float3 geometric_normal, float2 pixel)
 {
     if (n_dot_l <= 0.0)
     {
@@ -1998,7 +2142,7 @@ float point_visibility(GpuLight light, uint base, float3 world_position, float3 
     // than read off the row.
     float axial = max(max(abs(from_light.x), abs(from_light.y)), abs(from_light.z));
     return punctual_visibility(base + point_face(from_light), world_position, to_light, n_dot_l,
-                               2.0 * axial / SHADOW_TILE, geometric_normal);
+                               2.0 * axial / SHADOW_TILE, geometric_normal, pixel);
 }
 
 /// How bright a punctual light is at `distance`, reaching **exactly zero** at
@@ -2444,7 +2588,8 @@ FragmentOutput fragmentMain(VertexOutput input)
         // window and its cone, and the shadow is a third factor on it.
         if (light.kind == KIND_DIRECTIONAL)
         {
-            reach = sun_visibility(input.world_position, to_light, n_dot_l, geometric_normal);
+            reach = sun_visibility(input.world_position, to_light, n_dot_l, geometric_normal,
+                                   input.position.xy);
         }
         else if (light.kind == KIND_POINT)
         {
@@ -2461,13 +2606,13 @@ FragmentOutput fragmentMain(VertexOutput input)
             if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
             {
                 reach *= point_visibility(light, light.shadow_tile, input.world_position, to_light,
-                                          n_dot_l, geometric_normal);
+                                          n_dot_l, geometric_normal, input.position.xy);
             }
         }
         else if (light.shadow_tile < SHADOW_LIGHT_TILES)
         {
             reach *= spot_visibility(light, light.shadow_tile, input.world_position, to_light,
-                                     n_dot_l, geometric_normal);
+                                     n_dot_l, geometric_normal, input.position.xy);
         }
         diffuse *= reach;
         specular *= reach;

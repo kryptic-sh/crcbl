@@ -317,7 +317,27 @@ const CASTER_REACH: f32 = 40.0;
 /// texel, where the offset walks a receiver near a silhouette across the edge of
 /// its own caster. It is the standard cost of this direction, it is bounded by
 /// the offset itself, and it is a tenth the size of the strip it replaced.
-const DEPTH_BIAS_TEXELS: f32 = 1.0;
+///
+/// # And a half back, when the filter grew a radius
+///
+/// One held while the filter was a 3×3 box, whose furthest tap is one texel out.
+/// `mesh.slang`'s `SHADOW_FILTER_TEXELS` reaches two, and a tap two texels out
+/// reads a depth two texels' worth of the receiver's own slope away — which this
+/// constant, and not [`NORMAL_OFFSET_TEXELS`], is what covers: an offset along
+/// the normal moves every tap together and cannot close a gap between them. The
+/// dunes patch, counted as above with the disc filter at two texels:
+///
+/// | This constant | Dark pixels in the valley | Strip at the wall's foot |
+/// | ------------- | ------------------------- | ------------------------ |
+/// | 1             | 47                        | none                     |
+/// | 1.5 (shipped) | 25                        | none                     |
+/// | 2             | 24                        | 0.015 m                  |
+///
+/// A half-texel is where the count returns to what the box filter had and the
+/// strip has not yet come back. Two buys one more dark pixel and 15 mm of lit
+/// floor at the wall — a fortieth of the 0.391 m the seventh decision removed,
+/// but the wrong direction — so 1.5 ships.
+const DEPTH_BIAS_TEXELS: f32 = 1.5;
 
 /// How far along its own geometric normal a receiver is moved before the sun's
 /// shadow lookup, per unit of `sin(acos(Ng·L))`, in the same texels.
@@ -329,8 +349,8 @@ const DEPTH_BIAS_TEXELS: f32 = 1.0;
 ///
 /// # What sets it, and what caps it
 ///
-/// The dunes patch again, at [`DEPTH_BIAS_TEXELS`] held at one, counted the same
-/// way, on radv at 1280×960:
+/// The dunes patch again, at [`DEPTH_BIAS_TEXELS`] held at one and the filter
+/// still a 3×3 box, counted the same way, on radv at 1280×960:
 ///
 /// | Offset, in texels | Dark pixels in the valley |
 /// | ----------------- | ------------------------- |

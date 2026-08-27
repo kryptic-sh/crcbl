@@ -662,10 +662,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   it, fell from 33.7 to 5.8 on average and from 63.6 to 17.7 at worst, while
   control circles at 3.6 m and 4.5 m came back byte-identical.
 
-  It costs a second nine-tap PCF for fragments inside the band and nothing for
-  the ones outside it; the outermost cascade has nothing to fade into and never
-  pays. Goldens re-blessed: `apps/lantern`'s `room.png` and `live.png`. Every
-  golden in `crates/crcbl/tests/golden/` still matches.
+  It costs a second PCF for fragments inside the band and nothing for the ones
+  outside it; the outermost cascade has nothing to fade into and never pays.
+  Goldens re-blessed: `apps/lantern`'s `room.png` and `live.png`. Every golden
+  in `crates/crcbl/tests/golden/` still matches.
+
+- **The shadow filter is a rotated 32-tap disc, not a 3×3 box.** `tile_pcf` in
+  both `mesh.slang` and `volumetric.slang` takes its taps on a Vogel spiral of
+  radius two tile texels and turns that spiral by one of sixteen tabulated
+  rotations, picked off the fragment's pixel coordinate — the froxel's column
+  index, in the volumetric pass — through an ordered-dither matrix. Twice the
+  penumbra of the box, which could not reach further without its tap count
+  growing as the square of the radius.
+
+  **A Vogel spiral rather than a Poisson set**, deliberately: the spiral has a
+  closed form, so `crcbl_shaders::mesh`'s
+  `the_shadow_disc_is_the_vogel_spiral_it_claims_to_be` re-derives every literal
+  in the table instead of pinning a copy of itself. **The rotation is a constant
+  table indexed by an integer** rather than a float hash and a `sincos`, so
+  every target picks the same disc.
+
+  `crcbl_render::shadow::DEPTH_BIAS_TEXELS` rose from 1.0 to 1.5, which is what
+  a tap two texels out costs: measured on radv, the dunes patch's self-shadowing
+  dots went 24 → 47 when the reach doubled at the old bias and back to 25 at the
+  new one, with no lit strip at the wall's foot returning. The tap count is what
+  keeps the dither quiet — the grain over a smooth shadowed patch of that scene
+  reads 1.459 at 16 taps, 1.099 at 24 and 0.918 at 32, against the box's own
+  0.827.
+
+  **Nothing in the tree times it.** Thirty-two taps against nine, in two passes,
+  chosen on the picture alone; `SHADOW_TAPS` is the first constant a
+  graphics-quality setting should expose. Goldens re-blessed: `dunes`, and
+  `apps/lantern`'s `room.png` and `live.png`.
 
 ### Breaking
 

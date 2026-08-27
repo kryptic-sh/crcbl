@@ -3035,7 +3035,7 @@ mod tests {
             // And what it grows towards is the next cascade out, which is the
             // half a swapped `lerp` would keep silent.
             "float next = cascade_visibility(cascade + 1, world_position, to_light, \
-             geometric_normal); return lerp(visibility, next, blend);",
+             geometric_normal, pixel); return lerp(visibility, next, blend);",
         ] {
             let wanted = expected.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
@@ -3045,6 +3045,165 @@ mod tests {
                  or has moved:\n{wanted}"
             );
         }
+    }
+
+    /// Pulls every `float2(x, y)` literal out of one `static const` table in
+    /// `shaders/mesh.slang`.
+    ///
+    /// The two table tests below both need this and neither can ask the shader
+    /// compiler for it, so the tables are read the only way a host test can read
+    /// them: out of the source, between the declaration and its closing brace.
+    fn shader_table(name: &str) -> Vec<(f64, f64)> {
+        let source = include_str!("../shaders/mesh.slang");
+        let start = source
+            .find(&format!("{name}["))
+            .unwrap_or_else(|| panic!("mesh.slang has no {name} table"));
+        let body = &source[start..];
+        let end = body.find("};").expect("an unterminated table");
+        body[..end]
+            .split("float2(")
+            .skip(1)
+            .map(|tail| {
+                let (pair, _) = tail.split_once(')').expect("an unclosed float2");
+                let (x, y) = pair.split_once(',').expect("a float2 of one component");
+                (
+                    x.trim().parse().expect("a float2 x that is not a number"),
+                    y.trim().parse().expect("a float2 y that is not a number"),
+                )
+            })
+            .collect()
+    }
+
+    /// **The shadow filter's taps are the Vogel spiral its doc comment says they
+    /// are.**
+    ///
+    /// Two dozen coordinates transcribed by hand into a shader are two dozen
+    /// chances to fat-finger a digit, and nothing downstream would say so: a
+    /// wrong tap still samples the map, still returns a fraction, and moves a
+    /// penumbra by an amount no golden distinguishes from the filter working.
+    /// So the table is re-derived from the formula its doc quotes — radius
+    /// `sqrt((i + 0.5) / n)` at angle `i π (3 - sqrt 5)` — rather than pinned to
+    /// a copy of itself.
+    ///
+    /// The tolerance is what six printed decimals can carry.
+    #[test]
+    fn the_shadow_disc_is_the_vogel_spiral_it_claims_to_be() {
+        let disc = shader_table("SHADOW_DISC");
+        let count = disc.len();
+        let declared = format!("static const uint SHADOW_TAPS = {count};");
+        assert!(
+            include_str!("../shaders/mesh.slang").contains(&declared),
+            "SHADOW_DISC has {count} taps and SHADOW_TAPS declares another number, so the loop \
+             in tile_pcf reads past the table or stops short of it"
+        );
+        let golden_angle = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+        for (index, &(x, y)) in disc.iter().enumerate() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a tap index is at most a few dozen"
+            )]
+            let position = index as f64;
+            let radius = ((position + 0.5) / count as f64).sqrt();
+            let angle = position * golden_angle;
+            let (wanted_x, wanted_y) = (radius * angle.cos(), radius * angle.sin());
+            assert!(
+                (x - wanted_x).abs() < 1e-6 && (y - wanted_y).abs() < 1e-6,
+                "SHADOW_DISC[{index}] is ({x}, {y}) where the spiral it claims to be puts \
+                 ({wanted_x}, {wanted_y})"
+            );
+        }
+    }
+
+    /// **The rotation table is the sixteen sixteenths of a turn, in order.**
+    ///
+    /// `tile_pcf` indexes it with a lattice that assumes exactly that: the
+    /// coefficients are chosen for the *circular* distance between neighbouring
+    /// indices, which is a claim about angles and is only true of a table whose
+    /// entry `k` is the turn `2π k / 16`. A shuffled table would leave the index
+    /// arithmetic reading as designed and the discs it picks arbitrarily close
+    /// together.
+    #[test]
+    fn the_shadow_rotations_are_sixteenths_of_a_turn() {
+        let rotations = shader_table("SHADOW_ROTATIONS");
+        assert_eq!(rotations.len(), 16, "SHADOW_ROTATIONS is not sixteen turns");
+        for (index, &(cosine, sine)) in rotations.iter().enumerate() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a rotation index is at most fifteen"
+            )]
+            let angle = std::f64::consts::TAU * index as f64 / 16.0;
+            assert!(
+                (cosine - angle.cos()).abs() < 1e-6 && (sine - angle.sin()).abs() < 1e-6,
+                "SHADOW_ROTATIONS[{index}] is ({cosine}, {sine}) and turn {index} of sixteen is \
+                 ({}, {})",
+                angle.cos(),
+                angle.sin()
+            );
+        }
+    }
+
+    /// **The dither matrix reaches every rotation and no two neighbours share
+    /// one.**
+    ///
+    /// Both halves fail quietly. A matrix that repeats an entry leaves one disc
+    /// unreachable and another taken twice as often, which is a bias in the
+    /// filter nothing would report; two adjacent cells holding the same rotation
+    /// is a pair of fragments sampling identical texels, which draws a smooth
+    /// frame with the banding the rotation exists to break still in it. Neither
+    /// is a thing a golden distinguishes from the filter working.
+    ///
+    /// The minimum separation is only asserted to be non-zero rather than to the
+    /// matrix's actual spread: the wrap between the fourth row and the first is
+    /// one step in one column, which is a property of tiling sixteen values over
+    /// a torus and not a defect to assert away.
+    #[test]
+    fn the_shadow_dither_covers_every_rotation() {
+        let source = include_str!("../shaders/mesh.slang");
+        assert!(
+            source.contains("SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]]"),
+            "tile_pcf no longer picks its rotation through the matrix this test is about"
+        );
+        let matrix = source
+            .split_once("static const uint SHADOW_DITHER[16] = {")
+            .expect("mesh.slang has no dither matrix")
+            .1;
+        let cells = matrix[..matrix.find("};").expect("an unterminated matrix")]
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .trim_end_matches('u')
+                    .parse::<u32>()
+                    .expect("a dither entry that is not a number")
+            })
+            .collect::<Vec<_>>();
+        let mut sorted = cells.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (0..16).collect::<Vec<_>>(),
+            "SHADOW_DITHER is not a permutation of the sixteen rotations, so some disc is \
+             unreachable and another is taken twice as often: {cells:?}"
+        );
+        let circular = |a: u32, b: u32| {
+            let step = a.abs_diff(b) % 16;
+            step.min(16 - step)
+        };
+        let at = |x: usize, y: usize| cells[(y % 4) * 4 + (x % 4)];
+        let closest = (0..4)
+            .flat_map(|y| {
+                (0..4).map(move |x| {
+                    circular(at(x, y), at(x + 1, y)).min(circular(at(x, y), at(x, y + 1)))
+                })
+            })
+            .min()
+            .expect("a matrix of sixteen cells");
+        assert!(
+            closest >= 1,
+            "two adjacent cells of SHADOW_DITHER take the same rotation, which is no dither \
+             at all"
+        );
     }
 
     /// **A normal taken through `normal_basis` stays perpendicular to its

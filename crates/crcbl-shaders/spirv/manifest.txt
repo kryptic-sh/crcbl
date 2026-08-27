@@ -180,16 +180,16 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = a0f494e7c659b86e8547bf64a41ca6eb1a765340b5c8a48ca2be87c2cb20f744
+source-sha256 = ccfc3b1d6e09aaca9d990463323fe0c154a3f8cdb7005659741cdbdd085a583a
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 72a245fdbd9bcc88d8e28bfc0ff939eec43d9e562c2aa0cfb8dbb8d600ae34fa
+spirv-sha256 = f0bee75cc626ed81b5ec1f358e07a758414377efbadc4f9634ec5c7ae7fb6ea7
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 2a647c4763058ce6c9d4e9c72ac318adcb4939ee4f34cefdf5a779c0178dd221
+wgsl-sha256 = 571d4f368062f9793b9a61e821e553181e2a9792a501c3278fccaa69a0c84203
 msl = msl/mesh.metal
-msl-sha256 = fabde7939a4bf4d60678d89723f57f29c9dd0ae2c72114fa0da956a267da2b8a
+msl-sha256 = d3953b8c3285e87e0277dcf31b30598bf08901e29fcf8090f1b510800a7fe0f6
 dxil = vertexMain:dxil/mesh.vertexMain.dxil:0fb4de15f386daf2e20f2d61f74d94f931c1d990417ab0247391e47192a09503
-dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:4e43e4d7243a09b47975a2322d67622a423c9acbda076e982a389b583aa06053
+dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:4cee485daba394d3bacf0fdbecc0afa97e53ef01267fb13d8e52c8bf91de72c2
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [mesh_cluster]
@@ -408,15 +408,15 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [volumetric]
 source = shaders/volumetric.slang
-source-sha256 = c695ac2b3862ac7e07599459205ab4c07beee241532e5a76e7ec817f17bd957c
+source-sha256 = 9e67ad596de487f20a13ae4eaad58a197bd3fa6033ae7c9542f770a07393cd3c
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric.spv
-spirv-sha256 = caa75bda7ef9812dbdf339279a38998729f3a182e0f16a9192aa8801117f4567
+spirv-sha256 = be33929fc8ad77cb7f23e73520d5b964f7ac1c576e5bc9ab6db6200c49aecfe3
 wgsl = wgsl/volumetric.wgsl
-wgsl-sha256 = 2b8426897486f8110a6cb4b754790ff657026ba02b840579b1822aa0d42bd273
+wgsl-sha256 = aafadb48bff7a7cb1d46edd9fd3eb48bae3015247d5ea66d34cca9c5382f093f
 msl = msl/volumetric.metal
-msl-sha256 = f286d1d0ac2e9bc7abb639825fe277b01f3573f0bf5b3ee321a8dad5a78f0f36
-dxil = scatterMain:dxil/volumetric.scatterMain.dxil:5b566f3a6d48e613318b0fa6831200077031dca6ed4d68c39f89442579213041
+msl-sha256 = dfebbbe97656da41d4b16d0488603d1ec3ba58caa6021f363f285946484e59f9
+dxil = scatterMain:dxil/volumetric.scatterMain.dxil:d2428d312995576ae98f10bc8f5114f022842b9ea4175251188b49dd96d9ff62
 dxil = integrateMain:dxil/volumetric.integrateMain.dxil:b1f68f9677c4768513280bac717e660f0078e8e8e39ebebc3d7eb1314e5e8b81
 entry-points = scatterMain:glcompute, integrateMain:glcompute
 

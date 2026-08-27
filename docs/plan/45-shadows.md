@@ -381,17 +381,109 @@ falls outside them. `crcbl_shaders::mesh`'s
 direction and its position, both of which draw a plausible frame when they are
 wrong.
 
+### A ninth, taken 2026-08-28: a rotated disc, and the count that makes it quiet
+
+**The filter is a 32-tap Vogel disc of radius two tile texels, turned by one of
+sixteen rotations that an ordered-dither matrix picks off the fragment's pixel
+coordinate.** It replaces the 3×3 box, whose nine taps sat on the grid they
+sampled and could not reach further than one texel without the count growing as
+the square of the radius.
+
+**The rotation is integer-indexed, which the ladder asked for and is worth
+restating.** The usual spelling hashes the pixel coordinate into a float angle
+and rotates by its sine and cosine. Both halves are wrong here: a hash is float
+arithmetic whose low bits differ between drivers by construction, and `sin` and
+`cos` are specified to no accuracy anyone can quote. A shadow comparison is
+binary, so a tap that lands the other side of an edge is a whole tap of
+difference rather than a rounding one, and a per-driver re-bless is what that
+buys. The angles are therefore a constant table and the index is
+`SHADOW_DITHER`'s.
+
+**The taps are a Vogel spiral, not a Poisson set, and that is a deliberate
+departure from the rung above.** A Poisson set has no closed form — it comes out
+of dart-throwing, so it arrives as two dozen constants whose provenance is a
+program nobody kept. The spiral's radius is `sqrt((i + 0.5) / n)` and its angle
+`i π (3 - sqrt 5)`, so `crcbl_shaders::mesh`'s
+`the_shadow_disc_is_the_vogel_spiral_it_claims_to_be` re-derives every literal
+rather than pinning a copy of itself. Its spectral behaviour is slightly worse
+and its auditability is not comparable.
+
+**A wider filter buys acne back, and the depth constant is what pays.** A tap
+two texels out reads a depth two texels' worth of the receiver's slope away, and
+an offset along the normal cannot help — it moves every tap together. Counted as
+the seventh decision counted them, on the dunes patch at 1280×960:
+
+| Reach, in texels | Depth bias | Dark pixels | Strip at the wall's foot |
+| ---------------- | ---------- | ----------- | ------------------------ |
+| 1 (the box)      | 1.0        | 24          | none                     |
+| 1.5              | 1.0        | 25          | none                     |
+| 2                | 1.0        | 47          | none                     |
+| **2**            | **1.5**    | **25**      | **none**                 |
+| 2                | 2.0        | 24          | 0.015 m                  |
+| 3                | 1.0        | 155         | 0.003 m                  |
+
+So `DEPTH_BIAS_TEXELS` rose from one to one and a half, which is where the count
+returns to the box's own and the strip has not yet come back. Three texels of
+reach is off the table at any bias.
+
+**What sets the tap count is dither, and two scenes had to be asked.**
+`apps/lantern`'s wall shaft is a penumbra magnified across a hundred pixels:
+twelve taps put a plain 4-pixel stipple through it, sixteen still showed one,
+and by twenty-four it was gone. The dunes terrain is harder — one large smooth
+surface in partial shadow, where a dither reads as texture rather than as noise
+— and there it was measured as the RMS of each pixel about its own 5×5
+neighbourhood over a patch that is one gradient:
+
+| Taps         | Grain over the dunes patch |
+| ------------ | -------------------------- |
+| 9 (the box)  | 0.827                      |
+| 16           | 1.459                      |
+| 24           | 1.099                      |
+| 32 (shipped) | 0.918                      |
+
+Thirty-two is where what the filter adds falls back to what the box already had.
+**Narrowing the disc does not substitute for taps**: twenty-four over a
+1.5-texel disc measured 1.129, slightly worse than the same count over two, so
+the count is the only knob this has.
+
+**The dither matrix beat the obvious lattice, measurably.** `(3x + 4y) mod 16`
+keeps neighbours three and four rotations apart and needs no table at all; it
+was tried first. Because that difference is _constant_, what it leaves on a
+smooth surface is a set of diagonal stripes, and it measured a fifth grainier
+than the ordered matrix at the same tap count — 1.187 against 1.099. The
+matrix's differences vary, so its texture has no direction to it.
+
+**`volumetric.slang` took the same filter**, dithered by the froxel column's
+grid position where a fragment uses its pixel. A shaft of light filtered on a
+different disc from the surface behind it would have two penumbrae where the
+scene has one. The two copies are held together by `crcbl_shaders::volumetric`'s
+`both_shaders_spell_the_same_atlas_walk`, which now compares the four tables as
+text as well as the walk.
+
+**Nothing in the tree times any of this.** Thirty-two taps against nine is the
+cost, twice over — the fragment path and the froxel pass — and there is no
+shadow-pass timing to price it, so the count was chosen on the picture alone.
+`docs/backlog.md` carries that as the gap it is, and `SHADOW_TAPS` is the first
+constant a graphics-quality setting should reach for.
+
+Goldens re-blessed: `dunes` in `crates/crcbl/tests/golden/` — 7085 of 49 152
+pixels differing, **none of them grossly**, at an SSIM of 0.999351, which is the
+shape of every edge softening slightly rather than anything moving — and
+`room.png` and `live.png` in `apps/lantern/tests/golden/`. Every other golden in
+the tree still matches.
+
 ### The quality ladder, taken 2026-08-27
 
 What ships, first, because the ladder is only readable against it: **stable
 sphere-fitted cascades snapped to texels** — `crates/crcbl-render/src/shadow.rs`
 fits a sphere around the eye rather than a box around the frustum, so rotating
 the camera cannot change a cascade's extent, and quantises the light-space
-origin to whole texels — **3×3 hardware PCF through a comparison sampler**,
-which is `mesh.slang`'s `tile_pcf` taking nine `SampleCmpLevelZero` taps one
-atlas texel apart and dividing by nine, the texel-denominated bias of the fifth
-decision, the geometric normal of the sixth, the **normal-offset** direction of
-the seventh, the **cascade cross-fade** of the eighth, and the **2026-08-26
+origin to whole texels — **hardware PCF through a comparison sampler**, which is
+`mesh.slang`'s `tile_pcf` taking its `SampleCmpLevelZero` taps over a rotated
+disc and averaging them, the texel-denominated bias of the fifth decision, the
+geometric normal of the sixth, the **normal-offset** direction of the seventh,
+the **cascade cross-fade** of the eighth, the **rotated disc** of the ninth —
+which is what the box in the sentence above became — and the **2026-08-26
 re-tiling** that bought a second point light by shrinking `SHADOW_TILE` rather
 than growing the image.
 
@@ -423,12 +515,12 @@ The ladder, in the order it should be climbed:
   has the seam's measurement and the sweep that sized the band. It cost what
   this rung said it would: a second `tile_pcf` inside the band and nothing
   outside it.
-- **A rotated Poisson-disc PCF kernel.** A wider penumbra at the same tap count,
-  which a 3×3 box cannot trade for at any price. **The rotation must be an
-  integer-indexed constant table**, for the reason the AO section gives at
-  length: a per-pixel float hash amplifies by construction exactly the driver
-  differences a golden cannot absorb, and a shadow comparison is every bit as
-  binary as an AO sample.
+- ~~**A rotated Poisson-disc PCF kernel.**~~ **Built 2026-08-28** as a rotated
+  _Vogel_ disc — the ninth decision above says why the substitution, and carries
+  the two sweeps that sized the reach and the tap count. The rotation is the
+  integer-indexed constant table this rung insisted on. What the rung did not
+  anticipate is that a wider penumbra is not free at the same tap count: it took
+  thirty-two, not twelve, to keep the dither under what the box already had.
 - **PCSS, or contact hardening.** A blocker search over the map, then a filter
   whose width comes from how far the blockers it found are — the industry
   standard soft shadow, and the first rung here that costs a **second sampling

@@ -789,9 +789,28 @@ mod tests {
             );
         }
 
+        // The filter's shape, which `tile_pcf` reads and neither file computes:
+        // a tap count, a reach and two tables. Compared as text, because what
+        // has to agree is every digit — a shaft of light filtered on a different
+        // disc from the surface behind it has two penumbrae where the scene has
+        // one, and no assertion about the *walk* would see it.
+        for (name, terminator) in [
+            ("uint SHADOW_TAPS", ";"),
+            ("float SHADOW_FILTER_TEXELS", ";"),
+            ("float2 SHADOW_DISC", "};"),
+            ("float2 SHADOW_ROTATIONS", "};"),
+            ("uint SHADOW_DITHER", "};"),
+        ] {
+            assert_eq!(
+                one_declaration(MESH, name, terminator),
+                one_declaration(VOLUMETRIC, name, terminator),
+                "`{name}` has drifted between mesh.slang and volumetric.slang"
+            );
+        }
+
         for signature in [
             "float2 atlas_uv(uint tile, float2 tile_uv)",
-            "float tile_pcf(uint tile, float2 tile_uv, float reference)",
+            "float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel)",
         ] {
             assert_eq!(
                 one_function(MESH, signature, "frame."),
@@ -799,6 +818,26 @@ mod tests {
                 "`{signature}` has drifted between mesh.slang and volumetric.slang"
             );
         }
+    }
+
+    /// The text of one `static const` declaration, from its name to
+    /// `terminator`, with runs of whitespace collapsed to one space.
+    ///
+    /// Unlike `one_function` this keeps everything it finds: a table has no
+    /// comments inside it, and the whole point of comparing two copies of one is
+    /// that every literal in them is the same literal.
+    fn one_declaration(source: &str, name: &str, terminator: &str) -> String {
+        let at = source
+            .find(&format!("static const {name}"))
+            .unwrap_or_else(|| panic!("no `static const {name}` in this shader"));
+        let tail = &source[at..];
+        let end = tail
+            .find(terminator)
+            .unwrap_or_else(|| panic!("`{name}` is never terminated by `{terminator}`"));
+        tail[..end + terminator.len()]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// The body of the function `signature` opens: its code, with `//` comments
