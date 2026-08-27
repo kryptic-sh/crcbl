@@ -137,14 +137,14 @@
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
-    BufferUsage, ColorTargetState, CullMode, DepthStencilState, Device, DrawIndirect,
-    DrawIndirectCount, Features, FilterMode, Format, GeometryPath, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
-    MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode,
-    PrimitiveState, QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode,
-    SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
-    StoreOp, Viewport, check_portable_storage_buffers,
+    BufferUsage, ColorTargetState, CompareOp, CullMode, DepthBias, DepthStencilState, Device,
+    DrawIndirect, DrawIndirectCount, Features, FilterMode, Format, GeometryPath,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
+    IndexFormat, LoadOp, MemoryLocation, MeshPipelineDesc, MultisampleState, PipelineLayoutDesc,
+    PipelineLayoutHandle, PolygonMode, PrimitiveState, QueueHandle, Rect2d, ResourceState,
+    SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StoreOp, Viewport, check_portable_storage_buffers,
 };
 use crcbl_shaders::meshlet::MeshClusters;
 use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr, tonemap};
@@ -166,6 +166,7 @@ use crate::graph::{
 use crate::bloom::Bloom;
 use crate::fxaa::Fxaa;
 use crate::grid::{Grid as GroundGrid, GridStyle};
+use crate::hiz::Hiz;
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError};
 use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
@@ -585,12 +586,14 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// records one more pass, and a bound short of that would silently stop timing
 /// the last pass of every frame it drew.
 ///
-/// **The bloom term is a ceiling where the other two are counts**, because the
-/// chain's length is a function of the target's extent — see [`crate::bloom`] —
-/// and this constant is read before any extent is known. The frame that lands on
+/// **The bloom and Hi-Z terms are ceilings where the others are counts**,
+/// because a chain's length is a function of the target's extent — see
+/// [`crate::bloom`] and [`crate::hiz`] — and this constant is read before any
+/// extent is known. The frame that lands on
 /// it is a large one with bloom switched on; every smaller frame records fewer,
 /// exactly as a frame with a free shadow slot does.
-const RENDER_PASSES: u32 = 6 + Ssao::PASSES + Ssr::PASSES + Bloom::MAX_PASSES + Fxaa::PASSES;
+const RENDER_PASSES: u32 =
+    6 + Ssao::PASSES + Hiz::PASSES + Ssr::PASSES + Bloom::MAX_PASSES + Fxaa::PASSES;
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
@@ -619,7 +622,10 @@ fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32)) -> u64 {
         passes += Ssao::PASSES as u64;
     }
     if effects.contains(RenderEffects::REFLECTIONS) {
-        passes += Ssr::PASSES as u64;
+        // The march's pair, and the pyramid it climbs — which is as long as the
+        // extent allows and is zero on a frame too small to halve once, so this
+        // term is the only one here that is not a constant per effect.
+        passes += Ssr::PASSES as u64 + u64::from(crate::hiz::levels_for(extent));
     }
     if effects.contains(RenderEffects::BLOOM) {
         passes += u64::from(Bloom::passes_for(extent));
@@ -1196,6 +1202,9 @@ pub struct ForwardRenderer {
 
     /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
     ssao: Ssao,
+    /// `docs/plan/18-render-features.md`'s depth pyramid, which the reflection
+    /// march climbs — see [`crate::hiz`].
+    hiz: Hiz,
     /// `docs/plan/18-render-features.md`'s reflection march — see
     /// [`crate::ssr`].
     ssr: Ssr,
@@ -1292,6 +1301,9 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s occlusion pair, which owns two
     /// pipelines, two layouts and a ring of blocks.
     ssao: Option<Ssao>,
+    /// `docs/plan/18-render-features.md`'s depth pyramid, which owns one
+    /// pipeline, one layout and a ring of blocks per level.
+    hiz: Option<Hiz>,
     /// `docs/plan/18-render-features.md`'s reflection march, which owns one
     /// pipeline, one layout and a ring of blocks.
     ssr: Option<Ssr>,
@@ -1351,6 +1363,9 @@ impl Rollback {
         }
         if let Some(ssr) = self.ssr {
             ssr.destroy(device);
+        }
+        if let Some(hiz) = self.hiz {
+            hiz.destroy(device);
         }
         if let Some(ssao) = self.ssao {
             ssao.destroy(device);
@@ -3673,6 +3688,18 @@ impl ForwardRenderer {
             Self::build_fullscreen,
         )?);
 
+        // --- the Hi-Z pyramid the march climbs ---
+        //
+        // After the march it serves and before the chain below, on their reason:
+        // `Rollback::run` releases in the reverse order of construction. Its
+        // pipeline is the only one in this file with a depth attachment and no
+        // colour one — see [`Self::build_depth_fullscreen`].
+        rollback.hiz = Some(Hiz::new(
+            device,
+            instance_buffers.len(),
+            Self::build_depth_fullscreen,
+        )?);
+
         // --- the bloom chain ---
         //
         // Stored whole for the pair above's reason, and after them because
@@ -3845,6 +3872,10 @@ impl ForwardRenderer {
                 .ssao
                 .take()
                 .unwrap_or_else(|| unreachable!("the pair was placed in the rollback above")),
+            hiz: rollback
+                .hiz
+                .take()
+                .unwrap_or_else(|| unreachable!("the pyramid was placed in the rollback above")),
             ssr: rollback
                 .ssr
                 .take()
@@ -3917,6 +3948,67 @@ impl ForwardRenderer {
             depth_stencil: None,
             multisample: MultisampleState::default(),
             color_targets,
+        });
+        device.destroy_shader_module(module);
+        pipeline
+    }
+
+    /// Builds a full-screen-triangle pipeline that writes a **depth**
+    /// attachment and no colour one.
+    ///
+    /// [`Self::build_fullscreen`]'s shape with the two halves of that swapped:
+    /// no colour target at all, and a depth state whose comparison always
+    /// passes so every texel of the destination takes the value the fragment
+    /// computed. The reversed-Z [`CompareOp::Greater`] every geometry pipeline
+    /// in this file uses would be wrong here — this pass is not depth-testing
+    /// anything, it is writing a reduction, and a test against the target's
+    /// undefined contents would drop texels at random.
+    ///
+    /// One caller, [`crate::hiz`], and it stays a method rather than moving
+    /// there because the module lookup and the destroy-before-unwrap above are
+    /// this file's, and `crate::hiz` takes it in exactly as `crate::ssao` takes
+    /// the sibling.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the manifest lookup, the module or the pipeline.
+    fn build_depth_fullscreen(
+        device: &dyn Device,
+        label: &str,
+        shader: &crcbl_shaders::Shader,
+        layout: PipelineLayoutHandle,
+        format: Format,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        let vertex = entry(shader, Stage::Vertex)?;
+        let fragment = entry(shader, Stage::Fragment)?;
+        let module = device.create_shader_module(&ShaderModuleDesc {
+            label: Some(shader.source()),
+            spirv: shader.spirv(),
+            wgsl: shader.wgsl(),
+            msl: shader.msl(),
+            dxil: &shader.dxil_containers(),
+        })?;
+        let pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
+            label: Some(label),
+            layout,
+            vertex: ShaderEntry {
+                module,
+                entry_point: vertex,
+            },
+            fragment: Some(ShaderEntry {
+                module,
+                entry_point: fragment,
+            }),
+            primitive: PrimitiveState::default(),
+            depth_stencil: Some(DepthStencilState {
+                format,
+                depth_write: true,
+                depth_compare: CompareOp::Always,
+                stencil: None,
+                bias: DepthBias::default(),
+            }),
+            multisample: MultisampleState::default(),
+            color_targets: &[],
         });
         device.destroy_shader_module(module);
         pipeline
@@ -4446,6 +4538,12 @@ impl ForwardRenderer {
                 proj: projection.to_cols_array(),
                 inv_view: camera.view().inverse().to_cols_array(),
                 probe_volume: self.probe_volume,
+                // How far up the pyramid the march may climb, which is the
+                // pyramid this extent has — `add_passes` records the reduction
+                // whenever it records the march, so the two never disagree. A
+                // frame too small to halve gets zero, and the march walks the
+                // prepass at full resolution.
+                hiz_levels: crate::hiz::levels_for(extent),
             },
         )?;
         // The bloom chain's blocks, one row per step: each step needs the texel
@@ -5437,6 +5535,26 @@ impl ForwardRenderer {
                 graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent)),
             )
         });
+        // The Hi-Z pyramid's levels, **conditional on the march** that is the
+        // only thing that reads them: an image nobody samples is a physical
+        // image out of the pool for a pass that does not exist. Level 0 is the
+        // prepass itself and is not in this list.
+        //
+        // Empty on a target too small to halve, which is a frame the march walks
+        // at full resolution — `crate::hiz::levels_for` carries that floor, and
+        // `SsrParams::hiz_levels` is what tells the shader about it.
+        let pyramid: Vec<ImageId> = if reflected.is_some() {
+            (1..=crate::hiz::levels_for(extent))
+                .map(|level| {
+                    graph.create_image(
+                        format!("hiz-{level}"),
+                        TransientImageDesc::hiz_level(crate::hiz::level_extent(extent, level)),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // The bloom chain's levels and the image its composite writes, and
         // **all of them are conditional** on the pair above's terms exactly: a
         // transient nothing reads or writes is a physical image taken out of the
@@ -5810,6 +5928,12 @@ impl ForwardRenderer {
         // off-switch.
         let tonemapped = match reflected {
             Some((reflection, composited)) => {
+                // The pyramid first: the march climbs it, so every level has to
+                // be written before the pass that reads it is recorded. Skipped
+                // outright on a frame whose extent has no levels, which
+                // `Hiz::add_passes` would record zero passes for anyway.
+                self.hiz
+                    .add_passes(graph, frame, extent, scene_depth, &pyramid);
                 self.ssr.add_passes(
                     graph,
                     frame,
@@ -5819,6 +5943,7 @@ impl ForwardRenderer {
                         reflectivity,
                         reflection,
                         composited,
+                        pyramid: crate::hiz::level_slots(scene_depth, &pyramid),
                     },
                     probe_buffer,
                     probe_table,
@@ -7115,6 +7240,7 @@ impl ForwardRenderer {
         self.fxaa.destroy(device);
         self.bloom.destroy(device);
         self.ssr.destroy(device);
+        self.hiz.destroy(device);
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
 
@@ -10199,6 +10325,13 @@ mod tests {
                 "ssao",
                 "ssao-blur",
                 "forward",
+                // The pyramid the march climbs, between the pass that wrote
+                // level 0 and the pass that reads the chain. Two levels at this
+                // extent, written out for the reason `crate::bloom`'s chain is
+                // in the toggle test below: a table generated from
+                // `crate::hiz::levels_for` could not fail.
+                "hiz-1",
+                "hiz-2",
                 "ssr",
                 "ssr-blur",
                 "tonemap",
@@ -10909,7 +11042,15 @@ mod tests {
                 RenderEffects::AMBIENT_OCCLUSION,
                 ["ssao", "ssao-blur"].as_slice(),
             ),
-            (RenderEffects::REFLECTIONS, ["ssr", "ssr-blur"].as_slice()),
+            (
+                RenderEffects::REFLECTIONS,
+                // **The pyramid goes with the march**, which is the whole of
+                // what makes it an optimisation rather than a resource: it is
+                // recorded on the frames that reflect and on no others. Two
+                // levels at `TEST_EXTENT`, written out on the chain's terms
+                // above.
+                ["hiz-1", "hiz-2", "ssr", "ssr-blur"].as_slice(),
+            ),
             (
                 RenderEffects::BLOOM,
                 [
@@ -11369,9 +11510,16 @@ mod tests {
         // untouched by either.
         for (off, fewer) in [
             (RenderEffects::AMBIENT_OCCLUSION, u64::from(Ssao::PASSES)),
-            (RenderEffects::REFLECTIONS, u64::from(Ssr::PASSES)),
-            // Not a constant, unlike the two above: the chain's length is a
-            // function of the extent, and this is what it is at `TEST_EXTENT`.
+            // The march's two passes and the reductions that feed them, which
+            // is what makes this arm's number a function of the extent the way
+            // the chain's below is.
+            (
+                RenderEffects::REFLECTIONS,
+                u64::from(Ssr::PASSES) + u64::from(crate::hiz::levels_for(TEST_EXTENT)),
+            ),
+            // Not a constant, unlike the occlusion pair above: the chain's
+            // length is a function of the extent, and this is what it is at
+            // `TEST_EXTENT`.
             (
                 RenderEffects::BLOOM,
                 u64::from(Bloom::passes_for(TEST_EXTENT)),

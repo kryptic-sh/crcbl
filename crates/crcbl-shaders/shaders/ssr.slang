@@ -109,6 +109,14 @@ struct SsrParams
     float4 probe_origin;
     float4 probe_inv_spacing;
     uint4 probe_counts;
+    /// `x` is how many levels of the Hi-Z pyramid this frame built, which is the
+    /// deepest level the march may climb to; the other three lanes are the
+    /// sixteen-byte row's padding.
+    ///
+    /// **Zero is a valid frame**: an extent too small to halve once gets no
+    /// pyramid at all, the march never leaves level 0, and what it walks is the
+    /// full-resolution prepass one texel at a time.
+    uint4 hiz;
 };
 
 struct GpuProbe
@@ -161,6 +169,37 @@ Texture2D<float4> reflectivity;
 [[vk::binding(4, 0)]]
 StructuredBuffer<GpuProbe> probes;
 
+/// The Hi-Z pyramid `hiz.slang` builds, one binding per level.
+///
+/// **Level 0 is [`scene_depth`] itself** — the prepass, at full resolution — so
+/// these are levels 1 to [`MAX_HIZ_LEVEL`], each half the extent of the one
+/// before it and each texel the nearest surface in the block it covers.
+///
+/// Separate declarations and a `switch` in [`hiz_at`] rather than an array,
+/// because WGSL has no arrays of textures and one image with mips is not
+/// something the render graph can attach a level of — `crcbl_render::bloom`'s
+/// header gives that second reason in full, and this pyramid is built the same
+/// way for it.
+///
+/// **Every slot is always bound.** A frame whose extent is too small for a
+/// level of a given depth binds the deepest level it does have into the slots
+/// above it, and `SsrParams::hiz_levels` is what stops the march ever reading
+/// them — see `crcbl_render::hiz`.
+[[vk::binding(5, 0)]]
+DepthTexture2D hiz_1;
+
+[[vk::binding(6, 0)]]
+DepthTexture2D hiz_2;
+
+[[vk::binding(7, 0)]]
+DepthTexture2D hiz_3;
+
+[[vk::binding(8, 0)]]
+DepthTexture2D hiz_4;
+
+[[vk::binding(9, 0)]]
+DepthTexture2D hiz_5;
+
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` declares under this name.
 ///
@@ -208,14 +247,56 @@ static const float ROUGHNESS_CUTOFF = 0.5;
 /// shorter axis so a wide window does not quietly buy a longer one.
 static const float REACH_FRACTION = 0.75;
 
-/// Taps a ray may take before it gives up.
+/// Iterations a ray may take before it gives up.
 ///
 /// **The cost, and it is the same number at every resolution** — which is what
 /// matters when CI's rasterisers are software and the loop bound is the whole
-/// price of the pass. With [`REACH_FRACTION`] it also fixes the stride: the walk
-/// is a fixed number of pixels per step *within a frame*, which is the property
-/// that keeps every tap's meaning the same along one ray.
+/// price of the pass. It is no longer a *stride*: a hierarchical march spends an
+/// iteration either crossing one cell of the level it is on — which is `2^level`
+/// texels wide — or dropping a level to look inside one. So the budget buys a
+/// reach that grows with the pyramid rather than a fixed number of pixels, and
+/// the number itself is the ceiling on the work, not the work.
 static const uint MAX_STEPS = 96u;
+
+/// The deepest level of the pyramid a march may climb to, and the number of
+/// bindings above [`scene_depth`].
+///
+/// Five, so the coarsest cell is 32 texels across: with [`MAX_STEPS`] that is
+/// three thousand texels of reach for a ray crossing empty space, which is more
+/// than any frame this engine renders is wide. A sixth level would be another
+/// binding, another pass and another image for reach nothing can use.
+/// `crcbl_render::hiz::MAX_LEVELS` is the Rust mirror.
+static const uint MAX_HIZ_LEVEL = 5u;
+
+/// How far past a cell boundary a step lands, in texels of the level it is on.
+///
+/// **A step that lands exactly on the boundary has not left the cell**, and the
+/// next iteration would test the same cell again and advance by nothing — a ray
+/// running exactly along a texel edge would spend its whole budget standing
+/// still. This is the nudge that puts the new position strictly inside the next
+/// cell. Small enough that it cannot carry the ray across a second boundary at
+/// level 0, where a cell is one texel.
+static const float BOUNDARY_NUDGE = 0.00390625;
+
+/// How far short of the vanishing point the segment stops, in pixels.
+///
+/// **One pixel, and it is a guard rather than a taste.** `w` grows without
+/// bound towards the vanishing point, so a segment clipped to land exactly on
+/// it solves for a ray parameter of infinity — and `over_w_end` is then a
+/// product of an infinite parameter and a zero reciprocal, which is a NaN that
+/// every depth along the segment inherits. Every comparison against a NaN is
+/// false, so such a ray crosses nothing, finds no hit, and returns the
+/// environment: a reflection with holes scattered through it wherever a pixel's
+/// own vanishing point happened to land on the clip.
+///
+/// The fixed-stride march this replaced never met it, and not by design: it
+/// floored the segment to a whole number of strides, which pulled the end back
+/// off the clip by up to one stride every time.
+///
+/// A pixel is the right size because the march's finest tap is a texel: there is
+/// no reflection to find in the last one before a point the projection cannot
+/// describe.
+static const float VANISH_MARGIN = 1.0;
 
 /// How far off the surface a ray starts, as a share of the surface's view depth.
 ///
@@ -383,6 +464,74 @@ float thickness_at(float advance, float depth)
     return max(advance, abs(depth) * THICKNESS_FLOOR);
 }
 
+/// The nearest surface anywhere in the cell of `level` that `texel` falls in.
+///
+/// Level 0 is [`scene_depth`] and every level above it is one of the pyramid
+/// bindings; `extent` is that level's own extent, so the clamp is
+/// [`depth_at`]'s and for its reason — a fetch outside the image reads
+/// [`DEPTH_FAR`] on some targets and is undefined on others, and either would
+/// say "nothing here" along the border of every level.
+///
+/// A `switch` and not an index, because the five levels are five declarations —
+/// see the bindings. The level is not uniform across a quad, and it does not
+/// have to be: every read here is a `Load`, which has no implicit derivative and
+/// no uniformity rule to break.
+float hiz_at(uint level, int2 texel, int2 extent)
+{
+    int2 clamped = clamp(texel, int2(0, 0), max(extent - int2(1, 1), int2(0, 0)));
+    int3 at = int3(clamped, 0);
+    switch (level)
+    {
+    case 0u:
+        return scene_depth.Load(at);
+    case 1u:
+        return hiz_1.Load(at);
+    case 2u:
+        return hiz_2.Load(at);
+    case 3u:
+        return hiz_3.Load(at);
+    case 4u:
+        return hiz_4.Load(at);
+    default:
+        return hiz_5.Load(at);
+    }
+}
+
+/// View-space `z` of a point at reversed-Z depth `depth`.
+///
+/// [`view_position`] without the screen position, and it is the same
+/// unprojection: for a perspective projection the view `z` a depth unprojects to
+/// does not depend on where in the frame it was sampled, so a cell of the
+/// pyramid — which is a *region* of the screen and has no one pixel — still has
+/// a well-defined depth to compare a ray against.
+float view_z_of(float depth)
+{
+    float4 view = mul(camera.inv_proj, float4(0.0, 0.0, depth, 1.0));
+    return view.z / view.w;
+}
+
+/// How far along `forward` the point `at` is from leaving its cell of `size`
+/// texels, in pixels.
+///
+/// The smaller of the two axes' boundary crossings, nudged past the edge by
+/// [`BOUNDARY_NUDGE`] so the step lands strictly inside the next cell. An axis
+/// the ray does not move along cannot bound the step, and its term is the
+/// reach itself rather than a division by nothing.
+float cell_exit(float2 at, float2 forward, float size, float reach)
+{
+    float2 edge = float2(
+        forward.x > 0.0 ? (floor(at.x / size) + 1.0) * size : floor(at.x / size) * size,
+        forward.y > 0.0 ? (floor(at.y / size) + 1.0) * size : floor(at.y / size) * size);
+    float nudge = size * BOUNDARY_NUDGE;
+    float along_x = abs(forward.x) < 1e-6
+        ? reach
+        : ((edge.x + (forward.x > 0.0 ? nudge : -nudge)) - at.x) / forward.x;
+    float along_y = abs(forward.y) < 1e-6
+        ? reach
+        : ((edge.y + (forward.y > 0.0 ? nudge : -nudge)) - at.y) / forward.y;
+    return max(min(along_x, along_y), nudge);
+}
+
 /// The clamped-cosine transfer of the stored irradiance probe's constant band:
 /// `π`. Specular lookup undoes it to recover approximate L1 radiance.
 static const float PROBE_TRANSFER_L0 = 3.14159265358979323846;
@@ -540,8 +689,8 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // Every tap is then in bounds by construction and a ray leaving the screen
     // stops being a branch. The reach starts at [`REACH_FRACTION`] of the frame
     // and is cut down by each viewport edge the segment would cross.
-    float stride = REACH_FRACTION * min(size.x, size.y) / float(MAX_STEPS);
-    float travel = float(MAX_STEPS) * stride;
+    float reach = REACH_FRACTION * min(size.x, size.y);
+    float travel = reach;
     if (forward.x > 0.0)
     {
         travel = min(travel, (size.x - 1.0 - at_start.x) / forward.x);
@@ -573,7 +722,9 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
         // reflection off a floor, which is most of them — walk straight through
         // infinity and keep marching.
         float2 at_vanish = pixel_of(clip_ray.xy / clip_ray.w, size);
-        travel = min(travel, max(dot(at_vanish - at_start, forward), 0.0));
+        // [`VANISH_MARGIN`] short of it, because landing on it exactly is what
+        // turns every depth along the segment into a NaN.
+        travel = min(travel, max(dot(at_vanish - at_start, forward) - VANISH_MARGIN, 0.0));
     }
     else if (clip_ray.w < 0.0)
     {
@@ -594,12 +745,11 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
         travel = min(travel, max(dot(at_near - at_start, forward), 0.0));
     }
 
-    uint steps = uint(max(travel, 0.0) / stride);
-    if (steps == 0u)
+    travel = max(travel, 0.0);
+    if (travel <= BOUNDARY_NUDGE)
     {
         return float4(environment * fresnel, sharpness);
     }
-    travel = float(steps) * stride;
 
     // The ray parameter at the far end, solved on the screen axis the segment
     // moves fastest along: that axis has the largest denominator and so the
@@ -615,7 +765,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // reflection to compute for such a ray, and the miss is the honest answer,
     // stated here rather than left to arrive as a NaN that every comparison below
     // happens to answer `false` to.
-    if (!(when_end > 0.0))
+    if (!(when_end > 0.0) || !isfinite(when_end))
     {
         return float4(environment * fresnel, sharpness);
     }
@@ -629,57 +779,103 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float over_w_start = start.z * inverse_w_start;
     float over_w_end = (start.z + when_end * ray.z) * inverse_w_end;
 
-    // The step before the first one is the ray's own origin, which sits
-    // [`NORMAL_OFFSET`] in front of the surface it left — so the march begins on
-    // the near side of everything, which is what a crossing is measured from.
-    float previous_gap = start.z - origin.z;
-    float previous_z = start.z;
-    float2 previous_at = at_start;
-
+    // The march begins at the ray's own origin, which sits [`NORMAL_OFFSET`] in
+    // front of the surface it left — so it starts on the near side of
+    // everything, which is what a crossing is measured from.
     float3 reflection = environment * fresnel;
-    for (uint step = 1u; step <= steps; ++step)
-    {
-        float along = float(step) / float(steps);
-        float2 at = at_start + forward * (travel * along);
-        int2 tap = int2(at);
-        float ray_z = lerp(over_w_start, over_w_end, along) / lerp(inverse_w_start, inverse_w_end, along);
+    uint max_level = min(camera.hiz.x, MAX_HIZ_LEVEL);
 
-        float tapped = depth_at(tap, extent);
-        // The far plane has no surface, so the ray is in front of it by any
-        // measure and the march passes through — this is a hole in the evidence,
-        // not the end of the ray.
-        float gap = 1.0;
-        if (tapped > DEPTH_FAR)
+    // --- the hierarchical march ---
+    //
+    // One iteration crosses one cell of the level the ray is on, or drops a
+    // level to look inside a cell that is not empty. A cell of level `n` is
+    // `2^n` texels across, so a ray over open space climbs to the coarsest level
+    // it has and crosses the frame in a handful of iterations, while a ray about
+    // to hit something walks back down to a single texel before it decides.
+    // **The walk starts at the far side of the ray's own texel.** That texel
+    // holds the surface the ray left, and a cell of one texel is short enough
+    // that the ray is still inside it — so testing it would compare the ray
+    // against the very surface it is reflecting off, and a surface sloping away
+    // under the ray would answer "behind" and reflect a pixel in itself.
+    float at_travel = min(cell_exit(at_start, forward, 1.0, travel), travel);
+    uint level = 0u;
+    float entry_z = start.z;
+    // **How far in front of the frame the ray was when it entered this cell**,
+    // carried across iterations rather than recomputed from the cell it is now
+    // in. That distinction is the whole crossing test: a ray reaching the first
+    // texel of a surface is behind *that* texel at both ends of it — a texel is
+    // one pixel and a ray barely changes depth crossing one — so a test that
+    // compared both ends against the same cell would see no sign change and
+    // march on through every surface it met. What changed sign is the gap
+    // against the cell *before* this one, which is where the frame was still
+    // showing whatever stood behind.
+    //
+    // It starts at the ray's own offset from the surface it left:
+    // [`NORMAL_OFFSET`] puts the origin in front of that surface, which is the
+    // near side of everything and what a crossing is measured from.
+    float previous_gap = start.z - origin.z;
+
+    for (uint step = 0u; step < MAX_STEPS; ++step)
+    {
+        float cell = float(1u << level);
+        float2 at = at_start + forward * at_travel;
+        float exit_travel = min(at_travel + cell_exit(at, forward, cell, travel), travel);
+        float2 exit_at = at_start + forward * exit_travel;
+        float along = exit_travel / travel;
+        float exit_z =
+            lerp(over_w_start, over_w_end, along) / lerp(inverse_w_start, inverse_w_end, along);
+
+        // The level's own extent — the frame halved once per level, which is how
+        // `crcbl_render::hiz` sizes the images — and the cell this point is in.
+        int2 level_extent = int2(extent.x >> level, extent.y >> level);
+        float cell_depth = hiz_at(level, int2(floor(at / cell)), level_extent);
+        // The far plane has no surface, so a cell holding nothing else is a cell
+        // the ray crosses whatever its own depth: a hole in the evidence rather
+        // than the end of the ray.
+        float gap = cell_depth <= DEPTH_FAR ? 1.0 : exit_z - view_z_of(cell_depth);
+        // View `z` is negative ahead of the eye, so a **larger** `z` is nearer:
+        // a positive gap is a ray still in front of what this cell holds. The
+        // ray's `z` runs monotonically along the segment, so a ray in front of
+        // the cell's nearest surface at the *exit* point was in front of it
+        // everywhere in the cell — which is what makes one comparison stand for
+        // the whole crossing.
+        bool in_front = gap > 0.0;
+
+        if (!in_front && level > 0u)
         {
-            gap = ray_z - view_position(tap, tapped, size).z;
+            // Something in this cell is in the way and the cell is a region
+            // rather than a texel. Look inside it instead of advancing — the
+            // position does not move, so no part of the segment is skipped.
+            level -= 1u;
+            continue;
         }
 
-        // View `z` is negative ahead of the eye, so a **larger** `z` is nearer:
-        // a positive gap is a ray still in front of what the frame drew, and the
-        // sign changing is the crossing.
-        if (previous_gap > 0.0 && gap < 0.0)
+        if (!in_front && previous_gap > 0.0)
         {
+            // Level 0: the cell **is** one texel and `cell_depth` is that texel's
+            // own prepass value, so this is the crossing itself rather than a
+            // reduction of one.
             float behind = -gap;
-            float thickness = thickness_at(abs(ray_z - previous_z), ray_z);
+            float thickness = thickness_at(abs(exit_z - entry_z), exit_z);
             if (behind <= thickness)
             {
-                // Linear crossing between the last two taps' gaps. A bisection is
-                // a cascade of binary comparisons; this is arithmetic on two
-                // values already fetched.
+                // Linear crossing between the last two gaps. A bisection is a
+                // cascade of binary comparisons; this is arithmetic on two values
+                // already computed.
                 float crossed = previous_gap / max(previous_gap - gap, 1e-8);
-                float2 hit_at = lerp(previous_at, at, crossed);
+                float2 hit_at = lerp(at, exit_at, crossed);
                 int2 hit = clamp(int2(hit_at), int2(0, 0), extent - int2(1, 1));
 
                 float2 hit_ndc = ndc_of(hit_at, size);
                 float border =
                     saturate((1.0 - max(abs(hit_ndc.x), abs(hit_ndc.y))) / BORDER_FADE);
-                // Against [`MAX_STEPS`] rather than against the clipped `steps`,
-                // so a ray that ended early because it left the frame is faded by
-                // the border ramp instead of twice — and over [`DISTANCE_FADE`]
-                // of the reach rather than the whole of it, because what this
-                // ramps out is the fragile end and not a falloff.
-                float distance =
-                    saturate((1.0 - float(step) / float(MAX_STEPS)) / DISTANCE_FADE);
+                // Against the ray's whole [`REACH_FRACTION`] reach rather than
+                // against the segment the viewport clipped it to, so a ray that
+                // ended early because it left the frame is faded by the border
+                // ramp instead of twice — and over [`DISTANCE_FADE`] of that
+                // reach rather than the whole of it, because what this ramps out
+                // is the fragile end and not a falloff.
+                float distance = saturate((1.0 - exit_travel / reach) / DISTANCE_FADE);
                 float bound = saturate(1.0 - behind / thickness);
 
                 float confidence = sharpness * facing * border * distance * bound;
@@ -688,12 +884,21 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
                     + environment * fresnel * (1.0 - confidence);
                 break;
             }
-            // Past the bound: the tap is no evidence and the march continues.
+            // Past the bound: the tap is no evidence and the march continues
+            // through it — see [`thickness_at`].
         }
 
         previous_gap = gap;
-        previous_z = ray_z;
-        previous_at = at;
+        entry_z = exit_z;
+        at_travel = exit_travel;
+        if (at_travel >= travel)
+        {
+            break;
+        }
+        // Climb: the cell just crossed was empty of anything in the ray's way, so
+        // the next one may be tested at twice the size. A march that never
+        // climbed would be the fixed-stride walk this replaced.
+        level = min(level + 1u, max_level);
     }
 
     // **The alpha is [`ROUGHNESS_CUTOFF`]'s ramp, not an opacity**, and it is

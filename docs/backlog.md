@@ -9,9 +9,34 @@ Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
 techniques in `docs/plan/18-render-features.md`, and four sample plans were
 written to compare the rungs — `docs/plan/sample/17-mirrors.md`,
 `docs/plan/sample/18-sundial.md`, `docs/plan/sample/19-alcove.md` and
-`docs/plan/sample/20-options.md`. The antialiasing ladder's first rung is built
-— see that topic's `FXAA 3.11 first` — and the rest of the ladders and all four
-samples are planned, not built. What follows is what the plans could not settle.
+`docs/plan/sample/20-options.md`. Two rungs are built — the antialiasing
+ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
+`Taken 2026-08-27` section in that topic now records what it predicted wrongly —
+and the rest of the ladders and all four samples are planned, not built. What
+follows is what the plans could not settle.
+
+### `registers_are_assigned_per_class_in_declaration_order` covers half the shaders (2026-08-27)
+
+That test in `crates/crcbl-dx12/src/dxil.rs` says "Every shader is listed, not
+only the compute ones" and it is not true: `crates/crcbl-shaders/dxil/` holds
+twenty-eight shaders and the case table names about fifteen. The whole post
+stack is missing — `ssao`, `ssao_blur`, `ssr`, `ssr_blur`, `bloom_down`,
+`bloom_up`, `bloom_composite` — along with `grid`, `skinning`, `mesh_shader`,
+`mesh_cluster`'s siblings and the probe fixtures. `hiz` was added when it was
+built, which is what turned the gap up.
+
+**What it costs:** the failure the test exists to catch — a root signature
+naming registers the shader does not use, rejected at pipeline creation on a
+Windows runner — is unguarded for every unlisted shader. Nothing has gone wrong
+yet; this is a coverage gap, not a symptom.
+
+**What it would take:** transcribing each source's bindings in ascending
+`(set, binding)` order into the case table, by hand, from the `.slang`
+declarations. It is mechanical but not automatic — the register class per
+binding is a reading of the declaration, and getting one wrong writes a false
+assertion rather than a failing one. Worth doing with the completeness check the
+doc already implies: a case per shader in the artifact directory, so a new
+shader cannot be missed the way these were.
 
 ### Nothing lets a running sample toggle antialiasing (2026-08-27)
 
@@ -20,6 +45,57 @@ frame resolves and the suite was re-blessed for it. What is still missing is a
 **runtime** switch: `crcbl`'s `VIDEO_KEYS` carries an `antialiasing` row, so a
 settings file can ask for it, but no sample has a key bound and `apps/lantern`
 has no flag. The lantern is the natural place, on its bloom flag's terms.
+
+### The Hi-Z march trusts a genuine crossing less than the strided one did (2026-08-27)
+
+`ssr.slang`'s `bound` — `saturate(1 - behind / thickness)`, the soft half of the
+thickness rejection — reads lower under the hierarchical march for the same hit,
+so a little more probe environment is blended behind a valid screen reflection.
+It is why `apps/lantern`'s `SSR_HIT_TOLERANCE` moved from 0.06 to 0.10. Not a
+defect that was found and left: it is a measured difference nobody has
+explained, and it is recorded so the next person does not repeat the search
+below.
+
+**What was measured** (the probe point in
+`zero_probes_only_remove_the_ssr_and_rough_fallbacks`, both adapters agreeing to
+a tenth of a percent):
+
+- Strided march: 51.8 with probes, 49.2 without. Hierarchical: 46.8 and 43.4.
+- With `bound`, `border` and `distance` all forced to one, **both marches read
+  53** — so the hit texel and its colour are the same and the whole difference
+  is the weight.
+- Forcing `distance` alone to one moves nothing, and `border` alone moves 0.1,
+  so `bound` is the entire term.
+- Thresholding `behind / thickness` instead of ramping it: the strided march has
+  almost every ray under 0.1, the hierarchical one spreads to 0.4.
+
+**Three explanations tested and rejected**, each by measurement:
+
+1. **A per-pixel-rate thickness** — dividing the ray's depth advance by the cell
+   span before `thickness_at`. Byte-identical output. `THICKNESS_FLOOR`
+   dominates at this pixel, so the advance term is not what is being compared
+   against.
+2. **Measuring `behind` at the cell entry** rather than at the exit, so the ray
+   depth and the sampled texel are the same point. 43.5 — worse, because a
+   smaller `behind` also relaxes the `behind <= thickness` gate and the march
+   then accepts an earlier, darker crossing.
+3. **Measuring `behind` at the midpoint of the cell traversal**, both as the
+   gate and as the fade alone. 44.9 and 43.0 — worse both ways, which also says
+   the sign of the ray's depth change along these rays is not what the
+   entry/exit argument assumed.
+
+**Not tested:** a minimum-travel gate before a hit is allowed was swept at 0,
+1.5, 3 and 6 pixels and changes nothing, so near-origin self-intersection is
+ruled out. What has _not_ been tried is instrumenting `behind` and `thickness`
+per pixel into a debug attachment; every measurement above is the one blurred
+pixel the lantern test reads, which aggregates a neighbourhood through
+`ssr-blur` and cannot separate one ray from another. That is the next step if
+this is picked up.
+
+**Why it was left:** the reflection is better by every other measure — the
+`Scene::Ssr` golden re-blessed to a smooth gradient where the strided march
+stepped, the other six lantern claims and both lantern goldens are unchanged,
+and the residual is a fade constant rather than a wrong pixel.
 
 ### The `cube` browser golden fails and nothing has decided what to do (2026-08-27)
 

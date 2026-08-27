@@ -792,8 +792,18 @@ because only the SSR pass reads it.
 
 ### The march
 
-Screen-space DDA over the projected segment, fixed pixel stride, no jitter, no
-refinement pass.
+Screen-space DDA over the projected segment, no jitter, no refinement pass.
+
+**Built 2026-08-27: the stride is hierarchical, not fixed.** The march climbs a
+Hi-Z pyramid of the depth prepass — `crates/crcbl-shaders/shaders/hiz.slang` and
+`crates/crcbl-render/src/hiz.rs`, one `hiz-N` pass per level — and crosses a
+whole cell of whatever level it is on in one iteration, dropping a level only
+where the cell in front of it is not empty. Everything else in this section is
+unchanged and still describes the march: the reach, the clip, the border ramp,
+the thickness bound and the probe fallback are all what they were. A frame too
+small to halve once has no pyramid and the walk stays on level 0, which is the
+fixed stride the paragraphs below describe, so that path is still live rather
+than replaced.
 
 - **Screen space, not view space.** A world-unit step is tens of pixels near the
   eye and a fraction of one far away, so the same constants would be a different
@@ -922,9 +932,9 @@ should say.
   composites that centre value directly. Positive sharpness uses
   `lerp(centre, filtered, sqrt(sharpness))`, so approaching the cutoff is
   continuous while a half-sharp reflection retains enough filtering to remove
-  the march's fixed-stride stepping. The linear share was measured at 8.46–8.48
-  levels of mean row bend across lavapipe, WARP and Metal against the fixture's
-  limit of 8; the square-root share measures 4.82 on local lavapipe.
+  the march's stepping. The linear share was measured at 8.46–8.48 levels of
+  mean row bend across lavapipe, WARP and Metal against the fixture's limit of
+  8; the square-root share measures 4.82 on local lavapipe.
 - **The depth tolerance is the march's `THICKNESS_FLOOR` times a small
   multiplier, and the multiplier is not decoration.** `DEPTH_TOLERANCE_RADII`'s
   shape, but a floor-thickness is a much shorter length than the AO radius: at
@@ -952,18 +962,18 @@ and `docs/backlog.md` carries that as a coverage gap rather than as a claim.
 
 ### What is left to later rows
 
-No temporal anything. No Hi-Z traversal. No back-face or thickness buffer. No
-half-resolution SSR — half-res AO is already owed and unmeasured, and a second
-unmeasured quality-for-speed trade should not land before the timers have been
-pointed at the first. No `LightingPath` gate, which still has no consumer. **No
-specular occlusion**: AO scales the ambient term alone, a highlight is an image
-of a light, and a reflection is an image of the room in one direction — none of
-the three take the same occlusion factor, and if one is wanted it is its own
-term and its own decision. And **SSR on transparency is out, with the
-interaction recorded now**: a transparent surface writing the reflectivity
-attachment would overwrite the opaque `F0` behind it while the scene colour at
-that pixel is a blend. Every SSR has this; writing it down is what stops the
-transparency row rediscovering it as a bug.
+No temporal anything. No back-face or thickness buffer. No half-resolution SSR —
+half-res AO is already owed and unmeasured, and a second unmeasured
+quality-for-speed trade should not land before the timers have been pointed at
+the first. No `LightingPath` gate, which still has no consumer. **No specular
+occlusion**: AO scales the ambient term alone, a highlight is an image of a
+light, and a reflection is an image of the room in one direction — none of the
+three take the same occlusion factor, and if one is wanted it is its own term
+and its own decision. And **SSR on transparency is out, with the interaction
+recorded now**: a transparent surface writing the reflectivity attachment would
+overwrite the opaque `F0` behind it while the scene colour at that pixel is a
+blend. Every SSR has this; writing it down is what stops the transparency row
+rediscovering it as a bug.
 
 ### Taken 2026-08-27: Hi-Z marching, and a colour pyramid that may already exist
 
@@ -971,19 +981,31 @@ The row above names "No Hi-Z traversal", and the roughness section concedes that
 cone tracing is the better technique. This is the quality-and-performance pass
 that collects both, and it is one slice because they share the march.
 
-- **Hi-Z marching replaces the fixed-stride DDA.** A min-max depth pyramid lets
-  a ray climb to whichever level its current cell is empty at and step across
-  the whole of it, so a march crosses a frame in `O(log n)` steps where a fixed
-  stride spends a constant number of taps at a constant spacing. That buys both
-  ends of the trade the current march makes: the cost falls, and the reach stops
-  being a fixed share of the frame, so a reflection can find something the far
-  side of a room. **The determinism cost is real and is stated rather than waved
-  at**: a pyramid is a reduction, so its levels are float arithmetic four
-  rasterisers perform independently and the goldens have to absorb the
-  difference. The mitigation is the one the current march already uses — no
-  jitter of any kind, and a loop bound that is a constant — under this section's
-  standing rule that every real check is a structural ratio between two blocks
-  of one frame.
+- **Hi-Z marching replaces the fixed-stride DDA. Built 2026-08-27**, and this
+  bullet is kept for the two things it predicted wrongly. A ray climbs to
+  whichever level its current cell is empty at and steps across the whole of it,
+  so a march crosses a frame in `O(log n)` steps where a fixed stride spent a
+  constant number of taps at a constant spacing.
+
+  **It is a `max` reduction, not min-max.** One value per texel — the nearest
+  surface anywhere in the block below it — is the whole of what the skip test
+  needs, and a second channel would have been a second image, a second binding
+  and a second attachment per level for a bound nothing reads.
+
+  **The reach did not stop being a share of the frame.** `REACH_FRACTION` is
+  still what bounds a ray, and the pyramid buys the cost end of the trade alone:
+  the same reach for far fewer taps, and a crossing resolved to a texel instead
+  of to a 1.5-pixel stride. Lengthening the reach is a separate change with its
+  own goldens, and nothing here forced it.
+
+  **The determinism cost was real and it landed as predicted**: a pyramid is a
+  reduction, so its levels are float arithmetic four rasterisers perform
+  independently. The mitigation held — no jitter, a constant loop bound, and
+  structural ratios rather than tolerances — and the one number that moved was
+  `apps/lantern`'s `SSR_HIT_TOLERANCE`, because a texel-exact crossing weighs
+  the same hit differently from a strided one. The two adapters agree on the new
+  figure to a tenth of a percent, which is the claim that matters.
+
 - **Cone tracing over a colour mip chain, for roughness.** `ssr.slang`'s header
   refuses it on two costs: building a colour pyramid, and a `SampleLevel` at a
   computed LOD. Half of that has changed under it — **the bloom downsample chain
@@ -1334,21 +1356,21 @@ the reader holding that view is the one who should make the call.
 
 ## Delivery
 
-| Slice                                                                                                                                         | Phase                                                                                                                                                                                     |
-| --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| HDR target + exposure/tonemap pass                                                                                                            | P7 — built at P1. The **filmic curve** is still owed; see the post stack                                                                                                                  |
-| Antialiasing rung 1: **FXAA 3.11**                                                                                                            | P7 — built, in `DEFAULT_STACK`, and the whole of the stack's AA row today                                                                                                                 |
-| Sun CSM (culling-integrated, 3×3 PCF)                                                                                                         | P7 — built. The **cascade debug overlay** is not                                                                                                                                          |
-| Shadow ladder rung 1: **normal-offset bias**                                                                                                  | P7 — the fifth decision named it and the sixth's constants are what it buys back                                                                                                          |
-| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes                                                                           | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`                                                                                                          |
-| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats`                                                                         | P7C                                                                                                                                                                                       |
-| Ray-traced shadows + AO                                                                                                                       | P7C                                                                                                                                                                                       |
-| Ray-traced reflections                                                                                                                        | P7C                                                                                                                                                                                       |
-| Ray-traced global illumination                                                                                                                | P7C                                                                                                                                                                                       |
-| Bloom chain                                                                                                                                   | **Built 2026-08-23** (P10) — off unless a view asks; see `RenderEffects::DEFAULT_STACK`                                                                                                   |
-| The render quality pass: **SMAA 1x**, **GTAO + bent normals**, **Hi-Z + cone-traced SSR**, shadow cross-fade → rotated Poisson PCF → **PCSS** | P10, with the bloom chain, for the reason that row gives: the profiler HUD is what shows a quality rung's cost honestly. Each rung's section above says what it costs and what it refuses |
-| MSAA                                                                                                                                          | **No phase, and not a rejection** — viable and priced by the seventh decision, and not the default for exactly as long as SSAO and SSR read a single-sample depth                         |
-| Auto-exposure; TAA (jitter, motion vectors, the `GpuInstance` slot); temporal SSR; shadow atlases                                             | post-MVP. The instance slot is **one blocker for two features** — see the antialiasing and reflection sections                                                                            |
+| Slice                                                                                                                                         | Phase                                                                                                                                                                                                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HDR target + exposure/tonemap pass                                                                                                            | P7 — built at P1. The **filmic curve** is still owed; see the post stack                                                                                                                                                                                                                        |
+| Antialiasing rung 1: **FXAA 3.11**                                                                                                            | P7 — built, in `DEFAULT_STACK`, and the whole of the stack's AA row today                                                                                                                                                                                                                       |
+| Sun CSM (culling-integrated, 3×3 PCF)                                                                                                         | P7 — built. The **cascade debug overlay** is not                                                                                                                                                                                                                                                |
+| Shadow ladder rung 1: **normal-offset bias**                                                                                                  | P7 — the fifth decision named it and the sixth's constants are what it buys back                                                                                                                                                                                                                |
+| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes                                                                           | P7B — **complete**, each gated by a golden in `crates/crcbl/tests/render_e2e.rs`                                                                                                                                                                                                                |
+| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats`                                                                         | P7C                                                                                                                                                                                                                                                                                             |
+| Ray-traced shadows + AO                                                                                                                       | P7C                                                                                                                                                                                                                                                                                             |
+| Ray-traced reflections                                                                                                                        | P7C                                                                                                                                                                                                                                                                                             |
+| Ray-traced global illumination                                                                                                                | P7C                                                                                                                                                                                                                                                                                             |
+| Bloom chain                                                                                                                                   | **Built 2026-08-23** (P10) — off unless a view asks; see `RenderEffects::DEFAULT_STACK`                                                                                                                                                                                                         |
+| The render quality pass: **SMAA 1x**, **GTAO + bent normals**, **Hi-Z + cone-traced SSR**, shadow cross-fade → rotated Poisson PCF → **PCSS** | P10, with the bloom chain, for the reason that row gives: the profiler HUD is what shows a quality rung's cost honestly. Each rung's section above says what it costs and what it refuses. **The Hi-Z half of the SSR rung is built (2026-08-27)**; the cone trace over a colour pyramid is not |
+| MSAA                                                                                                                                          | **No phase, and not a rejection** — viable and priced by the seventh decision, and not the default for exactly as long as SSAO and SSR read a single-sample depth                                                                                                                               |
+| Auto-exposure; TAA (jitter, motion vectors, the `GpuInstance` slot); temporal SSR; shadow atlases                                             | post-MVP. The instance slot is **one blocker for two features** — see the antialiasing and reflection sections                                                                                                                                                                                  |
 
 **P7B and P7C are new phases** carrying the raster twin and the ray-traced path
 respectively; the roadmap's phase table is authoritative for their ordering. The
@@ -1384,9 +1406,11 @@ under both paths side by side. Exit criteria of the other samples inherit
   rather than a scene at a time.
 - **A Hi-Z pyramid puts a reduction underneath the reflection goldens.** Every
   level is float arithmetic four rasterisers perform independently, where the
-  fixed-stride march reads the prepass directly. The SSR section's standing rule
+  fixed-stride march read the prepass directly. The SSR section's standing rule
   — structural ratios rather than tolerances, and never a per-driver re-bless —
-  is what has to absorb it, and it was written before this rung was scheduled.
+  is what had to absorb it, and it was written before this rung was scheduled.
+  **Landed 2026-08-27 and it held**: one re-blessed golden, `Scene::Ssr`, and
+  one constant re-measured on two adapters that agree.
 - **TAA later ≠ never**: reserving the prev-transform slot now was the cheap
   insurance and it was not taken — see the AA row above. What has changed is the
   price of not taking it: **temporal SSR is blocked on the same slot**, so the

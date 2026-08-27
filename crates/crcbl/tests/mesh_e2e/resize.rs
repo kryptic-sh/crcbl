@@ -66,6 +66,13 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
         (64, 48),
         MESH_EXTENT,
     ];
+    // The Hi-Z pyramid is the one thing in the frame whose size is *derived*
+    // from the configured extent rather than equal to it, so it is the only pass
+    // that can go stale without the assertion below noticing — hence the flag,
+    // checked once after the storm rather than per size: an extent too small to
+    // halve has no pyramid at all, and `(17, 5)` in the list above is exactly
+    // that case.
+    let mut pyramid_seen = false;
     for extent in sizes {
         device
             .reconfigure_swapchain(
@@ -131,6 +138,15 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                 let expected = if pass.label() == "shadow" {
                     shadow_atlas = true;
                     crcbl::render::shadow::atlas_extent()
+                } else if let Some(level) = pass.label().strip_prefix("hiz-") {
+                    // Halved once per level, floored — the reduction the pyramid
+                    // is. Spelled out here rather than called from the renderer
+                    // so the two arrive at it independently: a level that
+                    // rounded the other way would agree with itself and fail
+                    // here.
+                    pyramid_seen = true;
+                    let level: u32 = level.parse().expect("hiz-N names its level");
+                    (extent.0 >> level, extent.1 >> level)
                 } else {
                     extent
                 };
@@ -186,6 +202,12 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
             pool.image_count()
         );
     }
+
+    assert!(
+        pyramid_seen,
+        "no Hi-Z pass in any frame of the storm, so the derived extent above \
+         checked nothing"
+    );
 
     renderer.destroy(device);
     pool.destroy(device);

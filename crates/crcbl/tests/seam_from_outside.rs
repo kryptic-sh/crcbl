@@ -584,14 +584,27 @@ fn a_settings_file_switching_an_effect_off_is_a_frame_with_fewer_passes() {
             "ambient_occlusion = false",
             ["ssao", "ssao-blur"].as_slice(),
         ),
-        ("reflections = false", ["ssr", "ssr-blur"].as_slice()),
+        // The pyramid goes with the march that climbs it: the reduction passes
+        // are recorded on the frames that reflect and on no others, so
+        // switching reflections off costs a frame the whole chain and not only
+        // the two passes named after it. Matched by prefix because how many
+        // levels this window has is a function of its size — see
+        // `crcbl_render::hiz` — and the claim here is that *all* of them go.
+        (
+            "reflections = false",
+            ["ssr", "ssr-blur", "hiz-"].as_slice(),
+        ),
     ] {
         let storage = settings_file(&format!("[engine.video]\n{toml}\n"));
         let (effects, labels) = a_frame_opened_with(SettingsSource::Source(&storage));
         assert_ne!(effects, all_on, "{toml}: the player's row did nothing");
         let expected: Vec<String> = every_pass
             .iter()
-            .filter(|label| !gone.contains(&label.as_str()))
+            .filter(|label| {
+                !gone
+                    .iter()
+                    .any(|dropped| *label == dropped || label.starts_with(dropped))
+            })
             .cloned()
             .collect();
         assert_eq!(

@@ -237,15 +237,22 @@ fn per_pass_gpu_timers_report_real_numbers() {
     // where a pass opens and closes, and a `PassKind::Copy` opens no scope at
     // all. `PassTimers` gives it no query pair and no row, rather than a row
     // reading 0.000 ms that a reader would take for a measurement.
+    expected.extend(["shadow", "depth-prepass", "ssao", "ssao-blur", "forward"]);
+    // The Hi-Z pyramid the reflection march climbs, one pass per level and as
+    // many levels as this extent has — from `crcbl_render::hiz` rather than
+    // written out, on [`CASCADES`](crcbl_render::shadow::CASCADES)'s terms: a
+    // pyramid that stopped being recorded is a failure here rather than a
+    // shorter HUD nobody counted.
+    let hiz: Vec<String> = (1..=crcbl_render::hiz::levels_for(MESH_EXTENT))
+        .map(|level| format!("hiz-{level}"))
+        .collect();
+    assert!(
+        !hiz.is_empty(),
+        "no pyramid at {MESH_EXTENT:?}, so this suite is not covering the levels at all"
+    );
+    expected.extend(hiz.iter().map(String::as_str));
     expected.extend([
-        "shadow",
-        "depth-prepass",
-        "ssao",
-        "ssao-blur",
-        "forward",
-        "ssr",
-        "ssr-blur",
-        "tonemap",
+        "ssr", "ssr-blur", "tonemap",
         // The antialiasing resolve, which every frame draws — see
         // `RenderEffects::DEFAULT_STACK`.
         "fxaa",

@@ -69,6 +69,13 @@ pub(crate) struct SsrImages {
     pub(crate) reflection: ImageId,
     /// The blur's output, and the image the caller must go on to tonemap.
     pub(crate) composited: ImageId,
+    /// Levels 1 upwards of the Hi-Z pyramid the march climbs, one slot per
+    /// binding and **every slot filled** — a frame with a shorter pyramid than
+    /// bindings repeats its deepest level, and one with no pyramid at all
+    /// repeats [`SsrImages::depth`]. See [`crate::hiz::level_slots`], which is
+    /// what the caller fills this with, and `SsrParams::hiz_levels`, which is
+    /// what stops the march reading a slot that is a repeat.
+    pub(crate) pyramid: [ImageId; crate::hiz::MAX_LEVELS as usize],
 }
 
 /// Everything the reflection pair owns.
@@ -200,6 +207,27 @@ impl Ssr {
                 flags: BindingFlags::empty(),
             },
         ];
+        // Levels 1 upwards of the depth pyramid, one binding each rather than
+        // one array binding: `ssr.slang` reads them through a `switch` on the
+        // level, which is what keeps the whole march inside a texture type WGSL
+        // will index without a binding array — see that shader's `hiz_at`.
+        // Level 0 is binding 1 above, which is the prepass itself.
+        let mut entries = entries.to_vec();
+        entries.extend(
+            (0..crate::hiz::MAX_LEVELS).map(|level| BindGroupLayoutEntry {
+                binding: 5 + level,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    // `Depth`, and the paragraph on binding 1 is this one's too:
+                    // every level is `D32Float`, which is the point of the pyramid
+                    // being depth images rather than `R32Float` ones.
+                    sample_type: SampleType::Depth,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            }),
+        );
         let desc = BindGroupLayoutDesc {
             label: Some("ssr"),
             entries: &entries,
@@ -359,6 +387,7 @@ impl Ssr {
             reflectivity,
             reflection,
             composited,
+            pyramid,
         } = images;
         let pipeline = self.pipeline;
         let pipeline_layout = self.pipeline_layout;
@@ -373,7 +402,18 @@ impl Ssr {
         let cached = &mut groups[frame];
         let blur_cached = &mut blur_groups[frame];
 
-        graph
+        // The pyramid slots, deduplicated against the depth prepass and against
+        // each other: a short pyramid repeats its deepest level into the slots
+        // above, and declaring one image's read twice would have the graph emit
+        // a barrier for a transition that has already happened.
+        let mut pyramid_reads: Vec<ImageId> = Vec::with_capacity(pyramid.len());
+        for level in pyramid {
+            if level != depth && !pyramid_reads.contains(&level) {
+                pyramid_reads.push(level);
+            }
+        }
+
+        let mut pass = graph
             .add_render_pass("ssr")
             // `DontCare`, not `Clear`: the full-screen triangle writes every
             // pixel of the target — a pixel with no reflection writes zero — so
@@ -391,58 +431,74 @@ impl Ssr {
             .read_image(color)
             .read_image(depth)
             .read_image(reflectivity)
-            .read_buffer(probe_id)
-            .execute(move |ctx| {
-                let color_view = ctx.image_view(color);
-                let depth_view = ctx.image_view(depth);
-                let material_view = ctx.image_view(reflectivity);
-                let device = ctx.device();
-                let entries = vec![
-                    BindGroupEntry {
-                        binding: 0,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(uniforms),
-                    },
-                    // The three below are overwritten by `cached_group` with the
-                    // realised views; written here so the list is a complete
-                    // description of the layout rather than a list with holes in
-                    // it.
-                    BindGroupEntry {
-                        binding: 1,
-                        array_index: 0,
-                        resource: BindingResource::ImageView(depth_view),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        array_index: 0,
-                        resource: BindingResource::ImageView(color_view),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        array_index: 0,
-                        resource: BindingResource::ImageView(material_view),
-                    },
-                    BindGroupEntry {
-                        binding: 4,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(probes),
-                    },
-                ];
-                let Some(group) = cached_group(
-                    cached,
-                    device,
-                    &[(1, depth_view), (2, color_view), (3, material_view)],
-                    "ssr",
-                    layout,
-                    entries,
-                ) else {
-                    return;
-                };
-                let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(pipeline);
-                encoder.bind_group(0, group, &[], pipeline_layout);
-                encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
-            });
+            .read_buffer(probe_id);
+        for level in pyramid_reads {
+            // Each level was this pass's own reduction's depth attachment a
+            // moment ago, so this declaration is its barrier into a
+            // shader-readable layout.
+            pass = pass.read_image(level);
+        }
+        pass.execute(move |ctx| {
+            let color_view = ctx.image_view(color);
+            let depth_view = ctx.image_view(depth);
+            let material_view = ctx.image_view(reflectivity);
+            let device = ctx.device();
+            let mut entries = vec![
+                BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(uniforms),
+                },
+                // The three below are overwritten by `cached_group` with the
+                // realised views; written here so the list is a complete
+                // description of the layout rather than a list with holes in
+                // it.
+                BindGroupEntry {
+                    binding: 1,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(depth_view),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(color_view),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(material_view),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(probes),
+                },
+            ];
+            let pyramid_views = pyramid.map(|level| ctx.image_view(level));
+            entries.extend(pyramid_views.iter().enumerate().map(|(level, view)| {
+                BindGroupEntry {
+                    binding: 5 + u32::try_from(level)
+                        .unwrap_or_else(|_| unreachable!("a pyramid of a few levels")),
+                    array_index: 0,
+                    resource: BindingResource::ImageView(*view),
+                }
+            }));
+            let mut key = vec![(1, depth_view), (2, color_view), (3, material_view)];
+            key.extend(pyramid_views.iter().enumerate().map(|(level, view)| {
+                (
+                    5 + u32::try_from(level)
+                        .unwrap_or_else(|_| unreachable!("a pyramid of a few levels")),
+                    *view,
+                )
+            }));
+            let Some(group) = cached_group(cached, device, &key, "ssr", layout, entries) else {
+                return;
+            };
+            let encoder = ctx.encoder();
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.bind_group(0, group, &[], pipeline_layout);
+            encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
+        });
 
         let blur_pipeline = self.blur_pipeline;
         let blur_pipeline_layout = self.blur_pipeline_layout;

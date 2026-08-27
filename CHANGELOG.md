@@ -16,6 +16,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Screen-space reflections march a Hi-Z pyramid instead of a fixed stride.**
+  `crates/crcbl-shaders/shaders/hiz.slang` and `crates/crcbl-render/src/hiz.rs`
+  reduce the depth prepass to up to five levels, each texel the nearest surface
+  of the 2×2 block below it, and `shaders/ssr.slang` climbs that structure: a
+  ray over open space crosses a 32-texel cell in one iteration and walks back
+  down to a single texel only where something is in its way. The reflection is
+  resolved to a texel rather than to a 1.5-pixel stride, which is what removed
+  the stepping the old walk left on grazing rays.
+
+  **The frame grows a `hiz-N` pass per level**, between `forward` and `ssr`, and
+  only when `RenderEffects::REFLECTIONS` is on. The count depends on the extent
+  — the frame halved until a level would fall under eight texels — so
+  `crcbl_render::hiz::levels_for` and `level_extent` are public for anyone
+  budgeting passes or GPU timer slots. A frame too small to halve once gets no
+  pyramid at all and the march walks the prepass at full resolution, so the pass
+  is an optimisation the reflection can be built without.
+
+  The pyramid is `D32Float` written through `SV_Depth`, not an `R32Float` colour
+  target: it keeps every level the same texture type as the prepass, so the
+  march reads all six bindings through one `DepthTexture2D` and the seam needs
+  no third sample type for a format WebGPU cannot filter.
+
+  **It also took out a NaN the old walk was hiding.** A ray clipped exactly to
+  the vanishing point solves for an infinite ray parameter, and the depth of
+  every point along that segment is then `inf * 0` — so those rays found no
+  crossing and silently fell back to the probe environment. The fixed-stride
+  walk avoided it by accident, because flooring the reach to a whole number of
+  strides never landed on the point itself; a march that clips to its own cell
+  boundaries does land there. `ssr.slang` now stops a pixel short of the
+  vanishing point and rejects a non-finite parameter by name.
+
 - **Antialiasing: FXAA 3.11 over the tonemapped frame.**
   `docs/plan/18-render-features.md`'s AA slot had been a contract for a pass
   that did not exist; `crates/crcbl-shaders/shaders/fxaa.slang` and

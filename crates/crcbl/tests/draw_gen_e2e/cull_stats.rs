@@ -53,13 +53,23 @@ const REPORT_FLOOR: u64 = 2;
 const REPORT_BOUND: u64 = 32;
 
 /// The full-screen triangles a forward frame draws: `ssao`'s, `ssao-blur`'s,
-/// `ssr`'s, `ssr-blur`'s, the tonemap's and the antialiasing resolve's.
+/// `ssr`'s, `ssr-blur`'s, the tonemap's, the antialiasing resolve's, and one per
+/// level of the Hi-Z pyramid the march climbs.
 ///
 /// One instance each, submitted and drawn, and the only draws in a forward frame
 /// the CPU knows the count of. They are on both sides of the submitted/drawn
 /// pair, which is what makes the two comparable — see
 /// `crcbl::render::ForwardRenderer::counters`.
-const FULLSCREEN_INSTANCES: u64 = 6;
+///
+/// **The pyramid term is the one that depends on the frame's size**, so it is
+/// asked of `crcbl::render::hiz` at the extent this suite renders at rather than
+/// written down here: a pyramid that stopped being built would otherwise leave
+/// this constant right and the frame short.
+fn fullscreen_instances() -> u64 {
+    6 + u64::from(crcbl::render::hiz::levels_for(
+        crate::mesh_scene::MESH_EXTENT,
+    ))
+}
 
 /// **The culling counters come back off the GPU, and they are the cull's own
 /// answer.**
@@ -139,12 +149,12 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
     let submitted = counters.instances;
     assert_eq!(
         submitted,
-        3 + FULLSCREEN_INSTANCES,
+        3 + fullscreen_instances(),
         "the cube, two pyramids and one triangle per full-screen pass",
     );
     assert_eq!(
         counters.drawn,
-        Some(1 + FULLSCREEN_INSTANCES),
+        Some(1 + fullscreen_instances()),
         "one instance survives the frustum test, and the full-screen triangles are drawn \
          whatever the cull decided",
     );
@@ -162,7 +172,7 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
         crcbl::shaders::cull::INSTANCE_SURVIVOR_WORD,
     );
     assert_eq!(
-        u64::from(by_hand) + FULLSCREEN_INSTANCES,
+        u64::from(by_hand) + fullscreen_instances(),
         counters.drawn.expect("the ring came round"),
         "the ring's number must be the one in the counter buffer",
     );
@@ -327,7 +337,7 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
     );
     assert_eq!(
         renderer.counters().drawn,
-        Some(2 + FULLSCREEN_INSTANCES),
+        Some(2 + fullscreen_instances()),
         "and the row follows it",
     );
 

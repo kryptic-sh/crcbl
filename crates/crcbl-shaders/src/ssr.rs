@@ -16,11 +16,11 @@
 //!
 //! [`tests::the_shared_screen_space_helpers_have_not_drifted`]: self
 
-/// Bytes of the uniform block: three `float4x4`, two `float4`, and one `uint4`.
+/// Bytes of the uniform block: three `float4x4`, two `float4`, and two `uint4`.
 ///
-/// `std140` gives each row sixteen-byte alignment, so the three matrices and
-/// probe-volume header fill the block without tail padding.
-pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE;
+/// `std140` gives each row sixteen-byte alignment, so the three matrices, the
+/// probe-volume header and the pyramid row fill the block without tail padding.
+pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 16;
 
 /// The roughness at which SSR's sharpness ramp reaches zero, matching
 /// `static const float ROUGHNESS_CUTOFF` in both shader sources.
@@ -77,6 +77,15 @@ pub struct SsrParams {
     pub inv_view: [f32; 16],
     /// The probe grid header, matching [`crate::probe::ProbeVolume`].
     pub probe_volume: crate::probe::ProbeVolume,
+    /// How many levels of the Hi-Z pyramid this frame built, which is the
+    /// deepest level the march may climb to.
+    ///
+    /// Zero is a valid frame: an extent too small to halve once gets no pyramid,
+    /// and the march walks the full-resolution prepass a texel at a time. The
+    /// shader clamps this to its own `MAX_HIZ_LEVEL` — `crcbl_render::hiz`'s
+    /// `MAX_LEVELS` is the Rust mirror of that number, and this field is what
+    /// the frame actually has.
+    pub hiz_levels: u32,
 }
 
 impl SsrParams {
@@ -100,9 +109,14 @@ impl SsrParams {
         bytes[at..at + crate::probe::PROBE_VOLUME_SIZE]
             .copy_from_slice(&self.probe_volume.to_bytes());
         at += crate::probe::PROBE_VOLUME_SIZE;
+        // The pyramid row: the level count, and three lanes of the padding a
+        // sixteen-byte row leaves. They stay zero, which is what the array was
+        // initialised to.
+        bytes[at..at + 4].copy_from_slice(&self.hiz_levels.to_le_bytes());
+        at += 16;
         debug_assert_eq!(
             at, PARAMS_SIZE,
-            "the matrices and probe volume fill the block exactly"
+            "the matrices, probe volume and pyramid row fill the block exactly"
         );
         bytes
     }
@@ -393,8 +407,11 @@ mod tests {
         let probe_origin = source
             .find("float4 probe_origin;")
             .expect("ssr.slang declares `float4 probe_origin;`");
+        let hiz = source
+            .find("uint4 hiz;")
+            .expect("ssr.slang declares `uint4 hiz;`");
         assert!(
-            inv_proj < proj && proj < inv_view && inv_view < probe_origin,
+            inv_proj < proj && proj < inv_view && inv_view < probe_origin && probe_origin < hiz,
             "ssr.slang declares the block in a different order than `to_bytes` writes it"
         );
     }
@@ -417,6 +434,7 @@ mod tests {
             proj,
             inv_view,
             probe_volume,
+            hiz_levels: 3,
         }
         .to_bytes();
 
@@ -426,5 +444,9 @@ mod tests {
         assert_eq!(&bytes[128..132], &3.0f32.to_le_bytes());
         assert_eq!(&bytes[192..196], &4.0f32.to_le_bytes());
         assert_eq!(&bytes[236..240], &1320u32.to_le_bytes());
+        // The pyramid row, which is the last sixteen bytes: the level count in
+        // `x` and nothing in the three lanes `std140` padded it out to.
+        assert_eq!(&bytes[240..244], &3u32.to_le_bytes());
+        assert_eq!(&bytes[244..PARAMS_SIZE], &[0u8; 12]);
     }
 }

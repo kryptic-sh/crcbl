@@ -136,6 +136,7 @@ pub mod forward;
 mod fxaa;
 pub mod graph;
 pub mod grid;
+pub mod hiz;
 pub mod instance_pool;
 pub mod layers;
 pub mod light;

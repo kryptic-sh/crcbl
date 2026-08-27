@@ -3067,6 +3067,34 @@ impl TransientImageDesc {
         }
     }
 
+    /// One level of the Hi-Z depth pyramid: `D32Float`, rendered into through
+    /// `SV_Depth` and then fetched.
+    ///
+    /// [`scene_depth`]'s description at a level's own extent, which is the
+    /// point of it being a description of its own: `crcbl_render::hiz` builds
+    /// the pyramid out of separate single-level images for [`bloom_mip`]'s two
+    /// reasons, so a level is its own extent and the pool hands out its own
+    /// physical image for it.
+    ///
+    /// **A depth format rather than `R32Float`.** `shaders/hiz.slang`'s header
+    /// carries the whole of it: `R32Float` is unfilterable in WebGPU, so binding
+    /// one would need a third [`SampleType`](crcbl_hal::SampleType) across four
+    /// backends, and the pyramid would be a different texture type from the
+    /// prepass that is its own level 0.
+    ///
+    /// [`scene_depth`]: TransientImageDesc::scene_depth
+    /// [`bloom_mip`]: TransientImageDesc::bloom_mip
+    #[must_use]
+    pub const fn hiz_level(extent: (u32, u32)) -> Self {
+        Self {
+            extent,
+            format: Format::D32Float,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT.union(ImageUsage::SAMPLED),
+            samples: 1,
+            mip_levels: 1,
+        }
+    }
+
     /// A screen-space occlusion channel: `R8Unorm`, rendered into and then
     /// fetched.
     ///

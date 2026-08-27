@@ -3866,6 +3866,15 @@ mod tests {
                 ("render", "ssao"),
                 ("render", "ssao-blur"),
                 ("render", "forward"),
+                // **The pyramid the march climbs, and it is part of the march
+                // rather than of the prepass**: `crcbl_render::hiz` records a
+                // reduction per level only on the frames that reflect, so this
+                // row disappears with `ssr` below rather than with
+                // `depth-prepass` above. One level, because these fixtures
+                // render at a size that halves once before hitting the floor
+                // `crcbl_render::hiz` keeps — the same arithmetic that gives the
+                // bloom chain below its single downsample.
+                ("render", "hiz-1"),
                 ("render", "ssr"),
                 ("render", "ssr-blur"),
                 ("render", "tonemap"),
@@ -3883,7 +3892,7 @@ mod tests {
         // diffuse irradiance, and a rough probe fallback would be an unmodelled
         // specular term in every measured floor pixel.
         let mut probe_passes = forward_passes(0);
-        probe_passes.retain(|(_, label)| *label != "ssr" && *label != "ssr-blur");
+        probe_passes.retain(|(_, label)| !matches!(*label, "hiz-1" | "ssr" | "ssr-blur"));
         // The spot scene's one light is a spot, it is the only candidate, and
         // there are tiles left after the cascades — so it holds one.
         let spot_shadow_passes = forward_passes(1);

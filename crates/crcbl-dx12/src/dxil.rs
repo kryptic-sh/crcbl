@@ -904,6 +904,15 @@ mod tests {
                 &[Srv, Sampler, Cbv],
             ),
             (
+                "hiz",
+                &crcbl_shaders::HIZ,
+                &["vertexMain", "fragmentMain"],
+                // One binding and no sampler — the reduction fetches by integer
+                // texel, so the level being reduced is `t0` and there is nothing
+                // else in the set.
+                &[Srv],
+            ),
+            (
                 "mesh",
                 &crcbl_shaders::MESH,
                 &["vertexMain", "fragmentMain"],

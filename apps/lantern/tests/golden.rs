@@ -163,9 +163,26 @@ const MIRROR_FRACTION_OF_PLASTER: f32 = 0.14;
 
 /// How much a fully screen-space hit may vary when the probe rows are zeroed.
 ///
-/// The fixed Vulkan run measured a 5.1% difference at this pixel; 6% leaves
-/// rasterisation margin while rejecting a fallback substituted for the hit.
-const SSR_HIT_TOLERANCE: f32 = 0.06;
+/// **What the difference is** is the environment the march blends in behind its
+/// own hit: `ssr.slang` weighs a crossing by a confidence and fills the rest
+/// with the probe environment, so zeroing the probes removes exactly that
+/// remainder and what is left is the screen hit alone.
+///
+/// **The march is what moved it, not the mirror.** It was 6% against a measured
+/// 5.1% until `ssr.slang` was rebuilt on the Hi-Z pyramid on 2026-08-27, which
+/// resolves a crossing to a single texel instead of to a 1.5-pixel stride and so
+/// measures how far past the surface the ray got on a finer basis — a lower
+/// confidence for the same hit, and a larger remainder. The point reads 46.8 ->
+/// 43.4 on llvmpipe and 46.7 -> 43.3 on the discrete adapter, 7.3% either way,
+/// and the hit colour itself is unchanged: with the confidence forced to one
+/// both marches read 53. So 10%, on the old constant's terms — margin over a
+/// measured difference the two adapters agree on.
+///
+/// The teeth are unchanged. A fallback substituted for the hit is not a few per
+/// cent: with the probe rows zeroed the fallback reads at most 1.0, which the
+/// miss point in the same test pins at 20.3 -> 0.0, so that failure lands an
+/// order of magnitude below this threshold whichever of the two it is.
+const SSR_HIT_TOLERANCE: f32 = 0.10;
 
 /// How much brighter the foot of the mirror panel is than its face further up.
 ///
