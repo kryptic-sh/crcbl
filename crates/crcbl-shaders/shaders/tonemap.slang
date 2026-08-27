@@ -10,7 +10,12 @@
 // target and a pass that resolves it — not the operator. `topic 18`'s real stack
 // replaces exactly one function in this file.
 //
-// # The operator is exposure-and-clamp, on purpose
+// # The operator is exposure-and-clamp by default, and a curve on request
+//
+// Since 2026-08-27 the block carries a selector and this file carries two
+// operators. What follows is the argument for the *default* being the clamp,
+// which is unchanged and is why nothing in the tree re-blessed when the curve
+// landed.
 //
 // A Reinhard curve would be just as short and is what "tonemap" usually means,
 // and it was rejected: `c / (1 + c)` maps 0.5 to 0.333, so every LDR colour in
@@ -54,7 +59,64 @@ struct TonemapParams
     /// slider without a second pipeline. Auto-exposure, which would compute it
     /// from the scene rather than take it from a caller, is still topic 18.
     float exposure;
+    /// Which operator to run: [`CURVE_CLAMP`] or [`CURVE_ACES`].
+    ///
+    /// A `uint` selector rather than two pipelines, because the two operators
+    /// differ by a handful of arithmetic instructions in a pass that is already
+    /// one triangle over one texture — a second pipeline would cost a state
+    /// object, a bind-group layout and a branch on the host to pick between
+    /// them, to save a branch the whole warp takes the same way.
+    ///
+    /// `crcbl_shaders::tonemap::TonemapCurve` is the Rust side, and
+    /// [`CURVE_CLAMP`] is what a renderer nobody has configured writes.
+    uint curve;
 };
+
+/// [`TonemapParams::curve`]: exposure and clamp, the operator this pass shipped
+/// with and the identity on `[0, 1]`.
+static const uint CURVE_CLAMP = 0u;
+
+/// [`TonemapParams::curve`]: the ACES filmic curve, fitted.
+static const uint CURVE_ACES = 1u;
+
+// The ACES fit, and why this one.
+//
+// Stephen Hill's fit of the ACES RRT and ODT: two 3x3 changes of primaries
+// around a rational polynomial. Every operation in it is a multiply, an add or
+// a divide.
+//
+// **That is the reason it is this curve and not AgX**, which is otherwise the
+// newer answer and the one Blender and Filament moved to. AgX takes a `log2`
+// and a `pow` per channel, and this workspace's whole determinism argument —
+// the one `mesh.slang`'s `ggx_lobe` is held to and the one every cross-backend
+// golden rests on — is that a shader uses no transcendental functions, because
+// four platforms' implementations of them differ in the last place. A curve
+// that cannot be blessed across the backends is not a curve this engine can
+// ship, however good it looks on one of them.
+//
+// The constants are the published fit and are mirrored in
+// `crcbl_shaders::tonemap`, which pins them against the specification and
+// checks that this file spells the same numbers.
+
+/// ACEScc-relative primaries in, for the fit's polynomial.
+static const float3x3 ACES_INPUT = float3x3(
+    0.59719, 0.35458, 0.04823,
+    0.07600, 0.90834, 0.01566,
+    0.02840, 0.13383, 0.83777);
+
+/// And back out to display primaries afterwards.
+static const float3x3 ACES_OUTPUT = float3x3(
+    1.60475, -0.53108, -0.07367,
+    -0.10208, 1.10813, -0.00605,
+    -0.00327, -0.07276, 1.07602);
+
+/// The rational polynomial standing in for the RRT and the ODT together.
+float3 rrt_and_odt_fit(float3 v)
+{
+    float3 a = v * (v + 0.0245786) - 0.000090537;
+    float3 b = v * (0.983729 * v + 0.432951) + 0.238081;
+    return a / b;
+}
 
 // Declaration order is binding order and it is load-bearing on Metal — see
 // `crcbl_shaders::declaration_order`, which lints it over every source. The
@@ -75,10 +137,21 @@ struct FullscreenOutput
     float2 uv : TEXCOORD0;
 };
 
-/// The operator. **Replace this function, and only this function, at P7.**
-float3 tonemap(float3 color, float exposure)
+/// The operator, selected per frame.
+///
+/// **The clamp is still the default and still the identity on `[0, 1]`**, which
+/// is what keeps display-referred content — every 2D sample in the tree — going
+/// to the swapchain unchanged. A view that wants the filmic roll-off asks for
+/// it by name; see `crcbl_render::ForwardRenderer::set_tonemap_curve`.
+float3 tonemap(float3 color, float exposure, uint curve)
 {
-    return saturate(color * exposure);
+    float3 exposed = color * exposure;
+    if (curve == CURVE_ACES)
+    {
+        float3 aces = rrt_and_odt_fit(mul(ACES_INPUT, exposed));
+        return saturate(mul(ACES_OUTPUT, aces));
+    }
+    return saturate(exposed);
 }
 
 [shader("vertex")]
@@ -109,5 +182,5 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // (`CompositeAlpha::Opaque`), and carrying a scene alpha into it would make
     // the window's transparency depend on the geometry that happened to be
     // drawn.
-    return float4(tonemap(color, params.exposure), 1.0);
+    return float4(tonemap(color, params.exposure, params.curve), 1.0);
 }

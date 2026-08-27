@@ -201,7 +201,7 @@ bloom → exposure and tonemap → FXAA → UI.
 | Stage          | Industry            | Here                                        |
 | -------------- | ------------------- | ------------------------------------------- |
 | Auto-exposure  | histogram, GPU      | **missing** — exposure is a runtime uniform |
-| Tonemap curve  | ACES or AgX         | **missing** — `tonemap.slang` clamps        |
+| Tonemap curve  | ACES or AgX         | **built 2026-08-27**, ACES; clamp default   |
 | Bloom          | Karis-average chain | **built**, off unless a view asks           |
 | Colour grading | 3D LUT              | **missing**                                 |
 | Depth of field | gather or scatter   | **missing**                                 |
@@ -209,12 +209,13 @@ bloom → exposure and tonemap → FXAA → UI.
 | Lens artefacts | CA, vignette, grain | **missing**                                 |
 | HDR display    | scRGB or HDR10      | **missing** — sRGB swapchain only           |
 
-**The tonemap curve is the one to take first and it is nearly free.**
-`shaders/tonemap.slang` says in its own header that topic 18's stack "replaces
-exactly one function" in it, so the operator is a function body and not a pass,
-a transient or a uniform block. Every frame this engine draws is currently
-exposure-and-clamp, which is why bright pixels go chalky rather than rolling
-off.
+**The tonemap curve was the one to take first and it was nearly free.** Taken
+2026-08-27: `shaders/tonemap.slang` carries Stephen Hill's ACES fit behind a
+selector in its block, and [48-post-processing.md](48-post-processing.md)
+records why the clamp is still what a view gets unless it asks — and why the
+curve is ACES rather than AgX, which needs transcendentals this workspace's
+goldens cannot absorb. What is left of this row is deciding which stacks default
+to the curve, which is a re-bless rather than a design.
 
 **Auto-exposure is second**, and it is a histogram compute pass plus a reduce —
 the engine has compute, has readback-free ring buffers, and has the profiler to
@@ -305,7 +306,6 @@ above.
 | Rung                                                     | Why here                                                                                 |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | **Reserve the previous-transform slot in `GpuInstance`** | §9 — smallest change on this page, unblocks five features, gets more expensive with time |
-| **A filmic tonemap curve**                               | §6 — one function body, changes every frame the engine draws                             |
 | **Exponential height fog**                               | §4 — one term, no new pass, most of the outdoor benefit                                  |
 | **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road      |
 | **Emissive factor and page**                             | §2 — small, and the bloom chain already makes it pay                                     |

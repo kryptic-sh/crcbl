@@ -16,6 +16,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The tonemap has a filmic curve, and it is off by default.**
+  `crates/crcbl-shaders/shaders/tonemap.slang` carries a second operator behind
+  a `uint curve` lane of its uniform block: Stephen Hill's fit of the ACES RRT
+  and ODT, two changes of primaries around a rational polynomial.
+  `ForwardRenderer::set_tonemap_curve` and `ForwardRenderer::tonemap_curve` are
+  how a view asks for it and reads back what it got, and
+  `crcbl_shaders::tonemap::TonemapCurve` is the selector both sides share.
+
+  **Nothing in the tree looks different yet**, deliberately. Exposure-and-clamp
+  stays the default because it is the identity on `0..=1`, so every 2D sample —
+  which is display-referred already — reaches the swapchain exactly as it did.
+  Flipping which stacks default to the curve is a separate change whose whole
+  content is the re-bless, the shape the FXAA resolve landed in.
+
+  **ACES rather than AgX**, and the reason is this workspace's goldens: AgX
+  needs a `log2` and a `pow` per channel, four platforms' transcendental
+  functions differ in the last place, and a curve that cannot be blessed on all
+  four backends is not one this engine can ship. The fit uses no transcendental
+  at all. `TonemapCurve::apply` is the same arithmetic on the CPU, checked
+  against the ODT's published anchors rather than against itself — a neutral
+  stays neutral because both matrices' rows sum to one, and a scene-referred
+  0.18 lands near a tenth of display range — and a source grep holds the shader
+  to the same constants so the two copies cannot drift.
+
 - **Screen-space reflections march a Hi-Z pyramid instead of a fixed stride.**
   `crates/crcbl-shaders/shaders/hiz.slang` and `crates/crcbl-render/src/hiz.rs`
   reduce the depth prepass to up to five levels, each texel the nearest surface

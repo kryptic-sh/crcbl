@@ -1106,6 +1106,13 @@ pub struct ForwardRenderer {
     /// Always within [`EXPOSURE_MIN`]`..=`[`EXPOSURE_MAX`], because the setter is
     /// the only thing that writes it and it clamps.
     exposure: f32,
+    /// Which operator the tonemap pass runs — see
+    /// [`set_tonemap_curve`](ForwardRenderer::set_tonemap_curve).
+    ///
+    /// [`TonemapCurve::Clamp`](crcbl_shaders::tonemap::TonemapCurve::Clamp)
+    /// until a caller says otherwise, which is what keeps a renderer nobody has
+    /// configured drawing the frame it drew before the selector existed.
+    tonemap_curve: tonemap::TonemapCurve,
 
     /// The format the tonemap pipeline was built for. A swapchain format change
     /// needs a new pipeline, which is why it is remembered rather than assumed.
@@ -3855,6 +3862,8 @@ impl ForwardRenderer {
             // renderer nobody has called `set_exposure` on writes the frame it
             // wrote before the block existed.
             exposure: tonemap::DEFAULT_EXPOSURE,
+            // And the operator that constant is the identity under.
+            tonemap_curve: tonemap::TonemapCurve::Clamp,
             target_format,
             ambient_occlusion_placeholder,
             mesh_group_entries,
@@ -4499,6 +4508,7 @@ impl ForwardRenderer {
             0,
             &tonemap::TonemapParams {
                 exposure: self.exposure,
+                curve: self.tonemap_curve,
             }
             .to_bytes(),
         )?;
@@ -6539,6 +6549,34 @@ impl ForwardRenderer {
         self.exposure = exposure.max(EXPOSURE_MIN).min(EXPOSURE_MAX);
     }
 
+    /// Which operator the tonemap pass runs on the exposed scene colour.
+    ///
+    /// **Off by default, and that is the whole of why nothing re-blessed when
+    /// the curve landed.** `tonemap.slang`'s clamp is the identity on `0..=1`,
+    /// so display-referred content — every 2D sample in this tree — reaches the
+    /// swapchain exactly; a filmic curve applied to it would move colours
+    /// somebody chose. A 3D view is the one that wants the roll-off, and asks.
+    ///
+    /// It takes effect on the next [`begin_frame`](Self::begin_frame), for
+    /// [`set_exposure`](Self::set_exposure)'s reason: the block is written
+    /// there, and a frame already recorded reads the value it was recorded
+    /// with.
+    ///
+    /// **There is nothing to refuse and no `supports_` probe beside it.** The
+    /// selector is a lane of a uniform block read by a branch every device
+    /// already runs, so unlike the wireframe there is no second pipeline for a
+    /// device to decline to build.
+    pub const fn set_tonemap_curve(&mut self, curve: tonemap::TonemapCurve) {
+        self.tonemap_curve = curve;
+    }
+
+    /// The operator in force, on [`exposure`](Self::exposure)'s terms: the
+    /// value the next frame will be drawn with.
+    #[must_use]
+    pub const fn tonemap_curve(&self) -> tonemap::TonemapCurve {
+        self.tonemap_curve
+    }
+
     /// The exposure in force, after the clamp
     /// [`set_exposure`](Self::set_exposure) applied.
     ///
@@ -7780,9 +7818,11 @@ mod tests {
                 .expect("begin_frame wrote the block"),
             crcbl_shaders::tonemap::TonemapParams {
                 exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
+                curve: crcbl_shaders::tonemap::TonemapCurve::Clamp,
             }
             .to_bytes(),
-            "an untouched renderer must write the exposure the constant used to hold",
+            "an untouched renderer must write the exposure the constant used to hold, \
+             under the operator that constant is the identity for",
         );
 
         // A value that is neither the default nor a bound, so a block left at
@@ -7798,7 +7838,11 @@ mod tests {
                 recorder
                     .buffer_bytes(renderer.tonemap_uniforms[renderer.frame])
                     .expect("begin_frame wrote the block"),
-                crcbl_shaders::tonemap::TonemapParams { exposure: 3.5 }.to_bytes(),
+                crcbl_shaders::tonemap::TonemapParams {
+                    exposure: 3.5,
+                    curve: crcbl_shaders::tonemap::TonemapCurve::Clamp,
+                }
+                .to_bytes(),
                 "the frame's own block must carry the exposure in force",
             );
         }
@@ -7807,6 +7851,58 @@ mod tests {
             "consecutive frames must not share a block"
         );
         assert_eq!(slots[0], slots[FRAMES_IN_FLIGHT], "and the ring must wrap");
+
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The curve reaches the block, and the default one does not move it.**
+    ///
+    /// The selector is a lane of the same ring the exposure rides in, and a lane
+    /// nothing wrote would read as
+    /// [`TonemapCurve::Clamp`](crcbl_shaders::tonemap::TonemapCurve::Clamp)
+    /// whatever a caller asked for — a setter that compiles, a frame that looks
+    /// right, and a curve that never runs. So the check is that setting it
+    /// changes the bytes, on every frame of the ring.
+    #[test]
+    fn the_tonemap_block_carries_the_curve_a_caller_selected() {
+        use crcbl_shaders::tonemap::TonemapCurve;
+
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let camera = Camera::default();
+        let light = DirectionalLight::default();
+
+        assert_eq!(
+            renderer.tonemap_curve(),
+            TonemapCurve::Clamp,
+            "a renderer nobody configured must run the operator the goldens were blessed under",
+        );
+
+        renderer.set_tonemap_curve(TonemapCurve::Aces);
+        assert_eq!(renderer.tonemap_curve(), TonemapCurve::Aces);
+        for _ in 0..FRAMES_IN_FLIGHT * 2 {
+            renderer
+                .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                .expect("write");
+            let written = recorder
+                .buffer_bytes(renderer.tonemap_uniforms[renderer.frame])
+                .expect("begin_frame wrote the block");
+            assert_eq!(
+                written,
+                crcbl_shaders::tonemap::TonemapParams {
+                    exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
+                    curve: TonemapCurve::Aces,
+                }
+                .to_bytes(),
+                "every frame of the ring must carry the selected curve",
+            );
+            assert_ne!(
+                written,
+                crcbl_shaders::tonemap::TonemapParams::default().to_bytes(),
+                "and it must differ from the block a default renderer writes",
+            );
+        }
 
         renderer.destroy(device.as_ref());
     }

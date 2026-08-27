@@ -30,14 +30,33 @@ interactions below unchanged.
   moment real lighting exists). Fixed exposure MVP; auto-exposure (histogram,
   GPU reduce) later.
 - **Tonemap (MVP)**: filmic/ACES-fitted curve + sRGB encode. One combined
-  fullscreen pass with exposure. **The pass is built and the curve is not**:
-  `tonemap.slang` is exposure-and-clamp, chosen at P1 so display-referred
-  content reached the swapchain unchanged and no golden would be re-blessed
-  twice — once when the pass landed and again when this row does. That file says
-  in as many words that topic 18's stack "replaces exactly one function" in it,
-  so what is owed here is the operator, not the pass, the transient or the
-  `TonemapParams` block. Fixed exposure is a runtime uniform now; auto-exposure
-  (histogram, GPU reduce) is still later.
+  fullscreen pass with exposure. **Built 2026-08-27, and the clamp stayed the
+  default.** `tonemap.slang` carries two operators behind a `uint curve` lane of
+  its block — exposure-and-clamp, and Stephen Hill's fit of the ACES RRT and ODT
+  — and `crcbl_render::ForwardRenderer::set_tonemap_curve` is what a view asks
+  with. Fixed exposure is a runtime uniform; auto-exposure (histogram, GPU
+  reduce) is still later.
+
+  **The default is the clamp for the reason P1 chose it**, and that reason
+  outlived the curve arriving: exposure-and-clamp is the identity on `[0, 1]`,
+  so display-referred content — every 2D sample in this tree — reaches the
+  swapchain exactly. A filmic curve over a sprite an artist already graded moves
+  colours somebody chose, and it would have re-blessed the whole 2D suite for a
+  picture nobody asked to change. So the operator is per view, not per engine,
+  and flipping which one a 3D stack defaults to is a separate change whose whole
+  content is the re-bless — exactly the shape the FXAA rung landed in.
+
+  **ACES rather than AgX**, which is otherwise the newer answer and the one
+  Blender and Filament moved to. AgX takes a `log2` and a `pow` per channel, and
+  this workspace's determinism rule is that a shader uses no transcendental
+  function, because four platforms' implementations of them differ in the last
+  place. Hill's fit is two changes of primaries around a rational polynomial —
+  multiplies, adds and divides only — so it can be blessed on all four backends.
+  `crcbl_shaders::tonemap::TonemapCurve::apply` is the same arithmetic on the
+  CPU, pinned against the ODT's published anchors (a neutral stays neutral; a
+  scene-referred 0.18 lands near a tenth of display range), and a source grep
+  holds the shader to the same constants.
+
 - **AA (MVP)**: **FXAA**, then SMAA 1x, with TAA post-MVP and MSAA priced rather
   than rejected — the whole ladder, what each rung costs in this tree and what
   is refused are [49-antialiasing.md](49-antialiasing.md). **Built 2026-08-27**:

@@ -457,50 +457,29 @@ docs had already been annotated inline as work landed, so the audit's yield was
 mostly **false claims corrected** rather than plans closed; what follows is the
 work they name that the tree does not have.
 
-### The tonemap has no curve (2026-08-27)
+### Which stacks default to the filmic curve is undecided (2026-08-27)
 
-**Not built.** `18-render-features.md`'s post stack asks for a
-"filmic/ACES-fitted curve + sRGB encode".
-`crates/crcbl-shaders/shaders/tonemap.slang` implements
-`saturate(color * exposure)` and its own header says so: the operator is
-exposure-and-clamp, chosen at P1 so display-referred content reached the
-swapchain unchanged and no golden would be re-blessed twice.
+The ACES fit shipped on 2026-08-27 and **nothing renders with it**:
+`crcbl_shaders::tonemap::TonemapCurve::Clamp` is what `ForwardRenderer` starts
+on, so the curve only runs for a caller that names it and no caller does.
 
-**What it would take.** That file says it too — "topic 18's real stack replaces
-exactly one function in this file". The pass, the `Rgba16Float` transient, the
-`TonemapParams` uniform and the runtime exposure all exist. What lands is the
-curve, plus a re-bless of every 3D golden in the tree, which is the classic
-"everything shifted" diff the `--bless` flow exists for.
+That is deliberate — the clamp is the identity on `0..=1` and every 2D sample in
+the tree is display-referred, so a curve applied engine-wide would move colours
+an artist chose and re-bless the 2D suite for a change nobody asked for.
+`docs/plan/48-post-processing.md` carries the argument.
 
-**Blocks.** Nothing structurally; it is a quality row. But every golden blessed
-before it lands has to be blessed again after, so the later it goes the more it
-costs.
+**What is left is the decision, not the code.** Either the 3D samples each ask
+for the curve (a line per app, no shared policy, and the samples drift), or
+`RenderEffects` grows a bit and `DEFAULT_STACK` carries it (one place, and every
+3D golden in `crates/crcbl`, `apps/lantern` and `apps/quarry` re-blesses in the
+commit that flips it — the shape the FXAA resolve landed in). The second is the
+better one and it is the user's call when to spend the re-bless.
 
-**Evidence.** `tonemap.slang`'s `tonemap` function and its "The operator is
-exposure-and-clamp, on purpose" section; `crcbl_shaders::tonemap::TonemapParams`
-is the Rust mirror.
-
-### FXAA does not exist (2026-08-27)
-
-**Not built.** `18-render-features.md` lists FXAA as MVP ("AA (MVP): FXAA —
-cheap, single pass, no history") and the P7 delivery row named it. There is no
-`fxaa.slang` in `crates/crcbl-shaders/shaders/`, no FXAA artifact in `spirv/`,
-`wgsl/`, `msl/` or `clusters/`, no resolve pass in `crcbl_render::forward`, and
-no `RenderEffects` bit for one. The only occurrence of the word in the workspace
-is a doc comment on `MultisampleState::default` in `crcbl-hal` explaining why
-MSAA is not the default.
-
-**What it would take.** One `.slang` with the four-target header, one fullscreen
-pass in the graph after tonemap, and a `RenderEffects` bit so it is a frame with
-fewer passes when off — the shape `RenderEffects::BLOOM` already has. Its input
-is the tonemapped LDR image, so it does not interact with the HDR chain.
-
-**Blocks.** Nothing depends on it; it is the last MVP row of the post stack that
-has no implementation at all. Every frame the engine draws is currently
-unresolved.
-
-**Evidence.** `grep -rni fxaa` over `crates/` and `apps/` returns one hit, in
-`crates/crcbl-hal/src/pipeline.rs`.
+**Evidence.** `ForwardRenderer::set_tonemap_curve` and its `tonemap_curve`
+field; `the_tonemap_block_carries_the_curve_a_caller_selected` in
+`crates/crcbl-render/src/forward.rs` is what proves the lane reaches the GPU,
+and `the_aces_curve_keeps_the_shading_the_clamp_flattens` in
+`crates/crcbl/tests/mesh_e2e/hdr.rs` is what proves the branch runs on a device.
 
 ### The prev-transform slot for TAA was never reserved (2026-08-27)
 

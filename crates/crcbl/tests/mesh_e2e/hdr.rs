@@ -19,6 +19,7 @@ use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh};
 use crcbl::render::{
     EffectOverride, EffectRequest, ForwardRenderer, Projection, RenderEffects, TransientPool,
 };
+use crcbl_shaders::tonemap::TonemapCurve;
 
 /// The frame's `Rgba16Float` scene target, as the bytes the copy produced.
 struct HdrTarget(Vec<u8>);
@@ -98,6 +99,14 @@ fn half_to_f32(bits: u16) -> f32 {
 /// neighbours, so the value read back would be a filtered one and the
 /// assertion would be about the filter rather than about the tonemap.
 fn cube_frame() -> (crcbl_golden::Image, HdrTarget) {
+    cube_frame_with(
+        TonemapCurve::Clamp,
+        crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
+    )
+}
+
+/// The same frame under a chosen tonemap operator and exposure.
+fn cube_frame_with(curve: TonemapCurve, exposure: f32) -> (crcbl_golden::Image, HdrTarget) {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
@@ -107,6 +116,8 @@ fn cube_frame() -> (crcbl_golden::Image, HdrTarget) {
         programmatic: EffectOverride::none().force(RenderEffects::ANTIALIASING, Some(false)),
         ..EffectRequest::default()
     });
+    renderer.set_tonemap_curve(curve);
+    renderer.set_exposure(exposure);
     place_cube(&mut renderer);
     let mut hdr = Vec::new();
     let image = render_mesh(
@@ -215,5 +226,81 @@ fn the_hdr_target_carries_values_an_eight_bit_target_could_not() {
         brightest_channel, 255,
         "the tonemap must clamp a linear {peak} to the top of the swapchain's range, \
          got {pixel:?} at ({x}, {y})"
+    );
+}
+
+/// How many pixels of a frame are pinned at the top of every channel.
+fn blown_out(image: &crcbl_golden::Image) -> usize {
+    let mut count = 0;
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            if pixel[..3].iter().all(|channel| *channel == 255) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// **The ACES curve runs on the device, and it buys back the highlights the
+/// clamp threw away.**
+///
+/// The operator is a branch in `tonemap.slang` on a lane of a uniform block, so
+/// every way it can be wrong ends with the frame looking plausible: a selector
+/// that never reaches the block, a branch the compiler folded to the other arm,
+/// a matrix that lowered to the identity. None of those change the picture in a
+/// way a golden blessed alongside them would catch.
+///
+/// What the curve is *for* is what this measures instead. At an exposure that
+/// pushes a good part of the cube past 1.0, exposure-and-clamp maps all of it to
+/// the same white and the shading in it is gone; the fit keeps it ordered and
+/// below one. So the two frames are rendered at the same exposure and compared
+/// on how much of each is pinned at the top — which cannot come out equal unless
+/// the curve did not run.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_aces_curve_keeps_the_shading_the_clamp_flattens() {
+    // Bright enough that the clamp loses a real area of the cube, and well
+    // inside `ForwardRenderer::set_exposure`'s range.
+    const OVEREXPOSED: f32 = 4.0;
+
+    let (clamped, hdr) = cube_frame_with(TonemapCurve::Clamp, OVEREXPOSED);
+    let (curved, _) = cube_frame_with(TonemapCurve::Aces, OVEREXPOSED);
+
+    let (x, y, peak) = hdr.peak();
+    let clamped_blown = blown_out(&clamped);
+    let curved_blown = blown_out(&curved);
+    eprintln!(
+        "{}: at exposure {OVEREXPOSED} the clamp pins {clamped_blown} pixels and the \
+         ACES fit pins {curved_blown}; the HDR peak is {peak} at ({x}, {y})",
+        crate::SUITE
+    );
+
+    assert!(
+        clamped_blown > 100,
+        "the fixture must actually overexpose under the clamp, or there is nothing \
+         for the curve to buy back; only {clamped_blown} pixels were pinned"
+    );
+    assert!(
+        curved_blown * 4 < clamped_blown,
+        "the ACES fit must recover most of what the clamp pinned: {curved_blown} \
+         pixels are still at the top against the clamp's {clamped_blown}"
+    );
+
+    // And the hottest texel specifically: bright, and no longer white.
+    let peak_pixel = curved.pixel(x, y).expect("inside the frame");
+    let brightest = peak_pixel[..3]
+        .iter()
+        .copied()
+        .max()
+        .expect("three channels");
+    assert!(
+        brightest < 255,
+        "the fit must leave headroom above a linear {peak}, got {peak_pixel:?}"
+    );
+    assert!(
+        brightest > 128,
+        "and the frame's hottest texel must still read as a highlight, got {peak_pixel:?}"
     );
 }
