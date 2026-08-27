@@ -143,8 +143,18 @@ Why GGX now rather than a roughness-driven Blinn later:
 - **It costs nothing a device has to have.** The lobe is dot products, a square
   root and two divides. No `pow` with a variable exponent and no trigonometry,
   for the reason the rest of `mesh.slang` avoids them: a platform's
-  transcendental functions differ in the last place between the four targets and
-  this file's determinism argument is that it does not use any.
+  transcendental functions differ in the last place between the four targets, so
+  none of them may reach a colour.
+
+  **The rule is about shading, not about the file**, and the correction is worth
+  making because the looser claim invites the wrong test. `mesh.slang` does call
+  `log2` — three times, in `froxel_of`, inverting the cluster grid's exponential
+  slice mapping. That is sound for the same reason the ban is real elsewhere:
+  its result goes through a `floor` into an integer slice index, so a last-place
+  disagreement between two platforms changes nothing unless a fragment is
+  standing exactly on a slice boundary, and a fragment on the boundary was
+  already free to land either side. A transcendental whose output is quantised
+  is safe; a transcendental in the arithmetic that produces a texel is not.
 
 Two consequences worth stating before somebody meets them:
 

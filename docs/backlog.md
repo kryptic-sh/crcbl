@@ -15,6 +15,41 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
+### DECISION NEEDED — exponential height fog needs `exp`, which shading forbids (2026-08-27)
+
+`docs/plan/43-render-standards.md` §4 ranks height fog as the cheapest large win
+on the gap list, and it still is — but the closed-form integral is `exp` twice
+(density falloff with height, transmittance along the ray) and this workspace's
+rule is that no transcendental may reach a colour, because four platforms
+disagree in the last place and a cross-backend golden has no tolerance to absorb
+it. `log2` in `mesh.slang`'s `froxel_of` is not a precedent: its result is
+floored into an integer slice index, so a last-place disagreement changes
+nothing.
+
+Three exits, written out in that section: a rational fit of the exponential (the
+trick `tonemap.slang` already uses on the ACES RRT, and the reason that pass
+could be blessed on all four backends); the first shading goldens in the tree to
+carry a tolerance rather than an exact compare, declared where the bless flow
+meets it; or skip the analytic form and march the froxel grid, where the
+integration is a sum over slices and no closed form appears. The third needs no
+exception and is the most work.
+
+**Evidence:** the transcendental ban is `44-lighting.md`'s BRDF argument and is
+what ruled out AgX for the tonemap; the `log2` sites are `froxel_of` in
+`crates/crcbl-shaders/shaders/mesh.slang`, and they are the only ones in that
+file. Nothing was prototyped — this is a reading of the constraint, not a
+measurement of an error.
+
+### The emissive page is not built; the factor is (2026-08-27)
+
+`GpuMaterial::emissive` is a linear radiance added last in `mesh.slang`, filled
+on glTF import from `emissiveFactor` times `KHR_materials_emissive_strength`.
+The per-texel half — an emissive texture page — is not, and cannot be until the
+material row carries a second texture page at all, which is
+`43-render-standards.md` §2's own rung. Until then an emitter is uniform over
+its whole surface: a lamp is a glowing box, not a glowing filament in a dark
+housing.
+
 ### Code comments still cite `18-render-features.md` by a section it no longer holds (2026-08-27)
 
 That topic was split into one document per technique — `44-lighting.md` through

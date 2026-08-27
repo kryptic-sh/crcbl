@@ -97,6 +97,11 @@ them gets.
    and a normal page's neutral is `(0.5, 0.5, 1.0)` rather than white.
 3. **Emissive**, which is a factor and a page and one add before the tonemap —
    and which the bloom chain already existing makes worth more than it costs.
+   **The factor half is built (2026-08-27)**: `GpuMaterial::emissive` is a
+   linear radiance in the three words the row already padded with, glTF's factor
+   times `KHR_materials_emissive_strength` fills it on import, and `mesh.slang`
+   adds it last and unclamped. The emissive _page_ is not, and waits on the
+   second texture page rung above it.
 4. **Alpha modes.** `MASK` is a `discard` against a cutoff and is nearly free;
    `BLEND` is §3 and is not.
 
@@ -164,6 +169,26 @@ composite. Three passes and no new culling.
 pass, no new resource — and it is most of the perceived benefit in an outdoor
 scene. It should land first for the same reason FXAA landed before SMAA.
 
+**But it is not free the way this section assumed, and whoever takes it should
+know that before starting (2026-08-27).** The analytic exponential-height-fog
+integral is `exp` twice over — once for the density falloff with height and once
+for the transmittance along the ray — and this workspace's shading rule is that
+no transcendental function may reach a colour, because four platforms'
+implementations of them differ in the last place and a cross-backend golden has
+no tolerance to absorb that. `log2` inside `froxel_of` is not a precedent for
+it: that result is floored into an integer slice, and the fog's is a colour.
+
+So height fog is a **decision**, not a slice, and it has three honest exits:
+approximate the exponential with a rational fit the way the ACES tonemap
+approximates the RRT — the same trick, and the reason the tonemap could be
+blessed on all four backends; accept the fog term as the first shading path
+whose goldens carry a tolerance rather than an exact compare, and say so where
+the bless flow will meet it; or march the froxel grid instead, where the
+integration is a sum over slices and no closed form appears. The third is the
+most work and the only one that needs no exception. Nothing here changes the
+ranking — fog is still the cheapest large win — but the row below buys a
+determinism argument along with the pass.
+
 ## 5. Global illumination
 
 **What a current engine ships:** at minimum a probe-based irradiance volume with
@@ -192,6 +217,45 @@ the right first rung.
 - **No lightmaps and no baked GI**, which is a deliberate absence rather than a
   gap: this engine's scenes are described in RON and imported from glTF with no
   bake step, and adding one is a pipeline decision rather than a render feature.
+
+**Which trace family this engine can afford (2026-08-27).** "Ray marching" names
+three techniques, and only one of them answers GI:
+
+1. **Screen-space marching** — SSR, GTAO, and the SSGI rung above. Marches the
+   depth buffer, needs no acceleration structure, runs on every target. Its
+   limit is structural rather than a quality setting: the depth buffer holds
+   only what is on screen, so off-screen geometry, backfaces and anything
+   occluded contribute nothing. Excellent at contact scale, and on its own not
+   global illumination at all.
+2. **Signed-distance-field marching** (sphere tracing) — per-mesh distance
+   fields in a BVH plus a coarse global field for the far term, with a cache
+   holding surface radiance. This is what Unreal's Lumen software path and
+   Godot's SDFGI are, and it is the family that actually removes the off-screen
+   limit without ray-tracing hardware. It costs a bake and a volume texture per
+   mesh, it has no answer for skinned or deforming geometry, and a coarse field
+   loses thin geometry and contact detail — which is why Lumen is a **hybrid**
+   (screen trace near, mesh SDF mid, global field far) rather than one march.
+3. **Voxel cone tracing** — march a voxel mip with a widening cone. Cheaper than
+   an SDF for the diffuse term, leaks through thin walls, and pays a
+   revoxelisation cost every time the scene moves. Largely superseded by 2.
+
+**"Faster than ray tracing" is the wrong reason to pick a march.** On a device
+with ray-tracing hardware, Lumen's hardware path is both faster and more
+accurate than its software path; the march exists for **reach**. Reach is
+exactly what decides it here — WebGPU has no ray tracing at all and the browser
+is a first-class target in [10-wasm-webgpu.md](10-wasm-webgpu.md), so on that
+target a march is not the cheap option, it is the only one. The second reason is
+this workspace's own rule: a march is adds and compares, so it carries no
+transcendental into a colour and can be blessed on all four backends. That is
+the argument the Hi-Z SSR rung already landed on.
+
+So the ordering is cheapest real win first: **screen-space contact shadows**
+(one march on the depth prepass, and the contact gap no shadow bias can close),
+then **SSGI over the Hi-Z pyramid already built**, then the **cone trace over a
+colour pyramid** that §9's delivery table already carries, and only then **mesh
+plus global SDF** — which is the Lumen-class answer, and is a bake pipeline, a
+volume-texture budget, a BVH and an honestly-documented skinned-geometry
+exclusion rather than a slice.
 
 ## 6. Post-processing
 
@@ -306,9 +370,9 @@ above.
 | Rung                                                     | Why here                                                                                 |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | **Reserve the previous-transform slot in `GpuInstance`** | §9 — smallest change on this page, unblocks five features, gets more expensive with time |
-| **Exponential height fog**                               | §4 — one term, no new pass, most of the outdoor benefit                                  |
+| **Exponential height fog**                               | §4 — one term, no new pass, but `exp` needs a determinism answer first                   |
 | **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road      |
-| **Emissive factor and page**                             | §2 — small, and the bloom chain already makes it pay                                     |
+| **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                  |
 | **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                               |
 | **Render scale and a blit**                              | §7 — the settings menu's largest knob, one pass                                          |
 | **A gradient sky feeding ambient and the SSR fallback**  | §8 — closes part of §5 at the same time                                                  |
