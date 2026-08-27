@@ -31,6 +31,7 @@ churned in a move commit.
 | The post-processing stack: order, HDR, tonemap, bloom                   | [48-post-processing.md](48-post-processing.md)     |
 | Antialiasing: FXAA, SMAA, TAA, MSAA                                     | [49-antialiasing.md](49-antialiasing.md)           |
 | Irradiance probes: the L1 grid                                          | [50-irradiance-probes.md](50-irradiance-probes.md) |
+| Volumetrics: height fog, the froxel column, light shafts                | [51-volumetrics.md](51-volumetrics.md)             |
 
 **What this engine does not do at all** is a different question from how well it
 does these, and it is answered in one place:

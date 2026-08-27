@@ -19,30 +19,24 @@ follows is what the plans could not settle.
 
 `crcbl_shaders::volumetric` is built and proved — `phase` and `integrate_slice`,
 with six sabotages red-checked against eight tests — and **nothing on a GPU
-reads it**. What is left for `docs/plan/43-render-standards.md` §4's froxel row:
+reads it**. What the frame still owes, rung by rung, is
+`docs/plan/51-volumetrics.md`, written the same day: the target, the two compute
+passes, the composite, and the drift guard the second copy of the light loop
+will need.
 
-- **A 3D scattering target** over the view frustum, on the froxel grid
-  `light_cluster.slang` already builds. The grid's `z` slicing is exponential
-  (`froxel_of`), so the slice thicknesses `integrate_slice` is handed are not
-  uniform and the pass has to compute each one rather than assume it.
-- **The scattering pass**: one dispatch per froxel, reading that froxel's light
-  list — the culling this row was ranked cheap for is already paid for by the
-  opaque shading — and writing `source` and `extinction` per froxel.
-- **The integration along `z`**: the front-to-back accumulation
-  `splitting_a_slice_composites_to_the_same_radiance` spells out, in place, so
-  each froxel holds the column in front of it.
-- **The composite** over the finished radiance, and its interaction with the
-  height fog already applied in `mesh.slang`'s fragment stage — the two are the
-  same medium seen two ways and must not both be charged for the same
-  absorption.
-- **The Slang mirror and its drift guard.** There is no `#include` in these
-  shaders, so `phase`, `integrate_slice` and `INV_FOUR_PI` will exist twice; the
-  guard has to enumerate every source carrying the copy, on
-  `crcbl_shaders::sky`'s `the_shader_spells_the_same_gradient` pattern.
+Two things belong here rather than there, because they are gaps rather than
+plans:
 
-**Not verified on hardware.** Everything above the line is host arithmetic
-checked against `f64` oracles and Simpson quadrature. No claim is made about how
-it composites on four backends until a pass exists to bless.
+- **Nothing is verified on hardware.** Every claim `crcbl_shaders::volumetric`
+  makes is host arithmetic checked against `f64` oracles and Simpson quadrature.
+  How it composites on four backends is unknown until a pass exists to bless,
+  and the six sabotages say nothing about that.
+- **The two media double-charge for absorption, and no test would catch it
+  today.** Height fog's `optical_depth` in `mesh.slang` and a froxel column's
+  accumulated transmittance are the same air integrated twice. `51-volumetrics`
+  states the rule — the column owns the transmittance when it is present — but
+  the frame has no switch for it and the mesh goldens absorb a whole-frame
+  darkening of a few per cent, which is measured further down this file.
 
 ### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
 

@@ -33,7 +33,7 @@ every gap below is easier to read against it.
 | Irradiance probes       | first rung only                 | [50-irradiance-probes.md](50-irradiance-probes.md)                               |
 | **Materials**           | **far behind, nothing written** | [37-materials.md](37-materials.md), and §2 below                                 |
 | **Transparency**        | **absent, nothing written**     | §3 below                                                                         |
-| **Volumetrics**         | **absent, nothing written**     | §4 below                                                                         |
+| **Volumetrics**         | height fog only, ladder written | [51-volumetrics.md](51-volumetrics.md), and §4 below                             |
 | Global illumination     | behind                          | §5 below                                                                         |
 | Post-processing         | behind                          | [48-post-processing.md](48-post-processing.md), §6                               |
 | Upscaling               | absent, contract without a pass | [15-windowing.md](15-windowing.md), §7                                           |
@@ -166,7 +166,12 @@ sorting proves insufficient. Weighted-blended OIT is the cheap candidate and it
 is a _approximation_ that cannot be blessed against a reference — which this
 workspace's golden discipline should decide about before it is built, not after.
 
-## 4. Volumetrics — absent, and the structure it needs already exists
+## 4. Volumetrics — height fog built, the froxel half open
+
+> **The ladder moved to [51-volumetrics.md](51-volumetrics.md) on 2026-08-27**,
+> where the rungs, the decisions the froxel pass has to make before it is
+> written, and what each rung is checked by all live. What follows is this
+> topic's own account: how far behind the industry this area is, and why.
 
 **What a current engine ships:** exponential height fog with a single scattering
 term, and froxel-based volumetric lighting — a 3D texture over the view frustum,
@@ -181,8 +186,11 @@ is still open.
 fog wants is the froxel grid `light_cluster.slang` **already builds** — same
 frustum subdivision, same light list per cell, and the light culling that is the
 expensive part of a volumetric pass is already paid for by the opaque shading.
-What is missing is a 3D scattering target, an integration pass along `z`, and a
-composite. Three passes and no new culling.
+What is missing is a scattering target over that grid, an integration pass along
+`z`, and a composite. Three passes and no new culling.
+[51-volumetrics.md](51-volumetrics.md) argues that target should be a storage
+buffer on the grid the light pass already fills rather than the 3D texture a
+current engine uses, and says what that gives up.
 
 **Height fog alone is cheaper still** — one term in the tonemap's input, no new
 pass, no new resource — and it is most of the perceived benefit in an outdoor
@@ -261,9 +269,11 @@ which matters, because that form reads correctly and is what a froxel pass
 reaches for first. Its failure direction is the visible one: more slices, more
 light.
 
-What is left is the frame — a 3D scattering target, the pass that fills it from
-the froxel light lists, the integration along `z`, and the composite — plus the
-Slang mirror of both functions and the drift guard that holds it to this module.
+What is left is the frame — the scattering target, the pass that fills it, the
+integration along `z`, and the composite — plus the Slang mirror of both
+functions and the drift guard that holds it to this module.
+[51-volumetrics.md](51-volumetrics.md) is where each of those is decided, and
+the rung it belongs to.
 
 ## 5. Global illumination
 
