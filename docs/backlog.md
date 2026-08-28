@@ -169,6 +169,69 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
+### shard's browser gate has a verdict at last, and it is 52/54 (2026-08-28)
+
+**The first one it has ever produced.** Every earlier run either cancelled or
+killed the step on its cap; the `demos` fan-out gave it a clock of its own and
+it finished in 26m17s, inside the 45-minute bound. Two of its fifty-four checks
+fail, both on `web/tools/browser-e2e.mjs`'s 90-second `TIMEOUT_MS`, and both on
+a run whose heartbeat measured **88.9x** — "two HUD lines 22226 ms apart".
+
+- **`C: and a foe's ability costs them health, which nothing before it did` — 0
+  damage arrived and hp held at 100**, after the full 90 s. The checks either
+  side of it pass: a foe engages, and a blow that reaches one fells it for 20
+  damage. So the character reaches the foe and the foe reaches the character;
+  what did not happen inside the window is the foe's _ability_. Whether that is
+  a cooldown longer than the window at this pace or a real gap in the ability
+  path is not established — nobody has run this check to a verdict before.
+- **`I: a steady-state frame gives back everything it takes` — the demo drew
+  fewer than 20 more frames in 90000 ms.** This one says in its own message that
+  it is not a verdict, which is the right shape: a window the demo cannot finish
+  inside the poll ceiling fails for want of frames rather than for anything it
+  holds on to. `FRAMES_WATCHED` is 20 and `WINDOWS` is 3, sized against quarry's
+  measured two frames per three seconds under SwiftShader; shard is slower again
+  and does not fit.
+
+**What it would take, and what it must not be.** `TIMEOUT_MS` is the one budget
+in that file the measured `slowdown` does **not** scale, so the obvious fix is
+to bound this window with `budget(TIMEOUT_MS)` like every other wait. It is not
+that simple: 88.9 × 90 s is 130 minutes for one window and three of them would
+not fit any job cap. What is missing before either number can be picked is the
+frame rate itself — the failure message says "fewer than 20" and never says how
+many. **Make it print the frames actually drawn and the elapsed time first**;
+the next run then supplies the measurement instead of another guess. Shrinking
+`FRAMES_WATCHED` to fit is the move to avoid: the check's own comment argues any
+size at all catches a per-frame leak, but a smaller window is more easily
+satisfied by noise, and the three-window rule is what is buying the teeth.
+
+Neither of these is a regression from the fan-out — shard's gate had produced no
+verdict at all until this run, so both are first sightings rather than breakage.
+They do block the deploy, because `deploy` needs `demos`.
+
+### The macOS probe job hangs on quarry, and had not run in nine attempts (2026-08-28)
+
+`probe the seam on macOS` was **skipped in every Pages run from `713da9d` to
+`80022df`** — nine in a row — because the `build` job it needs kept failing on
+its own cap. The fan-out let it start, and it timed out after 20 minutes on
+`Render quarry in a real browser`.
+
+This is not the pace failure the Linux gates have. That leg runs on a real Apple
+adapter and quarry's own heartbeat there read **1.1x** — "two HUD lines 1115 ms
+apart". It passed groups A through E's pause check at 02:44:28 and then printed
+nothing at all for twenty minutes. The check that follows is group E's "a click
+in the corner hands the canvas its keyboard back", so a headless Chrome on macOS
+appears not to return focus to the canvas — or the demo does not resume — and
+the poll simply never resolves.
+
+**Not reviewed, and not reproduced:** this leg has never been green with the
+demo gates in it, so there is no earlier run to compare against, and nothing
+local has driven `--headless` against an Apple adapter. Whether the other 3D
+demo (lantern) does the same is unknown — the job dies at quarry before reaching
+it.
+
+It does **not** block the deploy: `deploy` needs `build` and `demos`, and this
+job is neither. It does fail the workflow.
+
 ### The browser gate's cap says "out of time", never "too slow" (2026-08-28)
 
 **The sum is fixed; the instrument is not.** The Pages workflow's fourteen Linux
