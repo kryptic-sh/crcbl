@@ -785,9 +785,24 @@ resolve and drop, `SettingsStack::save_platform` writes the user layer back to
 it, and `crcbl::settings` has `set_video`, `set_video_effects`,
 `set_render_scale` and `set_audio_gain` beside its readers, with
 `SettingsSource::open` and `SettingsSource::save` as the pair a settings screen
-holds. What is left is the catalogue itself: the keys above still have neither a
-reader nor a writer, and no application in `apps/` calls any of this yet — the
-only caller of a writer remains `crates/crcbl-cli/src/settings_cmd.rs`.
+holds.
+
+**Nor is the catalogue, since later the same day.** `crcbl::settings::catalogue`
+enumerates every key the engine defines with a `KeyStatus` of `Read` or `Named`,
+and `crcbl settings list` marks each line of a player's file with it — so a
+mistyped `engine.video.shadow`, which parses and saves and is read by nothing,
+is now reported instead of invisible.
+
+**What is left is a caller.** No application in `apps/` reads or writes a
+setting through any of this, and the keys with `KeyStatus::Named` — display
+mode, monitor, resolution, present mode, frame limit, brightness, HDR output, UI
+scale, field of view — still have no reader. The next one to grow a reader has a
+design question in front of it that `render_scale` did not:
+`docs/plan/15-windowing.md`'s rule 1 says `[engine.video]` may only clamp
+downward, and it reads `display_mode = "borderless"` as a **ceiling** that does
+not force a game into borderless. That makes the obvious round trip — persist
+the F11 toggle every sample already has — not obviously expressible in this
+namespace, and it is a decision rather than an implementation.
 
 **Neither platform arm of `with_platform_storage` is covered by a test.** The
 round trips are through `MemoryStorage`, which is what `SettingsSource::Source`

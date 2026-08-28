@@ -83,7 +83,7 @@ fn list(
     path: &Path,
     file_exists: bool,
 ) -> Result<Outcome, Failure> {
-    let entries = flatten(&file);
+    let (entries, stray) = flatten(&file);
     // `SettingsStack::dump` renders the merged view as TOML, which for a
     // one-layer stack is the file itself — the same text a person would open
     // the file to read, rather than a second rendering of it.
@@ -91,12 +91,26 @@ fn list(
     stack.add(SettingsLayer::UserFile(file));
 
     let header = format!("settings for `{app}` — {}", path.display());
+    // Named after the dump rather than beside each line: the dump is the file
+    // as a person would open it, and interleaving a verdict into TOML would
+    // stop it being that. A stray is worth saying out loud because it is the
+    // one thing in the file that will never do anything — see [`status_of`].
+    let warning = if stray.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n{} key(s) under `{ENGINE_PREFIX}` that the engine does not \
+             define, so nothing reads them: {}",
+            stray.len(),
+            stray.join(", ")
+        )
+    };
     let human = if !file_exists {
         format!("{header} (no file yet)")
     } else if entries.is_empty() {
         format!("{header} (empty)")
     } else {
-        format!("{header}\n\n{}", stack.dump().trim_end())
+        format!("{header}\n\n{}{warning}", stack.dump().trim_end())
     };
 
     Ok(Outcome {
@@ -107,6 +121,10 @@ fn list(
             ("path", Json::string(path.display().to_string())),
             ("file_exists", Json::Bool(file_exists)),
             ("count", Json::Number(entries.len() as i64)),
+            (
+                "unknown",
+                Json::Array(stray.into_iter().map(Json::string).collect()),
+            ),
             ("settings", Json::Array(entries)),
         ],
     })
@@ -432,8 +450,36 @@ fn config_root(args: &SettingsArgs, app: &str) -> Result<PathBuf, Failure> {
 /// and a `fn` taking one would have to. An explicit worklist takes every type
 /// from inference instead. `toml::Table` iterates in key order, so the records
 /// come out in a stable order for a diff.
-fn flatten(file: &StorageSettingsFile) -> Vec<Json> {
+/// The engine namespace, whose keys the engine's own catalogue is the authority
+/// on.
+///
+/// Anything outside it belongs to whichever game wrote it, so an unrecognised
+/// `[game]` key is not a mistake this command can see.
+const ENGINE_PREFIX: &str = "engine.";
+
+/// What [`crcbl::settings::catalogue`] says about a key in a player's file.
+///
+/// The four answers, and the one that matters is the third: **a key under
+/// `engine.` that the catalogue does not name is a typo**, and until this
+/// existed it was invisible. The readers warn about a key they know holding the
+/// wrong type; nothing warned about `engine.video.shadow`, which parses, saves,
+/// lists and is read by nothing for ever.
+fn status_of(key: &str) -> &'static str {
+    match crcbl::settings::catalogued(key) {
+        Some(entry) => match entry.status {
+            crcbl::settings::KeyStatus::Read => "read",
+            // Named by the catalogue and read by nothing yet — a control a
+            // settings screen must label rather than offer silently.
+            crcbl::settings::KeyStatus::Named => "named",
+        },
+        None if key.starts_with(ENGINE_PREFIX) => "unknown",
+        None => "game",
+    }
+}
+
+fn flatten(file: &StorageSettingsFile) -> (Vec<Json>, Vec<String>) {
     let mut entries = Vec::new();
+    let mut stray = Vec::new();
     let mut pending: Vec<_> = file
         .table()
         .iter()
@@ -462,13 +508,18 @@ fn flatten(file: &StorageSettingsFile) -> Vec<Json> {
             // which is what the human dump above shows too.
             ("other", Json::string(value.to_string()))
         };
+        let status = status_of(&key);
+        if status == "unknown" {
+            stray.push(key.clone());
+        }
         entries.push(Json::Object(vec![
+            ("status", Json::string(status)),
             ("key", Json::string(key)),
             ("type", Json::string(kind)),
             ("value", rendered),
         ]));
     }
-    entries
+    (entries, stray)
 }
 
 #[cfg(test)]
@@ -658,15 +709,42 @@ mod tests {
         let file = StorageSettingsFile::load(&storage, Path::new(SETTINGS_FILE))
             .expect("a file this test wrote");
 
-        let records = flatten(&file);
+        let (records, stray) = flatten(&file);
         let rendered: Vec<String> = records.iter().map(Json::to_string).collect();
         assert_eq!(
             rendered,
             vec![
-                r#"{"key":"engine.video.shadows","type":"boolean","value":false}"#.to_string(),
-                r#"{"key":"engine.video.size","type":"other","value":"[1920, 1080]"}"#.to_string(),
-                r#"{"key":"game.name","type":"string","value":"Ada"}"#.to_string(),
+                r#"{"status":"read","key":"engine.video.shadows","type":"boolean","value":false}"#
+                    .to_string(),
+                r#"{"status":"unknown","key":"engine.video.size","type":"other","value":"[1920, 1080]"}"#
+                    .to_string(),
+                r#"{"status":"game","key":"game.name","type":"string","value":"Ada"}"#.to_string(),
             ]
         );
+        // `size` is the typo shape this exists for: the catalogue's row is
+        // `resolution`, so nothing will ever read what was written here, and
+        // before the status column said so nothing in the tree could tell a
+        // person that.
+        assert_eq!(stray, vec!["engine.video.size".to_string()]);
+    }
+
+    /// **Each of the four statuses, against a key that really has it.**
+    ///
+    /// Written as the pairs rather than derived from the catalogue: deriving it
+    /// would make the test agree with whatever `status_of` did, which is the
+    /// one thing it is here to check.
+    #[test]
+    fn a_key_is_read_named_unknown_or_the_game_own() {
+        for (key, wanted) in [
+            ("engine.video.shadows", "read"),
+            ("engine.video.render_scale", "read"),
+            ("engine.audio.music_volume", "read"),
+            ("engine.video.display_mode", "named"),
+            ("engine.video.shadow", "unknown"),
+            ("engine.audio.music", "unknown"),
+            ("game.difficulty", "game"),
+        ] {
+            assert_eq!(status_of(key), wanted, "`{key}`");
+        }
     }
 }

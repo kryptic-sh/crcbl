@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The settings catalogue is a list in code, and `crcbl settings list` says
+  which of a player's keys anything reads.** `crcbl::settings::catalogue`
+  enumerates every key the engine defines with its domain and a `KeyStatus` —
+  `Read` where a reader in that module answers it, `Named` where
+  `docs/plan/15-windowing.md` fixed the name and nothing reads it yet — and
+  `catalogued` is the lookup. The read rows are derived from `VIDEO_KEYS`,
+  `RENDER_SCALE_KEY` and `Bus::settings_key` rather than restated, so a key
+  cannot be catalogued under one spelling and read under another.
+
+  `crcbl settings list` now carries a `status` per line — `read`, `named`,
+  `unknown` or `game` — and names the `engine.` keys the engine does not define,
+  in the human output and as an `unknown` array in `--json`. `set` still writes
+  any dotted key, because a game's own namespace is not the command's business;
+  what changed is that a mistyped `engine.video.shadow` is reported instead of
+  parsing, saving and being read by nothing for ever.
+
 - **A setting can now be written, which nothing in the workspace could do.**
   `crcbl-store` shipped the layered stack, `SettingsStack::set` and `save`, but
   `SettingsStack::platform` resolved the platform's storage, read the file and

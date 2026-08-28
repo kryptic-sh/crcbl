@@ -102,9 +102,13 @@ argument is on `crcbl::settings::VIDEO_KEYS`, which is the one place a key is
 spelled today.
 
 **Almost none of this is implemented, and the "Today" column says so per row**
-rather than once at the end. The name and the domain are fixed now anyway, which
-is [14-persistence.md](14-persistence.md)'s second catalogue rule: a key named
-late is a file every existing player has already written.
+rather than once at the end. **Every row below is now also in code**, as of
+2026-08-28: `crcbl::settings::catalogue` carries each key with its domain and a
+`KeyStatus` of `Read` or `Named`, so a settings screen and `crcbl settings list`
+read the same list this table states rather than a second copy of it. The name
+and the domain are fixed now anyway, which is
+[14-persistence.md](14-persistence.md)'s second catalogue rule: a key named late
+is a file every existing player has already written.
 
 | Key            | Domain                                                          | Today                                                                                                                                                                                                                                                     |
 | -------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

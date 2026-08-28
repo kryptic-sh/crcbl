@@ -2441,14 +2441,54 @@ fn list_shows_the_file_it_read_and_everything_in_it() {
     assert!(has_field(&json, "file_exists", "true"), "{json}");
     assert!(has_field(&json, "count", "2"), "{json}");
     assert!(
-        json.contains(r#"{"key":"engine.video.shadows","type":"boolean","value":false}"#),
+        json.contains(
+            r#"{"status":"read","key":"engine.video.shadows","type":"boolean","value":false}"#
+        ),
         "{json}"
     );
     assert!(
-        json.contains(r#"{"key":"game.difficulty","type":"string","value":"hard"}"#),
+        json.contains(
+            r#"{"status":"game","key":"game.difficulty","type":"string","value":"hard"}"#
+        ),
         "{json}"
     );
     assert!(json.contains(&json_string(&path)), "{json}");
+}
+
+/// **A key the engine does not define is written, listed, and called out.**
+///
+/// The whole point of the status column: `set` writes any dotted key, because a
+/// game's own namespace is not this command's business, so a mistyped
+/// `engine.*` key parses, saves and is read by nothing for ever. Before the
+/// column existed nothing in the tree could tell a person that had happened.
+///
+/// Through the binary rather than through `status_of`, because what is under
+/// test is that the verdict *reaches* a person — a status computed and never
+/// printed would pass the unit test beside that function.
+#[test]
+fn a_mistyped_engine_key_is_saved_and_reported_as_read_by_nothing() {
+    let temporary = TempDir::new("settings-stray");
+    let home = temporary.path();
+
+    assert_eq!(
+        code(&settings(home, &["set", "engine.video.shadow", "false"])),
+        0,
+        "a key the engine does not define is still the player's to write",
+    );
+
+    let human = stdout(&settings(home, &["list"]));
+    assert!(human.contains("shadow = false"), "{human}");
+    assert!(
+        human.contains("engine.video.shadow") && human.contains("nothing reads them"),
+        "the stray was not called out:\n{human}"
+    );
+
+    let json = stdout(&settings(home, &["--json", "list"]));
+    assert!(
+        json.contains(r#""unknown":["engine.video.shadow"]"#),
+        "{json}"
+    );
+    assert!(json.contains(r#""status":"unknown""#), "{json}");
 }
 
 /// **A key that is not set is an answer, not a failure**, and it is not

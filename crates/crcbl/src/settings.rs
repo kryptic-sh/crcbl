@@ -358,6 +358,118 @@ pub fn set_audio_gain(stack: &mut SettingsStack, bus: Bus, gain: f32) -> Result<
     stack.set(&dotted, &f64::from(gain.clamp(0.0, 1.0)))
 }
 
+// ── The catalogue ───────────────────────────────────────────────────────────
+
+/// Whether anything in this workspace reads a key yet.
+///
+/// The distinction the settings sample's exit criteria are written against:
+/// "any key with no reader is labelled as such". A screen that offers a control
+/// which silently does nothing is worse than one that says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyStatus {
+    /// A reader in this module answers it, so writing it changes a frame or a
+    /// mix.
+    Read,
+    /// Named by `docs/plan/15-windowing.md`'s catalogue and read by nothing.
+    ///
+    /// Named anyway, and now rather than later, because a key named late is a
+    /// file every existing player has already written — `docs/plan/14-persistence.md`'s
+    /// second catalogue rule.
+    Named,
+}
+
+/// One key the engine's settings catalogue defines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogueKey {
+    /// The dotted key, as it is written in `settings.toml` and passed to
+    /// [`SettingsStack::get`].
+    pub key: String,
+    /// What the key accepts, for a screen to render and a person to read.
+    pub domain: &'static str,
+    /// Whether a reader answers it; see [`KeyStatus`].
+    pub status: KeyStatus,
+}
+
+/// The `[engine.video]` rows nothing reads yet, with the domains
+/// `docs/plan/15-windowing.md` fixed for them.
+///
+/// Literals, unlike the rows below them, because there is nothing in the tree
+/// to derive them from — that is exactly what makes them [`KeyStatus::Named`].
+/// A row leaves this list by growing a reader and joining `catalogue`'s derived
+/// half, so the two halves cannot both claim one key.
+const NAMED_VIDEO_KEYS: [(&str, &str); 9] = [
+    ("display_mode", r#""windowed" | "borderless""#),
+    (
+        "monitor",
+        "monitor name; absent means wherever the window is",
+    ),
+    ("resolution", "[width, height] in device pixels"),
+    ("present_mode", r#""auto" | "vsync" | "adaptive" | "off""#),
+    ("frame_limit", "frames a second; 0 is unlimited"),
+    (
+        "brightness",
+        "scalar multiplier applied in the tonemap pass",
+    ),
+    ("hdr_output", "true | false"),
+    ("ui_scale", "multiplier over the window's own scale factor"),
+    ("fov", "vertical field of view in degrees"),
+];
+
+/// Every key the engine defines, read or merely named.
+///
+/// **Derived from the readers wherever there is a reader**, so a key cannot
+/// appear here under one spelling and be read under another: the effect rows
+/// come from [`VIDEO_KEYS`], the scale row from [`RENDER_SCALE_KEY`], and the
+/// volume rows from [`Bus::settings_key`]. Only the rows with no reader are
+/// written out, because there is nothing to derive them from.
+///
+/// A `Vec` rather than a `const`: a dotted key is its namespace and its name
+/// joined, and `format!` is not a const operation. The caller is a settings
+/// screen or `crcbl settings list`, neither of which runs per frame.
+///
+/// What is **not** here is the `[game]` namespace. Those keys belong to
+/// whichever game wrote them, so a key this list does not name is unknown to
+/// the *engine* rather than wrong.
+#[must_use]
+pub fn catalogue() -> Vec<CatalogueKey> {
+    let read = |key: String, domain| CatalogueKey {
+        key,
+        domain,
+        status: KeyStatus::Read,
+    };
+    let mut keys: Vec<CatalogueKey> = VIDEO_KEYS
+        .iter()
+        .map(|(key, _)| read(format!("{VIDEO_NAMESPACE}.{key}"), "true | false"))
+        .collect();
+    keys.push(read(
+        format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"),
+        "fraction of the surface extent; clamped to the renderer's floor",
+    ));
+    keys.extend(NAMED_VIDEO_KEYS.map(|(key, domain)| CatalogueKey {
+        key: format!("{VIDEO_NAMESPACE}.{key}"),
+        domain,
+        status: KeyStatus::Named,
+    }));
+    keys.extend(Bus::ALL.map(|bus| {
+        read(
+            format!("{AUDIO_NAMESPACE}.{}", bus.settings_key()),
+            "gain from 0 to 1; absent is unity",
+        )
+    }));
+    keys
+}
+
+/// What the catalogue says about `key`, or `None` for one it does not name.
+///
+/// The lookup a settings screen and `crcbl settings list` both make, and the
+/// reason [`catalogue`] is a list rather than a map: thirteen entries scanned
+/// once per key in a player's file is not worth a hash, and the order is what a
+/// screen renders in.
+#[must_use]
+pub fn catalogued(key: &str) -> Option<CatalogueKey> {
+    catalogue().into_iter().find(|entry| entry.key == key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +592,103 @@ mod tests {
         assert!(
             !stack.contains(&format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}")),
             "a refused write still put the key in the stack"
+        );
+    }
+
+    /// **Every key a reader answers is in the catalogue, under the spelling
+    /// the reader uses.**
+    ///
+    /// The failure this exists for is a catalogue that drifts: a screen offers
+    /// `engine.video.ssao`, the reader looks for `ambient_occlusion`, and the
+    /// player's choice lands in a key nothing will ever read. Asserted against
+    /// the reader tables themselves rather than a second list, so a key renamed
+    /// in one place fails here rather than in a player's file.
+    #[test]
+    fn every_key_with_a_reader_is_catalogued_as_read() {
+        let read: Vec<String> = catalogue()
+            .into_iter()
+            .filter(|entry| entry.status == KeyStatus::Read)
+            .map(|entry| entry.key)
+            .collect();
+
+        let mut wanted: Vec<String> = VIDEO_KEYS
+            .iter()
+            .map(|(key, _)| format!("{VIDEO_NAMESPACE}.{key}"))
+            .collect();
+        wanted.push(format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"));
+        wanted.extend(Bus::ALL.map(|bus| format!("{AUDIO_NAMESPACE}.{}", bus.settings_key())));
+
+        for key in &wanted {
+            assert!(read.contains(key), "`{key}` has a reader and no entry");
+        }
+        assert_eq!(
+            read.len(),
+            wanted.len(),
+            "the catalogue calls something read that no reader answers: {read:?}"
+        );
+    }
+
+    /// **A key is named once**, so a lookup cannot be ambiguous and a screen
+    /// cannot draw one control twice.
+    ///
+    /// The way this breaks is a row keeping its `Named` entry after it grows a
+    /// reader, which would put the same key in the list under both statuses.
+    #[test]
+    fn no_key_appears_in_the_catalogue_twice() {
+        let mut seen: Vec<String> = catalogue().into_iter().map(|entry| entry.key).collect();
+        let before = seen.len();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "a key is catalogued twice: {seen:?}");
+    }
+
+    /// **A key the catalogue names is a key a stack can be asked for**, which
+    /// is the claim a screen depends on and the one a stray space or a wrong
+    /// namespace would break silently.
+    #[test]
+    fn every_catalogued_key_is_a_usable_dotted_key() {
+        let stack = stack_from("");
+        for entry in catalogue() {
+            assert!(
+                entry.key.starts_with("engine.")
+                    && !entry.key.contains(' ')
+                    && entry.key.split('.').count() == 3,
+                "`{}` is not a two-level engine key",
+                entry.key
+            );
+            assert!(
+                !stack.contains(&entry.key),
+                "an empty file answered `{}`",
+                entry.key
+            );
+            assert!(!entry.domain.is_empty(), "`{}` has no domain", entry.key);
+        }
+    }
+
+    /// **A key nothing defines is not catalogued**, which is what lets a caller
+    /// tell a typo from a `[game]` key.
+    #[test]
+    fn a_key_the_engine_does_not_define_is_not_catalogued() {
+        assert!(
+            catalogued("engine.video.shadow").is_none(),
+            "a typo matched"
+        );
+        assert!(
+            catalogued("game.difficulty").is_none(),
+            "a game key matched"
+        );
+        assert_eq!(
+            catalogued(&format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"))
+                .expect("the scale is catalogued")
+                .status,
+            KeyStatus::Read,
+        );
+        assert_eq!(
+            catalogued(&format!("{VIDEO_NAMESPACE}.display_mode"))
+                .expect("the display mode is catalogued")
+                .status,
+            KeyStatus::Named,
+            "a key with no reader must not claim to have one",
         );
     }
 
