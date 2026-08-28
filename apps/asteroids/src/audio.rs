@@ -123,6 +123,15 @@ pub struct Audio {
 /// what every device this has run on reports.
 const SAMPLE_RATE: u32 = 48_000;
 
+/// The settings directory this sample reads its volumes out of.
+///
+/// The same spelling `crate::gpu` hands
+/// [`GpuContextDesc::label`](crcbl::engine::GpuContextDesc::label), because it
+/// is the same directory: a player has one settings file per game, and two
+/// spellings of the name would be a video section and an audio section in
+/// different files.
+const APP_NAME: &str = "asteroids";
+
 /// How many cycles of the engine tone one loop of it holds.
 ///
 /// Eleven at [`ENGINE_HZ`] over [`SAMPLE_RATE`] is 4 800 frames — a tenth of a
@@ -135,6 +144,10 @@ const ENGINE_HZ: f32 = 110.0;
 impl Audio {
     pub fn new(headless: bool) -> Self {
         let audio = Self::without_output();
+        // Before the first cue: a voice started against the default gains is
+        // computed once and keeps them, so it would be the one sound in the run
+        // the player's settings did not reach.
+        crcbl::engine::SettingsSource::for_run(headless).apply_audio_gains(APP_NAME, &audio.mixer);
         let stream = if headless {
             Some(AudioStream::open_null(Arc::clone(&audio.mixer)))
         } else {

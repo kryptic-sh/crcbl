@@ -711,6 +711,21 @@ impl Default for GpuContextDesc<'_> {
 }
 
 impl SettingsSource<'_> {
+    /// The source a run that may be headless should read.
+    ///
+    /// [`Self::None`] when it is and [`Self::Platform`] when it is not, because
+    /// a headless run is a golden run or a test and neither may take its
+    /// settings from whichever home directory it happens to execute in — the
+    /// same rule the video layer states at [`Self::None`] itself.
+    ///
+    /// Here rather than spelled out at each caller because it is one rule with
+    /// four of them, and the copy that forgets it is the one nobody notices:
+    /// its run passes, on that machine, until the machine changes.
+    #[must_use]
+    pub const fn for_run(headless: bool) -> Self {
+        if headless { Self::None } else { Self::Platform }
+    }
+
     /// The stack this source resolves to, or `None` when there is nothing to
     /// read.
     ///
@@ -764,6 +779,22 @@ impl SettingsSource<'_> {
             || crcbl_audio::mixer::Bus::ALL.map(|bus| (bus, 1.0)),
             crate::settings::audio_gains,
         )
+    }
+
+    /// Hand [`Self::audio_gains`] to `mixer`, bus by bus.
+    ///
+    /// The whole of what a game does with them, and it was a loop in four
+    /// samples before it was this: `apps/asteroids`, `apps/breakout`,
+    /// `apps/flappy` and `apps/horde` each own a mixer and each read the same
+    /// six keys into it.
+    ///
+    /// **Call it before the first cue.** A voice started against the default
+    /// gains is computed once and keeps them, so it would be the one sound in
+    /// the run the player's settings did not reach.
+    pub fn apply_audio_gains(self, app_name: &str, mixer: &crcbl_audio::mixer::Mixer) {
+        for (bus, gain) in self.audio_gains(app_name) {
+            mixer.set_bus_gain(bus, gain);
+        }
     }
 }
 
@@ -11791,6 +11822,64 @@ mod tests {
             SettingsSource::None.video("test"),
             VideoSettings::unrestricted(),
             "a run with no source must draw everything at full size",
+        );
+    }
+
+    /// **The gains reach the mixer**, and a headless run reads no file.
+    ///
+    /// The loop this replaced lived in four samples, so what it did was checked
+    /// nowhere: `audio_gains` had a test for what it *answers*, and nothing
+    /// held that answer against a mixer. A helper that read the file and then
+    /// applied nothing would have passed every test in this crate.
+    ///
+    /// [`SettingsSource::for_run`] is asserted here rather than on its own
+    /// because what it is for is this call: `true` must not reach the file a
+    /// developer has in their own config directory, which is a claim about the
+    /// pair and not about either half.
+    #[test]
+    fn the_gains_reach_the_mixer_and_a_headless_run_reads_no_file() {
+        use crcbl_audio::mixer::{Bus, Mixer};
+        use crcbl_store::StorageSource;
+        use crcbl_store::settings::SETTINGS_FILE;
+
+        let storage = crcbl_store::MemoryStorage::new();
+        storage
+            .write(
+                std::path::Path::new(SETTINGS_FILE),
+                b"[engine.audio]\nmusic_volume = 0.25\n",
+            )
+            .expect("memory storage accepts every write");
+
+        let mixer = Mixer::new();
+        SettingsSource::Source(&storage).apply_audio_gains("test", &mixer);
+        assert!(
+            (mixer.bus_gain(Bus::Music) - 0.25).abs() < f32::EPSILON,
+            "the music bus reads {}",
+            mixer.bus_gain(Bus::Music)
+        );
+        for bus in Bus::ALL {
+            if bus == Bus::Music {
+                continue;
+            }
+            assert!(
+                (mixer.bus_gain(bus) - 1.0).abs() < f32::EPSILON,
+                "setting the music volume moved {bus:?} to {}",
+                mixer.bus_gain(bus)
+            );
+        }
+
+        let headless = Mixer::new();
+        SettingsSource::for_run(true).apply_audio_gains("test", &headless);
+        for bus in Bus::ALL {
+            assert!(
+                (headless.bus_gain(bus) - 1.0).abs() < f32::EPSILON,
+                "a headless run must leave {bus:?} at unity, and it reads {}",
+                headless.bus_gain(bus)
+            );
+        }
+        assert!(
+            matches!(SettingsSource::for_run(false), SettingsSource::Platform),
+            "a run with a window reads the player's own settings directory",
         );
     }
 }

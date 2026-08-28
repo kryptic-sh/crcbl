@@ -215,12 +215,16 @@ it is a bound on a hang, not a measurement of shard, and there is still none.
 `docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. Two halves of
 it are not, both deliberately out of that slice:
 
-- **Only one sample reads `[engine.audio]`.** `crcbl::settings::audio_gains` and
-  `SettingsSource::audio_gains` landed 2026-08-28 and `apps/breakout` is their
-  only caller; `asteroids`, `flappy` and `horde` each build a `Mixer` in their
-  own `Audio::new` and none of them applies a gain. It is three copies of four
-  lines rather than a design question, and the right moment to do it is when
-  sample 20 exists to say what a settings screen writes.
+- **Nothing writes a setting.** Every reader on this seam —
+  `crcbl::settings::video`, `render_scale`, `audio_gains` — takes a file a
+  player edits by hand. `crcbl-store` ships `SettingsStack::set` and `save`, and
+  `crates/crcbl-cli/src/settings_cmd.rs` is their only caller in the workspace,
+  so no game has ever persisted a choice. Two things are missing rather than
+  one: a writer beside each reader, so a screen does not have to know how a key
+  is spelled; and a way to reach the storage a stack was built over —
+  `SettingsStack::platform` resolves the config directory, uses it and drops it,
+  so a caller holding that stack has nothing to pass `save`. Sample 20 is what
+  needs both.
 - **`AudioEvent` carries no bus.** The plan already prices this: a 28-byte wire
   format gaining a route becomes 29 or 32, and `WIRE_SIZE` plus both round-trip
   tests move with it. It is worth doing rather than deriving the bus from the

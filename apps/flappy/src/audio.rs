@@ -68,6 +68,15 @@ pub struct Audio {
     _stream: Option<AudioStream>,
 }
 
+/// The settings directory this sample reads its volumes out of.
+///
+/// The same spelling `crate::gpu` hands
+/// [`GpuContextDesc::label`](crcbl::engine::GpuContextDesc::label), because it
+/// is the same directory: a player has one settings file per game, and two
+/// spellings of the name would be a video section and an audio section in
+/// different files.
+const APP_NAME: &str = "flappy";
+
 impl Audio {
     pub fn new(headless: bool) -> Self {
         // A short high chirp for the flap, a longer low one for the end. Both
@@ -80,6 +89,10 @@ impl Audio {
         // The stream takes a handle, not the mixer: this copy is what stays
         // behind to play voices through.
         let mixer = Arc::new(Mixer::new());
+        // Before the first cue: a voice started against the default gains is
+        // computed once and keeps them, so it would be the one sound in the run
+        // the player's settings did not reach.
+        crcbl::engine::SettingsSource::for_run(headless).apply_audio_gains(APP_NAME, &mixer);
         let stream = if headless {
             Some(AudioStream::open_null(Arc::clone(&mixer)))
         } else {

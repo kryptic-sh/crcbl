@@ -103,14 +103,7 @@ impl Audio {
         // Before any cue can be raised, for the listener's reason: a voice
         // started against the default gains would be the one sound in the run
         // the player's settings did not reach.
-        let settings = if headless {
-            crcbl::engine::SettingsSource::None
-        } else {
-            crcbl::engine::SettingsSource::Platform
-        };
-        for (bus, gain) in settings.audio_gains(APP_NAME) {
-            mixer.set_bus_gain(bus, gain);
-        }
+        crcbl::engine::SettingsSource::for_run(headless).apply_audio_gains(APP_NAME, &mixer);
         let stream: Option<AudioStream> = if headless {
             Some(AudioStream::open_null(Arc::clone(&mixer)))
         } else {
