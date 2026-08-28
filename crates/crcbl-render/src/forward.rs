@@ -187,7 +187,7 @@ use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
-use crate::volumetric::{Medium, Volumetric, VolumetricImages};
+use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages};
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -7675,6 +7675,21 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn draws(&self) -> &DrawGen {
         &self.draws
+    }
+
+    /// `frame`'s froxel column: the buffers `docs/plan/51-volumetrics.md`'s
+    /// three passes write, and the block they read.
+    ///
+    /// What `crcbl`'s `mesh_e2e` copies back to check the column froxel by
+    /// froxel against `crcbl_shaders::volumetric`, on
+    /// [`draws`](Self::draws)' terms — see [`FroxelBuffers`].
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this renderer was built with.
+    #[must_use]
+    pub fn froxel_buffers(&self, frame: usize) -> FroxelBuffers {
+        self.volumetric.buffers(frame)
     }
 
     /// The three layers a caller supplies to the toggle resolution order — see

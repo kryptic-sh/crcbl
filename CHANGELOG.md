@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The froxel column can be read back and checked per froxel.**
+  `ForwardRenderer::froxel_buffers` hands out one frame's `FroxelBuffers` — the
+  parameter block, the column and the per-froxel sun visibility — and
+  `crcbl_shaders::volumetric::VolumetricParams::from_bytes` decodes that block,
+  so a caller models the volume from the numbers the shaders were handed rather
+  than from a second derivation of them. The three buffers all carry
+  `TRANSFER_SRC` now. `crates/crcbl/tests/mesh_e2e/froxels.rs` is the first
+  caller: it rebuilds every slab and scans it on the host, which is what tells a
+  wrong scatter from a wrong scan where a composited frame can only say that one
+  of them moved.
+
 - **`apps/lantern` asks for the froxel volumetric path, so something dispatches
   it.** `room::View::Main`'s camera stack now carries
   `RenderEffects::VOLUMETRIC_FOG` — the only view in the workspace that asks for

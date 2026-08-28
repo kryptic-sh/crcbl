@@ -308,6 +308,64 @@ impl VolumetricParams {
         debug_assert_eq!(at + 4, PARAMS_SIZE, "a field escaped the writer");
         bytes
     }
+
+    /// The block back out of those bytes.
+    ///
+    /// The inverse of [`VolumetricParams::to_bytes`], and it exists so that a
+    /// test reading the uniform buffer back models the froxel column from the
+    /// numbers the two shaders were **handed** rather than from a second
+    /// derivation of them on the host. A model built the other way agrees with
+    /// a wrong camera, a wrong grid or a wrong cascade matrix, because the same
+    /// mistake would be in both sides of the comparison.
+    ///
+    /// The trailing pad is not read, for the reason [`to_bytes`] does not write
+    /// it.
+    ///
+    /// [`to_bytes`]: VolumetricParams::to_bytes
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; PARAMS_SIZE]) -> Self {
+        fn floats<const N: usize>(bytes: &[u8; PARAMS_SIZE], at: &mut usize) -> [f32; N] {
+            core::array::from_fn(|_| {
+                let value = f32::from_le_bytes(
+                    bytes[*at..*at + 4]
+                        .try_into()
+                        .expect("four bytes are inside the block"),
+                );
+                *at += 4;
+                value
+            })
+        }
+        fn word(bytes: &[u8; PARAMS_SIZE], at: &mut usize) -> u32 {
+            let value = u32::from_le_bytes(
+                bytes[*at..*at + 4]
+                    .try_into()
+                    .expect("four bytes are inside the block"),
+            );
+            *at += 4;
+            value
+        }
+
+        let at = &mut 0;
+        Self {
+            inverse_view_proj: floats(bytes, at),
+            eye: floats(bytes, at),
+            depth_row: floats(bytes, at),
+            fog_params: floats(bytes, at),
+            fog_color: floats(bytes, at),
+            sun_direction: floats(bytes, at),
+            sun_radiance: floats(bytes, at),
+            shadow_view_proj: core::array::from_fn(|_| floats(bytes, at)),
+            cascade_far: floats(bytes, at),
+            shadow_params: floats(bytes, at),
+            grid_x: word(bytes, at),
+            grid_y: word(bytes, at),
+            slices: word(bytes, at),
+            tile_pixels: word(bytes, at),
+            viewport_x: word(bytes, at),
+            viewport_y: word(bytes, at),
+            froxel_count: word(bytes, at),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -700,6 +758,49 @@ mod tests {
             assert_eq!(uint_at(offset), value, "the word at byte {offset}");
         }
         assert_eq!(uint_at(348), 0, "the pad word is not written");
+    }
+
+    /// Reading the block back gives the block that was written, field for
+    /// field.
+    ///
+    /// Every float is **distinct**, unlike the row-uniform fixture above: this
+    /// one is what catches a reader that walks a row backwards or crosses two
+    /// of them, which a block of repeated values cannot see. The two together
+    /// are the whole of the layout — that one says where each row lands, this
+    /// one says the reader arrives at the same places in the same order.
+    #[test]
+    fn the_params_block_reads_back_the_fields_it_wrote() {
+        fn row<const N: usize>(next: &mut f32, scale: f32) -> [f32; N] {
+            core::array::from_fn(|_| {
+                *next += 1.0;
+                *next * scale
+            })
+        }
+        let next = &mut 0.0f32;
+        let params = VolumetricParams {
+            inverse_view_proj: row(next, 0.125),
+            eye: row(next, 0.25),
+            depth_row: row(next, 0.5),
+            fog_params: row(next, 1.0),
+            fog_color: row(next, 2.0),
+            sun_direction: row(next, 4.0),
+            sun_radiance: row(next, 8.0),
+            shadow_view_proj: core::array::from_fn(|_| row(next, 16.0)),
+            cascade_far: row(next, 32.0),
+            shadow_params: row(next, 64.0),
+            grid_x: 7,
+            grid_y: 11,
+            slices: 13,
+            tile_pixels: 17,
+            viewport_x: 19,
+            viewport_y: 23,
+            froxel_count: 29,
+        };
+        assert_eq!(
+            VolumetricParams::from_bytes(&params.to_bytes()),
+            params,
+            "the block did not survive a round trip through its own bytes"
+        );
     }
 
     /// Both shaders spell this module's phase function, with this module's

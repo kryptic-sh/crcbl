@@ -560,8 +560,7 @@ and the cascades occlude it per froxel. Rungs 2 to 4 — punctual lights, a 3D
 target with temporal reprojection, a density field — are argued there and none
 is scheduled.
 
-Four things belong here rather than there, because they are gaps rather than
-plans:
+These belong here rather than there, because they are gaps rather than plans:
 
 - **No demo you can run draws a medium.** `apps/lantern` now asks for the effect
   — `room::View::Main`'s stack carries `VOLUMETRIC_FOG`, so every backend that
@@ -591,25 +590,21 @@ plans:
   further down this file, and the froxel path inherited it deliberately: it sits
   where the analytic fog sat so the two paths are comparable. `51-volumetrics`
   argues both should move after `ssr_blur.slang` together.
-- **Nothing checks the buffer per froxel.** The rung-1a gate is a frame-level
-  equality against the closed form, which is exact enough to have caught a
-  one-cell slice-boundary disagreement between the two shaders. It cannot
-  separate a wrong scatter from a wrong scan, because at an albedo of one the
-  two compose to the same answer. A readback compared against
-  `crcbl_shaders::volumetric` on the CPU is what will. The equality still holds
-  wherever a caller leaves `Fog::sun_scattering` at zero, which every sample
-  does, so the rung-1a gate has not stopped being evidence.
 - **The composite's own partial slice is still only guarded by a text read.**
   `apps/lantern/tests/golden.rs`'s
   `the_air_scatters_the_sun_where_the_cascades_let_it_through` closed the
   neighbouring hole — dropping the **scatter** pass's `visibilities[froxel]`
   reddens its shadowed-column control, which is a rendered frame catching the
-  sabotage that left all 28 `mesh_e2e` tests green to the digit. It does not
-  reach `volumetric_composite.slang`'s partial slice, which is the tail of the
-  column nearest the eye: that arrives at a fragment where the transmittance in
-  front of it is still one, and both of the claim's blocks read a surface metres
-  away. The per-froxel readback above is still what would catch it, and
-  `crcbl_shaders::volumetric`'s
+  sabotage that left every `mesh_e2e` test green to the digit. It does not reach
+  `volumetric_composite.slang`'s partial slice, which is the tail of the column
+  nearest the eye: that arrives at a fragment where the transmittance in front
+  of it is still one, and both of the claim's blocks read a surface metres away.
+  `crates/crcbl/tests/mesh_e2e/froxels.rs` does not reach it either: that reads
+  the buffers the two **compute** passes wrote, and the partial slice is work
+  the composite does per pixel and stores nowhere. What would catch it is a
+  frame whose nearest surface is inside the first slice — a wall a fraction of a
+  unit from the eye — so the tail the composite integrates is most of what the
+  pixel sees. Meanwhile `crcbl_shaders::volumetric`'s
   `the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility`
   remains a text guard worth exactly what it says: the read is written down, not
   that it is right.

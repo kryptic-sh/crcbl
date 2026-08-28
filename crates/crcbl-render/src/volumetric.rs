@@ -111,6 +111,34 @@ pub(crate) struct VolumetricImages {
     pub(crate) shadow_atlas: ImageId,
 }
 
+/// The buffers one frame's froxel column lives in.
+///
+/// **A window for a test, and the froxel path's only public surface.** The
+/// column is checked against `crcbl_shaders::volumetric` on the host, per
+/// froxel, which is the one thing that can tell a wrong scatter from a wrong
+/// scan: the frame-level checks compare a picture against the closed form, and
+/// at a single-scattering albedo of one those two mistakes compose to the same
+/// answer. Handing out the handles is what lets that comparison exist without
+/// this module's internals leaving it.
+///
+/// [`DrawGen::visible_count`](crate::draw_gen::DrawGen::visible_count) is the
+/// same shape and the precedent for it.
+#[derive(Clone, Copy, Debug)]
+pub struct FroxelBuffers {
+    /// The parameter block both compute passes and the composite read —
+    /// [`crcbl_shaders::volumetric::PARAMS_SIZE`] bytes, in the layout
+    /// [`VolumetricParams::from_bytes`] decodes.
+    pub params: BufferHandle,
+    /// The column: [`FROXEL_STRIDE`] bytes per froxel, holding the **exclusive
+    /// prefix** in front of each slice once the frame's passes have run.
+    pub froxels: BufferHandle,
+    /// What fraction of the sun each froxel sees — [`VISIBILITY_STRIDE`] bytes
+    /// each, and the one thing in the column the scan does not overwrite, which
+    /// is what lets a host model rebuild each slice's own scattering source
+    /// without walking the shadow atlas itself.
+    pub visibility: BufferHandle,
+}
+
 /// What lights the medium on this frame.
 ///
 /// One struct rather than three more arguments, on [`VolumetricImages`]' terms:
@@ -367,7 +395,13 @@ impl Volumetric {
             let block = device.create_buffer(&BufferDesc {
                 label: Some(&format!("volumetric params {frame}")),
                 size: PARAMS_SIZE as u64,
-                usage: BufferUsage::UNIFORM,
+                // `TRANSFER_SRC` for the reason the froxel volume carries it: a
+                // test reads the block back rather than deriving a second copy
+                // of it, so what it models the column from is what the shaders
+                // were handed. Host-visible memory is not a substitute — an
+                // upload heap is write-combined, and reading it back on the
+                // host is a different question from what the device saw.
+                usage: BufferUsage::UNIFORM | BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::HostUpload,
             })?;
             let volume = device.create_buffer(&BufferDesc {
@@ -505,6 +539,19 @@ impl Volumetric {
             }
             .to_bytes(),
         )
+    }
+
+    /// `frame`'s froxel column and the numbers it was built from.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn buffers(&self, frame: usize) -> FroxelBuffers {
+        FroxelBuffers {
+            params: self.params[frame],
+            froxels: self.froxels[frame],
+            visibility: self.visibility[frame],
+        }
     }
 
     /// Adds the scatter, integrate and composite passes, in that order.

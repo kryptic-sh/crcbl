@@ -1068,7 +1068,7 @@ fn a_forward_lobe_brightens_the_frame_the_sun_is_ahead_of() {
 
 /// Where the sun is put for the shaft tests: straight down the world `+x` axis,
 /// which is the axis [`occluder_transform`]'s slab faces.
-const SHAFT_TO_SUN: crcbl::math::Vec3 = crcbl::math::Vec3::X;
+pub(crate) const SHAFT_TO_SUN: crcbl::math::Vec3 = crcbl::math::Vec3::X;
 
 /// A slab standing between the sun and half the scene.
 ///
@@ -1082,7 +1082,7 @@ const SHAFT_TO_SUN: crcbl::math::Vec3 = crcbl::math::Vec3::X;
 /// over the whole scene would darken every background texel by about the same
 /// amount, which is a picture a global dimmer draws just as well; a half-covered
 /// frustum has an edge in it, and the test asserts both sides of that edge.
-fn occluder_transform() -> crcbl::math::Mat4 {
+pub(crate) fn occluder_transform() -> crcbl::math::Mat4 {
     crcbl::math::Mat4::from_scale_rotation_translation(
         crcbl::math::Vec3::new(0.4, 40.0, 40.0),
         crcbl::math::Quat::IDENTITY,

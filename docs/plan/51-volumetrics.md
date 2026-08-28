@@ -226,16 +226,26 @@ What the passes owe on top of that is the part the host cannot see:
   the same law `doubling_the_fog_density_squares_the_transmittance` holds the
   closed form to, now measured through the froxel path. A linear falloff passes
   a golden and fails this.
-- **The buffer holds what the host says it should.** Not built: a readback of
-  the scattering buffer compared per froxel against `crcbl_shaders::volumetric`
-  on the CPU. The frame-level equality above is the cheaper statement of the
-  same thing and is what rung 1a shipped with; a per-froxel readback is what
-  will separate a wrong scatter from a wrong scan. It is also the only thing
-  that would catch the composite sourcing its partial slice from a constant
-  rather than from the froxel's own visibility: every rendered test stays green
-  to the digit under that change, for the reason
+- **The buffer holds what the host says it should.** _Built_ —
+  `crates/crcbl/tests/mesh_e2e/froxels.rs`'s
+  `the_froxel_column_is_the_scan_of_the_slabs_the_medium_scatters` copies the
+  parameter block, the column and the visibilities back, rebuilds every slab out
+  of the block the two shaders were handed, scans it on the host and compares
+  the result froxel by froxel. The frame-level equality above is the cheaper
+  statement of part of the same thing; this is what separates a wrong scatter
+  from a wrong scan, and what names the froxel rather than the frame. Two
+  mistakes put into `integrateMain` in turn — the scan made inclusive, and its
+  last slice dropped — failed here at froxel 0 and at froxel 284; the rendered
+  checks failed on both too, but on a different one each time and neither said
+  which pass had moved.
+
+  It does **not** reach the composite sourcing its partial slice from a constant
+  rather than from the froxel's own visibility. That is work the composite does
+  per pixel and stores in no buffer, so there is nothing to read back;
   `the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility`
-  gives, and a text guard is what stands in for it today.
+  remains the text guard standing in for it, and `docs/backlog.md` carries the
+  frame that would catch it.
+
 - **An isotropic medium does not care which way the sun points.** _Built_ —
   `an_isotropic_medium_scatters_the_sun_the_same_way_whichever_way_it_points`
   reverses the sun at `g = 0` and demands every background texel come back byte
