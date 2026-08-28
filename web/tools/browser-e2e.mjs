@@ -5268,6 +5268,25 @@ try {
   const slowdown = beat ? Math.max(1, beat.beat / nominalBeat) : 1;
   const budget = (ms) => Math.round(ms * slowdown);
 
+  // **THE ONE BUDGET `slowdown` DOES NOT SCALE, REPORTED RATHER THAN LEFT TO BE
+  // DIVIDED OUT.** `TIMEOUT_MS` is the default ceiling of every `until()` in
+  // this file, and it is wall clock: a poll waiting on the simulation to *do*
+  // something gets `TIMEOUT_MS / beat` of game time, which on a runner at 88.9x
+  // is one second. Three checks went red that way on 2026-08-28 — puppet's step
+  // climb twice and shard's foe ability — each having waited the full ceiling
+  // for a thing the demo had not had time to reach.
+  //
+  // Printed in **simulated seconds** because that is the unit those checks are
+  // really written in, and because a reader holding a red log should not have
+  // to do this division themselves. `docs/backlog.md` carries what has to be
+  // settled before the ceiling itself changes; until then this line is what
+  // says whether a failure below is a finding or a stopwatch.
+  //
+  // Off `slowdown` rather than the raw ratio, so the two halves of the line
+  // divide into each other and a reader can check the arithmetic without
+  // knowing this demo's `beatMs`. On a machine faster than nominal `slowdown`
+  // is clamped to 1, so the figure is a floor there rather than an estimate.
+  const pollSimSeconds = beat ? TIMEOUT_MS / slowdown / 1000 : null;
   check(
     'E',
     'a running demo logs its HUD from inside the tick',
@@ -5275,7 +5294,9 @@ try {
     beat === null
       ? `no second HUD line in ${Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)} ms`
       : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms — ` +
-          `every later budget scaled ${slowdown.toFixed(1)}x`
+          `every later budget scaled ${slowdown.toFixed(1)}x, and the ` +
+          `${TIMEOUT_MS} ms poll ceiling buys ` +
+          `${pollSimSeconds.toFixed(2)} simulated second(s)`
   );
 
   // **Never shorter than the constant used to give.** `TICK_WINDOW_MS` is the
@@ -6643,10 +6664,19 @@ try {
     new Map((held ?? []).map(({ kind, count }) => [kind, count]));
   const heldSamples = [heldRunning];
   let watched = true;
+  // What the window that ran out actually managed, for the message below. "The
+  // demo drew fewer than 20" was true of every slow runner and told a reader
+  // nothing about how much slower: 19 frames and 2 need different answers, and
+  // this is the only place that number can be read.
+  let drewInWindow = null;
   for (let window = 0; window < WINDOWS && watched; window += 1) {
     const framesBefore = await replayedNow();
     const drewMore = await until(async () => {
       const now = await replayedNow();
+      drewInWindow =
+        typeof now === 'number' && typeof framesBefore === 'number'
+          ? now - framesBefore
+          : null;
       return typeof now === 'number' && now >= framesBefore + FRAMES_WATCHED
         ? { now }
         : null;
@@ -6680,7 +6710,8 @@ try {
     'a steady-state frame gives back everything it takes',
     watched && readSamples && grew.length === 0,
     !watched
-      ? `the demo drew fewer than ${FRAMES_WATCHED} more frames in ${TIMEOUT_MS} ms, ` +
+      ? `the demo drew ${drewInWindow ?? 'an unreadable number of'} of the ` +
+          `${FRAMES_WATCHED} frames this window wanted, in ${TIMEOUT_MS} ms, ` +
           'so nothing here is a verdict about what a frame holds on to'
       : !readSamples
         ? `liveObjects() answered ${JSON.stringify(heldSamples.find((held) => !Array.isArray(held)))} on one of the heldSamples`

@@ -225,10 +225,22 @@ neither is a number to pick:
 
 Shrinking `FRAMES_WATCHED` to fit is the move to avoid: the check's own comment
 argues any size catches a per-frame leak, but a smaller window is more easily
-satisfied by noise and the three-window rule is what buys the teeth. Likewise,
-the failure message says "fewer than 20" and never says how many were drawn —
-**make it print the frames actually drawn and the elapsed time**, so a run
-supplies the frame rate instead of the next reader guessing it.
+satisfied by noise and the three-window rule is what buys the teeth.
+
+**Both numbers are now printed, as of 2026-08-28**, so the next run of each gate
+is the sweep rather than the next reader's guess:
+
+- The heartbeat control's line says what the ceiling is worth in the unit the
+  checks are written in — "every later budget scaled 88.9x, and the 90000 ms
+  poll ceiling buys 1.01 simulated second(s)". Measured locally on hud at 1.0x,
+  where it reads 88.85.
+- Group I says how many frames it got — "the demo drew 5400 of the 2000000
+  frames this window wanted" under a sabotaged `FRAMES_WATCHED`, against the old
+  "fewer than 20", which was true of every slow runner and distinguished none of
+  them.
+
+Neither changes a verdict. What is still owed is the decision above: the ceiling
+itself is unchanged, and until it moves these lines only make a red log legible.
 
 None of this is a regression from the fan-out. shard's gate had produced no
 verdict at all before, and puppet's group C had never run at a 33x slowdown
