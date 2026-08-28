@@ -127,6 +127,48 @@ What the early-out left owed:
   number — three would cost less and leave a wider blind gap, six more and leave
   less — was not swept, because no scene in the tree distinguishes them.
 
+### The jobs gate's `no-init-tls` red check stopped before it could look (2026-08-28)
+
+`web/run-jobs-e2e.sh`'s second red check sabotages `__wasm_init_tls`, which
+leaves every worker's `__tls_base` at zero so their thread-locals alias one
+address. The assertion that catches it is `gate_tls_shared` — a thread finding a
+frame address in its own thread-local that its own stack could not have written
+— and **only the second worker to run a chunk can make that observation**: the
+first finds the shared cell empty and fills it.
+
+The page's drive loop stopped at `gate_threads() >= 2 && runs >= 4`, and
+`gate_threads` counts the driver. So four `par_for` calls in which one worker
+took every chunk satisfied it, and the arm came back green with all 29 checks
+passing. That happened on CI at `afd76a4` and failed
+`threaded wasm gates (linux)` — every other job in that run was green, and
+`crcbl-jobs` had not changed since the previous green run, so the artifact was
+byte-identical. The loop now stops at the driver plus two workers, or at the
+observation itself, whichever comes first, in both `web/jobs/main.js` and the
+copy in `web/tools/worker-gate.mjs`.
+
+**The residual is real and is not fixed.** If one worker takes every chunk for
+the whole 20-second deadline, the arm still comes back green. The window shrank
+from four `par_for` calls to twenty seconds; it did not close. Closing it needs
+the gate to assert its own precondition — that two workers ran — and
+`gate_threads` cannot say so in the sabotaged arm, because the count it keeps
+lives in the thread-local the sabotage collapses. **A count keyed on the stack
+instead** would: the example already identifies a thread by its frame address
+(`SAME_STACK` in `crates/crcbl-jobs/examples/web_worker_gate.rs`), so a small
+static table of distinct stack bases and a `gate_chunk_threads` export would
+give both arms an honest participant count, to drive the loop on and to assert.
+That was deliberately not done in the same change: it alters the wasm artifact,
+and this file already records that the `no-stack-pointer` arm's trap moves when
+the artifact's layout does.
+
+**Not reproduced locally.** Five runs of the sabotaged arm under
+`taskset -c 0,1` went red with the old condition on this machine, so the fix is
+argued from the mechanism the CI log shows — `2 thread(s) ran chunks` with
+`gate_tls_shared` at zero, which is reachable only by the old break — and not
+from a reproduction. What was verified locally is that the new condition still
+goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
+observation rather than on the thread count) and that the whole gate, four red
+checks included, still passes.
+
 ### The browser gate's per-step cap is the wrong instrument (2026-08-28)
 
 Five of the fourteen demo steps in the Pages workflow's `build the demo site`

@@ -268,9 +268,12 @@ async function run() {
   );
 
   // ---- the run ------------------------------------------------------------
-  // Driven until a second thread has taken a chunk, because `par_for` finishes
-  // on the calling thread whether or not a worker ever wakes — so "the answer
-  // was right" cannot stand in for "a worker ran it".
+  // Driven until two workers have taken a chunk, because `par_for` finishes on
+  // the calling thread whether or not a worker ever wakes — so "the answer was
+  // right" cannot stand in for "a worker ran it", and one worker running is not
+  // enough for the shared-TLS assertion below to have anything to see.
+  // The driver plus two workers, or as many as the pool actually took.
+  const wantThreads = Math.min(3, taken.length + 1);
   let runs = 0;
   let wrong = 0;
   /** @type {string[]} */
@@ -286,7 +289,22 @@ async function run() {
       traps.push(String(error));
       break;
     }
-    if (ex.gate_threads() >= 2 && runs >= 4) break;
+    // **A second *worker*, not a second thread.** `gate_threads` counts the
+    // driver as one, so stopping at two stopped as soon as a single worker had
+    // taken a chunk — and the shared-TLS assertion needs a *second* worker to
+    // arrive and find the first one's frame in what should be its own
+    // thread-local. A run that stopped at two could not observe the thing this
+    // gate is about, which is how the `no-init-tls` red check came back green
+    // on a CI runner that gave one worker all four chunks. In a healthy build
+    // every worker has a cell of its own, so the driver plus two workers is
+    // three; in a sabotaged one the count sticks at two and the observation
+    // itself is what ends the loop.
+    if (
+      runs >= 4 &&
+      (ex.gate_threads() >= wantThreads || ex.gate_tls_shared() !== 0)
+    ) {
+      break;
+    }
     await pause(1);
   }
 
