@@ -102,8 +102,10 @@ import {
   launch as launchBrowser,
   openPage,
   pause,
+  say,
   stopEverything,
   until as pollUntil,
+  warn,
 } from './browser-launch.mjs';
 import { ISOLATION_HEADERS, MIME, serve } from './serve.mjs';
 
@@ -1182,7 +1184,7 @@ const EXPECTATIONS = {
 
 const EXPECTED = EXPECTATIONS[SLUG];
 if (!EXPECTED) {
-  console.error(
+  warn(
     `browser-e2e: no expectations for demo "${SLUG}". Add it to EXPECTATIONS ` +
       `in this file — a gate that does not know what the game logs would pass ` +
       `on a game that never started.`
@@ -1926,7 +1928,7 @@ const isRealMiss = (path) => !path.endsWith('favicon.ico');
 // `stopEverything` and the exit hooks that call it are in
 // `web/tools/browser-launch.mjs`, with the launch that registers each browser.
 function fail(message) {
-  console.error(`web e2e: ${message}`);
+  warn(`web e2e: ${message}`);
   stopEverything();
   process.exit(2);
 }
@@ -2401,9 +2403,7 @@ function check(group, name, ok, detail = '') {
   const now = Date.now();
   checks.push({ group, name, ok: Boolean(ok), detail, ms: now - checkedAt });
   checkedAt = now;
-  console.log(
-    `  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`
-  );
+  say(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
   return Boolean(ok);
 }
 
@@ -2411,7 +2411,7 @@ function check(group, name, ok, detail = '') {
 const SLOWEST_REPORTED = 5;
 
 function group(name) {
-  console.log(`\nweb e2e: ${name}`);
+  say(`\nweb e2e: ${name}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2434,9 +2434,9 @@ let browser = null;
 let exitCode = 1;
 
 try {
-  console.log(`web e2e: browser ${binary}`);
-  console.log(`web e2e: serving ${SITE} at ${site.origin}`);
-  console.log(`web e2e: adapter mode "${ADAPTER}"`);
+  say(`web e2e: browser ${binary}`);
+  say(`web e2e: serving ${SITE} at ${site.origin}`);
+  say(`web e2e: adapter mode "${ADAPTER}"`);
 
   group('A — the platform');
 
@@ -2450,7 +2450,7 @@ try {
   for (const mode of modes) {
     const result = await preflight(binary, mode, site.origin);
     attempts.push(result);
-    console.log(
+    say(
       `  ..   control page under "${mode}": ` +
         `adapter ${result.adapter ?? 'none'}, ` +
         `readback ${result.readback ? (result.readback.matches ? 'ok' : `rgb(${result.readback.seen.join(',')})`) : (result.error ?? 'n/a')}`
@@ -2516,12 +2516,12 @@ try {
     );
   }
 
-  console.log(
+  say(
     `\nweb e2e: running against the "${chosen.mode}" adapter — ${chosen.adapter}`
   );
 
   browser = await launch(binary, chosen.mode);
-  console.log(
+  say(
     `web e2e: flags ${browser.flags.filter((f) => !f.startsWith('--user-data-dir')).join(' ')}`
   );
 
@@ -6905,19 +6905,19 @@ try {
   for (const line of consoleLines.filter((line) =>
     line.includes(TEARDOWN_LEAK)
   ))
-    console.log(`web e2e: ${line}`);
+    say(`web e2e: ${line}`);
 
   writeFileSync(
     join(OUT, `${SLUG}-${chosen.mode}.log`),
     consoleLines.join('\n')
   );
-  console.log(`\nweb e2e: canvas  ${shotPath}`);
-  console.log(`web e2e: page log ${join(OUT, `${SLUG}-${chosen.mode}.log`)}`);
+  say(`\nweb e2e: canvas  ${shotPath}`);
+  say(`web e2e: page log ${join(OUT, `${SLUG}-${chosen.mode}.log`)}`);
 
   page.close();
   exitCode = 0;
 } catch (error) {
-  console.error(`\nweb e2e: ${error.message}`);
+  warn(`\nweb e2e: ${error.message}`);
   exitCode = 1;
 } finally {
   browser?.stop();
@@ -6930,19 +6930,16 @@ try {
 
 const failed = checks.filter((c) => !c.ok);
 
-console.log('');
+say('');
 if (checks.length === 0) {
   // The trap `docs/plan/12-testing.md` names: a harness that checked nothing and
   // said so quietly is worse than no harness.
-  console.error('web e2e: ZERO CHECKS RAN — the gate is not gating.');
-  if (browser?.stderr.length)
-    console.error(browser.stderr.slice(-40).join('\n'));
+  warn('web e2e: ZERO CHECKS RAN — the gate is not gating.');
+  if (browser?.stderr.length) warn(browser.stderr.slice(-40).join('\n'));
   process.exit(1);
 }
 
-console.log(
-  `web e2e: ${checks.length - failed.length}/${checks.length} checks passed`
-);
+say(`web e2e: ${checks.length - failed.length}/${checks.length} checks passed`);
 
 // **What the run spent its time on**, in the order that matters when a step is
 // about to hit a CI timeout. The elapsed is the wall clock from the previous
@@ -6951,15 +6948,15 @@ console.log(
 const slowest = [...checks]
   .sort((a, b) => b.ms - a.ms)
   .slice(0, SLOWEST_REPORTED);
-console.log(
+say(
   `web e2e: slowest ${slowest.length} of ${checks.length} check(s): ` +
     slowest.map((c) => `${c.name} ${(c.ms / 1000).toFixed(1)}s`).join(', ')
 );
 
 if (failed.length) {
-  console.error('\nweb e2e: FAILED');
+  warn('\nweb e2e: FAILED');
   for (const c of failed)
-    console.error(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
+    warn(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
   // **The one reader of `deviceErrors` past group D's check**, and the reason
   // group H filters rather than deletes. That group provokes a validation error
   // on purpose, on a device it opens for the purpose, and a run that fails
@@ -6972,9 +6969,9 @@ if (failed.length) {
     (message) => !message.includes(PROVOCATION)
   );
   if (realDeviceErrors.length) {
-    console.error('\nweb e2e: WebGPU device errors, in full:');
+    warn('\nweb e2e: WebGPU device errors, in full:');
     for (const message of realDeviceErrors.slice(0, 4)) {
-      console.error(
+      warn(
         message
           .split('\n')
           .map((line) => `    ${line}`)
@@ -6982,7 +6979,7 @@ if (failed.length) {
       );
     }
     if (realDeviceErrors.length > 4)
-      console.error(`    … and ${realDeviceErrors.length - 4} more`);
+      warn(`    … and ${realDeviceErrors.length - 4} more`);
   }
   process.exit(1);
 }

@@ -257,17 +257,33 @@ through `until` in `web/tools/browser-launch.mjs`, which enforces a deadline,
 catches a throwing probe and sleeps on a plain `setTimeout` — so no poll can
 hang, and a poll that expired would have printed a `FAIL`. Nothing printed.
 Which means either something outside `until` is awaiting a promise that never
-settles, or **the last line in the log is simply not the last line the run
-wrote**: `console.log` to a pipe is asynchronous in Node, and the action's
-timeout kills the process, so whatever was still buffered is lost. Until that is
-ruled out, the hang point is unknown to within however much output the buffer
-held.
+settles, or the last line in the log is not the last line the run wrote.
 
-**Where to start:** make the step's output unbuffered or line-flushed before
-reading another one of these logs, since every later conclusion depends on
-trusting the last line. Then the two candidates are a `evaluate` that never
-settles — CDP has no deadline of its own here, unlike `until` — and the demo
-itself wedging.
+**The second half is settled as of 2026-08-28, and it was not the answer.**
+`say` and `warn` in `web/tools/browser-launch.mjs` write through `fs.writeSync`
+and do not return until the bytes are on the descriptor, and
+`web/tools/browser-e2e.mjs` prints through them exclusively — it has no
+`console` call left. This can only matter on macOS: Node documents its own
+stdout as asynchronous for a pipe there and synchronous for one on Linux and
+Windows, and CI runs this gate as `node … 2>&1 | tee`. Which is also why **it
+could not be verified from here**. Locally, 5000 lines printed with
+`console.log` and then `SIGKILL`ed all 5000 arrive — what a synchronous pipe
+looks like — so the change is a provable no-op on the platform available to test
+it on. The proof is a macOS log that reaches past `E — focus and pause`, and the
+next run of that job is the first chance to see one.
+
+**What is left is the hang**, with the two candidates unchanged: an `evaluate`
+that never settles — CDP has no deadline of its own here, unlike `until` — and
+the demo itself wedging. The log can now be read backwards to find out which.
+
+**The other gates still print through `console`, and nothing stops it coming
+back.** `probe-e2e.mjs`, `render-harness-e2e.mjs`, `horde-threads-e2e.mjs`,
+`jobs-e2e.mjs`, `worker-gate.mjs`, `smoke.mjs` and `check-exports.mjs` in
+`web/tools/` are all run from CI steps, under a job cap or a step one, and all
+of them still print through `console`. Converting them is mechanical. The guard
+is the part worth having, since this is a property that reads as fine right up
+to the moment a job is killed, and the `shell (e2e harness guards)` job in
+`ci.yml` is where a check for it would sit.
 
 **Not reviewed, and not reproduced:** this leg has never been green with the
 demo gates in it, so there is no earlier run to compare against, and nothing

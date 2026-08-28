@@ -42,9 +42,57 @@
 // Windows in `hardware` mode.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+
+// ---------------------------------------------------------------------------
+// Printing, which has to survive the process being killed
+// ---------------------------------------------------------------------------
+
+/**
+ * Write one line to a file descriptor and do not return until it is written.
+ *
+ * **`console.log` does not do this.** Node's stdout is asynchronous when it is
+ * a pipe on POSIX, and CI runs every gate in this directory as
+ * `node … 2>&1 | tee`, so a "printed" line can still be sitting in a queue when
+ * the step's `timeout-minutes` kills the process — at which point it is never
+ * written at all. A gate that hangs is read backwards from its last line, and
+ * that reading is worthless if the last line in the log is not the last line
+ * the run reached.
+ *
+ * Two failures are expected of a pipe and neither is this caller's to handle.
+ * `EPIPE` means the reader is gone, so there is nowhere left to print and
+ * nothing to say about it. `EAGAIN` means the pipe is full — Node puts stdout
+ * in non-blocking mode, so a full pipe refuses the write rather than waiting —
+ * and retrying in place *is* the wait, spinning against a reader that is
+ * draining as fast as it can.
+ */
+function emit(fd, line) {
+  const bytes = Buffer.from(`${line}\n`, 'utf8');
+  let at = 0;
+  while (at < bytes.length) {
+    try {
+      at += writeSync(fd, bytes.subarray(at));
+    } catch (error) {
+      const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+      if (code === 'EPIPE') return;
+      if (code !== 'EAGAIN') throw error;
+    }
+  }
+}
+
+/** {@link emit} to stdout: `console.log`, minus the queue. */
+export const say = (line = '') => emit(1, line);
+
+/** {@link emit} to stderr: `console.error`, minus the queue. */
+export const warn = (line = '') => emit(2, line);
 
 /**
  * The browser binaries worth trying on this platform, in preference order.
@@ -358,7 +406,7 @@ export function stopBrowser(child, profile) {
       retryDelay: 100,
     });
   } catch (error) {
-    console.error(`  ..   left ${profile} behind: ${error.message}`);
+    warn(`  ..   left ${profile} behind: ${error.message}`);
   }
 }
 
@@ -488,7 +536,7 @@ export async function launch({
   const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (exited) {
-      console.error(stderr.join('\n'));
+      warn(stderr.join('\n'));
       fail(`the browser stopped before it listened (${exited})`);
     }
     const endpoint = readDevToolsPort(portFile);
@@ -498,7 +546,7 @@ export async function launch({
     }
     await pause(50);
   }
-  console.error(stderr.join('\n'));
+  warn(stderr.join('\n'));
   return fail('the browser never wrote DevToolsActivePort');
 }
 
