@@ -306,6 +306,9 @@ pub mod sky;
 /// The uniform block `tonemap.slang` reads, in the layout that shader declares.
 pub mod tonemap;
 
+// `exposure` carries its own `//!` header, for `fog`'s reason above.
+pub mod exposure;
+
 // `upscale` and `dfg` carry their own `//!` headers rather than a line here.
 // Both forms on one module makes rustdoc resolve the module's inner intra-doc
 // links in *this* file's scope, where its own items are not — six broken links

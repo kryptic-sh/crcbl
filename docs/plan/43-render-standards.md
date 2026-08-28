@@ -371,16 +371,16 @@ exclusion rather than a slice.
 Pipeline as it stands, verified in `crcbl_render::forward`'s pass list: scene →
 bloom → exposure and tonemap → FXAA → UI.
 
-| Stage          | Industry            | Here                                        |
-| -------------- | ------------------- | ------------------------------------------- |
-| Auto-exposure  | histogram, GPU      | **missing** — exposure is a runtime uniform |
-| Tonemap curve  | ACES or AgX         | **built 2026-08-27**, ACES; clamp default   |
-| Bloom          | Karis-average chain | **built**, off unless a view asks           |
-| Colour grading | 3D LUT              | **missing**                                 |
-| Depth of field | gather or scatter   | **missing**                                 |
-| Motion blur    | per-object          | **missing**, blocked — §9                   |
-| Lens artefacts | CA, vignette, grain | **missing**                                 |
-| HDR display    | scRGB or HDR10      | **missing** — sRGB swapchain only           |
+| Stage          | Industry            | Here                                      |
+| -------------- | ------------------- | ----------------------------------------- |
+| Auto-exposure  | histogram, GPU      | **built 2026-08-29**, no adaptation yet   |
+| Tonemap curve  | ACES or AgX         | **built 2026-08-27**, ACES; clamp default |
+| Bloom          | Karis-average chain | **built**, off unless a view asks         |
+| Colour grading | 3D LUT              | **missing**                               |
+| Depth of field | gather or scatter   | **missing**                               |
+| Motion blur    | per-object          | **missing**, blocked — §9                 |
+| Lens artefacts | CA, vignette, grain | **missing**                               |
+| HDR display    | scRGB or HDR10      | **missing** — sRGB swapchain only         |
 
 **The tonemap curve was the one to take first and it was nearly free.** Taken
 2026-08-27: `shaders/tonemap.slang` carries Stephen Hill's ACES fit behind a
@@ -390,9 +390,24 @@ curve is ACES rather than AgX, which needs transcendentals this workspace's
 goldens cannot absorb. What is left of this row is deciding which stacks default
 to the curve, which is a re-bless rather than a design.
 
-**Auto-exposure is second**, and it is a histogram compute pass plus a reduce —
-the engine has compute, has readback-free ring buffers, and has the profiler to
-show what it costs.
+**Auto-exposure was second and it was taken 2026-08-29.**
+`shaders/exposure.slang` is three compute entry points — a clear, a histogram of
+the finished frame's luminance, and a serial reduce over the bins — and
+`crcbl_shaders::exposure` is the same arithmetic on the CPU that `crcbl`'s
+`mesh_e2e` checks the bins against. Nothing is read back: the reduce writes one
+float into a device-local buffer the tonemap binds, and the frame that was
+measured is the frame that applies it.
+
+The binning is integer arithmetic on the exponent field rather than a `log2`,
+for §5's reason — the exponent of an IEEE-754 float _is_ the floor of its base-2
+logarithm, so the bins are identical on all four backends where the
+transcendental would not be.
+
+What is left of the row is **adaptation**: there is no time constant, so a cut
+between two differently-lit shots lands in one frame. That is the rung that
+needs a value to survive between frames, which is why it is a change to the
+buffer ring rather than a constant —
+[48-post-processing.md](48-post-processing.md) carries it.
 
 ## 7. Upscaling and render scale
 
@@ -579,7 +594,7 @@ above.
 | ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                                                        |
 | ~~A gradient sky feeding ambient and the SSR fallback~~  | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame                           |
 | ~~The sun's shaft through the froxel column~~            | §4 — **built 2026-08-28**: the buffer, the scatter, the scan, the composite, the sun's phase-scattered radiance and the cascade lookup that occludes it — [51-volumetrics.md](51-volumetrics.md) rungs 1a through 1b-ii |
-| **Auto-exposure**                                        | §6 — a histogram and a reduce                                                                                                                                                                                           |
+| ~~Auto-exposure~~                                        | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads and the `AUTO_EXPOSURE` bit a view asks with; temporal adaptation is a rung of its own                                               |
 | **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                                                                                                                             |
 | **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                                           |
 | **Specular antialiasing (roughness regularisation)**     | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                              |

@@ -15,6 +15,46 @@ ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
 and the rest of the ladders and all four samples are planned, not built. What
 follows is what the plans could not settle.
 
+### What auto-exposure left owed (2026-08-29)
+
+`docs/plan/43-render-standards.md` §6's histogram-and-reduce rung is built —
+`shaders/exposure.slang`, `crcbl_shaders::exposure`, `crcbl_render::exposure`,
+`RenderEffects::AUTO_EXPOSURE` and the `auto_exposure` settings key, checked
+end-to-end by `crates/crcbl/tests/mesh_e2e/exposure.rs` on radv. Four things it
+did not do.
+
+- **There is no temporal adaptation, and that is the rung that follows.** The
+  exposure a frame is drawn with is measured from that same frame, so a cut
+  between two differently-lit shots lands in one frame with no roll. The usual
+  answer is an exponential approach with separate up and down time constants,
+  which needs the previous frame's exposure to survive into this one — a change
+  to `Exposure`'s buffer ring (it is already one buffer per frame in flight, so
+  the previous frame's value is _there_; nothing reads it) plus a delta-time
+  lane in `ExposureParams`, plus a rule for what the first frame does. It is a
+  slice, not a constant.
+
+- **`reduceMain` is one invocation over ninety-six bins**, on purpose: float
+  addition is not associative and a tree reduction sums them in an order the
+  device schedules, which is the workspace's determinism rule. It was not
+  measured against a tree, because the tree is the thing that is refused. If the
+  pass ever shows up in a profile, the shape that keeps determinism is a fixed
+  pairwise tree with a written-down order, not a subgroup reduce.
+
+- **`histogramMain` atomically increments a global buffer, one texel per
+  invocation.** The usual optimisation is a workgroup-local histogram merged
+  once per group, which cuts the global atomic traffic by the group size. Not
+  taken: it needs groupshared memory across the four backends and the pass has
+  never been profiled here. `docs/plan/48-post-processing.md` has the pass's
+  shape; nothing in the tree records what it costs.
+
+- **Only radv ran it.** The e2e suite is `mesh_e2e`, which is Vulkan on this
+  machine and lavapipe in CI; the DX12, Metal and WebGPU artifacts compile and
+  are checked into `crates/crcbl-shaders/`, and the register-order test covers
+  the D3D12 root signature, but **no frame drawn through them has been compared
+  against the host histogram**. The `Atomic<uint>` spelling is `cull.slang`'s,
+  which does run on all four, so the risk is the reduce's serial loop rather
+  than the atomic.
+
 ### The shadow filter costs 48 taps and it timed out the browser gate (2026-08-28)
 
 `docs/plan/45-shadows.md`'s ninth decision replaced the 3×3 box filter with a

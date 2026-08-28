@@ -40,14 +40,14 @@ test calls it.
 - **HDR (MVP, lands with P7)**: scene renders to RGBA16F; lighting in linear HDR
   from the start (retrofitting HDR is repainting every material — do it the
   moment real lighting exists). Fixed exposure MVP; auto-exposure (histogram,
-  GPU reduce) later.
+  GPU reduce) **built 2026-08-29** — see the rung below.
 - **Tonemap (MVP)**: filmic/ACES-fitted curve + sRGB encode. One combined
   fullscreen pass with exposure. **Built 2026-08-27, and the clamp stayed the
   default.** `tonemap.slang` carries two operators behind a `uint curve` lane of
   its block — exposure-and-clamp, and Stephen Hill's fit of the ACES RRT and ODT
   — and `crcbl_render::ForwardRenderer::set_tonemap_curve` is what a view asks
-  with. Fixed exposure is a runtime uniform; auto-exposure (histogram, GPU
-  reduce) is still later.
+  with. Fixed exposure is still a runtime uniform, and auto-exposure is the lane
+  beside it rather than a replacement for it — the rung below says why.
 
   **The default is the clamp for the reason P1 chose it**, and that reason
   outlived the curve arriving: exposure-and-clamp is the identity on `[0, 1]`,
@@ -68,6 +68,37 @@ test calls it.
   CPU, pinned against the ODT's published anchors (a neutral stays neutral; a
   scene-referred 0.18 lands near a tenth of display range), and a source grep
   holds the shader to the same constants.
+
+- **Auto-exposure**: a luminance histogram of the finished frame and a reduce
+  over it, no readback. **Built 2026-08-29.** `shaders/exposure.slang` is three
+  entry points in the order a frame runs them — `clearMain` zeroes the bins,
+  `histogramMain` bins one texel per invocation with an atomic add, and
+  `reduceMain` walks the bins on a single invocation and divides the key by the
+  average luminance of the frame's middle. `crcbl_render::exposure` owns the
+  three pipelines and the two buffer rings; `RenderEffects::AUTO_EXPOSURE` is
+  the bit, `auto_exposure` the settings key.
+
+  **The bins are integer arithmetic, not a `log2`.** The exponent field of an
+  IEEE-754 float is the floor of its base-two logarithm, so the bin index is a
+  shift and a subtract, and the bin's lower edge is that exponent written back
+  into a float — the trick `mesh.slang` already uses. That is what lets the
+  histogram be identical on four backends where the transcendental this rung
+  otherwise wants is identical on none of them.
+
+  **It is out of `DEFAULT_STACK`**, and it is the first post effect that has no
+  additive-zero form: an exposure the frame measured is not the exposure the
+  caller set, so switching it on is always a different picture and every golden
+  in this tree would have to be re-blessed to make it a default. A view asks.
+
+  **The reduce is one invocation on purpose.** Float addition is not
+  associative, so a tree reduction sums the bins in an order the device
+  schedules and two runs of the same frame need not agree. Ninety-six bins on
+  one lane costs less than the atomic traffic the pass before it already paid.
+
+  What is **not** here is adaptation: there is no time constant, so a cut
+  between two differently-lit shots lands in a single frame. That is the next
+  rung, and it is the one that needs the previous frame's exposure to survive
+  into this one — a change to the buffer ring rather than a constant.
 
 - **AA (MVP)**: **FXAA**, then SMAA 1x, with TAA post-MVP and MSAA priced rather
   than rejected — the whole ladder, what each rung costs in this tree and what

@@ -133,6 +133,30 @@ bitflags::bitflags! {
         ///
         /// [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
         const VOLUMETRIC_FOG = 1 << 5;
+        /// Auto-exposure — the luminance histogram of the finished frame, the
+        /// reduce that turns it into one number, and the tonemap reading that
+        /// number instead of the one a caller set.
+        ///
+        /// `docs/plan/43-render-standards.md` §6's rung, and **the fourth bit
+        /// not in [`RenderEffects::DEFAULT_STACK`]**. The reason is
+        /// [`VOLUMETRIC_FOG`](Self::VOLUMETRIC_FOG)'s rather than
+        /// [`BLOOM`](Self::BLOOM)'s: it does not add a term to the picture, it
+        /// takes the exposure away from the caller and computes it from the
+        /// frame. A view that set an exposure and then found the engine
+        /// overriding it would have been given a control that does nothing, so
+        /// handing the control over is something a view asks for.
+        ///
+        /// It also has no additive-zero form to land behind — an exposure
+        /// measured from the frame is not the exposure a caller happened to
+        /// set — so switching it on moves every frame it is on for, which is the
+        /// re-bless [`ANTIALIASING`](Self::ANTIALIASING) is held out by.
+        ///
+        /// There is **no time constant** on it yet: the exposure a frame is
+        /// drawn with is measured from that frame, so a cut between two
+        /// differently-lit shots lands in one frame rather than over a few
+        /// tenths of a second. `docs/plan/48-post-processing.md` carries the
+        /// adaptation as the next rung.
+        const AUTO_EXPOSURE = 1 << 6;
     }
 }
 
@@ -156,6 +180,9 @@ impl RenderEffects {
     /// add a term to the picture, it takes one away from the fragment stage and
     /// computes it somewhere else, and which of the two a view wants is a cost
     /// question rather than a correctness one.
+    /// [`AUTO_EXPOSURE`](Self::AUTO_EXPOSURE) is out for a fourth, written on
+    /// the bit: it takes a control away from the caller, and a view that set an
+    /// exposure has said what it wants done with it.
     ///
     /// So the default is the most correct picture and no lens, and a view that
     /// wants the lens asks for it: through its own stack, or through
@@ -165,7 +192,11 @@ impl RenderEffects {
     /// [`camera`](EffectRequest::camera) holds, and it is why adding the bloom
     /// bit — and then the antialiasing bit — did not change a single frame the
     /// engine already drew.
-    pub const DEFAULT_STACK: Self = Self::all().difference(Self::BLOOM.union(Self::VOLUMETRIC_FOG));
+    pub const DEFAULT_STACK: Self = Self::all().difference(
+        Self::BLOOM
+            .union(Self::VOLUMETRIC_FOG)
+            .union(Self::AUTO_EXPOSURE),
+    );
 
     /// Every effect and the one word a report spells it with, in bit order.
     ///
@@ -186,6 +217,7 @@ impl RenderEffects {
         (Self::BLOOM, "bloom"),
         (Self::ANTIALIASING, "aa"),
         (Self::VOLUMETRIC_FOG, "vfog"),
+        (Self::AUTO_EXPOSURE, "autoexp"),
     ];
 
     /// This set as a debug panel row and a headless summary line spell it:
@@ -467,23 +499,28 @@ mod tests {
     /// consumer that does exactly that.
     ///
     /// What it guards is the claim [`RenderEffects::DEFAULT_STACK`]'s docs make:
-    /// the lens and the froxel volume are what a view has to ask for, and they
-    /// are the **only** two. A default that quietly included one would have
+    /// the lens, the froxel volume and auto-exposure are what a view has to ask
+    /// for, and they are the **only** three. A default that quietly included one would have
     /// re-blessed every golden image in the tree, and each of them would still
     /// have been a plausible picture — which is the whole difficulty: a
     /// wrongly-defaulted post pass does not look like a bug.
     ///
     /// The antialiasing resolve was held out on the same terms for exactly one
     /// change, which is what re-blessed the suite; it is in the default now, and
-    /// this asserts that neither of the other two followed it in.
+    /// this asserts that none of the other three followed it in.
     #[test]
     fn the_default_stack_is_the_light_transport_effects_and_a_view_can_still_ask() {
         assert_eq!(
             RenderEffects::DEFAULT_STACK,
-            RenderEffects::all()
-                .difference(RenderEffects::BLOOM.union(RenderEffects::VOLUMETRIC_FOG)),
+            RenderEffects::all().difference(
+                RenderEffects::BLOOM
+                    .union(RenderEffects::VOLUMETRIC_FOG)
+                    .union(RenderEffects::AUTO_EXPOSURE)
+            ),
         );
-        let post = RenderEffects::BLOOM.union(RenderEffects::VOLUMETRIC_FOG);
+        let post = RenderEffects::BLOOM
+            .union(RenderEffects::VOLUMETRIC_FOG)
+            .union(RenderEffects::AUTO_EXPOSURE);
         assert!(!EffectRequest::default().camera.contains(post));
         assert!(
             !EffectRequest::default()
@@ -505,7 +542,8 @@ mod tests {
             programmatic: EffectOverride::none()
                 .force(RenderEffects::BLOOM, Some(true))
                 .force(RenderEffects::ANTIALIASING, Some(true))
-                .force(RenderEffects::VOLUMETRIC_FOG, Some(true)),
+                .force(RenderEffects::VOLUMETRIC_FOG, Some(true))
+                .force(RenderEffects::AUTO_EXPOSURE, Some(true)),
             ..EffectRequest::default()
         };
         assert_eq!(forced.resolve(RenderEffects::all()), RenderEffects::all());

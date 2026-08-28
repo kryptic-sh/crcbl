@@ -169,6 +169,7 @@ use crate::graph::{
 // bare name here and means the froxel grid — the collision [`crate::grid`]'s
 // header predicted.
 use crate::bloom::Bloom;
+use crate::exposure::{Exposure, ExposureBuffers};
 use crate::fxaa::Fxaa;
 use crate::grid::{Grid as GroundGrid, GridStyle};
 use crate::hiz::Hiz;
@@ -599,7 +600,8 @@ fn imported_state(pool: &TransientPool, image: ImageHandle) -> ResourceState {
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
 /// atlas's, the depth prepass, the forward pass, the tonemap, the ground grid
 /// and the culling-statistics copy — plus [`Ssao::PASSES`], [`Ssr::PASSES`],
-/// [`Bloom::MAX_PASSES`] and [`Upscale::PASSES`] beside them.
+/// [`Bloom::MAX_PASSES`], [`Exposure::PASSES`] and [`Upscale::PASSES`] beside
+/// them.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
@@ -628,6 +630,7 @@ const RENDER_PASSES: u32 = 6
     + Hiz::PASSES
     + Ssr::PASSES
     + Volumetric::PASSES
+    + Exposure::PASSES
     + Bloom::MAX_PASSES
     + Fxaa::PASSES
     + Upscale::PASSES;
@@ -698,6 +701,9 @@ fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32), upscaling: bool
         // full-screen *draws*, and only the composite is one.
         passes += 1;
     }
+    // [`RenderEffects::AUTO_EXPOSURE`] adds none, and that is the whole of its
+    // entry here: all three of its passes are compute dispatches, and the
+    // exposure they measure reaches the picture through the tonemap's own draw.
     passes
 }
 
@@ -1324,6 +1330,10 @@ pub struct ForwardRenderer {
     /// `docs/plan/51-volumetrics.md`'s froxel volume and its composite — see
     /// [`crate::volumetric`].
     volumetric: Volumetric,
+    /// `docs/plan/43-render-standards.md` §6's auto-exposure — see
+    /// [`crate::exposure`]. Named for what it owns rather than for the value:
+    /// [`exposure`](Self::exposure) is the number a caller set.
+    auto_exposure: Exposure,
     /// `docs/plan/18-render-features.md`'s bloom chain — see [`crate::bloom`].
     bloom: Bloom,
     /// `docs/plan/18-render-features.md`'s antialiasing resolve — see
@@ -1436,6 +1446,9 @@ struct Rollback {
     /// `docs/plan/51-volumetrics.md`'s froxel volume, which owns three
     /// pipelines, two layouts and two rings of buffers.
     volumetric: Option<Volumetric>,
+    /// `docs/plan/43-render-standards.md` §6's auto-exposure, which owns three
+    /// pipelines, one layout and three rings of buffers.
+    exposure: Option<Exposure>,
     /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
     /// pipelines, two layouts, a sampler and a ring of blocks.
     bloom: Option<Bloom>,
@@ -1499,6 +1512,9 @@ impl Rollback {
         }
         if let Some(bloom) = self.bloom {
             bloom.destroy(device);
+        }
+        if let Some(exposure) = self.exposure {
+            exposure.destroy(device);
         }
         if let Some(volumetric) = self.volumetric {
             volumetric.destroy(device);
@@ -3788,6 +3804,24 @@ impl ForwardRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            // The measured exposure — see [`crate::exposure`]. **Bound on every
+            // frame, whether or not anything measured**, because a binding that
+            // comes and goes is a second pipeline layout and a second group
+            // cache keyed on which one is live, to save four bytes. The block
+            // above carries the switch that decides whether the shader reads it.
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::StorageBuffer {
+                    // Written by `exposure.slang`'s reduce and read here —
+                    // `StructuredBuffer` in this shader, which is the truth
+                    // rather than a hint.
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let tonemap_desc = BindGroupLayoutDesc {
             label: Some("tonemap scene"),
@@ -3915,6 +3949,15 @@ impl ForwardRenderer {
             shadow_sampler,
             Self::build_fullscreen,
         )?);
+
+        // --- auto-exposure ---
+        //
+        // Stored whole for the volume's reason, and after it because
+        // `Rollback::run` releases in the reverse order of construction. It runs
+        // between the chain and the tonemap in the frame as well: it bins the
+        // picture the tonemap is about to read, which is the one with the lens
+        // already on it — see [`crate::exposure`].
+        rollback.exposure = Some(Exposure::new(device, instance_buffers.len())?);
 
         // --- the bloom chain ---
         //
@@ -4137,6 +4180,10 @@ impl ForwardRenderer {
                 .volumetric
                 .take()
                 .unwrap_or_else(|| unreachable!("the volume was placed in the rollback above")),
+            auto_exposure: rollback
+                .exposure
+                .take()
+                .unwrap_or_else(|| unreachable!("the histogram was placed in the rollback above")),
             bloom: rollback
                 .bloom
                 .take()
@@ -4882,6 +4929,15 @@ impl ForwardRenderer {
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
+        // The extent auto-exposure bins, which is the internal one this
+        // function has been working in since `internal_extent` — the histogram
+        // reads the scene target, not the caller's window.
+        //
+        // Written whether or not this frame adds the passes, on every other
+        // block's terms: one written only on the frames that measure is stale on
+        // the frame a caller first switches the effect on.
+        self.auto_exposure.begin_frame(device, self.frame, extent)?;
+
         // The tonemap's one number, written here rather than in `add_passes` for
         // every other block's reason: a pass body runs at execute time, and the
         // buffer it reads has to have been written before the frame was
@@ -4892,6 +4948,12 @@ impl ForwardRenderer {
             &tonemap::TonemapParams {
                 exposure: self.exposure,
                 curve: self.tonemap_curve,
+                // **The switch, and it is this frame's effects rather than the
+                // caller's request**: a device that refused the effect draws the
+                // frame with the number a caller set, and reading a buffer no
+                // pass wrote would be reading whatever the last frame in this
+                // slot left there.
+                auto_exposure: self.frame_effects.contains(RenderEffects::AUTO_EXPOSURE),
             }
             .to_bytes(),
         )?;
@@ -6486,6 +6548,20 @@ impl ForwardRenderer {
             None => tonemapped,
         };
 
+        // `docs/plan/43-render-standards.md` §6's auto-exposure, and it reads
+        // the image the tonemap is about to read: the frame with the medium, the
+        // reflection and the chain already in it, which is the picture a viewer
+        // sees and therefore the one to expose for. Binning `scene_color`
+        // instead would expose the frame for a picture nobody looks at.
+        //
+        // Read first because the passes borrow the ring for the rest of this
+        // function, and the tonemap below needs the handle out of it.
+        let measured = self.auto_exposure.measured(frame);
+        if self.frame_effects.contains(RenderEffects::AUTO_EXPOSURE) {
+            self.auto_exposure
+                .add_passes(graph, frame, extent, tonemapped);
+        }
+
         // The tonemap group names a *graph-owned* view, so it can only be built
         // once the graph has realised one. It is cached against the view handle
         // and therefore rebuilt only on a resize.
@@ -6530,6 +6606,11 @@ impl ForwardRenderer {
                         binding: 2,
                         array_index: 0,
                         resource: BindingResource::whole_buffer(exposure_block),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(measured),
                     },
                 ];
                 let Some(group) = cached_group(
@@ -7677,6 +7758,24 @@ impl ForwardRenderer {
         &self.draws
     }
 
+    /// `frame`'s auto-exposure measurement: the bins the histogram pass filled
+    /// and the exposure the reduce wrote out of them.
+    ///
+    /// What `crcbl`'s `mesh_e2e` copies back to check the histogram bin by bin
+    /// against `crcbl_shaders::exposure`, on [`draws`](Self::draws)' terms — see
+    /// [`ExposureBuffers`]. Both hold whatever the last frame that measured left
+    /// there, so a frame drawn without
+    /// [`RenderEffects::AUTO_EXPOSURE`](crate::RenderEffects::AUTO_EXPOSURE)
+    /// hands back the frame before it rather than nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this renderer was built with.
+    #[must_use]
+    pub fn exposure_buffers(&self, frame: usize) -> ExposureBuffers {
+        self.auto_exposure.buffers(frame)
+    }
+
     /// `frame`'s froxel column: the buffers `docs/plan/51-volumetrics.md`'s
     /// three passes write, and the block they read.
     ///
@@ -8003,6 +8102,7 @@ impl ForwardRenderer {
         self.upscale.destroy(device);
         self.fxaa.destroy(device);
         self.bloom.destroy(device);
+        self.auto_exposure.destroy(device);
         self.volumetric.destroy(device);
         self.ssr.destroy(device);
         self.hiz.destroy(device);
@@ -8547,6 +8647,7 @@ mod tests {
             crcbl_shaders::tonemap::TonemapParams {
                 exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
                 curve: crcbl_shaders::tonemap::TonemapCurve::Clamp,
+                auto_exposure: false,
             }
             .to_bytes(),
             "an untouched renderer must write the exposure the constant used to hold, \
@@ -8569,6 +8670,7 @@ mod tests {
                 crcbl_shaders::tonemap::TonemapParams {
                     exposure: 3.5,
                     curve: crcbl_shaders::tonemap::TonemapCurve::Clamp,
+                    auto_exposure: false,
                 }
                 .to_bytes(),
                 "the frame's own block must carry the exposure in force",
@@ -8621,6 +8723,7 @@ mod tests {
                 crcbl_shaders::tonemap::TonemapParams {
                     exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
                     curve: TonemapCurve::Aces,
+                    auto_exposure: false,
                 }
                 .to_bytes(),
                 "every frame of the ring must carry the selected curve",
@@ -12095,6 +12198,13 @@ mod tests {
                 .as_slice(),
             ),
             (RenderEffects::ANTIALIASING, ["fxaa"].as_slice()),
+            (
+                RenderEffects::AUTO_EXPOSURE,
+                // All three go together and the tonemap stays: the pass reads
+                // the measurement only when the block says to, and the block
+                // says so on exactly the frames these three ran on.
+                ["exposure-clear", "exposure-histogram", "exposure-reduce"].as_slice(),
+            ),
         ] {
             let labels = without(&mut renderer, off);
             assert_eq!(
@@ -13251,7 +13361,8 @@ mod tests {
     /// each — and share only that a test wanting the widest frame must ask.
     const POST_EFFECTS: RenderEffects = RenderEffects::BLOOM
         .union(RenderEffects::ANTIALIASING)
-        .union(RenderEffects::VOLUMETRIC_FOG);
+        .union(RenderEffects::VOLUMETRIC_FOG)
+        .union(RenderEffects::AUTO_EXPOSURE);
 
     /// Every effect this renderer draws is either in the default stack or in
     /// [`POST_EFFECTS`].

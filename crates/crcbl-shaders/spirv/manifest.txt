@@ -113,6 +113,21 @@ msl-sha256 = 17145d4cb1e08d1f358979d1e2832fb6c2e071d48196c9ff7f64c1cd7525481c
 dxil = computeMain:dxil/draw_gen.computeMain.dxil:9244ace0e03b95b0fab8c53b2079adb96edbe896f5c42a2592da099346e24641
 entry-points = computeMain:glcompute
 
+[exposure]
+source = shaders/exposure.slang
+source-sha256 = d05ea197e5506227b418e8850d1cb1b466203f9bfefdcc8f13fb9b82c6686a09
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/exposure.spv
+spirv-sha256 = 9476637fb0f8663469bdf06e3395a735d3a9d9d826d714ecc6041ff27fb226af
+wgsl = wgsl/exposure.wgsl
+wgsl-sha256 = cb84e11f60245f28c0854902fe042d5030b7f54354aea4451b256e39e9137707
+msl = msl/exposure.metal
+msl-sha256 = 95b6f43e19a273328a4aed68a0dc0bf6d1d7e7b74eda7ab88777201d350b8a11
+dxil = clearMain:dxil/exposure.clearMain.dxil:5e5d778fc71a9cdc6035c361445edd38389feb37e3e4dd6e923131c8790b1b54
+dxil = reduceMain:dxil/exposure.reduceMain.dxil:bf1ce61da8daade51c9b35aa7d8c6248d3774fea2f176a8cce4a32a52d036d20
+dxil = histogramMain:dxil/exposure.histogramMain.dxil:c29e0e3fae5a287d8423c60fe742855980f2c18c18c57931f816c8894bda64f6
+entry-points = clearMain:glcompute, reduceMain:glcompute, histogramMain:glcompute
+
 [fxaa]
 source = shaders/fxaa.slang
 source-sha256 = 94dd6ef681f1be8f4f1f6786063315981c0bd95356ded5762a547cf493f18c42
@@ -352,16 +367,16 @@ entry-points = writingTaskMain:taskext
 
 [tonemap]
 source = shaders/tonemap.slang
-source-sha256 = 411af74962f6ff9718c49e48c19f6624d218d36cee0fb3a5a226e0b615a8e0f5
+source-sha256 = 9afded0fbcc3f5c7f337f2908cdb899eac6b357c61ab50fc954a6795da0ec545
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/tonemap.spv
-spirv-sha256 = fd57c8276e9b271d00538aaa136fb4a2870ecf9d481dafadb17bb6394e934488
+spirv-sha256 = ed9eed97452a1a522e19953a98b1d2d680f2043a83b04747e41685559e6041b0
 wgsl = wgsl/tonemap.wgsl
-wgsl-sha256 = b1f2132f21cdffaa3a2902da7f49046d3816d4f19e61e23295e5741ee23087c9
+wgsl-sha256 = fd6205cc00789679cd567d39d9d3eec3ad0cd6d533cdcbe5132d6a19f8e2deba
 msl = msl/tonemap.metal
-msl-sha256 = 4bf5cabc8c1cfe42254f9c71a9c24162905473c77d148e9bd366fdea499a6db0
+msl-sha256 = 12014905097ff9df2b85ad94b682bdd3883c8339bf6b9cd9fa83f0be3710ffc8
 dxil = vertexMain:dxil/tonemap.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/tonemap.fragmentMain.dxil:77b01fa55cbce166d90590162bff6477e043a495fb4a637fb30a6228f1dd0d85
+dxil = fragmentMain:dxil/tonemap.fragmentMain.dxil:ab7ba6321799fcc24732778590fbc532f3990d0838d3da10f236fe3a98e739bb
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [triangle]

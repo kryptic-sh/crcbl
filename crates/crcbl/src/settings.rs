@@ -98,13 +98,14 @@ pub const VIDEO_NAMESPACE: &str = "engine.video";
 /// switches have on a command line. A settings file is a description of what
 /// the player wants on, and a negated key would make `shadows = false` and
 /// `no_shadows = false` both writable and opposite.
-pub const VIDEO_KEYS: [(&str, RenderEffects); 6] = [
+pub const VIDEO_KEYS: [(&str, RenderEffects); 7] = [
     ("shadows", RenderEffects::SHADOWS),
     ("ambient_occlusion", RenderEffects::AMBIENT_OCCLUSION),
     ("reflections", RenderEffects::REFLECTIONS),
     ("bloom", RenderEffects::BLOOM),
     ("antialiasing", RenderEffects::ANTIALIASING),
     ("volumetric_fog", RenderEffects::VOLUMETRIC_FOG),
+    ("auto_exposure", RenderEffects::AUTO_EXPOSURE),
 ];
 
 /// What the player's `[engine.video]` section allows, for
@@ -931,6 +932,7 @@ mod tests {
             ("bloom", RenderEffects::BLOOM),
             ("antialiasing", RenderEffects::ANTIALIASING),
             ("volumetric_fog", RenderEffects::VOLUMETRIC_FOG),
+            ("auto_exposure", RenderEffects::AUTO_EXPOSURE),
         ] {
             let stack = stack_from(&format!("[{VIDEO_NAMESPACE}]\n{key} = false\n"));
             assert_eq!(

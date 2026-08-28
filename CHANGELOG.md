@@ -16,6 +16,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Auto-exposure: the frame measures its own exposure, and no readback stalls
+  on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —
+  adds three compute passes before the tonemap: `exposure.slang`'s `clearMain`,
+  `histogramMain` and `reduceMain` bin the finished frame's luminance and write
+  one float into a device-local buffer the tonemap reads in the same frame.
+  `crcbl_shaders::exposure` is the same arithmetic on the CPU — `bin_of`,
+  `bin_luminance`, `measure` — and `ForwardRenderer::exposure_buffers` hands the
+  bins and the measured exposure to a caller that wants to check them.
+
+  The bins are the exponent field of the luminance rather than a `log2`, so they
+  are identical on all four backends; the reduce runs on a single invocation
+  because float addition is not associative and a tree would sum the bins in an
+  order the device schedules.
+
+  **It is not in `DEFAULT_STACK`**, and it is the first post effect with no
+  additive-zero form — a measured exposure is by definition not the one the
+  caller set, so a view has to ask. A frame that does not ask draws exactly the
+  picture it drew before the pass existed. There is no temporal adaptation yet:
+  a cut between two differently-lit shots lands in one frame.
+
 - **The froxel column can be read back and checked per froxel.**
   `ForwardRenderer::froxel_buffers` hands out one frame's `FroxelBuffers` — the
   parameter block, the column and the per-froxel sun visibility — and

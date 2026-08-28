@@ -70,6 +70,16 @@ struct TonemapParams
     /// `crcbl_shaders::tonemap::TonemapCurve` is the Rust side, and
     /// [`CURVE_CLAMP`] is what a renderer nobody has configured writes.
     uint curve;
+    /// Non-zero to take the exposure from `measured[0]` instead of from
+    /// [`TonemapParams::exposure`].
+    ///
+    /// `docs/plan/43-render-standards.md` §6's auto-exposure, and the switch is
+    /// here rather than in a second pipeline for [`TonemapParams::curve`]'s
+    /// reason exactly. Zero is what a frame that added no exposure passes
+    /// writes, and on that frame this pass reads the number the host set and is
+    /// the pass that ran before `exposure.slang` existed — which is what keeps
+    /// every golden image in the tree untouched.
+    uint auto_exposure;
 };
 
 /// [`TonemapParams::curve`]: exposure and clamp, the operator this pass shipped
@@ -131,6 +141,17 @@ SamplerState sceneSampler;
 [[vk::binding(2, 0)]]
 ConstantBuffer<TonemapParams> params;
 
+/// `[0]`: the exposure `exposure.slang`'s `reduceMain` measured from this
+/// frame, read only when [`TonemapParams::auto_exposure`] says to.
+///
+/// **Always bound, on every frame, whether or not it holds anything.** A
+/// binding that comes and goes is a second pipeline layout and a second bind
+/// group cache keyed on which one is live, and the value it would save is four
+/// bytes; `crcbl_render::exposure` creates the buffer with the renderer and
+/// writes it only on a frame that measures.
+[[vk::binding(3, 0)]]
+StructuredBuffer<float> measured;
+
 struct FullscreenOutput
 {
     float4 position : SV_Position;
@@ -182,5 +203,9 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // (`CompositeAlpha::Opaque`), and carrying a scene alpha into it would make
     // the window's transparency depend on the geometry that happened to be
     // drawn.
-    return float4(tonemap(color, params.exposure, params.curve), 1.0);
+    // The measured exposure or the caller's, decided per frame by the block.
+    // Reading the buffer unconditionally would be the same picture and a
+    // dependency on a value no pass wrote on a frame that does not measure.
+    float exposure = params.auto_exposure != 0u ? measured[0] : params.exposure;
+    return float4(tonemap(color, exposure, params.curve), 1.0);
 }

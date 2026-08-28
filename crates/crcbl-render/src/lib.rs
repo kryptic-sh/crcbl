@@ -131,6 +131,7 @@ pub mod cull;
 pub mod cull_stats;
 pub mod draw_gen;
 pub mod effects;
+mod exposure;
 pub mod fly;
 pub mod forward;
 mod fxaa;
@@ -189,6 +190,7 @@ pub use cull::{Aabb, Frustum, visible_instances};
 pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use effects::{EffectOverride, EffectRequest, RenderEffects};
+pub use exposure::ExposureBuffers;
 pub use fly::{Flyer, LOOK, SPEED, TURN};
 pub use forward::{
     DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, MIN_RENDER_SCALE, SCENE_CLEAR,

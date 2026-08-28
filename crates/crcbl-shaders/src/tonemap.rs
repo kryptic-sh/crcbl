@@ -123,6 +123,15 @@ pub struct TonemapParams {
     pub exposure: f32,
     /// Which operator runs on the exposed colour.
     pub curve: TonemapCurve,
+    /// Whether the pass takes its exposure from the buffer
+    /// `crcbl_shaders::exposure`'s reduce writes instead of from
+    /// [`exposure`](Self::exposure).
+    ///
+    /// `false` on every frame that adds no auto-exposure passes, which is the
+    /// frame this pass drew before they existed — see `tonemap.slang`, where the
+    /// lane carries the argument for the switch being a lane rather than a
+    /// second pipeline.
+    pub auto_exposure: bool,
 }
 
 impl Default for TonemapParams {
@@ -132,6 +141,7 @@ impl Default for TonemapParams {
         Self {
             exposure: DEFAULT_EXPOSURE,
             curve: TonemapCurve::Clamp,
+            auto_exposure: false,
         }
     }
 }
@@ -139,17 +149,16 @@ impl Default for TonemapParams {
 impl TonemapParams {
     /// The block as the bytes a uniform buffer holds.
     ///
-    /// Little-endian, and the two padding words after [`curve`] are written
-    /// rather than left alone for [`crate::ssao::SsaoParams::to_bytes`]'s reason:
-    /// the buffer is [`PARAMS_SIZE`] wide and a partial write leaves the tail
-    /// undefined.
-    ///
-    /// [`curve`]: Self::curve
+    /// Little-endian, and the padding word after
+    /// [`auto_exposure`](Self::auto_exposure) is written rather than left alone
+    /// for [`crate::ssao::SsaoParams::to_bytes`]'s reason: the buffer is
+    /// [`PARAMS_SIZE`] wide and a partial write leaves the tail undefined.
     #[must_use]
     pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
         bytes[..4].copy_from_slice(&self.exposure.to_le_bytes());
         bytes[4..8].copy_from_slice(&self.curve.as_u32().to_le_bytes());
+        bytes[8..12].copy_from_slice(&u32::from(self.auto_exposure).to_le_bytes());
         bytes
     }
 }
@@ -177,8 +186,33 @@ mod tests {
             "tonemap.slang does not declare `uint curve;`"
         );
         assert!(
+            source.contains("uint auto_exposure;"),
+            "tonemap.slang does not declare `uint auto_exposure;`"
+        );
+        assert!(
             source.contains("ConstantBuffer<TonemapParams> params;"),
             "tonemap.slang does not bind the block `to_bytes` writes"
+        );
+        assert!(
+            source.contains("StructuredBuffer<float> measured;"),
+            "tonemap.slang does not bind the buffer the auto-exposure lane selects, \
+             so the lane selects nothing"
+        );
+        // The lane is a switch and not a scale: a block that says nothing about
+        // auto-exposure writes a zero word, which is the frame this pass drew
+        // before `exposure.slang` existed.
+        assert_eq!(
+            TonemapParams::default().to_bytes()[8..12],
+            [0, 0, 0, 0],
+            "the default block must leave auto-exposure off"
+        );
+        assert_eq!(
+            TonemapParams {
+                auto_exposure: true,
+                ..TonemapParams::default()
+            }
+            .to_bytes()[8..12],
+            [1, 0, 0, 0],
         );
     }
 
@@ -323,19 +357,21 @@ mod tests {
         }
     }
 
-    /// The exposure is the first word, the curve the second, and the rest of the
-    /// row is zeroed.
+    /// The exposure is the first word, the curve the second, the auto-exposure
+    /// switch the third, and the rest of the row is zeroed.
     #[test]
-    fn the_block_is_the_two_values_and_a_padded_row() {
+    fn the_block_is_the_three_values_and_a_padded_row() {
         let bytes = TonemapParams {
             exposure: 2.5,
             curve: TonemapCurve::Aces,
+            auto_exposure: true,
         }
         .to_bytes();
         assert_eq!(bytes.len(), PARAMS_SIZE);
         assert_eq!(&bytes[0..4], &2.5f32.to_le_bytes());
         assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
-        assert!(bytes[8..].iter().all(|byte| *byte == 0), "{bytes:?}");
+        assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
+        assert!(bytes[12..].iter().all(|byte| *byte == 0), "{bytes:?}");
     }
 
     /// The default is the value the constant held, which is what says the
@@ -349,6 +385,7 @@ mod tests {
             TonemapParams {
                 exposure: DEFAULT_EXPOSURE,
                 curve: TonemapCurve::Clamp,
+                auto_exposure: false,
             }
             .to_bytes(),
         );

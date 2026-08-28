@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 114 "shaders/tonemap.slang"
+#line 124 "shaders/tonemap.slang"
 float3 rrt_and_odt_fit_0(float3 v_0)
 {
 
@@ -12,7 +12,7 @@ float3 rrt_and_odt_fit_0(float3 v_0)
 }
 
 
-#line 146
+#line 167
 float3 tonemap_0(float3 color_0, float exposure_0, uint curve_0)
 {
     float3 exposed_0 = color_0 * float3(exposure_0) ;
@@ -44,43 +44,70 @@ struct TonemapParams_0
 {
     float exposure_1;
     uint curve_1;
+    uint auto_exposure_0;
 };
 
 
-#line 1084 "core"
+#line 209
 struct KernelContext_0
 {
     texture2d<float, access::sample> scene_0;
     sampler sceneSampler_0;
     TonemapParams_0 constant* params_0;
+    float device* measured_0;
 };
 
 
-#line 172 "shaders/tonemap.slang"
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> scene_1 [[texture(0)]], sampler sceneSampler_1 [[sampler(0)]], TonemapParams_0 constant* params_1 [[buffer(0)]])
+#line 193
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> scene_1 [[texture(0)]], sampler sceneSampler_1 [[sampler(0)]], TonemapParams_0 constant* params_1 [[buffer(0)]], float device* measured_1 [[buffer(1)]])
 {
 
-#line 172
+#line 193
     thread KernelContext_0 kernelContext_0;
 
-#line 172
+#line 193
     (&kernelContext_0)->scene_0 = scene_1;
 
-#line 172
+#line 193
     (&kernelContext_0)->sceneSampler_0 = sceneSampler_1;
 
-#line 172
+#line 193
     (&kernelContext_0)->params_0 = params_1;
 
-#line 172
-    pixelOutput_0 _S2 = { float4(tonemap_0(((scene_1).sample((sceneSampler_1), (_S1.uv_0))).xyz, params_1->exposure_1, params_1->curve_1), 1.0f) };
+#line 193
+    (&kernelContext_0)->measured_0 = measured_1;
 
-#line 185
+#line 201
+    float3 color_1 = ((scene_1).sample((sceneSampler_1), (_S1.uv_0))).xyz;
+
+#line 201
+    float exposure_2;
+
+#line 209
+    if((params_1->auto_exposure_0) != 0U)
+    {
+
+#line 209
+        exposure_2 = (&kernelContext_0)->measured_0[int(0)];
+
+#line 209
+    }
+    else
+    {
+
+#line 209
+        exposure_2 = (&kernelContext_0)->params_0->exposure_1;
+
+#line 209
+    }
+
+#line 209
+    pixelOutput_0 _S2 = { float4(tonemap_0(color_1, exposure_2, (&kernelContext_0)->params_0->curve_1), 1.0f) };
     return _S2;
 }
 
 
-#line 185
+#line 210
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];
@@ -88,7 +115,7 @@ struct vertexMain_Result_0
 };
 
 
-#line 134
+#line 155
 struct FullscreenOutput_0
 {
     float4 position_2;
@@ -97,7 +124,7 @@ struct FullscreenOutput_0
 
 
 #line 473 "core"
-[[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], texture2d<float, access::sample> scene_2 [[texture(0)]], sampler sceneSampler_2 [[sampler(0)]], TonemapParams_0 constant* params_2 [[buffer(0)]])
+[[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], texture2d<float, access::sample> scene_2 [[texture(0)]], sampler sceneSampler_2 [[sampler(0)]], TonemapParams_0 constant* params_2 [[buffer(0)]], float device* measured_2 [[buffer(1)]])
 {
 
 #line 473
@@ -112,27 +139,30 @@ struct FullscreenOutput_0
 #line 473
     (&kernelContext_1)->params_0 = params_2;
 
-#line 160 "shaders/tonemap.slang"
+#line 473
+    (&kernelContext_1)->measured_0 = measured_2;
+
+#line 181 "shaders/tonemap.slang"
     thread FullscreenOutput_0 output_1;
 
     float2 _S3 = float2(float((index_0 << 1U) & 2U), float(index_0 & 2U));
 
-#line 162
+#line 183
     (&output_1)->uv_2 = _S3;
 
-#line 167
+#line 188
     (&output_1)->position_2 = float4(_S3 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
 
-#line 167
+#line 188
     thread vertexMain_Result_0 _S4;
 
-#line 167
+#line 188
     (&_S4)->position_1 = output_1.position_2;
 
-#line 167
+#line 188
     (&_S4)->uv_1 = output_1.uv_2;
 
-#line 167
+#line 188
     return _S4;
 }
 

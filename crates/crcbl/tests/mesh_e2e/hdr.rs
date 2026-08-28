@@ -25,11 +25,11 @@ use crcbl::render::{
 use crcbl_shaders::tonemap::TonemapCurve;
 
 /// The frame's `Rgba16Float` scene target, as the bytes the copy produced.
-struct HdrTarget(Vec<u8>);
+pub(crate) struct HdrTarget(pub(crate) Vec<u8>);
 
 impl HdrTarget {
     /// The linear HDR value at a texel, decoded from `Rgba16Float`.
-    fn pixel(&self, x: u32, y: u32) -> [f32; 4] {
+    pub(crate) fn pixel(&self, x: u32, y: u32) -> [f32; 4] {
         let index = ((y * MESH_EXTENT.0 + x) * 4) as usize * 2;
         let mut out = [0.0f32; 4];
         for (channel, value) in out.iter_mut().enumerate() {

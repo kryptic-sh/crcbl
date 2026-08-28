@@ -975,10 +975,11 @@ mod tests {
                 "tonemap",
                 &crcbl_shaders::TONEMAP,
                 &["vertexMain", "fragmentMain"],
-                // The scene target, the sampler that reads it, and the exposure
-                // block — declared last because it is numbered last, so `t0`,
-                // `s0` and `b0`.
-                &[Srv, Sampler, Cbv],
+                // The scene target, the sampler that reads it, the exposure
+                // block, and the buffer auto-exposure measured into — in
+                // declaration order, which is binding order, so `t0`, `s0`, `b0`
+                // and `t1`.
+                &[Srv, Sampler, Cbv, Srv],
             ),
             (
                 "triangle",
