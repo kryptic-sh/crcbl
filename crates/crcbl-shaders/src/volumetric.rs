@@ -1013,10 +1013,16 @@ mod tests {
     /// turning the cascades on or off moves the surface's own shading too, so a
     /// two-frame comparison cannot attribute the difference to the medium.
     ///
-    /// What would catch it is the per-froxel readback `docs/backlog.md` carries
-    /// as a gap. Until that exists this is what stands between the composite and
-    /// a seam at every slice boundary, and it is worth exactly what it says: the
-    /// read is written down, not that it is right.
+    /// **The per-froxel readback does not catch it either.** `crcbl`'s
+    /// `mesh_e2e/froxels.rs` compares the buffers the two *compute* passes
+    /// wrote; the partial slice is work the composite does per pixel and stores
+    /// in none of them. What would catch it is a frame whose nearest surface
+    /// sits inside the first slice — a wall a fraction of a unit from the eye —
+    /// so the tail the composite integrates is most of what the pixel sees;
+    /// `docs/backlog.md` carries that as the gap. Until it exists this is what
+    /// stands between the composite and a seam at every slice boundary, and it
+    /// is worth exactly what it says: the read is written down, not that it is
+    /// right.
     #[test]
     fn the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility() {
         const COMPOSITE: &str = include_str!("../shaders/volumetric_composite.slang");
