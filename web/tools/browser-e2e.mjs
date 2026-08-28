@@ -1211,6 +1211,44 @@ const EXPECTATIONS = {
     // own counter instead of the picture.
     moving: /tick: (\d+)/,
     movingLabel: 'the loop keeps ticking with nothing to simulate',
+    // **The round trip this sample exists for**, read by the block group C runs
+    // last. Every number here comes from the sample's own source rather than
+    // from a reading taken once and written down.
+    settings: {
+      // How many `ArrowDown`s reach the MUSIC fader from the row the panel
+      // opens on, and how many more reach `SAVE`. `apps/options/src/menu.rs`'s
+      // `menus` lays the panel out as FULLSCREEN, DEBUG PANEL, a fader per
+      // `Bus::ALL` in that order, then SAVE and RESET.
+      toFader: 3,
+      toSave: 5,
+      // How far to walk the fader, in `Slider::KEY_STEP`s of a twentieth each.
+      // Four steps down from the top is a handle at 0.8, and the square taper
+      // in `menu::gain_at` makes that a gain of 64% — far enough that no
+      // rounding in `menu::percent` can leave it reading as unity.
+      nudges: 4,
+      // The keys those two lines mean, as a real keyboard sends them.
+      down: { code: 'ArrowDown', key: 'ArrowDown', virtualKeyCode: 40 },
+      left: { code: 'ArrowLeft', key: 'ArrowLeft', virtualKeyCode: 37 },
+      commit: { code: 'Enter', key: 'Enter', text: '\r', virtualKeyCode: 13 },
+      // The three fields of `app::Screen::log_heartbeat` this block reads, and
+      // the gain an absent key means — `crcbl::settings`' default, which is
+      // also what `RESET` writes.
+      gain: /music: (\d+)%/,
+      edits: /edits: (\d+)/,
+      file: /file: (.+?)\s*$/,
+      unity: 100,
+      // Two arms of `app::SaveState`, as its `Display` spells them.
+      saved: 'saved',
+      untouched: 'nothing changed',
+      // What `SettingsStack::save_platform` leaves in the OPFS root:
+      // `crates/crcbl-store/src/settings.rs`'s `SETTINGS_FILE` in both of the
+      // generation slots `crates/crcbl-store/src/web/opfs.rs` ping-pongs
+      // between, and the magic that module frames every record with. Either
+      // slot answers — which one holds the newest generation is that module's
+      // business and not this gate's.
+      files: ['settings.toml~0', 'settings.toml~1'],
+      recordMagic: 'CRWB',
+    },
   },
 };
 
@@ -4828,6 +4866,268 @@ try {
             `"resumed: ${freshBeat.resumed}" at pz ${freshBeat.along} with ` +
             `${freshBeat.alive} of ${save.count} foes standing, ` +
             `${freshBeat.health} health and ${freshBeat.downs} down(s)`
+    );
+
+    // **And the canvas gets its keyboard back.** Two navigations replaced the
+    // document, so the click group C made was on an element that no longer
+    // exists — and group E's first claim is that *blurring* the canvas pauses
+    // the demo, which a canvas that never had focus cannot do.
+    const handedBack = hud().length;
+    await clickAt(await focusPoint());
+    await until(async () =>
+      (await evaluate(page, `document.activeElement?.id ?? ''`)) === 'canvas'
+        ? true
+        : null
+    );
+    await until(async () => (hud().length > handedBack ? hud().length : null));
+  }
+
+  // **AND THE SETTING COMING BACK, WHICH IS THE WHOLE OF THIS SAMPLE.**
+  // Only options has one. Every other check on this page is about the engine —
+  // it boots, it ticks, it draws, it lets go of what it took — and every one of
+  // them passes on a build whose `SAVE` writes nothing at all, because a page
+  // that is never reloaded never has to answer for what it wrote. A browser has
+  // no filesystem, `crates/crcbl-store/src/web/opfs.rs` is the only backend
+  // there is, and the way it fails is silently: that is the half
+  // `docs/plan/sample/20-options.md` calls the easy one to get wrong.
+  //
+  // Four claims, each with the control that stops it passing for the wrong
+  // reason:
+  //
+  // * a **key moves a fader**, and the screen writes the key — `edits` rising
+  //   beside a gain that fell. Without the gain, "a key was delivered" passes
+  //   for a screen that counted the press and changed nothing.
+  // * the save **is on the browser's own disk**: `settings.toml` in one of its
+  //   generation slots, framed as this store frames a record, with nothing left
+  //   queued inside wasm. The control is the wipe below — a directory that
+  //   empties is what says the file found here was this demo's.
+  // * a reloaded page **opens on the gain the last one saved**, checked against
+  //   the heartbeat that reported the write rather than against a number this
+  //   file predicts. `edits: 0` on that same line is the control: it says the
+  //   value was *read* rather than re-entered by a page that replayed the keys.
+  // * and the last control: **a page booted with the store cleared comes up at
+  //   unity**, which is what an absent key means. Without it, "it came back"
+  //   passes for a build that never reads the file and always opens wherever
+  //   this one happened to leave the fader.
+  //
+  // **Nothing here waits on a wall clock for the screen.**
+  // `app::Screen::log_heartbeat` logs on any edit as well as every
+  // `HEARTBEAT_TICKS`, so every reading below is a line the demo emitted
+  // because the thing being asserted had already happened.
+  if (EXPECTED.settings) {
+    const settings = EXPECTED.settings;
+
+    /** One of this screen's keys, pressed and released `times` over. */
+    const tap = async (
+      /** @type {{code: string, key: string, text?: string, virtualKeyCode: number}} */ binding,
+      /** @type {number} */ times = 1
+    ) => {
+      for (let press = 0; press < times; press += 1) {
+        for (const type of ['keyDown', 'keyUp']) {
+          await page.send('Input.dispatchKeyEvent', {
+            type,
+            code: binding.code,
+            key: binding.key,
+            windowsVirtualKeyCode: binding.virtualKeyCode,
+            nativeVirtualKeyCode: binding.virtualKeyCode,
+            ...(type === 'keyDown' && binding.text
+              ? { text: binding.text }
+              : {}),
+          });
+        }
+      }
+    };
+
+    /** One heartbeat, as the three fields this block reads. */
+    const reading = (/** @type {string} */ line) => {
+      const gain = line.match(settings.gain)?.[1];
+      const edits = line.match(settings.edits)?.[1];
+      const file = line.match(settings.file)?.[1];
+      if (gain === undefined || edits === undefined || file === undefined)
+        return null;
+      return { gain: Number(gain), edits: Number(edits), file, line };
+    };
+    /** Every heartbeat logged since `mark`, in order. */
+    const beatsSince = (/** @type {number} */ mark) =>
+      hud()
+        .slice(mark)
+        .map(reading)
+        .filter((beat) => beat !== null);
+
+    /** What the OPFS root holds, and what wasm still has queued for it. */
+    const storage = async () =>
+      evaluate(
+        page,
+        `(async () => {
+           const queue = crcbl.saves();
+           const files = [];
+           try {
+             const root = await navigator.storage.getDirectory();
+             for await (const [name, handle] of root.entries()) {
+               if (handle.kind !== 'file') continue;
+               const blob = await handle.getFile();
+               const head = new Uint8Array(
+                 await blob.slice(0, ${settings.recordMagic.length}).arrayBuffer()
+               );
+               files.push({
+                 name,
+                 bytes: blob.size,
+                 record: String.fromCharCode(...head),
+               });
+             }
+           } catch (error) {
+             return { queue, files: null, error: String(error) };
+           }
+           return { queue, files };
+         })()`
+      );
+
+    // ---- a key moves a fader -------------------------------------------------
+    const beforeEdit = hud().length;
+    await tap(settings.down, settings.toFader);
+    await tap(settings.left, settings.nudges);
+    const edited = await until(async () => {
+      const beat = beatsSince(beforeEdit).find(
+        (r) => r.edits > 0 && r.gain < settings.unity
+      );
+      return beat ?? null;
+    });
+    check(
+      'C',
+      'a key moves a fader, and the screen writes the key',
+      edited !== null,
+      edited
+        ? edited.line.trim()
+        : `no heartbeat in ${pollCeiling()} ms read under ${settings.unity}% ` +
+            `after ${settings.toFader} row(s) down and ${settings.nudges} ` +
+            `nudge(s); the last one said "${hud().at(-1)?.trim() ?? 'nothing'}"`
+    );
+
+    // ---- and SAVE puts it where the next start-up reads ----------------------
+    const beforeSave = hud().length;
+    await tap(settings.down, settings.toSave);
+    await tap(settings.commit);
+    const written = await until(async () => {
+      const beat = beatsSince(beforeSave).find(
+        (r) => r.file === settings.saved
+      );
+      return beat ?? null;
+    });
+    const landed = written
+      ? await until(async () => {
+          const seen = await storage();
+          if (seen.files === null) return null;
+          const file = seen.files.find((f) => settings.files.includes(f.name));
+          return file &&
+            seen.queue.pending === 0 &&
+            seen.queue.inFlight === 0 &&
+            file.record === settings.recordMagic
+            ? { ...seen, file }
+            : null;
+        })
+      : null;
+    const beforeReload = hud().length;
+    check(
+      'C',
+      "the settings file is on the browser's own file system",
+      landed !== null,
+      landed
+        ? `${landed.file.name} holds ${landed.file.bytes} bytes framed ` +
+            `"${landed.file.record}", with nothing queued in wasm — written on ` +
+            `the beat that read "${written?.file}"`
+        : written === null
+          ? `no heartbeat in ${pollCeiling()} ms said "${settings.saved}" after ` +
+            `SAVE; the last one said "${hud().at(-1)?.trim() ?? 'nothing'}"`
+          : `the screen reported "${written.file}" but the OPFS root held ` +
+            `${JSON.stringify((await storage()).files)}, queued ` +
+            `${JSON.stringify((await storage()).queue)}`
+    );
+
+    // ---- the next page opens on it ------------------------------------------
+    await page.send('Page.navigate', { url });
+    await until(async () =>
+      evaluate(page, `document.readyState === 'complete'`)
+    );
+    await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 3 ? status : null;
+    });
+    const reopened = await until(
+      async () => beatsSince(beforeReload).at(0) ?? null
+    );
+    const restored =
+      written !== null &&
+      reopened !== null &&
+      reopened.gain === written.gain &&
+      reopened.gain < settings.unity &&
+      reopened.edits === 0;
+    check(
+      'C',
+      'a reloaded page opens on the gain the last one saved',
+      restored,
+      reopened === null
+        ? `no heartbeat in ${pollCeiling()} ms after the reload`
+        : `it came up at ${reopened.gain}% after ${reopened.edits} edit(s), ` +
+            `against the ${written?.gain}% the saving beat reported`
+    );
+
+    // ---- and the control: the same page with the store cleared --------------
+    // The queue is drained first. This screen writes only when SAVE is pressed,
+    // so there is no autosave to race — but a record the shim has taken and not
+    // yet written would reappear after the directory was emptied, and the
+    // control would then be reading a file this block created after wiping the
+    // one it meant to remove.
+    const settled = await until(async () => {
+      const queue = await evaluate(page, `crcbl.saves()`);
+      return queue.pending === 0 && queue.inFlight === 0 ? queue : null;
+    });
+    const wiped = settled
+      ? await evaluate(
+          page,
+          `(async () => {
+             const root = await navigator.storage.getDirectory();
+             const names = [];
+             for await (const [name] of root.entries()) names.push(name);
+             for (const name of names) await root.removeEntry(name);
+             const left = [];
+             for await (const [name] of root.entries()) left.push(name);
+             return { removed: names, left };
+           })()`
+        )
+      : null;
+    const cleared =
+      wiped !== null && wiped.left.length === 0 && wiped.removed.length > 0;
+
+    const afterWipe = hud().length;
+    await page.send('Page.navigate', { url });
+    await until(async () =>
+      evaluate(page, `document.readyState === 'complete'`)
+    );
+    await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 3 ? status : null;
+    });
+    const fresh = await until(async () => beatsSince(afterWipe).at(0) ?? null);
+    const opened =
+      cleared &&
+      fresh !== null &&
+      fresh.gain === settings.unity &&
+      fresh.edits === 0 &&
+      fresh.file === settings.untouched;
+    check(
+      'C',
+      'and the same page with the store cleared comes up at unity',
+      opened,
+      !cleared
+        ? `the OPFS root would not empty: removed ` +
+            `${JSON.stringify(wiped?.removed ?? null)}, left ` +
+            `${JSON.stringify(wiped?.left ?? null)}, queued ` +
+            `${JSON.stringify(settled)}`
+        : fresh === null
+          ? `no heartbeat in ${pollCeiling()} ms after the reload`
+          : `with ${wiped.removed.join(', ')} removed it came up at ` +
+            `${fresh.gain}% after ${fresh.edits} edit(s), reporting ` +
+            `"${fresh.file}"`
     );
 
     // **And the canvas gets its keyboard back.** Two navigations replaced the

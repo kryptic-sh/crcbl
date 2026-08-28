@@ -21587,27 +21587,20 @@ What that leaves:
   samples already call. Until then nothing in the workspace demonstrates that a
   saved gain reaches a gain stage: the round trip is proven as far as the key.
 
-- **The browser build is on the site, and its subject is not gated.** The demo
-  runs at `/demos/options/` and scores 44/44 in the browser gate, but every one
-  of those checks is a claim about the engine: it boots, it ticks, it draws, it
-  lets go of what it took. **Nothing in a browser has ever saved a setting and
-  read it back.** That is the half of this sample the plan calls the easy one to
-  get wrong — OPFS is the only browser backend, and where no store is installed
-  the settings silently do not persist. `SaveState` carries a `Nowhere` arm for
-  exactly that and nothing has ever reached it on a real platform.
+- **The `Nowhere` case has never been reached on a real platform.** The round
+  trip itself is gated in a browser as of 2026-08-28 — `EXPECTED.settings` in
+  `web/tools/browser-e2e.mjs` nudges a fader with `ArrowLeft`, saves, finds
+  `settings.toml` in the OPFS root, reloads onto the saved gain and then wipes
+  the store and requires unity back. What that block never sees is a page with
+  **no store installed at all**, which is `SaveState::Nowhere` and the failure
+  the plan calls the easy one to get wrong: the settings silently do not persist
+  and the screen is the only thing that can say so.
 
-  **What the check needs to be, and the precedent for it:** shard's `save` block
-  in `web/tools/browser-e2e.mjs` is the shape — drive the demo, reload the page,
-  and assert the state came back, with a store-cleared boot as the control that
-  stops "it resumed" passing for a build that always starts the same way. Here
-  that is: nudge a fader off unity with `ArrowLeft`, press `SAVE`, reload, and
-  read the gain off the first heartbeat; then clear the origin's OPFS directory
-  and reload again, and require every bus back at unity. The `file:` field of
-  `app::Screen::log_heartbeat` already reports where the write went, so the
-  reference reading is a heartbeat rather than a wall clock.
-
-  The `Nowhere` case is a second check and needs a page booted with no store
-  installed, which nothing on the site does today.
+  Reaching it needs a page whose shim skips `installOpfs`, which nothing on the
+  site does — every demo's `prepare()` installs both backends. The cheapest
+  shape is a query parameter the options shim reads, in the way
+  `web/demos/breach/main.js` reads `?map=`, since the gate already navigates
+  with one to boot a second configuration.
 
 - **The video and graphics halves are untouched** — milestones 2 and 3. No
   display mode, resolution, present mode or frame cap on the screen, and no

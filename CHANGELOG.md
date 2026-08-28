@@ -42,8 +42,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   **It runs in a browser too**, at `/demos/options/`, from the same build that
   runs natively. That half is the point of the sample rather than a bonus: a tab
   has no filesystem, so the settings file goes to the origin's OPFS store, and
-  the way that fails is silently. The browser gate runs it on every push like
-  every other demo.
+  the way that fails is silently. The browser gate drives the whole round trip
+  on every push — a fader nudged with the arrows, `SAVE`, `settings.toml` found
+  in the OPFS root, the page reloaded onto the gain it saved, and then the store
+  wiped and the reload required to come up at unity.
 
 - **Every sample now honours the player's frame-rate ceiling, and no sample had
   to be told to.** `GameGpu` gains `video`, which hands the `[engine.video]`

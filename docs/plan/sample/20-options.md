@@ -109,8 +109,9 @@ machinery. Verified against the tree on 2026-08-28:
   `web/pages/options.html` are the page, and both browser-gate jobs run it. Its
   `EXPECTATIONS` row is the only one in `web/tools/browser-e2e.mjs` marked
   `still` — a settings screen has nothing to animate, so group D asks the loop's
-  own frame counter for the claim the frame hash makes everywhere else. What the
-  gate does **not** yet do is save anything: see `docs/backlog.md`.
+  own frame counter for the claim the frame hash makes everywhere else. Its
+  `settings` block is the round trip itself, and it is the only place in the
+  workspace where a saved setting is read back after a reload.
 - **OPFS is the only browser storage backend**; `crates/crcbl-store/src/lib.rs`
   records that an IndexedDB fallback is still to come. Where no store is
   installed, settings are not persisted and a log line says so — which this
@@ -126,11 +127,13 @@ machinery. Verified against the tree on 2026-08-28:
    the user layer and reports where it went, a `RESET` that puts every bus back
    to unity, a start that opens the player's own file and places the faders from
    it, and a page at `/demos/options/` built from the same source and run by the
-   browser gate on every push. What is left of this milestone is **something to
-   hear** — the sample is silent, so a bus gain is a number the screen shows
-   rather than a level anyone can check by ear — and **a browser check of the
-   round trip itself**: every check the gate makes today is about the engine,
-   not about a setting surviving a reload. `docs/backlog.md` carries both.
+   browser gate on every push — which drives the round trip through the
+   keyboard, finds `settings.toml` in the OPFS root, reloads onto the saved gain
+   and then wipes the store and requires unity back. What is left of this
+   milestone is **something to hear**: the sample is silent, so a bus gain is a
+   number the screen shows rather than a level anyone can check by ear.
+   `docs/backlog.md` carries it, along with the one browser case still unreached
+   — a page with no store installed, which is `SaveState::Nowhere`.
 2. **The video half**: display mode, resolution, present mode, frame cap, and
    the requested-versus-resolved display of the clamp.
 3. **The graphics half**: the quality tiers over the technique ladders, the
