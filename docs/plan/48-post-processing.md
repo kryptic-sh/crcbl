@@ -30,12 +30,14 @@ landed in, so a frame that asked for no scaling is what it was before the pass
 existed. The filter is Catmull-Rom, sixteen taps, priced against bilinear in
 [43-render-standards.md](43-render-standards.md)'s §7.
 
-**The seam above the renderer is still missing.**
-[15-windowing.md](15-windowing.md) defines borderless as an internal render
-target upscale-blitted to the native surface and `ShellCaps::HW_UPSCALE` reports
-what a window system will do for free, but no settings key reads `render_scale`
-and no `Shell` carries a request for it. The knob is a method and nothing but a
-test calls it.
+**The seam above the renderer arrived 2026-08-28**:
+`[engine.video] render_scale` is read by `crcbl::settings::video`,
+`GpuContext::render_scale` carries it, and `apps/viewer` hands it to the
+renderer. What no `Shell` carries yet is the free half —
+[15-windowing.md](15-windowing.md) defines borderless as an internal target
+upscale-blitted to the native surface and `ShellCaps::HW_UPSCALE` reports what a
+window system will do for free, and that is still a definition without a
+request.
 
 - **HDR (MVP, lands with P7)**: scene renders to RGBA16F; lighting in linear HDR
   from the start (retrofitting HDR is repainting every material — do it the
@@ -145,7 +147,8 @@ test calls it.
 - **Bloom (P10)**: physically-plausible threshold-free downsample chain (Karis
   average), 5–6 mips, tent upsample, additive with scalar. Cheap, huge
   perceived-quality win — timed with the UI/debug polish phase so the profiler
-  HUD can show its cost honestly.
+  HUD can show its cost honestly. **Built 2026-08-23**, `RenderEffects::BLOOM`,
+  off unless a view asks; `docs/backlog.md` carries what the slice left.
 - Stack is data-driven per camera (RON: which passes, parameters) —
   games/samples tune without engine edits; settings UI (topic 14 P10) exposes
   quality toggles.

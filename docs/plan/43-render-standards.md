@@ -23,23 +23,24 @@ re-proposing it means arguing with that reason rather than with this table.
 ahead of two of the three comparands, and that is worth stating first because
 every gap below is easier to read against it.
 
-| Area                    | Here                            | Owner                                                                            |
-| ----------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
-| Geometry and visibility | **ahead**                       | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md), [25-lod.md](25-lod.md) |
-| Shadows                 | behind, ladder written          | [45-shadows.md](45-shadows.md)                                                   |
-| Ambient occlusion       | behind, ladder written          | [46-ambient-occlusion.md](46-ambient-occlusion.md)                               |
-| Reflections             | comparable for screen space     | [47-reflections.md](47-reflections.md)                                           |
-| Antialiasing            | behind, ladder written          | [49-antialiasing.md](49-antialiasing.md)                                         |
-| Irradiance probes       | first rung only                 | [50-irradiance-probes.md](50-irradiance-probes.md)                               |
-| **Materials**           | **far behind, nothing written** | [37-materials.md](37-materials.md), and §2 below                                 |
-| **Transparency**        | **absent, nothing written**     | §3 below                                                                         |
-| **Volumetrics**         | height fog and a froxel column  | [51-volumetrics.md](51-volumetrics.md), and §4 below                             |
-| Global illumination     | behind                          | §5 below                                                                         |
-| Post-processing         | behind                          | [48-post-processing.md](48-post-processing.md), §6                               |
-| Upscaling               | absent, contract without a pass | [15-windowing.md](15-windowing.md), §7                                           |
-| Decals                  | absent, planned                 | [33-decals.md](33-decals.md)                                                     |
-| Particles               | simulated, never drawn          | [20-particles.md](20-particles.md)                                               |
-| Sky and atmosphere      | absent                          | §8 below                                                                         |
+| Area                    | Here                                 | Owner                                                                            |
+| ----------------------- | ------------------------------------ | -------------------------------------------------------------------------------- |
+| Geometry and visibility | **ahead**                            | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md), [25-lod.md](25-lod.md) |
+| Shadows                 | behind, ladder written               | [45-shadows.md](45-shadows.md)                                                   |
+| Ambient occlusion       | behind, ladder written               | [46-ambient-occlusion.md](46-ambient-occlusion.md)                               |
+| Reflections             | comparable for screen space          | [47-reflections.md](47-reflections.md)                                           |
+| Antialiasing            | behind, ladder written               | [49-antialiasing.md](49-antialiasing.md)                                         |
+| Irradiance probes       | first rung only                      | [50-irradiance-probes.md](50-irradiance-probes.md)                               |
+| **Materials**           | **far behind**, ladder in §2         | [37-materials.md](37-materials.md), and §2 below                                 |
+| **Texture filtering**   | **one mip, nearest, uncompressed**   | §2's filtering subsection                                                        |
+| **Transparency**        | **absent**, argued                   | §3 below                                                                         |
+| **Volumetrics**         | height fog and a froxel column       | [51-volumetrics.md](51-volumetrics.md), and §4 below                             |
+| Global illumination     | behind                               | §5 below                                                                         |
+| Post-processing         | behind                               | [48-post-processing.md](48-post-processing.md), §6                               |
+| Upscaling               | spatial half built, temporal blocked | [15-windowing.md](15-windowing.md), §7                                           |
+| Decals                  | absent, planned                      | [33-decals.md](33-decals.md)                                                     |
+| Particles               | simulated, never drawn               | [20-particles.md](20-particles.md)                                               |
+| Sky and atmosphere      | a gradient, no atmosphere            | §8 below                                                                         |
 
 ## 1. What is already at or above the standard
 
@@ -72,18 +73,18 @@ Stated first, and with the same evidence discipline as the gaps.
   derivation. **The BRDF is not this engine's PBR gap** — §2 and §5 are, and
   that document's ladder is what closes them.
 
-## 2. Materials — the largest gap, and the one nothing yet plans
+## 2. Materials — the largest gap
 
 **What a current engine ships:** a metallic-roughness texture set — base colour,
 normal, occlusion-roughness-metallic packed, emissive — with alpha modes
 (opaque, mask, blend), and a tangent frame to sample the normal map in.
 
 **Where this one is**, read out of `crcbl_shaders::mesh::GpuMaterial`:
-`base_color`, `base_color_texture`, `metallic`, `roughness`, `tiling`,
-`tile_metres`. One texture, and it is the base colour.
+`base_color`, `base_color_texture`, `metallic`, `roughness`, `emissive`,
+`tiling`, `tile_metres`. One texture, and it is the base colour.
 `crcbl_shaders::mesh::MeshVertex` is position, normal, colour and one UV — **no
-tangent**. There is no emissive term anywhere in `shaders/mesh.slang`, and no
-alpha mode of any kind.
+tangent**. `emissive` is a factor with no page behind it, and there is no alpha
+mode of any kind.
 
 So: **no normal mapping.** That is the single largest visual gap in this
 renderer, and it is larger than every rung of the AO, shadow and AA ladders put
@@ -128,6 +129,104 @@ every `.crcblmesh` on disk. That is a version bump of the mesh format and a
 re-bless of the whole suite, and it is the user's call when to spend it — see
 [06-assets-scenes.md](06-assets-scenes.md) for the format's own compatibility
 rule.
+
+### Texture filtering — mips, anisotropy, compression
+
+**What a current engine ships:** every texture carries a full mip chain, built
+offline in linear light and shipped inside the asset; the sampler is trilinear
+with 8× to 16× anisotropy behind a settings row; and the bytes are
+block-compressed — BC7 for colour, BC5 for a two-channel normal, BC4 for a
+single-channel mask — with ETC2 or ASTC standing in on a device without BC.
+Filtering is not a technique a player names, which is why a survey walks past
+it: it is the difference between a floor that shimmers as the camera moves and
+one that does not.
+
+**Where this one is**, read out of `crcbl_render::forward` and
+`crcbl_render::texture`: the base-colour page is uploaded by
+`upload_texture_layers` at one mip level, its sampler is `Nearest` on all three
+filters with no anisotropy, and the page is `Rgba8UnormSrgb`, uncompressed.
+Every minified texel is therefore a point sample of the top level — the shimmer
+above — and every magnified one a block. The seam is already ahead of the
+renderer: `SamplerDesc` carries `mip_filter`, `lod_min`, `lod_max` and
+`anisotropy`; `Limits::max_sampler_anisotropy` and
+`Features::SAMPLER_ANISOTROPY` report what a device allows;
+`ImageDesc::mip_levels` and `Extent3d::full_mip_levels` size a chain; and
+`Format` holds BC1 through BC7 behind `Features::TEXTURE_COMPRESSION_BC`. None
+of it has a caller in the renderer.
+
+**What it would take**, in the order the dependencies fall — and none of it
+waits on this section's stride decision, which is what makes it the cheapest
+unblocked rung on this page:
+
+1. **The chain, built at import and uploaded whole.** `crcbl_scene::gltf_render`
+   already resamples every base-colour image onto the page's extent with an
+   alpha-weighted box filter in linear light — its `resample` — and a mip chain
+   is that filter run once per level down to one texel. So the importer produces
+   `Extent3d::full_mip_levels` levels per layer and `upload_texture_layers`
+   grows a form that takes them. **On the host, not in a compute pass** —
+   [06-assets-scenes.md](06-assets-scenes.md) and
+   [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) both named a compute
+   pass, and both are corrected (2026-08-29). Three reasons, each sufficient on
+   its own: a compute pass over an sRGB page needs a `UNORM` view alias over the
+   image, which is `ImageDesc::view_formats`, which does not exist, and
+   `docs/backlog.md` records that WebGPU refuses the reinterpretation without
+   it; a host filter is adds and one divide per texel, so the page's bytes are
+   identical on all four backends and the goldens hold, where a device-built
+   chain is four drivers' rounding; and offline is what every current engine
+   does anyway — the mips ship in the asset, and a compute pass is for a texture
+   the frame itself produced, of which this engine has none. Two rules the
+   filter keeps: average in linear light and re-encode, never average the
+   encodings (the importer's own comment says what that costs); and weight by
+   alpha so a transparent texel does not bleed. A non-colour page, when this
+   section lands one, averages its numbers plainly and **renormalises a normal
+   after averaging** — the mean of unit vectors is shorter than one, and the
+   length it lost is the roughness that [44-lighting.md](44-lighting.md)'s rung
+   4 exists to put back.
+2. **The sampler: trilinear and anisotropic.** `mag`, `min` and `mip` go
+   `Linear`, `lod_max` covers the chain, and `anisotropy` is the player's
+   `anisotropic_filtering` row clamped to `Limits::max_sampler_anisotropy` — a
+   value key on `render_scale`'s pattern rather than a `RenderEffects` bit, and
+   the first such key after it. The default is 8× where the device reports it
+   and 1× where it does not. **On WebGPU the reported limit is one**, by a
+   decision `docs/backlog.md` carries — the API has no query for the ceiling —
+   so the browser filters isotropically until that decision is revisited; the
+   specification's own text is that an ask above the platform's maximum is
+   clamped and never refused, which is the ground for reporting the desktop
+   figure there instead.
+
+   **What this costs the goldens is bounded and stated.** The specification
+   bounds the level-of-detail computation rather than fixing it and leaves the
+   anisotropic footprint to the implementation, so a minified textured surface
+   is the one place four rasterisers are _permitted_ to differ by more than a
+   last bit. The frames that hold a textured layer re-bless under
+   `Tolerance::RASTERISER`, and every exactness claim about a page — that its
+   bytes reach the device whole, that a row's layer index selects the layer —
+   stays on a magnified or `SampleLevel` read, where the filter is a bilinear
+   blend of four known texels and the answer is arithmetic. Which goldens carry
+   a textured layer is measured at the slice, not guessed here.
+
+3. **`texture_quality` as a `lod_min` clamp**, which is all the cheap form of
+   that key means: the top level or two of every chain go unread, the memory
+   they cost stays until residency exists, and the picture is what a smaller
+   page would draw. Topic 25's streaming is the expensive form and is not this
+   rung.
+4. **Block compression, at the bake tool and not before.** The device half is
+   done — `Format::Bc7RgbaUnormSrgb` for colour, `Bc5RgUnorm` for the
+   two-channel normal [44-lighting.md](44-lighting.md)'s rung 2 asks for,
+   `Bc4RUnorm` for a mask or a lone roughness — and the encoder is the whole of
+   the work: the workspace has none, and one is a new dependency and therefore
+   the user's decision. **The standard answer is KTX2 carrying Basis
+   Universal**, which is what glTF's `KHR_texture_basisu` names and what
+   three.js, Babylon and Godot import — one asset that transcodes at load to BC7
+   on a desktop and to ETC2 or ASTC on a device without BC. That matters here
+   because the browser is a first-class target and BC is an optional WebGPU
+   feature, so a BC-only pipeline ships uncompressed to part of the site. The
+   `gltf` crate this workspace resolves exposes no feature for that extension,
+   so the importer would read it out of the document's JSON by hand; and
+   `Format` has no ETC2 or ASTC variant, which is a seam change on the day a
+   device without BC is targeted. Until then a page is uncompressed and four
+   times its BC7 size — a memory figure rather than a picture, which is why this
+   rung is last.
 
 ## 3. Transparency — absent, structurally
 
@@ -199,7 +298,8 @@ and what that choice gives up.
 
 **Height fog alone is cheaper still** — one term in the tonemap's input, no new
 pass, no new resource — and it is most of the perceived benefit in an outdoor
-scene. It should land first for the same reason FXAA landed before SMAA.
+scene. It landed first, 2026-08-27, for the same reason FXAA landed before SMAA
+— `ForwardRenderer::set_fog` switches it on.
 
 **The `exp` this needs looked like a blocker and is not one — decided and
 answered 2026-08-27.** The analytic exponential-height-fog integral is `exp`
@@ -274,11 +374,12 @@ which matters, because that form reads correctly and is what a froxel pass
 reaches for first. Its failure direction is the visible one: more slices, more
 light.
 
-What is left is the frame — the scattering target, the pass that fills it, the
-integration along `z`, and the composite — plus the Slang mirror of both
-functions and the drift guard that holds it to this module.
-[51-volumetrics.md](51-volumetrics.md) is where each of those is decided, and
-the rung it belongs to.
+The frame followed — the scattering target, the pass that fills it, the scan
+along `z`, the composite, the Slang mirror of both functions and the drift guard
+that holds it to this module — as [51-volumetrics.md](51-volumetrics.md)'s rungs
+1a through 1b-ii, all built by 2026-08-28. What is left of §4 is that document's
+rungs 2 to 4: punctual lights in the medium, a 3D target with temporal
+reprojection, and a density field.
 
 ## 5. Global illumination
 
@@ -440,9 +541,10 @@ bits, surfaced as `GpuContext::render_scale`, and handed to the renderer by
 `apps/viewer`. It obeys the same clamp-downward rule the effect keys do — an
 absent key is `1.0`, which is the whole extent and no pass — and the reader
 clamps to the renderer's own `MIN_RENDER_SCALE..=1.0` so a typed-in extra digit
-cannot ask for a target larger than the surface. What is still missing is a
-writer: nothing in the workspace saves a setting, so the slider this exists for
-cannot yet persist what it moves.
+cannot ask for a target larger than the surface. The writer arrived the same day
+— `crcbl::settings::set_render_scale` beside the reader, saved through
+`SettingsSource::save` — and `apps/options` is the screen; what that screen does
+not yet carry is a row for this key.
 
 **The filter is Catmull-Rom**, sixteen taps, and it is Mitchell-Netravali at
 `B = 0, C = 0.5` — interpolating, so a texel that survives the scale reaches the
@@ -592,20 +694,22 @@ listed here so a survey of gaps does not read as a list of things to build.
 Ordered by benefit per unit of work, which is not the order of the sections
 above.
 
-| Rung                                                     | Why here                                                                                                                                                                                                                |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ~~Reserve the previous-transform slot in `GpuInstance`~~ | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved                                                                                                         |
-| ~~Exponential height fog~~                               | §4 — **built 2026-08-27**: `crcbl_shaders::fog` answers the `exp` question, two rows of the frame block carry it, `set_fog` switches it on                                                                              |
-| ~~Multi-scatter energy compensation~~                    | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                                                                                                                                   |
-| **Normal maps: tangent, page, sampling**                 | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                                                     |
-| **Emissive page** (the factor shipped 2026-08-27)        | §2 — rides the second texture page rung                                                                                                                                                                                 |
-| **Alpha-mask materials**                                 | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                                              |
-| ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                                                        |
-| ~~A gradient sky feeding ambient and the SSR fallback~~  | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame                           |
-| ~~The sun's shaft through the froxel column~~            | §4 — **built 2026-08-28**: the buffer, the scatter, the scan, the composite, the sun's phase-scattered radiance and the cascade lookup that occludes it — [51-volumetrics.md](51-volumetrics.md) rungs 1a through 1b-ii |
-| ~~Auto-exposure~~                                        | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads, the `AUTO_EXPOSURE` bit a view asks with, and the temporal roll between one frame's exposure and the next                           |
-| **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                                                                                                                             |
-| **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                                           |
-| **Specular antialiasing (roughness regularisation)**     | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                              |
-| Colour grading, DOF, lens artefacts                      | §6 — polish, after the curve exists to grade against                                                                                                                                                                    |
-| SSGI, temporal SSR, TAA, temporal upscaling              | §9's slot first; each is its own rung after it                                                                                                                                                                          |
+| Rung                                                                              | Why here                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ~~Reserve the previous-transform slot in `GpuInstance`~~                          | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved                                                                                                         |
+| ~~Exponential height fog~~                                                        | §4 — **built 2026-08-27**: `crcbl_shaders::fog` answers the `exp` question, two rows of the frame block carry it, `set_fog` switches it on                                                                              |
+| ~~Multi-scatter energy compensation~~                                             | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                                                                                                                                   |
+| **Mip chains at import, and a trilinear anisotropic sampler**                     | §2's filtering subsection — nothing about it waits on the stride, the importer's own resampler builds the chain, and it is the shimmer on every minified surface in every sample                                        |
+| **Normal maps: tangent, page, sampling**                                          | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                                                     |
+| **Emissive page** (the factor shipped 2026-08-27)                                 | §2 — rides the second texture page rung                                                                                                                                                                                 |
+| **Alpha-mask materials**                                                          | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                                              |
+| ~~Render scale and a blit~~                                                       | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                                                        |
+| ~~A gradient sky feeding ambient and the SSR fallback~~                           | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame                           |
+| ~~The sun's shaft through the froxel column~~                                     | §4 — **built 2026-08-28**: the buffer, the scatter, the scan, the composite, the sun's phase-scattered radiance and the cascade lookup that occludes it — [51-volumetrics.md](51-volumetrics.md) rungs 1a through 1b-ii |
+| ~~Auto-exposure~~                                                                 | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads, the `AUTO_EXPOSURE` bit a view asks with, and the temporal roll between one frame's exposure and the next                           |
+| **Blended transparency with GPU-sorted keys**                                     | §3 — the first rung here that touches the frame's structure                                                                                                                                                             |
+| **Specular IBL: prefiltered radiance and a BRDF LUT**                             | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                                           |
+| **Specular antialiasing (roughness regularisation)**                              | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                              |
+| **Block-compressed pages: KTX2 and Basis at the bake, BC7/BC5/BC4 on the device** | §2's filtering subsection — a bake-tool rung, gated on an encoder the workspace does not have and the user has not chosen                                                                                               |
+| Colour grading, DOF, lens artefacts                                               | §6 — polish, after the curve exists to grade against                                                                                                                                                                    |
+| SSGI, temporal SSR, TAA, temporal upscaling                                       | §9's slot first; each is its own rung after it                                                                                                                                                                          |

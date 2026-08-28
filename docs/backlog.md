@@ -9,11 +9,13 @@ Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
 techniques in `docs/plan/18-render-features.md`, and four sample plans were
 written to compare the rungs — `docs/plan/sample/17-mirrors.md`,
 `docs/plan/sample/18-sundial.md`, `docs/plan/sample/19-alcove.md` and
-`docs/plan/sample/20-options.md`. Two rungs are built — the antialiasing
-ladder's first, `FXAA 3.11 first`, and the reflection ladder's Hi-Z march, whose
-`Taken 2026-08-27` section in that topic now records what it predicted wrongly —
-and the rest of the ladders and all four samples are planned, not built. What
-follows is what the plans could not settle.
+`docs/plan/sample/20-options.md`. Most of the ladders' first rungs are built —
+FXAA, the Hi-Z march, GTAO, the shadow ladder through PCSS and its early-out,
+the ACES curve, auto-exposure, the froxel column, render scale, the gradient sky
+and multi-scatter compensation — and `docs/plan/43-render-standards.md`'s
+delivery table is the record of which. `apps/options` is sample 20; the other
+three samples are planned, not built. What follows is what the plans could not
+settle.
 
 ### What auto-exposure left owed (2026-08-29)
 
@@ -728,9 +730,10 @@ take the derivative route for tangents and pay nothing — which
 `43-render-standards.md` §2 rejects on mirrored UVs, not on determinism (see the
 2026-08-27 correction there).
 
-**Not blocked on this:** multi-scatter energy compensation, specular IBL, and a
-gradient sky. All three read the row as it stands, which is why `44-lighting.md`
-ranks them first.
+**Not blocked on this:** specular IBL, and the mip chain with its trilinear
+anisotropic sampler (`43-render-standards.md`'s filtering subsection). Both read
+the row as it stands; multi-scatter compensation and the gradient sky were not
+blocked either, and are built.
 
 ### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
 
@@ -821,18 +824,18 @@ housing.
 
 That topic was split into one document per technique — `44-lighting.md` through
 `50-irradiance-probes.md`, with `18-render-features.md` kept as the index that
-holds the interactions, the delivery table and the risks. Roughly a hundred and
-eighty doc comments, shader headers and test headers across `crcbl-shaders`,
-`crcbl-render`, `crcbl`, `crcbl-vk`, `apps/lantern`, `apps/shard` and
-`apps/breach` name `docs/plan/18-render-features.md` and then name a section —
-"'s shadow section", "'s screen-space reflections", "'s irradiance grid" — that
-now lives elsewhere.
+holds the interactions, the delivery table and the risks. A hundred and twenty
+citations in forty files (2026-08-29) — doc comments, shader headers and test
+headers across `crcbl-shaders`, `crcbl-render`, `crcbl`, `crcbl-vk`,
+`apps/lantern`, `apps/shard` and `apps/breach` name
+`docs/plan/18-render-features.md` and then name a section — "'s shadow section",
+"'s screen-space reflections", "'s irradiance grid" — that now lives elsewhere.
 
 **Nothing is broken**: the path still resolves, `tools/check-doc-citations.sh`
 passes, and topic 18's index table is one hop from any of those citations to the
 document it meant. They were left alone deliberately, on the rule that a move
-commit should be reviewable as a move: repointing them is a ~180-file diff whose
-every hunk is a string, and mixing it into the split would have buried the
+commit should be reviewable as a move: repointing them is a forty-file diff
+whose every hunk is a string, and mixing it into the split would have buried the
 split.
 
 **What it would take:** a mechanical pass mapping each citation's named section
@@ -849,10 +852,10 @@ arguing them; the rows below have a paragraph and no decision record.
 
 Specifically un-argued, and each needing its own topic before it is built:
 order-independent transparency and whether an approximation can be blessed at
-all under this workspace's golden discipline; the froxel volumetric-fog pass and
-what it does to the light-cluster grid's lifetime; specular IBL's prefiltered
-radiance cube and where its BRDF LUT is generated; and colour grading's LUT
-format and authoring path.
+all under this workspace's golden discipline; and colour grading's LUT format
+and authoring path. Two rows this entry named have since been argued — the
+froxel pass is `docs/plan/51-volumetrics.md`, and specular IBL is
+`44-lighting.md`'s rung 3, whose `DFG` half `crcbl_shaders::dfg` already cooks.
 
 **The one row that is a decision rather than a design** is reserving the
 previous-transform slot in `crcbl_shaders::mesh::GpuInstance`. It blocks TAA,
@@ -864,11 +867,10 @@ stride, and it needs the user's call on when to spend the re-bless.
 
 That test in `crates/crcbl-dx12/src/dxil.rs` says "Every shader is listed, not
 only the compute ones" and it is not true: `crates/crcbl-shaders/dxil/` holds
-twenty-eight shaders and the case table names about fifteen. The whole post
-stack is missing — `ssao`, `ssao_blur`, `ssr`, `ssr_blur`, `bloom_down`,
-`bloom_up`, `bloom_composite` — along with `grid`, `skinning`, `mesh_shader`,
-`mesh_cluster`'s siblings and the probe fixtures. `hiz` was added when it was
-built, which is what turned the gap up.
+thirty-three shaders and the case table names seventeen (2026-08-29). The post
+stack is most of what is missing, along with `grid`, `skinning`, the mesh-shader
+pair and the probe fixtures; `hiz` and `exposure` were added when they were
+built, which is what keeps turning the gap up.
 
 **What it costs:** the failure the test exists to catch — a root signature
 naming registers the shader does not use, rejected at pipeline creation on a
@@ -1031,9 +1033,9 @@ the loop needs is already carried.
 **A writer with a screen behind it arrived on 2026-08-28**: `apps/options` edits
 the six `[engine.audio]` bus gains and saves them through
 `SettingsSource::save`, so `save_platform` has a caller a player can reach.
-**What is still owed is a caller for the other keys** — nothing writes
-`[engine.video]` from a screen, and the eight `Named` keys still face the
-ceiling question below.
+`frame_limit` joined it on the same screen the same day. **What is still owed is
+a row for the rest** — `render_scale` and the effect bits have writers and no
+screen — and the eight `Named` keys still face the ceiling question below.
 
 The keys still `Named` face a design question that `render_scale` and
 `frame_limit` did not: `docs/plan/15-windowing.md`'s rule 1 says
@@ -1404,9 +1406,10 @@ particle buckets. Additive effects do not need it.
 
 **Not built, and correctly marked post-MVP.** §3.3 asks that the compute pass be
 left "structured so it can be inserted (visibility buffer slot in the pass
-inputs)". There is no depth pyramid, no Hi-Z and no two-phase pass in
-`crcbl-render` — `grep -rni "depth pyramid|hi-z|occlusion cull"` over
-`crates/crcbl-render/src/` returns nothing.
+inputs)". There is no occlusion pass and no two-phase cull in `crcbl-render`.
+**A Hi-Z pyramid does exist since 2026-08-27** — `hiz.slang`, built for the SSR
+march — so the pyramid half of the technique is in the tree and what is absent
+is the cull that reads it.
 
 **Coverage gap, stated plainly:** whether `crcbl_render::draw_gen`'s pass
 structure actually admits the insertion was **not** verified. The three-dispatch
@@ -6240,10 +6243,10 @@ Three things it did not settle:
   bloom is a lens. If it should be on by default instead, that is a re-bless of
   every forward golden in the tree on four backends, and its own slice.
 - **`apps/lantern` cannot show the effect it now ships.** It has no `--no-bloom`
-  flag and no menu row, and its stack is `DEFAULT_STACK`, so the lighting
-  fixture draws no bloom. Giving it the flag is small; giving it a golden with
-  bloom in it is the re-bless above in miniature and would want the firefly
-  fixture first.
+  flag and no menu row, and neither of its stacks carries `BLOOM`, so the
+  lighting fixture draws no bloom. Giving it the flag is small; giving it a
+  golden with bloom in it is the re-bless above in miniature and would want the
+  firefly fixture first.
 
 ### Two of the four teardown reporters only warn, and both are deferred
 
@@ -16994,12 +16997,14 @@ still _one_ extent for every layer. Real content does not look like that. See
 "The base-colour page is still `ArrayPages`" below for what stands between here
 and the bindless form.
 
-**No mip chain, and the sampler is nearest because of it.** §3.2 makes mip
-generation a compute pass of its own and it is not written, so
+**No mip chain, and the sampler is nearest because of it.**
 `upload_texture_layers` uploads `mip_levels: 1` and `forward`'s base-colour
 sampler filters nearest — a filtered read of a page with no mips buys a shimmer
-rather than a smoother picture. The first minified material texture is what
-makes the compute pass worth writing.
+rather than a smoother picture. **The plan is written (2026-08-29)**:
+`docs/plan/43-render-standards.md`'s filtering subsection builds the chain at
+import with `gltf_render`'s own resampler and uploads it whole — not the compute
+pass §3.2 named, for reasons recorded there — then goes trilinear and
+anisotropic, and none of it waits on the stride decision.
 
 **glTF base-colour import landed; every other map is still unimported.**
 `crcbl-scene`'s `gltf_render` decodes the `baseColorTexture` of every material
@@ -18044,9 +18049,6 @@ All were real, all are fixed, and all three are invisible to a mouse:
 The list, the froxel grid and the sun-as-a-row landed; the decision below it is
 recorded in `docs/plan/18-render-features.md`. What is left:
 
-- **Both closed**: `Scene::Spot` draws a cone and asserts its shape by pixels,
-  and the froxel bound is a cone as well as a sphere (144 froxels to 91 on a
-  narrow spot, every golden unmoved).
 - **`spot_cone` is a linear ramp in cosine space, not a smoothstep** — worth
   knowing before someone "fixes" the falloff to match a description that was
   never in the code.
@@ -18593,7 +18595,7 @@ The atlas is a fixed `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` tile grid,
 `shadow::Selection` decides who gets tiles, `shadow::spot_matrix` and
 `shadow::point_matrix` build reversed-Z perspective projections, and
 `mesh.slang`'s `spot_visibility` and `point_visibility` sample them through the
-same 3×3 PCF kernel the cascades use. Decisions taken, so they are not
+same `tile_pcf` disc the cascades use. Decisions taken, so they are not
 re-argued:
 
 - **Two budgets, because they buy different things.** `LIGHT_TILES` is atlas
@@ -18644,28 +18646,6 @@ re-argued:
 
 What is left:
 
-- **Fixed: `cluster_survives` carried a mesh-space radius into a world-space
-  test.** This and the "large open box stops drawing" entry were **one bug seen
-  from two ends** — a cluster's bounding radius was not scaled by the instance
-  transform, so a scaled instance's clusters were rejected while the instance
-  itself was correctly kept. Both files documented it as safe because
-  `GpuInstance::transform` "is rigid", and that claim was **already false in two
-  shipped scenes**: the open-box floor's true world radius is 3.10 against a
-  local 0.71, and `Scene::Spot`'s floor 4.24 against 0.87.
-
-  The radius is now multiplied by `max_stretch`, the square root of the largest
-  absolute row sum of `BᵀB` — an upper bound on the basis's largest singular
-  value that is **exact** for any rotation-then-scale and needs no contract
-  about what callers may pass, which is the point: the old code needed one and
-  did not have it. It is `1.0` for a rigid transform, so nothing previously
-  correct moved and no golden changed. The transformed cone axis is normalised
-  in the same function for the same reason — unnormalised, `dot(axis, d)` scaled
-  with the transform while the radius term did not, so the same shape at two
-  sizes got two answers.
-
-  **Only the amplification path was affected** — `IndirectCount` drew the box at
-  every offset — which is why the earlier note said "both paths" and was wrong.
-
 - **The cube's face seams are unpadded, and the plan's mitigation is not
   built.** `tile_pcf` clamps taps half a texel inside the tile, so a receiver
   within one texel of a face boundary re-samples its own edge texel instead of
@@ -18692,44 +18672,6 @@ What is left:
   is byte-identical through both the 2026-08-23 and 2026-08-26 budget changes
   and `every_scene_records_the_passes_it_names…` expects the extra triples —
   worth knowing before reading that scene as unshadowed.
-
-## P7B could not start as written: the engine has one light
-
-Surveying P7B before delegating it found that `docs/plan/18-render-features.md`
-names "CSM for sun, single map for spot, cube for point" while **the engine has
-exactly one light** — a single `DirectionalLight` carrying a direction and a
-colour. No light list, no point or spot lights, no light culling, and **no
-specification anywhere** of how many lights there are or how they are gathered:
-grepping topic 18 and topic 3 for clustered, tiled, Forward+, light list or
-light culling returns nothing. So "spot and point shadows" would have meant
-shadowing lights that have no representation.
-
-**Decided and written into topic 18: clustered forward.** Lights are an SSBO of
-rows like instances and materials, and a compute pass assigns them to a froxel
-grid the fragment stage indexes. The reasoning is on the record there; the short
-form is that tiled/Forward+ degrades badly over depth range and the samples that
-motivate lighting are exactly that shape, deferred conflicts with two rules
-already locked in that topic (one BRDF shared with the ray-traced twin, one post
-stack after either path) and would make the raster path structurally unlike its
-twin, and clustered forward needs nothing of a device — a compute pass and two
-storage buffers — so it is the same code on all four backends, which is the
-constraint every other path here is held to.
-
-Two things that follow and are worth holding to:
-
-- **A directional light becomes a row too**, flagged as affecting every cluster,
-  so the sun stops being a special case in the shader.
-- **Cluster overflow is counted, not dropped silently** — it surfaces through
-  topic 40's counters, because a scene that overflows should be visible in the
-  panel rather than mysteriously dark.
-
-**Left undecided on purpose**, each wanting the list to exist first:
-shadow-atlas allocation across light types, the rule choosing which lights get
-maps (nearest, brightest, largest screen influence), and whether point lights
-use a cube map or six atlas tiles.
-
-**So the P7B order is: the light list first, then shadows for the types it
-introduces**, not the other way round.
 
 ## Decision needed: `taiki-e/install-action` is a single point of failure 17 times over
 
@@ -19539,33 +19481,31 @@ left:
 ## The GGX slice: what it left owed (2026-08-13)
 
 `GpuMaterial` gained `metallic` and `roughness` into the row's own padding
-(`MATERIAL_STRIDE` is still 32), `mesh.slang` shades with one Cook-Torrance GGX
-lobe driven by them, and `SPECULAR_POWER`/`SPECULAR_STRENGTH` are gone. The
-decision and its two consequences are written up in
-`docs/plan/18-render-features.md`. What this session did not finish, decided
-against, or found on the way:
+(`MATERIAL_STRIDE` was 32 then; emissive took it to 48 on 2026-08-27),
+`mesh.slang` shades with one Cook-Torrance GGX lobe driven by them, and
+`SPECULAR_POWER`/`SPECULAR_STRENGTH` are gone. The decision and its two
+consequences are written up in `docs/plan/18-render-features.md`. What this
+session did not finish, decided against, or found on the way:
 
 - **A metal is black until something reflects in it, and that is the model.**
   Ambient scales the diffuse albedo and a conductor's is zero, so a fully
-  metallic surface out of every light's reach shades black. Nothing regresses —
-  `GpuMaterial::UNTINTED` is `metallic 0.0` and no scene in the tree sets one
-  higher — and the row that closes it is **screen-space reflections**, with
-  irradiance probes behind it, both P7B in that file's delivery table. Until one
-  of them lands, an author who reaches for `metallic 1.0` gets a black object
-  and is not wrong about the shader.
+  metallic surface out of every light's reach shades black. **Both rows that
+  close it have landed** — screen-space reflections and the probe fallback
+  behind them — so `apps/lantern`'s brass reads its room; with `REFLECTIONS` off
+  it is black again, coherently, and an author who sees that is not wrong about
+  the shader.
 - **A zeroed material row is no longer exactly black.** It is `metallic 0.0`, so
   its `F0` is the dielectric 0.04 and it carries a mirror-sharp four-per-cent
   highlight where a light happens to reflect off it. Still nothing anyone would
   mistake for an authored material, and `GpuMaterial`'s docs say so — but the "a
   row nobody wrote shades black" contract is now "shades black apart from a
   glint".
-- **The importer reads neither `metallicRoughnessTexture` nor
-  `baseColorTexture`.** `crcbl_scene::gltf_import` takes all three _factors_ off
-  the one `pbr_metallic_roughness()` accessor and leaves both images alone, for
-  the reason the base-colour one was already left: nothing here decodes an
-  image, uploads one, or owns a layer of the renderer's page. The gloss map is
-  the one whose absence is now _visible_ — a document that varies roughness over
-  a surface arrives with the factor applied flat across it.
+- **The importer reads `baseColorTexture` now and still not
+  `metallicRoughnessTexture`.** `crcbl_scene::gltf_render` decodes the first
+  onto the page; the second waits on a linear page, which is the stride decision
+  above. The gloss map is the one whose absence is _visible_ — a document that
+  varies roughness over a surface arrives with the factor applied flat across
+  it.
 - **An imported default material is no longer `GpuMaterial::UNTINTED`**, and
   that is deliberate. glTF defaults a material to `metallic 1.0, roughness 1.0`;
   the engine's neutral row is a dielectric at half roughness. The importer
@@ -19644,11 +19584,10 @@ against 1.003.
   works as the control. The consequence is that the roughness edit had to go on
   the _tinted_ row, so `material_rows`' "one row and two single-column edits"
   invariant is now "two edits, neither of which can be mistaken for the other".
-- **Not covered: a metal.** No scene sets `metallic` above zero, so the `F0`
-  interpolation and the `1 - metallic` on the diffuse albedo are compiled,
-  type-checked and never exercised by a rendered pixel. The first scene with a
-  conductor in it is what would test them, and it wants SSR to look like
-  anything.
+- **A metal is covered by `apps/lantern` alone.** Its brass block and mirror
+  panel are fully metallic rows under a golden, so the `F0` interpolation and
+  the `1 - metallic` on the diffuse albedo are exercised there; no
+  `crcbl::screenshot` scene sets `metallic` above zero.
 - **Not covered locally: Metal, D3D12 and wasm.** The lobe was run on lavapipe,
   radv and wgpu-on-radv. `msl/mesh.metal` and `dxil/mesh.fragmentMain.dxil` were
   regenerated and compile, and CI is the only thing that can say the frame they
@@ -19772,14 +19711,12 @@ room produced. `docs/plan/sample/13-lantern.md` carries the status.
 
 ### Findings the first real room produced
 
-- **The sun's shadow peter-pans at contacts.** A lit strip along the foot of
-  every wall the sun should be shadowing, and a sawtoothed band at the head of
-  the back wall where the ceiling should be. **Diagnosed and largely fixed** —
-  see "The sun's shadow peter-pans on a facet seam, at 0.26 m (2026-08-14)"
-  below. It was one defect rather than the two this bullet used to claim, and
-  the strip was 0.60 m rather than the "metre wide" it said, a figure that had
-  reached `room.rs`'s `SHADED_FLOOR` doc comment and is corrected in both
-  places.
+- **The sun's shadow peter-panned at contacts, and it is closed.** A lit strip
+  along the foot of every wall and a sawtoothed band at the head of the back
+  wall; two bias slices took the strip 0.60 m → 0.26 m and
+  `docs/plan/45-shadows.md`'s seventh decision — the normal offset, 2026-08-28 —
+  took the rest. What it left is "The normal offset scallops one silhouette's
+  foot" above, and "What the sun's shadow bias still leaves open" below.
 - **A single-quad wall casts no shadow at all.** Back faces are culled in the
   shadow pass as well as the colour one, so an inward-facing quad is invisible
   to the sun. lantern's first frame was an evenly lit floor with a window that
@@ -19948,95 +19885,43 @@ point. **Nothing was retuned.**
   AO. Anyone repeating this measurement must take it on a wall whose foot the
   sun does not reach, which is why the numbers above are from the back wall.
 
-## The sun's shadow peter-pans on a facet seam, at 0.26 m (2026-08-14)
+## What the sun's shadow bias still leaves open (2026-08-28)
 
-Two slices have run at this. The bias was re-denominated from cascade clip depth
-into cascade texels (`DEPTH_BIAS_TEXELS`, `sun_visibility`), then its slope term
-was moved from the interpolated shading normal onto the rasterised facet
-(`geometric_normal_of`, `shadow_slope`). `apps/lantern`'s wall-foot strip went
-0.601 m → 0.382 → 0.256, and the band down the back wall's left edge 0.579 →
-0.373 → 0.244. Both shipped. What is left is below.
+Three slices ran at the sun's peter-panning in `apps/lantern`. The bias was
+re-denominated from cascade clip depth into cascade texels, its slope term was
+moved from the shading normal onto the rasterised facet (`geometric_normal_of`),
+and then `docs/plan/45-shadows.md`'s seventh decision replaced the slope-scaled
+depth move with a normal offset (`shadow_normal_offset`). The wall-foot strip
+went 0.601 m → 0.382 → 0.256 across the first two, and the seventh decision's
+own table records the strip and the cornice lift gone after the third. **This
+entry predicted twice and was wrong twice**: that the slope constant would fall
+to half a texel once it read the facet (it fell to three), and that nothing
+cheap would take the strip below 0.26 m (a sideways move for two derivatives
+did). The facet-seam account of why three texels were needed was inference from
+pictures, never instrumented, and the seventh decision made it moot.
 
-### What the second slice found, against what this entry predicted
+What is still open — and none of it was re-measured after the normal offset:
 
-**This entry predicted the constant would fall to about half a texel once the
-slope read the geometric normal. It did not — it fell from 6.0 to 3.0.** The
-prediction was wrong in an informative way, and the reason is a second artefact
-the first diagnosis did not see.
-
-The geometric normal removes the _broad cross-hatch_ over the dunes' valley
-floor, which is real and is what six texels were paying for. Underneath it is a
-**facet seam**: adjacent triangles of a tessellated surface climb at different
-rates, each is biased by its own slope, and the texel their shared edge falls in
-stores the steeper one's depth. No slope read off either facet predicts the
-other's, so a constant still covers it — a smaller one. Measured, slope
-coefficient held at 2.0:
-
-| `DEPTH_BIAS_TEXELS` | lantern's strip | dunes, shading `N` | dunes, facet `Ng`   |
-| ------------------- | --------------- | ------------------ | ------------------- |
-| 0                   | 0.128 m         | heavy cross-hatch  | seam on most edges  |
-| 1                   | 0.170 m         | —                  | seam on some edges  |
-| 2                   | 0.213 m         | faint cross-hatch  | a few isolated dots |
-| 3 (shipped)         | 0.256 m         | —                  | clean               |
-| 6 (was)             | 0.382 m         | clean              | clean               |
-
-Shipped at 3.0 with **no margin above it**, deliberately unlike the 6-over-5 it
-replaced: six covered an unexplained shortfall, three covers a bounded and
-understood one, so margin here is lantern's strip bought back for nothing. 4.0
-would cost about 0.29 m if that judgement is ever revisited.
-
-**The facet-seam mechanism is inference from the pictures, not instrumented.**
-What is measured is that the broad hatch goes and a dotted hairline on triangle
-edges appears in its place; the account of why fits and was not confirmed by
-reading the shadow map.
-
-### What would take the strip below 0.26 m
-
-Nothing cheap. The remaining constant is covering a real quantity, so lowering
-it alone brings the seam back — the table is the evidence. Removing the seam
-means biasing per-edge rather than per-facet, which nothing in the tree does and
-which is a research task rather than a slice. **Recorded as the floor of this
-approach** rather than as work: 0.256 m on a 0.15 m shell is a shadow that still
-detaches, and the next real gain is more likely to come from the shadow map's
-resolution at the contact than from the bias.
-
-### Still open
-
-- **The sunlit shaft over-reaches its sill edge by 0.185 m**, unexplained by the
-  bias at any denomination — the sill silhouette is 2.99 m from the receiver.
-  Suspected sub-kernel occluder, the sill's top face being narrower than the PCF
-  footprint. **Not measured**, and untouched by either slice.
-- **The cornice metric never reconciled between the two slices.** The first
-  reported the band at the back wall's head going 112 luma → 5.7; the second,
-  measuring peak luma in the band over the wall below it, read 61 on the
-  _unmodified_ tree and 21 after. The second slice's pair is matched and
-  reproducible; the first's statistic was not recorded and could not be
-  recovered, and the figure has been dropped from `CHANGELOG.md`. **Only the
-  second pair should be quoted.**
-- **Cascade 0 is still unmeasured** across all of this. Every artefact measured
-  is in cascade 1 — the nearest floor point the fixed camera reaches is 4.74 m
-  against a 4.699 m split.
+- **The sunlit shaft over-reached its sill edge by 0.185 m** under the old bias,
+  unexplained by it at any denomination — the sill silhouette is 2.99 m from the
+  receiver. Suspected sub-kernel occluder, the sill's top face being narrower
+  than the filter footprint. Whether the rotated disc or the normal offset moved
+  it is unmeasured.
+- **Cascade 0 is unmeasured** across all of this. Every artefact measured is in
+  cascade 1 — the nearest floor point the fixed camera reaches is 4.74 m against
+  a 4.699 m split.
 - **The geometric normal's sign was measured on SPIR-V/radv only.** It is
   derived from the shading normal rather than hard-coded, which makes the other
-  three targets correct by construction; none of them was run.
-- **One backend at the time; the shadows are under a cross-backend compare
-  now.** Both slices were tuned on vk on radv and cross-checked on lavapipe,
-  which improved slightly on each. `wgpu` no longer exists, and mtl and dx12
-  were not run for either change. **That gap has since closed from the other
-  direction, re-read 2026-08-23**: `pages.yml` runs
-  `web/run-cross-backend-e2e.sh --reference vk --expect-fail ssr,ui` on Linux
-  and `--reference mtl` on macOS, and `spot_shadow` and `point_shadow` are both
-  in `apps/render-harness`'s `SCENES`, so every Pages run holds the browser's
-  shadows against a live native render rather than against a committed image.
-  The `ssr`/`ui` exception is the SwiftShader-against-lavapipe pairing, not the
-  shadows.
-
-  What that does **not** do is validate the bias: it compares two of our own
-  implementations against each other, so a constant that is wrong in the same
-  way on both agrees perfectly. The peter-panning above is exactly that kind of
-  quantity, and no cross-backend gate can see it. dx12 has no leg, and will not
-  get one while it is deferred.
-
+  three targets correct by construction; none of them was run for it. The
+  cross-backend gate `pages.yml` runs — `web/run-cross-backend-e2e.sh` against
+  vk on Linux and mtl on macOS, with `spot_shadow` and `point_shadow` in
+  `apps/render-harness`'s `SCENES` — holds the browser's shadows against a live
+  native render, but it compares two of our own implementations, so a bias wrong
+  the same way on both agrees perfectly. dx12 has no leg while it is deferred.
+- **Only one pair of cornice figures should be quoted**: the seventh decision's
+  78.3 → 11.7 luma. The first slice's 112 → 5.7 was never recorded reproducibly
+  and was dropped from `CHANGELOG.md`; the second's 61 → 21 is the slope-bias
+  era and superseded.
 - **The dunes acne grading is visual**, backed by amplified difference maps. A
   radius-4 high-pass misses the cross-hatch entirely — its wavelength is tens of
   pixels — and a deficit-against-clean-reference measure conflates acne with
@@ -20093,15 +19978,14 @@ these crates are ever published in earnest.
 The design is `docs/plan/18-render-features.md`'s "Irradiance probes: the
 design" — a static grid of L1 spherical-harmonic probes in a read-only storage
 buffer, adding no render pass, added to `frame.ambient` for diffuse and returned
-by an SSR miss for specular. Read it first; this is only the order to build it
-in and the decisions still open.
+by an SSR miss for specular. Read it first; all slices are built and both of its
+open questions are taken, so what stays here is the record and the limits.
 
-All slices are built. The seam still permits a read-only storage binding of a
-host-visible buffer, and appending the mesh binding after
-`AMBIENT_OCCLUSION_BINDING` needed no `mesh_cluster.slang` mirror for the same
-reason occlusion did not.
+The seam still permits a read-only storage binding of a host-visible buffer, and
+appending the mesh binding after `AMBIENT_OCCLUSION_BINDING` needed no
+`mesh_cluster.slang` mirror for the same reason occlusion did not.
 
-### Decisions
+### Decisions, both taken
 
 - **Q1: does the probe half of the environment specular evaluate above
   `ROUGHNESS_CUTOFF`?** **Resolved yes.** A wide lobe is where the low-frequency
@@ -20204,8 +20088,9 @@ The room is now wide enough to crop those `±X` strips while retaining the `±Z`
 walls as context. That changes no measured floor point, probe row, tolerance, or
 semantic assertion. The centre is still compared against both endpoints, and the
 widened-to-room negative control still fails on an 11.60-level endpoint-region
-change against its 0.5-level flatness budget. Only the next WARP run can confirm
-the crop.
+change against its 0.5-level flatness budget. **The crop held**:
+`dx12 e2e (software adapter)`'s ForwardRenderer step runs `render_e2e` on WARP,
+and it has been green with `Scene::Probes` in it since.
 
 ## The Pages browser gate fails on the runner's GPU stack, not on the code
 

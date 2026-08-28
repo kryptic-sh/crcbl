@@ -120,8 +120,11 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
 - Import happens at load time in MVP (no offline bake step required); the
   `AssetSource` seam is where `crcbl bake` output slots in without touching
   consumers.
-- Textures: sRGB/linear handling correct from the start; mip generation on
-  upload (compute pass — GPU-side, per the round-trip principle).
+- Textures: sRGB/linear handling correct from the start. Mip generation is at
+  **import, on the host, in linear light** — corrected 2026-08-29; this line
+  used to name a compute pass on upload, and
+  [43-render-standards.md](43-render-standards.md)'s filtering subsection says
+  why that is the wrong first form here.
 
 ## Hot reload (dev builds)
 
@@ -188,7 +191,10 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
   "mipgen in a compute pass" cannot write sRGB directly. Corrected: create a
   `UNORM` **image view alias** over the sRGB image and do the encode/decode
   manually in the compute shader (the standard approach), or fall back to
-  render-pass downsampling. Stated so it isn't discovered at P9.
+  render-pass downsampling. Stated so it isn't discovered at P9. **Moot for the
+  import path since the 2026-08-29 correction above** — the chain is built on
+  the host and uploaded whole; this note binds only a texture the frame itself
+  produces, and none exists.
 
 ## Landed: task 2 (2026-08-11)
 

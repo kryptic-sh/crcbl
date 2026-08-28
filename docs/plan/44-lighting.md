@@ -294,6 +294,11 @@ rather than of the material asset:
   transcendental would not be, and reconstructing it means a BC5-class two-
   channel format holds the map at half the bytes with more precision per
   channel. The neutral texel §2 names as `(0.5, 0.5, 1.0)` becomes `(0.5, 0.5)`.
+- **The pages' mips, sampler and compression are
+  [43-render-standards.md](43-render-standards.md)'s filtering subsection**, and
+  one line of it is the shading model's: a normal page's mips are renormalised
+  after averaging, and the length a normal loses in that average is the
+  roughness rung 4 puts back.
 
 ### Rung 3 — Specular IBL by the split-sum approximation
 

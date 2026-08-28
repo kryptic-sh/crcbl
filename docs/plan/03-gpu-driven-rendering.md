@@ -136,9 +136,12 @@ layer is four unequal texels rather than a flat colour, so the frame also fails
 if the texture coordinate never reached the fragment stage.
 
 Still absent: every other texture slot a material could have, and the mip chain
-that makes a page filterable — mip generation is a compute pass and a slice of
-its own, which is why the page's sampler is nearest. `docs/plan/37-materials.md`
-owns the shape a real material takes.
+that makes a page filterable — the chain is built at import and uploaded whole,
+and the sampler goes trilinear and anisotropic with it, which is
+`docs/plan/43-render-standards.md`'s filtering rung (2026-08-29; the compute
+pass this line used to name is declined there). Until it lands the page's
+sampler is nearest. `docs/plan/37-materials.md` owns the shape a real material
+takes.
 
 The table is one buffer with no ring, unlike the instance array beside it: a
 material is written when it is created, which is the mesh table's lifetime, so
