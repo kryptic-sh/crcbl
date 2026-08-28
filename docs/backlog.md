@@ -112,6 +112,38 @@ What the early-out left owed:
   number — three would cost less and leave a wider blind gap, six more and leave
   less — was not swept, because no scene in the tree distinguishes them.
 
+### The browser gate's per-step cap is the wrong instrument (2026-08-28)
+
+Five of the fourteen demo steps in the Pages workflow's `build the demo site`
+job have now had their `timeout-minutes` raised from 10 to 20 — quarry, lantern,
+breach, shard and, on 2026-08-28, puppet. Every one of those raises followed the
+same failure: **the step reported all of its checks green and was then killed on
+wall clock**, because `web/tools/browser-e2e.mjs` scales its own per-check
+budgets to the machine it is on. A slower frame stretches the run rather than
+failing it, so the cap cannot say "too slow" — only "out of time" — and the job
+it kills is the one that uploads the site.
+
+puppet's own log names the mechanism: "two HUD lines 24982 ms apart, in 44854 ms
+— every later budget scaled 25.0x". The runner has no GPU, its software
+rasteriser drives the tick at a twenty-fifth of real time, and every check that
+waits on simulated progress waits in wall-clock multiples of that. The shadow
+filter's early-out took 27% off the forward pass on two adapters and moved
+puppet's step by one second (612s to 613s), which is the same finding from the
+other side: what these steps spend is simulation, not picture.
+
+**What is not fixed:** a cap is still the only thing that fires, so a demo that
+genuinely hangs and a demo that is merely slow are the same red, ten or twenty
+minutes later. What would distinguish them is a budget the driver itself
+enforces — it already measures its own scale factor, so it could fail on the
+factor rather than on the clock — or a per-demo wall-clock figure recorded and
+compared run to run. Neither exists.
+
+**Coverage gap this leaves:** `sparks` has not completed in that job since
+`cec27b3`, where it took 236s, so it has never run under the rotated disc, PCSS
+or GTAO. It was deliberately left at 10 rather than raised on a guess — puppet
+grew by a factor of 1.3 across those rungs and 236s would need 2.5 — but that is
+arithmetic, not a measurement, and the step has been skipped in every run since.
+
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 
 `docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. Two halves of

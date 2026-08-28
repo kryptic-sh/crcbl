@@ -418,10 +418,34 @@ jobs:
         timeout-minutes: 10
         run: CRCBL_WEB_E2E_DEMO=bracket ./web/run-browser-e2e.sh
 
+      # **Twenty, and it is the fifth demo to need it.** puppet timed out here
+      # twice in a row — 612s on `13b5883` and 613s on `ef8a47d`, each with
+      # every one of its checks green and the kill landing mid-group-F — and
+      # both runs took the site down with them, because this job is the one
+      # that uploads it. The comment above breach already priced puppet at 468s;
+      # that number is from before the shadow ladder and GTAO and is no longer
+      # what this step takes.
+      #
+      # **The stretch is the simulation, not the picture.** puppet's own log
+      # says it: "two HUD lines 24982 ms apart, in 44854 ms — every later budget
+      # scaled 25.0x". The runner has no GPU, so its software rasteriser drives
+      # the tick at a twenty-fifth of real time and every check that waits on
+      # simulated progress waits in wall-clock multiples of it. The shadow
+      # filter's early-out, which took a quarter off the forward pass on two
+      # adapters, moved this step by one second across those two runs — which is
+      # the same finding from the other side.
       - name: Render puppet in a real browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=puppet ./web/run-browser-e2e.sh
 
+      # **Ten, and deliberately not raised with its neighbour above.** sparks has
+      # not completed in this job since `cec27b3`, where it took 236s — every
+      # run after that one died at quarry, lantern or puppet before reaching it
+      # — so it has never run under the shadow ladder or GTAO. Raising it too
+      # would have been a guess, and the arithmetic says a poor one: puppet grew
+      # by a factor of 1.3 across those rungs, and 236s would have to grow by
+      # 2.5 to reach this ceiling. The number to replace this paragraph with is
+      # the one its next green run prints.
       - name: Render sparks in a real browser
         timeout-minutes: 10
         run: CRCBL_WEB_E2E_DEMO=sparks ./web/run-browser-e2e.sh
@@ -430,7 +454,9 @@ jobs:
       # fail — on the run that reddened `main` it reported 46 checks, every one
       # of them green, and then died mid-group-F at the cap. It is simply the
       # longest gate here: 613s against a 600s ceiling, beside puppet's 468s,
-      # lantern's 456s and quarry's 436s.
+      # lantern's 456s and quarry's 436s. **Those three numbers are historical**
+      # — every one of them has since grown past this ceiling, and each raised
+      # its own cap in turn; the step below is the fifth.
       #
       # Those three are the reason this is a cap change rather than a demo
       # change: they sit at three quarters of the same ceiling, so the ceiling
