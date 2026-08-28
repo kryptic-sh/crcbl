@@ -16,6 +16,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every sample now honours the player's frame-rate ceiling, and no sample had
+  to be told to.** `GameGpu` gains `video`, which hands the `[engine.video]`
+  section a bundle's `GpuContext` read to the engine's loop, and `Loop::new`
+  holds `LoopConfig::limit` under it with `FrameLimit::clamped_to`. So `--fps`
+  is what the game asks for and the player's file is the ceiling over it; a file
+  that says nothing changes nothing.
+
+  It hands over `VideoSettings` rather than the context because a bundle need
+  not have one — the loop's own test fixture opens no device — and because what
+  the loop wants is the settings, not the device that read them.
+  `GpuContext::video` is the new accessor behind it, beside the narrow
+  `video_effects`, `render_scale` and `frame_limit`. `impl_game_gpu!` forwards
+  the method, and its `const _` guard makes a bundle that forgets an `E0599`
+  naming `video` rather than an infinite recursion.
+
+### Changed
+
+- **`Loop::new` no longer takes `LoopConfig::limit` at face value.** It applies
+  the player's `[engine.video] frame_limit` first. A run whose player set no
+  ceiling is unaffected; one whose player capped the rate lower now starts
+  there.
+
+### Added
+
 - **`[engine.video] frame_limit` is read, and it is the first key whose clamp
   needs the value it is clamping.** `crcbl::settings::frame_limit` answers with
   the ceiling the player's file puts on the frame rate and

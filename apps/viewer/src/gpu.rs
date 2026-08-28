@@ -793,6 +793,15 @@ impl Gpu {
             .plus(self.ui.counters())
     }
 
+    /// The `[engine.video]` section this bundle's context read while opening.
+    ///
+    /// Forwarded rather than answered, so a run reports the player's file
+    /// rather than a default — see [`crcbl::engine::GameGpu::video`].
+    #[must_use]
+    pub const fn video(&self) -> &crcbl::settings::VideoSettings {
+        self.ctx.video()
+    }
+
     /// The UI geometry this frame handed over, for this crate's own tests.
     #[cfg(test)]
     #[must_use]

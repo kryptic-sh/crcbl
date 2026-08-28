@@ -1470,6 +1470,18 @@ impl GpuContext {
         self.video.render_scale
     }
 
+    /// The whole `[engine.video]` section this context read while opening.
+    ///
+    /// The narrow accessors beside it — [`video_effects`](Self::video_effects),
+    /// [`render_scale`](Self::render_scale),
+    /// [`frame_limit`](Self::frame_limit) — are what a caller wanting one key
+    /// uses. This is for a caller that has to carry the section somewhere
+    /// else, which is [`GameGpu::video`] and through it the loop.
+    #[must_use]
+    pub const fn video(&self) -> &VideoSettings {
+        &self.video
+    }
+
     /// `asked` held under the ceiling the player's `[engine.video]` section
     /// put on the frame rate, read while this context opened.
     ///
@@ -4175,6 +4187,21 @@ pub trait GameGpu: GpuSurface + Sized {
     /// [`crcbl_render::counters`].
     fn counters(&self) -> crcbl_render::FrameCounters;
 
+    /// The `[engine.video]` section the player's settings file asked for.
+    ///
+    /// Whatever [`GpuContext::video`] answered when the bundle opened, which
+    /// for a bundle built on [`SettingsSource::None`] is
+    /// [`VideoSettings::unrestricted`]. **A bundle answers with what it read,
+    /// never with a default it made up**: the loop applies these as ceilings,
+    /// so a bundle inventing an unrestricted answer would silently drop every
+    /// setting the player wrote.
+    ///
+    /// Here rather than an accessor for the context itself because a bundle
+    /// need not have one — the loop's own fixture opens no device — and
+    /// because what the loop wants is the settings rather than the device that
+    /// read them. [`Loop::new`] takes the frame-rate ceiling off it.
+    fn video(&self) -> &crate::settings::VideoSettings;
+
     /// Records, submits and presents one frame.
     ///
     /// # Errors
@@ -4190,20 +4217,20 @@ pub trait GameGpu: GpuSurface + Sized {
     fn destroy(self) -> Result<(), GpuError>;
 }
 
-/// Implements [`GameGpu`] and [`GpuSurface`] for a bundle that already has the
-/// nine methods as inherent ones.
+/// Implements [`GameGpu`] and [`GpuSurface`] for a bundle that already has
+/// every method as an inherent one.
 ///
 /// # Why this is a macro and not a blanket impl
 ///
 /// Every method here is `Self::method(self)` — the trait exists so the loop can
 /// call methods a sample had already written for itself, not to give them
 /// behaviour. There is nothing to put in a default body and nothing to abstract
-/// over: a blanket impl would need a second trait naming the same nine methods,
-/// which is the duplication moved rather than removed.
+/// over: a blanket impl would need a second trait naming the same methods, which
+/// is the duplication moved rather than removed.
 ///
 /// What it buys is that the block cannot **drift**: every sample wrote it out
-/// byte for byte, and nine forwards copied six times is nine chances for one
-/// copy to be wired to the wrong method.
+/// byte for byte, and a forward copied once per sample is a chance per copy for
+/// one to be wired to the wrong method.
 ///
 /// # The recursion this had to be made safe against first
 ///
@@ -4232,8 +4259,7 @@ pub trait GameGpu: GpuSurface + Sized {
 /// crcbl::impl_game_gpu!(Gpu);
 /// ```
 ///
-/// The example is `ignore` because it needs a `Gpu` with all nine inherent
-/// methods. The expansion is exercised by every sample in `apps/`, and its
+/// The example is `ignore` because it needs a `Gpu` with every inherent method. The expansion is exercised by every sample in `apps/`, and its
 /// guard by the experiment described above.
 #[macro_export]
 macro_rules! impl_game_gpu {
@@ -4264,6 +4290,7 @@ macro_rules! impl_game_gpu {
             let _: fn(&$gpu) -> ::core::option::Option<&$crate::render::FrameTimings> =
                 <$gpu>::timings;
             let _: fn(&$gpu) -> $crate::render::FrameCounters = <$gpu>::counters;
+            let _: fn(&$gpu) -> &$crate::settings::VideoSettings = <$gpu>::video;
             let _: fn(
                 &mut $gpu,
             ) -> ::core::result::Result<
@@ -4312,6 +4339,10 @@ macro_rules! impl_game_gpu {
 
             fn counters(&self) -> $crate::render::FrameCounters {
                 Self::counters(self)
+            }
+
+            fn video(&self) -> &$crate::settings::VideoSettings {
+                Self::video(self)
             }
 
             fn frame(
@@ -4888,6 +4919,11 @@ pub struct LoopConfig {
     /// exposes this as a user setting calls that method on
     /// [`Loop::clock_source_mut`] when the setting changes; this is only the
     /// value the run starts at.
+    ///
+    /// **Held under the player's `[engine.video] frame_limit` first**, off
+    /// [`GameGpu::video`], so this is what the game asks for rather than what
+    /// the loop runs at. A player who capped the rate lower keeps their cap and
+    /// one who wrote nothing changes nothing; see [`FrameLimit::clamped_to`].
     pub limit: FrameLimit,
 }
 
@@ -5046,8 +5082,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // Here rather than at every bring-up path's `Clock::new`, because this
         // is the one place both of them pass through and the one place the
         // command line's value is already in hand. A manual clock ignores it.
+        //
+        // The player's file is applied here too, for the same reason and one
+        // more: it is a *ceiling*, so it has to meet the game's own value, and
+        // this is where that value arrives. Fifteen samples build a
+        // `LoopConfig` and none of them would have remembered to do it.
         let mut clock_source = booted.clock_source;
-        clock_source.set_limit(config.limit);
+        clock_source.set_limit(config.limit.clamped_to(booted.gpu.video().frame_limit));
         Self {
             shell: booted.shell,
             window: booted.window,
@@ -6162,6 +6203,13 @@ mod tests {
         /// belongs to leaves the same final extent behind as one that reached it
         /// before, and only the per-frame record tells the two apart.
         frame_extents: Vec<(u32, u32)>,
+        /// What [`GameGpu::video`] answers — the player's file, as a bundle
+        /// that opened a device would have read it.
+        ///
+        /// Settable so a test can put a ceiling in it: this fake is the only
+        /// way the loop's own application of `[engine.video]` can be exercised
+        /// at all, since a real `GpuContext` needs a device.
+        video: crate::settings::VideoSettings,
     }
 
     impl FakeGpu {
@@ -6175,6 +6223,18 @@ mod tests {
                 timings: None,
                 counters: crcbl_render::FrameCounters::default(),
                 frame_extents: Vec::new(),
+                video: crate::settings::VideoSettings::unrestricted(),
+            }
+        }
+
+        /// The same fake, under a player who capped the frame rate.
+        fn capped_at(extent: (u32, u32), ceiling: FrameLimit) -> Self {
+            Self {
+                video: crate::settings::VideoSettings {
+                    frame_limit: ceiling,
+                    ..crate::settings::VideoSettings::unrestricted()
+                },
+                ..Self::at(extent)
             }
         }
     }
@@ -6244,6 +6304,10 @@ mod tests {
 
         fn take_draw_list(&mut self, list: &mut crcbl_ui::draw_list::DrawList) {
             std::mem::swap(&mut self.draw_list, list);
+        }
+
+        fn video(&self) -> &crate::settings::VideoSettings {
+            &self.video
         }
 
         fn timings(&self) -> Option<&crcbl_render::FrameTimings> {
@@ -7682,6 +7746,64 @@ mod tests {
             Some(FrameLimit::unlimited()),
             "a mid-run change did not reach the clock",
         );
+    }
+
+    /// **The player's `[engine.video] frame_limit` reaches the clock, and only
+    /// ever downward.**
+    ///
+    /// Three directions off one fake, because each passes on its own for a
+    /// `Loop::new` that is wrong in the others: a ceiling under the game's
+    /// value must win, a ceiling over it must not raise it, and a file that
+    /// says nothing must leave it exactly where the command line put it. The
+    /// third is the one a naive `min` on the rate fails, since unlimited is
+    /// spelled zero.
+    ///
+    /// This is the only place the loop's own application of `[engine.video]`
+    /// can be observed: a real bundle reads it from a `GpuContext`, which needs
+    /// a device no headless runner has.
+    #[test]
+    fn a_hosted_loop_holds_its_frame_limit_under_the_players_ceiling() {
+        for (asked, ceiling, wanted) in [
+            (
+                FrameLimit::fps(144),
+                FrameLimit::fps(60),
+                FrameLimit::fps(60),
+            ),
+            (
+                FrameLimit::fps(30),
+                FrameLimit::fps(60),
+                FrameLimit::fps(30),
+            ),
+            (
+                FrameLimit::fps(144),
+                FrameLimit::unlimited(),
+                FrameLimit::fps(144),
+            ),
+        ] {
+            let mut shell = crcbl_shell::HeadlessShell::new();
+            let window = shell
+                .create_window(&crcbl_shell::WindowDesc::default())
+                .expect("headless always creates a window");
+            let engine: Loop<_, FakeGame> = Loop::new(
+                Booted {
+                    shell: Box::new(shell),
+                    window,
+                    gpu: FakeGpu::capped_at((640, 480), ceiling),
+                    clock_source: Clock::new(false),
+                    events: 0,
+                },
+                FakeGame::default(),
+                LoopConfig {
+                    limit: asked,
+                    ..hosted_config(None)
+                },
+            );
+            assert_eq!(
+                engine.clock_source().limit(),
+                Some(wanted),
+                "a game asking for {asked} under a ceiling of {ceiling}",
+            );
+        }
     }
 
     /// A settings row's change reaches the clock: the loop applies what

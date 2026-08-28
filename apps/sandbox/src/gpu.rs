@@ -322,6 +322,15 @@ impl Gpu {
             .plus(self.ui.counters())
     }
 
+    /// The `[engine.video]` section this bundle's context read while opening.
+    ///
+    /// Forwarded rather than answered, so a run reports the player's file
+    /// rather than a default — see [`crcbl::engine::GameGpu::video`].
+    #[must_use]
+    pub const fn video(&self) -> &crcbl::settings::VideoSettings {
+        self.ctx.video()
+    }
+
     /// Takes this frame's UI geometry, handing the previous frame's allocation
     /// back so the caller can refill it instead of building a new one.
     pub fn take_draw_list(&mut self, dl: &mut DrawList) {
@@ -580,6 +589,10 @@ impl crcbl::engine::GameGpu for Gpu {
 
     fn counters(&self) -> crcbl::render::FrameCounters {
         Self::counters(self)
+    }
+
+    fn video(&self) -> &crcbl::settings::VideoSettings {
+        Self::video(self)
     }
 
     fn frame(&mut self) -> Result<FrameOutcome, GpuError> {

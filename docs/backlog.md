@@ -823,13 +823,18 @@ less than the rate the _game_ asked for, which no reader holds — so
 `FrameLimit::clamped_to` applies it, with unlimited sitting at the top of the
 order though it is spelled zero. `GpuContext::frame_limit` is the pair.
 
-**What is left is a caller.** No application in `apps/` reads or writes a
-setting through any of this. `frame_limit` is the closest to having one and did
-not get it here: `Loop::new` is where `LoopConfig::limit` reaches the clock and
-it holds no `GpuContext` — `Booted` does not carry one and `GpuSurface` has no
-accessor for one — so wiring it means a method on `GameGpu` and a change at
-every implementor, which is a slice of its own. Until then a game applies it
-itself, on the two lines `GpuContext::frame_limit`'s doc comment shows.
+**`frame_limit` has a caller as of 2026-08-28, and it is every sample.**
+`GameGpu::video` hands the section a bundle's context read to the loop, and
+`Loop::new` holds `LoopConfig::limit` under it. It answers with `VideoSettings`
+rather than the `GpuContext` because the loop's own fixture opens no device and
+could not have implemented an accessor for one. Nothing is owed per sample: the
+fifteen bundles forward it, `impl_game_gpu!`'s `const _` guard turns a bundle
+that forgets into an `E0599` naming `video`, and the next `[engine.video]` key
+the loop needs is already carried.
+
+**What is still owed is a caller for the other keys**, and for the writers. No
+application in `apps/` _writes_ a setting, so nothing exercises `save_platform`,
+and no sample offers a screen to write one from.
 
 The keys still `Named` face a design question that `render_scale` and
 `frame_limit` did not: `docs/plan/15-windowing.md`'s rule 1 says

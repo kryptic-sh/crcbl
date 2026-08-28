@@ -315,6 +315,15 @@ impl Gpu {
             .plus(self.ui.counters())
     }
 
+    /// The `[engine.video]` section this bundle's context read while opening.
+    ///
+    /// Forwarded rather than answered, so a run reports the player's file
+    /// rather than a default — see [`crcbl::engine::GameGpu::video`].
+    #[must_use]
+    pub const fn video(&self) -> &crcbl::settings::VideoSettings {
+        self.ctx.video()
+    }
+
     /// The glyph atlas the UI pass renders text from.
     ///
     /// The debug overlay measures its own panel with it, and must measure with
