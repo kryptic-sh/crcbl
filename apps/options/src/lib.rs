@@ -44,9 +44,12 @@ mod args;
 pub mod gpu;
 pub mod menu;
 
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
 pub use app::{
-    APP_NAME, Loop, Options, OptionsError, PendingLoop, SaveState, Screen, Store, Summary, run,
-    start, with_shell,
+    APP_NAME, HEARTBEAT_TICKS, Loop, Options, OptionsError, PendingLoop, SaveState, Screen, Store,
+    Summary, run, start, with_shell,
 };
 pub use args::{DEFAULT_TICK_HZ, Invocation, USAGE, parse};
 pub use menu::{Action, MenuKind, Menus};

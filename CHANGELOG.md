@@ -39,6 +39,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   gain is a number on the screen rather than a level to hear, and the video half
   of the catalogue is not on it yet — `docs/plan/sample/20-options.md` has both.
 
+  **It runs in a browser too**, at `/demos/options/`, from the same build that
+  runs natively. That half is the point of the sample rather than a bonus: a tab
+  has no filesystem, so the settings file goes to the origin's OPFS store, and
+  the way that fails is silently. The browser gate runs it on every push like
+  every other demo.
+
 - **Every sample now honours the player's frame-rate ceiling, and no sample had
   to be told to.** `GameGpu` gains `video`, which hands the `[engine.video]`
   section a bundle's `GpuContext` read to the engine's loop, and `Loop::new`

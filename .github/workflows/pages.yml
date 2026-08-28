@@ -382,6 +382,11 @@ jobs:
           # advances — viewer's idle turntable, orbit's scripted ascent.
           - viewer
           - orbit
+          # options goes one further: nothing it draws moves at all, because a
+          # settings screen has nothing to animate. It is the one demo whose
+          # `EXPECTATIONS` row carries `still`, which swaps group D's frame hash
+          # for the loop's own frame counter — see that row.
+          - options
           - bracket
           - puppet
           - sparks
@@ -601,6 +606,10 @@ jobs:
       - name: Render shard in a real browser
         timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=shard ./web/run-browser-e2e.sh --headless
+
+      - name: Render options in a real browser
+        timeout-minutes: 12
+        run: CRCBL_WEB_E2E_DEMO=options ./web/run-browser-e2e.sh --headless
 
   probe-windows:
     name: probe the seam on Windows

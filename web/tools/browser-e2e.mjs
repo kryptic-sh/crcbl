@@ -1180,6 +1180,38 @@ const EXPECTATIONS = {
     moving: /alt: (-?[\d.]+)/,
     movingLabel: 'the rocket climbs under its own steam',
   },
+  // **The demo whose canvas is meant to hold still.** options is a settings
+  // screen with nothing behind it: `HostedGame::draw` is empty, `crcbl-ui`'s
+  // menu has no animation in it, and the panel is laid out from the same values
+  // every frame — so the picture is identical from one frame to the next by
+  // construction. That is the opposite of what group D's frame hash asks of
+  // every other demo here, and `still` is what says so rather than leaving a
+  // check to fail on a demo doing exactly what it was built to do. See group D
+  // for the pair it swaps in.
+  options: {
+    still: true,
+    // No start key and no waiting state: the screen is what the visitor came
+    // for and it is up from the first frame. The arrows and ENTER do reach it —
+    // group F's page-level claims are made against that — but there is no run
+    // to begin, so there is nothing for a `Space` to leave.
+    key: null,
+    // Read off the *first* heartbeat, which `app::HEARTBEAT_TICKS` puts at tick
+    // sixty. `edits: 0` is the control and it is the half worth having: this
+    // sample's whole risk is a screen that writes a value nobody asked it to,
+    // and a boot that had already moved a fader would report it here.
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') && line.includes('edits: 0'),
+    // **The weakest `moving` in this table, and deliberately so.** Nothing on
+    // this screen advances on its own — there is no simulation to advance — so
+    // the only number that moves between heartbeats is the tick they are logged
+    // on. What it asks is that the loop kept ticking for another
+    // `HEARTBEAT_TICKS` after the first line, which is less than every other row
+    // asks and is all this demo has to give. The claim that frames are still
+    // being *presented* is the `still` pair in group D, which reads the loop's
+    // own counter instead of the picture.
+    moving: /tick: (\d+)/,
+    movingLabel: 'the loop keeps ticking with nothing to simulate',
+  },
 };
 
 const EXPECTED = EXPECTATIONS[SLUG];
@@ -5331,13 +5363,45 @@ try {
       : 'nothing sampled'
   );
 
+  // **A frame hash that changed is how every demo but one proves its loop is
+  // alive.** It is the cheapest proof there is and it needs nothing of the
+  // demo, which is why it is the check every row here makes — and why the one
+  // row that cannot make it needs a replacement rather than an exemption.
+  //
+  // `still` in EXPECTATIONS names the demo that draws the same picture on
+  // purpose: a settings screen has nothing to animate, so an identical hash is
+  // the correct result and a *changed* one would be the finding. The pair below
+  // asks the two halves separately — the loop presented new frames across the
+  // same window the samples were taken in, and the picture did not move while
+  // it did. Neither half passes on a stopped loop: `crcbl.frames()` is
+  // incremented by `web/engine/demo.js` inside the callback itself, so a loop
+  // that stopped leaves it standing and `loopFrames` reports that rather than
+  // hanging.
   const frames = new Set(samples.map((s) => s.hash));
-  check(
-    'D',
-    'the canvas changes between frames while the simulation runs',
-    frames.size > 1,
-    `${frames.size} distinct frame(s) across ${samples.length} samples`
-  );
+  if (EXPECTED.still) {
+    const presented = await loopFrames(page, SAMPLE_COUNT);
+    check(
+      'D',
+      'the loop presents new frames while the canvas holds still',
+      presented !== null && presented > 0,
+      presented !== null
+        ? `${presented} frame(s) presented`
+        : `the loop presented nothing in ${pollCeiling()} ms`
+    );
+    check(
+      'D',
+      'and the canvas holds still, which is what this demo draws',
+      frames.size === 1,
+      `${frames.size} distinct frame(s) across ${samples.length} samples`
+    );
+  } else {
+    check(
+      'D',
+      'the canvas changes between frames while the simulation runs',
+      frames.size > 1,
+      `${frames.size} distinct frame(s) across ${samples.length} samples`
+    );
+  }
 
   // **A number that only comes back if a readback completed**, and the one
   // check here that is about the GPU answering rather than about pixels.

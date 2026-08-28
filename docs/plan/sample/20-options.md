@@ -104,6 +104,13 @@ machinery. Verified against the tree on 2026-08-28:
   the sound. What the workspace still has no screen for is the video and
   graphics halves — milestones 2 and 3 — which is now the largest single thing
   this sample owes.
+- **The screen runs in a browser**, as of 2026-08-28: `apps/options/src/web.rs`
+  carries the `__crcbl_options_*` ABI, `web/demos/options/` and
+  `web/pages/options.html` are the page, and both browser-gate jobs run it. Its
+  `EXPECTATIONS` row is the only one in `web/tools/browser-e2e.mjs` marked
+  `still` — a settings screen has nothing to animate, so group D asks the loop's
+  own frame counter for the claim the frame hash makes everywhere else. What the
+  gate does **not** yet do is save anything: see `docs/backlog.md`.
 - **OPFS is the only browser storage backend**; `crates/crcbl-store/src/lib.rs`
   records that an IndexedDB fallback is still to come. Where no store is
   installed, settings are not persisted and a log line says so — which this
@@ -114,13 +121,16 @@ machinery. Verified against the tree on 2026-08-28:
 
 1. **The screen, the audio buses and the round trip.** Bus volumes are the
    cheapest setting to make real — they need no renderer change — so they are
-   what proves save, load and restart first. **The screen and the round trip are
-   done**, in `apps/options`: six faders, a `SAVE` that writes the user layer
-   and reports where it went, a `RESET` that puts every bus back to unity, and a
-   start that opens the player's own file and places the faders from it. What is
-   left of this milestone is **something to hear** — the sample is silent, so a
-   bus gain is a number the screen shows rather than a level anyone can check by
-   ear — and a web build. `docs/backlog.md` carries both.
+   what proves save, load and restart first. **The screen, the round trip and
+   the web build are done**, in `apps/options`: six faders, a `SAVE` that writes
+   the user layer and reports where it went, a `RESET` that puts every bus back
+   to unity, a start that opens the player's own file and places the faders from
+   it, and a page at `/demos/options/` built from the same source and run by the
+   browser gate on every push. What is left of this milestone is **something to
+   hear** — the sample is silent, so a bus gain is a number the screen shows
+   rather than a level anyone can check by ear — and **a browser check of the
+   round trip itself**: every check the gate makes today is about the engine,
+   not about a setting surviving a reload. `docs/backlog.md` carries both.
 2. **The video half**: display mode, resolution, present mode, frame cap, and
    the requested-versus-resolved display of the clamp.
 3. **The graphics half**: the quality tiers over the technique ladders, the

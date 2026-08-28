@@ -21587,25 +21587,27 @@ What that leaves:
   samples already call. Until then nothing in the workspace demonstrates that a
   saved gain reaches a gain stage: the round trip is proven as far as the key.
 
-- **There is no browser build, which sample rule 7 requires and half this sample
-  is about.** No `src/web.rs`, no page, and no row in `web/build.sh`'s `DEMOS` —
-  so `tools/check-browser-gate-demos.sh` does not ask for it either, and the
-  browser gate never sees it. The point of the web half is the case the plan
-  calls the easy one to get wrong: OPFS is the only browser backend, and where
-  no store is installed the settings silently do not persist. `SaveState`
-  already carries a `Nowhere` arm for exactly that and nothing has ever reached
-  it on a real platform.
+- **The browser build is on the site, and its subject is not gated.** The demo
+  runs at `/demos/options/` and scores 44/44 in the browser gate, but every one
+  of those checks is a claim about the engine: it boots, it ticks, it draws, it
+  lets go of what it took. **Nothing in a browser has ever saved a setting and
+  read it back.** That is the half of this sample the plan calls the easy one to
+  get wrong — OPFS is the only browser backend, and where no store is installed
+  the settings silently do not persist. `SaveState` carries a `Nowhere` arm for
+  exactly that and nothing has ever reached it on a real platform.
 
-  **What that slice runs into, from reading the gate rather than writing it:**
-  every row of `EXPECTATIONS` in `web/tools/browser-e2e.mjs` has a `moving`
-  pattern — a number in the demo's own log that changes under its own steam —
-  and the driver has no arm for a demo without one. `apps/options` prints no
-  heartbeat at all: `HostedGame::tick` is empty, and the screen is static by
-  design. It does still tick (`120 frames, 119 ticks` headless, `46` on x11 at
-  vsync), so the cheapest answer is a heartbeat line carrying the tick number
-  and the gains, which gives `waiting`, `moving` and the group E pause checks
-  their observable in one line. The OPFS round trip needs a check of its own on
-  top of that — save, reload the page, and read the fader back.
+  **What the check needs to be, and the precedent for it:** shard's `save` block
+  in `web/tools/browser-e2e.mjs` is the shape — drive the demo, reload the page,
+  and assert the state came back, with a store-cleared boot as the control that
+  stops "it resumed" passing for a build that always starts the same way. Here
+  that is: nudge a fader off unity with `ArrowLeft`, press `SAVE`, reload, and
+  read the gain off the first heartbeat; then clear the origin's OPFS directory
+  and reload again, and require every bus back at unity. The `file:` field of
+  `app::Screen::log_heartbeat` already reports where the write went, so the
+  reference reading is a heartbeat rather than a wall clock.
+
+  The `Nowhere` case is a second check and needs a page booted with no store
+  installed, which nothing on the site does today.
 
 - **The video and graphics halves are untouched** — milestones 2 and 3. No
   display mode, resolution, present mode or frame cap on the screen, and no
@@ -21626,6 +21628,31 @@ What that leaves:
   `with_platform_storage`'s two platform arms, reached from the other side. A
   human running `cargo run -p options` twice is currently the only check that
   the native path writes where it reads.
+
+## `cargo doc` without features is red, and nothing runs it (2026-08-28)
+
+CI documents the workspace with `--all-features`, and it is green. Run the same
+command with the **default** feature set and `crcbl-sprite` does not document:
+
+```
+error: unresolved link to `crate::bake::aseprite_json`
+   --> crates/crcbl-sprite/src/load.rs:315
+```
+
+`crates/crcbl-sprite/src/lib.rs` gates `pub mod bake` behind the `bake` feature
+and `pub mod load` behind `load`, and `load.rs`'s doc comment links across that
+seam — so the link resolves only when both are on, which is exactly the
+configuration CI picks and no other. Anyone reading these docs from a dependent
+crate that turns on `load` alone gets a rustdoc error rather than a page.
+
+Found while running the workspace gates for the options web demo; nothing in
+that change touches `crcbl-sprite`, so this predates it. The fix is a link that
+survives the gate being off — an intra-doc link inside a `#[cfg(feature)]`
+block, or plain code text — rather than turning the features on by default,
+which is what `png` being optional exists to avoid. Whether the no-features
+configuration should also be a CI job is the open question: it is a second
+rustdoc run over the whole workspace, and this is the first defect it would have
+caught.
 
 ## sandbox is not in the windowed gate (2026-08-24)
 

@@ -80,6 +80,7 @@ const DEMOS = [
   ['sparks', 'sparks', '/demos/sparks/'],
   ['breach', 'breach', '/demos/breach/'],
   ['shard', 'shard', '/demos/shard/'],
+  ['options', 'options', '/demos/options/'],
 ];
 
 // Partials every demo page must pull in, so "the demo window is one template"

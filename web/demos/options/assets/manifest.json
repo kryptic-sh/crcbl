@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the demo boots. options has none: the screen is widgets and text, so its font atlas and shaders are compiled into the wasm module and there is no sprite art to fetch — sample rule 11 exempts it by name. The list is the seam, not the content.",
+  "keys": []
+}

@@ -56,6 +56,12 @@ pub use crate::args::Options;
 /// [`crcbl::engine::GpuContextDesc::label`].
 pub const APP_NAME: &str = "options";
 
+/// How often the screen logs its `[HUD]` line, in ticks.
+///
+/// A second of simulated time, which is the cadence every other sample's
+/// heartbeat uses — the gates that read one are written against that spacing.
+pub const HEARTBEAT_TICKS: u64 = 60;
+
 // ---- summary -----------------------------------------------------------------
 
 /// What a finished run reports.
@@ -194,6 +200,11 @@ pub struct Screen {
     placed: bool,
     edits: u64,
     saved: SaveState,
+    /// Ticks run, which is what the heartbeat counts.
+    ticks: u64,
+    /// The edit count the last heartbeat reported, so a moved fader is logged
+    /// when it moves rather than up to a second later.
+    logged_edits: u64,
 }
 
 /// The loop options runs in.
@@ -332,6 +343,8 @@ impl Screen {
             placed: false,
             edits: 0,
             saved: SaveState::default(),
+            ticks: 0,
+            logged_edits: 0,
         }
     }
 
@@ -358,6 +371,38 @@ impl Screen {
     #[must_use]
     pub const fn stack(&self) -> &SettingsStack {
         &self.stack
+    }
+
+    /// The `[HUD]` line, in the shape every other sample logs one.
+    ///
+    /// Every second of simulated time, plus the tick an edit lands on so a
+    /// moved fader is not swallowed by the gap — the same rule `apps/hud` uses
+    /// for a wave turning over, and for the same reason: the gate outside the
+    /// process reads the change off this line and nothing else.
+    ///
+    /// It carries the gains rather than the handle positions. A handle is where
+    /// a pointer left a widget; a gain is what the file will say, and the two
+    /// differ by a square, so logging the wrong one would make a reader's
+    /// arithmetic silently disagree with the key.
+    fn log_heartbeat(&mut self) {
+        let edited = self.edits != self.logged_edits;
+        if !edited && !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
+            return;
+        }
+        crcbl::log::info!(
+            "[HUD] tick: {}  master: {}  music: {}  sfx: {}  ui: {}  voice: {}  \
+             ambience: {}  edits: {}  file: {}",
+            self.ticks,
+            crate::menu::percent(self.gains[Bus::Master.index()]),
+            crate::menu::percent(self.gains[Bus::Music.index()]),
+            crate::menu::percent(self.gains[Bus::Sfx.index()]),
+            crate::menu::percent(self.gains[Bus::Ui.index()]),
+            crate::menu::percent(self.gains[Bus::Voice.index()]),
+            crate::menu::percent(self.gains[Bus::Ambience.index()]),
+            self.edits,
+            self.saved,
+        );
+        self.logged_edits = self.edits;
     }
 
     /// Moves one bus, writing the key and marking the file unsaved.
@@ -443,7 +488,18 @@ impl HostedGame for Screen {
     /// rules 2 and 10 by name — no game state, no `World`, no `GameModule`,
     /// because the settings are the content. An empty body is what that looks
     /// like.
-    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {}
+    /// Nothing to step, and one line to log.
+    ///
+    /// The screen has no simulation — see this module's own docs — so the tick
+    /// exists to be *counted*. That count is the heartbeat, and the heartbeat is
+    /// what tells a paused loop from a running one from outside the process:
+    /// the windowed harness and the browser gate both read it, and neither can
+    /// ask this sample anything else, since a settings screen at rest looks
+    /// exactly like a settings screen whose loop has stopped.
+    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {
+        self.ticks += 1;
+        self.log_heartbeat();
+    }
 
     /// Every key this screen answers to is the loop's or the menu's.
     ///

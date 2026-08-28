@@ -1,0 +1,111 @@
+<!--meta
+{
+  "out": "demos/options/index.html",
+  "slug": "options",
+  "name": "Settings",
+  "title": "Settings — Crucible",
+  "description": "options, the settings acceptance test, compiled to wasm32 and keeping its file in the Origin Private File System.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/options", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/options\">apps/options</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/options/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S4E</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+    <span class="badge">OPFS</span>
+  </div>
+  <h1><span class="grad">Settings</span></h1>
+  <p class="tagline">
+    A settings screen with nothing behind it. Move a fader, press SAVE, close
+    the tab — and the value is still there when you come back, kept in this
+    origin's own private filesystem by the same code that writes a config file
+    on a desktop.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>The panel is the demo, so it is never dismissed.</h3>
+  <p>
+    Click the canvas first — a canvas has to hold focus to receive keys, and
+    letting go of it pauses the loop.
+  </p>
+  <ul class="keys">
+    <li><kbd>↑</kbd><kbd>↓</kbd> pick a row</li>
+    <li><kbd>←</kbd><kbd>→</kbd> move the fader under it</li>
+    <li><kbd>ENTER</kbd> press SAVE or RESET</li>
+    <!--include demo-loop-keys-->
+  </ul>
+  <p>
+    SAVE says where it went. RESET puts every bus back to 100% and leaves the
+    file alone until you save it — a reset you did not mean to keep is one
+    reload away from being undone.
+  </p>
+</section>
+
+<section id="why-this-one">
+  <h2>why a screen with no game under it</h2>
+  <h3>Because a setting that does not survive a restart is not a setting.</h3>
+  <p>
+    The engine has had a layered settings stack for a long time: an on-disk TOML
+    file under the player's own config directory, layers that override each
+    other in a defined order, and readers for every key the renderer and the
+    mixer understand. What it had never had was an <em>application</em> writing
+    one. The only writer was a command line, so the code that keeps a player's
+    choices had been exercised by everything except a player.
+  </p>
+  <p>
+    This sample is that player. The six faders are the audio buses — master,
+    music, effects, interface, voice and ambience — and each is a real key in
+    the file, written the moment you move it and read back the next time the
+    page opens.
+  </p>
+  <p>
+    They are not linear. A fader is a square law, so the middle of the groove is
+    a quarter of the amplitude rather than half of it, which is roughly how a
+    halving sounds. The percentage beside each row is the gain that reaches the
+    file, not the position of the handle.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with the storage swapped underneath it.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. And the clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>.
+  </p>
+  <p>
+    The fourth difference is this demo's subject. A browser tab has no config
+    directory, so the same call that resolves
+    <code>~/.config/options/</code> on Linux resolves the Origin Private File
+    System here, and the save is queued rather than written — the page drains
+    the queue every frame. Where no store is installed at all, the screen says
+    so instead of pretending: a settings screen that silently forgets is the
+    worst version of this bug.
+  </p>
+  <p>
+    What is not here yet is anything to <em>hear</em>. The buses are real keys
+    and real gain stages, but this sample plays nothing, so a volume is a number
+    you can watch rather than a level you can check by ear. The video half of
+    the catalogue — display mode, resolution, present mode, frame cap — is not
+    on the screen either. Both are written down in the repository's backlog
+    rather than implied by an empty row.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

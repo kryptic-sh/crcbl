@@ -151,6 +151,7 @@ DEMOS=(
   "sparks:crcbl_sparks:demos/sparks"
   "breach:crcbl_breach:demos/breach"
   "shard:crcbl_shard:demos/shard"
+  "options:crcbl_options:demos/options"
 )
 
 profile_flag=()
