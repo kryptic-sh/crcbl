@@ -76,7 +76,17 @@ jobs:
     # the per-commit table. Raising a cap does not make a frame cheaper and is
     # not claimed to; what it does is stop a bound written to catch a *hang*
     # from firing on a demo that finished.
-    timeout-minutes: 90
+    #
+    # **120 rather than 90 since 2026-08-28**, because the sum reached the cap
+    # rather than one demo reaching its own. At `e010015` the fourteen browser
+    # gates took 74.3 minutes between them — quarry 507 s, lantern 528 s, puppet
+    # 598 s, breach 1007 s and shard killed at its own 20-minute bound — and the
+    # build ahead of them takes about seven more, so the job was inside four
+    # minutes of this ceiling before shard was given the extra ten it needs.
+    # This is the ceiling the comment above says will keep moving until the
+    # gates stop being a sum, and it is written down rather than rounded up:
+    # 84 minutes of steps plus the build does not fit under 90.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
 
@@ -470,14 +480,25 @@ jobs:
         timeout-minutes: 20
         run: CRCBL_WEB_E2E_DEMO=breach ./web/run-browser-e2e.sh
 
-      # 20 rather than the 10 its neighbours get, for breach's reason one step
+      # 30 rather than the 10 its neighbours get, for breach's reason one step
       # up: this is the heaviest scene on the site, and `docs/backlog.md`'s note
       # on the browser gates records that the runner drives it on a software
       # rasteriser at a fraction of real time. Measured at 88 s locally on that
       # same rasteriser, which is what the demo was tuned to; the runner is
       # several times slower again.
+      #
+      # **This step has never once completed in this job.** Every run before
+      # `e010015` was cancelled by a later push while shard was still going, and
+      # `e010015` — the first to reach the end of the queue — was killed on the
+      # 20-minute bound with every check it had reached green, in section I,
+      # which is the last one. Its own log names the reason it is the slowest
+      # thing on the site: "every later budget scaled 87.0x", against puppet's
+      # 25.0x. So 30 is not a measurement of shard, because there is none; it is
+      # ten minutes past the point the run had reached when it was killed, taken
+      # in order to *get* one. Whatever the next completed run reports belongs
+      # here in place of this paragraph.
       - name: Render shard in a real browser
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: CRCBL_WEB_E2E_DEMO=shard ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the

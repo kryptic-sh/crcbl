@@ -195,11 +195,32 @@ enforces — it already measures its own scale factor, so it could fail on the
 factor rather than on the clock — or a per-demo wall-clock figure recorded and
 compared run to run. Neither exists.
 
-**Coverage gap this leaves:** `sparks` has not completed in that job since
-`cec27b3`, where it took 236s, so it has never run under the rotated disc, PCSS
-or GTAO. It was deliberately left at 10 rather than raised on a guess — puppet
-grew by a factor of 1.3 across those rungs and 236s would need 2.5 — but that is
-arithmetic, not a measurement, and the step has been skipped in every run since.
+**sparks' coverage gap closed itself, and shard's turned out to be the real
+one.** `sparks` was left at 10 rather than raised on a guess, and at `e010015`
+it ran under the rotated disc, PCSS, GTAO and the probe in **240 s** against 236
+s at `cec27b3` — the arithmetic that said it would need 2.5× was wrong, and not
+raising it was right. `shard`, meanwhile, **has never once completed this
+step**: every run before `e010015` was cancelled by a later push while it was
+still going, and `e010015` — the first to reach the end of the queue — killed it
+on its 20-minute bound in section I, the last one, with every check it had
+reached green. Its log says why it is the slowest thing on the site: "every
+later budget scaled **87.0x**", against puppet's 25.0x.
+
+**The job cap became the binding constraint on 2026-08-28**, which is what the
+build job's own comment predicted would happen. At `e010015` the fourteen
+browser gates summed to **74.3 minutes** — quarry 507 s, lantern 528 s, puppet
+598 s, breach 1007 s, shard killed at 1212 s — with about seven more for the
+build ahead of them, so the job was inside four minutes of its 90-minute
+ceiling. Raising shard to 30 does not fit under 90, so the job went to 120 in
+the same change. **Neither number is a measurement of shard**, because there is
+still none; 30 is ten minutes past where the run had reached when it was killed,
+taken in order to get one, and the next completed run's figure replaces it.
+
+**The sum is the thing to fix, not the caps.** The build job runs all fourteen
+gates serially because they drive the site it just built. Uploading that site as
+an artifact and fanning the gates out across jobs — which `probe-macos` and
+`probe-windows` already do for their own — makes the total stop being a sum, and
+is the only change here that does not need another ceiling in a month.
 
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 
