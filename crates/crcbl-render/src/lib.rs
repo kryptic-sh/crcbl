@@ -145,6 +145,7 @@ pub mod light_grid;
 pub mod material_table;
 pub mod menu;
 pub mod mesh_pool;
+pub mod mip;
 pub mod nine_slice;
 pub mod orbit;
 pub mod pass_stats;
@@ -227,7 +228,9 @@ pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,
     SpriteConstants, SpriteInstance, SpriteRenderer, sheet_lane,
 };
-pub use texture::{UploadedTexture, upload_texture, upload_texture_layers};
+pub use texture::{
+    UploadedTexture, upload_texture, upload_texture_layers, upload_texture_mip_layers,
+};
 pub use timing::{FrameTimings, MAX_TIMED_PASSES, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
 pub use ui_pass::UiRenderer;

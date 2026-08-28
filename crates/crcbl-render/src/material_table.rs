@@ -37,9 +37,9 @@
 //! reaching [`MaterialTable::insert`] has already been through that.
 //!
 //! Still absent, and still deliberately: every other texture slot a material
-//! could have — normal, metallic-roughness, emissive — and the mip chain that
-//! makes a page filterable, which §3.2 calls a compute pass of its own.
-//! `docs/plan/37-materials.md` owns the shape a real material takes.
+//! could have — normal, metallic-roughness, emissive. `docs/plan/37-materials.md`
+//! owns the shape a real material takes. The page's mip chain is [`crate::mip`]'s
+//! and goes up with the page; only the sampler still reads level 0.
 //!
 //! # One buffer, and no ring — unlike [`crate::instance_pool`]
 //!

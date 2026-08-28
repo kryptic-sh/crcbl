@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The base-colour page carries a mip chain.** `crcbl_render::mip` builds one
+  on the host — `resample`, the alpha-weighted box filter in linear light the
+  glTF importer already packed textures with, now shared, and `chain`, that
+  filter run down to one texel — and `ForwardRenderer::with_scene` uploads every
+  layer's chain through the new `upload_texture_mip_layers`, one copy per level.
+  Images from every `upload_texture*` are now created as copy sources as well,
+  so a level can be read back. The page's sampler still reads level 0
+  (`lod_max: 0.0`), so no frame changes yet; the trilinear anisotropic sampler
+  is the next slice of `docs/plan/43-render-standards.md`'s filtering rung. The
+  page costs a third again in device memory for the chain.
+
 - **Auto-exposure: the frame measures its own exposure, and no readback stalls
   on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —
   adds three compute passes before the tonemap: `exposure.slang`'s `clearMain`,

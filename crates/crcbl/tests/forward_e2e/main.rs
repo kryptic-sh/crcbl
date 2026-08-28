@@ -22,6 +22,9 @@
 //!   geometry through two projections that differ in nothing else. Reversed-Z is
 //!   a decision a comment can claim and only a discriminating pair can check,
 //!   and nothing in a picture shows what the second colour target holds.
+//! * [`page`] reads the base-colour page's mip levels back. The sampler clamps
+//!   to level 0 until the filtering rung's sampler slice lands, so a chain that
+//!   never reached the device draws every golden exactly as before.
 //!
 //! They lived in `crates/crcbl-vk/tests/vk_e2e/` and therefore ran on Vulkan
 //! alone, so Metal, D3D12 and wgpu had `render_e2e`'s black-box goldens and
@@ -72,6 +75,7 @@ pub(crate) const SUITE: &str = "crcbl forward e2e";
 // binary named `forward_e2e` and every `mod` here resolves beside the root.
 mod depth_probe;
 mod lights;
+mod page;
 mod shadow;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because

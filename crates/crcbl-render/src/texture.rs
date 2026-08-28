@@ -6,7 +6,7 @@
 //!            └──barrier ▸ copy_buffer_to_image ▸ barrier──▶ sampled image + view
 //! ```
 //!
-//! # One layer or several
+//! # One layer or several, one level or a chain
 //!
 //! [`upload_texture`] uploads a single-layer `D2` image, which is what a sprite
 //! sheet and a glyph atlas are. [`upload_texture_layers`] uploads several layers
@@ -14,14 +14,18 @@
 //! `docs/plan/03-gpu-driven-rendering.md` §3.2's
 //! [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page: one image, one
 //! descriptor, and a layer index in the material row selecting between them.
+//! [`upload_texture_mip_layers`] is the same page with every layer's mip chain
+//! behind it — `docs/plan/43-render-standards.md`'s filtering rung, whose chain
+//! [`crate::mip`] builds on the host.
 //!
-//! Both go through the same body, and the layered one records **one copy per
-//! layer** rather than one covering all of them. That is not caution: a copy
-//! region's extent is a 2D extent on every backend here — `crcbl-dx12` refuses
-//! a `depth_or_layers` other than 1 by name, because `CopyTextureRegion`
-//! addresses one subresource — so the layer travels in
-//! [`ImageSubresourceLayers::base_layer`] and the buffer offset says where that
-//! layer's rows start.
+//! All three go through the same body, and it records **one copy per level of
+//! every layer** rather than one covering all of them. That is not caution: a
+//! copy region's extent is a 2D extent on every backend here — `crcbl-dx12`
+//! refuses a `depth_or_layers` other than 1 by name, because
+//! `CopyTextureRegion` addresses one subresource — so the layer travels in
+//! [`ImageSubresourceLayers::base_layer`], the level in
+//! [`ImageSubresourceLayers::mip`], and the buffer offset says where that
+//! subresource's rows start.
 //!
 //! This is a **startup** path, not a frame path: it records its own barriers
 //! and blocks on [`Device::wait_idle`], which is only legal because no graph
@@ -45,6 +49,8 @@ use crcbl_hal::{
     QueueHandle, ResourceState, SubmitInfo,
 };
 
+use crate::mip::level_extent;
+
 /// A texture that has been uploaded: the image, and the view callers bind.
 ///
 /// The two travel together because they die together, and every caller that
@@ -56,7 +62,8 @@ pub struct UploadedTexture {
     /// The device-local image the copy filled.
     pub image: ImageHandle,
     /// A full-subresource colour view of [`UploadedTexture::image`]: `D2` from
-    /// [`upload_texture`], `D2Array` from [`upload_texture_layers`].
+    /// [`upload_texture`], `D2Array` from [`upload_texture_layers`] and
+    /// [`upload_texture_mip_layers`].
     pub view: ImageViewHandle,
 }
 
@@ -110,7 +117,7 @@ pub fn upload_texture(
         label,
         format,
         (width, height),
-        &[pixels],
+        &[&[pixels]],
         ImageViewType::D2,
     )
 }
@@ -128,7 +135,8 @@ pub fn upload_texture(
 /// Every slice in `layers` must be exactly one tightly packed
 /// `width * height * texel_size` image, and they become layers 0, 1, … in the
 /// order given. [`upload_texture`]'s account of the label, the row padding and
-/// the release-on-every-path rule applies here unchanged.
+/// the release-on-every-path rule applies here unchanged. The image has one
+/// mip level; [`upload_texture_mip_layers`] is the form that carries a chain.
 ///
 /// # Errors
 ///
@@ -145,6 +153,46 @@ pub fn upload_texture_layers(
     height: u32,
     layers: &[&[u8]],
 ) -> Result<UploadedTexture, HalError> {
+    let chains: Vec<[&[u8]; 1]> = layers.iter().map(|pixels| [*pixels]).collect();
+    let layers: Vec<&[&[u8]]> = chains.iter().map(|chain| &chain[..]).collect();
+    upload(
+        device,
+        queue,
+        label,
+        format,
+        (width, height),
+        &layers,
+        ImageViewType::D2Array,
+    )
+}
+
+/// [`upload_texture_layers`] with a mip chain behind every layer: one
+/// `D2Array` image whose level count is the chain's length, and an array view
+/// onto every level of every layer.
+///
+/// `layers[layer][level]` is level `level` of layer `layer`, tightly packed at
+/// that level's extent — `width` and `height` each halved per level and never
+/// below one texel, which is [`crate::mip::level_extent`] and every backend's
+/// own definition. Every layer carries the same number of levels, at least one
+/// and at most the full chain
+/// [`Extent3d::full_mip_levels`](crcbl_hal::Extent3d::full_mip_levels) counts;
+/// a shorter chain is legal and leaves the sampler's `lod_max` to the caller.
+///
+/// # Errors
+///
+/// [`upload_texture_layers`]'s errors, plus [`HalError::InvalidDescriptor`]
+/// when a layer has no levels, when two layers disagree on how many, when the
+/// count exceeds the full chain, or when a level is not exactly its own
+/// extent's worth of texels — each naming the layer and the level.
+pub fn upload_texture_mip_layers(
+    device: &dyn Device,
+    queue: QueueHandle,
+    label: &str,
+    format: Format,
+    width: u32,
+    height: u32,
+    layers: &[&[&[u8]]],
+) -> Result<UploadedTexture, HalError> {
     upload(
         device,
         queue,
@@ -156,8 +204,8 @@ pub fn upload_texture_layers(
     )
 }
 
-/// The body both public uploads share: validate, stage every layer into one
-/// buffer, then hand over to [`upload_image`].
+/// The body the public uploads share: validate, stage every level of every
+/// layer into one buffer, then hand over to [`upload_image`].
 ///
 /// `extent` is `(width, height)` as one argument rather than two, which is what
 /// keeps this inside the argument count the public wrappers already sit at.
@@ -167,7 +215,7 @@ fn upload(
     label: &str,
     format: Format,
     extent: (u32, u32),
-    layers: &[&[u8]],
+    layers: &[&[&[u8]]],
     view_type: ImageViewType,
 ) -> Result<UploadedTexture, HalError> {
     let (width, height) = extent;
@@ -202,17 +250,18 @@ fn upload(
             "{label}: a texture needs at least one layer of pixels"
         )));
     }
-
-    let row_bytes = u64::from(width) * u64::from(texel);
-    let expected = row_bytes * u64::from(height);
-    for (index, pixels) in layers.iter().enumerate() {
-        if pixels.len() as u64 != expected {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{label}: layer {index} of a {width}x{height} {format:?} image is {expected} \
-                 bytes ({texel} per texel), got {}",
-                pixels.len()
-            )));
-        }
+    let mip_levels = u32::try_from(layers[0].len()).unwrap_or(u32::MAX);
+    let full_chain = Extent3d::d2(width, height).full_mip_levels(ImageType::D2);
+    if mip_levels == 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: layer 0 has no mip levels; a layer needs at least its own texels"
+        )));
+    }
+    if mip_levels > full_chain {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: {mip_levels} mip levels for a {width}x{height} image, whose full chain \
+             is {full_chain}"
+        )));
     }
 
     let alignment = device
@@ -220,32 +269,62 @@ fn upload(
         .limits
         .optimal_buffer_copy_offset_alignment
         .max(1);
-    let row_pitch = padded_row_pitch(row_bytes, texel, alignment);
-    // Each layer's rows are already a multiple of the alignment, so stacking
-    // them puts every layer's own offset on it too — which is what lets the
-    // copies below name one buffer offset per layer.
-    let layer_bytes = row_pitch * u64::from(height);
-    let size = layer_bytes * u64::from(layer_count);
+
+    // Every level of every layer is validated and staged in the order the
+    // copies below read them: layer-major, level-minor. Each level's rows are a
+    // multiple of the alignment, so stacking them puts every subresource's own
+    // offset on it too — which is what lets each copy name one buffer offset.
     let mut padded = Vec::new();
-    for pixels in layers {
-        let staged = stage_rows(row_bytes, height, row_pitch, pixels).ok_or_else(|| {
-            HalError::InvalidDescriptor(format!(
-                "{label}: a {size}-byte staging image does not fit in this host's address space"
-            ))
-        })?;
-        padded.extend_from_slice(&staged);
+    let mut regions = Vec::with_capacity(layers.len() * mip_levels as usize);
+    for (layer, chain) in layers.iter().enumerate() {
+        if chain.len() as u32 != mip_levels {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{label}: layer {layer} carries {} mip levels and layer 0 carries {mip_levels}; \
+                 every layer of one image has the same chain",
+                chain.len()
+            )));
+        }
+        for (level, pixels) in chain.iter().enumerate() {
+            let level_width = level_extent(width, level as u32);
+            let level_height = level_extent(height, level as u32);
+            let row_bytes = u64::from(level_width) * u64::from(texel);
+            let expected = row_bytes * u64::from(level_height);
+            if pixels.len() as u64 != expected {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "{label}: layer {layer} level {level} of a {width}x{height} {format:?} image \
+                     is {level_width}x{level_height}, {expected} bytes ({texel} per texel), got {}",
+                    pixels.len()
+                )));
+            }
+            let row_pitch = padded_row_pitch(row_bytes, texel, alignment);
+            let staged =
+                stage_rows(row_bytes, level_height, row_pitch, pixels).ok_or_else(|| {
+                    HalError::InvalidDescriptor(format!(
+                        "{label}: a staging image of {} bytes and more does not fit in this \
+                         host's address space",
+                        padded.len()
+                    ))
+                })?;
+            regions.push(StagedRegion {
+                buffer_offset: padded.len() as u64,
+                // The copy is in texels; the pitch above is in bytes.
+                // `padded_row_pitch` guarantees the division is exact.
+                row_texels: u32::try_from(row_pitch / u64::from(texel)).unwrap_or(u32::MAX),
+                extent: Extent3d::d2(level_width, level_height),
+                layer: layer as u32,
+                mip: level as u32,
+            });
+            padded.extend_from_slice(&staged);
+        }
     }
 
     let staging_label = format!("{label} staging");
     let staging = device.create_buffer(&BufferDesc {
         label: Some(&staging_label),
-        size,
+        size: padded.len() as u64,
         usage: BufferUsage::TRANSFER_SRC,
         memory: MemoryLocation::HostUpload,
     })?;
-    // The copy is in texels; the pitch above is in bytes. `padded_row_pitch`
-    // guarantees the division is exact.
-    let row_texels = u32::try_from(row_pitch / u64::from(texel)).unwrap_or(u32::MAX);
     let outcome = upload_image(
         device,
         queue,
@@ -254,11 +333,11 @@ fn upload(
             format,
             width,
             height,
-            row_texels,
             layer_count,
-            layer_bytes,
+            mip_levels,
             view_type,
             staging,
+            regions: &regions,
         },
         &padded,
     );
@@ -306,6 +385,20 @@ fn stage_rows(row_bytes: u64, height: u32, row_pitch: u64, pixels: &[u8]) -> Opt
     Some(padded)
 }
 
+/// One subresource's place in the staging buffer: what its
+/// [`BufferImageCopy`] names besides the buffer and the image.
+struct StagedRegion {
+    /// Where this subresource's first row starts, on the copy alignment.
+    buffer_offset: u64,
+    /// The padded row pitch, in texels — the unit
+    /// [`BufferImageCopy::buffer_row_length`] documents.
+    row_texels: u32,
+    /// This level's own extent, halved from the image's per level.
+    extent: Extent3d,
+    layer: u32,
+    mip: u32,
+}
+
 /// Everything [`upload_image`] needs that is not the device, the queue or the
 /// bytes — one struct rather than seven positional arguments, which is what
 /// `clippy::too_many_arguments` is objecting to and also what makes the two
@@ -315,17 +408,17 @@ struct UploadArgs<'a> {
     format: Format,
     width: u32,
     height: u32,
-    row_texels: u32,
-    /// Array layers in the image, and slices in the staging buffer.
+    /// Array layers in the image.
     layer_count: u32,
-    /// Bytes between one layer's first row and the next's, in the staging
-    /// buffer — the padded row pitch times the height.
-    layer_bytes: u64,
+    /// Mip levels in the image, and in every layer's chain.
+    mip_levels: u32,
     /// `D2` for one layer, `D2Array` for a page. Not derived from
     /// `layer_count`: a one-layer array view is a legitimate thing to want, and
     /// the shader's declaration is what decides which it is.
     view_type: ImageViewType,
     staging: crcbl_hal::BufferHandle,
+    /// One copy per level of every layer, in staging order.
+    regions: &'a [StagedRegion],
 }
 
 /// The half of [`upload_texture`] that owns the image and the view, so the
@@ -349,9 +442,14 @@ fn upload_image(
             // seam says on the field itself.
             depth_or_layers: args.layer_count,
         },
-        mip_levels: 1,
+        mip_levels: args.mip_levels,
         samples: 1,
-        usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+        // `TRANSFER_SRC` as well as the copy's `TRANSFER_DST`, so a test or a
+        // capture can copy a level back out — `tests/forward_e2e/page.rs` reads
+        // the page's chain that way. Free on every backend: a sampled image
+        // that is also a copy source costs no layout, no memory and no
+        // decompression it would not already pay.
+        usage: ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
     })?;
 
     let view = match device.create_image_view(&ImageViewDesc {
@@ -359,7 +457,7 @@ fn upload_image(
         image,
         view_type: args.view_type,
         format: args.format,
-        range: color_range(args.layer_count),
+        range: color_range(args.mip_levels, args.layer_count),
     }) {
         Ok(view) => view,
         Err(error) => {
@@ -378,12 +476,12 @@ fn upload_image(
     }
 }
 
-/// The whole of a single-mip colour image `layers` layers deep.
-const fn color_range(layers: u32) -> ImageSubresourceRange {
+/// The whole of a colour image `mips` levels deep and `layers` layers deep.
+const fn color_range(mips: u32, layers: u32) -> ImageSubresourceRange {
     ImageSubresourceRange {
         aspect: ImageAspect::COLOR,
         base_mip: 0,
-        mip_count: 1,
+        mip_count: mips,
         base_layer: 0,
         layer_count: layers,
     }
@@ -403,10 +501,11 @@ fn record_upload(
         queue,
     });
 
-    let range = color_range(args.layer_count);
+    let range = color_range(args.mip_levels, args.layer_count);
     // Undefined → TransferDst: the image has never held anything, so its old
     // contents are explicitly discarded rather than transitioned. The range
-    // covers every layer, so one barrier serves all the copies below.
+    // covers every level of every layer, so one barrier serves all the copies
+    // below.
     encoder.pipeline_barrier(&crcbl_hal::Barriers {
         images: &[crcbl_hal::ImageBarrier::new(
             image,
@@ -417,25 +516,26 @@ fn record_upload(
         ..Default::default()
     });
 
-    // One copy per layer. A region's `image_extent` is a 2D extent whatever the
-    // image is — `crcbl-dx12` refuses anything else by name, because
-    // `CopyTextureRegion` addresses one subresource — so the layer is named by
-    // `base_layer` and the buffer offset says where its rows start.
-    for layer in 0..args.layer_count {
+    // One copy per subresource. A region's `image_extent` is a 2D extent
+    // whatever the image is — `crcbl-dx12` refuses anything else by name,
+    // because `CopyTextureRegion` addresses one subresource — so the layer and
+    // the level are named by `base_layer` and `mip`, and the buffer offset says
+    // where that subresource's rows start.
+    for region in args.regions {
         encoder.copy_buffer_to_image(&BufferImageCopy {
             buffer: args.staging,
-            buffer_offset: u64::from(layer) * args.layer_bytes,
-            buffer_row_length: args.row_texels,
-            buffer_image_height: args.height,
+            buffer_offset: region.buffer_offset,
+            buffer_row_length: region.row_texels,
+            buffer_image_height: region.extent.height,
             image,
             image_subresource: ImageSubresourceLayers {
                 aspect: ImageAspect::COLOR,
-                mip: 0,
-                base_layer: layer,
+                mip: region.mip,
+                base_layer: region.layer,
                 layer_count: 1,
             },
             image_offset: Offset3d { x: 0, y: 0, z: 0 },
-            image_extent: Extent3d::d2(args.width, args.height),
+            image_extent: region.extent,
         });
     }
 
@@ -919,6 +1019,164 @@ mod tests {
                 .any(|event| matches!(event, Event::BufferWritten { .. })),
             "the test is only meaningful if the staging buffer really was created \
              and written before the failure"
+        );
+    }
+
+    /// **A chain is one copy per level of every layer**, each into its own mip
+    /// and each from its own padded offset — level-minor, so a layer's whole
+    /// chain sits together in the staging buffer.
+    ///
+    /// Tier B again, for the padded-versus-unpadded reason above, and a width
+    /// that halves onto rows of three different pitches: 100 texels pad to 512
+    /// bytes, 50 to 256, 25 to 256. A level offset computed from level 0's
+    /// pitch would land the second level's rows inside the first's tail.
+    #[test]
+    fn a_chain_copies_each_level_into_its_own_mip_from_its_own_offset() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_b(&recorder);
+        // Three of the seven levels a 100-wide image has: a partial chain is
+        // legal, and each level is its own extent's worth of texels.
+        let level_extents = [(WIDTH, HEIGHT), (50, 1), (25, 1)];
+        let chains: Vec<Vec<Vec<u8>>> = (0..2)
+            .map(|_| {
+                level_extents
+                    .iter()
+                    .map(|&(width, height)| ramp((width * height * 4) as usize))
+                    .collect()
+            })
+            .collect();
+        let levels: Vec<Vec<&[u8]>> = chains
+            .iter()
+            .map(|chain| chain.iter().map(Vec::as_slice).collect())
+            .collect();
+        let layers: Vec<&[&[u8]]> = levels.iter().map(Vec::as_slice).collect();
+
+        let page = upload_texture_mip_layers(
+            device.as_ref(),
+            queue,
+            "mipped page",
+            Format::Rgba8Unorm,
+            WIDTH,
+            HEIGHT,
+            &layers,
+        )
+        .expect("the null backend accepts a partial chain");
+
+        let level_bytes = [PITCH * HEIGHT as usize, 256, 256];
+        let layer_bytes: usize = level_bytes.iter().sum();
+        assert_eq!(
+            bytes_written(&recorder),
+            layer_bytes * chains.len(),
+            "the staging write is every level of every layer, each padded to its own pitch"
+        );
+        let copies = the_copies(&recorder);
+        assert_eq!(copies.len(), chains.len() * level_extents.len());
+        let mut expected_offset = 0u64;
+        for (index, copy) in copies.iter().enumerate() {
+            let layer = index / level_extents.len();
+            let level = index % level_extents.len();
+            let (width, height) = level_extents[level];
+            assert_eq!(
+                (
+                    copy.image_subresource.base_layer,
+                    copy.image_subresource.mip
+                ),
+                (layer as u32, level as u32),
+                "copy {index} is layer {layer}'s level {level}"
+            );
+            assert_eq!(copy.image_subresource.layer_count, 1);
+            assert_eq!(
+                copy.buffer_offset, expected_offset,
+                "layer {layer} level {level} reads from its own slice of the staging buffer"
+            );
+            assert_eq!(
+                copy.image_extent,
+                Extent3d::d2(width, height),
+                "level {level} is copied at its own extent"
+            );
+            assert_eq!(copy.buffer_image_height, height);
+            assert_eq!(
+                copy.buffer_row_length as usize * 4,
+                level_bytes[level] / height as usize,
+                "level {level}'s pitch is its own row padded, in texels"
+            );
+            expected_offset += level_bytes[level] as u64;
+        }
+
+        page.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// The single-level form is the chain form with one level, so the image it
+    /// creates has one mip and the copies name it — a `mip_levels` that
+    /// followed the chain length would otherwise be off by one somewhere.
+    #[test]
+    fn a_single_level_page_is_a_chain_of_one() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let pixels = vec![0u8; 4 * 4 * 4];
+        let page = upload_texture_layers(
+            device.as_ref(),
+            queue,
+            "flat page",
+            Format::Rgba8Unorm,
+            4,
+            4,
+            &[&pixels],
+        )
+        .expect("accepted");
+        let copy = the_copy(&recorder);
+        assert_eq!(copy.image_subresource.mip, 0);
+        page.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// A chain that is ragged, too long, empty, or has a level of the wrong
+    /// size is refused by name before anything is created.
+    #[test]
+    fn a_malformed_chain_is_rejected_naming_the_layer_and_the_level() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let before = recorder.total_live_objects();
+        let level0 = vec![0u8; 4 * 4 * 4];
+        let level1 = vec![0u8; 2 * 2 * 4];
+        let level2 = vec![0u8; 4];
+        let upload = |layers: &[&[&[u8]]]| {
+            upload_texture_mip_layers(
+                device.as_ref(),
+                queue,
+                "chain",
+                Format::Rgba8Unorm,
+                4,
+                4,
+                layers,
+            )
+            .expect_err("a malformed chain is not a page")
+            .to_string()
+        };
+
+        let ragged = upload(&[&[&level0, &level1], &[&level0]]);
+        assert!(
+            ragged.contains("layer 1 carries 1 mip levels and layer 0 carries 2"),
+            "got: {ragged}"
+        );
+        let long = upload(&[&[&level0, &level1, &level2, &level2]]);
+        assert!(
+            long.contains("4 mip levels") && long.contains("full chain is 3"),
+            "got: {long}"
+        );
+        let empty = upload(&[&[]]);
+        assert!(empty.contains("no mip levels"), "got: {empty}");
+        let wrong = upload(&[&[&level0, &level0]]);
+        assert!(
+            wrong.contains("layer 0 level 1") && wrong.contains("is 2x2, 16 bytes"),
+            "got: {wrong}"
+        );
+
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "a rejected chain creates nothing"
         );
     }
 }

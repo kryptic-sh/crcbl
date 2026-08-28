@@ -730,10 +730,57 @@ take the derivative route for tangents and pay nothing — which
 `43-render-standards.md` §2 rejects on mirrored UVs, not on determinism (see the
 2026-08-27 correction there).
 
-**Not blocked on this:** specular IBL, and the mip chain with its trilinear
-anisotropic sampler (`43-render-standards.md`'s filtering subsection). Both read
-the row as it stands; multi-scatter compensation and the gradient sky were not
-blocked either, and are built.
+**Not blocked on this:** specular IBL, and the trilinear anisotropic sampler
+over the page's mip chain (`43-render-standards.md`'s filtering subsection; the
+chain itself was built 2026-08-29). Both read the row as it stands;
+multi-scatter compensation and the gradient sky were not blocked either, and are
+built.
+
+### What the mip-chain slice left owed (2026-08-29)
+
+The page goes up with every layer's chain (`crcbl_render::mip::chain`,
+`upload_texture_mip_layers`) and `tests/forward_e2e/page.rs` reads the levels
+back. The sampler in `ForwardRenderer::with_scene` still reads level 0 —
+`lod_max: 0.0` — so nothing in a golden moved. What the rung still owes, in
+order:
+
+- **The sampler flip.** `mag`/`min`/`mip` to `Linear`, `lod_max` off, and
+  `anisotropy` from the player's `anisotropic_filtering` key clamped to
+  `Limits::max_sampler_anisotropy` — a value key on `render_scale`'s pattern in
+  `crcbl::settings`, with an `apps/options` row. This is the slice that
+  re-blesses every golden with a minified texture in it at
+  `Tolerance::RASTERISER`; `43-render-standards.md`'s filtering subsection says
+  why that tolerance and no other.
+- **WebGPU's anisotropy ceiling** is reported as one and the plan wants the
+  desktop figure — the decision the same subsection points here for. Not taken.
+- **The chain's bytes are `powf` bytes.** `mip::srgb_to_linear` and
+  `linear_to_srgb` go through `f32::powf`, which is each host's libm, so a level
+  below 0 can differ by a byte between the Linux, macOS and Windows runners that
+  bless and check goldens. Level 0 is untouched, so today nothing can see it;
+  the sampler flip can. The glTF importer has resampled level 0 through the same
+  `powf` since it existed, and no golden has moved on it, so the odds are low —
+  but a 256-entry decode table and an exact encode would make the chain
+  bit-identical everywhere and is the fix if a re-bless ever disagrees across
+  hosts by one.
+- **A description with no meshes panics out of `with_scene`.** `check_scene`
+  accepts an empty mesh list, then `build`'s mesh-table sizing hits an
+  `unreachable!("check_scene refused an empty description")`, and lifting that
+  reaches `draw_gen.rs`'s "draw generation with no buckets would generate no
+  draws" assertion. `crcbl-scene`'s
+  `an_empty_document_yields_a_description_a_device_would_still_accept` asserts
+  only the capacities, so its name overstates what it proves. Found while the
+  page test tried the smallest scene; it uses a cube instead. Needs a decision:
+  refuse an empty mesh list by name in `check_scene` (and rename the glTF test),
+  or teach draw generation an empty bucket list so an empty document renders a
+  sky. Neither was taken.
+- **`tests/forward_e2e/` does not fail on a Vulkan validation error.** The page
+  test first ran with the page image lacking `TRANSFER_SRC`; radv logged
+  `VUID-VkImageMemoryBarrier2-oldLayout-01212` as an `ERROR` line and the test
+  passed. `tests/gpu_scene/harness.rs`'s header says there is no cross-backend
+  equivalent of the validation report and `finish` checks only the seam's
+  out-of-band channel; `run-forward-e2e.sh` greps for nothing. A
+  `vk validation:` `ERROR` line in the runner's output is a red the runner could
+  raise itself. Not done — a gate change, not a rendering one.
 
 ### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
 

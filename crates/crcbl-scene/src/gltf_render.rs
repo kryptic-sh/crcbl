@@ -107,19 +107,20 @@
 //!
 //! # What this does with textures, and what a page cannot hold
 //!
-//! A [`PageDesc`] is one image: every layer shares one square extent, one
-//! format and no mips (`docs/backlog.md`, "The material table has both halves").
-//! Real glTF textures are neither square nor equally sized, so they are
+//! A [`PageDesc`] is one image: every layer shares one square extent and one
+//! format — `docs/backlog.md`'s `ArrayPages` entry says what still binds. Real
+//! glTF textures are neither square nor equally sized, so they are
 //! **resampled** onto a common extent — the largest side of the largest decoded
-//! image, clamped to [`MAX_PAGE_EXTENT`] — by an alpha-weighted box filter that
-//! averages in *linear* light and re-encodes to sRGB, which is what the page's
-//! `Rgba8UnormSrgb` format means. Averaging the stored bytes instead would
-//! darken every downscale.
+//! image, clamped to [`MAX_PAGE_EXTENT`] — by [`crcbl_render::mip::resample`],
+//! the alpha-weighted box filter that averages in *linear* light and re-encodes
+//! to sRGB, which is what the page's `Rgba8UnormSrgb` format means. The same
+//! filter builds each layer's mip chain when the page is uploaded.
 //!
-//! The page costs `layers × extent² × 4` bytes on the device, so a document with
-//! many large textures is expensive by construction. That is the single-page
-//! shape's limit rather than this module's choice; the fix is the bindless form
-//! the backlog entry describes.
+//! The page costs `layers × extent² × 4` bytes on the device, and a third again
+//! for the chain below level 0, so a document with many large textures is
+//! expensive by construction. That is the single-page shape's limit rather than
+//! this module's choice; the fix is the bindless form the backlog entry
+//! describes.
 //!
 //! Only images an untextured-capable slot can actually use are decoded:
 //! `baseColorTexture` and nothing else, because [`mesh::GpuMaterial`] has one
@@ -376,7 +377,12 @@ fn pack_page(scene: &GltfScene, skips: &mut Skips<'_>) -> (PageDesc<'static>, Ve
     let mut page = PageDesc::opaque_white(extent);
     let mut layer_of_image = vec![None; scene.images().len()];
     for (image, rgba) in decoded {
-        layer_of_image[image] = Some(page.push_layer(resample(&rgba, extent)));
+        layer_of_image[image] = Some(page.push_layer(crcbl_render::mip::resample(
+            &rgba.pixels,
+            rgba.width,
+            rgba.height,
+            extent,
+        )));
     }
     (page, layer_of_image)
 }
@@ -448,103 +454,6 @@ fn decode_image(
             None
         }
     }
-}
-
-/// Resample `rgba` onto a square `extent`, alpha-weighted and in linear light.
-///
-/// A box filter: each destination texel averages the source texels its own cell
-/// covers. Where the source is *smaller* than the destination each cell covers
-/// exactly one texel, so an upscale is nearest-neighbour — which is what the
-/// page's sampler filters with anyway.
-///
-/// Two things it does that a naive average does not, and both are visible when
-/// they are missing. The stored bytes are sRGB-encoded, so they are decoded to
-/// linear before averaging and re-encoded after; averaging the encodings instead
-/// darkens every downscale. And the colours are weighted by alpha, so a
-/// transparent texel does not drag the colour of its neighbours towards whatever
-/// happens to be stored under it.
-fn resample(rgba: &crcbl_sprite::load::Rgba8, extent: u32) -> Vec<u8> {
-    let (width, height) = (rgba.width, rgba.height);
-    let mut out = vec![0u8; extent as usize * extent as usize * 4];
-    for y in 0..extent {
-        let (y0, y1) = source_span(y, extent, height);
-        for x in 0..extent {
-            let (x0, x1) = source_span(x, extent, width);
-            let mut weighted = [0.0f32; 3];
-            let mut plain = [0.0f32; 3];
-            let mut alpha = 0.0f32;
-            let mut texels = 0.0f32;
-            for sy in y0..y1 {
-                for sx in x0..x1 {
-                    let at = (sy as usize * width as usize + sx as usize) * 4;
-                    let a = f32::from(rgba.pixels[at + 3]) / 255.0;
-                    for channel in 0..3 {
-                        let linear = srgb_to_linear(rgba.pixels[at + channel]);
-                        weighted[channel] += linear * a;
-                        plain[channel] += linear;
-                    }
-                    alpha += a;
-                    texels += 1.0;
-                }
-            }
-            let at = (y as usize * extent as usize + x as usize) * 4;
-            for channel in 0..3 {
-                // A cell that is wholly transparent has no alpha to weight by,
-                // and its colour is still the best guess for what is under it.
-                let linear = if alpha > 0.0 {
-                    weighted[channel] / alpha
-                } else {
-                    plain[channel] / texels
-                };
-                out[at + channel] = linear_to_srgb(linear);
-            }
-            out[at + 3] = quantise(alpha / texels);
-        }
-    }
-    out
-}
-
-/// The half-open run of source texels destination texel `at` covers, on one
-/// axis.
-///
-/// Never empty: when the destination is the larger of the two, the run is the
-/// single texel the destination centre falls in.
-fn source_span(at: u32, extent: u32, source: u32) -> (u32, u32) {
-    let scale = |step: u32| (u64::from(step) * u64::from(source) / u64::from(extent)) as u32;
-    let start = scale(at).min(source.saturating_sub(1));
-    let end = scale(at + 1).clamp(start + 1, source);
-    (start, end)
-}
-
-/// One sRGB-encoded byte as a linear value in `0..=1`.
-///
-/// The IEC 61966-2-1 transfer function, which is what `Rgba8UnormSrgb` decodes
-/// with.
-fn srgb_to_linear(value: u8) -> f32 {
-    let encoded = f32::from(value) / 255.0;
-    if encoded <= 0.040_45 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// The inverse of [`srgb_to_linear`], rounded to a byte.
-fn linear_to_srgb(value: f32) -> u8 {
-    let linear = value.clamp(0.0, 1.0);
-    let encoded = if linear <= 0.003_130_8 {
-        12.92 * linear
-    } else {
-        1.055 * linear.powf(1.0 / 2.4) - 0.055
-    };
-    quantise(encoded)
-}
-
-/// A `0..=1` fraction as the nearest byte.
-fn quantise(value: f32) -> u8 {
-    // `clamp` first so the cast cannot saturate on a NaN-free out-of-range
-    // input, and `+ 0.5` so it rounds rather than truncates.
-    (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,7 +915,6 @@ mod tests {
         import_rigged_glb, import_skinned_pair_glb, png_bytes, replacing, rigged_json,
         skinned_pair_bin, skinned_pair_json, textured_glb, textured_parts, triangle_json,
     };
-    use crcbl_sprite::load::Rgba8;
 
     /// The key every conversion under test is named by, so a message that leaks
     /// into an assertion is recognisable.
@@ -1352,107 +1260,6 @@ mod tests {
         ] {
             assert!(capacity >= 1, "a pool of no bytes is not a pool");
         }
-    }
-
-    // -- the resampler -----------------------------------------------------
-
-    fn rgba(width: u32, height: u32, pixels: &[u8]) -> Rgba8 {
-        Rgba8 {
-            width,
-            height,
-            pixels: pixels.to_vec(),
-        }
-    }
-
-    #[test]
-    fn resampling_onto_the_extent_an_image_already_has_changes_no_texel() {
-        let source = rgba(2, 2, &IMAGE_TEXELS);
-        assert_eq!(resample(&source, 2), IMAGE_TEXELS);
-    }
-
-    #[test]
-    fn a_downscale_averages_in_linear_light_rather_than_in_stored_bytes() {
-        // Two black and two white texels. Their average is a half in *linear*
-        // light, and sRGB encodes a half at 188 — the mid grey a person would
-        // pick. Averaging the stored bytes instead lands on 128, which is a
-        // linear 0.216: the same picture, visibly darker, on every downscale.
-        let checker = [
-            0x00, 0x00, 0x00, 0xFF, //
-            0xFF, 0xFF, 0xFF, 0xFF, //
-            0xFF, 0xFF, 0xFF, 0xFF, //
-            0x00, 0x00, 0x00, 0xFF,
-        ];
-        let one = resample(&rgba(2, 2, &checker), 1);
-
-        assert_eq!(one.len(), 4);
-        assert_eq!(one[3], 0xFF, "opaque in, opaque out");
-        for channel in &one[..3] {
-            assert!(
-                (i32::from(*channel) - 188).abs() <= 1,
-                "a half in linear light encodes to 188 and this is {channel}"
-            );
-            assert!(
-                (i32::from(*channel) - 128).abs() > 8,
-                "{channel} is the byte average, which is the bug this asserts against"
-            );
-        }
-    }
-
-    #[test]
-    fn an_upscale_repeats_texels_rather_than_inventing_them() {
-        // The page's sampler filters nearest and has no mips, so an upscale that
-        // blended would only blur what the sampler is about to point-sample.
-        let four = resample(&rgba(2, 2, &IMAGE_TEXELS), 4);
-        let texel = |x: usize, y: usize| &four[(y * 4 + x) * 4..][..4];
-
-        assert_eq!(
-            texel(0, 0),
-            &IMAGE_TEXELS[0..4],
-            "red fills the top-left quarter"
-        );
-        assert_eq!(texel(1, 1), &IMAGE_TEXELS[0..4]);
-        assert_eq!(texel(2, 0), &IMAGE_TEXELS[4..8], "green the top-right");
-        assert_eq!(texel(0, 2), &IMAGE_TEXELS[8..12], "blue the bottom-left");
-        assert_eq!(
-            texel(3, 3),
-            &IMAGE_TEXELS[12..16],
-            "yellow the bottom-right"
-        );
-    }
-
-    #[test]
-    fn a_wholly_transparent_cell_keeps_its_colour_instead_of_dividing_by_zero() {
-        let clear = [
-            0xFF, 0x00, 0x00, 0x00, //
-            0xFF, 0x00, 0x00, 0x00, //
-            0xFF, 0x00, 0x00, 0x00, //
-            0xFF, 0x00, 0x00, 0x00,
-        ];
-        assert_eq!(resample(&rgba(2, 2, &clear), 1), [0xFF, 0x00, 0x00, 0x00]);
-    }
-
-    #[test]
-    fn alpha_weighting_keeps_a_transparent_neighbour_from_tinting_an_opaque_one() {
-        // One opaque red texel beside three fully transparent black ones. The
-        // colour under a transparent texel is not colour anybody authored, so
-        // the average must be red — an unweighted mean would drag it to a
-        // quarter-strength red that no texel of the source holds.
-        let fringe = [
-            0xFF, 0x00, 0x00, 0xFF, //
-            0x00, 0x00, 0x00, 0x00, //
-            0x00, 0x00, 0x00, 0x00, //
-            0x00, 0x00, 0x00, 0x00,
-        ];
-        let one = resample(&rgba(2, 2, &fringe), 1);
-        assert_eq!(
-            &one[..3],
-            &[0xFF, 0x00, 0x00],
-            "the colour is the opaque texel's"
-        );
-        assert_eq!(
-            one[3], 64,
-            "the coverage is a quarter, which is what alpha carries"
-        );
     }
 
     #[test]

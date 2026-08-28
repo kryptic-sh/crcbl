@@ -114,7 +114,7 @@ pub const PYRAMID_ROUGHNESS: f32 = 0.25;
 /// * A flat layer would make the golden suite pass with **no UV at all**. Four
 ///   texels is what makes the texture coordinate observable, because a mesh
 ///   whose UVs never varied would shade each face in one texel's colour.
-/// * Every texel boundary is a hard edge — the sampler has no mips and filters
+/// * Every texel boundary is a hard edge — the sampler reads level 0 and filters
 ///   nearest — and a hard edge is where two rasterisers can land on opposite
 ///   sides of an interpolated UV. Four texels put **one** boundary across a face
 ///   in each axis, at `0.5`, which is as far from a vertex as an edge can be. A

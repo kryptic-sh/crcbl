@@ -185,7 +185,7 @@ use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
 use crate::sky_pass::SkyPass;
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrImages};
-use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
+use crate::texture::{UploadedTexture, upload_texture, upload_texture_mip_layers};
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages};
@@ -239,7 +239,7 @@ const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).forma
 /// The format §3.2's base-colour page is created with.
 ///
 /// **`Rgba8UnormSrgb`, and that is the colour-space decision** — the argument
-/// for it is at the `upload_texture_layers` call inside
+/// for it is at the `upload_texture_mip_layers` call inside
 /// [`ForwardRenderer::with_scene`]. Named rather than spelled twice because
 /// [`ForwardRenderer::base_color_page_import`] has to declare the same format
 /// the image was created with, and a barrier naming a format the image is not in
@@ -2460,28 +2460,49 @@ impl ForwardRenderer {
         //
         // Layer 0's whiteness and every layer's length were settled by
         // `check_scene` above, before this device object existed.
-        let page_layers: Vec<&[u8]> = scene
+        //
+        // **Every layer goes up with its mip chain**, built here on the host by
+        // [`crate::mip`] — `docs/plan/43-render-standards.md`'s filtering rung.
+        // The chain is what a trilinear sampler needs to stop shimmering on a
+        // minified surface, and it is built at upload rather than by a compute
+        // pass because the page's sRGB format is what decodes it and a host
+        // chain is the same bytes on every backend.
+        let extent = scene.page.extent();
+        let chains: Vec<Vec<Vec<u8>>> = scene
             .page
             .layers()
             .iter()
-            .map(|texels| texels.as_ref())
+            .map(|texels| crate::mip::chain(texels, extent))
             .collect();
-        let base_color_page = upload_texture_layers(
+        let page_levels: Vec<Vec<&[u8]>> = scene
+            .page
+            .layers()
+            .iter()
+            .zip(&chains)
+            .map(|(level0, below)| {
+                std::iter::once(level0.as_ref())
+                    .chain(below.iter().map(Vec::as_slice))
+                    .collect()
+            })
+            .collect();
+        let page_layers: Vec<&[&[u8]]> = page_levels.iter().map(Vec::as_slice).collect();
+        let base_color_page = upload_texture_mip_layers(
             device,
             queue,
             "material base colour",
             BASE_COLOR_PAGE_FORMAT,
-            scene.page.extent(),
-            scene.page.extent(),
+            extent,
+            extent,
             &page_layers,
         )?;
         rollback.textures.push(base_color_page);
 
-        // Nearest for the tonemap's reason of its own: the page has one mip
-        // level, because §3.2 makes mip generation a compute pass of its own,
-        // and filtering a page with no mips buys a shimmer rather than a
-        // smoother picture. A second sampler object rather than sharing the
-        // tonemap's, so a capture names each for what it filters.
+        // Nearest, and **clamped to level 0** even though the chain is there:
+        // the sampler's flip to trilinear-plus-anisotropic is the filtering
+        // rung's next slice, and it re-blesses every golden with a minified
+        // texture in it, so this sampler reads exactly what the one-level page
+        // read until that slice lands. A second sampler object rather than
+        // sharing the tonemap's, so a capture names each for what it filters.
         //
         // **`Repeat`, not `ClampToEdge`**, and that is what `mesh.slang`'s
         // `TILING_PHYSICAL` needs: a physical UV runs to `world_extent /
@@ -2496,6 +2517,7 @@ impl ForwardRenderer {
             min_filter: FilterMode::Nearest,
             mip_filter: FilterMode::Nearest,
             address_mode: [SamplerAddressMode::Repeat; 3],
+            lod_max: 0.0,
             ..SamplerDesc::default()
         })?;
         rollback.samplers.push(base_color_sampler);
@@ -10230,20 +10252,34 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // Every layer goes up with its chain — three levels for this extent —
+        // so the copies are layer-major, level-minor, each at its level's own
+        // extent.
+        let levels = crcbl_hal::Extent3d::d2(APP_EXTENT, APP_EXTENT)
+            .full_mip_levels(crcbl_hal::ImageType::D2);
+        assert_eq!(levels, 3, "a 4² page has three levels down to one texel");
+        let layer_count = u32::try_from(scene.page.layers().len()).expect("a page of a few layers");
         assert_eq!(
             copies
                 .iter()
-                .map(|copy| copy.image_subresource.base_layer)
-                .collect::<Vec<u32>>(),
-            (0..u32::try_from(scene.page.layers().len()).expect("a page of a few layers"))
-                .collect::<Vec<u32>>(),
-            "every layer the description carries must be copied into the page, in order"
+                .map(|copy| (
+                    copy.image_subresource.base_layer,
+                    copy.image_subresource.mip
+                ))
+                .collect::<Vec<(u32, u32)>>(),
+            (0..layer_count)
+                .flat_map(|layer| (0..levels).map(move |level| (layer, level)))
+                .collect::<Vec<(u32, u32)>>(),
+            "every level of every layer the description carries must be copied into the page, \
+             in order"
         );
         assert!(
-            copies
-                .iter()
-                .all(|copy| copy.image_extent == crcbl_hal::Extent3d::d2(APP_EXTENT, APP_EXTENT)),
-            "the page is the extent the caller wrote, not the demo's: {copies:?}"
+            copies.iter().all(|copy| {
+                let side = crate::mip::level_extent(APP_EXTENT, copy.image_subresource.mip);
+                copy.image_extent == crcbl_hal::Extent3d::d2(side, side)
+            }),
+            "the page is the extent the caller wrote, not the demo's, halved per level: \
+             {copies:?}"
         );
 
         // The table, row by row, out of the buffer `mesh.slang` indexes.
