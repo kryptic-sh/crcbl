@@ -395,9 +395,14 @@ fn modelled_column(params: &VolumetricParams, visibility: &[f32], count: usize) 
 /// gap is rounding and not a model. Swept on radv over densities from `0.02` to
 /// `0.6` against falloffs from `2` to `40`: the worst lane over the nine ran
 /// from `0.000017` to `0.000074`, with no trend in either parameter. This sits
-/// an order above the peak of that sweep, which leaves room for another
-/// driver's arithmetic and is still three orders under the factor either half
-/// of a wrong column is out by.
+/// an order above the peak of that sweep and is still three orders under the
+/// factor either half of a wrong column is out by.
+///
+/// **Four backends land on the same digit.** The fixture's own medium gives
+/// `0.00002` on radv, on lavapipe, on WARP and on Metal — the worst lane sits
+/// at a different froxel on each, which is what a rounding difference looks
+/// like. So the headroom above the sweep is for a driver nobody has run yet
+/// rather than for one of these.
 const FROXEL_RELATIVE: f32 = 5e-4;
 
 /// The radiance under which the relative comparison is not asked.
