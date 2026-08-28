@@ -238,7 +238,7 @@ Shrinking `FRAMES_WATCHED` to fit is still the move to avoid: the check's own
 comment argues any size catches a per-frame leak, but a smaller window is more
 easily satisfied by noise and the three-window rule is what buys the teeth.
 
-### The macOS probe job hangs after group E's pause window (2026-08-28)
+### The macOS probe job stops getting frames after group E's pause (2026-08-28)
 
 `probe the seam on macOS` has timed out after 20 minutes on
 `Render quarry in a real browser` three times: on `9705f12`, `4bf0375` and
@@ -294,12 +294,22 @@ or `--disable-background-timer-throttling` — which is a candidate, not a
 diagnosis. Nothing local reproduces it: the same gate passes on this machine,
 and only a macOS runner has ever shown it.
 
-**The deadline is not the fix.** That wait has to stop depending on the frame
-loop of a page that has been asked to stop: `until` on an observable is what the
-rest of this file does, and the observable here is the one the check after it
-already reads — `document.activeElement` becoming the canvas. The claim that
-follows it, that focus alone did not resume the demo, is a negative and needs a
-bounded window of its own that does not assume the page paints.
+**The wait is gone, and what replaced it is the loop's own count.**
+`web/engine/demo.js` counts its frames and publishes `crcbl.frames()`;
+`loopFrames` in `web/tools/browser-e2e.mjs` waits for two more of them, and a
+new group E check — `the demo loops again once the canvas has the focus back` —
+fails with what it saw instead of hanging. Verified locally against quarry and
+breakout on SwiftShader, and sabotage-verified by dropping the increment from
+the built site's copy: the check went red in 237 s naming the frames it did not
+get, where the old wait would have hung. The second frame wait, between
+breakout's `touchStart` and its `touchCancel`, went the same way.
+
+**What that does not do is explain the macOS runner.** The question it now asks
+is whether the demo's loop runs again after the corner click, and if the page
+still delivers no frames there, this check is what goes red — with the number,
+in four minutes rather than twenty. Whether the frames come back with the focus,
+and why they stopped at all, is what the next macOS run answers. The three
+backgrounding flags `browserFlags` does not pass remain the candidate.
 
 **A second bug the same log shows: an aborted run reports success.** After the
 rejection, the driver printed `web e2e: 25/25 checks passed` and then the touch

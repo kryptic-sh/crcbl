@@ -408,8 +408,23 @@ export function bootDemo(spec) {
 
     let announced = -1;
 
+    // **How many times this loop has run**, published on the debug handle below
+    // as the one thing a driver outside the page can wait on to know the demo
+    // has had a chance to act on something it was sent.
+    //
+    // The browser gate used to wait on two of its own `requestAnimationFrame`
+    // callbacks instead, which is the same idea asked of the wrong party: it
+    // says the *browser* produced frames, not that this loop ran, and on a
+    // macOS runner the page stopped producing them altogether once the canvas
+    // was blurred — so the wait never resolved and the job died at its cap. A
+    // counter the loop increments answers the question that was actually being
+    // asked, and a loop that has stopped makes the wait fail with that as the
+    // finding rather than hang.
+    let frames = 0;
+
     /** @param {number} now */
     function frame(now) {
+      frames += 1;
       // The shell's event-clock reference for this frame, before anything reads
       // an event timestamp.
       exports.__crcbl_web_frame(now);
@@ -481,6 +496,8 @@ export function bootDemo(spec) {
         exports,
         memory,
         status: () => api.status(),
+        // The loop's own frame count — see `frames` above for what waits on it.
+        frames: () => frames,
         audio: () => audio.then((a) => a?.stats()),
         saves: () => ({
           pending: exports.__crcbl_web_opfs_pending(),

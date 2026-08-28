@@ -2003,6 +2003,38 @@ const pollCeiling = () => Math.min(budget(TIMEOUT_MS), POLL_WALL_CAP_MS);
  */
 const until = (probe, timeout = pollCeiling()) => pollUntil(probe, timeout);
 
+/**
+ * Waits until the demo's own frame loop has run `wanted` more times.
+ *
+ * **The engine having had its chance, asked of the engine.** A driver that
+ * dispatches an event and then reads the result immediately reads it before
+ * anything has processed it — the shim's listeners run while the CDP command is
+ * in flight, so the event is queued in the wasm backend, and it is `frame()` in
+ * `web/engine/demo.js` that drains that queue and applies whatever it found. So
+ * the wait has to be for that loop, and `crcbl.frames()` is the loop counting
+ * itself.
+ *
+ * **It used to be two `requestAnimationFrame` callbacks of the driver's own,
+ * and that is a different question with the same shape.** It asks whether the
+ * *browser* produced frames for the page, not whether the demo's loop ran; the
+ * two agree right up until they do not. On the macOS runner they stopped
+ * agreeing: with the canvas blurred and the demo paused, the page delivered no
+ * animation frame at all, `Runtime.evaluate` never came back, and `probe the
+ * seam on macOS` died at its 20-minute cap three runs in a row — see
+ * `docs/backlog.md`. A loop that is not running now makes this **fail**, with
+ * the frames it did run, rather than hang.
+ *
+ * @returns {Promise<number | null>} frames run, or `null` if it never got there
+ */
+const loopFrames = async (page, wanted = 2) => {
+  const before = Number(await evaluate(page, `crcbl.frames()`));
+  const reached = await until(async () => {
+    const now = Number(await evaluate(page, `crcbl.frames()`));
+    return now >= before + wanted ? now - before : null;
+  });
+  return reached;
+};
+
 // ---------------------------------------------------------------------------
 // The static server
 // ---------------------------------------------------------------------------
@@ -5455,15 +5487,21 @@ try {
   // means anything: read the status too early and a demo that would have
   // resumed still reports 6, and the check passes for the reason it exists to
   // rule out. A sleep cannot establish that — it only makes the wrong answer
-  // less likely — so wait on the observable instead. The shim's `pointerdown`
-  // listener runs synchronously while `Input.dispatchMouseEvent` is in flight,
-  // so the event is already queued in the wasm backend by the time the command
-  // returns; `frame()` in the demo's `main.js` drains that queue and applies
-  // any menu action, so two `requestAnimationFrame` ticks is the engine having
-  // had, and taken, its chance to resume.
-  await evaluate(
-    page,
-    `new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))`
+  // less likely — so wait on the observable instead, which is the loop's own
+  // count. The shim's `pointerdown` listener runs synchronously while
+  // `Input.dispatchMouseEvent` is in flight, so the event is already queued in
+  // the wasm backend by the time the command returns; `frame()` in
+  // `web/engine/demo.js` drains that queue and applies any menu action, so two
+  // of its frames is the engine having had, and taken, its chance to resume.
+  const ranAfterClick = await loopFrames(page);
+  check(
+    'E',
+    'the demo loops again once the canvas has the focus back',
+    ranAfterClick !== null,
+    ranAfterClick === null
+      ? 'the frame loop ran fewer than two more frames after the click, so ' +
+          'nothing below can say the engine had its chance'
+      : `${ranAfterClick} more frame(s)`
   );
 
   // The other half of "the click reached the engine": it also has to have done
@@ -5989,10 +6027,7 @@ try {
       // rather than about a press and release landing in one pump, which is the
       // check below.
       await touch('touchStart', [contact(spot(PARK_X, PADDLE_BAND))]);
-      await evaluate(
-        page,
-        `new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))`
-      );
+      await loopFrames(page);
       await touch('touchCancel');
 
       const lostOne = await until(
