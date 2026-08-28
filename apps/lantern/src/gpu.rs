@@ -1188,7 +1188,7 @@ mod tests {
                 .value
                 .to_string()
         };
-        assert_eq!(row("effects"), "shadows ao ssr aa");
+        assert_eq!(row("effects"), "shadows ao ssr aa vfog");
         assert_eq!(row("monitor"), "shadows ao aa");
     }
 
@@ -1212,14 +1212,12 @@ mod tests {
         let monitor = request_for(room::View::Monitor, video, all).resolve(device);
         assert_eq!(
             main,
-            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
+            room::View::Main.stack().difference(RenderEffects::SHADOWS),
             "the settings file's clamp has to reach the room"
         );
         assert_eq!(
             monitor,
-            RenderEffects::DEFAULT_STACK
-                .difference(RenderEffects::SHADOWS)
-                .difference(RenderEffects::REFLECTIONS),
+            room::MONITOR_STACK.difference(RenderEffects::SHADOWS),
             "and the monitor, whose camera stack drops the reflections anyway"
         );
     }
@@ -1307,7 +1305,7 @@ mod tests {
         let (main, monitor) = effects_opened_with(crcbl::engine::SettingsSource::None);
         assert_eq!(
             (main, monitor),
-            (RenderEffects::DEFAULT_STACK, room::MONITOR_STACK),
+            (room::View::Main.stack(), room::MONITOR_STACK),
             "a run with no settings at all draws each view's own camera stack, \
              or the comparisons below are against the wrong control",
         );
@@ -1350,13 +1348,11 @@ mod tests {
         let monitor = request_for(room::View::Monitor, all, without_shadows).resolve(device);
         assert_eq!(
             main,
-            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS)
+            room::View::Main.stack().difference(RenderEffects::SHADOWS)
         );
         assert_eq!(
             monitor,
-            RenderEffects::DEFAULT_STACK
-                .difference(RenderEffects::SHADOWS)
-                .difference(RenderEffects::REFLECTIONS)
+            room::MONITOR_STACK.difference(RenderEffects::SHADOWS)
         );
 
         // And the override can move a decision *up* past the quality clamp

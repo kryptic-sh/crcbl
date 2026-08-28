@@ -788,22 +788,22 @@ mod tests {
                 .expect("headless runs everywhere")
                 .paths
                 .effects,
-            RenderEffects::DEFAULT_STACK,
+            room::View::Main.stack(),
             "a run that asked for nothing must draw every effect this sample's stack asks \
              for — see `room::View::stack`",
         );
 
         for (off, row) in [
-            (RenderEffects::SHADOWS, "ao ssr aa"),
-            (RenderEffects::AMBIENT_OCCLUSION, "shadows ssr aa"),
-            (RenderEffects::REFLECTIONS, "shadows ao aa"),
+            (RenderEffects::SHADOWS, "ao ssr aa vfog"),
+            (RenderEffects::AMBIENT_OCCLUSION, "shadows ssr aa vfog"),
+            (RenderEffects::REFLECTIONS, "shadows ao aa vfog"),
         ] {
             let mut options = headless(4);
             options.effects.remove(off);
             let summary = run(&options).expect("a frame with an effect off still runs");
             assert_eq!(
                 summary.paths.effects,
-                RenderEffects::DEFAULT_STACK.difference(off),
+                room::View::Main.stack().difference(off),
                 "{off:?} did not reach the renderer",
             );
             assert_eq!(summary.paths.effects_row(), row, "{off:?}");
@@ -963,7 +963,7 @@ mod tests {
         engine.frame().expect("a frame");
         assert_eq!(
             engine.gpu().paths().effects,
-            RenderEffects::DEFAULT_STACK,
+            room::View::Main.stack(),
             "a run that asked for nothing draws every effect this sample's stack asks for",
         );
 
@@ -979,10 +979,10 @@ mod tests {
         press_row(&mut engine, window, 4);
         assert_eq!(
             engine.gpu().paths().effects,
-            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
+            room::View::Main.stack().difference(RenderEffects::SHADOWS),
             "the row did not reach the renderer, or took more than shadows",
         );
-        assert_eq!(engine.gpu().paths().effects_row(), "ao ssr aa");
+        assert_eq!(engine.gpu().paths().effects_row(), "ao ssr aa vfog");
         assert!(
             ui_text(&engine).iter().any(|text| text == "SHADOWS: OFF"),
             "the row's label must show what the frame now draws: {:?}",
@@ -993,7 +993,7 @@ mod tests {
         // matrix is for: one keypress between a shadowed room and an unshadowed
         // one, with no restart in between.
         press_row(&mut engine, window, 0);
-        assert_eq!(engine.gpu().paths().effects, RenderEffects::DEFAULT_STACK);
+        assert_eq!(engine.gpu().paths().effects, room::View::Main.stack());
         assert!(
             ui_text(&engine).iter().any(|text| text == "SHADOWS: ON"),
             "the row's label must show the value it went back to: {:?}",
@@ -1005,7 +1005,7 @@ mod tests {
         let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
         assert_eq!(
             summary.paths.effects,
-            RenderEffects::DEFAULT_STACK.difference(RenderEffects::SHADOWS),
+            room::View::Main.stack().difference(RenderEffects::SHADOWS),
             "the summary reports the set the run ended on",
         );
     }

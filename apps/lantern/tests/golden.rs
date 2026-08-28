@@ -37,7 +37,7 @@
 
 use crcbl::hal::{AdapterInfo, BindingModel, Features, Format, GeometryPath};
 use crcbl::math::Vec3;
-use crcbl::render::{Camera, EffectOverride, EffectRequest, ForwardRenderer, RenderEffects};
+use crcbl::render::{Camera, EffectOverride, EffectRequest, Fog, ForwardRenderer, RenderEffects};
 use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 use crcbl::shaders::probe::GpuProbe;
 use crcbl_golden::{ChannelOrder, Golden, Image};
@@ -390,27 +390,69 @@ fn below_features() -> Features {
     OffscreenSetup::OPTIONAL_FEATURES.difference(selecting)
 }
 
-/// One arm of a comparison: which view of the room, at which camera stack.
+/// The air the room is drawn through by the one claim that is about a medium.
 ///
-/// A struct rather than two arguments because the second is normally derived
-/// from the first — `Arm::of` is what every arm but one uses — and the one test
-/// that overrides it is holding two arms apart at *exactly* that layer, which is
+/// **The room ships in a vacuum, and this is not it.** Every blessed frame and
+/// every other claim here is drawn with [`Fog::NONE`], because this suite's
+/// controls are near-zero absolutes — "a conductor with no ambient and no
+/// reflection is black", "the coloured wall's channels separate", "the screen's
+/// unlit far face reads nothing" — and a participating medium adds a term to
+/// every block in the frame, including those. Measured: at a density of 0.05
+/// four of them fail, and they still fail at 0.008.
+/// `docs/backlog.md` carries what it would take to give the room air it keeps.
+///
+/// So this is the medium `the_air_scatters_the_sun_where_the_cascades_let_it_through`
+/// puts in front of the camera and nothing else does, and every number in it is
+/// chosen against that claim's two blocks:
+///
+/// * [`falloff`](Fog::falloff) is [`room::HEIGHT`] over a
+///   [`reference_height`](Fog::reference_height) of the floor, so the column
+///   thins upward across the room it is measured in rather than standing as a
+///   slab.
+/// * [`anisotropy`](Fog::anisotropy) is **isotropic**, which real fog is not —
+///   Mie scattering sits near `0.8` forward. The fixed camera looks *across* the
+///   sun's path rather than into it, and a forward lobe aims the scattered
+///   radiance away from the only eye this fixture has: measured at
+///   [`room::SPOT_SHADOWED`], the shaft's lift falls from 9.4% at `0.0` to 3.1%
+///   at `0.7` and 1.4% at `0.85`. Isotropic is what makes the claim below a
+///   claim rather than a coin toss.
+/// * [`sun_scattering`](Fog::sun_scattering) is one — the whole of the sun's
+///   radiance per unit length, which is the conservative medium's ceiling. It is
+///   the term the claim below switches off, and `Arm::without_shafts` is how.
+const AIR: Fog = Fog {
+    density: 0.05,
+    falloff: room::HEIGHT,
+    reference_height: 0.0,
+    color: Vec3::new(0.10, 0.12, 0.16),
+    sun_scattering: 1.0,
+    anisotropy: 0.0,
+};
+
+/// One arm of a comparison: which view of the room, at which camera stack, in
+/// which air.
+///
+/// A struct rather than three arguments because the others are normally derived
+/// from the view — `Arm::of` is what every arm but two uses — and each test that
+/// overrides one is holding two arms apart at *exactly* that layer, which is
 /// worth saying at the call site rather than passing as a bare flag set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Arm {
     /// Which view: whose camera, and which objects are in it.
     view: room::View,
     /// The camera-stack layer of the resolution order this arm renders with.
     stack: RenderEffects,
+    /// The medium the frame is drawn through.
+    fog: Fog,
 }
 
 impl Arm {
-    /// The view as the room declares it — [`room::View::stack`] and its own
-    /// camera.
+    /// The view as the room declares it — [`room::View::stack`], its own camera,
+    /// and the vacuum every blessed frame here is drawn in. See [`AIR`].
     const fn of(view: room::View) -> Self {
         Self {
             view,
             stack: view.stack(),
+            fog: Fog::NONE,
         }
     }
 
@@ -418,6 +460,29 @@ impl Arm {
     /// of frames a claim about that layer.
     const fn with_stack(self, stack: RenderEffects) -> Self {
         Self { stack, ..self }
+    }
+
+    /// The same arm with [`AIR`] in front of the camera.
+    const fn with_air(self) -> Self {
+        Self { fog: AIR, ..self }
+    }
+
+    /// The same arm in [`AIR`] that the sun does not scatter into.
+    ///
+    /// The control half of
+    /// `the_air_scatters_the_sun_where_the_cascades_let_it_through`:
+    /// [`Fog::sun_scattering`] is the froxel path's whole reason for existing —
+    /// zero it and the medium keeps its absorption and its environment term and
+    /// loses the shaft, so two arms that differ in nothing else isolate what the
+    /// scatter pass put there and where.
+    const fn without_shafts(self) -> Self {
+        Self {
+            fog: Fog {
+                sun_scattering: 0.0,
+                ..AIR
+            },
+            ..self
+        }
     }
 }
 
@@ -584,6 +649,10 @@ fn build(
             .force(RenderEffects::all().difference(effects), Some(false)),
         ..EffectRequest::default()
     });
+    // `crate::gpu` sets the same air on both of its renderers, and a golden
+    // drawn without it would be a picture of a different room — see `Arm::fog`
+    // for the one arm that takes it out on purpose.
+    renderer.set_fog(arm.fog);
     if let Err(error) = room::place(&mut renderer, arm.view) {
         renderer.destroy(device);
         return Err(crcbl::screenshot::OffscreenError::Hal(
@@ -1219,6 +1288,77 @@ fn every_effect_toggles_and_the_frame_says_so() {
     );
 }
 
+/// How much brighter a block whose column is sunlit air has to get when the
+/// medium is allowed to scatter the sun.
+///
+/// Measured at [`room::SPOT_SHADOWED`] on radv with [`AIR`]: 67.20 with
+/// [`Fog::sun_scattering`] zeroed and 73.55 with it at one, which is 9.4%. Five
+/// per cent is under half of that and still an order above the control below,
+/// which reads 0.00% at the same two blocks.
+const SHAFT_LIFT: f32 = 1.05;
+
+/// **The froxel column puts the sun into the air the cascades let it reach, and
+/// into no other air.**
+///
+/// The one rendered claim about `crcbl_render::volumetric` in this tree, and the
+/// pair is what makes it one. Both arms draw the room in [`AIR`] through
+/// [`room::View::Main`]'s stack, which asks for
+/// [`RenderEffects::VOLUMETRIC_FOG`]; they differ in
+/// [`Fog::sun_scattering`] and in nothing else, so absorption, the environment
+/// term and every surface in the room are identical between them and the only
+/// thing that can move a block is the scatter pass's own output.
+///
+/// * The **claim** block is [`room::SPOT_SHADOWED`], low on the window wall.
+///   Its surface is in the corner post's shadow, so what the medium in front of
+///   it gains cannot be a change in how that surface is lit.
+/// * The **control** block is [`room::TINTED_PLASTER`], high on the back wall
+///   beyond the window's throw. Its whole column is out of the sun, so a scatter
+///   pass that ignored `visibilities[froxel]` — the sabotage `docs/backlog.md`
+///   records as leaving all 28 `mesh_e2e` tests green to the digit — lights it
+///   too. Measured here at exactly 0.00%.
+///
+/// Nothing is blessed: the room this draws is not the room this suite ships, and
+/// a golden of it would be a second picture to keep in step for no claim the
+/// pair does not already make. One frame per arm is written for a reviewer.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lantern-golden.sh"]
+fn the_air_scatters_the_sun_where_the_cascades_let_it_through() {
+    let block = review_block();
+    let camera = room::fixed_camera();
+    let at = |point: Vec3| project(&camera, REVIEW_EXTENT, point);
+    let arm = Arm::of(room::View::Main);
+    let lit = review_in(RenderEffects::all(), arm.with_air(), "air-scattering");
+    let flat = review_in(RenderEffects::all(), arm.without_shafts(), "air-absorbing");
+
+    let shaft = at(room::SPOT_SHADOWED);
+    let (shaft_off, shaft_on) = (
+        brightness(&flat, shaft, block),
+        brightness(&lit, shaft, block),
+    );
+    let shut = at(room::TINTED_PLASTER);
+    let (shut_off, shut_on) = (
+        brightness(&flat, shut, block),
+        brightness(&lit, shut, block),
+    );
+    eprintln!(
+        "lantern shaft: sunlit column {shaft_off:.2} -> {shaft_on:.2}, \
+         shadowed column {shut_off:.2} -> {shut_on:.2}"
+    );
+
+    assert!(
+        shaft_on > shaft_off * SHAFT_LIFT,
+        "the air in front of the window wall reads {shaft_off:.2} with the sun's scattering off \
+         and {shaft_on:.2} with it on — the scatter pass put nothing in the column the sun \
+         reaches"
+    );
+    assert!(
+        (shut_on - shut_off).abs() < shut_off * UNCHANGED,
+        "the air beyond the window's throw reads {shut_off:.2} with the sun's scattering off and \
+         {shut_on:.2} with it on — a froxel the cascades leave in shadow is being lit anyway, so \
+         the scatter pass is not reading its own visibility"
+    );
+}
+
 /// The extent the monitor's own view is inspected at.
 ///
 /// Square, because [`room::MONITOR_EXTENT`] is — the page carries one extent for
@@ -1530,7 +1670,18 @@ fn check_live_golden(image: &Image, backend: &str) {
 /// that is about to fail is exactly the run somebody wants the picture from, and
 /// a save after the assertions is a save a failure skips.
 fn review(effects: RenderEffects, name: &str) -> Image {
-    let (image, paths) = draw(REVIEW_EXTENT, effects);
+    review_in(effects, Arm::of(room::View::Main), name)
+}
+
+/// [`review`] of an arm that is not the room's own — the air-free control.
+fn review_in(effects: RenderEffects, arm: Arm, name: &str) -> Image {
+    let (image, paths, _) = draw_with_probes(
+        REVIEW_EXTENT,
+        effects,
+        OffscreenSetup::OPTIONAL_FEATURES,
+        false,
+        arm,
+    );
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(REVIEW_DIR);

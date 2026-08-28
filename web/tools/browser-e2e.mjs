@@ -533,6 +533,14 @@ const EXPECTATIONS = {
       line.includes('[HUD] tick: 60') && line.includes('lighting: Rasterised'),
     moving: /lamp x: (-?[\d.]+)/,
     movingLabel: 'the lamp keeps orbiting under its own steam',
+    // `room::View::Main`'s camera stack, resolved and printed by
+    // `Lantern::log_heartbeat`. `vfog` is the half that matters: this is the
+    // only demo that asks for it, so this is the only place a browser ever
+    // dispatches `crcbl_render::volumetric`'s scatter, scan and composite — and
+    // the scatter binds a comparison sampler to a compute stage, which is the
+    // one thing in that feature a backend could refuse where the artifact still
+    // compiles.
+    effectsRow: 'effects: shadows ao ssr aa vfog',
   },
   // **The third demo with no start key**, and the second that draws mesh
   // geometry. `apps/quarry` is the geometry acceptance fixture: there is no run
@@ -3040,6 +3048,26 @@ try {
               'being driven under a visible arrow'
       );
     }
+  }
+
+  // `effectsRow` is the resolved effect set a demo's own heartbeat prints,
+  // asserted where a demo asks for a pass that no other gate in this tree
+  // dispatches. `apps/lantern` is the only view in the workspace whose camera
+  // stack carries `VOLUMETRIC_FOG`, and the three froxel passes are *built*
+  // on every frame whatever the bit says — so an artifact that compiles and a
+  // driver that refuses it look identical until something runs them. This is
+  // the run that does, in a real browser, on the WebGPU backend.
+  if (EXPECTED.effectsRow) {
+    const wanted = EXPECTED.effectsRow;
+    const line = await until(async () => said(wanted) ?? null);
+    check(
+      'C',
+      'the resolved effect set reaches the frame this browser drew',
+      Boolean(line),
+      line?.trim() ??
+        `no console line carried "${wanted}" — the view's camera stack, the ` +
+          'device clamp or this backend stopped agreeing about what it draws'
+    );
   }
 
   // The ball's x is in every HUD line, and two different values is the

@@ -431,7 +431,8 @@ pub const MONITOR_EXTENT: (u32, u32) = (PAGE_EXTENT, PAGE_EXTENT);
 /// What the monitor's view **asks for**, as the camera-stack layer of
 /// `docs/plan/39-capabilities.md`'s resolution order.
 ///
-/// [`View::stack`]'s set less the reflections, which are
+/// [`RenderEffects::DEFAULT_STACK`](crcbl::render::RenderEffects::DEFAULT_STACK)
+/// less the reflections, which are
 /// `docs/plan/18-render-features.md`'s own example of what a render-to-texture
 /// camera does not want: a screen-space march in a view that is *about* to be
 /// pasted onto a surface standing in the same room is a frame's worth of work
@@ -1192,9 +1193,7 @@ impl View {
     ///
     /// The main view asks for
     /// [`RenderEffects::DEFAULT_STACK`](crcbl::render::RenderEffects::DEFAULT_STACK)
-    /// — every effect that models the room's own light transport, which is what
-    /// every frame the engine drew before there were two of them asked for; the
-    /// monitor asks for [`MONITOR_STACK`].
+    /// and the froxel path over it; the monitor asks for [`MONITOR_STACK`].
     ///
     /// **Not [`RenderEffects::all`](crcbl::render::RenderEffects::all)**, since
     /// topic 18's bloom slice put a lens effect in that set. This sample is the
@@ -1202,10 +1201,40 @@ impl View {
     /// the effects that approximate light transport — so what it asks for is the
     /// stack that models the room, and a lens is something a future run would
     /// have to ask for by name.
+    ///
+    /// **[`RenderEffects::VOLUMETRIC_FOG`] is asked for here and nowhere else in
+    /// this tree**, which is the whole reason it is here.
+    /// [`RenderEffects::DEFAULT_STACK`](crcbl::render::RenderEffects::DEFAULT_STACK)
+    /// leaves it out because integrating a medium in a froxel column rather than
+    /// in the fragment stage is a cost question rather than a correctness one —
+    /// and a view that never asks leaves `crcbl_render::volumetric`'s three
+    /// passes built on every frame and dispatched on none, so the artifacts
+    /// compile everywhere and no driver ever runs them. That gap is what this
+    /// asking closes: every backend that draws this room now runs the scatter,
+    /// the scan and the composite, the browser gate runs them in a real browser,
+    /// and the comparison sampler the scatter pass binds to a **compute** stage
+    /// is exercised rather than merely compiled.
+    ///
+    /// **It costs the frames nothing**, and that is deliberate rather than a
+    /// disappointment: this fixture's renderers are never handed a
+    /// [`Fog`](crcbl::render::Fog), and a view with
+    /// [`Fog::NONE`](crcbl::render::Fog::NONE) draws the same frame through
+    /// either integrator down to the bit — a zero density gives every froxel a
+    /// transmittance of one and no radiance. The air this room *could* have, and
+    /// what it puts in the frame, is `apps/lantern/tests/golden.rs`'s `AIR` and
+    /// the two arms that switch its scattering on and off; `docs/backlog.md`
+    /// carries why it is a test's air rather than the room's.
+    ///
+    /// The monitor does not ask, and that is the same judgement
+    /// [`MONITOR_STACK`] makes about reflections: a render-to-texture view about
+    /// to be pasted onto a screen in the corner is where a per-froxel integral
+    /// is least worth its cost.
+    ///
+    /// [`RenderEffects::VOLUMETRIC_FOG`]: crcbl::render::RenderEffects::VOLUMETRIC_FOG
     #[must_use]
     pub const fn stack(self) -> RenderEffects {
         match self {
-            Self::Main => RenderEffects::DEFAULT_STACK,
+            Self::Main => RenderEffects::DEFAULT_STACK.union(RenderEffects::VOLUMETRIC_FOG),
             Self::Monitor => MONITOR_STACK,
         }
     }
@@ -2781,9 +2810,14 @@ mod tests {
         );
         assert_eq!(
             View::Main.stack(),
-            RenderEffects::DEFAULT_STACK,
+            RenderEffects::DEFAULT_STACK.union(RenderEffects::VOLUMETRIC_FOG),
             "the frame the player sees asks for every effect that models the room's own \
-             light transport, as it always has"
+             light transport, and for the froxel column over the top of them"
+        );
+        assert!(
+            !MONITOR_STACK.contains(RenderEffects::VOLUMETRIC_FOG),
+            "the render-to-texture view integrates its medium in the fragment stage — \
+             see `View::stack`"
         );
         assert_ne!(
             View::Main.stack(),

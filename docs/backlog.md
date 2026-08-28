@@ -563,15 +563,29 @@ is scheduled.
 Four things belong here rather than there, because they are gaps rather than
 plans:
 
-- **Only Vulkan on radv has run it.** The two pipelines are built on every frame
-  whatever the effect bit says, so a WGSL, MSL or DXIL artifact that no backend
-  could compile reds CI immediately — but nothing _dispatches_ them outside
-  `mesh_e2e` on Vulkan, because the effect is off by default and no sample or
-  demo asks for it. The browser gate in particular runs the composite through no
-  pixel — and the scatter pass now binds a **comparison sampler to a compute
-  stage**, which is the one thing in this feature that a driver could refuse
-  where the artifact still compiles. A demo that switches the effect on is what
-  closes this, and it is the largest open gap in the feature.
+- **No demo you can run draws a medium.** `apps/lantern` now asks for the effect
+  — `room::View::Main`'s stack carries `VOLUMETRIC_FOG`, so every backend that
+  draws the room dispatches the scatter, the scan and the composite, and the
+  browser gate does it on WebGPU. What it does **not** do is hand the renderer a
+  `Fog`, so the column integrates a vacuum and the frames are the ones already
+  blessed.
+
+  That was measured rather than chosen. Lantern's acceptance claims are
+  near-zero absolutes — "a conductor with no ambient and no reflection is
+  black", "the coloured wall's channels separate", "the screen's unlit far face
+  reads nothing" — and a participating medium adds a term to every block in the
+  frame. With the air `golden.rs`'s `AIR` describes, four of them fail at a
+  density of 0.05 and they still fail at 0.008:
+  `the_fixed_camera_draws_the_room_and_matches_its_golden`'s coloured wall,
+  `zero_probes_only_remove_the_ssr_and_rough_fallbacks`,
+  `the_camera_stack_is_the_only_thing_between_the_monitors_two_frames` and
+  `the_screen_in_the_room_shows_the_room_and_matches_its_golden`. Giving lantern
+  air it keeps means restating each of those four against a vacuum arm — the
+  shape `Arm::without_air` already provides — and re-blessing both goldens; that
+  is a redesign of the fixture's claim set rather than a knob, and it is worth
+  doing deliberately or not at all. The other route is a demo whose charter is
+  the medium, which is what `docs/plan/sample/` would carry.
+
 - **The composite is before the reflection resolve, so a reflection arrives
   unfogged.** The same ordering gap `mesh.slang`'s closed form has, recorded
   further down this file, and the froxel path inherited it deliberately: it sits
@@ -585,18 +599,20 @@ plans:
   `crcbl_shaders::volumetric` on the CPU is what will. The equality still holds
   wherever a caller leaves `Fog::sun_scattering` at zero, which every sample
   does, so the rung-1a gate has not stopped being evidence.
-- **No rendered frame checks that the composite sources its partial slice from
-  the froxel's own visibility.** Replacing `visibilities[froxel]` with `1.0` in
-  `volumetric_composite.slang` leaves all 28 `mesh_e2e` tests green to the digit
-  — verified, not assumed. The reason is structural: those tests measure
-  background texels, where the partial slice is the tail of a column whose
-  transmittance has already gone to nothing, and the texels where the partial
-  slice does carry the frame are the ones a surface was drawn into, where
-  switching the cascades also moves that surface's own shading. What would catch
-  it is the per-froxel readback above. `crcbl_shaders::volumetric`'s
-  `the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility` is
-  a text guard standing in for it, and it is worth exactly what it says: the
-  read is written down, not that it is right.
+- **The composite's own partial slice is still only guarded by a text read.**
+  `apps/lantern/tests/golden.rs`'s
+  `the_air_scatters_the_sun_where_the_cascades_let_it_through` closed the
+  neighbouring hole — dropping the **scatter** pass's `visibilities[froxel]`
+  reddens its shadowed-column control, which is a rendered frame catching the
+  sabotage that left all 28 `mesh_e2e` tests green to the digit. It does not
+  reach `volumetric_composite.slang`'s partial slice, which is the tail of the
+  column nearest the eye: that arrives at a fragment where the transmittance in
+  front of it is still one, and both of the claim's blocks read a surface metres
+  away. The per-froxel readback above is still what would catch it, and
+  `crcbl_shaders::volumetric`'s
+  `the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility`
+  remains a text guard worth exactly what it says: the read is written down, not
+  that it is right.
 
 ### DECISION NEEDED — when the vertex and material strides widen (2026-08-27)
 
@@ -3754,6 +3770,16 @@ that mode. What is left:
   cursor" in core Wayland), naming a shape needs `cursor-shape-v1`, which is not
   vendored. Unchanged by this work and noted here because the new hook is what
   finally lets a game ask.
+
+### `gh run list --commit <sha>` returns nothing here (2026-08-29)
+
+A CI watcher built on `gh run list --commit 8586d82 --json ...` printed no rows
+for a commit that had two completed runs, so it waited out its whole timeout
+without emitting an event — a watcher that looks identical to "still running"
+and is the failure mode `Monitor`'s own guidance warns about.
+`gh run list --limit N --json headSha,...` and filtering with `jq` returns them.
+Not diagnosed further: it may be the flag, the `gh` version or the runs being
+reachable only by branch. Worth knowing before writing the next watcher.
 
 ### A failing `until` in the browser gate reddens a second, unrelated check (2026-08-29)
 

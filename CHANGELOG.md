@@ -16,6 +16,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/lantern` asks for the froxel volumetric path, so something dispatches
+  it.** `room::View::Main`'s camera stack now carries
+  `RenderEffects::VOLUMETRIC_FOG` — the only view in the workspace that asks for
+  it. `crcbl_render::volumetric`'s scatter, scan and composite were built on
+  every frame whatever the bit said and dispatched by nothing but one Vulkan
+  test, so every other backend compiled the artifacts and never ran them; the
+  scatter pass binds a **comparison sampler to a compute stage**, which a driver
+  can refuse where the artifact still compiles. Every backend that draws this
+  room now runs the column, the browser gate runs it on WebGPU, and the gate
+  asserts the resolved row the demo prints.
+
+  **No frame moved.** The fixture hands its renderers no `Fog`, and a view with
+  `Fog::NONE` draws the same picture through either integrator to the bit, so
+  both goldens are the ones already checked in.
+
+  `apps/lantern/tests/golden.rs`'s
+  `the_air_scatters_the_sun_where_the_cascades_let_it_through` is the first
+  rendered claim about the froxel path anywhere: two arms in the same medium
+  differing only in `Fog::sun_scattering`, asserting that a block whose column
+  is sunlit air gains and a block whose column the cascades shut out does not
+  move. Replacing the scatter pass's own `visibilities[froxel]` with `1.0` — a
+  sabotage `docs/backlog.md` records as leaving all 28 `mesh_e2e` tests green to
+  the digit — now reddens it.
+
 - **A game can hide its cursor, or name a shape for it.** `HostedGame::cursor`
   answers `Option<CursorIcon>` — `None` hides — and the loop reconciles it
   beside `HostedGame::pointer_mode`, calling `Shell::set_cursor` only when the

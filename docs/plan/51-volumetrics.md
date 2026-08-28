@@ -27,8 +27,12 @@ each slab of air scatters and transmits, then scans each column into an
 exclusive prefix; `volumetric_composite.slang` reads that prefix, integrates the
 last partial slice along the pixel's own ray and composites over the frame.
 `crcbl_render::volumetric` owns the three passes and
-`RenderEffects::VOLUMETRIC_FOG` switches them on — off by default, and the frame
-block's fog density is zeroed when they run, so the medium is charged once.
+`RenderEffects::VOLUMETRIC_FOG` switches them on — out of
+`RenderEffects::DEFAULT_STACK`, and the frame block's fog density is zeroed when
+they run, so the medium is charged once. `apps/lantern`'s main view is the one
+camera stack in the tree that asks for it, which is what makes every backend
+that draws that room — the browser included — dispatch the three passes rather
+than merely compile their artifacts.
 
 **Built.** The sun in the medium — rung 1b-i. `scatterMain` and the composite's
 partial slice both add `sun_radiance * phase(anisotropy, cos_theta)` to the
