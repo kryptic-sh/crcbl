@@ -695,6 +695,15 @@ and moved with it. Medians:
 | radv, 1920×1080   | 0.303 ms             | 0.221 ms                  | 27% |
 | llvmpipe, 960×720 | 11.281 ms            | 8.135 ms                  | 28% |
 
+**Reproducible since 2026-08-28, and confirmed.** Those medians were taken by
+hand from five runs because the exit log printed one arbitrary latent frame;
+`crcbl_render::PassStats` now prints a p50 and a p95 per label over the last 120
+frames of the same run, and it sums a label across the frame rather than
+reporting each view separately. On the same machine and extent one run reports
+`forward` at **0.230 ms p50 / 0.243 ms p95** — both views together, against the
+0.221 ms this table's room view alone — and 18 labels for 0.990 ms of p50, where
+the old line listed 53 rows. See [40-profiling.md](40-profiling.md).
+
 **The two agree to a percentage point, and that answers the open question.** The
 backlog asked whether the 48 taps cost what they cost because they are taps or
 because of the branch divergence they add on a CPU rasteriser, where a lane runs

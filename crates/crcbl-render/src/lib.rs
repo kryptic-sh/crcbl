@@ -146,6 +146,7 @@ pub mod menu;
 pub mod mesh_pool;
 pub mod nine_slice;
 pub mod orbit;
+pub mod pass_stats;
 mod probe;
 pub mod scene;
 pub mod shadow;
@@ -213,6 +214,7 @@ pub use mesh_pool::{
 };
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
 pub use orbit::OrbitCamera;
+pub use pass_stats::PassStats;
 pub use scene::{Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, ProbeGrid, SceneDesc};
 pub use shadow::Cascades;
 pub use skinning::{

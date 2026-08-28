@@ -324,6 +324,14 @@ it**: 0.255 ms, 25.9%, against `forward`'s 0.199 ms, `ssr`'s 0.099 ms,
 `shadow`'s 0.070 ms and `ssao-blur`'s 0.032 ms. Sixteen depth taps, an
 `acos_approx` and a `sqrt` per tap at 1920×1080 is what that buys.
 
+**Re-measured over a distribution on 2026-08-28**, once
+`crcbl_render::PassStats` existed to take one: the same run reports `ssao` at
+**0.258 ms p50 / 0.263 ms p95** and 26.0% of a 0.990 ms p50 total, summed across
+both of lantern's views rather than read off the room view's row. The
+single-frame reading above stands — it was not a fluke of the frame it came from
+— and `ssao` is still the most expensive pass in the frame, ahead of `forward`'s
+0.230 ms.
+
 **It is not a comparison.** The eight-tap hemisphere is deleted, so what GTAO
 costs _against what it replaced_ is not measurable from this tree — recovering
 it is the `git show` the tier note above describes, and a quality seam that

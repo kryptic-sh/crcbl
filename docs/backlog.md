@@ -83,7 +83,21 @@ What is left, in order of cost:
    numbers above came from a hand-run binary read out of a log. Nothing in the
    tree would notice a rung doubling the forward pass, and the browser gate —
    the only automated instrument that has ever reacted to this — reports wall
-   clock per demo, not per pass.
+   clock per demo, not per pass. **The recording half was built 2026-08-28** —
+   `crcbl_render::PassStats` accumulates every distinct `FrameTimings` the
+   timers resolve and `Loop::finish` reports a p50, a p95 and a share per pass
+   label over the last 120 frames, replacing a line that printed one arbitrary
+   latent frame. What is still missing is the half that fails: nothing records a
+   baseline, nothing compares against one, and nothing reddens. That is
+   `docs/plan/40-profiling.md`'s "Baseline storage + `--compare` + thresholds"
+   row, at P8, and that document's own decision bounds where it can run — **CI
+   does not gate on absolute timings**, because a shared runner is slower and
+   noisier than a dev box, so the comparison is against a baseline recorded on a
+   named machine and the gate is local. Which leaves a real question open: a
+   local gate is one nobody runs. The candidates are a `crcbl bench` scenario
+   that drives a sample headless and compares (the delivery row's own shape), or
+   a CI job that publishes the numbers as an artifact without gating, so a
+   regression is visible in the run rather than caught by it.
 2. **`SHADOW_TAPS` and `SHADOW_SEARCH_TAPS` as graphics-quality settings**
    rather than constants — the natural first entries for the settings seam,
    since 16 filter taps is a real quality tier rather than a broken one and a
@@ -93,11 +107,12 @@ What is left, in order of cost:
 
 What the early-out left owed:
 
-- **Nothing measures what it saved.** The claim "5 taps rather than 32" is
-  arithmetic off the shader, not a frame time. The Pages browser gate's own
-  per-step durations are the only instrument that has ever noticed this filter,
-  and they are wall clock for a whole demo — the table above is the shape any
-  future comparison has to take.
+- **What it saved is measured, but only once and only by hand.** The table above
+  is the measurement; what it is not is a thing that runs again. Since
+  2026-08-28 the exit log prints a p50 and p95 per pass rather than one latent
+  frame, so re-taking the figure is one `lantern --headless --frames 400` rather
+  than five of them plus arithmetic — but re-taking it is still something a
+  person decides to do. Answer 1 above is the rest.
 - **The probe is a branch on a filtered comparison, and that is a new
   cross-driver surface.** `tile_pcf` returns flat only where five
   `SampleCmpLevelZero` taps come back exactly 0 or exactly 1, which is the
@@ -191,11 +206,14 @@ the evidence. What the slice deferred or turned up:
   an `acos_approx` and a `sqrt` per tap. `crcbl_render::PassTimers` — which was
   in the tree the whole time this entry said nothing could time it — puts `ssao`
   at **0.255 ms, 25.9% of a 0.986 ms frame** on an RX 7900 XTX at 1920×1080,
-  against `forward`'s 0.199 ms, `ssr`'s 0.099 ms and `shadow`'s 0.070 ms. What
-  is **not** measured is GTAO against the eight-tap hemisphere it replaced,
-  because that code is gone; recovering it is the `git show` the tier bullet
-  above already describes, and it is what a quality seam would need in order to
-  offer the cheaper rung honestly.
+  against `forward`'s 0.199 ms, `ssr`'s 0.099 ms and `shadow`'s 0.070 ms — one
+  frame's rows, one view each. Re-taken 2026-08-28 as a distribution once
+  `crcbl_render::PassStats` existed: `ssao` at **0.258 ms p50 / 0.263 ms p95**,
+  26.0% of a 0.990 ms p50 total, summed across both views. What is **not**
+  measured is GTAO against the eight-tap hemisphere it replaced, because that
+  code is gone; recovering it is the `git show` the tier bullet above already
+  describes, and it is what a quality seam would need in order to offer the
+  cheaper rung honestly.
 - **GTAO made the depth buffer's last bits visible on a fourth scene.**
   `Scene::Probes` now needs an LSB budget in `path_lsb_channels`, joining
   `Dunes`, `PointShadow` and `Ssr` — two adjacent red channels, one level, on

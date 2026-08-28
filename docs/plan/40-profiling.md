@@ -20,6 +20,19 @@ afterwards that it worked.
   one more than the frames in flight, resolved only when a slot comes back
   round, so there is no fence, no wait and no `wait_idle`. The latency _is_ the
   synchronisation.
+- **Per-pass distributions over a run**, since 2026-08-28.
+  `crcbl_render::PassStats` takes every distinct `FrameTimings` the timers
+  resolve and keeps a rolling `crcbl_core::stats::Window` per pass label, which
+  `Loop::finish` reports as the `gpu passes` line: p50, p95 and share of the p50
+  total for each label, over the last `DEFAULT_FRAME_WINDOW` frames. It replaces
+  a line that printed the newest latent `FrameTimings` verbatim — one arbitrary
+  frame of the run, which is the shape of measurement this topic's "percentiles,
+  not means" decision exists to refuse, and which forced
+  [45-shadows.md](45-shadows.md)'s eleventh decision to be medians of five
+  hand-run binaries. **A label is summed within the frame rather than tracked
+  per occurrence**: `lantern` renders two views, so `shadow`, `forward` and
+  `tonemap` each appear twice in its report and the cull passes once per
+  cascade, and the occurrence count is on the row.
 - **A pass's span includes its barriers**, because `crcbl-hal`'s encoder scope
   rules put query writes outside any pass. That is the more useful number: a
   pass whose barriers cost more than its draws is a real finding, and one that
@@ -224,7 +237,11 @@ adds, and they are what makes a slowdown visible without exporting anything:
   single-frame pairing would be wrong by exactly that offset. Every row below it
   is still owed.
 - **Pass list**: the existing per-pass GPU times, sorted by cost, with the
-  frame's total and each pass's share.
+  frame's total and each pass's share. **The exit log has this since
+  2026-08-28** — `PassStats::report`, as distributions rather than one frame —
+  but the _panel_ row does not: what the overlay shows is still `FrameTimings`'
+  own `DebugModule`, one latent frame at a time, which is the right thing for a
+  live row and the wrong thing for a comparison.
 - **CPU breakdown**: tick, schedule, physics, upload, record, present-wait.
 - **Counters**: draws, instances submitted vs drawn (the culling win, visible),
   clusters drawn and their level histogram, triangles.
@@ -258,6 +275,7 @@ the wrong row.
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                                                            |
 | `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | **Started** — the subcommand and the `jobs` and `phys` scenarios (`crates/crcbl-cli/src/bench/`); the sample-owned scenarios, which need a device, are not written |
+| Per-pass GPU distributions in the exit log                                       | **Built 2026-08-28** — `crcbl_render::PassStats`, fed by `Loop::record_frame_cost` and reported by `Loop::finish`                                                  |
 | Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                                                                                                                                 |
 | Baseline storage + `--compare` + thresholds                                      | P8                                                                                                                                                                 |
 | Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)                                                                                                                 |

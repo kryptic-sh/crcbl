@@ -246,8 +246,9 @@ the panel's own pass, unchanged from its 0.005 ms at 960 × 720) and a
 pass from 0.020 to 0.041 ms, which is where the total's growth from 0.038 to
 0.067 ms comes from; the criterion's budget has two orders of magnitude of
 clearance at the extent it names, and the numbers come from the engine's own
-exit log (`frame timing` / `frame cpu` lines), so the run is reproducible
-without instrumentation. Measured 2026-08-07.
+exit log (`gpu passes` / `frame cpu` lines — the GPU line was `frame timing`,
+one latent frame, until 2026-08-28 replaced it with a p50/p95 per pass), so the
+run is reproducible without instrumentation. Measured 2026-08-07.
 
 `drawn` is what survived the CPU view cull and reached the pass — the arena is
 96 × 72 units against a view of about 37 × 28, so most of a large horde is off

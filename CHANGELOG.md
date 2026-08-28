@@ -16,6 +16,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_render::PassStats`: what each pass normally costs, not what one frame
+  cost.** The engine's exit log used to print the newest `FrameTimings` the
+  timers had resolved — one arbitrary, frames-latent sample, listed once per
+  occurrence, which for `lantern` is 53 rows across two views. It now prints a
+  `gpu passes` line instead: a p50, a p95 and a share of the p50 total for each
+  distinct pass label over the last 120 frames, with a label's occurrences
+  summed within the frame and the count shown. A run of
+  `lantern --headless --frames 400 --size 1920x1080` reports 18 labels for 0.990
+  ms of p50 where the old line reported 53 rows for whatever frame 397 happened
+  to cost. The accumulator is public and fed by `Loop::record_frame_cost`, so a
+  game driving its own loop can keep one. `FrameTimings::report` is unchanged
+  and still the single-frame form.
+
+- **`crcbl_core::stats::Window<N>`: the rolling window both distributions are
+  read off.** The eviction, the sort and the count below which a nearest-rank
+  p95 is the maximum under another name were private to `crcbl_ui::budget`; they
+  are now beside `percentile_of` and `MIN_PERCENTILE_SAMPLES`, which is where
+  the rest of that arithmetic already lived. `BudgetStats` and `PassStats` are
+  both callers.
+
 - **`crcbl::settings::audio_gains`: the `[engine.audio]` bus volumes a player
   can set.** One key per bus — `master_volume`, `music_volume`, `sfx_volume`,
   `ui_volume`, `voice_volume`, `ambience_volume` — each a linear gain clamped to

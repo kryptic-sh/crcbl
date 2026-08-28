@@ -34,9 +34,6 @@
 
 use core::fmt;
 use core::time::Duration;
-use std::collections::VecDeque;
-
-use crcbl_core::stats::percentile_of;
 
 use crate::debug::{DEFAULT_FRAME_WINDOW, DebugModule, DebugSection};
 
@@ -81,42 +78,12 @@ impl fmt::Display for Bound {
 }
 
 /// One rolling window of per-frame nanosecond costs.
-#[derive(Clone, Debug, Default)]
-struct Window {
-    /// Newest last, at most [`DEFAULT_FRAME_WINDOW`] of them.
-    samples: VecDeque<u64>,
-}
-
-impl Window {
-    fn record(&mut self, nanos: u64) {
-        if self.samples.len() == DEFAULT_FRAME_WINDOW {
-            self.samples.pop_front();
-        }
-        self.samples.push_back(nanos);
-    }
-
-    fn len(&self) -> usize {
-        self.samples.len()
-    }
-
-    /// The window's p50 and p95, or `None` below [`MIN_PERCENTILE_SAMPLES`].
-    ///
-    /// Sorted into a fixed buffer rather than a fresh `Vec`: this runs once a
-    /// frame while the panel is up, and the window's own bound is what says the
-    /// buffer is big enough.
-    fn percentiles(&self) -> Option<(u64, u64)> {
-        if self.samples.len() < MIN_PERCENTILE_SAMPLES {
-            return None;
-        }
-        let mut sorted = [0u64; DEFAULT_FRAME_WINDOW];
-        let sorted = &mut sorted[..self.samples.len()];
-        for (slot, sample) in sorted.iter_mut().zip(&self.samples) {
-            *slot = *sample;
-        }
-        sorted.sort_unstable();
-        Some((percentile_of(sorted, 50)?, percentile_of(sorted, 95)?))
-    }
-}
+///
+/// The window itself is [`crcbl_core::stats::Window`], which
+/// `crcbl_render::pass_stats` also keeps one of per pass: the eviction, the
+/// sort and the count below which a p95 is the maximum are one piece of
+/// knowledge and this row is not the only reader of it.
+type Window = crcbl_core::stats::Window<DEFAULT_FRAME_WINDOW>;
 
 /// CPU against GPU frame time, over a rolling window of each.
 ///
@@ -169,7 +136,7 @@ impl BudgetStats {
     /// of `none` in every sample is clutter rather than information.
     #[must_use]
     pub fn has_samples(&self) -> bool {
-        self.cpu.len() > 0 || self.gpu.len() > 0
+        !self.cpu.is_empty() || !self.gpu.is_empty()
     }
 
     /// The CPU window's p50 and p95, or `None` below
@@ -222,7 +189,7 @@ fn write_window(out: &mut DebugSection, label: &str, window: &Window) {
             label,
             format_args!("{:.2} / {:.2} ms", millis(p50), millis(p95)),
         ),
-        None if window.len() == 0 => out.row_str(label, "none"),
+        None if window.is_empty() => out.row_str(label, "none"),
         // Deliberately not a number: a p95 over this many samples is the
         // maximum, and printing it as a percentile is the lie this avoids.
         None => out.row(
@@ -277,21 +244,6 @@ mod tests {
             stats.record_cpu(ms(cpu));
             stats.record_gpu(frame as u64, ms(gpu));
         }
-    }
-
-    /// The order samples arrive in must not change the answer.
-    #[test]
-    fn the_window_sorts_before_it_picks() {
-        let mut ascending = Window::default();
-        let mut descending = Window::default();
-        for value in 1..=MIN_PERCENTILE_SAMPLES as u64 {
-            ascending.record(value);
-        }
-        for value in (1..=MIN_PERCENTILE_SAMPLES as u64).rev() {
-            descending.record(value);
-        }
-        assert_eq!(ascending.percentiles(), Some((10, 19)));
-        assert_eq!(descending.percentiles(), ascending.percentiles());
     }
 
     /// **Below the minimum there is no percentile**, and the row says which of

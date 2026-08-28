@@ -4777,6 +4777,14 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// are needed across frames, see [`PointerCapture`].
     pointer: PointerCapture,
     debug: crcbl_ui::DebugOverlay,
+    /// What each pass has cost over the run, beside the overlay's frame total.
+    ///
+    /// Not in [`Self::debug`] because it cannot be: `crcbl-ui` is below
+    /// `crcbl-render` and is not allowed to know a render pass exists, which is
+    /// the same reason [`crcbl_render::FrameTimings`] contributes its own debug
+    /// section from the renderer's side. Fed from [`Self::record_frame_cost`]
+    /// and read by [`Self::finish`].
+    passes: crcbl_render::PassStats,
     /// Whether the simulation is stopped. **The loop owns this, not the game.**
     /// Pause is not something a simulation does — it is the loop declining to
     /// advance it — and a `Paused` state inside the game would put a value in
@@ -4910,6 +4918,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             menus: G::menus(),
             pointer: PointerCapture::new(),
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
+            passes: crcbl_render::PassStats::new(),
             paused: false,
             held_keys: Vec::new(),
             held_buttons: Vec::new(),
@@ -5351,6 +5360,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             self.debug
                 .budget
                 .record_gpu(timings.frame, Duration::from_nanos(timings.total_nanos()));
+            self.passes.record(timings);
         }
     }
 
@@ -5557,10 +5567,15 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// are attempted regardless: the window is destroyed even when the GPU
     /// teardown failed, because leaving it mapped is strictly worse.
     pub fn finish(mut self, exit: ExitReason) -> Result<G::Summary, LoopError<G::Error>> {
-        if let Some(timings) = self.gpu.timings()
-            && !timings.is_empty()
-        {
-            log::info!("{}", timings.report().trim_end());
+        // **Distributions, not the last frame.** The timers are frames latent
+        // and hand the same report back until a slot resolves, so the newest
+        // `FrameTimings` is one arbitrary frame of the run — which is what this
+        // used to print, and what forced the shadow filter's measurement in
+        // `docs/plan/45-shadows.md` to be medians of five hand-run binaries.
+        // `PassStats` has been fed every distinct frame; this is its p50 and
+        // p95 per pass.
+        if !self.passes.is_empty() {
+            log::info!("{}", self.passes.report().trim_end());
         }
         // **The CPU half of the same report.** `FrameTimings` above is GPU
         // timestamps; this is the monotonic clock the loop was actually driven
@@ -10617,6 +10632,37 @@ mod tests {
         pending.frame().expect("the fake never fails");
         assert_eq!(pending.debug.budget.gpu_frame(), None);
         assert!(!pending.debug.budget.has_samples());
+        assert!(pending.passes.is_empty(), "an empty report is not a frame");
+    }
+
+    /// **The per-pass windows follow the same frame number as the budget row.**
+    ///
+    /// `PassStats` has its own guard against the timers' latency and its own
+    /// tests for it; what this pins is that the engine feeds it from
+    /// `record_frame_cost` at all, and feeds it the same reports the budget row
+    /// gets. Without this the accumulator `finish` reports from would stay empty
+    /// on every real run and nobody would see a difference — the log line would
+    /// simply not be printed.
+    #[test]
+    fn the_per_pass_windows_are_fed_the_frames_the_budget_row_is_fed() {
+        let timings = |frame: u64, nanos: u64| crcbl_render::FrameTimings {
+            frame,
+            passes: vec![crcbl_render::PassTiming {
+                label: "forward".to_string(),
+                gpu_nanos: nanos,
+            }],
+        };
+
+        let mut engine = hosted(None);
+        engine.gpu.timings = Some(timings(1, 2_000_000));
+        engine.frame().expect("the fake never fails");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.passes.frames(), 1, "one latent report is one frame");
+        assert_eq!(engine.passes.labels().collect::<Vec<_>>(), ["forward"]);
+
+        engine.gpu.timings = Some(timings(2, 3_000_000));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.passes.frames(), 2);
     }
 
     /// **Every frame draws once, and draws after the ticks it reports.**
