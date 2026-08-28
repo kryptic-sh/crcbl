@@ -83,13 +83,14 @@ moved since this document was written:
   `SettingsSource::save` as the pair a screen holds. The paragraph above this
   section still says the only writer is a command line; that was true when it
   was written and is not now.
-- **`crates/crcbl/src/settings.rs` reads thirteen keys**: the six
-  `RenderEffects` booleans of `VIDEO_KEYS`, `render_scale`, and the six
-  `[engine.audio]` bus volumes. `crcbl::settings::catalogue` is the enumeration
-  — every key the engine defines, each marked `Read` or `Named` — and
-  `crcbl settings list` marks each line of a player's file with it, so a key
-  under `engine.` that the engine does not define is reported rather than
-  silently written.
+- **`crates/crcbl/src/settings.rs` reads every `RenderEffects` boolean of
+  `VIDEO_KEYS`, `render_scale`, `frame_limit` and every `[engine.audio]` bus
+  volume.** `frame_limit` is the one the engine's loop applies for a game,
+  through `GameGpu::video`; the rest are handed over and applied by the caller.
+  `crcbl::settings::catalogue` is the enumeration — every key the engine
+  defines, each marked `Read` or `Named` — and `crcbl settings list` marks each
+  line of a player's file with it, so a key under `engine.` that the engine does
+  not define is reported rather than silently written.
 - **`crates/crcbl-audio/src/mixer.rs` has buses.** `Bus::ALL` is master, music,
   sfx, ui, voice and ambience; `Mixer::set_bus_gain` and `bus_gain` are the gain
   stage, `Bus::settings_key` is the spelling, and

@@ -456,6 +456,16 @@ impl GameGpu for Gpu {
         self.menu.counters().plus(self.ui.counters())
     }
 
+    /// The `[engine.video]` section this bundle's context read while opening.
+    ///
+    /// Forwarded, never answered with a default: the engine's loop applies
+    /// these as ceilings — the frame-rate cap among them — so a bundle that
+    /// invented an unrestricted answer here would silently drop every video
+    /// setting the player wrote.
+    fn video(&self) -> &crcbl::settings::VideoSettings {
+        self.ctx.video()
+    }
+
     fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
         Self::frame(self)
     }
