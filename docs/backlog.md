@@ -169,6 +169,54 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
+### shard's doused-torch check lands on its own threshold (2026-08-28)
+
+**A red check the ceiling fix made reachable, and it is not a timeout.** Pages
+`78ab19e` — a docs-only commit, so the same harness as `4bf0375` — failed
+`C: and dousing them leaves a still frame that is darker but not blank`, at a
+measured 78.0x. `4bf0375` passed the same check at 98.4x. So it is flaky, and
+the flakiness is not pace in the way the poll ceiling was.
+
+The two windows, verbatim from that run:
+
+| window | distinct frames | mean luma | swing | flattest colour |
+| ------ | --------------- | --------- | ----- | --------------- |
+| lit    | 4 of 4          | 15.18     | 0.32  | 40.1%           |
+| doused | 2 of 4          | 10.57     | 0.01  | 48.4%           |
+
+The doused window is asked for a swing of at most `TORCH_STILL_LUMA` (0.01), a
+mean under 14.42, and no colour over `TORCH_FLAT_SHARE` (85%). **Only the swing
+clause failed**, and it failed against a value that prints as the threshold
+itself — so the true reading is just above 0.01 and the check is sitting on its
+own constant.
+
+**Two candidate causes, and no evidence separating them.** Do not fix one
+without measuring:
+
+1. **`TORCH_SAMPLE_GAP_MS` is not scaled by `slowdown`, and its sibling is.**
+   `BACKDROP_INTERVAL_MS`'s doc comment says it is "scaled by the measured
+   slowdown at the call site, like every other budget here", and
+   `await pause(TORCH_SAMPLE_GAP_MS)` in the torch sampler is the call site that
+   is not. `sampleWindow`'s own comment says the window must be "wide enough to
+   hold a flicker cycle", which is a claim about simulated time. Against that:
+   the run reported the window spanning **2 beats** already, so the four
+   `toDataURL` round trips — not the pause — are what sets its width on a slow
+   runner, and scaling the pause would widen an already-wide window rather than
+   fix a narrow one.
+2. **The sampling starts before the douse has settled.** Nothing waits for the
+   luma to stop falling; the check reads the HUD saying `torches: out` and then
+   samples. A window that opens mid-transition holds two brightnesses, which is
+   exactly "2 distinct frames" with a small swing.
+
+**What would settle it:** print the four per-sample lumas rather than their
+spread, which says immediately whether the two distinct frames are a monotonic
+fade (cause 2) or an oscillation (cause 1). That is the same move that turned
+the poll-ceiling guess into a measurement, and it costs one line.
+
+**Not a gameplay defect.** `torches: out` was reported by the HUD and the mean
+luma did fall from 15.18 to 10.57, so the douse happened; what is in question is
+whether the harness looked at the right moment.
+
 ### shard runs at 98x in a browser and nothing has profiled it (2026-08-28)
 
 **The harness half of this is shipped and green.** `until()` defaulted to an
