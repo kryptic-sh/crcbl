@@ -1458,6 +1458,11 @@ const TORCH_SAMPLE_GAP_MS = 80;
  * spread was exactly zero rather than merely small. The two thresholds are
  * therefore set either side of a gap with no reading anywhere in it, which is
  * the only way a pair like this is worth having.
+ *
+ * Two runs since have read a doused spread of 0.01 rather than nothing at all,
+ * which is on the still threshold rather than in the gap. That is why the
+ * window prints its samples: the gap is only real for as long as a reading
+ * keeps landing in it, and the digits say whether this one does.
  */
 const TORCH_FLICKER_LUMA = 0.04;
 const TORCH_STILL_LUMA = 0.01;
@@ -4203,6 +4208,7 @@ try {
       const lumas = taken.map((sample) => sample.luma);
       return {
         samples: taken.length,
+        lumas: lumas.map((value) => value.toFixed(3)),
         frames: new Set(taken.map((sample) => sample.hash)).size,
         beats: hud().length - from,
         mean: lumas.length
@@ -4214,11 +4220,20 @@ try {
           : 1,
       };
     };
-    /** What a window measured, for a failure message to carry. */
+    /**
+     * What a window measured, for a failure message to carry.
+     *
+     * The per-sample lumas are printed beside the spread because the spread
+     * alone cannot say *which way* a window moved: a monotonic settle and an
+     * oscillation reduce to the same number, and only the samples separate
+     * them. Three decimals, because two put a reading of 0.01 on top of
+     * `TORCH_STILL_LUMA` and left no way to tell a pass from a failure.
+     */
     const readWindow = (/** @type {any} */ window) =>
       `${window.frames} distinct frame(s) in ${window.samples} sample(s) over ` +
       `${window.beats} beat(s), mean luma ${window.mean.toFixed(2)} swinging ` +
-      `${window.spread.toFixed(2)}, flattest colour ${(window.flattest * 100).toFixed(1)}%`;
+      `${window.spread.toFixed(3)} over ${window.lumas.join(', ')}, flattest ` +
+      `colour ${(window.flattest * 100).toFixed(1)}%`;
 
     const lit = await sampleWindow();
     check(
@@ -4239,13 +4254,20 @@ try {
       since(zone.torches, beforeDouse).includes('out') ? hud().length : null
     );
     const out = await sampleWindow();
+    // `out.frames` is read out below but deliberately not asserted on, where
+    // the lit window's `frames > 1` is. The two are not symmetric: a flicker
+    // has to move *some* pixels, so the lit claim is a floor a broken build
+    // cannot meet, while requiring exactly one frame here is a claim about the
+    // whole zone rather than about the light — shard's foes and character are
+    // in it, and where they stand differs from run to run. Stillness of the
+    // *light* is what `TORCH_STILL_LUMA` measures, and it keeps its teeth
+    // whether or not something else in the picture moved a pixel.
     check(
       'C',
       'and dousing them leaves a still frame that is darker but not blank',
       doused !== null &&
         out.samples === TORCH_SAMPLES &&
         out.beats > 0 &&
-        out.frames === 1 &&
         out.spread <= TORCH_STILL_LUMA &&
         out.mean <= lit.mean * TORCH_DARKER_RATIO &&
         out.flattest < TORCH_FLAT_SHARE,

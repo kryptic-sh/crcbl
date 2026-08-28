@@ -169,52 +169,59 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
-### shard's doused-torch window straddles the douse (2026-08-28)
+### shard's doused-torch check asked the whole zone to hold still (2026-08-28)
 
-**A red check the poll-ceiling fix made reachable, and it is not a timeout, not
-a threshold and not pace.** Three Pages runs of the same harness:
+**Fixed 2026-08-28, and the two entries this replaces were both wrong about
+why.** Kept because the wrong readings are the interesting part.
 
-| run       | shard's pace | doused: distinct of 4 | mean luma | swing | flattest |
-| --------- | ------------ | --------------------- | --------- | ----- | -------- |
-| `4bf0375` | 98.4x        | 1                     | 10.25     | 0.00  | 51.7%    |
-| `78ab19e` | 78.0x        | 2                     | 10.57     | 0.01  | 48.4%    |
-| `732a58d` | 102.0x       | 2                     | 10.57     | 0.01  | 48.4%    |
+Three Pages runs of
+`C: and dousing them leaves a still frame that is darker but not blank`, in the
+browser gate:
 
-`C: and dousing them leaves a still frame that is darker but not blank` asks for
-a swing of at most `TORCH_STILL_LUMA` (0.01), a mean under a share of the lit
-window, and no colour over `TORCH_FLAT_SHARE` (85%). Only the swing clause ever
-fails.
+| run       | lit mean / swing | doused: frames of 4, mean, swing, flattest | result |
+| --------- | ---------------- | ------------------------------------------ | ------ |
+| `4bf0375` | 14.14 / 0.22     | 1, 10.25, 0.00, 51.7%                      | pass   |
+| `78ab19e` | 15.18 / 0.32     | 2, 10.57, 0.01, 48.4%                      | fail   |
+| `732a58d` | 15.17 / 0.29     | 2, 10.57, 0.01, 48.4%                      | fail   |
 
-**The two failing runs are byte-identical at pace 78.0x and 102.0x.** That is
-what settles it: a reading that repeats to the hundredth across a 24-point
-change in slowdown is not noise and is not a budget. The outcome is **bimodal**
-— either the window holds one frame and swings 0.00, or it holds exactly two and
-swings 0.01, with the same two values every time. The two frames are the same
-two frames: the last one drawn before the douse reached the canvas, and the
-doused ones after it. The mean rises from 10.25 to 10.57 for the same reason.
+The check is a conjunction of six clauses. Reading them against the failing row:
+four samples arrived, two heartbeats arrived, the mean 10.57 is under the 14.41
+the darkness clause asked for, and the flattest colour 48.4% is well under 85%.
+`spread <= TORCH_STILL_LUMA` compares 0.01 against 0.01 and passes. **The clause
+that failed was `out.frames === 1`** — one distinct canvas hash across the
+window.
 
-**So the window opens before the douse has landed.** `sampleWindow` starts once
-the HUD line says `torches: out`, and the HUD is the simulation's word — the
-canvas lags it by at least one presented frame, which on a runner at 100x is six
-wall seconds.
+**Two entries got this wrong before it, in different ways.** The first read the
+0.01 spread as the failure and called it a threshold sitting on its own value.
+The second read the pair of identical failing rows as a window straddling the
+douse, which the numbers refute outright: a window holding one lit frame and
+three doused ones would swing about five bytes, not 0.01. Both were written from
+a summary of the log rather than from the log, and from the failure message
+rather than from the condition it belongs to — the message lists the three
+clauses it can quantify and never mentions `frames`, so the clause that actually
+failed was the one clause invisible from the message.
 
-**An earlier version of this entry called it flaky and offered a second
-candidate — that `await pause(TORCH_SAMPLE_GAP_MS)` is the one call site
-`slowdown` does not scale, against a sibling whose doc says every budget here is
-scaled. Both readings are now ruled out by the table.** The gap being unscaled
-is still a real inconsistency with `BACKDROP_INTERVAL_MS`'s stated convention
-and worth fixing on its own terms; it is not the cause of this.
+**What `frames === 1` was really asking.** `78ab19e` is a docs-only commit, so
+its harness and its wasm are byte-identical to `4bf0375`'s, and its lit window
+still read 15.18 against 14.14 — shard's zone is not in the same state from one
+run to the next. It holds a character who stops where the walk key left them and
+three foes who engage on their own schedule. Requiring one distinct hash across
+the doused window is requiring all of that to hold still too, which shard never
+promised; what the check is about is the _light_, and the light's stillness is
+what `TORCH_STILL_LUMA` measures against a lit window that has to swing
+`TORCH_FLICKER_LUMA`. That pair is measured, it is two-sided, and it is what
+keeps the check non-vacuous. The `frames` clause was an observation from five
+runs — "the same frame down to the last bit" — promoted to a requirement.
 
-**The fix has a trap in it.** Waiting for the canvas to stop changing and then
-asserting that it does not change is circular, and would leave a check that
-cannot fail. The window has to open on evidence the douse **reached the canvas**
-— a sample whose luma has fallen clear of the lit mean — and only then measure
-stillness across four samples. Stillness stays a real question; what stops being
-a question is whether the harness looked during the transition.
+**The fix**: `out.frames` is still read out in the failure message, so the
+number stays visible; it no longer gates. Every window now also prints its four
+per-sample lumas, at three decimals, because a spread printed at two put 0.01 on
+top of its own threshold and left no way to tell a pass from a failure.
 
-**Not a gameplay defect.** The HUD said `torches: out` and the mean fell from
-about 14–15 to about 10 in every run, so the douse happened on time. What is
-wrong is when the harness looked.
+**Still open**: whether the doused spread has real headroom under
+`TORCH_STILL_LUMA` or is riding it. The digits the next run prints are what
+answer that, and the answer decides whether the gap the threshold pair sits
+either side of is still a gap.
 
 ### shard runs at 98x in a browser and nothing has profiled it (2026-08-28)
 
