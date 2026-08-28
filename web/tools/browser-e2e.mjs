@@ -2719,6 +2719,26 @@ try {
     said('hal: swapchain'),
     said('hal: swapchain')?.trim() ?? 'no swapchain line'
   );
+  // The cursor axis, end to end: `Shell::set_cursor` publishes a CSS keyword
+  // out of wasm memory and `syncCursor` in `web/engine/shell.js` writes it to
+  // the canvas. Every demo answers the default today, so `default` is the value
+  // here — and it is the value that distinguishes a shim that read the string
+  // from one that read nothing, because an inline style nobody set is `''` and
+  // a canvas's own computed cursor is `auto`. The first demo to hide its cursor
+  // needs this check taught which demos say what.
+  const inlineCursor = await evaluate(
+    page,
+    `document.getElementById('canvas')?.style.cursor ?? ''`
+  );
+  check(
+    'B',
+    'the shim drew the cursor the engine asked for',
+    inlineCursor === 'default',
+    inlineCursor === 'default'
+      ? 'canvas.style.cursor is default'
+      : `canvas.style.cursor is "${inlineCursor}" — the engine's request did ` +
+          'not reach the canvas, so a game that hid its cursor would not be hidden'
+  );
   const isRunning = check(
     'B',
     'the demo reached STATUS_RUNNING',

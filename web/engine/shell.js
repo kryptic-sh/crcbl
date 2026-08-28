@@ -18,6 +18,12 @@
 // address inside wasm memory. `__crcbl_web_key_scratch_ptr` hands one out; the
 // two strings a key event carries are written into it back to back.
 //
+// CURSOR. The other pointer axis, and polled by the same loop for the same
+// reason: `Shell::set_cursor` publishes a CSS keyword — `none` when the engine
+// wants the cursor hidden — and this shim writes it to `canvas.style.cursor`.
+// Nothing here needs a gesture, so unlike the lock below the request always
+// lands on the frame after it is made.
+//
 // POINTER LOCK. The engine asks for it and this shim takes it, because a
 // browser grants `requestPointerLock` only from inside a user gesture and wasm
 // never is — the same split `requestFullscreen` has below. The request is
@@ -26,7 +32,7 @@
 // one import), so `__crcbl_web_pointer_lock_wanted` is read once a frame and
 // the answer comes back through `__crcbl_web_pointer_lock`.
 
-import { writeUtf8 } from './wasm.js';
+import { readUtf8, writeUtf8 } from './wasm.js';
 
 /** `event.ctrlKey`. */
 export const STATE_CTRL = 1 << 0;
@@ -363,6 +369,41 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   }
 
   /**
+   * What was last written to `canvas.style.cursor`, so an unchanged request
+   * touches no style.
+   *
+   * `null` and not `''` for the first frame: an empty string is a value the
+   * engine really does publish — "no request, leave the page's own cursor" —
+   * and starting there would skip the write that clears an inline style some
+   * earlier window left behind.
+   */
+  let appliedCursor = null;
+
+  /**
+   * Draws the cursor the engine asked for.
+   *
+   * The keyword comes out of wasm memory rather than a table here, because
+   * `CursorIcon`'s variants are CSS keywords already: see `set_cursor` in
+   * `crates/crcbl-shell/src/web/mod.rs`. A table would be a second copy of that
+   * enum, in a file no compiler checks against it.
+   *
+   * A zero length is the engine saying it has no window on this canvas, which
+   * is not the same as any keyword: the inline style is cleared and the page's
+   * own cursor comes back, rather than the canvas being pinned to an arrow
+   * nobody asked for.
+   */
+  function syncCursor() {
+    const len = exports.__crcbl_web_cursor_len(canvasId);
+    const wanted =
+      len === 0
+        ? ''
+        : readUtf8(memory, exports.__crcbl_web_cursor_ptr(canvasId), len);
+    if (wanted === appliedCursor) return;
+    appliedCursor = wanted;
+    canvas.style.cursor = wanted;
+  }
+
+  /**
    * Brings the browser's pointer lock in line with what the engine asked for.
    *
    * Polled once a frame rather than driven by a call from wasm, because a
@@ -662,12 +703,14 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   const onDprChange = () => syncSize();
   dprQuery.addEventListener('change', onDprChange);
 
-  // A loop of this shim's own, and the smallest one there is: a single integer
-  // call into wasm per frame. It is separate from the demo's frame loop because
-  // the demo's is the *engine's* — it runs `api.frame` and stops when the
-  // engine does — and the pointer has to be given back when it stops.
+  // A loop of this shim's own, and a small one: two integer calls into wasm per
+  // frame, plus a third only on the frame the cursor changes. It is separate
+  // from the demo's frame loop because the demo's is the *engine's* — it runs
+  // `api.frame` and stops when the engine does — and the pointer has to be
+  // given back when it stops.
   let lockPoll = requestAnimationFrame(function poll() {
     syncPointerLock();
+    syncCursor();
     lockPoll = requestAnimationFrame(poll);
   });
 

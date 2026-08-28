@@ -33,8 +33,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   itself on every platform that has a lock — the request is what it comes back
   to when the lock ends.
 
-  Not yet honoured by the web backend, which records the request and draws
-  nothing from it; `docs/backlog.md` carries that.
+  The browser honours it too: `Shell::set_cursor` publishes the CSS keyword
+  `CursorIcon::as_css_name` already answers in — `none` for hidden — and the
+  shim writes it to the canvas once a frame. `PointerMode::Confined` remains
+  unsupported on web and errors rather than doing nothing, because no browser
+  has a confine primitive.
 
 - **A slider row answers the keyboard.** `ArrowLeft` and `ArrowRight` move the
   highlighted slider by `Slider::KEY_STEP` — twenty presses end to end — through

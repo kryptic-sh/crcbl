@@ -207,6 +207,23 @@ struct Bridge {
     /// rather than pushed at it, because a browser artifact imports nothing:
     /// see the module docs.
     pointer_lock_wanted: bool,
+    /// The CSS `cursor` value the canvas should carry, as a keyword.
+    ///
+    /// Published for the shim to poll, for the same reason
+    /// [`Self::pointer_lock_wanted`] is. It is a string rather than a number
+    /// because [`CursorIcon::as_css_name`] already answers in the browser's own
+    /// vocabulary — every variant of that enum is a CSS keyword — so publishing
+    /// the bytes leaves the shim nothing to translate and no numbered table to
+    /// keep in step with the enum.
+    ///
+    /// `"none"` is how a hidden cursor is spelled in CSS, so
+    /// [`set_cursor(window, None)`](Shell::set_cursor) needs no special case.
+    ///
+    /// **Empty means "not ours"**, which is not the same as any keyword: before
+    /// a window exists and after one is destroyed there is no request to make,
+    /// and the shim clears the inline style rather than pinning the canvas to a
+    /// value the page never asked for.
+    cursor_css: &'static str,
     /// Whether the canvas is the document's `pointerLockElement`, as the shim
     /// last reported through
     /// [`__crcbl_web_pointer_lock`](shim::__crcbl_web_pointer_lock).
@@ -254,6 +271,13 @@ thread_local! {
 /// must drop the event rather than truncate it: half a `code` is a *different*
 /// key, and would bind to one.
 pub const KEY_SCRATCH_CAPACITY: usize = 256;
+
+/// CSS's own spelling of a hidden cursor, which is what `set_cursor(_, None)`
+/// publishes.
+///
+/// Not in [`CursorIcon`] because hiding is the other axis — see that type's
+/// module docs — and a variant for it would put the two back in one enum.
+const HIDDEN_CURSOR_CSS: &str = "none";
 
 /// Runs `f` against the live shell's bridge.
 ///
@@ -657,6 +681,60 @@ pub(crate) mod shim {
         wanted
     }
 
+    /// Where the canvas's CSS `cursor` value starts in wasm memory.
+    ///
+    /// The shim reads `len` bytes from here once a frame and writes them to
+    /// `canvas.style.cursor`; see [`Bridge::cursor_css`]. The value is a
+    /// `&'static str` in the module's own rodata, so the address is stable and
+    /// there is nothing for the shim to free.
+    ///
+    /// `0` for a canvas this shell does not own and `0` when there is no shell
+    /// on this thread, which pairs with the length below being `0` — together
+    /// they say "no request", and the shim clears the inline style rather than
+    /// reading a byte.
+    ///
+    /// **A wasm32 address**, which is the only target that calls this. The
+    /// module also compiles under `cfg(test)` on a 64-bit host, where the cast
+    /// truncates and the answer is not a usable address; the tests there check
+    /// which string is published, never dereference it.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_cursor_ptr(canvas: u32) -> u32 {
+        let mut ptr = 0;
+        with_bridge(|bridge| {
+            // `is_empty` and not just the canvas check: an empty `&str` still
+            // has a non-null pointer — Rust gives it a dangling aligned one —
+            // so publishing it unconditionally would answer "no request" with
+            // an address, and the two halves would disagree.
+            if bridge.canvas == canvas && !bridge.cursor_css.is_empty() {
+                ptr = bridge.cursor_css.as_ptr() as usize as u32;
+            }
+        });
+        ptr
+    }
+
+    /// How many bytes the canvas's CSS `cursor` value is.
+    ///
+    /// Read together with [`__crcbl_web_cursor_ptr`], and `0` in every case
+    /// that answers `0` — including the one where there is simply no request:
+    /// before a window is created and after it is destroyed the bridge
+    /// publishes an empty string, which is how this shell says "the page's own
+    /// cursor" rather than naming a keyword nobody asked for.
+    ///
+    /// Two calls rather than one packed return because a wasm32 pointer is a
+    /// whole `u32` with no bits to spare. Nothing can move between them: the
+    /// shim is the only caller, it calls them back to back, and the value is
+    /// static.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_cursor_len(canvas: u32) -> u32 {
+        let mut len = 0;
+        with_bridge(|bridge| {
+            if bridge.canvas == canvas {
+                len = bridge.cursor_css.len() as u32;
+            }
+        });
+        len
+    }
+
     /// The canvas became, or stopped being, the document's `pointerLockElement`.
     ///
     /// `state & STATE_EDGE` means the pointer *is* locked to this canvas. As
@@ -1024,6 +1102,7 @@ impl Shell for WebShell {
         self.close_pending = false;
         self.pointer_mode = PointerMode::Free;
         self.cursor = Some(CursorIcon::Default);
+        self.shared.borrow_mut().cursor_css = CursorIcon::Default.as_css_name();
         // The lock request the bridge publishes is already clear: a second
         // window is refused above until the first is destroyed, and that is
         // where it is withdrawn.
@@ -1046,6 +1125,10 @@ impl Shell for WebShell {
             // it must not keep the pointer pinned, and the frames between a
             // destroy and the next create are frames the shim is polling.
             bridge.pointer_lock_wanted = false;
+            // And the cursor stops being this shell's business at all, rather
+            // than staying at whatever the destroyed window last asked for —
+            // a canvas with no window behind it must not be left hidden.
+            bridge.cursor_css = "";
             // Anything the shim queued for this window before it went away
             // would be delivered naming a handle the consumer has just been
             // told is dead.
@@ -1221,6 +1304,23 @@ impl Shell for WebShell {
         Ok(())
     }
 
+    /// Sets the cursor shape, or hides the cursor with `None`.
+    ///
+    /// **Published for the shim to poll**, like the pointer lock above and
+    /// unlike it in one way that matters: nothing here needs a user gesture, so
+    /// the shim applies this on its next frame and the request always lands.
+    /// What it lands on is the canvas's inline CSS `cursor`, out of
+    /// [`__crcbl_web_cursor_ptr`](shim::__crcbl_web_cursor_ptr) and
+    /// [`__crcbl_web_cursor_len`](shim::__crcbl_web_cursor_len); a page with no
+    /// shim keeps the cursor the document gave it.
+    ///
+    /// Every [`CursorIcon`] is drawable here, which is not true of every
+    /// backend: the enum's variants are CSS keywords and a browser has all of
+    /// them. `None` becomes `none`, CSS's own spelling of a hidden cursor.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle.
     fn set_cursor(
         &mut self,
         window: WindowId,
@@ -1228,6 +1328,8 @@ impl Shell for WebShell {
     ) -> Result<(), ShellError> {
         self.check(window)?;
         self.cursor = cursor;
+        self.shared.borrow_mut().cursor_css =
+            cursor.map_or(HIDDEN_CURSOR_CSS, CursorIcon::as_css_name);
         Ok(())
     }
 
@@ -1783,6 +1885,87 @@ mod tests {
             vec![Some(PhysicalPoint::new(11.0, 21.0))]
         );
         assert_eq!(raw_deltas(&events), vec![None]);
+    }
+
+    /// The keyword the bridge publishes for the shim to read.
+    ///
+    /// Taken through the length export and the bridge together rather than off
+    /// the pointer: this module compiles for a 64-bit host under `cfg(test)`,
+    /// where `__crcbl_web_cursor_ptr` truncates a real address and the bytes it
+    /// names are not the ones the shim would read on wasm32.
+    fn published_cursor(shell: &WebShell) -> &'static str {
+        shell.shared.borrow().cursor_css
+    }
+
+    /// **The cursor the engine sets reaches the shim, hiding included.**
+    ///
+    /// The two exports are one value in two halves, so the length is checked
+    /// against the keyword every time: a length that stopped tracking the
+    /// string would have the shim read a prefix, and `no` is not `none`.
+    ///
+    /// The pointer is checked against the static the keyword comes from, which
+    /// is what says the export publishes *this* request rather than some other
+    /// string that happens to be the right length.
+    #[test]
+    fn the_cursor_is_published_as_a_css_keyword() {
+        let (mut shell, window) = shell_with_window(0);
+        assert_eq!(
+            published_cursor(&shell),
+            "default",
+            "a fresh window starts on the platform's arrow",
+        );
+
+        shell
+            .set_cursor(window, Some(CursorIcon::Crosshair))
+            .expect("recorded");
+        assert_eq!(published_cursor(&shell), "crosshair");
+        assert_eq!(
+            shim::__crcbl_web_cursor_len(0) as usize,
+            "crosshair".len(),
+            "the length export stopped agreeing with the string",
+        );
+        assert_eq!(
+            shim::__crcbl_web_cursor_ptr(0),
+            CursorIcon::Crosshair.as_css_name().as_ptr() as usize as u32,
+            "the pointer export names a string that is not the request",
+        );
+
+        shell.set_cursor(window, None).expect("recorded");
+        assert_eq!(
+            published_cursor(&shell),
+            "none",
+            "hiding is a CSS keyword like any other, and this is how it is spelled",
+        );
+        assert_eq!(shim::__crcbl_web_cursor_len(0) as usize, "none".len());
+
+        // A shim asking about some other canvas is told nothing, exactly as it
+        // is about the lock: both halves answer zero, which is "no request".
+        assert_eq!(shim::__crcbl_web_cursor_ptr(9), 0);
+        assert_eq!(shim::__crcbl_web_cursor_len(9), 0);
+    }
+
+    /// A canvas with no window behind it must not be left with a hidden cursor.
+    ///
+    /// Withdrawn to the empty string rather than back to `default`, because
+    /// there is a difference: this shell has no window, so it is asking for
+    /// nothing, and the shim clears the inline style instead of pinning the
+    /// canvas to a keyword the page never chose.
+    #[test]
+    fn destroying_the_window_withdraws_the_cursor_request() {
+        let (mut shell, window) = shell_with_window(0);
+        shell.set_cursor(window, None).expect("recorded");
+        assert_eq!(shim::__crcbl_web_cursor_len(0) as usize, "none".len());
+
+        shell.destroy_window(window).expect("destroy");
+        assert_eq!(published_cursor(&shell), "");
+        assert_eq!(shim::__crcbl_web_cursor_len(0), 0);
+        assert_eq!(shim::__crcbl_web_cursor_ptr(0), 0);
+
+        // And a new window starts the request again rather than staying silent.
+        shell
+            .create_window(&WindowDesc::default())
+            .expect("the canvas is still there");
+        assert_eq!(published_cursor(&shell), "default");
     }
 
     /// A canvas with no window behind it must not keep the pointer pinned.
