@@ -169,35 +169,41 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
-### The poll ceiling now scales, and shard is a 111x demo (2026-08-28)
+### shard runs at 98x in a browser and nothing has profiled it (2026-08-28)
 
-**The three red checks that opened this entry had one cause and it is fixed.**
-`web/tools/browser-e2e.mjs` measured its `slowdown` in group E and defaulted
-every `until()` to an unscaled `TIMEOUT_MS`, so groups B and C ran on a fast
-desktop's constants and a poll waiting on the simulation got wall clock rather
-than game time. The measurement moved to group B, `slowdown`/`budget` moved to
-module scope, and `until` now defaults to `pollCeiling()` —
-`min(budget(TIMEOUT_MS), POLL_WALL_CAP_MS)`, five minutes. Verified locally on
-hud: 43/43 at 1.0x, and 43/43 again with `NOMINAL_BEAT_MS` sabotaged to 100 so
-the calibration reported 9.8x and the printed ceiling moved to the capped 300
-000 ms.
+**The harness half of this is shipped and green.** `until()` defaulted to an
+unscaled 90-second ceiling while every other budget in
+`web/tools/browser-e2e.mjs` was scaled by a measured `slowdown`, and the
+measurement itself lived in group E, after the groups that needed it. The
+measurement moved to group B, `slowdown`/`budget` moved to module scope, and
+`until` now defaults to `pollCeiling()` —
+`min(budget(TIMEOUT_MS), POLL_WALL_CAP_MS)`, five minutes. Pages run `4bf0375`
+is the confirmation: **all fourteen demo jobs passed and the site deployed**,
+where the two runs before it had shard and puppet red on three checks between
+them.
 
-**What that leaves open is whether five minutes is enough for shard**, and only
-CI can say. The cap was derived from the slowest thing measured — shard drew 15
-of group I's 20 frames in 90 s on 2026-08-28, so six wall seconds a frame and
-120 s for the window — and from the `demos` job's own `timeout-minutes: 45`,
-which three polls burning a five-minute cap leaves near 28 minutes. But shard's
-group C checks wait on gameplay, not frames: at 111.2x a five-minute poll is 2.7
-simulated seconds of walking at a foe, and nothing has measured how many the foe
-needs. If they still expire, the next reader has the number in the group B line
-and should raise the cap or denominate that check in beats rather than shrink
-what it asks for.
+The sweep the fix was sized against, off that run's group B lines — the first
+time the site's pace has been measured demo by demo:
 
-**The other half of the finding is untouched: shard runs at 111.2x under
-SwiftShader**, against 1.0x for most of the site and 28.4x for puppet, and it
-draws a frame every six seconds. That is a rendering cost, not a harness one,
-and the shadow-filter entry above is where its instrument lives. Nothing has
-profiled a browser frame of shard.
+| slowdown            | what a poll buys | ceiling  |
+| ------------------- | ---------------- | -------- |
+| 1.0–1.6x (9 demos)  | 90 s             | 90–146 s |
+| 9.0x                | 33.4 s           | capped   |
+| 11.9x, 20.6x, 26.6x | 25.3–11.3 s      | capped   |
+| 28.4x (puppet)      | 10.6 s           | capped   |
+| 37.3x               | 8.1 s            | capped   |
+| 98.4x (shard)       | 3.1 s            | capped   |
+
+shard passed on 3.05 simulated seconds, so the cap has margin at today's pace
+and no check needs re-denominating in beats yet. A demo slower again would hit
+the cap first, and the group B line is what says so.
+
+**What is left is not a harness problem. shard runs at 98x under SwiftShader**,
+against 1.0x for most of the site, and drew a frame every six seconds on
+`9705f12`. That is a rendering cost, and nothing has profiled a browser frame of
+it — `crcbl_render::PassStats` reports per-pass p50/p95 out of a native headless
+run, and the browser path has no equivalent. The shadow-filter entry above is
+where that instrument lives and what it has been used for.
 
 **Nothing here was ever evidence of a gameplay defect**, and going to read
 shard's ability cooldown on the strength of a red group C check is the specific
@@ -210,20 +216,36 @@ Shrinking `FRAMES_WATCHED` to fit is still the move to avoid: the check's own
 comment argues any size catches a per-frame leak, but a smaller window is more
 easily satisfied by noise and the three-window rule is what buys the teeth.
 
-### The macOS probe job hangs on quarry, and had not run in nine attempts (2026-08-28)
+### The macOS probe job hangs on quarry, twice, and the log's last line is not the hang point (2026-08-28)
 
 `probe the seam on macOS` was **skipped in every Pages run from `713da9d` to
 `80022df`** — nine in a row — because the `build` job it needs kept failing on
-its own cap. The fan-out let it start, and it timed out after 20 minutes on
-`Render quarry in a real browser`.
+its own cap. The fan-out let it start, and it has now timed out after 20 minutes
+on `Render quarry in a real browser` **twice**: on `9705f12` and again on
+`4bf0375`.
 
-This is not the pace failure the Linux gates have. That leg runs on a real Apple
-adapter and quarry's own heartbeat there read **1.1x** — "two HUD lines 1115 ms
-apart". It passed groups A through E's pause check at 02:44:28 and then printed
-nothing at all for twenty minutes. The check that follows is group E's "a click
-in the corner hands the canvas its keyboard back", so a headless Chrome on macOS
-appears not to return focus to the canvas — or the demo does not resume — and
-the poll simply never resolves.
+This is not the pace failure the Linux gates had. That leg runs on a real Apple
+adapter and quarry's own heartbeat there read **1.1x**. Both runs printed
+`E — focus and pause` and then nothing at all until the cap.
+
+**The obvious reading of that is wrong, and it was written here before.** This
+entry used to name the check after group E's pause window as the one that never
+resolves. It cannot be read off the log that way: every poll in the file goes
+through `until` in `web/tools/browser-launch.mjs`, which enforces a deadline,
+catches a throwing probe and sleeps on a plain `setTimeout` — so no poll can
+hang, and a poll that expired would have printed a `FAIL`. Nothing printed.
+Which means either something outside `until` is awaiting a promise that never
+settles, or **the last line in the log is simply not the last line the run
+wrote**: `console.log` to a pipe is asynchronous in Node, and the action's
+timeout kills the process, so whatever was still buffered is lost. Until that is
+ruled out, the hang point is unknown to within however much output the buffer
+held.
+
+**Where to start:** make the step's output unbuffered or line-flushed before
+reading another one of these logs, since every later conclusion depends on
+trusting the last line. Then the two candidates are a `evaluate` that never
+settles — CDP has no deadline of its own here, unlike `until` — and the demo
+itself wedging.
 
 **Not reviewed, and not reproduced:** this leg has never been green with the
 demo gates in it, so there is no earlier run to compare against, and nothing
@@ -232,7 +254,8 @@ demo (lantern) does the same is unknown — the job dies at quarry before reachi
 it.
 
 It does **not** block the deploy: `deploy` needs `build` and `demos`, and this
-job is neither. It does fail the workflow.
+job is neither — `4bf0375` deployed with this job red. It does fail the
+workflow.
 
 ### The browser gate's cap says "out of time", never "too slow" (2026-08-28)
 
