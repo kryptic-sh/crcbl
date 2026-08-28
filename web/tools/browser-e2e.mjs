@@ -568,6 +568,10 @@ const EXPECTATIONS = {
   // so this gate reads it before group F touches the canvas.
   viewer: {
     key: null,
+    // The only demo that overrides `HostedGame::cursor`: the whole canvas is a
+    // turntable, so it shows the open hand every model viewer shows, and the
+    // closed one while the hand is holding it — which group C asserts mid-drag.
+    cursor: 'grab',
     // `instances` is the document's own three, so this also says the generated
     // `.glb` reached the renderer rather than an empty scene arriving as a
     // successful boot.
@@ -2721,23 +2725,33 @@ try {
   );
   // The cursor axis, end to end: `Shell::set_cursor` publishes a CSS keyword
   // out of wasm memory and `syncCursor` in `web/engine/shell.js` writes it to
-  // the canvas. Every demo answers the default today, so `default` is the value
-  // here — and it is the value that distinguishes a shim that read the string
-  // from one that read nothing, because an inline style nobody set is `''` and
-  // a canvas's own computed cursor is `auto`. The first demo to hide its cursor
-  // needs this check taught which demos say what.
-  const inlineCursor = await evaluate(
-    page,
-    `document.getElementById('canvas')?.style.cursor ?? ''`
+  // the canvas. `EXPECTED.cursor` is what this demo's `HostedGame::cursor`
+  // answers at rest, and `default` is the hook's own default for the demos that
+  // never override it — the value that distinguishes a shim which read the
+  // string from one that read nothing, because an inline style nobody set is
+  // `''` and a canvas's own computed cursor is `auto`.
+  //
+  // Polled rather than read once, and the reason is worth keeping: the engine
+  // reports STATUS_RUNNING before it has drawn a frame, the request is made by
+  // the loop's reconcile at the end of one, and the shim applies it from a
+  // `requestAnimationFrame` loop of its own. So there are two frames between
+  // "running" and "the canvas carries the demo's cursor", and a single read
+  // here catches the `default` every window is created with.
+  const restingCursor = EXPECTED.cursor ?? 'default';
+  const drawnCursor = async () =>
+    evaluate(page, `document.getElementById('canvas')?.style.cursor ?? ''`);
+  const settledCursor = await until(async () =>
+    (await drawnCursor()) === restingCursor ? restingCursor : null
   );
   check(
     'B',
     'the shim drew the cursor the engine asked for',
-    inlineCursor === 'default',
-    inlineCursor === 'default'
-      ? 'canvas.style.cursor is default'
-      : `canvas.style.cursor is "${inlineCursor}" — the engine's request did ` +
-          'not reach the canvas, so a game that hid its cursor would not be hidden'
+    settledCursor === restingCursor,
+    settledCursor === restingCursor
+      ? `canvas.style.cursor is ${restingCursor}`
+      : `canvas.style.cursor stayed "${await drawnCursor()}" and this demo asks ` +
+          `for "${restingCursor}" — the engine's request did not reach the ` +
+          'canvas, so a game that hid its cursor would not be hidden'
   );
   const isRunning = check(
     'B',
@@ -5376,6 +5390,31 @@ try {
         buttons: 1,
       });
     }
+    // **The hand closes while it is holding.** The other end of group B's
+    // resting-cursor check and the only place in this file where a *changed*
+    // cursor is observed: that one proves the request reaches the canvas, this
+    // one proves it goes on reaching it when the game changes its mind. Read
+    // with the button still down, because the release is what opens the hand
+    // again — and polled rather than read once, since `syncCursor` in
+    // `web/engine/shell.js` applies it from the shim's own frame loop and the
+    // press has only just been queued.
+    const closed = await until(async () => {
+      const drawn = await evaluate(
+        page,
+        `document.getElementById('canvas')?.style.cursor ?? ''`
+      );
+      return drawn === 'grabbing' ? drawn : null;
+    });
+    check(
+      'C',
+      'the cursor closes into a fist while the turntable is held',
+      closed === 'grabbing',
+      closed === 'grabbing'
+        ? 'canvas.style.cursor is grabbing with the button down'
+        : 'canvas.style.cursor never became grabbing under a held button — the ' +
+            "demo's changed cursor is not reaching the canvas"
+    );
+
     await page.send('Input.dispatchMouseEvent', {
       type: 'mouseReleased',
       x: grip.x + TURNTABLE_DRAG_STEPS * TURNTABLE_DRAG_STEP_PX,

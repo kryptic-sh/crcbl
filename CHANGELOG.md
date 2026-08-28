@@ -33,6 +33,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   itself on every platform that has a lock — the request is what it comes back
   to when the lock ends.
 
+  **`viewer` is the first sample to answer it**: the whole canvas is a
+  turntable, so it shows the open hand every model viewer shows, closes it into
+  a fist while the hand is holding, and hands back the ordinary arrow while the
+  pause panel is up — a grab hand over a row of buttons says the wrong thing
+  about what a click there would do.
+
   The browser honours it too: `Shell::set_cursor` publishes the CSS keyword
   `CursorIcon::as_css_name` already answers in — `none` for hidden — and the
   shim writes it to the canvas once a frame. `PointerMode::Confined` remains

@@ -55,7 +55,7 @@ use crcbl::prelude::*;
 use crcbl::render::cull::Aabb;
 use crcbl::render::{OrbitCamera, RenderEffects};
 use crcbl::scene::gltf_render::Skip;
-use crcbl::shell::DisplayMode;
+use crcbl::shell::{CursorIcon, DisplayMode};
 use crcbl::ui::{DebugModule, DebugSection, draw_list::DrawList};
 
 use crate::args::Options;
@@ -270,6 +270,12 @@ pub struct Viewer {
     /// happened to be — see [`OrbitCamera`].
     orbit: OrbitCamera,
     controls: Controls,
+    /// Whether the panel is up, as [`Viewer::menu_kind`] was last told.
+    ///
+    /// Kept because [`Viewer::cursor`] is asked `&self` and the pause is the
+    /// loop's state rather than this game's; `apps/breach` and `apps/lantern`
+    /// keep the same copy for the same reason.
+    paused: bool,
     /// What the model occupies, kept so [`REFRAME_KEY`] can fit it again after
     /// the user has zoomed away.
     bounds: Aabb,
@@ -547,6 +553,7 @@ fn assemble<S: Shell + ?Sized>(
         Viewer {
             orbit,
             controls: Controls::new(),
+            paused: false,
             bounds: model.bounds,
             extent,
             reframe: false,
@@ -997,6 +1004,25 @@ impl HostedGame for Viewer {
         }
     }
 
+    /// The open hand over the turntable, and the closed one while it is turning.
+    ///
+    /// What every model viewer on the web does, and the reason this sample is
+    /// the one that answers the hook: the whole canvas is the turntable, so the
+    /// cursor is the only thing that can say so before the visitor tries.
+    ///
+    /// The panel gets the ordinary arrow. A grab hand over a row of buttons
+    /// says the wrong thing about what a click there would do, and the panel is
+    /// the one part of this canvas that is not the turntable.
+    fn cursor(&self) -> Option<CursorIcon> {
+        if self.paused {
+            Some(CursorIcon::Default)
+        } else if self.controls.is_dragging() {
+            Some(CursorIcon::Grabbing)
+        } else {
+            Some(CursorIcon::Grab)
+        }
+    }
+
     /// The orbit drag: the primary button's edges, and the movement of the
     /// pointer while any drag is running.
     fn pointer_event(&mut self, pointer: PointerUpdate) {
@@ -1065,6 +1091,9 @@ impl HostedGame for Viewer {
     /// `current_mut`, because the loop has not been told which menu this frame
     /// shows yet — that is what this call returns.
     fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> MenuKind {
+        // Recorded as well as answered: `cursor` is asked immediately after
+        // this and needs to know, and it is handed no argument.
+        self.paused = paused;
         if let Some(menu) = menus.get_mut(MenuKind::Menu) {
             let handle = menu.slider(crate::menu::EXPOSURE_ID);
             match handle {
@@ -1701,6 +1730,90 @@ mod tests {
             held.eye,
             "the turntable kept running after {took_hold} — a tool that drifts out from \
              under the pose someone aimed it at"
+        );
+    }
+
+    /// The cursor the shell actually has on this loop's window.
+    ///
+    /// Read off the shell for the reason `shell_pointer_mode` is in the samples
+    /// that lock: the loop's own record and the window can disagree.
+    fn the_cursor_the_shell_is_drawing(engine: &mut Loop<HeadlessShell>) -> Option<CursorIcon> {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .cursor(window)
+            .expect("the loop's window is live")
+    }
+
+    /// **The hand is open over the turntable, closed while it turns, and an
+    /// arrow over the panel.**
+    ///
+    /// Read off the window rather than off [`Viewer::cursor`], so what this
+    /// asserts is the whole path: this game's answer, the loop's poll, and the
+    /// shell call. A hook that returned the right value and was never polled
+    /// leaves the window on the arrow it was created with for the whole run.
+    ///
+    /// The panel half is not decoration. A grab hand over a row of buttons
+    /// tells a visitor that a click there turns the model, which is the one
+    /// thing on this canvas a click does not do.
+    #[test]
+    fn the_cursor_is_an_open_hand_over_the_turntable_and_closes_on_a_drag() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 64);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let window = engine.window();
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            Some(CursorIcon::Grab),
+            "the whole canvas is the turntable and nothing says so",
+        );
+
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                crcbl::core::input::ButtonState::Pressed,
+                None,
+            )
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            Some(CursorIcon::Grabbing),
+            "the hand did not close on the press that took hold of the model",
+        );
+
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                crcbl::core::input::ButtonState::Released,
+                None,
+            )
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            Some(CursorIcon::Grab),
+            "the hand stayed closed after the drag ended",
+        );
+
+        tap(&mut engine, window, PAUSE_KEY);
+        assert!(engine.is_paused());
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            Some(CursorIcon::Default),
+            "the panel is up under a grab hand",
+        );
+
+        tap(&mut engine, window, PAUSE_KEY);
+        assert!(!engine.is_paused());
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            Some(CursorIcon::Grab),
+            "resuming did not give the turntable its hand back",
         );
     }
 

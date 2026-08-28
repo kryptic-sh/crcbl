@@ -3725,16 +3725,18 @@ on it. The split follows GLFW's (`GLFW_CURSOR_HIDDEN` is separate from
 `CAPTURED` and `DISABLED`) and Unity's (`CursorLockMode` plus `Cursor.visible`).
 What it does not yet do:
 
-- **No sample sets a cursor.** The three that take the lock — `apps/breach`,
-  `apps/lantern`, `apps/quarry` — get a hidden cursor from the lock itself, so
-  nothing in the workspace answers `HostedGame::cursor` with anything but the
-  default. The browser gate's group B check
-  `the shim drew the cursor the engine asked for` therefore asserts
-  `canvas.style.cursor === 'default'` for every demo, which proves the request
-  reaches the canvas and proves nothing about a _changed_ one. A demo that hides
-  the cursor while the pointer is free — a shooter drawing its own reticle is
-  the honest case — is what would close that, and it has to teach that check
-  which demos say what.
+- **Nothing hides the cursor.** `apps/viewer` answers the hook with `Grab`,
+  `Grabbing` and `Default`, and the browser gate reads all three — group B's
+  `the shim drew the cursor the engine asked for` against
+  `EXPECTATIONS.viewer`'s `cursor: 'grab'`, group C's
+  `the cursor closes into a fist while the turntable is held` mid-drag. So a
+  _changed_ shape is proven end to end on every platform the gate runs. The
+  `None` arm is not: the three samples that take the lock — `apps/breach`,
+  `apps/lantern`, `apps/quarry` — get a hidden cursor from the lock itself and
+  never ask, so `set_cursor(_, None)` and the `none` keyword it publishes have
+  unit tests either side and no demo between them. A shooter drawing its own
+  reticle with the pointer free is the honest case, and it needs a `cursor`
+  entry in that table like viewer's.
 - **`PointerMode::Confined` is unsupported on web, deliberately.**
   `WebShell::caps` omits `ShellCaps::POINTER_CONFINE` and the mode errors rather
   than silently doing nothing, which is right: no browser has a confine
