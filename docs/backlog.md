@@ -3771,6 +3771,22 @@ that mode. What is left:
   vendored. Unchanged by this work and noted here because the new hook is what
   finally lets a game ask.
 
+### `vk e2e (lavapipe)` segfaulted once in `viewer`'s lib tests (2026-08-29)
+
+Run 33196877649 on `0702de9` failed the `vk e2e (lavapipe)` job with
+`process didn't exit successfully: … crcbl_viewer-… --quiet (signal: 11, SIGSEGV: invalid memory reference)`,
+fifteen tests into a suite of 116. Not an assertion — the binary died.
+**Re-running the job with no change to the tree passed**, so it is a flake
+rather than a defect the commit introduced, and that commit touched only
+`apps/lantern`, docs and the browser gate — nothing `viewer` links.
+
+Ran locally against the same driver and the same flags CI sets — `CRCBL_GPU=vk`,
+`CRCBL_VK_ICD` at Arch's `lvp_icd.json`, validation, sync validation and
+`CRCBL_VK_VALIDATION_FATAL` all on — and all 116 passed. So the crash is not
+reproducible here, and nothing narrows it further than "lavapipe, on the runner,
+once". Worth reading this entry before chasing a second one: a repeat with a
+different test index is a real race, and a repeat at the same index is not.
+
 ### `gh run list --commit <sha>` returns nothing here (2026-08-29)
 
 A CI watcher built on `gh run list --commit 8586d82 --json ...` printed no rows
