@@ -8848,30 +8848,79 @@ So the browser was still starting and the gate gave up on it.
 failed. **Whether that is enough is not yet known** — the next occurrence is the
 measurement, and it will say a longer time rather than the same one.
 
-### The viewer's suite segfaulted once on lavapipe, and did not again
+### The viewer's suite has now segfaulted twice on lavapipe, nine days apart
 
-On 2026-08-19 the `vk e2e (lavapipe)` job's "Run the viewer's suite against
-lavapipe" step died with `signal: 11, SIGSEGV` after `running 71 tests`. Every
-other step in that job passed, including the quarry step added in the same
-commit, and the only non-CI change in it was an additive `GpuContext::adapter`
-the viewer never calls.
+**2026-08-19**, `running 71 tests`, and **2026-08-28** on `db25eca`,
+`running 115 tests` — both the `vk e2e (lavapipe)` job's "Run the viewer's suite
+against lavapipe" step, both `signal: 11, SIGSEGV`, both with every other step
+in the job passing. Neither commit touched `apps/viewer`, `crcbl-vk` or anything
+the suite exercises: the first carried an additive `GpuContext::adapter` the
+viewer never calls, and the second was a browser-gate change and three markdown
+files. **Re-running the job passed both times.**
 
-**Re-running the job passed.** So did ten local runs of
-`cargo test -p viewer --lib -- --test-threads=16` against lavapipe with both
-validation layers on. It is also the **only** failure in the last thirty CI runs
-on `main` — every other non-success there is a concurrency cancellation.
+**Not reproduced locally, and this time on the right driver.** 25 consecutive
+runs of `cargo test --locked --quiet --package viewer` against lavapipe with
+both validation layers and the fatal gate on: no failure. The suite takes 7.2 s
+there against 2.4 s on this machine's radv, which is how the run was confirmed
+to be on the software rasteriser at all — see the entry below, because the env
+var CI sets for this does not pin anything, and the ten local runs the
+2026-08-19 version of this entry cited were very probably on radv rather than
+lavapipe.
 
-**The candidate mechanism, unproven:** the viewer's lib tests open real devices
-through `HeadlessShell`, and 71 of them run at `cargo test`'s default
-parallelism. Concurrent device creation and teardown in one process is where
-lavapipe crashes if it is going to. That is a hypothesis from the shape of the
-failure, not a diagnosis — nothing here has reproduced it.
+**The candidate mechanism is still the same and still unproven:** the viewer's
+lib tests open real devices through `HeadlessShell` and run at `cargo test`'s
+default parallelism. Concurrent device creation and teardown in one process is
+where lavapipe crashes if it is going to. Note the two data points differ in
+test count but not in kind, and that the CI runner has four cores against this
+machine's 32 — so local parallelism is _higher_ and still does not fire it,
+which argues the trigger is contention or timing rather than thread count.
 
-**What would settle it**, in order of cost: run that step under a loop in a
-scratch branch until it fires; or serialise the device-opening viewer tests and
-see whether the class disappears. Neither is worth doing for one occurrence, and
-both are worth doing at the second — which is what this entry exists to make
-recognisable.
+**What would settle it**, in order of cost: serialise the device-opening viewer
+tests and watch whether the class disappears over the next few weeks — cheap,
+but unfalsifiable at two failures in forty-odd runs, so it would be a change
+made on a hypothesis and would have to say so; or loop the step in CI until it
+fires, which is the only thing that would produce a stack. Neither has been
+done. A third occurrence should stop being treated as a flake.
+
+### Eight CI steps declare a lavapipe pin that pins nothing (2026-08-28)
+
+`ci.yml` sets `CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json` on
+twenty-odd steps of the `vk e2e (lavapipe)` job. **Nothing reads that variable
+except the shell harnesses.** `crcbl_pin_vk_icd` in
+`crates/crcbl-vk/tests/vulkan-icd.sh` is what turns it into the
+`VK_DRIVER_FILES` and `VK_ICD_FILENAMES` the loader actually reads — resolving a
+sibling when the manifest's name differs between distributions, which is the
+whole reason the variable is spelled this way and not written out directly. No
+Rust anywhere reads it: `grep` for `CRCBL_VK_ICD` across the crates finds four
+doc comments and no code.
+
+Most of those steps run a `.sh` that sources the helper, so the pin is real for
+them. **Eight run a bare `cargo` command instead**, and for those the variable
+reaches no reader at all:
+
+- the five headless sample runs — breakout, bare, asteroids, flappy, horde — and
+  hud's, each `cargo run --package <sample> -- --headless … --backend vk`
+- "Run the viewer's suite against lavapipe", `cargo test --package viewer`
+- the `coverage (linux)` job's `cargo llvm-cov nextest --workspace`
+
+They are on lavapipe today because it is the **only** ICD on `ubuntu-latest`,
+not because anything selected it. The day that image ships a second driver, all
+eight silently change what they test — the coverage job most of all, since it
+runs the whole workspace.
+
+Found while diagnosing the viewer segfault above, and it is what made the local
+reproduction attempt honest: exporting `CRCBL_VK_ICD` on a workstation with both
+`lvp_icd.json` and `radeon_icd.json` installed runs on radv, and the only thing
+that gave it away was the suite finishing in 2.4 s instead of 7.2 s.
+
+**The fix is not to write the two spellings into the workflow** — that is the
+runner-specific guess the "Draw a frame through ForwardRenderer on lavapipe"
+step's own comment records failing with `ERROR_INCOMPATIBLE_DRIVER`. It is a
+small `tools/` wrapper that sources `vulkan-icd.sh`, calls `crcbl_pin_vk_icd`
+and `exec`s its arguments, with those eight steps invoking their `cargo` command
+through it. Not done here: it changes eight steps for a problem that is latent
+rather than active, and nothing on the current runner image can observe the
+difference, so it wants to be its own change rather than a rider on one.
 
 ### A tile's border needs no explicit locking — the decimator already holds it
 
