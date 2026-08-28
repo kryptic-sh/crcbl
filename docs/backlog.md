@@ -169,58 +169,46 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
-### The browser gate's per-step cap is the wrong instrument (2026-08-28)
+### The browser gate's cap says "out of time", never "too slow" (2026-08-28)
 
-Five of the fourteen demo steps in the Pages workflow's `build the demo site`
-job have now had their `timeout-minutes` raised from 10 to 20 — quarry, lantern,
-breach, shard and, on 2026-08-28, puppet. Every one of those raises followed the
-same failure: **the step reported all of its checks green and was then killed on
-wall clock**, because `web/tools/browser-e2e.mjs` scales its own per-check
-budgets to the machine it is on. A slower frame stretches the run rather than
-failing it, so the cap cannot say "too slow" — only "out of time" — and the job
-it kills is the one that uploads the site.
+**The sum is fixed; the instrument is not.** The Pages workflow's fourteen Linux
+demo gates were steps of the `build the demo site` job, run serially because
+they all drive the site it builds, so the job's `timeout-minutes` had to fit
+their total. It did not, five times running: 30 minutes on 2026-08-25, then 60,
+then 90, then 120, and at `80022df` the job still reached 69 minutes with breach
+killed on its own step bound and shard never started. A job cap firing **skips**
+the deploy rather than failing it, so every one of those runs looked green with
+the site a commit behind — it had not deployed since `00c92e3`.
 
-puppet's own log names the mechanism: "two HUD lines 24982 ms apart, in 44854 ms
-— every later budget scaled 25.0x". The runner has no GPU, its software
-rasteriser drives the tick at a twenty-fifth of real time, and every check that
-waits on simulated progress waits in wall-clock multiples of that. The shadow
-filter's early-out took 27% off the forward pass on two adapters and moved
-puppet's step by one second (612s to 613s), which is the same finding from the
-other side: what these steps spend is simulation, not picture.
+They are the `demos` matrix job now, one job per demo, each downloading the
+`site` artifact that `build` uploads before it drives anything, and `deploy`
+waits on both. The wall clock is the slowest single demo rather than the sum,
+`fail-fast: false` means one red gate no longer leaves thirteen unrun, and
+`deploy` fails loudly on a red gate instead of skipping.
 
-**What is not fixed:** a cap is still the only thing that fires, so a demo that
-genuinely hangs and a demo that is merely slow are the same red, ten or twenty
-minutes later. What would distinguish them is a budget the driver itself
-enforces — it already measures its own scale factor, so it could fail on the
-factor rather than on the clock — or a per-demo wall-clock figure recorded and
-compared run to run. Neither exists.
+**What is still not fixed is the cap itself.** `web/tools/browser-e2e.mjs`
+scales its own per-check budgets to the machine it is on, so a slower frame
+stretches the run rather than failing it: a demo that genuinely hangs and a demo
+that is merely slow are the same red, forty-five minutes later. What would
+distinguish them is a budget the driver enforces — it already measures its own
+scale factor, so it could fail on the factor rather than on the clock — or a
+per-demo wall-clock figure recorded and compared run to run. Neither exists, and
+the fan-out does not create either.
 
-**sparks' coverage gap closed itself, and shard's turned out to be the real
-one.** `sparks` was left at 10 rather than raised on a guess, and at `e010015`
-it ran under the rotated disc, PCSS, GTAO and the probe in **240 s** against 236
-s at `cec27b3` — the arithmetic that said it would need 2.5× was wrong, and not
-raising it was right. `shard`, meanwhile, **has never once completed this
-step**: every run before `e010015` was cancelled by a later push while it was
-still going, and `e010015` — the first to reach the end of the queue — killed it
-on its 20-minute bound in section I, the last one, with every check it had
-reached green. Its log says why it is the slowest thing on the site: "every
-later budget scaled **87.0x**", against puppet's 25.0x.
+**What these gates spend is simulation, not picture.** The runner has no GPU;
+its software rasteriser drives the tick at a fraction of real time, and every
+check waiting on simulated progress waits in wall-clock multiples of it. The
+logs name their own factor: 1.0x for the five 2D demos, 25.0x for puppet, 51.1x
+for breach, 87.0x for shard. The shadow filter's early-out took 27% off the
+forward pass on two adapters and moved puppet's step by one second (612 s to 613
+s) — the same finding from the other side.
 
-**The job cap became the binding constraint on 2026-08-28**, which is what the
-build job's own comment predicted would happen. At `e010015` the fourteen
-browser gates summed to **74.3 minutes** — quarry 507 s, lantern 528 s, puppet
-598 s, breach 1007 s, shard killed at 1212 s — with about seven more for the
-build ahead of them, so the job was inside four minutes of its 90-minute
-ceiling. Raising shard to 30 does not fit under 90, so the job went to 120 in
-the same change. **Neither number is a measurement of shard**, because there is
-still none; 30 is ten minutes past where the run had reached when it was killed,
-taken in order to get one, and the next completed run's figure replaces it.
-
-**The sum is the thing to fix, not the caps.** The build job runs all fourteen
-gates serially because they drive the site it just built. Uploading that site as
-an artifact and fanning the gates out across jobs — which `probe-macos` and
-`probe-windows` already do for their own — makes the total stop being a sum, and
-is the only change here that does not need another ceiling in a month.
+**shard has still never completed.** Every run before `e010015` was cancelled by
+a later push while it was still going; `e010015` killed it at 20 minutes in
+section I, the last one, with every check it had reached green; every run since
+died at a demo ahead of it. The `demos` job's uniform 45-minute cap is past
+every figure measured so far — puppet 774 s and breach 1213 s at `80022df` — but
+it is a bound on a hang, not a measurement of shard, and there is still none.
 
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 

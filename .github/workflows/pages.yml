@@ -50,43 +50,29 @@ jobs:
   build:
     name: build the demo site
     runs-on: ubuntu-latest
-    # **The whole budget, not one demo's.** Every browser gate runs in this one
-    # job, serially, because they all drive the site this job just built — so
-    # what has to fit here is their sum, and that sum grows with every demo the
-    # site ships. The per-step `timeout-minutes` below bound a single hanging
-    # demo; they cannot bound the total, and when the job cap is the smaller of
-    # the two it is the cap that fires. It did on 2026-08-25: eleven
-    # demos rendered for 29 minutes, puppet was the one still running when the
-    # 30-minute cap hit, and the deploy step was skipped rather than failed —
-    # green-looking workflow, site a commit behind.
+    # **The build and the seam probe, and no demo.** Until 2026-08-28 every
+    # browser gate ran in this one job, serially, because they all drive the
+    # site it builds — so what had to fit here was their sum, and per-step
+    # `timeout-minutes` could bound a hanging demo but never the total. When
+    # the job cap was the smaller of the two it was the cap that fired, and a
+    # cap firing **skips** the deploy rather than failing it: a green-looking
+    # workflow with the site a commit behind. It happened on 2026-08-25 at 30
+    # minutes, and the ceiling went to 60, then 90, then 120 chasing it. At
+    # `80022df` the fourteen gates were still growing — quarry 658 s, lantern
+    # 667 s, puppet 774 s, breach killed on its own 20-minute bound with every
+    # check green, shard never reached — and the site had not deployed since
+    # `00c92e3`.
     #
-    # The two heavy 3D frames dominate and are the reason the total is what it
-    # is: on this runner quarry and lantern each take over ten minutes against
-    # well under one for a 2D demo, each behind by the factor its own heartbeat
-    # reports. `docs/backlog.md` carries the structural answer — render the
-    # demos in a matrix job that downloads the `site` artifact, the way the
-    # probe jobs already do, so they run in parallel and the total stops being a
-    # sum at all.
+    # **The gates are the `demos` matrix job now**, one per demo, each
+    # downloading the `site` artifact this job uploads before it drives
+    # anything. The total is the slowest single demo rather than the sum of all
+    # of them, a step cap is a bound on a hang again, and a gate that goes red
+    # fails the deploy through `deploy`'s `needs` instead of skipping it. The
+    # header this replaces had named that answer for three raises running.
     #
-    # **90 rather than 60 since 2026-08-28**, because the sum grew again: the
-    # shadow ladder's rotated disc and its blocker search put quarry from 480 s
-    # to 602 s and lantern from 471 s to 612 s, over their own caps, and the
-    # deploy step went back to being skipped on a run that had passed every
-    # check inside it. `docs/backlog.md`'s "The shadow filter costs 48 taps" has
-    # the per-commit table. Raising a cap does not make a frame cheaper and is
-    # not claimed to; what it does is stop a bound written to catch a *hang*
-    # from firing on a demo that finished.
-    #
-    # **120 rather than 90 since 2026-08-28**, because the sum reached the cap
-    # rather than one demo reaching its own. At `e010015` the fourteen browser
-    # gates took 74.3 minutes between them — quarry 507 s, lantern 528 s, puppet
-    # 598 s, breach 1007 s and shard killed at its own 20-minute bound — and the
-    # build ahead of them takes about seven more, so the job was inside four
-    # minutes of this ceiling before shard was given the extra ten it needs.
-    # This is the ceiling the comment above says will keep moving until the
-    # gates stop being a sum, and it is written down rather than rounded up:
-    # 84 minutes of steps plus the build does not fit under 90.
-    timeout-minutes: 120
+    # 30 covers the wasm build (55 s at `80022df`), the five node checks ahead
+    # of it and the eight-second seam probe, with room for a cold Rust cache.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -206,6 +192,20 @@ jobs:
           }
           echo "custom domain: $domain"
 
+      # **Uploaded before a single gate runs, and that ordering is the point.**
+      # This step used to be last, after fourteen browser gates, so a gate that
+      # timed out took the artifact down with it and the `deploy` job below had
+      # nothing to publish. The gates are their own jobs now and download this;
+      # `deploy` still waits for them through its `needs`, so what changed is
+      # that a red gate fails the deploy loudly instead of leaving it skipped.
+      - name: Upload the site
+        uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: target/site
+          if-no-files-found: error
+          retention-days: 7
+
       # THE ASSUMPTIONS THE BROWSER GATE MAKES, CHECKED RATHER THAN HOPED FOR.
       # `ubuntu-latest` ships `/usr/bin/google-chrome` and `Xvfb`, and both of
       # those are facts about an image that changes; a runner that stopped
@@ -227,48 +227,29 @@ jobs:
           fi
           echo "Xvfb: $(command -v Xvfb)"
 
-      # THE P5 GATE. Loads the site that was just built in a real browser,
-      # opens a WebGPU device, drives a real Space key into the canvas of every
-      # demo that has one to press, and reads the canvas back to prove it is
-      # neither blank nor still.
+      # THE P5 GATE LIVES IN THE `demos` JOB BELOW, NOT HERE.
+      # It used to be fourteen steps in this job, run one after another because
+      # they all drive the site this job builds. That made the bound this job
+      # has to fit their *sum*, and the sum is what kept firing: the cap was
+      # raised from 30 to 60 to 90 to 120 minutes across 2026-08-25 to
+      # 2026-08-28, and on `80022df` the build reached 69 minutes with breach
+      # killed on its own 20-minute step bound and shard never started. Every
+      # one of those runs skipped the deploy rather than failing it, so the site
+      # sat a commit behind while the workflow looked green.
       #
-      # A GitHub runner has no GPU, which is why the harness runs the browser
-      # inside Xvfb against Chromium's bundled SwiftShader: that is the one
-      # combination whose canvas pixels can be read back at all (the table is in
-      # `web/run-browser-e2e.sh`). It verifies that for itself with a
-      # known-colour clear before it interprets anything, so a runner where the
-      # readback stops working fails here rather than reporting a working
-      # renderer as blank.
-      # Once per demo, and named per demo, so "the browser gate failed" says
-      # which game. The site is built once; each run launches its own browser
-      # because the driver reads one canvas.
-      #
-      # The driver waits for `crcbl-webgpu`'s own `hal: webgpu adapter` line at
-      # boot, which is a check that the *right* backend opened the device rather
-      # than that some backend did. It is not configurable: a browser build has
-      # one GPU backend, so a `hal: wgpu adapter` line here would mean the
-      # umbrella's manifest had regressed.
-      - name: Render breakout in a real browser
-        run: CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh
-
-      - name: Render flappy in a real browser
-        run: CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
-
-      - name: Render asteroids in a real browser
-        run: CRCBL_WEB_E2E_DEMO=asteroids ./web/run-browser-e2e.sh
-
-      - name: Render horde in a real browser
-        run: CRCBL_WEB_E2E_DEMO=horde ./web/run-browser-e2e.sh
-
-      # hud is the one demo that takes no input, so the driver dispatches no key
-      # for it and reads "the simulation is advancing" off the ticker's own rng
-      # cursor instead. Its `EXPECTATIONS` row in `web/tools/browser-e2e.mjs` is
-      # what says so; the step is otherwise identical.
-      - name: Render hud in a real browser
-        run: CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh
+      # The site is uploaded above instead, before anything drives it, and the
+      # gates download it — the way `probe-macos`, `probe-windows` and the
+      # golden legs already do. They run as one matrix job per demo, so the
+      # total is the slowest demo rather than the sum of all of them, and a
+      # step cap goes back to bounding a hang. This is the structural answer
+      # this job's header and `docs/backlog.md` have both been naming.
 
       # THE crcbl-webgpu SEAM GATE. **It must not be deleted**, nor folded into
-      # the demo runs above.
+      # the `demos` job below.
+      #
+      # It stayed in this job when the demo gates left because it costs eight
+      # seconds against their minutes: a job of its own would spend longer
+      # downloading the artifact than driving it.
       #
       # `web/tools/probe-groups.mjs` carries the PROBE groups — that file's own
       # header names the range, and restating it here has gone stale twice —
@@ -280,12 +261,12 @@ jobs:
       # pipelines — and from S onward the ones that read bytes back and compare
       # their *values*: a cleared texture, a drawn triangle, a compute shader's
       # storage writes, a copy chain, a sub-range fill, a presented canvas
-      # frame, a reconfigured swapchain and an indirect draw. The five steps
-      # above prove the shipped artifact renders; this is the only thing that
+      # frame, a reconfigured swapchain and an indirect draw. The `demos` job
+      # proves the shipped artifact renders; this is the only thing that
       # proves the seam underneath it command by command. Delete it and every
       # probe group stops running with nothing going red.
       #
-      # It runs on `target/site` — the build the steps above reuse and the
+      # It runs on `target/site` — the build the `demos` job downloads and the
       # `deploy` job ships — and needs no second backend, which is what changed:
       # the probe exports install their own command-stream channel and a page has
       # exactly one, so they run wherever nothing else has claimed it.
@@ -306,7 +287,7 @@ jobs:
       # group that keeps its letter while dropping the claim that makes it worth
       # running fails there too.
       #
-      # It brings up its own Xvfb, as the demo steps do. That is not cosmetic on
+      # It brings up its own Xvfb, as the demo gates do. That is not cosmetic on
       # a runner with no GPU: under `--headless=new` plus SwiftShader the three
       # groups that acquire or present a canvas frame — X, Y and Z — never
       # resolve their readback map, while all three pass in the same browser
@@ -314,218 +295,158 @@ jobs:
       - name: Gate crcbl-webgpu's seam on a standalone probe page
         run: ./web/run-probe-e2e.sh
 
-      # BOTH 3D DEMOS ARE RENDERED HERE, AND IT TOOK TWO DIFFERENT FIXES —
-      # READ THIS BEFORE DELETING EITHER.
-      #
-      # They are the site's two 3D demos, and until 2026-08 neither ran here for
-      # one cause: `crcbl-render`'s draw-argument pass bound fourteen storage
-      # buffers in a single compute stage, Chrome's SwiftShader adapter — the
-      # only WebGPU adapter a runner with no GPU has — reports a ceiling of ten,
-      # so the pipeline was never created and the canvas stayed black. Both
-      # samples draw through that pass: lantern because it is a lit room of mesh
-      # instances, quarry because a cluster DAG is nothing but mesh instances.
-      #
-      # **That pass binds eight now** — see `crates/crcbl-render/src/draw_gen.rs`,
-      # whose module docs record the merges and say in as many words that it
-      # bound fourteen "until 2026-08 and could therefore not be created on a
-      # browser at the default limits, nor on SwiftShader". So the stated cause
-      # no longer holds, and it was checked rather than assumed: on Chromium
-      # 151.0.7922.137 under Xvfb against the bundled SwiftShader — this job's
-      # own configuration — `CRCBL_WEB_E2E_DEMO=quarry` and
-      # `CRCBL_WEB_E2E_DEMO=lantern` each passed 34 of 34 checks, and quarry passed
-      # 34 of 34 against real hardware as well. **Every count on this page is the
-      # total that run had**: group H took the driver to 37, so a fresh run scores
-      # 37 of 37 and these older figures are history rather than drift.
-      #
-      # **A GitHub runner has now been measured, and it is not the ceiling that
-      # keeps them out — it is `TICK_WINDOW_MS`.** quarry's step ran here on
-      # 2026-08-20 (run 32363651779) and scored **32 of 34**: it booted, opened a
-      # SwiftShader device, resolved `IndirectPerBatch`/`ArrayPages`, drew 64
-      # distinct colours, changed between all 16 sampled frames, and got its
-      # culling statistics back. The two it failed are group E's HUD heartbeat
-      # checks, both `0 HUD line(s) in 4000 ms`, and the step took 3m39s against
-      # 22–41s for the five 2D demos.
-      #
-      # That is a **pace** result, not a rendering one. The HUD line is logged
-      # every sixtieth tick — a second of *simulated* time — and this runner
-      # advanced the demo's clock to 22s over roughly 40s of wall clock, so a
-      # fixed four-second window does not reliably contain one. Worse, the group's
-      # "a paused demo runs no ticks at all" check passes for free on a run where
-      # no heartbeat can appear at all: exactly the shape `TICK_WINDOW_MS`'s own
-      # comment says the group's first check exists to prevent, which is why that
-      # first check is what went red.
-      #
-      # **That is fixed rather than tuned around, which is why both steps are
-      # here now.** `heartbeatMs` in `web/tools/browser-e2e.mjs` waits for two HUD
-      # lines and times the gap, and the watch window is
-      # `max(TICK_WINDOW_MS, beat * TICK_WINDOW_BEATS)` — the constant kept as a
-      # floor, so a fast machine is unchanged and a slow one watches longer.
-      # Raising the constant instead was declined: it buys this runner and loses
-      # the next slower one, and it weakens "a paused demo runs no ticks at all"
-      # on every demo. `docs/backlog.md` carries the reasoning.
-      #
-      # **That fixed group E, and group F has the same defect one budget along.**
-      # quarry's second run here (12:03 on 2026-08-20, 5m58s) scored **33 of 34**:
-      # group E went fully green — the beat measured **27204 ms**, the window came
-      # out at 54408 ms, the paused check saw zero heartbeats in it and the
-      # resumed check saw two — and what failed instead is group F's
-      # `a second contact arrives as its own contact and moves only itself`, which
-      # waits `PADDLE_SETTLE_MS` (1500 ms) for the two `Ended` contacts and saw
-      # only the `Began`s and a `Moved`. On a machine advancing a simulated second
-      # every 27 seconds, one and a half seconds is not a batch fold plus a log
-      # drain.
-      #
-      # **Every wall-clock budget in the harness is now scaled by the measured
-      # beat**, not just the tick window: `slowdown = max(1, beat / 1000)` is how
-      # far behind real time this machine is running the demo, and group F's four
-      # budgets go through it. The heartbeat control prints the factor, so a
-      # failure here says in the same log how slow the runner was. Clamped at 1,
-      # so nothing is shorter than the constants already gave.
-      #
-      # **Both have now passed here, 37 of 37 each**, and the numbers are the
-      # reason to leave the machinery alone: on this runner the five 2D demos
-      # report a beat of 992–1034 ms and a factor of `1.0x` — exactly nominal,
-      # untouched by any of this — while quarry reports 26243 ms (`26.2x`, step
-      # 5m54s) and lantern 19339 ms (`19.3x`, 5m23s). Only the two heavy frames are
-      # behind, and each by the factor its own heartbeat measured.
-      #
-      # Ten-minute timeouts against those. If one goes red, read **which** check
-      # failed before touching a number — a heartbeat control failing now means
-      # fewer than two HUD lines in a minute, which is a different claim from the
-      # four-second one it used to make.
-      # **20 rather than 10, with breach and shard, since 2026-08-28.** Both
-      # demos render the sun's shadow filter, and the shadow ladder's last two
-      # rungs took them past ten minutes on this runner — 602 s and 612 s, each
-      # having reported every one of its checks passing before the cap killed
-      # the step. `web/tools/browser-e2e.mjs` scales its own per-check budgets
-      # to the machine it is on, so a slower frame stretches the run rather than
-      # failing it: the cap is the only thing that can fire, and what it says
-      # when it does is "out of wall clock", never "too slow". The job header
-      # above and `docs/backlog.md` carry the cost itself.
-      - name: Render quarry in a real browser
-        timeout-minutes: 20
-        run: CRCBL_WEB_E2E_DEMO=quarry ./web/run-browser-e2e.sh
+  # THE P5 GATE, ONE JOB PER DEMO.
+  #
+  # Loads the site `build` produced in a real browser, opens a WebGPU device,
+  # drives real input into the canvas of every demo that has one, and reads the
+  # canvas back to prove it is neither blank nor still.
+  #
+  # A GitHub runner has no GPU, which is why the harness runs the browser inside
+  # Xvfb against Chromium's bundled SwiftShader: that is the one combination
+  # whose canvas pixels can be read back at all (the table is in
+  # `web/run-browser-e2e.sh`). It verifies that for itself with a known-colour
+  # clear before it interprets anything, so a runner where the readback stops
+  # working fails here rather than reporting a working renderer as blank.
+  #
+  # The driver waits for `crcbl-webgpu`'s own `hal: webgpu adapter` line at
+  # boot, which is a check that the *right* backend opened the device rather
+  # than that some backend did. It is not configurable: a browser build has one
+  # GPU backend, so a `hal: wgpu adapter` line here would mean the umbrella's
+  # manifest had regressed.
+  #
+  # **A MATRIX RATHER THAN A LIST OF STEPS, SINCE 2026-08-28.** These were
+  # fourteen steps of `build`. `build`'s header carries what that cost; what it
+  # bought here is that the wall clock is the slowest demo instead of the sum,
+  # and that `fail-fast: false` lets thirteen demos report while one is red —
+  # under the old arrangement the first failure ended the job and every gate
+  # behind it went unrun, which is why sparks had not completed since `cec27b3`
+  # and shard had never completed at all.
+  #
+  # **NOTHING HERE BUILDS THE SITE**, and no Rust toolchain is installed:
+  # `web/run-browser-e2e.sh` only invokes `web/build.sh` when `target/site` is
+  # missing, and the download above puts it there. Fourteen rebuilds would be
+  # fourteen different artifacts under test.
+  #
+  # The script warns that its sources are newer than the site it drives — a
+  # fresh checkout's mtimes always are, and the artifact carries the build
+  # job's. That warning is for a developer reusing a stale local `target/site`;
+  # here the site is this commit's by construction, so the line is noise rather
+  # than a finding. `probe-macos` and `probe-windows` have printed the same one
+  # since they were written.
+  #
+  # **The cap is a bound on a hang, not a budget.** One number for every demo,
+  # deliberately: the reason the old per-step numbers had to be argued one by
+  # one is gone with the sum they had to fit into, and a generous cap costs
+  # nothing on a run that passes. At `80022df` the slowest gate to complete was
+  # puppet at 774 s; breach was killed at 1213 s with every check it had reached
+  # green, and shard's only measurement is that it, too, was killed. 45 is past
+  # every one of those with room for a runner slower again.
+  demos:
+    name: render ${{ matrix.demo }} in a real browser
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        demo:
+          - breakout
+          - flappy
+          - asteroids
+          - horde
+          # hud is the one demo that takes no input, so the driver dispatches no
+          # key for it and reads "the simulation is advancing" off the ticker's
+          # own rng cursor instead. Its `EXPECTATIONS` row in
+          # `web/tools/browser-e2e.mjs` is what says so.
+          - hud
+          # quarry and lantern are the site's two 3D demos, and until 2026-08
+          # neither ran here for one cause: `crcbl-render`'s draw-argument pass
+          # bound fourteen storage buffers in a single compute stage, and
+          # Chrome's SwiftShader adapter reports a ceiling of ten, so the
+          # pipeline was never created and the canvas stayed black. That pass
+          # binds eight now — `crates/crcbl-render/src/draw_gen.rs` records the
+          # merges — and both score every check here.
+          #
+          # What keeps them slow is not the picture but the simulation: the
+          # runner's software rasteriser advances the demo's clock at a fraction
+          # of real time, and `web/tools/browser-e2e.mjs` scales every wall-clock
+          # budget by the beat it measures, so a slower frame stretches the run
+          # rather than failing it. Each demo's log prints its own factor —
+          # 1.0x for the 2D demos, 51.1x for breach on `80022df`. If one of
+          # these goes red, read **which** check failed before touching a
+          # number: the cap says "out of wall clock", never "too slow".
+          - quarry
+          - lantern
+          # viewer and orbit are the two samples whose subject does not move on
+          # its own, and both answer group C off something the sample itself
+          # advances — viewer's idle turntable, orbit's scripted ascent.
+          - viewer
+          - orbit
+          - bracket
+          - puppet
+          - sparks
+          - breach
+          # shard is the heaviest scene the site ships and the slowest thing
+          # here: 88 s locally on the same software rasteriser, and "every later
+          # budget scaled 87.0x" in the one CI log that reached it. It has never
+          # completed in this workflow — every run before `e010015` was
+          # cancelled by a later push while it was still going, and every run
+          # since died at a demo ahead of it. This job is what gives it a clock
+          # of its own.
+          - shard
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: target/site
 
-      # lantern last: it is the heaviest frame the site ships, and its local
-      # evidence is the same 34-of-34 SwiftShader run quarry's was.
-      - name: Render lantern in a real browser
-        timeout-minutes: 20
-        run: CRCBL_WEB_E2E_DEMO=lantern ./web/run-browser-e2e.sh
+      # THE ASSUMPTIONS THE BROWSER GATE MAKES, CHECKED RATHER THAN HOPED FOR.
+      # `ubuntu-latest` ships `/usr/bin/google-chrome` and `Xvfb`, and both of
+      # those are facts about an image that changes; a runner that stopped
+      # shipping either would otherwise turn the gate below into a step that
+      # skips and reports success, which is the failure mode
+      # `docs/plan/12-testing.md` warns about by name.
+      - name: Check the browser gate's assumptions
+        run: |
+          browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -z "$browser" ]; then
+            echo "::error::no Chrome or Chromium on this runner. The image is assumed to ship /usr/bin/google-chrome."
+            exit 1
+          fi
+          echo "browser: $browser ($("$browser" --version))"
+          if ! command -v Xvfb >/dev/null 2>&1; then
+            echo "Xvfb is not on this image; installing it."
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends xvfb
+          fi
+          echo "Xvfb: $(command -v Xvfb)"
 
-      # viewer and orbit are the two samples whose subject does not move on its
-      # own, and both answer group C off something the sample itself advances —
-      # viewer's idle turntable, orbit's scripted ascent. Their `EXPECTATIONS`
-      # rows in `web/tools/browser-e2e.mjs` say which number each reads.
-      - name: Render viewer in a real browser
-        timeout-minutes: 10
-        run: CRCBL_WEB_E2E_DEMO=viewer ./web/run-browser-e2e.sh
-
-      - name: Render orbit in a real browser
-        timeout-minutes: 10
-        run: CRCBL_WEB_E2E_DEMO=orbit ./web/run-browser-e2e.sh
-
-      - name: Render bracket in a real browser
-        timeout-minutes: 10
-        run: CRCBL_WEB_E2E_DEMO=bracket ./web/run-browser-e2e.sh
-
-      # **Twenty, and it is the fifth demo to need it.** puppet timed out here
-      # twice in a row — 612s on `13b5883` and 613s on `ef8a47d`, each with
-      # every one of its checks green and the kill landing mid-group-F — and
-      # both runs took the site down with them, because this job is the one
-      # that uploads it. The comment above breach already priced puppet at 468s;
-      # that number is from before the shadow ladder and GTAO and is no longer
-      # what this step takes.
-      #
-      # **The stretch is the simulation, not the picture.** puppet's own log
-      # says it: "two HUD lines 24982 ms apart, in 44854 ms — every later budget
-      # scaled 25.0x". The runner has no GPU, so its software rasteriser drives
-      # the tick at a twenty-fifth of real time and every check that waits on
-      # simulated progress waits in wall-clock multiples of it. The shadow
-      # filter's early-out, which took a quarter off the forward pass on two
-      # adapters, moved this step by one second across those two runs — which is
-      # the same finding from the other side.
-      - name: Render puppet in a real browser
-        timeout-minutes: 20
-        run: CRCBL_WEB_E2E_DEMO=puppet ./web/run-browser-e2e.sh
-
-      # **Ten, and deliberately not raised with its neighbour above.** sparks has
-      # not completed in this job since `cec27b3`, where it took 236s — every
-      # run after that one died at quarry, lantern or puppet before reaching it
-      # — so it has never run under the shadow ladder or GTAO. Raising it too
-      # would have been a guess, and the arithmetic says a poor one: puppet grew
-      # by a factor of 1.3 across those rungs, and 236s would have to grow by
-      # 2.5 to reach this ceiling. The number to replace this paragraph with is
-      # the one its next green run prints.
-      - name: Render sparks in a real browser
-        timeout-minutes: 10
-        run: CRCBL_WEB_E2E_DEMO=sparks ./web/run-browser-e2e.sh
-
-      # **Twenty rather than the ten its neighbours take.** This step does not
-      # fail — on the run that reddened `main` it reported 46 checks, every one
-      # of them green, and then died mid-group-F at the cap. It is simply the
-      # longest gate here: 613s against a 600s ceiling, beside puppet's 468s,
-      # lantern's 456s and quarry's 436s. **Those three numbers are historical**
-      # — every one of them has since grown past this ceiling, and each raised
-      # its own cap in turn; the step below is the fifth.
-      #
-      # Those three are the reason this is a cap change rather than a demo
-      # change: they sit at three quarters of the same ceiling, so the ceiling
-      # is what is wrong, not breach. Why every simulation-heavy demo runs this
-      # close is a live question — the runner has no GPU, and its software
-      # rasteriser drives the simulation at a fraction of real time, so every
-      # check that waits on simulated progress waits in wall-clock multiples of
-      # it. `docs/backlog.md` carries what is measured and what is still
-      # unexplained.
-      - name: Render breach in a real browser
-        timeout-minutes: 20
-        run: CRCBL_WEB_E2E_DEMO=breach ./web/run-browser-e2e.sh
-
-      # 30 rather than the 10 its neighbours get, for breach's reason one step
-      # up: this is the heaviest scene on the site, and `docs/backlog.md`'s note
-      # on the browser gates records that the runner drives it on a software
-      # rasteriser at a fraction of real time. Measured at 88 s locally on that
-      # same rasteriser, which is what the demo was tuned to; the runner is
-      # several times slower again.
-      #
-      # **This step has never once completed in this job.** Every run before
-      # `e010015` was cancelled by a later push while shard was still going, and
-      # `e010015` — the first to reach the end of the queue — was killed on the
-      # 20-minute bound with every check it had reached green, in section I,
-      # which is the last one. Its own log names the reason it is the slowest
-      # thing on the site: "every later budget scaled 87.0x", against puppet's
-      # 25.0x. So 30 is not a measurement of shard, because there is none; it is
-      # ten minutes past the point the run had reached when it was killed, taken
-      # in order to *get* one. Whatever the next completed run reports belongs
-      # here in place of this paragraph.
-      - name: Render shard in a real browser
-        timeout-minutes: 30
-        run: CRCBL_WEB_E2E_DEMO=shard ./web/run-browser-e2e.sh
+      - name: Render ${{ matrix.demo }} in a real browser
+        run: CRCBL_WEB_E2E_DEMO=${{ matrix.demo }} ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
-      # from the step log.
+      # from the step log. Named per demo: one artifact name across the matrix
+      # would have fourteen jobs uploading over each other.
       - name: Upload the browser evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: web-e2e
+          name: web-e2e-${{ matrix.demo }}
           path: target/web-e2e
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload the site
-        uses: actions/upload-artifact@v7
-        with:
-          name: site
-          path: target/site
-          if-no-files-found: error
-          retention-days: 7
-
   # THE SAME SEAM GATE, ON THE OTHER TWO PLATFORMS.
   #
-  # `build` runs every browser step above on `ubuntu-latest`, so until these two
-  # jobs existed "the WebGPU backend works in a browser" meant "on Linux, under
-  # SwiftShader". These run the **probe gate only** — `web/run-probe-e2e.sh`,
+  # `build` and `demos` run every browser gate on `ubuntu-latest`, so until
+  # these two jobs existed "the WebGPU backend works in a browser" meant "on
+  # Linux, under SwiftShader". These run the **probe gate only** —
+  # `web/run-probe-e2e.sh`,
   # which drives `crcbl-webgpu`'s command stream verb by verb — and not the five
   # demo steps: measured on a real run, the probe costs about 2 seconds of
   # browser time against the demos' 2m38s, and it is the gate that reads bytes
@@ -1129,7 +1050,11 @@ jobs:
 
   deploy:
     name: deploy to GitHub Pages
-    needs: build
+    # **`demos` as well as `build`, since 2026-08-28.** The browser gates used
+    # to be steps of `build`, so waiting for `build` was waiting for them. Now
+    # that they are their own jobs, dropping them from this list would publish
+    # a site no gate had passed.
+    needs: [build, demos]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
