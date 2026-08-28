@@ -110,18 +110,18 @@ and the domain are fixed now anyway, which is
 [14-persistence.md](14-persistence.md)'s second catalogue rule: a key named late
 is a file every existing player has already written.
 
-| Key            | Domain                                                          | Today                                                                                                                                                                                                                                                     |
-| -------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_mode` | `"windowed"` \| `"borderless"`                                  | **The switch is built and the persistence is not.** `DisplayMode` and `Shell::set_mode` ship on every backend, and `crcbl::engine::ModeRequest::toggle` drives them from the engine's own pause menu. No key reads or writes it.                          |
-| `monitor`      | monitor **name**; absent means "wherever the window already is" | `Shell::monitors` and `DisplayMode::Borderless { monitor }` exist. No key reads it.                                                                                                                                                                       |
-| `resolution`   | `[width, height]` in device pixels — the **surface** extent     | The shell creates a window at a requested size and `SwapchainDesc::extent` is that size. No key reads it, and nothing resizes a window from a setting.                                                                                                    |
-| `present_mode` | `"auto"` \| `"vsync"` \| `"adaptive"` \| `"off"`                | `crcbl::engine::Pacing` implements all four and `GpuContext::set_pacing` applies them to a live swapchain. No key reads it.                                                                                                                               |
-| `frame_limit`  | frames a second; `0` is unlimited                               | `crcbl::engine::FrameLimit` implements it. No key reads it.                                                                                                                                                                                               |
-| `render_scale` | fraction of the surface extent — the **internal** extent        | **The renderer half is built and no key reads it.** `ForwardRenderer::set_render_scale` sizes the internal target and `shaders/upscale.slang` reconstructs it into the caller's; `MIN_RENDER_SCALE` is the floor. No settings key and no `Shell` request. |
-| `brightness`   | scalar multiplier applied in the tonemap pass                   | **Nothing.** `crcbl_shaders::tonemap::TonemapParams` carries `exposure` and no second field; brightness would be that field.                                                                                                                              |
-| `hdr_output`   | `true` \| `false`                                               | **Nothing, and further from built than the rest** — see the HDR note below.                                                                                                                                                                               |
-| `ui_scale`     | multiplier over the window's own scale factor, UI only          | **Nothing global.** `crcbl_ui::MenuStyle::pixel_art` takes a whole-number scale per menu; no crate applies a player-chosen factor to UI layout.                                                                                                           |
-| `fov`          | vertical field of view in degrees                               | `crcbl_render::Camera::Perspective`'s `fov_y` is the value a game sets in code. No key reads it.                                                                                                                                                          |
+| Key            | Domain                                                          | Today                                                                                                                                                                                                                                                                       |
+| -------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_mode` | `"windowed"` \| `"borderless"`                                  | **The switch is built and the persistence is not.** `DisplayMode` and `Shell::set_mode` ship on every backend, and `crcbl::engine::ModeRequest::toggle` drives them from the engine's own pause menu. No key reads or writes it.                                            |
+| `monitor`      | monitor **name**; absent means "wherever the window already is" | `Shell::monitors` and `DisplayMode::Borderless { monitor }` exist. No key reads it.                                                                                                                                                                                         |
+| `resolution`   | `[width, height]` in device pixels — the **surface** extent     | The shell creates a window at a requested size and `SwapchainDesc::extent` is that size. No key reads it, and nothing resizes a window from a setting.                                                                                                                      |
+| `present_mode` | `"auto"` \| `"vsync"` \| `"adaptive"` \| `"off"`                | `crcbl::engine::Pacing` implements all four and `GpuContext::set_pacing` applies them to a live swapchain. No key reads it.                                                                                                                                                 |
+| `frame_limit`  | frames a second; `0` is unlimited                               | **Read as of 2026-08-28.** `crcbl::settings::frame_limit` reads the key as a _ceiling_ and `FrameLimit::clamped_to` applies it, since "less" here means less than the game's own cap; `GpuContext::frame_limit` is the pair a caller uses. Nothing in `apps/` calls it yet. |
+| `render_scale` | fraction of the surface extent — the **internal** extent        | **The renderer half is built and no key reads it.** `ForwardRenderer::set_render_scale` sizes the internal target and `shaders/upscale.slang` reconstructs it into the caller's; `MIN_RENDER_SCALE` is the floor. No settings key and no `Shell` request.                   |
+| `brightness`   | scalar multiplier applied in the tonemap pass                   | **Nothing.** `crcbl_shaders::tonemap::TonemapParams` carries `exposure` and no second field; brightness would be that field.                                                                                                                                                |
+| `hdr_output`   | `true` \| `false`                                               | **Nothing, and further from built than the rest** — see the HDR note below.                                                                                                                                                                                                 |
+| `ui_scale`     | multiplier over the window's own scale factor, UI only          | **Nothing global.** `crcbl_ui::MenuStyle::pixel_art` takes a whole-number scale per menu; no crate applies a player-chosen factor to UI layout.                                                                                                                             |
+| `fov`          | vertical field of view in degrees                               | `crcbl_render::Camera::Perspective`'s `fov_y` is the value a game sets in code. No key reads it.                                                                                                                                                                            |
 
 ### `resolution` and `render_scale` are two different resolutions
 
@@ -190,10 +190,14 @@ The display rows are where rule 1 is least intuitive, so it is worth saying what
 it means here: `display_mode = "borderless"` does **not** force a game into
 borderless. It is a ceiling like every other key in the section — a game that
 opened windowed stays windowed, and a player who wants the switch uses the
-control that already exists for it. The key that has a genuine downward reading
-is `render_scale`, whose lower values are cheaper, and `resolution`, whose
-smaller extents are cheaper. `monitor`, `fov` and `ui_scale` have no ordering at
-all, which is discussed under rule 1 rather than here.
+control that already exists for it. The keys that have a genuine downward
+reading are `render_scale`, whose lower values are cheaper, `resolution`, whose
+smaller extents are cheaper, and `frame_limit`, whose lower rates are cheaper —
+and that last one is the row that shows what "downward" costs to implement,
+because its zero means _unlimited_ and therefore sits at the top of the order
+rather than the bottom. `crcbl::engine::FrameLimit::clamped_to` is where that is
+written down. `monitor`, `fov` and `ui_scale` have no ordering at all, which is
+discussed under rule 1 rather than here.
 
 ### Considered and declined
 

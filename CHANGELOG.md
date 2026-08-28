@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`[engine.video] frame_limit` is read, and it is the first key whose clamp
+  needs the value it is clamping.** `crcbl::settings::frame_limit` answers with
+  the ceiling the player's file puts on the frame rate and
+  `FrameLimit::clamped_to` applies it to whatever the game asked for, because
+  "less" here means less than a runtime value no reader holds.
+  `GpuContext::frame_limit(asked)` is the pair a caller uses, beside
+  `render_scale` and `video_effects`, and `VideoSettings` grows the field.
+
+  **Zero is unlimited on both sides**, which is `FrameLimit::fps`'s own
+  spelling, so a file saying `frame_limit = 0` and a file saying nothing give
+  one answer — the ceiling that takes nothing away. That also makes unlimited
+  sit at the _top_ of the order while being the smallest `u32`, which is what
+  `clamped_to` exists for and what a `min` on the rate would get backwards.
+  `set_frame_limit` writes it, `set_video` includes it, and an unlimited ceiling
+  is written as a row rather than omitted for the same reason an effect left on
+  is. The catalogue row moves from `Named` to `Read`, so `crcbl settings list`
+  now marks it `read`.
+
+  Nothing in `apps/` applies it yet: `Loop::new` is where the limit reaches the
+  clock and it holds no `GpuContext`, so a game applies it itself for now.
+
 - **The settings catalogue is a list in code, and `crcbl settings list` says
   which of a player's keys anything reads.** `crcbl::settings::catalogue`
   enumerates every key the engine defines with its domain and a `KeyStatus` —

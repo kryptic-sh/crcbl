@@ -847,16 +847,29 @@ and `crcbl settings list` marks each line of a player's file with it — so a
 mistyped `engine.video.shadow`, which parses and saves and is read by nothing,
 is now reported instead of invisible.
 
+**`frame_limit` grew a reader on 2026-08-28**, which leaves eight keys `Named`:
+display mode, monitor, resolution, present mode, brightness, HDR output, UI
+scale, field of view. It is the key whose clamp is not a value — "less" means
+less than the rate the _game_ asked for, which no reader holds — so
+`crcbl::settings::frame_limit` answers with the ceiling and
+`FrameLimit::clamped_to` applies it, with unlimited sitting at the top of the
+order though it is spelled zero. `GpuContext::frame_limit` is the pair.
+
 **What is left is a caller.** No application in `apps/` reads or writes a
-setting through any of this, and the keys with `KeyStatus::Named` — display
-mode, monitor, resolution, present mode, frame limit, brightness, HDR output, UI
-scale, field of view — still have no reader. The next one to grow a reader has a
-design question in front of it that `render_scale` did not:
-`docs/plan/15-windowing.md`'s rule 1 says `[engine.video]` may only clamp
-downward, and it reads `display_mode = "borderless"` as a **ceiling** that does
-not force a game into borderless. That makes the obvious round trip — persist
-the F11 toggle every sample already has — not obviously expressible in this
-namespace, and it is a decision rather than an implementation.
+setting through any of this. `frame_limit` is the closest to having one and did
+not get it here: `Loop::new` is where `LoopConfig::limit` reaches the clock and
+it holds no `GpuContext` — `Booted` does not carry one and `GpuSurface` has no
+accessor for one — so wiring it means a method on `GameGpu` and a change at
+every implementor, which is a slice of its own. Until then a game applies it
+itself, on the two lines `GpuContext::frame_limit`'s doc comment shows.
+
+The keys still `Named` face a design question that `render_scale` and
+`frame_limit` did not: `docs/plan/15-windowing.md`'s rule 1 says
+`[engine.video]` may only clamp downward, and it reads
+`display_mode = "borderless"` as a **ceiling** that does not force a game into
+borderless. That makes the obvious round trip — persist the F11 toggle every
+sample already has — not obviously expressible in this namespace, and it is a
+decision rather than an implementation.
 
 **Neither platform arm of `with_platform_storage` is covered by a test.** The
 round trips are through `MemoryStorage`, which is what `SettingsSource::Source`

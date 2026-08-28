@@ -64,9 +64,21 @@
 //! [`ForwardRenderer::set_render_scale`](crcbl_render::ForwardRenderer::set_render_scale)
 //! already enforces — this reader clamps to the same bounds rather than
 //! trusting the file, because the two must not be able to disagree.
+//!
+//! # And [`frame_limit`] is the first key that clamps something it cannot see
+//!
+//! Every key above resolves to a value on its own: a bit is on or off, a scale
+//! is a fraction of the extent. A frame-rate ceiling is not — "less" means less
+//! than whatever the *game* asked for, which is a runtime value no reader here
+//! holds. So this one answers with the ceiling and leaves the comparison to
+//! [`FrameLimit::clamped_to`], where the ordering that makes it work — unlimited
+//! being above every rate rather than below it, though it is spelled zero —
+//! belongs to the type rather than to the file.
 
 use crcbl_audio::mixer::Bus;
 use crcbl_render::{MIN_RENDER_SCALE, RenderEffects};
+
+use crate::engine::FrameLimit;
 use crcbl_store::StorageError;
 use crcbl_store::settings::SettingsStack;
 
@@ -139,6 +151,12 @@ pub fn video_effects(stack: &SettingsStack) -> RenderEffects {
 /// back still go through one spelling.
 pub const RENDER_SCALE_KEY: &str = "render_scale";
 
+/// The `[engine.video]` key that caps the loop's frame rate.
+///
+/// Spelled here for [`RENDER_SCALE_KEY`]'s reason, and read by
+/// [`frame_limit`].
+pub const FRAME_LIMIT_KEY: &str = "frame_limit";
+
 /// Everything the player's `[engine.video]` section says, read in one pass.
 ///
 /// One type rather than a reader per key because a caller wants all of it at
@@ -152,6 +170,14 @@ pub struct VideoSettings {
     /// What fraction of the caller's extent the renderer draws at; see
     /// [`render_scale`].
     pub render_scale: f32,
+    /// The ceiling the player puts on the loop's frame rate; see
+    /// [`frame_limit`].
+    ///
+    /// A **ceiling**, not the rate the loop runs at:
+    /// [`FrameLimit::clamped_to`] is what a caller holding the game's own limit
+    /// applies it with, and [`FrameLimit::unlimited`] is the ceiling that holds
+    /// nothing down.
+    pub frame_limit: FrameLimit,
 }
 
 impl VideoSettings {
@@ -167,6 +193,7 @@ impl VideoSettings {
         Self {
             effects: RenderEffects::all(),
             render_scale: 1.0,
+            frame_limit: FrameLimit::unlimited(),
         }
     }
 }
@@ -177,6 +204,7 @@ pub fn video(stack: &SettingsStack) -> VideoSettings {
     VideoSettings {
         effects: video_effects(stack),
         render_scale: render_scale(stack),
+        frame_limit: frame_limit(stack),
     }
 }
 
@@ -220,10 +248,46 @@ pub fn render_scale(stack: &SettingsStack) -> f32 {
     }
 }
 
+/// The ceiling the player puts on the loop's frame rate, for
+/// [`FrameLimit::clamped_to`].
+///
+/// [`FrameLimit::unlimited`] for a stack that says nothing, and otherwise the
+/// file's value. **Zero reads as unlimited and is not a mistake** — it is the
+/// spelling [`FrameLimit::fps`] already gives "no cap", and here it means the
+/// same thing an absent key does: this layer may only clamp downward, and a
+/// player who asked for no ceiling has asked for nothing to be taken away.
+///
+/// The value is a ceiling rather than the rate the loop runs at, so a game
+/// already capped below it keeps its own cap. That is what
+/// [`FrameLimit::clamped_to`] does with the two, and why nothing here compares
+/// the rates itself.
+///
+/// # A line that does nothing says so
+///
+/// A key holding something this cannot use — `frame_limit = "sixty"`, a
+/// negative, or a rate past [`u32::MAX`] — leaves the ceiling unlimited and
+/// **warns**, naming the key, on [`video_effects`]' terms.
+#[must_use]
+pub fn frame_limit(stack: &SettingsStack) -> FrameLimit {
+    let dotted = format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}");
+    match stack.get::<u32>(&dotted) {
+        Some(fps) => FrameLimit::fps(fps),
+        None if stack.contains(&dotted) => {
+            crcbl_core::log::warn!(
+                "settings: `{dotted}` is not a usable frame rate, so it does nothing; \
+                 the loop runs at the limit the game asked for"
+            );
+            FrameLimit::unlimited()
+        }
+        None => FrameLimit::unlimited(),
+    }
+}
+
 /// Write the whole `[engine.video]` section into the stack's user layer.
 ///
-/// The mirror of [`video`], key for key: every entry of [`VIDEO_KEYS`] and
-/// [`RENDER_SCALE_KEY`]. Nothing is persisted until the caller saves the stack
+/// The mirror of [`video`], key for key: every entry of [`VIDEO_KEYS`],
+/// [`RENDER_SCALE_KEY`] and [`FRAME_LIMIT_KEY`]. Nothing is persisted until the
+/// caller saves the stack
 /// — see [`SettingsStack::save_platform`].
 ///
 /// # It writes the row that says "on", where the reader ignores it
@@ -242,7 +306,8 @@ pub fn render_scale(stack: &SettingsStack) -> f32 {
 /// key already holding a scalar in a hand-edited file.
 pub fn set_video(stack: &mut SettingsStack, video: VideoSettings) -> Result<(), StorageError> {
     set_video_effects(stack, video.effects)?;
-    set_render_scale(stack, video.render_scale)
+    set_render_scale(stack, video.render_scale)?;
+    set_frame_limit(stack, video.frame_limit)
 }
 
 /// Write the effect rows of `[engine.video]`, one key per [`VIDEO_KEYS`] entry.
@@ -287,6 +352,23 @@ pub fn set_render_scale(stack: &mut SettingsStack, scale: f32) -> Result<(), Sto
         )));
     }
     stack.set(&dotted, &f64::from(scale.clamp(MIN_RENDER_SCALE, 1.0)))
+}
+
+/// Write `[engine.video] frame_limit`, as the rate [`frame_limit`] reads back.
+///
+/// **[`FrameLimit::unlimited`] is written as `0` rather than left out**, which
+/// is the same choice [`set_video_effects`] makes for a `true`: the two differ
+/// to a file and not to the reader, and a settings screen that omitted the row
+/// could never move a player's ceiling back off a cap they had saved.
+///
+/// # Errors
+///
+/// [`set_video`]'s.
+pub fn set_frame_limit(stack: &mut SettingsStack, limit: FrameLimit) -> Result<(), StorageError> {
+    stack.set(
+        &format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"),
+        &limit.rate(),
+    )
 }
 
 /// The `[engine.audio]` section, as a dotted key prefix.
@@ -397,7 +479,7 @@ pub struct CatalogueKey {
 /// to derive them from — that is exactly what makes them [`KeyStatus::Named`].
 /// A row leaves this list by growing a reader and joining `catalogue`'s derived
 /// half, so the two halves cannot both claim one key.
-const NAMED_VIDEO_KEYS: [(&str, &str); 9] = [
+const NAMED_VIDEO_KEYS: [(&str, &str); 8] = [
     ("display_mode", r#""windowed" | "borderless""#),
     (
         "monitor",
@@ -405,7 +487,6 @@ const NAMED_VIDEO_KEYS: [(&str, &str); 9] = [
     ),
     ("resolution", "[width, height] in device pixels"),
     ("present_mode", r#""auto" | "vsync" | "adaptive" | "off""#),
-    ("frame_limit", "frames a second; 0 is unlimited"),
     (
         "brightness",
         "scalar multiplier applied in the tonemap pass",
@@ -445,6 +526,10 @@ pub fn catalogue() -> Vec<CatalogueKey> {
         format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"),
         "fraction of the surface extent; clamped to the renderer's floor",
     ));
+    keys.push(read(
+        format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"),
+        "frames a second; 0 is unlimited",
+    ));
     keys.extend(NAMED_VIDEO_KEYS.map(|(key, domain)| CatalogueKey {
         key: format!("{VIDEO_NAMESPACE}.{key}"),
         domain,
@@ -462,7 +547,7 @@ pub fn catalogue() -> Vec<CatalogueKey> {
 /// What the catalogue says about `key`, or `None` for one it does not name.
 ///
 /// The lookup a settings screen and `crcbl settings list` both make, and the
-/// reason [`catalogue`] is a list rather than a map: thirteen entries scanned
+/// reason [`catalogue`] is a list rather than a map: the whole catalogue scanned
 /// once per key in a player's file is not worth a hash, and the order is what a
 /// screen renders in.
 #[must_use]
@@ -507,6 +592,7 @@ mod tests {
         let wanted = VideoSettings {
             effects: RenderEffects::all() - RenderEffects::BLOOM - RenderEffects::SHADOWS,
             render_scale: 0.5,
+            frame_limit: FrameLimit::fps(60),
         };
         let (reloaded, _) = round_trip(|stack| {
             set_video(stack, wanted).expect("a fresh user layer accepts every key");
@@ -616,6 +702,7 @@ mod tests {
             .map(|(key, _)| format!("{VIDEO_NAMESPACE}.{key}"))
             .collect();
         wanted.push(format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"));
+        wanted.push(format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"));
         wanted.extend(Bus::ALL.map(|bus| format!("{AUDIO_NAMESPACE}.{}", bus.settings_key())));
 
         for key in &wanted {
@@ -1109,6 +1196,114 @@ mod tests {
                 .iter()
                 .all(|record| record.level != crcbl_core::log::Level::Warn),
             "a file this layer can read whole warns about nothing: {records:?}"
+        );
+    }
+
+    /// The ceiling `toml` puts on the frame rate.
+    fn ceiling_of(toml: &str) -> FrameLimit {
+        frame_limit(&stack_from(toml))
+    }
+
+    /// **A file that says nothing caps nothing**, and so does a file that says
+    /// zero.
+    ///
+    /// The two are one test because they must give one answer: zero is
+    /// [`FrameLimit::unlimited`]'s own spelling, so a player who wrote
+    /// `frame_limit = 0` has asked for exactly what a player who wrote nothing
+    /// asked for, and a reader that treated the row as "cap at zero fps" would
+    /// stop the loop dead.
+    #[test]
+    fn an_absent_frame_limit_and_a_zero_one_both_cap_nothing() {
+        let asked = FrameLimit::fps(144);
+        for toml in ["", &format!("[{VIDEO_NAMESPACE}]\n{FRAME_LIMIT_KEY} = 0\n")] {
+            let ceiling = ceiling_of(toml);
+            assert_eq!(ceiling, FrameLimit::unlimited(), "read from {toml:?}");
+            assert_eq!(asked.clamped_to(ceiling), asked, "read from {toml:?}");
+        }
+    }
+
+    /// **The ceiling only ever takes rate away.**
+    ///
+    /// All three directions, because a reader that returned the file's value
+    /// outright passes the middle case and fails the other two — and the case
+    /// it fails is the one that matters, a game capped at 30 jumping to 60
+    /// because the player asked for "at most 60".
+    #[test]
+    fn a_frame_limit_caps_a_game_and_never_raises_one() {
+        let ceiling = ceiling_of(&format!("[{VIDEO_NAMESPACE}]\n{FRAME_LIMIT_KEY} = 60\n"));
+        assert_eq!(ceiling, FrameLimit::fps(60));
+        assert_eq!(
+            FrameLimit::fps(144).clamped_to(ceiling),
+            FrameLimit::fps(60)
+        );
+        assert_eq!(FrameLimit::fps(30).clamped_to(ceiling), FrameLimit::fps(30));
+        assert_eq!(
+            FrameLimit::unlimited().clamped_to(ceiling),
+            FrameLimit::fps(60)
+        );
+    }
+
+    /// **A value no frame rate can be read out of caps nothing and warns,
+    /// naming the key.**
+    ///
+    /// A negative and a fraction are here beside the string because TOML
+    /// spells both and neither is a `u32`: a reader written against `i64` would
+    /// take `-1` and hand it on as a rate of four billion.
+    #[test]
+    fn a_frame_limit_that_is_not_a_usable_rate_warns_and_caps_nothing() {
+        for value in ["\"sixty\"", "-1", "59.94", "true"] {
+            let capture = crcbl_core::log::capture();
+            let toml = format!("[{VIDEO_NAMESPACE}]\n{FRAME_LIMIT_KEY} = {value}\n");
+            assert_eq!(
+                ceiling_of(&toml),
+                FrameLimit::unlimited(),
+                "`{value}` was read as a rate"
+            );
+
+            let warned: Vec<_> = capture
+                .records()
+                .into_iter()
+                .filter(|record| {
+                    record
+                        .message
+                        .contains(&format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"))
+                })
+                .collect();
+            assert_eq!(
+                warned.len(),
+                1,
+                "`{value}` should warn exactly once: {:?}",
+                capture.records()
+            );
+            assert_eq!(warned[0].level, crcbl_core::log::Level::Warn);
+        }
+    }
+
+    /// **An unlimited ceiling is written as a row, not left out.**
+    ///
+    /// [`an_effect_left_standing_is_still_a_row_in_the_file`]'s case for a
+    /// number: a screen that omitted the row could never move a player's
+    /// ceiling back off a cap they had already saved, because the key it would
+    /// have to remove is the one it never writes.
+    #[test]
+    fn a_saved_frame_limit_reads_back_and_unlimited_is_a_row() {
+        let (reloaded, written) = round_trip(|stack| {
+            set_frame_limit(stack, FrameLimit::fps(30)).expect("a fresh user layer takes the key");
+        });
+        assert_eq!(frame_limit(&reloaded), FrameLimit::fps(30));
+        assert!(
+            written.contains(&format!("{FRAME_LIMIT_KEY} = 30")),
+            "the cap is missing from the file:\n{written}"
+        );
+
+        let (reloaded, written) = round_trip(|stack| {
+            set_frame_limit(stack, FrameLimit::unlimited())
+                .expect("a fresh user layer takes the key");
+        });
+        assert_eq!(frame_limit(&reloaded), FrameLimit::unlimited());
+        assert!(
+            written.contains(&format!("{FRAME_LIMIT_KEY} = 0")),
+            "an unlimited ceiling left no row behind:\n{written}"
         );
     }
 }

@@ -1470,6 +1470,29 @@ impl GpuContext {
         self.video.render_scale
     }
 
+    /// `asked` held under the ceiling the player's `[engine.video]` section
+    /// put on the frame rate, read while this context opened.
+    ///
+    /// `asked` unchanged for a run whose player has said nothing, and for one
+    /// whose file asks for no cap — the two are the same answer, because this
+    /// layer may only clamp downward.
+    ///
+    /// **It takes the game's limit rather than answering on its own**, unlike
+    /// every other reader on this type: a ceiling is only meaningful against
+    /// the value it caps, and the value is the game's. The caller is whoever
+    /// builds the [`LoopConfig`], which on the sample path is
+    /// [`Common::loop_config`](crate::args::Common::loop_config) followed by
+    /// [`Loop::clock_source_mut`] for a change made mid-run.
+    ///
+    /// ```ignore
+    /// let mut config = args.loop_config();
+    /// config.limit = ctx.frame_limit(config.limit);
+    /// ```
+    #[must_use]
+    pub const fn frame_limit(&self, asked: FrameLimit) -> FrameLimit {
+        asked.clamped_to(self.video.frame_limit)
+    }
+
     /// The effect request a renderer built on this context should start from.
     ///
     /// ```ignore
@@ -2312,6 +2335,28 @@ impl FrameLimit {
     #[must_use]
     pub const fn rate(self) -> u32 {
         self.fps
+    }
+
+    /// This limit, held under `ceiling` — the lower of the two rates.
+    ///
+    /// **[`unlimited`](Self::unlimited) sits *above* every rate, not below
+    /// it**, which is the part a plain `min` on [`rate`](Self::rate) gets
+    /// backwards: zero is the smallest `u32` and the largest limit. So an
+    /// unlimited ceiling holds nothing down and an unlimited value is held down
+    /// by any ceiling there is.
+    ///
+    /// This is what a player's `[engine.video] frame_limit` means — see
+    /// [`crate::settings::frame_limit`], whose whole section may only clamp
+    /// downward — and it is here rather than there because the ordering is a
+    /// fact about the type.
+    #[must_use]
+    pub const fn clamped_to(self, ceiling: Self) -> Self {
+        match (self.fps, ceiling.fps) {
+            (_, 0) => self,
+            (0, _) => ceiling,
+            (fps, cap) if cap < fps => ceiling,
+            _ => self,
+        }
     }
 
     /// The least time one frame may take, if there is a limit.
@@ -7552,6 +7597,32 @@ mod tests {
 
         clock.set_limit(FrameLimit::fps(30));
         assert_eq!(clock.limit(), Some(FrameLimit::fps(30)));
+    }
+
+    /// A ceiling only ever holds a limit down, and unlimited is the top of the
+    /// order rather than the bottom.
+    ///
+    /// The pair that would break a `min` on [`FrameLimit::rate`]: zero is the
+    /// smallest `u32` and the largest limit, so a ceiling of unlimited must
+    /// leave a cap alone and a value of unlimited must take any ceiling there
+    /// is. Both directions, because each passes on its own for an
+    /// implementation that is wrong in the other.
+    #[test]
+    fn a_ceiling_holds_a_frame_limit_down_and_never_lifts_one() {
+        let cap = FrameLimit::fps(60);
+        assert_eq!(FrameLimit::fps(144).clamped_to(cap), cap);
+        assert_eq!(FrameLimit::fps(30).clamped_to(cap), FrameLimit::fps(30));
+        assert_eq!(cap.clamped_to(cap), cap);
+
+        assert_eq!(FrameLimit::unlimited().clamped_to(cap), cap);
+        assert_eq!(
+            FrameLimit::fps(30).clamped_to(FrameLimit::unlimited()),
+            FrameLimit::fps(30)
+        );
+        assert_eq!(
+            FrameLimit::unlimited().clamped_to(FrameLimit::unlimited()),
+            FrameLimit::unlimited()
+        );
     }
 
     /// The rate survives the round trip, and says itself out loud.
