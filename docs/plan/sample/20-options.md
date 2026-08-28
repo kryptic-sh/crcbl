@@ -7,10 +7,11 @@ and still there after a restart — on the desktop and in a browser tab.
 **This is the sample that closes a round trip nothing else closes.** The
 settings machinery is built: `crates/crcbl-store/src/settings.rs` is a layered
 TOML stack with `get`, `set` and `save`, and `SettingsStack::platform` already
-picks the platform config directory on native and OPFS on wasm. What has never
-happened is an _application_ writing a setting. The only writer in the workspace
-is `crates/crcbl-cli/src/settings_cmd.rs` — a command line. So the layer that
-stores a player's choices has been exercised by everything except a player.
+picks the platform config directory on native and OPFS on wasm. What had never
+happened is an _application_ writing a setting: the only writer in the workspace
+was `crates/crcbl-cli/src/settings_cmd.rs`, a command line. So the layer that
+stores a player's choices had been exercised by everything except a player.
+`apps/options` is now the second writer, and the first one a player can reach.
 
 ## Proves
 
@@ -67,12 +68,11 @@ subject is a settings screen, on the same ground `apps/hud` is exempt. **Exempt
 from rules 2 and 10**: no game state, no `World`, no `GameModule` — the settings
 are the content.
 
-## Status: unbuilt, and the gap is narrower than it looks
+## Status: the audio half is built, the video half is not
 
-Nothing exists, but very little of what this sample needs is machinery. Verified
-against the tree on 2026-08-28, and **three of these rows had gone stale in the
-engine's favour** — the mixer, the reader count and the writer gap have all
-moved since this document was written:
+`apps/options` exists and edits the audio buses; the rest of the catalogue is
+still only reachable from a text editor. Very little of what is left is
+machinery. Verified against the tree on 2026-08-28:
 
 - **Storage and the layered stack are built**, native and wasm, read and write.
 - **A setting is writable from an application**, as of 2026-08-28.
@@ -97,8 +97,13 @@ moved since this document was written:
   `SettingsSource::apply_audio_gains` is what four samples already call at
   start-up. The claim below this line — that there is neither a bus nor a master
   — was true of an earlier tree.
-- **There is no settings UI anywhere in the workspace**, which is now the
-  largest single thing this sample owes.
+- **There is a settings UI, and it edits the audio half.** `apps/options` is
+  built: `menu::menus` lays out a fader per bus over the styled widget set,
+  `app::Screen` reconciles the faders against the keys every frame, and `SAVE`
+  writes the user layer through `SettingsSource::save`. It is milestone 1 minus
+  the sound. What the workspace still has no screen for is the video and
+  graphics halves — milestones 2 and 3 — which is now the largest single thing
+  this sample owes.
 - **OPFS is the only browser storage backend**; `crates/crcbl-store/src/lib.rs`
   records that an IndexedDB fallback is still to come. Where no store is
   installed, settings are not persisted and a log line says so — which this
@@ -109,11 +114,13 @@ moved since this document was written:
 
 1. **The screen, the audio buses and the round trip.** Bus volumes are the
    cheapest setting to make real — they need no renderer change — so they are
-   what proves save, load and restart first. **The half under the screen is
-   done**: the buses exist, the reader and the writer exist, and the round trip
-   is covered by `a_saved_gain_reads_back_on_its_own_bus` in
-   `crates/crcbl/src/settings.rs`. What is left of this milestone is the screen
-   itself and a run that restarts.
+   what proves save, load and restart first. **The screen and the round trip are
+   done**, in `apps/options`: six faders, a `SAVE` that writes the user layer
+   and reports where it went, a `RESET` that puts every bus back to unity, and a
+   start that opens the player's own file and places the faders from it. What is
+   left of this milestone is **something to hear** — the sample is silent, so a
+   bus gain is a number the screen shows rather than a level anyone can check by
+   ear — and a web build. `docs/backlog.md` carries both.
 2. **The video half**: display mode, resolution, present mode, frame cap, and
    the requested-versus-resolved display of the clamp.
 3. **The graphics half**: the quality tiers over the technique ladders, the

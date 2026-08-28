@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`options`, the first settings screen in the workspace.**
+  `cargo run -p options` opens a panel of faders over the six `[engine.audio]`
+  buses — master, music, effects, interface, voice, ambience — writes them to
+  the player's own settings file on `SAVE`, and places them from that file on
+  the next start. `RESET` puts every bus back to unity. It is the first
+  application to write a setting: `SettingsStack::save_platform` shipped with no
+  caller a player could reach, and this is it. The sample is silent so far, so a
+  gain is a number on the screen rather than a level to hear, and the video half
+  of the catalogue is not on it yet — `docs/plan/sample/20-options.md` has both.
+
 - **Every sample now honours the player's frame-rate ceiling, and no sample had
   to be told to.** `GameGpu` gains `video`, which hands the `[engine.video]`
   section a bundle's `GpuContext` read to the engine's loop, and `Loop::new`

@@ -855,9 +855,12 @@ fifteen bundles forward it, `impl_game_gpu!`'s `const _` guard turns a bundle
 that forgets into an `E0599` naming `video`, and the next `[engine.video]` key
 the loop needs is already carried.
 
-**What is still owed is a caller for the other keys**, and for the writers. No
-application in `apps/` _writes_ a setting, so nothing exercises `save_platform`,
-and no sample offers a screen to write one from.
+**A writer with a screen behind it arrived on 2026-08-28**: `apps/options` edits
+the six `[engine.audio]` bus gains and saves them through
+`SettingsSource::save`, so `save_platform` has a caller a player can reach.
+**What is still owed is a caller for the other keys** — nothing writes
+`[engine.video]` from a screen, and the eight `Named` keys still face the
+ceiling question below.
 
 The keys still `Named` face a design question that `render_scale` and
 `frame_limit` did not: `docs/plan/15-windowing.md`'s rule 1 says
@@ -21497,6 +21500,53 @@ with the flight instruments over it. What that leaves:
   minutes of simulated time. `crcbl-phys` proves the propagator itself over ten
   thousand revolutions, but nothing has run _this sample_ at ×1000 for long
   enough to say the frame hierarchy, the fuel and the phase logic survive it.
+
+## `apps/options` — what the first slice left (2026-08-28)
+
+`docs/plan/sample/20-options.md`'s milestone 1 is built minus its sound: six
+faders over the `[engine.audio]` buses, a `SAVE` that writes the user layer and
+says where it went, a `RESET` to unity, and a start that places the faders from
+the player's own file. `menu::menus` and `app::Screen` are the whole sample.
+What that leaves:
+
+- **It is silent, so a bus gain is a number rather than a level.** The plan's
+  scope wants "a music loop, a repeating effect, a UI click on the widgets
+  themselves", and its exit criteria want music and effects independently
+  _audible_; sample rule 8 wants the sound to go through `crcbl-audio`. The
+  sample links no audio at all — `apps/options/Cargo.toml` depends on `crcbl`
+  and nothing else, and no `Mixer` is built. What it costs is three cues, a
+  mixer, and `SettingsSource::apply_audio_gains` at start-up, which four other
+  samples already call. Until then nothing in the workspace demonstrates that a
+  saved gain reaches a gain stage: the round trip is proven as far as the key.
+
+- **There is no browser build, which sample rule 7 requires and half this sample
+  is about.** No `src/web.rs`, no page, and no row in `web/build.sh`'s `DEMOS` —
+  so `tools/check-browser-gate-demos.sh` does not ask for it either, and the
+  browser gate never sees it. The point of the web half is the case the plan
+  calls the easy one to get wrong: OPFS is the only browser backend, and where
+  no store is installed the settings silently do not persist. `SaveState`
+  already carries a `Nowhere` arm for exactly that and nothing has ever reached
+  it on a real platform.
+
+- **The video and graphics halves are untouched** — milestones 2 and 3. No
+  display mode, resolution, present mode or frame cap on the screen, and no
+  requested-versus-resolved display, which is the thing that makes
+  `docs/plan/39-capabilities.md`'s downward-only clamp visible instead of
+  confusing. The frame cap is the one key of those with a reader today
+  (`crcbl::settings::frame_limit`, applied by `Loop::new`), so it is the
+  cheapest of the four to put on the screen next.
+
+- **`SettingsStack::dump` has no viewer**, though the plan's scope asks for "a
+  view of the settings file as it stands". The screen shows six values and the
+  file may hold keys none of them own.
+
+- **Coverage gap: nothing restarts.** The round trip is covered by the tests in
+  `apps/options/src/app.rs` over `MemoryStorage`, which is what
+  `SettingsSource::Source` resolves. No test quits the binary and relaunches it
+  against a platform config directory — the same gap the entry above records for
+  `with_platform_storage`'s two platform arms, reached from the other side. A
+  human running `cargo run -p options` twice is currently the only check that
+  the native path writes where it reads.
 
 ## sandbox is not in the windowed gate (2026-08-24)
 

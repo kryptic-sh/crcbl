@@ -102,6 +102,7 @@ SAMPLES=(
     "horde 960x720"
     "hud 960x720"
     "lantern 960x720"
+    "options 960x720"
     "orbit 960x720"
     "puppet 960x720"
     "quarry 960x720"
