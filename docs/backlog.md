@@ -169,53 +169,52 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
-### shard's doused-torch check lands on its own threshold (2026-08-28)
+### shard's doused-torch window straddles the douse (2026-08-28)
 
-**A red check the ceiling fix made reachable, and it is not a timeout.** Pages
-`78ab19e` — a docs-only commit, so the same harness as `4bf0375` — failed
-`C: and dousing them leaves a still frame that is darker but not blank`, at a
-measured 78.0x. `4bf0375` passed the same check at 98.4x. So it is flaky, and
-the flakiness is not pace in the way the poll ceiling was.
+**A red check the poll-ceiling fix made reachable, and it is not a timeout, not
+a threshold and not pace.** Three Pages runs of the same harness:
 
-The two windows, verbatim from that run:
+| run       | shard's pace | doused: distinct of 4 | mean luma | swing | flattest |
+| --------- | ------------ | --------------------- | --------- | ----- | -------- |
+| `4bf0375` | 98.4x        | 1                     | 10.25     | 0.00  | 51.7%    |
+| `78ab19e` | 78.0x        | 2                     | 10.57     | 0.01  | 48.4%    |
+| `732a58d` | 102.0x       | 2                     | 10.57     | 0.01  | 48.4%    |
 
-| window | distinct frames | mean luma | swing | flattest colour |
-| ------ | --------------- | --------- | ----- | --------------- |
-| lit    | 4 of 4          | 15.18     | 0.32  | 40.1%           |
-| doused | 2 of 4          | 10.57     | 0.01  | 48.4%           |
+`C: and dousing them leaves a still frame that is darker but not blank` asks for
+a swing of at most `TORCH_STILL_LUMA` (0.01), a mean under a share of the lit
+window, and no colour over `TORCH_FLAT_SHARE` (85%). Only the swing clause ever
+fails.
 
-The doused window is asked for a swing of at most `TORCH_STILL_LUMA` (0.01), a
-mean under 14.42, and no colour over `TORCH_FLAT_SHARE` (85%). **Only the swing
-clause failed**, and it failed against a value that prints as the threshold
-itself — so the true reading is just above 0.01 and the check is sitting on its
-own constant.
+**The two failing runs are byte-identical at pace 78.0x and 102.0x.** That is
+what settles it: a reading that repeats to the hundredth across a 24-point
+change in slowdown is not noise and is not a budget. The outcome is **bimodal**
+— either the window holds one frame and swings 0.00, or it holds exactly two and
+swings 0.01, with the same two values every time. The two frames are the same
+two frames: the last one drawn before the douse reached the canvas, and the
+doused ones after it. The mean rises from 10.25 to 10.57 for the same reason.
 
-**Two candidate causes, and no evidence separating them.** Do not fix one
-without measuring:
+**So the window opens before the douse has landed.** `sampleWindow` starts once
+the HUD line says `torches: out`, and the HUD is the simulation's word — the
+canvas lags it by at least one presented frame, which on a runner at 100x is six
+wall seconds.
 
-1. **`TORCH_SAMPLE_GAP_MS` is not scaled by `slowdown`, and its sibling is.**
-   `BACKDROP_INTERVAL_MS`'s doc comment says it is "scaled by the measured
-   slowdown at the call site, like every other budget here", and
-   `await pause(TORCH_SAMPLE_GAP_MS)` in the torch sampler is the call site that
-   is not. `sampleWindow`'s own comment says the window must be "wide enough to
-   hold a flicker cycle", which is a claim about simulated time. Against that:
-   the run reported the window spanning **2 beats** already, so the four
-   `toDataURL` round trips — not the pause — are what sets its width on a slow
-   runner, and scaling the pause would widen an already-wide window rather than
-   fix a narrow one.
-2. **The sampling starts before the douse has settled.** Nothing waits for the
-   luma to stop falling; the check reads the HUD saying `torches: out` and then
-   samples. A window that opens mid-transition holds two brightnesses, which is
-   exactly "2 distinct frames" with a small swing.
+**An earlier version of this entry called it flaky and offered a second
+candidate — that `await pause(TORCH_SAMPLE_GAP_MS)` is the one call site
+`slowdown` does not scale, against a sibling whose doc says every budget here is
+scaled. Both readings are now ruled out by the table.** The gap being unscaled
+is still a real inconsistency with `BACKDROP_INTERVAL_MS`'s stated convention
+and worth fixing on its own terms; it is not the cause of this.
 
-**What would settle it:** print the four per-sample lumas rather than their
-spread, which says immediately whether the two distinct frames are a monotonic
-fade (cause 2) or an oscillation (cause 1). That is the same move that turned
-the poll-ceiling guess into a measurement, and it costs one line.
+**The fix has a trap in it.** Waiting for the canvas to stop changing and then
+asserting that it does not change is circular, and would leave a check that
+cannot fail. The window has to open on evidence the douse **reached the canvas**
+— a sample whose luma has fallen clear of the lit mean — and only then measure
+stillness across four samples. Stillness stays a real question; what stops being
+a question is whether the harness looked during the transition.
 
-**Not a gameplay defect.** `torches: out` was reported by the HUD and the mean
-luma did fall from 15.18 to 10.57, so the douse happened; what is in question is
-whether the harness looked at the right moment.
+**Not a gameplay defect.** The HUD said `torches: out` and the mean fell from
+about 14–15 to about 10 in every run, so the douse happened on time. What is
+wrong is when the harness looked.
 
 ### shard runs at 98x in a browser and nothing has profiled it (2026-08-28)
 
