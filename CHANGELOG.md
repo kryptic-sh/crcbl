@@ -33,8 +33,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   **It is not in `DEFAULT_STACK`**, and it is the first post effect with no
   additive-zero form — a measured exposure is by definition not the one the
   caller set, so a view has to ask. A frame that does not ask draws exactly the
-  picture it drew before the pass existed. There is no temporal adaptation yet:
-  a cut between two differently-lit shots lands in one frame.
+  picture it drew before the pass existed.
+
+- **Auto-exposure rolls between frames instead of cutting.**
+  `ForwardRenderer::set_exposure_adaptation` takes an `ExposureAdaptation` —
+  `brighten` and `darken` rates in fractions of the remaining distance per
+  second, and the view's own frame delta — and the reduce writes a step from
+  what the frame before was exposed by rather than the measurement itself. The
+  previous value is the slot behind the one this frame writes in the `measured`
+  ring, and every slot is filled with `DEFAULT_EXPOSURE` before any frame
+  exists, so the first frame's step starts somewhere defined.
+
+  Two rates because a real eye adapts down to a bright scene faster than it
+  adapts back up. The step is linear rather than `1 - exp(-rate * delta)`: an
+  exposure multiplies every texel, and no transcendental may reach a colour
+  here. `crcbl_shaders::exposure::adapt` is the same arithmetic on the CPU.
+
+  **`None` — the default — is the whole distance in one frame**, which is the
+  picture the pass drew before this landed, exactly: the shader branches on the
+  endpoints rather than interpolating, because
+  `previous + (target - previous) * 1` is not `target` in floating point.
 
 - **The froxel column can be read back and checked per froxel.**
   `ForwardRenderer::froxel_buffers` hands out one frame's `FroxelBuffers` — the

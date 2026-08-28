@@ -95,10 +95,36 @@ test calls it.
   schedules and two runs of the same frame need not agree. Ninety-six bins on
   one lane costs less than the atomic traffic the pass before it already paid.
 
-  What is **not** here is adaptation: there is no time constant, so a cut
-  between two differently-lit shots lands in a single frame. That is the next
-  rung, and it is the one that needs the previous frame's exposure to survive
-  into this one — a change to the buffer ring rather than a constant.
+  **Adaptation landed the same day, and it is a step rather than a jump.** The
+  reduce writes what the frame before was exposed by, moved a fraction of the
+  way toward what this frame's histogram asks for; the fraction is
+  `rate * delta` clamped into `[0, 1]`, and the two rates differ by direction
+  because a real eye adapts down to a bright scene quickly and back up slowly.
+  What carries the previous value is the `measured` ring itself — the reduce
+  binds the slot behind the one it writes, which is the frame before — and
+  `crcbl_render::exposure` fills every slot with the default exposure before any
+  frame exists, so the first frame's step starts somewhere defined rather than
+  from whatever the allocation came with.
+
+  **The step is linear, not `1 - exp(-rate * delta)`**, which is what the
+  literature and every engine write. The exponential is the honest model of an
+  approach and this is its first-order term; taking it costs a `log`-family
+  intrinsic in the arithmetic that produces the exposure, and an exposure
+  multiplies every texel of the frame, which is exactly what this workspace's
+  determinism rule refuses. The visible difference is the shape of the last
+  tenth of the roll, and the two rates are a stronger lever over how a cut feels
+  than that shape is.
+
+  **Both endpoints are exact.** `previous + (target - previous) * 1` is not
+  `target` in floating point, so a blend of one — what a view that asked for no
+  adaptation gets — takes a branch that writes the target itself, and a blend of
+  zero writes the previous itself. That is what keeps a frame with no adaptation
+  asked for identical to the frame drawn before adaptation existed, rather than
+  merely close to it.
+
+  What is **not** here is a settings key: `auto_exposure` switches the effect on
+  and off, and the rates are an API a view calls with its own frame delta. There
+  is no clock in `crcbl-render` to take the delta from, which is why.
 
 - **AA (MVP)**: **FXAA**, then SMAA 1x, with TAA post-MVP and MSAA priced rather
   than rejected — the whole ladder, what each rung costs in this tree and what

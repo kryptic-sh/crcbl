@@ -29,7 +29,7 @@
 // So there is no approximation to bless and no error term to bound. The host
 // mirror in `crcbl_shaders::exposure::bin_of` is the same integer expression
 // and lands on the same bin for every finite input, which is what
-// `crcbl`'s `mesh_e2e/histogram.rs` checks against a real frame.
+// `crcbl`'s `mesh_e2e/exposure.rs` checks against a real frame.
 //
 // # Three entry points, in the order a frame runs them
 //
@@ -49,16 +49,22 @@
 // next rung, and it is the one that needs a value to survive between frames.
 
 /// What `crcbl_shaders::exposure::ExposureParams` writes: the extent of the
-/// image being binned.
+/// image being binned, and how far this frame's exposure is allowed to move.
 ///
 /// The scene target's extent rather than the swapchain's, because this pass
 /// runs before the upscale — see `crcbl_render::exposure`.
+///
+/// The two blends are already `rate * delta`, clamped to `[0, 1]` by the host:
+/// this pass has no clock, and the multiply belongs where the frame time is. A
+/// blend of one is the whole distance in one frame, which is the picture this
+/// pass drew before adaptation existed, and it is what a block that says
+/// nothing about adaptation carries.
 struct ExposureParams
 {
     uint viewport_x;
     uint viewport_y;
-    uint pad_0;
-    uint pad_1;
+    float brighten_blend;
+    float darken_blend;
 };
 
 [[vk::binding(0, 0)]]
@@ -91,6 +97,18 @@ RWStructuredBuffer<Atomic<uint> > histogram;
 /// from that frame and never from the one before it.
 [[vk::binding(3, 0)]]
 RWStructuredBuffer<float> measured;
+
+/// `[0]`: what the frame before this one was exposed by, which is the same ring
+/// one slot back — `crcbl_render::exposure` binds it.
+///
+/// Read-only, and a *different* buffer from `measured` on every device with
+/// more than one frame in flight, so this pass never reads a slot it is also
+/// writing. `crcbl_render::exposure` fills the whole ring with
+/// `DEFAULT_EXPOSURE` before any frame exists, which is what makes the first
+/// frame's adaptation start somewhere defined rather than from whatever the
+/// allocation came with.
+[[vk::binding(4, 0)]]
+StructuredBuffer<float> previous;
 
 /// Bins per octave, matching `crcbl_shaders::exposure::BINS_PER_OCTAVE`.
 static const uint BINS_PER_OCTAVE = 4;
@@ -215,45 +233,70 @@ float bin_luminance(uint bin)
 /// the frame, weighted at each bin's own luminance. Bin 0 — everything below
 /// the histogram's floor — is left out: it is the black background, and
 /// including it would expose for how much of the frame is empty.
+///
+/// **What the frame is exposed by is not that number but a step toward it**,
+/// from what the frame before was exposed by, a fraction `blend` of the way.
+/// The eye takes seconds to adapt and a cut that re-exposes in one frame reads
+/// as a flicker; `crcbl_shaders::exposure::adapt` is this arithmetic on the
+/// CPU, and the two blends the block carries are why the step is not the same
+/// size in both directions.
+///
+/// **The two endpoints are exact rather than nearly so.** `prior + (target -
+/// prior) * 1` is not `target` in floating point, so a blend of one — the
+/// default, and the frame this pass drew before adaptation existed — takes the
+/// branch that writes the target itself, and a blend of zero writes the prior
+/// itself. Only a blend strictly between them interpolates.
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void reduceMain()
 {
+    float target = DEFAULT_EXPOSURE;
     uint total = 0;
     for (uint bin = 1; bin < BIN_COUNT; ++bin)
     {
         total += histogram[bin].load();
     }
-    if (total == 0)
+    if (total > 0)
     {
-        measured[0] = DEFAULT_EXPOSURE;
-        return;
-    }
-
-    uint low = uint(float(total) * LOW_FRACTION);
-    uint high = uint(float(total) * HIGH_FRACTION);
-    uint seen = 0;
-    float weighted = 0.0;
-    float population = 0.0;
-    for (uint bin = 1; bin < BIN_COUNT; ++bin)
-    {
-        uint start = seen;
-        seen += histogram[bin].load();
-        uint lower = max(start, low);
-        uint upper = min(seen, high);
-        if (upper > lower)
+        uint low = uint(float(total) * LOW_FRACTION);
+        uint high = uint(float(total) * HIGH_FRACTION);
+        uint seen = 0;
+        float weighted = 0.0;
+        float population = 0.0;
+        for (uint bin = 1; bin < BIN_COUNT; ++bin)
         {
-            float part = float(upper - lower);
-            weighted += part * bin_luminance(bin) * BIN_CENTRE;
-            population += part;
+            uint start = seen;
+            seen += histogram[bin].load();
+            uint lower = max(start, low);
+            uint upper = min(seen, high);
+            if (upper > lower)
+            {
+                float part = float(upper - lower);
+                weighted += part * bin_luminance(bin) * BIN_CENTRE;
+                population += part;
+            }
+        }
+        if (population > 0.0)
+        {
+            target = clamp(KEY / (weighted / population), MIN_EXPOSURE, MAX_EXPOSURE);
         }
     }
-    if (population == 0.0)
+
+    float prior = previous[0];
+    float rate = target > prior ? params.brighten_blend : params.darken_blend;
+    float blend = clamp(rate, 0.0, 1.0);
+    if (blend >= 1.0)
     {
-        measured[0] = DEFAULT_EXPOSURE;
-        return;
+        measured[0] = target;
     }
-    measured[0] = clamp(KEY / (weighted / population), MIN_EXPOSURE, MAX_EXPOSURE);
+    else if (blend <= 0.0)
+    {
+        measured[0] = prior;
+    }
+    else
+    {
+        measured[0] = clamp(prior + (target - prior) * blend, MIN_EXPOSURE, MAX_EXPOSURE);
+    }
 }
 
 /// One invocation per texel of the scene target, each adding one to its bin.

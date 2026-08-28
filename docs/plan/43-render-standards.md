@@ -373,7 +373,7 @@ bloom → exposure and tonemap → FXAA → UI.
 
 | Stage          | Industry            | Here                                      |
 | -------------- | ------------------- | ----------------------------------------- |
-| Auto-exposure  | histogram, GPU      | **built 2026-08-29**, no adaptation yet   |
+| Auto-exposure  | histogram, GPU      | **built 2026-08-29**, histogram and roll  |
 | Tonemap curve  | ACES or AgX         | **built 2026-08-27**, ACES; clamp default |
 | Bloom          | Karis-average chain | **built**, off unless a view asks         |
 | Colour grading | 3D LUT              | **missing**                               |
@@ -403,11 +403,20 @@ for §5's reason — the exponent of an IEEE-754 float _is_ the floor of its bas
 logarithm, so the bins are identical on all four backends where the
 transcendental would not be.
 
-What is left of the row is **adaptation**: there is no time constant, so a cut
-between two differently-lit shots lands in one frame. That is the rung that
-needs a value to survive between frames, which is why it is a change to the
-buffer ring rather than a constant —
-[48-post-processing.md](48-post-processing.md) carries it.
+**Adaptation followed the same day.** The reduce no longer writes what it
+measured; it writes a step toward it from what the frame before was exposed by,
+which is the slot behind it in the same ring —
+`crcbl_render::ExposureAdaptation` is what a view hands in, with its own frame
+delta, and the two rates differ because a real eye adapts down faster than it
+adapts back up. The step is linear rather than the `1 - exp(-rate * delta)`
+every engine writes, for §5's reason again: an exposure multiplies every texel
+of the frame, so no transcendental may reach it. A view that asks for nothing
+gets a blend of one, which is the target itself and the picture the pass drew
+before adaptation existed.
+
+What is left of the row is **the histogram's cost**: the pass takes one global
+atomic per texel with no workgroup-local tile in front of it, and nothing in
+this tree has profiled it — `docs/backlog.md` carries what that would take.
 
 ## 7. Upscaling and render scale
 
@@ -594,7 +603,7 @@ above.
 | ~~Render scale and a blit~~                              | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                                                        |
 | ~~A gradient sky feeding ambient and the SSR fallback~~  | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame                           |
 | ~~The sun's shaft through the froxel column~~            | §4 — **built 2026-08-28**: the buffer, the scatter, the scan, the composite, the sun's phase-scattered radiance and the cascade lookup that occludes it — [51-volumetrics.md](51-volumetrics.md) rungs 1a through 1b-ii |
-| ~~Auto-exposure~~                                        | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads and the `AUTO_EXPOSURE` bit a view asks with; temporal adaptation is a rung of its own                                               |
+| ~~Auto-exposure~~                                        | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads, the `AUTO_EXPOSURE` bit a view asks with, and the temporal roll between one frame's exposure and the next                           |
 | **Blended transparency with GPU-sorted keys**            | §3 — the first rung here that touches the frame's structure                                                                                                                                                             |
 | **Specular IBL: prefiltered radiance and a BRDF LUT**    | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                                           |
 | **Specular antialiasing (roughness regularisation)**     | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                              |

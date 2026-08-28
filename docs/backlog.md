@@ -23,15 +23,33 @@ follows is what the plans could not settle.
 end-to-end by `crates/crcbl/tests/mesh_e2e/exposure.rs` on radv. Four things it
 did not do.
 
-- **There is no temporal adaptation, and that is the rung that follows.** The
-  exposure a frame is drawn with is measured from that same frame, so a cut
-  between two differently-lit shots lands in one frame with no roll. The usual
-  answer is an exponential approach with separate up and down time constants,
-  which needs the previous frame's exposure to survive into this one — a change
-  to `Exposure`'s buffer ring (it is already one buffer per frame in flight, so
-  the previous frame's value is _there_; nothing reads it) plus a delta-time
-  lane in `ExposureParams`, plus a rule for what the first frame does. It is a
-  slice, not a constant.
+- **No demo asks for `AUTO_EXPOSURE`, so no backend but this one has run it.**
+  The same gap the froxel column had until `apps/lantern` asked, and the same
+  fix — except that this effect has no additive-zero form, so the demo that asks
+  re-blesses its goldens on every backend, which is the whole content of the
+  slice rather than a side effect of it. `apps/lantern` is the natural candidate
+  (it is the lighting acceptance fixture and its `room::View::Main` already
+  reaches past `DEFAULT_STACK`), and the decision it needs is whether a
+  re-blessed lantern is worth four backends' worth of coverage of this pass.
+  Until then the pass is exercised by `mesh_e2e/exposure.rs` and by nothing that
+  draws on DX12, Metal or WebGPU.
+
+- **No time constant is spelled anywhere but a test.**
+  `ForwardRenderer::set_exposure_adaptation` exists and `mesh_e2e/exposure.rs`
+  drives it; no sample or settings key does. A rate is not a bool, so it does
+  not fit `crcbl::settings`' `VIDEO_KEYS` table as it stands — that table maps a
+  key to a `RenderEffects` bit. Giving a player a slider means a second kind of
+  video key, which is its own decision.
+
+- **The adaptation is linear where the literature is exponential.** The step is
+  `rate * delta` of the remaining distance, clamped, which is the first-order
+  term of `1 - exp(-rate * delta)`. Taken deliberately: the exponential needs a
+  transcendental in the arithmetic that produces the exposure, and an exposure
+  multiplies every texel of the frame. What is lost is the shape of the last
+  tenth of the roll — the linear form decelerates less smoothly as it arrives.
+  If that ever reads badly, the escape this workspace permits is a baked table
+  of `1 - exp(-x)` indexed by the clamped blend, on `docs/plan/44-lighting.md`'s
+  terms.
 
 - **`reduceMain` is one invocation over ninety-six bins**, on purpose: float
   addition is not associative and a tree reduction sums them in an order the
@@ -49,11 +67,19 @@ did not do.
 
 - **Only radv ran it.** The e2e suite is `mesh_e2e`, which is Vulkan on this
   machine and lavapipe in CI; the DX12, Metal and WebGPU artifacts compile and
-  are checked into `crates/crcbl-shaders/`, and the register-order test covers
-  the D3D12 root signature, but **no frame drawn through them has been compared
-  against the host histogram**. The `Atomic<uint>` spelling is `cull.slang`'s,
-  which does run on all four, so the risk is the reduce's serial loop rather
-  than the atomic.
+  are checked into `crates/crcbl-shaders/`, and
+  `registers_are_assigned_per_class_in_declaration_order` now covers the D3D12
+  root signature for `exposure` as well, but **no frame drawn through them has
+  been compared against the host histogram**. The `Atomic<uint>` spelling is
+  `cull.slang`'s, which does run on all four, so the risk is the reduce's serial
+  loop rather than the atomic. The bullet above is what would close this.
+
+- **`Exposure::new` refuses a ring shorter than two slots**, because the reduce
+  reads the slot behind the one it writes and a graph pass cannot claim one
+  resource as both written and read. `FRAMES_IN_FLIGHT` is two, so nothing
+  reaches the refusal — it is a floor rather than a branch, and a device that
+  ever wanted one frame in flight would need the previous exposure to live
+  somewhere else.
 
 ### The shadow filter costs 48 taps and it timed out the browser gate (2026-08-28)
 

@@ -956,6 +956,17 @@ mod tests {
                 ],
             ),
             (
+                "exposure",
+                &crcbl_shaders::EXPOSURE,
+                &["clearMain", "histogramMain", "reduceMain"],
+                // The block, the scene target it bins, the bins, the exposure it
+                // reduces to and the frame before's exposure — in declaration
+                // order, which is binding order, so `b0`, `t0`, `u0`, `u1` and
+                // `t1`. The read-only buffer is an SRV and the two written ones
+                // are UAVs, which is the whole reason the classes interleave.
+                &[Cbv, Srv, Uav, Uav, Srv],
+            ),
+            (
                 "light_cluster",
                 &crcbl_shaders::LIGHT_CLUSTER,
                 &["computeMain"],

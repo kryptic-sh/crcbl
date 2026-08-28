@@ -205,23 +205,79 @@ pub fn measure(histogram: &[u32]) -> f32 {
     (KEY / (weighted / population)).clamp(MIN_EXPOSURE, MAX_EXPOSURE)
 }
 
+/// One frame's step from the exposure it was last drawn at toward the one
+/// [`measure`] asks for, exactly as `exposure.slang`'s `reduceMain` takes it.
+///
+/// A cut between two differently-lit shots re-exposed in a single frame reads
+/// as a flicker; a real eye takes seconds. So the exposure a frame is drawn at
+/// is `previous` moved a fraction of the way to `target`, and the fraction is
+/// not the same in both directions — adapting *down* to a suddenly bright scene
+/// is fast in a real eye and adapting back up is slow, and a viewer notices the
+/// wrong one immediately.
+///
+/// Both blends are `rate * delta` already clamped into `[0, 1]` by the caller;
+/// this is the step, not the clock. **Its endpoints are exact**: at a blend of
+/// one this is `target` itself and at zero it is `previous` itself, rather than
+/// the `previous + (target - previous) * blend` those would round to. That is
+/// what lets a frame with no adaptation asked for be the frame this engine drew
+/// before adaptation existed, down to the bit.
+#[must_use]
+pub fn adapt(previous: f32, target: f32, brighten_blend: f32, darken_blend: f32) -> f32 {
+    let blend = if target > previous {
+        brighten_blend
+    } else {
+        darken_blend
+    }
+    .clamp(0.0, 1.0);
+    if blend >= 1.0 {
+        return target;
+    }
+    if blend <= 0.0 {
+        return previous;
+    }
+    (previous + (target - previous) * blend).clamp(MIN_EXPOSURE, MAX_EXPOSURE)
+}
+
 /// The uniform block, matching `struct ExposureParams` in
 /// `shaders/exposure.slang`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExposureParams {
     /// Width of the image being binned, in texels.
     pub viewport_x: u32,
     /// Its height.
     pub viewport_y: u32,
+    /// How far toward a *higher* exposure this frame may move, as a fraction of
+    /// the distance — [`adapt`]'s `brighten_blend`.
+    pub brighten_blend: f32,
+    /// The same toward a lower one.
+    pub darken_blend: f32,
+}
+
+impl Default for ExposureParams {
+    /// A zero extent and **both blends at one**, which is the whole distance in
+    /// one frame: a caller that says nothing about adaptation gets the frame
+    /// this pass drew before adaptation existed. A derived `Default` would zero
+    /// the blends, which is the opposite — an exposure frozen wherever it
+    /// happened to be.
+    fn default() -> Self {
+        Self {
+            viewport_x: 0,
+            viewport_y: 0,
+            brighten_blend: 1.0,
+            darken_blend: 1.0,
+        }
+    }
 }
 
 impl ExposureParams {
-    /// The block as the shader reads it: two `uint`s and two padding words.
+    /// The block as the shader reads it: two `uint`s and two `float`s.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
         bytes[0..4].copy_from_slice(&self.viewport_x.to_le_bytes());
         bytes[4..8].copy_from_slice(&self.viewport_y.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.brighten_blend.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.darken_blend.to_le_bytes());
         bytes
     }
 }
@@ -230,7 +286,7 @@ impl ExposureParams {
 mod tests {
     use super::{
         BIN_CENTRE, BIN_COUNT, BINS_PER_OCTAVE, HIGH_FRACTION, KEY, MAX_EXPOSURE, MIN_EXPONENT,
-        MIN_EXPOSURE, bin_luminance, bin_of, luma, measure,
+        MIN_EXPOSURE, adapt, bin_luminance, bin_of, luma, measure,
     };
 
     /// The shader this module mirrors, read at test time.
@@ -471,7 +527,12 @@ mod tests {
     /// The block the shader declares, member for member and in this order.
     #[test]
     fn the_uniform_block_matches_the_struct_the_source_declares() {
-        for declaration in ["uint viewport_x;", "uint viewport_y;"] {
+        for declaration in [
+            "uint viewport_x;",
+            "uint viewport_y;",
+            "float brighten_blend;",
+            "float darken_blend;",
+        ] {
             assert!(
                 SOURCE.contains(declaration),
                 "`exposure.slang` does not declare `{declaration}`"
@@ -480,10 +541,98 @@ mod tests {
         let params = super::ExposureParams {
             viewport_x: 0x0123_4567,
             viewport_y: 0x89ab_cdef,
+            brighten_blend: 0.25,
+            darken_blend: 0.75,
         };
         let bytes = params.to_bytes();
         assert_eq!(&bytes[0..4], &0x0123_4567u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &0x89ab_cdefu32.to_le_bytes());
-        assert_eq!(&bytes[8..], &[0u8; 8], "the tail is padding and stays zero");
+        assert_eq!(&bytes[8..12], &0.25f32.to_le_bytes());
+        assert_eq!(&bytes[12..16], &0.75f32.to_le_bytes());
+    }
+
+    /// **A block nobody configured asks for no adaptation at all**, which is
+    /// the whole distance in one frame.
+    ///
+    /// The derived `Default` would have zeroed the blends, and a zero blend is
+    /// an exposure that never moves off whatever the ring was initialised with
+    /// — a frame that looks deliberate and is the opposite of what a caller
+    /// that said nothing meant.
+    #[test]
+    fn a_block_nobody_configured_takes_the_whole_step() {
+        let params = super::ExposureParams::default();
+        assert_eq!(params.brighten_blend, 1.0);
+        assert_eq!(params.darken_blend, 1.0);
+        assert_eq!(
+            adapt(0.5, 4.0, params.brighten_blend, params.darken_blend),
+            4.0,
+            "the default block has to land on the target itself"
+        );
+    }
+
+    /// The endpoints are the two the shader branches for, and they are exact.
+    ///
+    /// `previous + (target - previous) * 1.0` is *not* `target` in floating
+    /// point, which is the whole reason both sides branch rather than
+    /// interpolating: a frame that asked for no adaptation has to be the frame
+    /// drawn before adaptation existed, to the bit.
+    #[test]
+    fn a_blend_of_one_snaps_and_a_blend_of_zero_freezes() {
+        // Chosen so the rounded interpolation is visibly not the endpoint: the
+        // difference is large next to the value it is added back to.
+        let (previous, target) = (MIN_EXPOSURE, MAX_EXPOSURE);
+        assert_eq!(adapt(previous, target, 1.0, 1.0), target);
+        assert_eq!(adapt(target, previous, 1.0, 1.0), previous);
+        assert_eq!(adapt(previous, target, 0.0, 0.0), previous);
+        assert_eq!(adapt(target, previous, 0.0, 0.0), target);
+    }
+
+    /// Halfway is halfway, and the two directions read different blends.
+    ///
+    /// The asymmetry is the point of carrying two: a rate that is right for
+    /// adapting to a scene that just got brighter is wrong for adapting back.
+    #[test]
+    fn each_direction_reads_its_own_blend() {
+        // 1 → 3 is a brightening; 3 → 1 is a darkening. Each arm gives the
+        // other direction's blend a value that would be obvious if it were
+        // read by mistake.
+        assert_eq!(adapt(1.0, 3.0, 0.5, 0.0), 2.0);
+        assert_eq!(adapt(3.0, 1.0, 0.0, 0.5), 2.0);
+    }
+
+    /// A blend outside `[0, 1]` is brought back into it rather than overshooting.
+    ///
+    /// The host clamps before it writes the block and the shader clamps again
+    /// after it reads one, because a block is a thing a caller can get wrong
+    /// and an exposure that overshot multiplies every texel of the frame.
+    #[test]
+    fn a_blend_outside_the_range_is_brought_back_into_it() {
+        assert_eq!(
+            adapt(1.0, 3.0, 4.0, 4.0),
+            3.0,
+            "past the target is the target"
+        );
+        assert_eq!(
+            adapt(1.0, 3.0, -1.0, -1.0),
+            1.0,
+            "behind the start is the start"
+        );
+    }
+
+    /// The step never leaves the range the reduce clamps its target into.
+    #[test]
+    fn the_adapted_exposure_stays_inside_the_range() {
+        for previous in [MIN_EXPOSURE, 1.0, MAX_EXPOSURE] {
+            for target in [MIN_EXPOSURE, 0.2, 1.0, MAX_EXPOSURE] {
+                for blend in [0.0, 0.001, 0.5, 0.999, 1.0] {
+                    let adapted = adapt(previous, target, blend, blend);
+                    assert!(
+                        (MIN_EXPOSURE..=MAX_EXPOSURE).contains(&adapted),
+                        "adapting {previous} toward {target} at {blend} left the range: \
+                         {adapted}"
+                    );
+                }
+            }
+        }
     }
 }

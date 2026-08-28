@@ -169,7 +169,7 @@ use crate::graph::{
 // bare name here and means the froxel grid — the collision [`crate::grid`]'s
 // header predicted.
 use crate::bloom::Bloom;
-use crate::exposure::{Exposure, ExposureBuffers};
+use crate::exposure::{Exposure, ExposureAdaptation, ExposureBuffers};
 use crate::fxaa::Fxaa;
 use crate::grid::{Grid as GroundGrid, GridStyle};
 use crate::hiz::Hiz;
@@ -1208,6 +1208,12 @@ pub struct ForwardRenderer {
     /// Always within [`EXPOSURE_MIN`]`..=`[`EXPOSURE_MAX`], because the setter is
     /// the only thing that writes it and it clamps.
     exposure: f32,
+    /// How far auto-exposure may move in one frame — see
+    /// [`set_exposure_adaptation`](ForwardRenderer::set_exposure_adaptation).
+    ///
+    /// [`None`] until a caller says otherwise, and that is the whole distance in
+    /// one frame: the picture the pass drew before adaptation existed.
+    exposure_adaptation: Option<ExposureAdaptation>,
     /// Which operator the tonemap pass runs — see
     /// [`set_tonemap_curve`](ForwardRenderer::set_tonemap_curve).
     ///
@@ -3957,7 +3963,7 @@ impl ForwardRenderer {
         // between the chain and the tonemap in the frame as well: it bins the
         // picture the tonemap is about to read, which is the one with the lens
         // already on it — see [`crate::exposure`].
-        rollback.exposure = Some(Exposure::new(device, instance_buffers.len())?);
+        rollback.exposure = Some(Exposure::new(device, queue, instance_buffers.len())?);
 
         // --- the bloom chain ---
         //
@@ -4148,6 +4154,7 @@ impl ForwardRenderer {
             // renderer nobody has called `set_exposure` on writes the frame it
             // wrote before the block existed.
             exposure: tonemap::DEFAULT_EXPOSURE,
+            exposure_adaptation: None,
             // And the operator that constant is the identity under.
             tonemap_curve: tonemap::TonemapCurve::Clamp,
             target_format,
@@ -4936,7 +4943,8 @@ impl ForwardRenderer {
         // Written whether or not this frame adds the passes, on every other
         // block's terms: one written only on the frames that measure is stale on
         // the frame a caller first switches the effect on.
-        self.auto_exposure.begin_frame(device, self.frame, extent)?;
+        self.auto_exposure
+            .begin_frame(device, self.frame, extent, self.exposure_adaptation)?;
 
         // The tonemap's one number, written here rather than in `add_passes` for
         // every other block's reason: a pass body runs at execute time, and the
@@ -7163,6 +7171,30 @@ impl ForwardRenderer {
         // press to get out of it. `f32::max` returns the bound instead, so a NaN
         // lands on `EXPOSURE_MIN` — dark, and one press from being bright again.
         self.exposure = exposure.max(EXPOSURE_MIN).min(EXPOSURE_MAX);
+    }
+
+    /// How far auto-exposure may travel toward its measurement in one frame.
+    ///
+    /// **[`None`] is the whole distance**, which is what a renderer nobody
+    /// calls this on does and what the pass did before adaptation existed — so
+    /// no golden moved when this arrived. A view that wants the roll asks, and
+    /// asks *every frame*, because [`ExposureAdaptation`] carries that frame's
+    /// own delta: this crate has no clock, and the frame time lives where the
+    /// frame loop is.
+    ///
+    /// It takes effect on the next [`begin_frame`](Self::begin_frame), which is
+    /// what writes the block, and it does nothing at all on a frame that did not
+    /// ask for [`RenderEffects::AUTO_EXPOSURE`] — the passes that read it are
+    /// the ones that bit adds.
+    pub const fn set_exposure_adaptation(&mut self, adaptation: Option<ExposureAdaptation>) {
+        self.exposure_adaptation = adaptation;
+    }
+
+    /// What [`set_exposure_adaptation`](Self::set_exposure_adaptation) was last
+    /// handed.
+    #[must_use]
+    pub const fn exposure_adaptation(&self) -> Option<ExposureAdaptation> {
+        self.exposure_adaptation
     }
 
     /// Which operator the tonemap pass runs on the exposed scene colour.

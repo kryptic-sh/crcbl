@@ -42,8 +42,8 @@ use crcbl_hal::{
     BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ComputePipelineHandle, Device, HalError, ImageViewHandle, ImageViewType,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, SampleType,
-    ShaderStages, check_portable_storage_buffers,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, QueueHandle, ResourceState,
+    SampleType, ShaderStages, check_portable_storage_buffers,
 };
 use crcbl_shaders::EXPOSURE;
 use crcbl_shaders::exposure::{
@@ -53,9 +53,54 @@ use crcbl_shaders::exposure::{
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::draw_gen::{bound, compute_pipeline_entry, storage, uniform};
+use crate::draw_gen::{bound, compute_pipeline_entry, fill_at_start_up, storage, uniform};
 use crate::graph::{ImageId, ImportedBuffer, RenderGraph};
 use crate::ssao::cached_group;
+
+/// How far one frame's exposure may travel toward the one its histogram asks
+/// for.
+///
+/// **Why a step and not the measurement itself.** A real eye takes seconds to
+/// adapt; an exposure that lands on its target in a single frame turns a camera
+/// cut, a muzzle flash or a door opening into a flicker. So a view hands this
+/// in every frame with its own delta, and
+/// [`ForwardRenderer::set_exposure_adaptation`](crate::ForwardRenderer::set_exposure_adaptation)
+/// is where it goes.
+///
+/// **The two rates differ because the eye's do.** Adapting *down* to a scene
+/// that just got bright is fast and adapting back up is slow, and a viewer
+/// notices immediately when they are swapped. They are named for what the
+/// exposure does, not for what the scene did: `brighten` is the exposure
+/// climbing, which is the picture getting brighter as the eye opens up in the
+/// dark.
+///
+/// Each is a fraction of the remaining distance per second, so `2.0` covers
+/// half the distance in a quarter of a second and anything at or above
+/// `1.0 / delta` arrives in one frame. It is the linear approximation of the
+/// exponential approach every engine writes as `1 - exp(-rate * delta)`, and it
+/// is linear on purpose: this workspace lets no transcendental reach a colour,
+/// and an exposure multiplies every texel of the frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExposureAdaptation {
+    /// Fraction of the remaining distance per second while the exposure climbs.
+    pub brighten: f32,
+    /// The same while it falls.
+    pub darken: f32,
+    /// How long this frame was, in seconds — the view's own delta.
+    pub delta: f32,
+}
+
+impl ExposureAdaptation {
+    /// The two blends the block carries: `rate * delta`, clamped into `[0, 1]`.
+    ///
+    /// Clamped here rather than only in the shader because a rate and a delta
+    /// are both a caller's numbers, and the product of two of those is where a
+    /// pause, a breakpoint or a first frame puts a blend of several hundred.
+    fn blends(self) -> (f32, f32) {
+        let blend = |rate: f32| (rate * self.delta).clamp(0.0, 1.0);
+        (blend(self.brighten), blend(self.darken))
+    }
+}
 
 /// The buffers one frame's measurement lives in.
 ///
@@ -115,11 +160,22 @@ impl Exposure {
     /// [`HalError`] from any seam call. **Nothing is released on the failing
     /// path**, for the reason every other builder in this crate gives: the
     /// caller holds a rollback, and this is stored in it whole.
-    pub(crate) fn new(device: &dyn Device, frames: usize) -> Result<Self, HalError> {
-        if frames == 0 {
-            return Err(HalError::InvalidDescriptor(
-                "auto-exposure needs at least one frame in flight".to_string(),
-            ));
+    pub(crate) fn new(
+        device: &dyn Device,
+        queue: QueueHandle,
+        frames: usize,
+    ) -> Result<Self, HalError> {
+        // **Two, not one.** A frame reads the slot behind it for the exposure
+        // to adapt away from, and with a single slot that is the one this
+        // frame's reduce also writes — which the graph refuses outright, since
+        // a pass cannot claim one resource as both written and read. Enforced
+        // here rather than branched around: [`crate::forward::FRAMES_IN_FLIGHT`]
+        // is two, so the one-slot path would be a branch nothing ever takes.
+        if frames < 2 {
+            return Err(HalError::InvalidDescriptor(format!(
+                "auto-exposure needs at least two frames in flight, so a frame can read \
+                 the exposure the frame before it measured; got {frames}"
+            )));
         }
         // `exposure.slang`'s declaration order, which is the only order Metal
         // and D3D12 agree about — see `crcbl_shaders::declaration_order`.
@@ -139,6 +195,10 @@ impl Exposure {
             },
             storage(2, false),
             storage(3, false),
+            // Read-only: the reduce reads the frame before's exposure and never
+            // writes through this binding, which is what lets it be a different
+            // slot of the same ring the entry above writes.
+            storage(4, true),
         ];
         let desc = BindGroupLayoutDesc {
             label: Some("exposure"),
@@ -204,13 +264,32 @@ impl Exposure {
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 memory: MemoryLocation::DeviceLocal,
             })?);
-            measured.push(device.create_buffer(&BufferDesc {
+            let slot = device.create_buffer(&BufferDesc {
                 label: Some(&format!("exposure measured {frame}")),
                 size: MEASURED_SIZE as u64,
-                // `STORAGE` in both stages: written here, read by the tonemap.
-                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+                // `STORAGE` in three stages: written by the reduce, read by the
+                // tonemap, and read again by the *next* frame's reduce as the
+                // exposure to adapt away from. `TRANSFER_DST` for the start-up
+                // fill below.
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
                 memory: MemoryLocation::DeviceLocal,
-            })?);
+            })?;
+            // **Every slot starts at the default exposure**, because the first
+            // frame's reduce reads one of them as the value to adapt from and a
+            // device-local allocation carries whatever was last in that memory.
+            // A garbage prior inside the legal range would be indistinguishable
+            // from a measurement, and would differ between runs.
+            fill_at_start_up(
+                device,
+                queue,
+                &format!("exposure measured {frame}"),
+                slot,
+                &crcbl_shaders::tonemap::DEFAULT_EXPOSURE.to_le_bytes(),
+                // What `add_passes` imports it in, and what the tonemap left it
+                // in on every frame after the first.
+                ResourceState::ShaderRead,
+            )?;
+            measured.push(slot);
         }
 
         Ok(Self {
@@ -240,16 +319,38 @@ impl Exposure {
         device: &dyn Device,
         frame: usize,
         extent: (u32, u32),
+        adaptation: Option<ExposureAdaptation>,
     ) -> Result<(), HalError> {
+        // `None` is both blends at one, which is the whole distance in one
+        // frame — the picture this pass drew before adaptation existed, and the
+        // one `ExposureParams::default` carries for the same reason.
+        let (brighten_blend, darken_blend) =
+            adaptation.map_or((1.0, 1.0), ExposureAdaptation::blends);
         device.write_buffer(
             self.params[frame],
             0,
             &ExposureParams {
                 viewport_x: extent.0.max(1),
                 viewport_y: extent.1.max(1),
+                brighten_blend,
+                darken_blend,
             }
             .to_bytes(),
         )
+    }
+
+    /// The slot holding what the frame before `frame` was exposed by.
+    ///
+    /// One step back around the same ring, which is the previous frame because
+    /// the frame index advances by one — and never `frame`'s own slot, which is
+    /// what [`Exposure::new`]'s two-slot floor is for.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    fn previous(&self, frame: usize) -> BufferHandle {
+        assert!(frame < self.measured.len(), "no such frame slot");
+        self.measured[(frame + self.measured.len() - 1) % self.measured.len()]
     }
 
     /// The buffer the tonemap binds: `frame`'s measured exposure.
@@ -308,6 +409,19 @@ impl Exposure {
                 final_state: ResourceState::ShaderRead,
             },
         );
+        // The frame before's slot, always a different buffer from the one this
+        // frame writes — `Exposure::new` refuses a ring too short for that.
+        let previous_buffer = self.previous(frame);
+        let previous = graph.import_buffer(
+            "exposure-previous",
+            ImportedBuffer {
+                buffer: previous_buffer,
+                // What the frame that wrote it left it in, and what this frame
+                // leaves it in: nothing here writes through it.
+                initial: ResourceState::ShaderRead,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
         let params = self.params[frame];
         let histogram_buffer = self.histograms[frame];
         let measured_buffer = self.measured[frame];
@@ -357,6 +471,7 @@ impl Exposure {
                     },
                     bound(2, histogram_buffer),
                     bound(3, measured_buffer),
+                    bound(4, previous_buffer),
                 ];
                 let Some(built) =
                     cached_group(cached, device, &[(1, view)], "exposure", layout, entries)
@@ -397,6 +512,8 @@ impl Exposure {
             // between the two comes from both declaring this one id.
             .use_buffer(bins, ResourceState::ShaderReadWrite)
             .use_buffer(measured, ResourceState::ShaderReadWrite)
+            // The frame before's exposure, read to adapt away from.
+            .use_buffer(previous, ResourceState::ShaderRead)
             .execute(move |ctx| {
                 let Some(group) = bind.get() else {
                     return;

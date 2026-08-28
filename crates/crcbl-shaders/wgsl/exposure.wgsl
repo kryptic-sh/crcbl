@@ -1,16 +1,18 @@
 @binding(2) @group(0) var<storage, read_write> histogram_0 : array<atomic<u32>>;
 
-@binding(3) @group(0) var<storage, read_write> measured_0 : array<f32>;
+@binding(4) @group(0) var<storage, read> previous_0 : array<f32>;
 
 struct ExposureParams_std140_0
 {
     @align(16) viewport_x_0 : u32,
     @align(4) viewport_y_0 : u32,
-    @align(8) pad_0_0 : u32,
-    @align(4) pad_1_0 : u32,
+    @align(8) brighten_blend_0 : f32,
+    @align(4) darken_blend_0 : f32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : ExposureParams_std140_0;
+@binding(3) @group(0) var<storage, read_write> measured_0 : array<f32>;
+
 @binding(1) @group(0) var scene_0 : texture_2d<f32>;
 
 @compute
@@ -51,47 +53,78 @@ fn reduceMain()
         bin_1 = bin_1 + u32(1);
         total_0 = total_1;
     }
-    if(total_0 == u32(0))
+    var rate_0 : f32;
+    var target_0 : f32;
+    if(total_0 > u32(0))
     {
-        measured_0[i32(0)] = 1.0f;
-        return;
-    }
-    var _S3 : f32 = f32(total_0);
-    var _S4 : u32 = u32(_S3 * 0.5f);
-    var _S5 : u32 = u32(_S3 * 0.94999998807907104f);
-    bin_1 = u32(1);
-    var seen_0 : u32 = u32(0);
-    var weighted_0 : f32 = 0.0f;
-    var population_0 : f32 = 0.0f;
-    for(;;)
-    {
-        if(bin_1 < u32(96))
+        var _S3 : f32 = f32(total_0);
+        var _S4 : u32 = u32(_S3 * 0.5f);
+        var _S5 : u32 = u32(_S3 * 0.94999998807907104f);
+        bin_1 = u32(1);
+        var seen_0 : u32 = u32(0);
+        rate_0 = 0.0f;
+        var population_0 : f32 = 0.0f;
+        for(;;)
         {
+            if(bin_1 < u32(96))
+            {
+            }
+            else
+            {
+                break;
+            }
+            var _S6 : u32 = atomicLoad(&(histogram_0[bin_1]));
+            var seen_1 : u32 = seen_0 + _S6;
+            var _S7 : u32 = max(seen_0, _S4);
+            var _S8 : u32 = min(seen_1, _S5);
+            if(_S8 > _S7)
+            {
+                var part_0 : f32 = f32(_S8 - _S7);
+                var population_1 : f32 = population_0 + part_0;
+                rate_0 = rate_0 + part_0 * bin_luminance_0(bin_1) * 1.09050774574279785f;
+                population_0 = population_1;
+            }
+            bin_1 = bin_1 + u32(1);
+            seen_0 = seen_1;
+        }
+        if(population_0 > 0.0f)
+        {
+            target_0 = clamp(0.18000000715255737f / (rate_0 / population_0), 0.03125f, 32.0f);
         }
         else
         {
-            break;
+            target_0 = 1.0f;
         }
-        var _S6 : u32 = atomicLoad(&(histogram_0[bin_1]));
-        var seen_1 : u32 = seen_0 + _S6;
-        var _S7 : u32 = max(seen_0, _S4);
-        var _S8 : u32 = min(seen_1, _S5);
-        if(_S8 > _S7)
-        {
-            var part_0 : f32 = f32(_S8 - _S7);
-            var population_1 : f32 = population_0 + part_0;
-            weighted_0 = weighted_0 + part_0 * bin_luminance_0(bin_1) * 1.09050774574279785f;
-            population_0 = population_1;
-        }
-        bin_1 = bin_1 + u32(1);
-        seen_0 = seen_1;
     }
-    if(population_0 == 0.0f)
+    else
     {
-        measured_0[i32(0)] = 1.0f;
-        return;
+        target_0 = 1.0f;
     }
-    measured_0[i32(0)] = clamp(0.18000000715255737f / (weighted_0 / population_0), 0.03125f, 32.0f);
+    var prior_0 : f32 = previous_0[i32(0)];
+    if(target_0 > prior_0)
+    {
+        rate_0 = params_0.brighten_blend_0;
+    }
+    else
+    {
+        rate_0 = params_0.darken_blend_0;
+    }
+    var blend_0 : f32 = clamp(rate_0, 0.0f, 1.0f);
+    if(blend_0 >= 1.0f)
+    {
+        measured_0[i32(0)] = target_0;
+    }
+    else
+    {
+        if(blend_0 <= 0.0f)
+        {
+            measured_0[i32(0)] = prior_0;
+        }
+        else
+        {
+            measured_0[i32(0)] = clamp(prior_0 + (target_0 - prior_0) * blend_0, 0.03125f, 32.0f);
+        }
+    }
     return;
 }
 

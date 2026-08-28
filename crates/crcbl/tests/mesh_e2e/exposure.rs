@@ -18,21 +18,38 @@
 
 use crate::harness::{Headless, poisoned};
 use crate::hdr::HdrTarget;
-use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh};
+use crate::mesh_scene::{MESH_EXTENT, mesh_camera, place_cube, render_mesh_lit};
 use crcbl::hal::{
     Barriers, BufferBarrier, BufferCopy, BufferDesc, BufferUsage, CommandEncoderDesc,
     MemoryLocation, ResourceState, SubmitInfo,
 };
+use crcbl::math::Vec3;
 use crcbl::render::{
-    EffectOverride, EffectRequest, ExposureBuffers, ForwardRenderer, Projection, RenderEffects,
-    TransientPool,
+    DirectionalLight, EffectOverride, EffectRequest, ExposureAdaptation, ExposureBuffers,
+    ForwardRenderer, Projection, RenderEffects, TransientPool,
 };
-use crcbl::shaders::exposure::{BIN_COUNT, BIN_STRIDE, MEASURED_SIZE, bin_of, luma, measure};
+use crcbl::shaders::exposure::{
+    BIN_COUNT, BIN_STRIDE, MEASURED_SIZE, adapt, bin_of, luma, measure,
+};
 
 /// How many texels the cube frame covers, which is what both histograms have to
 /// total: the dispatch is one invocation per texel of the scene target, and the
 /// host bins the same target.
 const TEXELS: u32 = MESH_EXTENT.0 * MESH_EXTENT.1;
+
+/// A light bright enough that the frame it draws wants *less* exposure than the
+/// ring starts at, so the adaptation is travelling downward.
+///
+/// The multiplier is measured rather than picked: under the default light this
+/// fixture's window averages a luminance below middle grey and asks for an
+/// exposure above one, and the window is on the cube rather than on the
+/// background — so scaling the light scales it. Four is far enough past the
+/// crossing that the arm is not sitting on it.
+const BRIGHT: DirectionalLight = DirectionalLight {
+    direction: Vec3::new(0.4, 0.8, 0.45),
+    color: Vec3::new(4.8, 4.4, 3.8),
+    ambient: Vec3::new(0.4, 0.44, 0.56),
+};
 
 /// One frame, with whatever the auto-exposure pass left behind beside it.
 struct Frame {
@@ -56,7 +73,21 @@ struct Frame {
 /// texel for texel, and a resolve is one more pass between the exposure and the
 /// pixel that would have to be identical for the comparison to mean what it
 /// says.
-fn draw(auto: bool, exposure: f32) -> Frame {
+fn draw(auto: bool, exposure: f32, adaptation: Option<ExposureAdaptation>) -> Frame {
+    draw_lit(auto, exposure, adaptation, &DirectionalLight::default())
+}
+
+/// The same frame under a light of the caller's choosing.
+///
+/// The only caller that reaches past [`draw`] is the one whose claim is about a
+/// *darkening*: under the default light this fixture measures an exposure above
+/// where the ring starts, so every arm that uses it is travelling one way.
+fn draw_lit(
+    auto: bool,
+    exposure: f32,
+    adaptation: Option<ExposureAdaptation>,
+    light: &DirectionalLight,
+) -> Frame {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
@@ -69,13 +100,15 @@ fn draw(auto: bool, exposure: f32) -> Frame {
         ..EffectRequest::default()
     });
     renderer.set_exposure(exposure);
+    renderer.set_exposure_adaptation(adaptation);
     place_cube(&mut renderer);
     let mut hdr = Vec::new();
-    let image = render_mesh(
+    let image = render_mesh_lit(
         &headless,
         &mut renderer,
         &mut pool,
         &mesh_camera(Projection::default()),
+        light,
         Some(&mut hdr),
     );
 
@@ -212,7 +245,7 @@ fn host_histogram(hdr: &HdrTarget) -> Vec<u32> {
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn the_histogram_bins_every_texel_of_the_frame_the_host_reads_back() {
-    let frame = draw(true, crcbl_shaders::tonemap::DEFAULT_EXPOSURE);
+    let frame = draw(true, crcbl_shaders::tonemap::DEFAULT_EXPOSURE, None);
     let (gpu, _) = frame
         .measured
         .expect("the pass ran, so it wrote its buffers");
@@ -266,7 +299,7 @@ fn the_histogram_bins_every_texel_of_the_frame_the_host_reads_back() {
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn the_measured_exposure_is_the_one_the_tonemap_applied() {
-    let auto = draw(true, crcbl_shaders::tonemap::DEFAULT_EXPOSURE);
+    let auto = draw(true, crcbl_shaders::tonemap::DEFAULT_EXPOSURE, None);
     let (bins, exposure) = auto
         .measured
         .as_ref()
@@ -283,17 +316,275 @@ fn the_measured_exposure_is_the_one_the_tonemap_applied() {
          from the same bins: it wrote {exposure}, the host makes it {wanted}"
     );
 
-    let manual = draw(false, exposure);
+    let manual = draw(false, exposure, None);
     assert!(
         manual.image == auto.image,
         "a frame drawn by hand at the measured exposure has to be the frame the \
          pass drew; the tonemap is reading something else"
     );
 
-    let default = draw(false, crcbl_shaders::tonemap::DEFAULT_EXPOSURE);
+    let default = draw(false, crcbl_shaders::tonemap::DEFAULT_EXPOSURE, None);
     assert!(
         default.image != auto.image,
         "this fixture has to be one auto-exposure changes, or the equality above \
          holds for a pass that does nothing: it measured {exposure}"
     );
+}
+
+/// **The exposure steps toward its measurement instead of landing on it**, and
+/// the step starts somewhere defined.
+///
+/// Every arm here is a *first* frame — each fixture opens its own device — so
+/// what the reduce adapts away from is whatever `crcbl_render::exposure` put in
+/// the ring before any frame existed. That makes this two claims at once: the
+/// start-up fill landed, and the step is the one
+/// [`adapt`](crcbl::shaders::exposure::adapt) predicts. A ring left
+/// uninitialised would still produce *an* exposure, and it would differ between
+/// runs and between drivers.
+///
+/// The frozen arm is the sharper of the two: a blend of zero has to leave the
+/// exposure exactly where the fill put it, so the frame it draws is the frame
+/// drawn at the default exposure with no auto-exposure in it at all — which is
+/// checked as a picture and not just as a number.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_exposure_steps_toward_its_measurement_from_where_the_ring_started() {
+    let default = crcbl_shaders::tonemap::DEFAULT_EXPOSURE;
+    let snapped = draw(true, default, None);
+    let (bins, target) = snapped
+        .measured
+        .as_ref()
+        .map(|(bins, exposure)| (bins.clone(), *exposure))
+        .expect("the pass ran, so it wrote its buffers");
+    assert!(
+        (target - default).abs() > 0.05,
+        "this fixture has to measure an exposure away from the default, or a \
+         step toward it is indistinguishable from no step: it measured {target}"
+    );
+
+    // Half the distance in this frame: a rate of one over a frame that lasted
+    // half a second. The two are separate numbers on purpose — a blend read as
+    // the rate alone, or as the delta alone, lands somewhere else.
+    let half = ExposureAdaptation {
+        brighten: 1.0,
+        darken: 1.0,
+        delta: 0.5,
+    };
+    let stepped = draw(true, default, Some(half))
+        .measured
+        .map(|(_, exposure)| exposure)
+        .expect("the pass ran");
+    let wanted = adapt(default, measure(&bins), 0.5, 0.5);
+    eprintln!(
+        "{}: snapping measures {target}, half a step measures {stepped}, the host \
+         makes that {wanted}",
+        crate::SUITE
+    );
+    assert!(
+        (stepped - wanted).abs() <= wanted * 1e-5,
+        "half a step from the ring's start toward {target} is {wanted}; the reduce \
+         wrote {stepped}"
+    );
+
+    // A rate of zero: the exposure stays where the start-up fill put it, which
+    // is the default, so this frame is the one drawn with no auto-exposure.
+    let frozen = draw(
+        true,
+        default,
+        Some(ExposureAdaptation {
+            brighten: 0.0,
+            darken: 0.0,
+            delta: 0.5,
+        }),
+    );
+    let held = frozen
+        .measured
+        .as_ref()
+        .map(|(_, exposure)| *exposure)
+        .expect("the pass ran");
+    assert_eq!(
+        held, default,
+        "a blend of zero has to leave the exposure exactly where the ring was \
+         filled, and the fill wrote the default"
+    );
+    assert!(
+        frozen.image == draw(false, default, None).image,
+        "a frozen adaptation at the ring's starting value has to draw the frame \
+         this engine draws with no auto-exposure at all"
+    );
+}
+
+/// **Which of the two rates a frame reads is decided by the direction it is
+/// travelling**, and the shader decides it, not the host.
+///
+/// Every other arm here hands both rates the same number, so a reduce that read
+/// the wrong one would agree with all of them. This fixture measures an
+/// exposure *above* where the ring starts, so the travel is a brightening: the
+/// arm that gives brightening a rate and darkening none has to arrive, and the
+/// arm that gives it the other way round has to not move at all.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_direction_of_travel_picks_the_rate() {
+    let default = crcbl_shaders::tonemap::DEFAULT_EXPOSURE;
+    let measured_at = |brighten: f32, darken: f32| {
+        draw(
+            true,
+            default,
+            Some(ExposureAdaptation {
+                brighten,
+                darken,
+                delta: 1.0,
+            }),
+        )
+        .measured
+        .map(|(_, exposure)| exposure)
+        .expect("the pass ran")
+    };
+    let target = measured_at(1.0, 1.0);
+    assert!(
+        target > default,
+        "this fixture has to measure an exposure above the ring's start, or \
+         neither arm below says which rate was read: it measured {target}"
+    );
+    assert_eq!(
+        measured_at(1.0, 0.0),
+        target,
+        "a brightening frame reads the brightening rate, and a whole step of it \
+         arrives at the target"
+    );
+    assert_eq!(
+        measured_at(0.0, 1.0),
+        default,
+        "a brightening frame must not read the darkening rate, and with no \
+         brightening rate it stays where the ring started"
+    );
+
+    // And the other way round, under a light bright enough that the frame wants
+    // *less* exposure than the ring starts with. Without this arm a shader that
+    // read `brighten_blend` whatever the direction would pass every assertion
+    // above — measured, by making that mistake and running this suite.
+    let dark_at = |brighten: f32, darken: f32| {
+        draw_lit(
+            true,
+            default,
+            Some(ExposureAdaptation {
+                brighten,
+                darken,
+                delta: 1.0,
+            }),
+            &BRIGHT,
+        )
+        .measured
+        .map(|(_, exposure)| exposure)
+        .expect("the pass ran")
+    };
+    let below = dark_at(1.0, 1.0);
+    assert!(
+        below < default,
+        "the bright fixture has to measure an exposure below the ring's start, or \
+         the two arms below say nothing: it measured {below}"
+    );
+    assert_eq!(
+        dark_at(0.0, 1.0),
+        below,
+        "a darkening frame reads the darkening rate, and a whole step of it \
+         arrives at the target"
+    );
+    assert_eq!(
+        dark_at(1.0, 0.0),
+        default,
+        "a darkening frame must not read the brightening rate, and with no \
+         darkening rate it stays where the ring started"
+    );
+}
+
+/// **The frame before this one is the frame it adapts away from**, which is a
+/// claim no single frame can make.
+///
+/// Every arm above draws one frame, and on a first frame every slot of the ring
+/// still holds the value the start-up fill wrote — so a reduce reading its
+/// *own* slot instead of the one behind it would agree with all of them. This
+/// draws two frames through one renderer and predicts the second from the first
+/// rather than from the fill: two steps of the same size, compounding.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn each_frame_adapts_away_from_the_frame_before_it() {
+    let half = ExposureAdaptation {
+        brighten: 1.0,
+        darken: 1.0,
+        delta: 0.5,
+    };
+    let (exposures, bins) = draw_frames(3, half);
+    let target = measure(&bins);
+
+    // Each step is half of what is left, from the fill's default: the sequence
+    // is the fill's value walked toward the target and never reaching it.
+    let mut wanted = crcbl_shaders::tonemap::DEFAULT_EXPOSURE;
+    for (index, measured) in exposures.iter().enumerate() {
+        wanted = adapt(wanted, target, 0.5, 0.5);
+        eprintln!(
+            "{}: frame {index} measured {measured}, the host makes it {wanted}",
+            crate::SUITE
+        );
+        assert!(
+            (measured - wanted).abs() <= wanted * 1e-5,
+            "frame {index} has to be half a step on from frame {}: the host makes \
+             that {wanted} and the reduce wrote {measured}",
+            index.wrapping_sub(1)
+        );
+    }
+    assert!(
+        exposures
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() > f32::EPSILON),
+        "the exposures have to be moving, or a reduce that ignored the step would \
+         match every one of them: {exposures:?}"
+    );
+}
+
+/// Draws `count` frames through one renderer and reads the measured exposure
+/// back after each, with the last frame's bins beside them.
+///
+/// One fixture for all of them, unlike [`draw`]: the whole point is that the
+/// ring carries a value from one frame into the next, and a second `Headless`
+/// would be a second ring starting again from the fill.
+fn draw_frames(count: usize, adaptation: ExposureAdaptation) -> (Vec<f32>, Vec<u32>) {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::AUTO_EXPOSURE, Some(true)),
+        ..EffectRequest::default()
+    });
+    renderer.set_exposure_adaptation(Some(adaptation));
+    place_cube(&mut renderer);
+    let camera = mesh_camera(Projection::default());
+
+    let mut exposures = Vec::with_capacity(count);
+    let mut bins = Vec::new();
+    for _ in 0..count {
+        let _ = render_mesh_lit(
+            &headless,
+            &mut renderer,
+            &mut pool,
+            &camera,
+            &DirectionalLight::default(),
+            None,
+        );
+        let (frame_bins, exposure) =
+            read_back(&headless, renderer.exposure_buffers(renderer.frame()));
+        exposures.push(exposure);
+        bins = frame_bins;
+    }
+
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    (exposures, bins)
 }

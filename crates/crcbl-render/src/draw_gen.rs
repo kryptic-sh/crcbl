@@ -297,7 +297,7 @@ pub struct DrawGen {
     /// `ShaderReadWrite` both the writing and the reading pass declare on it.
     ///
     /// Zeroed at build and never again, which is where the monotonicity
-    /// induction starts — by the start-up copy [`zero_at_start_up`] submits,
+    /// induction starts — by the start-up copy [`fill_at_start_up`] submits,
     /// because a shader writes this and a buffer a shader writes cannot be
     /// host-visible. A second zero anywhere would erase the history rather than
     /// establish it, so there is deliberately no per-frame clear of it.
@@ -469,12 +469,21 @@ impl DrawGen {
             BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
             MemoryLocation::DeviceLocal,
         )?;
-        zero_at_start_up(
+        fill_at_start_up(
             device,
             queue,
             &format!("{stem} lod group state"),
             group_state,
-            group_state_bytes,
+            &vec![
+                0u8;
+                usize::try_from(group_state_bytes).map_err(|_| HalError::InvalidDescriptor(
+                    format!(
+                        "the lod group state is {group_state_bytes} bytes, which does not \
+                             fit this host's address space"
+                    )
+                ))?
+            ],
+            ResourceState::ShaderReadWrite,
         )?;
 
         let clear_params = buffer(
@@ -1161,7 +1170,7 @@ impl DrawGen {
         // what carries a decision from the previous frame into this one. It
         // arrives in `ShaderReadWrite` because that is what the last frame left
         // it in — and on the very first frame because that is what
-        // `zero_at_start_up` left it in, which is why that copy ends with a
+        // `fill_at_start_up` left it in, which is why that copy ends with a
         // barrier rather than in `TransferDst`. `ResourceState::needs_barrier`
         // answers `true` for any
         // transition touching a write — so the first barrier of this frame
@@ -1401,8 +1410,8 @@ pub(crate) fn compute_pipeline_entry(
     pipeline
 }
 
-/// Writes zeroes over `buffer` once, before any frame exists, and blocks until
-/// the copy has run.
+/// Writes `contents` over `buffer` once, before any frame exists, and blocks
+/// until the copy has run, leaving it in `final_state`.
 ///
 /// A start-up staging copy on [`crate::mesh_pool`]'s and [`crate::texture`]'s
 /// terms, and it joins them on the crate docs' list of named exceptions to the
@@ -1412,44 +1421,52 @@ pub(crate) fn compute_pipeline_entry(
 /// length; and not the clearing dispatch, which runs inside every frame rather
 /// than once.
 ///
-/// The buffer is left in [`ResourceState::ShaderReadWrite`], which is the state
-/// [`DrawGen::add_passes`] imports it in — so the graph's first barrier on it
-/// names a state the buffer is really in.
-fn zero_at_start_up(
+/// `final_state` is the state the buffer's first importer declares as its
+/// initial one, so the graph's first barrier on it names a state the buffer is
+/// really in: [`ResourceState::ShaderReadWrite`] for the LOD state below, and
+/// [`ResourceState::ShaderRead`] for [`crate::exposure`]'s ring.
+///
+/// # Errors
+///
+/// [`HalError`] from any seam call, and from a `contents` too long to be a
+/// buffer size on this host.
+pub(crate) fn fill_at_start_up(
     device: &dyn Device,
     queue: QueueHandle,
     label: &str,
     buffer: BufferHandle,
-    size: u64,
+    contents: &[u8],
+    final_state: ResourceState,
 ) -> Result<(), HalError> {
-    let zeroes = vec![
-        0u8;
-        usize::try_from(size).map_err(|_| HalError::InvalidDescriptor(format!(
-            "{label} is {size} bytes, which does not fit this host's address space"
-        )))?
-    ];
+    let size = u64::try_from(contents.len()).map_err(|_| {
+        HalError::InvalidDescriptor(format!(
+            "{label} is {} bytes, which does not fit a buffer size",
+            contents.len()
+        ))
+    })?;
     let staging = device.create_buffer(&BufferDesc {
         label: Some(&format!("{label} staging")),
         size,
         usage: BufferUsage::TRANSFER_SRC,
         memory: MemoryLocation::HostUpload,
     })?;
-    let zeroed = record_zero(device, queue, label, buffer, staging, &zeroes);
+    let filled = record_fill(device, queue, label, buffer, staging, contents, final_state);
     device.destroy_buffer(staging);
-    zeroed
+    filled
 }
 
-/// The half of [`zero_at_start_up`] the staging buffer is live across, so the
+/// The half of [`fill_at_start_up`] the staging buffer is live across, so the
 /// caller releases it on every path out.
-fn record_zero(
+fn record_fill(
     device: &dyn Device,
     queue: QueueHandle,
     label: &str,
     buffer: BufferHandle,
     staging: BufferHandle,
-    zeroes: &[u8],
+    contents: &[u8],
+    final_state: ResourceState,
 ) -> Result<(), HalError> {
-    device.write_buffer(staging, 0, zeroes)?;
+    device.write_buffer(staging, 0, contents)?;
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some(&format!("{label} zero")),
@@ -1472,13 +1489,13 @@ fn record_zero(
         src_offset: 0,
         dst: buffer,
         dst_offset: 0,
-        size: zeroes.len() as u64,
+        size: contents.len() as u64,
     });
     encoder.pipeline_barrier(&Barriers {
         buffers: &[BufferBarrier::new(
             buffer,
             ResourceState::TransferDst,
-            ResourceState::ShaderReadWrite,
+            final_state,
         )],
         ..Barriers::default()
     });

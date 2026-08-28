@@ -115,17 +115,17 @@ entry-points = computeMain:glcompute
 
 [exposure]
 source = shaders/exposure.slang
-source-sha256 = d05ea197e5506227b418e8850d1cb1b466203f9bfefdcc8f13fb9b82c6686a09
+source-sha256 = 22b5fae827bb8aca1fdd2b92f2c70ff3e5d3200c848d0a7d6006e98a873dd118
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/exposure.spv
-spirv-sha256 = 9476637fb0f8663469bdf06e3395a735d3a9d9d826d714ecc6041ff27fb226af
+spirv-sha256 = 1dfa0d6d9581a1b04f88848372b88eb032a3fef0b5e782807769473e34858ce7
 wgsl = wgsl/exposure.wgsl
-wgsl-sha256 = cb84e11f60245f28c0854902fe042d5030b7f54354aea4451b256e39e9137707
+wgsl-sha256 = 30aa0f411f8f54afdea8537fde95d40a0c3a317a3ac03907f25101be6e744c2e
 msl = msl/exposure.metal
-msl-sha256 = 95b6f43e19a273328a4aed68a0dc0bf6d1d7e7b74eda7ab88777201d350b8a11
+msl-sha256 = ad8bfb5e3f7f6cbafa311dec6c997d924e0677685ec079c0e4bb5b65db710da8
 dxil = clearMain:dxil/exposure.clearMain.dxil:5e5d778fc71a9cdc6035c361445edd38389feb37e3e4dd6e923131c8790b1b54
-dxil = reduceMain:dxil/exposure.reduceMain.dxil:bf1ce61da8daade51c9b35aa7d8c6248d3774fea2f176a8cce4a32a52d036d20
-dxil = histogramMain:dxil/exposure.histogramMain.dxil:c29e0e3fae5a287d8423c60fe742855980f2c18c18c57931f816c8894bda64f6
+dxil = reduceMain:dxil/exposure.reduceMain.dxil:51e85e9d0968ca7af7315d88e870532b7e6535f3bd7f8db1bfebcbb589b8c651
+dxil = histogramMain:dxil/exposure.histogramMain.dxil:000308fe4d9abd3b0047b3d7a1c8e572cc3b7aa989bc1108498271d31b067641
 entry-points = clearMain:glcompute, reduceMain:glcompute, histogramMain:glcompute
 
 [fxaa]

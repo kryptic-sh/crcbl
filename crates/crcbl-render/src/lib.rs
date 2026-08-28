@@ -190,7 +190,7 @@ pub use cull::{Aabb, Frustum, visible_instances};
 pub use cull_stats::{ClusterCull, CullStats, CullStatsRing};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use effects::{EffectOverride, EffectRequest, RenderEffects};
-pub use exposure::ExposureBuffers;
+pub use exposure::{ExposureAdaptation, ExposureBuffers};
 pub use fly::{Flyer, LOOK, SPEED, TURN};
 pub use forward::{
     DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardRenderer, MIN_RENDER_SCALE, SCENE_CLEAR,
