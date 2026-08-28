@@ -535,8 +535,17 @@ fn dimmed_sun(key: f32, ambient: f32) -> crcbl_render::DirectionalLight {
 
 /// The sun [`Scene::Lights`] runs under: dim enough that the pools of colour are
 /// unmistakably the three point lights' work.
+///
+/// **The key is what decides that, and the checker is what set it.** The lights
+/// probe reads each quadrant's brightest pixel, and on the textured pyramid the
+/// brightest pixel is the checker's white texel under whatever lights it — the
+/// sun as much as the pool. While the page sampled nearest that texel was a
+/// flat quarter the green pool sat on; sampled bilinear it is one point on a
+/// ramp, and at twice this key the sun on that point out-shone the pool by a
+/// step. The ambient is not the lever: sweeping it from `0.35` to `0.05` moved
+/// that pixel's blue by seven steps, halving the key moved it by twenty-one.
 fn dim_sun() -> crcbl_render::DirectionalLight {
-    dimmed_sun(0.12, 0.35)
+    dimmed_sun(0.06, 0.35)
 }
 
 /// The sun [`Scene::Spot`] runs under, which is dimmer still.

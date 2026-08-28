@@ -2497,12 +2497,16 @@ impl ForwardRenderer {
         )?;
         rollback.textures.push(base_color_page);
 
-        // Nearest, and **clamped to level 0** even though the chain is there:
-        // the sampler's flip to trilinear-plus-anisotropic is the filtering
-        // rung's next slice, and it re-blesses every golden with a minified
-        // texture in it, so this sampler reads exactly what the one-level page
-        // read until that slice lands. A second sampler object rather than
-        // sharing the tonemap's, so a capture names each for what it filters.
+        // **Trilinear over the whole chain** — `docs/plan/43-render-standards.md`'s
+        // filtering rung: a minified surface reads the level its footprint
+        // matches instead of shimmering through level 0, and a magnified one
+        // blends four texels instead of stepping between them. Anisotropy stays
+        // at one here; the default the plan names arrives with the
+        // `anisotropic_filtering` key, because WebGPU reports a ceiling of one
+        // and a desktop default of eight would put the browser's frame outside
+        // the tolerance the shared goldens are held to. A second sampler object
+        // rather than sharing the tonemap's, so a capture names each for what
+        // it filters.
         //
         // **`Repeat`, not `ClampToEdge`**, and that is what `mesh.slang`'s
         // `TILING_PHYSICAL` needs: a physical UV runs to `world_extent /
@@ -2513,11 +2517,10 @@ impl ForwardRenderer {
         // clamped read return the same nearest texel for it.
         let base_color_sampler = device.create_sampler(&SamplerDesc {
             label: Some("material base colour"),
-            mag_filter: FilterMode::Nearest,
-            min_filter: FilterMode::Nearest,
-            mip_filter: FilterMode::Nearest,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mip_filter: FilterMode::Linear,
             address_mode: [SamplerAddressMode::Repeat; 3],
-            lod_max: 0.0,
             ..SamplerDesc::default()
         })?;
         rollback.samplers.push(base_color_sampler);

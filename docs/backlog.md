@@ -736,32 +736,33 @@ chain itself was built 2026-08-29). Both read the row as it stands;
 multi-scatter compensation and the gradient sky were not blocked either, and are
 built.
 
-### What the mip-chain slice left owed (2026-08-29)
+### What the filtering rung still owes (2026-08-29)
 
 The page goes up with every layer's chain (`crcbl_render::mip::chain`,
-`upload_texture_mip_layers`) and `tests/forward_e2e/page.rs` reads the levels
-back. The sampler in `ForwardRenderer::with_scene` still reads level 0 —
-`lod_max: 0.0` — so nothing in a golden moved. What the rung still owes, in
-order:
+`upload_texture_mip_layers`), `tests/forward_e2e/page.rs` reads the levels back,
+and the sampler in `ForwardRenderer::with_scene` reads them trilinear. What the
+rung still owes, in order:
 
-- **The sampler flip.** `mag`/`min`/`mip` to `Linear`, `lod_max` off, and
-  `anisotropy` from the player's `anisotropic_filtering` key clamped to
-  `Limits::max_sampler_anisotropy` — a value key on `render_scale`'s pattern in
-  `crcbl::settings`, with an `apps/options` row. This is the slice that
-  re-blesses every golden with a minified texture in it at
-  `Tolerance::RASTERISER`; `43-render-standards.md`'s filtering subsection says
-  why that tolerance and no other.
+- **Anisotropy.** `anisotropy` from the player's `anisotropic_filtering` key
+  clamped to `Limits::max_sampler_anisotropy` — a value key on `render_scale`'s
+  pattern in `crcbl::settings`, with an `apps/options` row, and 8× by default
+  where the device reports it. Held out of the trilinear slice because the
+  goldens are one set compared on every backend and WebGPU reports a ceiling of
+  one: an 8× desktop frame against a 1× browser frame is a difference
+  `Tolerance::RASTERISER` may not cover on a grazing floor. Measure lantern's
+  `room` at 8× on radv against the browser's frame before deciding; the
+  filtering subsection of `43-render-standards.md` says why that tolerance and
+  no other.
 - **WebGPU's anisotropy ceiling** is reported as one and the plan wants the
   desktop figure — the decision the same subsection points here for. Not taken.
 - **The chain's bytes are `powf` bytes.** `mip::srgb_to_linear` and
   `linear_to_srgb` go through `f32::powf`, which is each host's libm, so a level
   below 0 can differ by a byte between the Linux, macOS and Windows runners that
-  bless and check goldens. Level 0 is untouched, so today nothing can see it;
-  the sampler flip can. The glTF importer has resampled level 0 through the same
-  `powf` since it existed, and no golden has moved on it, so the odds are low —
-  but a 256-entry decode table and an exact encode would make the chain
-  bit-identical everywhere and is the fix if a re-bless ever disagrees across
-  hosts by one.
+  bless and check goldens, and the sampler now reads those levels, so a golden
+  can see it. The glTF importer has resampled level 0 through the same `powf`
+  since it existed, and no golden has moved on it, so the odds are low — but a
+  256-entry decode table and an exact encode would make the chain bit-identical
+  everywhere and is the fix if a re-bless ever disagrees across hosts by one.
 - **A description with no meshes panics out of `with_scene`.** `check_scene`
   accepts an empty mesh list, then `build`'s mesh-table sizing hits an
   `unreachable!("check_scene refused an empty description")`, and lifting that

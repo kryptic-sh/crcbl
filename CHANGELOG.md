@@ -22,10 +22,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   filter run down to one texel — and `ForwardRenderer::with_scene` uploads every
   layer's chain through the new `upload_texture_mip_layers`, one copy per level.
   Images from every `upload_texture*` are now created as copy sources as well,
-  so a level can be read back. The page's sampler still reads level 0
-  (`lod_max: 0.0`), so no frame changes yet; the trilinear anisotropic sampler
-  is the next slice of `docs/plan/43-render-standards.md`'s filtering rung. The
-  page costs a third again in device memory for the chain.
+  so a level can be read back. The page's sampler reads the chain trilinear —
+  `Linear` on all three filters, no level clamp — so a minified texture no
+  longer shimmers; anisotropy stays at one until the `anisotropic_filtering` key
+  of `docs/plan/43-render-standards.md`'s filtering rung lands. The lights
+  fixture's sun (`dim_sun`) is halved so its pools stay the brightest thing on
+  their pyramids under a bilinear page. The page costs a third again in device
+  memory for the chain.
 
 - **Auto-exposure: the frame measures its own exposure, and no readback stalls
   on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —

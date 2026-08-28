@@ -22,9 +22,9 @@
 //!   geometry through two projections that differ in nothing else. Reversed-Z is
 //!   a decision a comment can claim and only a discriminating pair can check,
 //!   and nothing in a picture shows what the second colour target holds.
-//! * [`page`] reads the base-colour page's mip levels back. The sampler clamps
-//!   to level 0 until the filtering rung's sampler slice lands, so a chain that
-//!   never reached the device draws every golden exactly as before.
+//! * [`page`] reads the base-colour page's mip levels back. A golden shows that
+//!   *some* level was blended in, never which bytes it held; a chain that was
+//!   uploaded one level off would still draw a plausible frame.
 //!
 //! They lived in `crates/crcbl-vk/tests/vk_e2e/` and therefore ran on Vulkan
 //! alone, so Metal, D3D12 and wgpu had `render_e2e`'s black-box goldens and

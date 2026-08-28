@@ -22,8 +22,8 @@
 ///
 /// A box filter: each destination texel averages the source texels its own cell
 /// covers. Where the source is *smaller* than the destination each cell covers
-/// exactly one texel, so an upscale is nearest-neighbour — which is what the
-/// page's sampler magnifies with anyway.
+/// exactly one texel, so an upscale is nearest-neighbour — the page's sampler
+/// blends at the fetch, and blending here as well would blur twice.
 ///
 /// Two things it does that a naive average does not, and both are visible when
 /// they are missing. The stored bytes are sRGB-encoded, so they are decoded to
@@ -217,8 +217,9 @@ mod tests {
 
     #[test]
     fn an_upscale_repeats_texels_rather_than_inventing_them() {
-        // The page's sampler magnifies nearest, so an upscale that blended
-        // would only blur what the sampler is about to point-sample.
+        // The page's sampler magnifies bilinear, so an upscale that blended
+        // here would blur the texels twice — once at import and once at the
+        // fetch.
         let four = resample(&QUAD, 2, 2, 4);
         let texel = |x: usize, y: usize| &four[(y * 4 + x) * 4..][..4];
 

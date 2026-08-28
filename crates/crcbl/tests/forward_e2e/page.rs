@@ -2,12 +2,12 @@
 //!
 //! `docs/plan/43-render-standards.md`'s filtering rung: every layer of the page
 //! goes up with the chain `crcbl::render::mip` builds on the host, one copy per
-//! level. A picture cannot show it — the sampler still clamps to level 0 until
-//! the rung's sampler slice re-blesses the goldens — so this copies each level
-//! of the page's image into a buffer and compares the bytes with the host's own
-//! chain. An upload that wrote every level into mip 0, skipped the lower ones,
-//! or read a level from the wrong staging offset lands different bytes in one
-//! of them and no golden would ever have said so.
+//! level. A picture cannot show it — a trilinear fetch blends whatever the
+//! levels hold — so this copies each level of the page's image into a buffer
+//! and compares the bytes with the host's own chain. An upload that wrote every
+//! level into mip 0, skipped the lower ones, or read a level from the wrong
+//! staging offset lands different bytes in one of them and no golden would ever
+//! have said so.
 
 use crate::harness::{Headless, poisoned};
 use crcbl::hal::{
