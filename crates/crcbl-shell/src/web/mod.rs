@@ -684,7 +684,8 @@ pub(crate) mod shim {
     /// Where the canvas's CSS `cursor` value starts in wasm memory.
     ///
     /// The shim reads `len` bytes from here once a frame and writes them to
-    /// `canvas.style.cursor`; see [`Bridge::cursor_css`]. The value is a
+    /// `canvas.style.cursor`; see
+    /// [`Bridge::cursor_css`](super::Bridge::cursor_css). The value is a
     /// `&'static str` in the module's own rodata, so the address is stable and
     /// there is nothing for the shim to free.
     ///
