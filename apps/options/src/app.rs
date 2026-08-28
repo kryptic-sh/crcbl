@@ -21,10 +21,11 @@
 //! # What it edits, and what it does not
 //!
 //! The six `[engine.audio]` bus gains, which are the cheapest settings to make
-//! real: they need no renderer change and no restart to write. The video half of
-//! `docs/plan/sample/20-options.md` — display mode, resolution, present mode,
-//! frame cap, the quality tiers — is not here yet, and neither is the audio to
-//! hear a bus with. `docs/backlog.md` carries both.
+//! real: they need no renderer change and no restart to write, and three of them
+//! carry sound — see [`crate::audio`] — so a fader is audible while it moves.
+//! The video half of `docs/plan/sample/20-options.md` — display mode,
+//! resolution, present mode, frame cap, the quality tiers — is not here yet.
+//! `docs/backlog.md` carries it.
 //!
 //! **Nothing in this process listens to these gains.** A settings file belongs
 //! to the application that wrote it — natively, `~/.config/<label>/` — so the
@@ -44,6 +45,7 @@ use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 use crcbl::store::settings::SettingsStack;
 
+use crate::audio::Audio;
 use crate::gpu::Gpu;
 use crate::menu::{Action, MenuKind, Menus};
 
@@ -163,6 +165,17 @@ impl Store {
         if headless { Self::None } else { Self::Platform }
     }
 
+    /// Whether the run this store belongs to is headless.
+    ///
+    /// The inverse of [`Store::for_run`], and the reason it is worth a method:
+    /// the audio side needs the same flag — a headless run wants
+    /// `AudioStream::open_null` — and deriving it here keeps one answer rather
+    /// than passing the bool down a second path that could disagree.
+    #[must_use]
+    pub const fn headless(self) -> bool {
+        matches!(self, Self::None)
+    }
+
     /// This store as the engine spells it.
     #[must_use]
     pub const fn source(self) -> SettingsSource<'static> {
@@ -205,6 +218,8 @@ pub struct Screen {
     /// The edit count the last heartbeat reported, so a moved fader is logged
     /// when it moves rather than up to a second later.
     logged_edits: u64,
+    /// The cues the faders are heard on. See [`crate::audio`].
+    audio: Audio,
 }
 
 /// The loop options runs in.
@@ -339,6 +354,11 @@ impl Screen {
             stack,
             store,
             handles: gains.map(crate::menu::handle_at),
+            // The mixer is opened on the gains this screen opened on, not on a
+            // second read of the file: two readers of one file is how a screen
+            // and the levels under it come to disagree about what the player
+            // set.
+            audio: Audio::new(store.headless(), &gains),
             gains,
             placed: false,
             edits: 0,
@@ -417,6 +437,10 @@ impl Screen {
     /// a drag the player made.
     fn set(&mut self, bus: Bus, gain: f32) {
         self.gains[bus.index()] = gain;
+        // The gain stage, moved with the number. This is the whole claim the
+        // audio half of the sample exists to make, and putting it anywhere but
+        // here is how a screen comes to show a level it is not applying.
+        self.audio.set_bus_gain(bus, gain);
         self.edits += 1;
         self.saved = SaveState::Unsaved;
         if let Err(error) = crcbl::settings::set_audio_gain(&mut self.stack, bus, gain) {
@@ -482,22 +506,26 @@ impl HostedGame for Screen {
         crate::menu::menus(&Bus::ALL.map(|bus| (bus, 1.0)))
     }
 
-    /// There is no simulation to step.
+    /// Nothing to simulate: a metronome, a counter and one line to log.
     ///
-    /// Not a stub: `docs/plan/sample/20-options.md` exempts this sample from
-    /// rules 2 and 10 by name — no game state, no `World`, no `GameModule`,
-    /// because the settings are the content. An empty body is what that looks
-    /// like.
-    /// Nothing to step, and one line to log.
+    /// `docs/plan/sample/20-options.md` exempts this sample from rules 2 and 10
+    /// by name — no game state, no `World`, no `GameModule`, because the
+    /// settings are the content — so what the tick does is keep the two clocks
+    /// a settings screen still needs.
     ///
-    /// The screen has no simulation — see this module's own docs — so the tick
-    /// exists to be *counted*. That count is the heartbeat, and the heartbeat is
-    /// what tells a paused loop from a running one from outside the process:
-    /// the windowed harness and the browser gate both read it, and neither can
-    /// ask this sample anything else, since a settings screen at rest looks
-    /// exactly like a settings screen whose loop has stopped.
-    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {
+    /// The **count** is the heartbeat, and the heartbeat is what tells a paused
+    /// loop from a running one from outside the process: the windowed harness
+    /// and the browser gate both read it, and neither can ask this sample
+    /// anything else, since a settings screen at rest looks exactly like a
+    /// settings screen whose loop has stopped.
+    ///
+    /// The **metronome** is the effects bus's content. It runs on the fixed
+    /// tick rather than on the frame, so the repeating effect keeps its period
+    /// whatever the display is doing — and a paused loop, which runs no ticks,
+    /// stops it, which is what a player pressing `ESC` is asking for.
+    fn tick(&mut self, _gpu: &mut Gpu, tick_dt: f64) {
         self.ticks += 1;
+        self.audio.advance(tick_dt);
         self.log_heartbeat();
     }
 
@@ -520,6 +548,10 @@ impl HostedGame for Screen {
     }
 
     fn apply(&mut self, action: Action) {
+        // One click for the press, before the action: `RESET` moves six gains
+        // through `set`, and a click per gain would be six clicks for one
+        // keypress.
+        self.audio.click();
         match action {
             Action::Save => self.save(),
             Action::Reset => self.reset(),
@@ -545,6 +577,7 @@ impl HostedGame for Screen {
                         // is, and writing the derived one back would fight the
                         // pointer for the rest of the drag.
                         self.handles[bus.index()] = position;
+                        self.audio.fader_moved(bus, position);
                     }
                     _ => {
                         // The other direction: the gain moved — `RESET`, or the
@@ -556,13 +589,21 @@ impl HostedGame for Screen {
                         // is not reads as a drag on the very next frame.
                         if let Some(position) = menu.slider(id) {
                             self.handles[bus.index()] = position;
+                            // Silent, and it carries the click's mark with the
+                            // handle — a `RESET` is not a drag, and leaving the
+                            // mark behind would click on the next drag's very
+                            // first frame.
+                            self.audio.fader_placed(bus, position);
                         }
                     }
                 }
                 // Every frame and unconditionally, so the number beside the
                 // groove is the gain that would be written if `SAVE` were
                 // pressed now.
-                menu.set_item_hint(id, crate::menu::percent(self.gains[bus.index()]));
+                menu.set_item_hint(
+                    id,
+                    crate::menu::fader_hint(self.gains[bus.index()], Audio::sounds(bus)),
+                );
             }
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
@@ -578,6 +619,15 @@ impl HostedGame for Screen {
         _draw_list: &mut crcbl::ui::draw_list::DrawList,
         _frame: FrameInfo,
     ) {
+    }
+
+    /// The audio section, which is this sample's only live system.
+    ///
+    /// The engine's own sections carry the frame times and the GPU; what only
+    /// this sample can report is whether its cues are reaching a mixer, which
+    /// is the thing a fader is claiming to control.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        panel.add(&self.audio);
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -799,6 +849,70 @@ mod tests {
             reopened.gain(Bus::Ambience),
         );
         assert_eq!(reopened.gain(Bus::Music), 1.0, "nothing else moved");
+    }
+
+    /// **The other half of the round trip: the key reaches a gain stage.**
+    ///
+    /// Every other test here reads the number back off the stack, which a
+    /// screen that showed a level it never applied would pass exactly as well.
+    /// This one reads it off the mixer the voices are multiplied by.
+    #[test]
+    fn moving_a_fader_moves_the_gain_stage_and_not_only_the_key() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            screen.audio.bus_gain(Bus::Music),
+            1.0,
+            "an empty file is unity"
+        );
+
+        menus
+            .get_mut(MenuKind::Settings)
+            .expect("the one menu")
+            .set_slider(crate::menu::fader_id(Bus::Music), 0.5);
+        reconcile(&mut screen, &mut menus);
+
+        assert!(
+            (screen.audio.bus_gain(Bus::Music) - 0.25).abs() < 1e-6,
+            "the mixer is at {} while the screen shows {}",
+            screen.audio.bus_gain(Bus::Music),
+            screen.gain(Bus::Music),
+        );
+        assert_eq!(
+            screen.audio.bus_gain(Bus::Sfx),
+            1.0,
+            "one fader moved one stage",
+        );
+    }
+
+    /// A screen opened over a file has the mixer on that file's gains before
+    /// anything is reconciled — the faders walk down to the file, the levels do
+    /// not have to.
+    #[test]
+    fn a_screen_opens_with_the_mixer_already_on_the_file_s_gains() {
+        let (screen, _) = screen("[engine.audio]\nmusic_volume = 0.25\n");
+        assert!((screen.audio.bus_gain(Bus::Music) - 0.25).abs() < 1e-6);
+    }
+
+    /// **A fader that moves nothing audible says so.**
+    ///
+    /// `docs/plan/sample/20-options.md`'s exit criteria want a control with no
+    /// implementation labelled as such, and two of the six buses have no cue —
+    /// see [`crate::audio`]. Without the mark they are indistinguishable from
+    /// audio that is broken.
+    #[test]
+    fn a_bus_with_nothing_on_it_says_so_beside_its_gain() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+
+        for bus in Bus::ALL {
+            let hint = hint(&mut menus, crate::menu::fader_id(bus));
+            assert_eq!(
+                hint.contains(crate::menu::SILENT_MARK),
+                !Audio::sounds(bus),
+                "{bus:?}'s row reads {hint:?}",
+            );
+        }
     }
 
     /// A headless run must not write into whichever home directory it is

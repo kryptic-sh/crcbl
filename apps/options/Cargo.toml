@@ -8,9 +8,8 @@ repository.workspace = true
 publish = false
 
 # **A library with two front ends, like every other sample.** `src/main.rs` owns
-# argv and the exit code; the browser entry point this shape exists for is not
-# built yet — see `docs/backlog.md` — and the layout is the samples' anyway, so
-# the wasm half lands without moving anything.
+# argv and the exit code; `src/web.rs` carries the `__crcbl_options_*` ABI the
+# page at `/demos/options/` is driven through.
 #
 # The lib is not called `options`: a lib and a bin of the same name in one
 # package write the same `options.wasm`, which cargo calls an output filename
@@ -23,9 +22,11 @@ crate-type = ["cdylib", "rlib"]
 name = "options"
 path = "src/main.rs"
 
-# One engine dependency. No `build-dependencies`: this sample is **exempt from
-# sample rule 11** (`.crpix` art through the sprite pass) on the same ground
-# `apps/hud` is — its subject is a screen — and its own plan doc says so.
+# One engine dependency — the mixer and the synthesiser `src/audio.rs` plays
+# through are `crcbl::audio`, which is a re-export. No `build-dependencies`:
+# this sample is **exempt from sample rule 11** (`.crpix` art through the sprite
+# pass) on the same ground `apps/hud` is — its subject is a screen — and its own
+# plan doc says so.
 [dependencies]
 crcbl = { workspace = true }
 

@@ -101,6 +101,26 @@ pub fn percent(gain: f32) -> String {
     format!("{:.0}%", gain * 100.0)
 }
 
+/// The whole hint on a bus's row: its gain, and a mark when the bus carries
+/// nothing to hear.
+///
+/// `docs/plan/sample/20-options.md`'s exit criteria want a control with no
+/// implementation to say so. Two of the six buses have no content — see
+/// [`crate::audio`] — and their faders write a key that nothing in this process
+/// reads back as sound, which without the mark is indistinguishable from broken
+/// audio.
+#[must_use]
+pub fn fader_hint(gain: f32, audible: bool) -> String {
+    if audible {
+        percent(gain)
+    } else {
+        format!("{} {SILENT_MARK}", percent(gain))
+    }
+}
+
+/// What [`fader_hint`] writes after the gain of a bus with nothing on it.
+pub const SILENT_MARK: &str = "(silent)";
+
 /// The label a bus wears on its row.
 #[must_use]
 pub const fn label(bus: Bus) -> &'static str {

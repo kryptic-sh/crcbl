@@ -18,12 +18,14 @@
 //!
 //! # What is here, and what the document still wants
 //!
-//! Its milestone 1, minus the sound: the six `[engine.audio]` bus gains, edited
-//! on a screen, written to the player's own settings file and read back at the
-//! next start. What is **not** here is anything to hear those buses with, the
-//! video half of the catalogue, and the browser build sample rule 7 requires.
-//! `docs/backlog.md` carries all three, and [`app`]'s module docs say what the
-//! audio one costs.
+//! Its milestone 1: the six `[engine.audio]` bus gains, edited on a screen,
+//! written to the player's own settings file, read back at the next start, and —
+//! since [`audio`] landed — audible while they move, so a fader is a gain stage
+//! rather than a key nothing reads. The browser build sample rule 7 requires is
+//! here too, and the browser gate drives the whole round trip through it.
+//!
+//! What is **not** here is the video and graphics halves of the catalogue —
+//! milestones 2 and 3 — which `docs/backlog.md` carries.
 //!
 //! # It steps no simulation and loads no art
 //!
@@ -36,11 +38,14 @@
 //!
 //! Like every other sample, this is a library because it has to be reachable
 //! from two places that share nothing else: `src/main.rs` for the native binary,
-//! and — once the web half lands — a browser entry point driven from
-//! `requestAnimationFrame`. Everything below them is shared verbatim.
+//! and `src/web.rs` for a browser entry point driven from
+//! `requestAnimationFrame` — behind `cfg(target_arch = "wasm32")`, so it is not
+//! in these docs unless they were built for that target.
+//! Everything below them is shared verbatim.
 
 pub mod app;
 mod args;
+pub mod audio;
 pub mod gpu;
 pub mod menu;
 
@@ -52,4 +57,5 @@ pub use app::{
     Summary, run, start, with_shell,
 };
 pub use args::{DEFAULT_TICK_HZ, Invocation, USAGE, parse};
+pub use audio::Audio;
 pub use menu::{Action, MenuKind, Menus};

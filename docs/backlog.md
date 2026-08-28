@@ -21620,21 +21620,34 @@ with the flight instruments over it. What that leaves:
 
 ## `apps/options` — what the first slice left (2026-08-28)
 
-`docs/plan/sample/20-options.md`'s milestone 1 is built minus its sound: six
-faders over the `[engine.audio]` buses, a `SAVE` that writes the user layer and
-says where it went, a `RESET` to unity, and a start that places the faders from
-the player's own file. `menu::menus` and `app::Screen` are the whole sample.
-What that leaves:
+`docs/plan/sample/20-options.md`'s milestone 1 is built: six faders over the
+`[engine.audio]` buses, three of them on cues from `apps/options/src/audio.rs`,
+a `SAVE` that writes the user layer and says where it went, a `RESET` to unity,
+and a start that places the faders — and the mixer — from the player's own file.
+`menu::menus`, `app::Screen` and `audio::Audio` are the whole sample. What that
+leaves:
 
-- **It is silent, so a bus gain is a number rather than a level.** The plan's
-  scope wants "a music loop, a repeating effect, a UI click on the widgets
-  themselves", and its exit criteria want music and effects independently
-  _audible_; sample rule 8 wants the sound to go through `crcbl-audio`. The
-  sample links no audio at all — `apps/options/Cargo.toml` depends on `crcbl`
-  and nothing else, and no `Mixer` is built. What it costs is three cues, a
-  mixer, and `SettingsSource::apply_audio_gains` at start-up, which four other
-  samples already call. Until then nothing in the workspace demonstrates that a
-  saved gain reaches a gain stage: the round trip is proven as far as the key.
+- **Nobody has listened to it.** The gain stage is asserted rather than heard:
+  `pulling_the_music_bus_down_makes_the_mix_quieter` in
+  `apps/options/src/audio.rs` measures a block of the mix at two gains, which is
+  as far as a test can take the plan's "independently audible". What no check
+  covers is whether the three cues are _distinguishable_ by ear, whether the
+  drone is tolerable to sit in front of, and whether the detent click lands at a
+  sensible rate under a real pointer drag — all of which are one run of
+  `cargo run -p options` on a machine with a device, and none of which has
+  happened.
+
+- **The browser gate asserts nothing about audio, for any demo.** Every page
+  starts the worklet from `web/engine/demo.js`, and `web/tools/browser-e2e.mjs`
+  has no audio check in any `EXPECTATIONS` row — so options' cues, which are now
+  the sample's subject, are unverified in the browser even though the round trip
+  beside them is gated on every push. `demo.js` already exposes an `audio` stat
+  through the status object (`renderRate`, `engineUnderruns` among others), so
+  the cheapest shape is a group check that reads it back and requires the render
+  rate to be moving. Whether a page that has taken no user gesture can start its
+  `AudioContext` under CDP at all is the thing to establish first: if it cannot,
+  the honest check is that the demo reports a suspended context rather than an
+  error.
 
 - **The `Nowhere` case has never been reached on a real platform.** The round
   trip itself is gated in a browser as of 2026-08-28 — `EXPECTED.settings` in

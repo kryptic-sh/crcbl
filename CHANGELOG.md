@@ -35,9 +35,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the player's own settings file on `SAVE`, and places them from that file on
   the next start. `RESET` puts every bus back to unity. It is the first
   application to write a setting: `SettingsStack::save_platform` shipped with no
-  caller a player could reach, and this is it. The sample is silent so far, so a
-  gain is a number on the screen rather than a level to hear, and the video half
-  of the catalogue is not on it yet — `docs/plan/sample/20-options.md` has both.
+  caller a player could reach, and this is it. The video half of the catalogue
+  is not on the screen yet — `docs/plan/sample/20-options.md` has it.
+
+  **The faders are audible while they move.** `apps/options`'s `audio` module
+  puts three of the six buses on content a player can tell apart by behaviour
+  rather than by timbre: a looping tone on `Bus::Music` from start-up, a noise
+  tick once a second on `Bus::Sfx`, and a click on `Bus::Ui` each time a fader
+  passes a detent or a button is pressed. `Bus::Master` multiplies all three, so
+  the routing is audible too. Moving a fader moves `Mixer::set_bus_gain` in the
+  same call that writes the key, so what a player hears and what `SAVE` would
+  write cannot come apart — and a run opens with the mixer already on the file's
+  gains, before the first sound. `Bus::Voice` and `Bus::Ambience` carry nothing,
+  and their rows now say `(silent)` beside the percentage rather than leaving a
+  player to wonder whether their audio is broken.
 
   **It runs in a browser too**, at `/demos/options/`, from the same build that
   runs natively. That half is the point of the sample rather than a bonus: a tab

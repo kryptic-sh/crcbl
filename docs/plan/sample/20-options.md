@@ -100,10 +100,23 @@ machinery. Verified against the tree on 2026-08-28:
 - **There is a settings UI, and it edits the audio half.** `apps/options` is
   built: `menu::menus` lays out a fader per bus over the styled widget set,
   `app::Screen` reconciles the faders against the keys every frame, and `SAVE`
-  writes the user layer through `SettingsSource::save`. It is milestone 1 minus
-  the sound. What the workspace still has no screen for is the video and
-  graphics halves — milestones 2 and 3 — which is now the largest single thing
-  this sample owes.
+  writes the user layer through `SettingsSource::save`. What the workspace still
+  has no screen for is the video and graphics halves — milestones 2 and 3 —
+  which is now the largest single thing this sample owes.
+- **The faders reach a gain stage**, as of 2026-08-28:
+  `apps/options/src/audio.rs` banks a looping tone on `Bus::Music`, a noise tick
+  once a `TICK_PERIOD` on `Bus::Sfx` and a click on `Bus::Ui`, and `Screen::set`
+  — the one place a gain changes — moves `Mixer::set_bus_gain` in the same call
+  that writes the key. `Bus::Voice` and `Bus::Ambience` have no content, which
+  `Audio::sounds` answers and `menu::fader_hint` writes on the row as
+  `(silent)`.
+
+  What is asserted is the mixer, not a room:
+  `pulling_the_music_bus_down_makes_the_mix_quieter` measures a block of the mix
+  at two gains, which is as far as a test can take "audible". **Nobody has
+  listened to it on hardware.** That is the gap between this and the exit
+  criterion below.
+
 - **The screen runs in a browser**, as of 2026-08-28: `apps/options/src/web.rs`
   carries the `__crcbl_options_*` ABI, `web/demos/options/` and
   `web/pages/options.html` are the page, and both browser-gate jobs run it. Its
@@ -130,10 +143,11 @@ machinery. Verified against the tree on 2026-08-28:
    browser gate on every push — which drives the round trip through the
    keyboard, finds `settings.toml` in the OPFS root, reloads onto the saved gain
    and then wipes the store and requires unity back. What is left of this
-   milestone is **something to hear**: the sample is silent, so a bus gain is a
-   number the screen shows rather than a level anyone can check by ear.
-   `docs/backlog.md` carries it, along with the one browser case still unreached
-   — a page with no store installed, which is `SaveState::Nowhere`.
+   milestone is **audible in a browser and on hardware**: the cues are there and
+   the mixer is measured, but the browser gate asserts nothing about audio for
+   any demo, and no run of this sample has been listened to. `docs/backlog.md`
+   carries both, along with the one browser case still unreached — a page with
+   no store installed, which is `SaveState::Nowhere`.
 2. **The video half**: display mode, resolution, present mode, frame cap, and
    the requested-versus-resolved display of the clamp.
 3. **The graphics half**: the quality tiers over the technique ladders, the
