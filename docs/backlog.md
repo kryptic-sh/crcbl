@@ -169,86 +169,46 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
-### `TIMEOUT_MS` is the one budget the slowdown does not scale (2026-08-28)
+### The poll ceiling now scales, and shard is a 111x demo (2026-08-28)
 
-**One cause, three failing checks, two demos, and it is flaky.** The Pages
-fan-out gave every demo a clock of its own and the gates went from "killed on a
-cap" to "reporting verdicts". Three of those verdicts are red, and all three are
-an `until()` poll that ran out of wall clock while the demo was still
-simulating.
+**The three red checks that opened this entry had one cause and it is fixed.**
+`web/tools/browser-e2e.mjs` measured its `slowdown` in group E and defaulted
+every `until()` to an unscaled `TIMEOUT_MS`, so groups B and C ran on a fast
+desktop's constants and a poll waiting on the simulation got wall clock rather
+than game time. The measurement moved to group B, `slowdown`/`budget` moved to
+module scope, and `until` now defaults to `pollCeiling()` —
+`min(budget(TIMEOUT_MS), POLL_WALL_CAP_MS)`, five minutes. Verified locally on
+hud: 43/43 at 1.0x, and 43/43 again with `NOMINAL_BEAT_MS` sabotaged to 100 so
+the calibration reported 9.8x and the printed ceiling moved to the capped 300
+000 ms.
 
-`web/tools/browser-e2e.mjs` scales every wall-clock budget by a measured
-`slowdown` — `budget(ms)` at its definition, and the heartbeat control prints
-the factor. **`TIMEOUT_MS` is not one of them.** It is 90 000 ms, it is the
-default ceiling of `until(probe, timeout = TIMEOUT_MS)`, and it therefore bounds
-every poll in the file. On a runner where a demo advances one simulated second
-per 33 wall-clock seconds, those 90 seconds buy under three seconds of game
-time.
+**What that leaves open is whether five minutes is enough for shard**, and only
+CI can say. The cap was derived from the slowest thing measured — shard drew 15
+of group I's 20 frames in 90 s on 2026-08-28, so six wall seconds a frame and
+120 s for the window — and from the `demos` job's own `timeout-minutes: 45`,
+which three polls burning a five-minute cap leaves near 28 minutes. But shard's
+group C checks wait on gameplay, not frames: at 111.2x a five-minute poll is 2.7
+simulated seconds of walking at a foe, and nothing has measured how many the foe
+needs. If they still expire, the next reader has the number in the group B line
+and should raise the cap or denominate that check in beats rather than shrink
+what it asks for.
 
-The three:
+**The other half of the finding is untouched: shard runs at 111.2x under
+SwiftShader**, against 1.0x for most of the site and 28.4x for puppet, and it
+draws a frame every six seconds. That is a rendering cost, not a harness one,
+and the shadow-filter entry above is where its instrument lives. Nothing has
+profiled a browser frame of shard.
 
-- **puppet `C: the controller climbs the step inside its own step offset`**, and
-  the check paired with it about the step it must refuse. "it never got onto the
-  0.3 m step while pushing — climbed 0, blocked 0, feet 0.01 m". 48/50 twice —
-  at 33.3x on `a9af261` and 29.6x on `0552320`. **puppet passed 50/50 on
-  `c26d16e`**, the run before those, so the threshold sits somewhere near 30x
-  and which side of it a run lands on is the runner's mood. Both checks pass in
-  seconds locally under SwiftShader, so the controller itself is not the
-  subject.
-- **shard, whichever group C check the ceiling happens to land on.** 52/54 on
-  both runs, and **not the same two checks**: `c26d16e` failed "and a foe's
-  ability costs them health" while "a foe engages the character" passed at 85.8
-  s, and `0552320` failed "a foe engages the character" instead. At 88.9x and
-  89.1x a 90-second poll is about one simulated second, and which check runs out
-  of it first is not a fact about the game. **Nothing here is evidence of a
-  gameplay defect**, and going to read shard's ability cooldown on the strength
-  of it is the specific mistake this bullet exists to prevent.
-- **shard `I: a steady-state frame gives back everything it takes`** — "drew
-  fewer than 20 more frames in 90000 ms", which the message itself calls a
-  non-verdict. `FRAMES_WATCHED` is 20 over `WINDOWS` of 3, sized against
-  quarry's measured two frames per three seconds under SwiftShader; shard is
-  slower again.
+**Nothing here was ever evidence of a gameplay defect**, and going to read
+shard's ability cooldown on the strength of a red group C check is the specific
+mistake this entry exists to prevent — the failing check moved between runs
+(`c26d16e` failed "a foe's ability costs them health" where `0552320` and
+`9705f12` failed "a foe engages the character"), which is a stopwatch, not a
+game.
 
-**Group C is worse than the rest, because the factor is not known yet.** The
-heartbeat control that measures `slowdown` is in group **E**. Groups B and C run
-before it, so even the budgets that _are_ scaled are scaled by 1 there. Two of
-the three above are group C.
-
-**What it would take, and what it must not be.** The naive fix — default `until`
-to `budget(TIMEOUT_MS)` — does not work: 88.9 × 90 s is 133 minutes for a single
-failing poll, and no job cap fits that. Two things have to be settled first, and
-neither is a number to pick:
-
-1. **Move the beat measurement ahead of group B**, so a scaled budget is
-   available to every group rather than to E onwards.
-2. **Decide what a poll ceiling should be denominated in.** Wall clock is the
-   wrong unit for "the character walked up a step" — the demo needs simulated
-   time, which the harness already measures as `beat`. A ceiling in beats scales
-   by construction and cannot produce a 133-minute wait.
-
-Shrinking `FRAMES_WATCHED` to fit is the move to avoid: the check's own comment
-argues any size catches a per-frame leak, but a smaller window is more easily
-satisfied by noise and the three-window rule is what buys the teeth.
-
-**Both numbers are now printed, as of 2026-08-28**, so the next run of each gate
-is the sweep rather than the next reader's guess:
-
-- The heartbeat control's line says what the ceiling is worth in the unit the
-  checks are written in — "every later budget scaled 88.9x, and the 90000 ms
-  poll ceiling buys 1.01 simulated second(s)". Measured locally on hud at 1.0x,
-  where it reads 88.85.
-- Group I says how many frames it got — "the demo drew 5400 of the 2000000
-  frames this window wanted" under a sabotaged `FRAMES_WATCHED`, against the old
-  "fewer than 20", which was true of every slow runner and distinguished none of
-  them.
-
-Neither changes a verdict. What is still owed is the decision above: the ceiling
-itself is unchanged, and until it moves these lines only make a red log legible.
-
-None of this is a regression from the fan-out. shard's gate had produced no
-verdict at all before, and puppet's group C had never run at a 33x slowdown
-without something ahead of it dying first. It does block the deploy, because
-`deploy` needs `demos`.
+Shrinking `FRAMES_WATCHED` to fit is still the move to avoid: the check's own
+comment argues any size catches a per-frame leak, but a smaller window is more
+easily satisfied by noise and the three-window rule is what buys the teeth.
 
 ### The macOS probe job hangs on quarry, and had not run in nine attempts (2026-08-28)
 

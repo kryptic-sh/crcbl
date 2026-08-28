@@ -793,7 +793,7 @@ const EXPECTATIONS = {
     // simulated second — `apps/breach/src/game.rs`'s `HEARTBEAT_TICKS` says why,
     // and it is this gate: every wait the two blocks below make is a whole
     // number of heartbeats, so the period is what the step costs. Declared here
-    // because group E divides by it to work out how far behind real time this
+    // because group B divides by it to work out how far behind real time this
     // machine is running the demo, and a wrong denominator there shrinks every
     // budget that reading scales.
     beatMs: 500,
@@ -971,7 +971,7 @@ const EXPECTATIONS = {
     // shortest on the site — `apps/shard/src/game.rs`'s `HEARTBEAT_TICKS`
     // argues it, and the argument is this gate: shard is the heaviest scene
     // here, so every wait measured in beats is what its browser step costs.
-    // Group E divides by this to work out how far behind real time the machine
+    // Group B divides by this to work out how far behind real time the machine
     // is running the demo.
     beatMs: 250,
     // Read off the *first* line. `ground: yes` is `MoveOutcome::grounded`, which
@@ -1556,12 +1556,17 @@ const TICK_WINDOW_BEATS = 2;
 const NOMINAL_BEAT_MS = 1_000;
 
 /**
- * How long the run waits for two heartbeats before calling the tick loop dead.
+ * How long group E's heartbeat control waits before calling the tick loop dead.
  *
  * Generous, because the whole point is that this machine's pace is unknown; the
  * check it feeds is what fails when nothing arrives, so an over-long deadline
- * costs time on a broken run and never turns a red one green. Bounded by
- * `TIMEOUT_MS`, so `--timeout` still governs the run.
+ * costs time on a broken run and never turns a red one green. Scaled and then
+ * bounded by `pollCeiling`, so `--timeout` still governs the run.
+ *
+ * **Group B's calibration does not use it** and waits `TIMEOUT_MS` per line
+ * instead: that measurement is the one thing that cannot be scaled by its own
+ * answer, and shard's 27.8 s beat leaves this deadline one doubling from
+ * reporting a slow demo as a dead one.
  */
 const HEARTBEAT_DEADLINE_MS = 60_000;
 
@@ -1932,12 +1937,64 @@ if (!['auto', 'hardware', 'swiftshader'].includes(ADAPTER)) {
 }
 
 /**
+ * **How far behind real time this machine is running the demo**, and the one
+ * number every budget in this file is scaled by.
+ *
+ * Set once, out of the heartbeat group B measures, and 1 until then — so the
+ * checks that run before the measurement keep the constants they were written
+ * with, and every check after it gets those constants in the demo's own time.
+ * `TICK_WINDOW_MS` was not the only constant calibrated on a fast desktop:
+ * `PADDLE_SETTLE_MS` is 1500 ms for a batch fold plus a log drain, and on a
+ * runner advancing a simulated second every 27 seconds it expired before the
+ * two lifts it waits for arrived, which is one red CI run per constant if they
+ * are fixed one at a time.
+ *
+ * Never below 1, so a machine that keeps up is unchanged and no budget can come
+ * out *shorter* than the constant already gave it — that direction would weaken
+ * every check watching nothing happen.
+ */
+let slowdown = 1;
+
+/** A constant calibrated at a slowdown of 1, in this machine's wall clock. */
+const budget = (ms) => Math.round(ms * slowdown);
+
+/**
+ * The wall clock no single poll may exceed, however slow the demo is running.
+ *
+ * `budget(TIMEOUT_MS)` is 90 simulated seconds, which is what the ceiling has
+ * always been worth on a machine that keeps pace — and on shard under
+ * SwiftShader, measured at 111.2x on 2026-08-28, it is two and three quarter
+ * *hours*. So the ceiling is two-sided: the demo's own time is what a check
+ * waiting on the simulation needs, and this is what stops one stuck poll eating
+ * the runner.
+ *
+ * Five minutes, from the slowest thing measured against the slowest demo:
+ * shard's group I drew 15 of 20 frames in 90 s on 2026-08-28, so a 20-frame
+ * window there costs 120 s and this leaves it two and a half times that. The
+ * ceiling above it is the `demos` job's own `timeout-minutes: 45` in
+ * `.github/workflows/pages.yml`; shard's red run spent 18 minutes with three
+ * polls burning the unscaled ceiling, and three polls burning this one instead
+ * lands near 28, which is the arithmetic this number was chosen by.
+ */
+const POLL_WALL_CAP_MS = 300_000;
+
+/**
+ * The default poll ceiling: `TIMEOUT_MS` of the demo's time, bounded by wall.
+ *
+ * A function rather than a constant because `slowdown` is not known until group
+ * B has watched two heartbeats, and `until`'s default argument is evaluated per
+ * call — so the polls before the measurement get the unscaled ceiling and every
+ * one after it gets the scaled one, with no site having to opt in.
+ */
+const pollCeiling = () => Math.min(budget(TIMEOUT_MS), POLL_WALL_CAP_MS);
+
+/**
  * Polls until the condition holds, on this gate's own `--timeout` by default.
  *
  * The poll itself is shared — see `until` in `web/tools/browser-launch.mjs`,
  * which takes its deadline rather than keeping one.
  */
-const until = (probe, timeout = TIMEOUT_MS) => pollUntil(probe, timeout);
+const until = (probe, timeout = pollCeiling()) => pollUntil(probe, timeout);
 
 // ---------------------------------------------------------------------------
 // The static server
@@ -2579,6 +2636,70 @@ try {
     throw new Error(`the demo never started running: ${detail}`);
   }
 
+  const hud = () => consoleLines.filter((line) => line.includes('[HUD]'));
+
+  // **The beat is measured, not assumed.** Waiting for two lines and timing the
+  // gap is what makes every window below fit this machine: a desktop answers in
+  // well under the floor and nothing changes, and a runner whose frames are
+  // slow enough to stretch a simulated second past four wall seconds gets a
+  // window that still holds a beat. Two lines rather than one because an
+  // interval needs two ends — the wait for the first one absorbs whatever phase
+  // the run happens to start in.
+  const heartbeatMs = async (deadline) => {
+    const start = hud().length;
+    const began = Date.now();
+    const first = await until(
+      async () => (hud().length > start ? Date.now() : null),
+      deadline
+    );
+    if (first === null) return null;
+    const second = await until(
+      async () => (hud().length > start + 1 ? Date.now() : null),
+      deadline
+    );
+    return second === null
+      ? null
+      : { beat: second - first, waited: second - began };
+  };
+
+  // **MEASURED HERE AND NOT WHERE IT USED TO BE.** This lived in group E, which
+  // put every budget in groups C and D on constants a fast desktop had chosen
+  // and left the slow runners' checks to expire against them: three went red
+  // that way on 2026-08-28 — puppet's step climb twice at 28.4x and shard's foe
+  // ability at 111.2x — each having waited a full unscaled ceiling for a thing
+  // the demo had not had the time to reach. Group B is the first point at which
+  // there is anything to measure, since the demo has only just reached
+  // `STATUS_RUNNING`, and it is before the first check that waits on the
+  // simulation to do something.
+  //
+  // On `TIMEOUT_MS` rather than `HEARTBEAT_DEADLINE_MS`, because this is the
+  // one wait that cannot be scaled by the answer it is going to produce: a demo
+  // whose beat is slower than the deadline reports no beat at all, and the
+  // scaling that follows would then be the fast desktop's again. shard's beat
+  // was 27.8 s, so 60 s left it one doubling from unmeasurable.
+  const pace = await heartbeatMs(TIMEOUT_MS);
+  const nominalBeat = EXPECTED.beatMs ?? NOMINAL_BEAT_MS;
+  slowdown = pace ? Math.max(1, pace.beat / nominalBeat) : 1;
+
+  // Reported in **simulated seconds** as well as in the factor, because that is
+  // the unit the checks below are really written in: they wait for a character
+  // to walk somewhere, for a foe to notice, for twenty frames to be drawn. A
+  // reader holding a red log should not have to divide the ceiling by the beat
+  // themselves to see whether a failure is a finding or a stopwatch.
+  const pollSimSeconds = pollCeiling() / slowdown / 1000;
+  check(
+    'B',
+    'the demo ticks, and says how far behind the wall clock it is',
+    pace !== null,
+    pace === null
+      ? `no second HUD line in ${TIMEOUT_MS} ms`
+      : `two HUD lines ${pace.beat} ms apart against a nominal ` +
+          `${nominalBeat} ms, in ${pace.waited} ms — every later budget ` +
+          `scaled ${slowdown.toFixed(1)}x, and a poll now ceilings at ` +
+          `${pollCeiling()} ms, which buys ` +
+          `${pollSimSeconds.toFixed(2)} simulated second(s)`
+  );
+
   // The focus half runs for every demo — a canvas that cannot take the keyboard
   // is a paused demo whatever it is — and the key half only where there is a key.
   group(
@@ -2587,7 +2708,6 @@ try {
       : 'C — the simulation drives itself'
   );
 
-  const hud = () => consoleLines.filter((line) => line.includes('[HUD]'));
   await until(async () => hud().length > 0);
   const beforeLaunch = hud().length;
   check(
@@ -4130,7 +4250,7 @@ try {
         out.mean <= lit.mean * TORCH_DARKER_RATIO &&
         out.flattest < TORCH_FLAT_SHARE,
       doused === null
-        ? `no heartbeat in ${TIMEOUT_MS} ms said the torches were out — the key ` +
+        ? `no heartbeat in ${pollCeiling()} ms said the torches were out — the key ` +
             `never reached the game, so nothing below is about the lighting`
         : `${readWindow(out)}; asked for a swing under ${TORCH_STILL_LUMA}, a ` +
             `mean under ${(lit.mean * TORCH_DARKER_RATIO).toFixed(2)} (the lit ` +
@@ -4154,7 +4274,7 @@ try {
         back.frames > 1 &&
         back.spread >= TORCH_FLICKER_LUMA,
       relit === null
-        ? `no heartbeat in ${TIMEOUT_MS} ms said the torches were lit again`
+        ? `no heartbeat in ${pollCeiling()} ms said the torches were lit again`
         : `${readWindow(back)}; ${TORCH_FLICKER_LUMA} of swing asked for`
     );
   }
@@ -4487,7 +4607,7 @@ try {
             `with nothing queued in wasm — written on the beat that reported ` +
             `saves: ${written.writes}`
         : written === null
-          ? `no heartbeat in ${TIMEOUT_MS} ms reported a save past the ` +
+          ? `no heartbeat in ${pollCeiling()} ms reported a save past the ` +
             `${writesBefore} this page had already made`
           : `after ${written.writes} save(s) the OPFS root held ` +
             `${JSON.stringify((await storage()).files)}, queued ` +
@@ -4524,7 +4644,7 @@ try {
       'a reloaded page resumes the character the last one saved',
       restored,
       resumedBeat === null
-        ? `no heartbeat in ${TIMEOUT_MS} ms after the reload`
+        ? `no heartbeat in ${pollCeiling()} ms after the reload`
         : `it came up "resumed: ${resumedBeat.resumed}" at pz ${resumedBeat.along} ` +
             `with ${resumedBeat.alive} of ${save.count} foes standing, ` +
             `${resumedBeat.health} health and ${resumedBeat.downs} down(s); ` +
@@ -4617,7 +4737,7 @@ try {
             `${JSON.stringify(wiped?.left ?? null)}, queued ` +
             `${JSON.stringify(settled)}`
         : freshBeat === null
-          ? `no heartbeat in ${TIMEOUT_MS} ms after the reload`
+          ? `no heartbeat in ${pollCeiling()} ms after the reload`
           : `with ${wiped.removed.join(', ')} removed it came up ` +
             `"resumed: ${freshBeat.resumed}" at pz ${freshBeat.along} with ` +
             `${freshBeat.alive} of ${save.count} foes standing, ` +
@@ -5038,7 +5158,7 @@ try {
       Boolean(dropped),
       dropped
         ? dropped.trim()
-        : `no heartbeat in ${TIMEOUT_MS} ms said ${EXPECTED.drop.openedLabel} — ` +
+        : `no heartbeat in ${pollCeiling()} ms said ${EXPECTED.drop.openedLabel} — ` +
             `the last of ${hud().length - beforeDrop} since the drop was ` +
             `"${(hud().at(-1) ?? 'none').trim()}", and the status bar says ` +
             `"${await detailLine()}"`
@@ -5221,82 +5341,27 @@ try {
   // of the last paddle input, so a still board is the *normal* state by this
   // point in the run and "the picture stopped changing" passes whether or not
   // anything paused. A line that only the tick loop can emit does not.
-  // **The beat is measured, not assumed.** Waiting for two lines and timing the
-  // gap is what makes every window below fit this machine: a desktop answers in
-  // well under the floor and nothing changes, and a runner whose frames are
-  // slow enough to stretch a simulated second past four wall seconds gets a
-  // window that still holds a beat. Two lines rather than one because an
-  // interval needs two ends — the wait for the first one absorbs whatever phase
-  // the run happens to start in.
-  const heartbeatMs = async () => {
-    const start = hud().length;
-    const began = Date.now();
-    const first = await until(
-      async () => (hud().length > start ? Date.now() : null),
-      Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)
-    );
-    if (first === null) return null;
-    const second = await until(
-      async () => (hud().length > start + 1 ? Date.now() : null),
-      Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)
-    );
-    return second === null
-      ? null
-      : { beat: second - first, waited: second - began };
-  };
-
   // The control, and it is what makes every check after it mean something: a
   // tick loop that emits nothing fails here, loudly, instead of the pause check
   // passing for free on a run where no heartbeat could have appeared anyway.
-  const beat = await heartbeatMs();
+  //
+  // **Measured again rather than read off group B's**, because the question
+  // here is about *this* point in the run: everything between the two has
+  // clicked, dragged and held keys at the demo, and a tick loop that stopped
+  // somewhere in there is exactly what would make the pause check below pass
+  // for nothing. Group B's answer is a calibration; this one is a heartbeat.
+  const beat = await heartbeatMs(
+    Math.min(budget(HEARTBEAT_DEADLINE_MS), pollCeiling())
+  );
 
-  // **How far behind real time this machine is running the demo**, and the one
-  // number every later budget is scaled by. `TICK_WINDOW_MS` was not the only
-  // constant calibrated on a fast desktop — `PADDLE_SETTLE_MS` is 1500 ms for a
-  // batch fold plus a log drain, and on a runner advancing a simulated second
-  // every 27 seconds it expired before the two lifts it waits for arrived, which
-  // is one red CI run per constant if they are fixed one at a time.
-  //
-  // Never below 1, so a machine that keeps up is unchanged and no budget can
-  // come out *shorter* than the constant already gave it — that direction would
-  // weaken every check watching nothing happen. A machine faster than nominal
-  // therefore reports `1.0x` rather than a fraction: the ratio is a curiosity,
-  // the factor actually applied is what a reader needs when a later check fails.
-  // `beat === null` means the control below has already failed, so the run is
-  // red whatever this says.
-  const nominalBeat = EXPECTED.beatMs ?? NOMINAL_BEAT_MS;
-  const slowdown = beat ? Math.max(1, beat.beat / nominalBeat) : 1;
-  const budget = (ms) => Math.round(ms * slowdown);
-
-  // **THE ONE BUDGET `slowdown` DOES NOT SCALE, REPORTED RATHER THAN LEFT TO BE
-  // DIVIDED OUT.** `TIMEOUT_MS` is the default ceiling of every `until()` in
-  // this file, and it is wall clock: a poll waiting on the simulation to *do*
-  // something gets `TIMEOUT_MS / beat` of game time, which on a runner at 88.9x
-  // is one second. Three checks went red that way on 2026-08-28 — puppet's step
-  // climb twice and shard's foe ability — each having waited the full ceiling
-  // for a thing the demo had not had time to reach.
-  //
-  // Printed in **simulated seconds** because that is the unit those checks are
-  // really written in, and because a reader holding a red log should not have
-  // to do this division themselves. `docs/backlog.md` carries what has to be
-  // settled before the ceiling itself changes; until then this line is what
-  // says whether a failure below is a finding or a stopwatch.
-  //
-  // Off `slowdown` rather than the raw ratio, so the two halves of the line
-  // divide into each other and a reader can check the arithmetic without
-  // knowing this demo's `beatMs`. On a machine faster than nominal `slowdown`
-  // is clamped to 1, so the figure is a floor there rather than an estimate.
-  const pollSimSeconds = beat ? TIMEOUT_MS / slowdown / 1000 : null;
   check(
     'E',
     'a running demo logs its HUD from inside the tick',
     beat !== null,
     beat === null
-      ? `no second HUD line in ${Math.min(HEARTBEAT_DEADLINE_MS, TIMEOUT_MS)} ms`
-      : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms — ` +
-          `every later budget scaled ${slowdown.toFixed(1)}x, and the ` +
-          `${TIMEOUT_MS} ms poll ceiling buys ` +
-          `${pollSimSeconds.toFixed(2)} simulated second(s)`
+      ? `no second HUD line in ${Math.min(budget(HEARTBEAT_DEADLINE_MS), pollCeiling())} ms`
+      : `two HUD lines ${beat.beat} ms apart, in ${beat.waited} ms, with ` +
+          `every budget here scaled ${slowdown.toFixed(1)}x`
   );
 
   // **Never shorter than the constant used to give.** `TICK_WINDOW_MS` is the
@@ -6636,8 +6701,8 @@ try {
   // does. It failed twice that way (lantern 2 -> 5 against a ceiling of six,
   // quarry 1 -> 2 against three), both strictly inside the bound.
   //
-  // **THE WINDOW IS SMALL BECAUSE EACH ONE IS BOUNDED BY `TIMEOUT_MS`, AND THE
-  // SLOWEST DEMO SETS THE SIZE.** Every window polls through `until`, so a
+  // **THE WINDOW IS SMALL BECAUSE EACH ONE IS BOUNDED BY `pollCeiling`, AND
+  // THE SLOWEST DEMO SETS THE SIZE.** Every window polls through `until`, so a
   // window that the demo cannot finish inside the poll ceiling fails the check
   // for want of frames rather than for anything it holds on to. quarry draws at
   // roughly two frames every three seconds under SwiftShader on a CI runner —
@@ -6649,6 +6714,14 @@ try {
   // instead of just over it. Raising it buys no teeth — a leak that mints one
   // object per frame moves the count by the window size, and any size at all
   // makes it climb — so the size exists to fit the ceiling, not to catch more.
+  //
+  // **shard is the slowest demo now, not quarry**, and it is what moved the
+  // ceiling rather than this number. It drew 15 of these 20 frames in 90 s on
+  // 2026-08-28 — six wall seconds a frame — so the window needs 120 s and the
+  // unscaled ceiling could never have given it to them. Shrinking the window to
+  // fit was the alternative and was not taken: a window has to outrun the ring
+  // depths above by enough that a saturating ring and a climbing leak are told
+  // apart, and trading that margin for a green light is not a measurement.
   //
   // So the question asked is whether a kind climbs in **every** window rather
   // than in one. A ring saturates and stops; a leak does not, and the leak this
@@ -6711,7 +6784,7 @@ try {
     watched && readSamples && grew.length === 0,
     !watched
       ? `the demo drew ${drewInWindow ?? 'an unreadable number of'} of the ` +
-          `${FRAMES_WATCHED} frames this window wanted, in ${TIMEOUT_MS} ms, ` +
+          `${FRAMES_WATCHED} frames this window wanted, in ${pollCeiling()} ms, ` +
           'so nothing here is a verdict about what a frame holds on to'
       : !readSamples
         ? `liveObjects() answered ${JSON.stringify(heldSamples.find((held) => !Array.isArray(held)))} on one of the heldSamples`
@@ -6750,7 +6823,7 @@ try {
       : settledStop?.status === 5
         ? `status 5 (FAILED) — ${await evaluate(page, `document.getElementById('detail')?.textContent ?? ''`)}`
         : `status ${(await evaluate(page, `crcbl.status()`)) ?? 'unreadable'} after ` +
-          `${TIMEOUT_MS} ms — the demo never reached a terminal state`
+          `${pollCeiling()} ms — the demo never reached a terminal state`
   );
 
   const heldAfter = await evaluate(page, `crcbl.gpu.replayer.liveObjects()`);
