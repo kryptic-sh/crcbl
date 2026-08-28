@@ -2586,6 +2586,10 @@ impl OffscreenSetup {
         // records for `MESH_SHADER`: the frame comes out of a lesser path and
         // nothing says so.
         .union(Features::TASK_SHADER)
+        // What `ForwardRenderer::anisotropy_for` reads: without it the page is
+        // sampled isotropically on hardware that could do better, and the frame
+        // says nothing about the omission.
+        .union(Features::SAMPLER_ANISOTROPY)
         .union(Features::DEBUG_MARKERS);
 
     /// Opens the auto-selected GPU backend, creates an offscreen surface,

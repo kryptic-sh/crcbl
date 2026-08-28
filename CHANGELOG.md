@@ -24,11 +24,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Images from every `upload_texture*` are now created as copy sources as well,
   so a level can be read back. The page's sampler reads the chain trilinear —
   `Linear` on all three filters, no level clamp — so a minified texture no
-  longer shimmers; anisotropy stays at one until the `anisotropic_filtering` key
-  of `docs/plan/43-render-standards.md`'s filtering rung lands. The lights
-  fixture's sun (`dim_sun`) is halved so its pools stay the brightest thing on
-  their pyramids under a bilinear page. The page costs a third again in device
-  memory for the chain.
+  longer shimmers, and anisotropic at `crcbl_render::DEFAULT_ANISOTROPY` (8×)
+  clamped to the device, `ForwardRenderer::anisotropy_for`, wherever the device
+  was granted `Features::SAMPLER_ANISOTROPY`; `GpuContextDesc`'s default
+  optional features, `OffscreenSetup::OPTIONAL_FEATURES` and the `crcbl new`
+  scaffold now ask for it, and a game that names its own optional features has
+  to add it to keep a grazing floor sharp. A browser samples isotropically —
+  `crcbl-webgpu` withholds the feature. The player's `anisotropic_filtering` row
+  is still to come. The lights fixture's sun (`dim_sun`) is halved so its pools
+  stay the brightest thing on their pyramids under a bilinear page. The page
+  costs a third again in device memory for the chain.
 
 - **Auto-exposure: the frame measures its own exposure, and no readback stalls
   on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —

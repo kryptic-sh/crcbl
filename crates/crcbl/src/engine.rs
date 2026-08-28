@@ -704,7 +704,11 @@ impl Default for GpuContextDesc<'_> {
                 | Features::TIMESTAMP_QUERY
                 | Features::DEBUG_MARKERS
                 | Features::PRESENT_FEEDBACK
-                | Features::PRESENT_TIMING,
+                | Features::PRESENT_TIMING
+                // What `ForwardRenderer::anisotropy_for` reads: a device opened
+                // without it samples the page isotropically on hardware that
+                // could do better, and the frame says nothing about the omission.
+                | Features::SAMPLER_ANISOTROPY,
             pacing: Pacing::default(),
             settings: SettingsSource::default(),
         }

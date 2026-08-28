@@ -740,21 +740,28 @@ built.
 
 The page goes up with every layer's chain (`crcbl_render::mip::chain`,
 `upload_texture_mip_layers`), `tests/forward_e2e/page.rs` reads the levels back,
-and the sampler in `ForwardRenderer::with_scene` reads them trilinear. What the
-rung still owes, in order:
+and the sampler in `ForwardRenderer::with_scene` reads them trilinear at
+`ForwardRenderer::anisotropy_for`'s anisotropy — eight where the device was
+granted `SAMPLER_ANISOTROPY`, one where it was not. What the rung still owes, in
+order:
 
-- **Anisotropy.** `anisotropy` from the player's `anisotropic_filtering` key
-  clamped to `Limits::max_sampler_anisotropy` — a value key on `render_scale`'s
-  pattern in `crcbl::settings`, with an `apps/options` row, and 8× by default
-  where the device reports it. Held out of the trilinear slice because the
-  goldens are one set compared on every backend and WebGPU reports a ceiling of
-  one: an 8× desktop frame against a 1× browser frame is a difference
-  `Tolerance::RASTERISER` may not cover on a grazing floor. Measure lantern's
-  `room` at 8× on radv against the browser's frame before deciding; the
-  filtering subsection of `43-render-standards.md` says why that tolerance and
-  no other.
-- **WebGPU's anisotropy ceiling** is reported as one and the plan wants the
-  desktop figure — the decision the same subsection points here for. Not taken.
+- **The player's `anisotropic_filtering` key.** A value key on `render_scale`'s
+  pattern in `crcbl::settings`, with an `apps/options` row, clamped by
+  `anisotropy_for`'s rule; `1` turns it off. The renderer half is the part
+  `render_scale` never needed: the page's sampler is created once in
+  `with_scene` and bound into the shared bind group (`page_sampler`), so a
+  runtime change means a `set_anisotropy` that recreates the sampler and
+  rewrites that bind group, on `set_render_scale`'s terms otherwise. The device
+  half is measured and in: 8× on radv against the 1× goldens moved none of the
+  thirteen render scenes, lantern's `room` within tolerance and `live` past it,
+  both re-blessed at 8×.
+- **WebGPU's anisotropy ceiling** is reported as one and the feature withheld,
+  so a browser draws the page isotropically while every native backend draws it
+  at eight; the plan wants the desktop figure — the decision the same subsection
+  points here for. The measurement above says the shared goldens do not care
+  today: the render harness compares the thirteen scenes the browser draws at
+  one against references drawn at eight, and they match at
+  `Tolerance::RASTERISER` because none of them minifies the page. Not taken.
 - **The chain's bytes are `powf` bytes.** `mip::srgb_to_linear` and
   `linear_to_srgb` go through `f32::powf`, which is each host's libm, so a level
   below 0 can differ by a byte between the Linux, macOS and Windows runners that

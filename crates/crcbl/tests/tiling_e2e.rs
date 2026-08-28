@@ -27,7 +27,7 @@
 
 use crcbl::adapter::{ADAPTER_ENV_VAR, device_type_from_name};
 use crcbl::backend::{BACKEND_ENV_VAR, GpuBackend};
-use crcbl::hal::Format;
+use crcbl::hal::{Features, Format};
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::ProbeGrid;
 use crcbl::render::{
@@ -238,6 +238,157 @@ fn tiled_surface_cells(size_m: f32) -> usize {
     cells_across(&image)
 }
 
+/// How far along the floor [`grazing_floor_contrast`]'s camera looks, in
+/// metres: the quad's half-extent, so the frame's far band is floor rather than
+/// clear.
+const GRAZING_HALF_LENGTH: f32 = 8.0;
+
+/// How high above the floor the grazing camera sits, in metres.
+///
+/// Low, so the far band's texture footprint is many texels long along the view
+/// for every texel across it — the shape anisotropic filtering exists for. At
+/// this height the floor's far edge sits under two degrees below the horizon,
+/// which the band below is placed just under.
+const GRAZING_EYE_HEIGHT: f32 = 0.5;
+
+/// The rows of a [`grazing_floor_contrast`] frame that hold the far floor, as
+/// fractions of the height from the top.
+///
+/// The camera looks level, so the horizon is the frame's middle row and the
+/// floor's far edge lands a few rows under it. Measured on radv before the
+/// band was placed: the rows just under the edge are flat on both halves —
+/// the grid's lines are millimetres wide and no footprint resolves them at
+/// fifteen metres — and the bottom fifth is sharp on both, where a tile is
+/// tens of pixels tall and the footprint is nearly square. Between them the
+/// isotropic half held a contrast of six to fifteen and the anisotropic one
+/// fifty to sixty-seven, and that stretch is this band.
+const FAR_BAND: std::ops::Range<f32> = 0.60..0.70;
+
+/// The least far-band contrast the anisotropic half may show, and the least
+/// multiple of the isotropic half's it must be.
+///
+/// Both, because either alone can be met by a pair this test is meant to
+/// fail: two flat bands pass a ratio, and a frame where the band is nearer than
+/// it should be passes a floor with the isotropic half sharp as well. Against
+/// the measured pair — fifty granted, six withheld, and llvmpipe within one of
+/// each — the floor sits two fifths under the granted figure and the ratio at a
+/// quarter of the measured one.
+const FAR_BAND_CONTRAST_FLOOR: f32 = 30.0;
+const FAR_BAND_CONTRAST_RATIO: f32 = 2.0;
+
+/// How much line contrast the far band holds: the range of its per-column
+/// brightest pixel.
+///
+/// [`cells_across`]'s profile over a band of rows rather than the whole frame,
+/// reduced to its range instead of counted, because on the blurred half of the
+/// pair there are no runs to count — the profile is flat at the grid's mean
+/// grey and the count would be an assertion on noise.
+fn band_contrast(image: &Image, rows: std::ops::Range<u32>) -> f32 {
+    let profile: Vec<f32> = (0..image.width())
+        .map(|x| {
+            rows.clone()
+                .map(|y| luma(image.pixel(x, y).expect("in bounds")))
+                .fold(f32::NEG_INFINITY, f32::max)
+        })
+        .collect();
+    let min = profile.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = profile.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    max - min
+}
+
+/// Draws the greybox floor from a camera lying almost on it and returns the
+/// far band's line contrast, on a device opened with `optional_features`.
+///
+/// The same quad and material as [`tiled_surface_cells`], under a perspective
+/// camera looking along the floor instead of down at it — the one view where
+/// the page's sampler is asked for a footprint far longer than it is wide, and
+/// so the one view where its anisotropy is visible.
+fn grazing_floor_contrast(optional_features: Features) -> f32 {
+    crcbl::core::log::init_logging();
+
+    let setup = OffscreenSetup::open_forward_with(
+        EDGE,
+        EDGE,
+        optional_features,
+        move |device, queue, format| {
+            let scene = SceneDesc {
+                meshes: vec![MeshDesc {
+                    label: "grazing floor".into(),
+                    geometry: quad(GRAZING_HALF_LENGTH * 2.0, GRAZING_HALF_LENGTH * 2.0),
+                }],
+                materials: vec![greybox_color_material(GreyboxColor::Grey)],
+                page: greybox_page(),
+                probes: ProbeGrid::default(),
+                capacities: Capacities::default(),
+            };
+            let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
+            renderer
+                .add_instance(&InstanceDesc {
+                    mesh: 0,
+                    material: 0,
+                    transform: Mat4::IDENTITY,
+                })
+                .expect("a default instance pool holds one quad");
+            Ok(ForwardScene {
+                camera: Camera {
+                    eye: Vec3::new(0.0, GRAZING_EYE_HEIGHT, GRAZING_HALF_LENGTH),
+                    // Level, so the horizon is the middle row and `FAR_BAND`
+                    // is placed against it.
+                    target: Vec3::new(0.0, GRAZING_EYE_HEIGHT, -GRAZING_HALF_LENGTH),
+                    up: Vec3::Y,
+                    projection: Projection::Perspective {
+                        fov_y: std::f32::consts::FRAC_PI_3,
+                        near: 0.05,
+                    },
+                },
+                sun: DirectionalLight {
+                    direction: Vec3::Y,
+                    color: Vec3::splat(1.2),
+                    ambient: Vec3::splat(0.35),
+                },
+                renderer: Box::new(renderer),
+            })
+        },
+    )
+    .unwrap_or_else(|why| panic!("a GPU backend opens for the grazing floor: {why}"));
+    let mut setup = Offscreen::guard(SUITE, setup);
+    assert_pins_arrived(&setup);
+    let granted = setup.caps().features.contains(Features::SAMPLER_ANISOTROPY);
+    assert_eq!(
+        granted,
+        optional_features.contains(Features::SAMPLER_ANISOTROPY),
+        "the device was opened with what was asked for; one that does not offer \
+         SAMPLER_ANISOTROPY at all cannot draw the anisotropic half of this pair"
+    );
+
+    let format = setup.format();
+    let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+    setup.finish();
+
+    let order = match format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => ChannelOrder::Bgra,
+        _ => ChannelOrder::Rgba,
+    };
+    let image =
+        Image::from_readback(width, height, &pixels, order).expect("the readback is one image");
+    let rows = |fraction: f32| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a fraction of a frame height, in bounds"
+        )]
+        let row = (height as f32 * fraction) as u32;
+        row
+    };
+    let contrast = band_contrast(&image, rows(FAR_BAND.start)..rows(FAR_BAND.end));
+    eprintln!(
+        "crcbl tiling e2e: grazing floor with anisotropy {} — far band contrast {contrast:.1}",
+        if granted { "granted" } else { "withheld" }
+    );
+    contrast
+}
+
 /// A 2 m surface shows about twice the grid cells of a 1 m one — the whole of
 /// what physical tiling buys over stretching one authored tile.
 #[test]
@@ -267,5 +418,33 @@ fn a_two_metre_surface_shows_twice_the_tiles_of_a_one_metre_surface() {
         "a 2 m surface shows {two_metre} cells across and a 1 m surface {one_metre}; physical \
          tiling should roughly double them, so this reads as the texture stretching to fit the \
          face rather than tiling by its size"
+    );
+}
+
+/// **The device's anisotropy reaches the page's sampler.** The same grazing
+/// floor drawn on a device granted `SAMPLER_ANISOTROPY` keeps its far grid
+/// lines where the device without it has blurred them to the grid's mean.
+///
+/// A pair rather than a threshold on one frame, because "sharp" has no absolute
+/// number: what the far band holds depends on the rasteriser's level-of-detail
+/// arithmetic, which the specification bounds rather than fixes. The withheld
+/// half is the control — `ForwardRenderer::anisotropy_for` answers one for it,
+/// so its sampler is the trilinear one every backend agrees on — and the
+/// granted half has to beat it by the margin below on every device this runs
+/// on. A renderer that asked for the feature and then built the sampler at one
+/// draws the two halves alike and fails here; nothing else can see a sampler's
+/// anisotropy on any backend.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-tiling-e2e.sh"]
+fn the_far_floor_keeps_its_grid_where_the_device_filters_anisotropically() {
+    let withheld = grazing_floor_contrast(
+        OffscreenSetup::OPTIONAL_FEATURES.difference(Features::SAMPLER_ANISOTROPY),
+    );
+    let granted = grazing_floor_contrast(OffscreenSetup::OPTIONAL_FEATURES);
+    assert!(
+        granted > FAR_BAND_CONTRAST_FLOOR && granted > withheld * FAR_BAND_CONTRAST_RATIO,
+        "the far band keeps its lines under anisotropic filtering: contrast {granted:.1} \
+         granted against {withheld:.1} withheld, wanting at least \
+         {FAR_BAND_CONTRAST_FLOOR} and {FAR_BAND_CONTRAST_RATIO}× the control"
     );
 }

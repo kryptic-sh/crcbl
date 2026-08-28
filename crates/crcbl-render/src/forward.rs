@@ -141,7 +141,7 @@ use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ColorTargetState, CompareOp, CullMode, DepthBias, DepthStencilState, Device,
-    DrawIndirect, DrawIndirectCount, Features, FilterMode, Format, GeometryPath,
+    DeviceCaps, DrawIndirect, DrawIndirectCount, Features, FilterMode, Format, GeometryPath,
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
     IndexFormat, LoadOp, MemoryLocation, MeshPipelineDesc, MultisampleState, PipelineLayoutDesc,
@@ -648,6 +648,18 @@ const RENDER_PASSES: u32 = 6
 /// refusing, so a settings slider cannot hand the renderer a frame it cannot
 /// draw.
 pub const MIN_RENDER_SCALE: f32 = 0.25;
+
+/// The anisotropy the base-colour page is sampled with where the device grants
+/// [`Features::SAMPLER_ANISOTROPY`].
+///
+/// Eight, which is `docs/plan/43-render-standards.md`'s filtering rung's
+/// default and the figure current engines default their own slider to: past it
+/// the footprint's long axis is already sampled finely enough that sixteen is
+/// invisible at a grazing angle and costs the same again in fetches. A device
+/// whose [`Limits::max_sampler_anisotropy`](crcbl_hal::Limits) is lower gets
+/// that limit instead — [`ForwardRenderer::anisotropy_for`] is the clamp — and a
+/// device without the feature gets one, which is the value that turns it off.
+pub const DEFAULT_ANISOTROPY: f32 = 8.0;
 
 /// Named rather than written into [`ForwardRenderer::counters`]'s arithmetic,
 /// because these are the only draws in this file whose instance and triangle
@@ -2497,16 +2509,16 @@ impl ForwardRenderer {
         )?;
         rollback.textures.push(base_color_page);
 
-        // **Trilinear over the whole chain** — `docs/plan/43-render-standards.md`'s
-        // filtering rung: a minified surface reads the level its footprint
-        // matches instead of shimmering through level 0, and a magnified one
-        // blends four texels instead of stepping between them. Anisotropy stays
-        // at one here; the default the plan names arrives with the
-        // `anisotropic_filtering` key, because WebGPU reports a ceiling of one
-        // and a desktop default of eight would put the browser's frame outside
-        // the tolerance the shared goldens are held to. A second sampler object
-        // rather than sharing the tonemap's, so a capture names each for what
-        // it filters.
+        // **Trilinear over the whole chain, anisotropic where the device is** —
+        // `docs/plan/43-render-standards.md`'s filtering rung: a minified
+        // surface reads the level its footprint matches instead of shimmering
+        // through level 0, a magnified one blends four texels instead of
+        // stepping between them, and a surface at a grazing angle keeps its
+        // detail along the long axis of its footprint rather than blurring to
+        // the short one. The anisotropy is `Self::anisotropy_for`'s: the
+        // plan's default where the device granted the feature, one where it
+        // did not. A second sampler object rather than sharing the tonemap's,
+        // so a capture names each for what it filters.
         //
         // **`Repeat`, not `ClampToEdge`**, and that is what `mesh.slang`'s
         // `TILING_PHYSICAL` needs: a physical UV runs to `world_extent /
@@ -2521,6 +2533,7 @@ impl ForwardRenderer {
             min_filter: FilterMode::Linear,
             mip_filter: FilterMode::Linear,
             address_mode: [SamplerAddressMode::Repeat; 3],
+            anisotropy: Self::anisotropy_for(&device.caps()),
             ..SamplerDesc::default()
         })?;
         rollback.samplers.push(base_color_sampler);
@@ -7294,6 +7307,30 @@ impl ForwardRenderer {
         self.render_scale
     }
 
+    /// The anisotropy the base-colour page's sampler is created with on a
+    /// device of `caps`: [`DEFAULT_ANISOTROPY`] clamped to
+    /// [`Limits::max_sampler_anisotropy`](crcbl_hal::Limits) where
+    /// [`Features::SAMPLER_ANISOTROPY`] was granted, and `1.0` where it was
+    /// not.
+    ///
+    /// **Granted, not supported.** The feature is optional at every open site
+    /// — [`Features::GPU_DRIVEN`] does not carry it — and a device opened
+    /// without asking refuses a sampler above one even on hardware that has
+    /// it, which is the shape every backend's `create_sampler` documents. So
+    /// the question is what this device was opened *with*, and a caller that
+    /// wants the plan's default has to name the feature beside the others it
+    /// asks for. `crcbl-webgpu` withholds the feature and reports a ceiling of
+    /// one, so a browser samples isotropically until `docs/backlog.md`'s
+    /// ceiling decision is taken.
+    #[must_use]
+    pub fn anisotropy_for(caps: &DeviceCaps) -> f32 {
+        if caps.features.contains(Features::SAMPLER_ANISOTROPY) {
+            DEFAULT_ANISOTROPY.min(caps.limits.max_sampler_anisotropy)
+        } else {
+            1.0
+        }
+    }
+
     /// The extent a frame handed `target` is actually drawn at.
     ///
     /// Rounds rather than truncates, and floors at one texel in each dimension:
@@ -11866,6 +11903,40 @@ mod tests {
             inner_angle: 0.3,
             outer_angle: 0.6,
         })
+    }
+
+    /// The page's anisotropy is the plan's default clamped to the device, and
+    /// one on a device that was not granted the feature — whatever its limit
+    /// says.
+    ///
+    /// The last arm is the one worth having: `gate_limits_on_features` narrows
+    /// a declined feature's limit on `crcbl-vk`, but a backend that did not
+    /// would report sixteen beside an absent feature, and a clamp that read the
+    /// limit alone would ask for a sampler the device refuses.
+    #[test]
+    fn the_anisotropy_is_the_default_clamped_to_what_the_device_granted() {
+        let caps = |features: Features, max_sampler_anisotropy: f32| DeviceCaps {
+            features,
+            limits: crcbl_hal::Limits {
+                max_sampler_anisotropy,
+                ..crcbl_hal::Limits::desktop()
+            },
+        };
+        let granted = Features::SAMPLER_ANISOTROPY;
+        assert!(
+            (ForwardRenderer::anisotropy_for(&caps(granted, 16.0)) - DEFAULT_ANISOTROPY).abs()
+                < f32::EPSILON,
+            "a device above the default gets the default"
+        );
+        assert!(
+            (ForwardRenderer::anisotropy_for(&caps(granted, 4.0)) - 4.0).abs() < f32::EPSILON,
+            "a device below the default gets its own limit"
+        );
+        assert!(
+            (ForwardRenderer::anisotropy_for(&caps(Features::empty(), 16.0)) - 1.0).abs()
+                < f32::EPSILON,
+            "a device that was not granted the feature gets one, whatever its limit says"
+        );
     }
 
     /// The knob clamps to the range it documents, in both directions and on a

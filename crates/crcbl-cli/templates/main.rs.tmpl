@@ -329,7 +329,8 @@ impl Gpu {
                 optional_features: Features::GPU_DRIVEN
                     | Features::TIMESTAMP_QUERY
                     | Features::DEBUG_MARKERS
-                    | Features::PUSH_CONSTANTS,
+                    | Features::PUSH_CONSTANTS
+                    | Features::SAMPLER_ANISOTROPY,
                 // The command line's half: `--backend` and `--pacing`. The
                 // label and the features above are this game's.
                 ..GpuContextDesc::from(gpu)
