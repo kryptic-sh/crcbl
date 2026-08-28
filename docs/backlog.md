@@ -273,12 +273,41 @@ a reading of the code plus a bounded log, **not a reproduction** — nothing loc
 has driven `--headless` against an Apple adapter, and the same gate passes on
 this machine.
 
-`Cdp.send` now has the deadline it never had: `CDP_DEADLINE_MS` in
-`web/tools/browser-launch.mjs`, with the offending method and expression in the
-failure. The next run of this job says which command it was instead of dying
-anonymously at the cap. If it is the frame wait, the deadline is not the fix —
-that wait has to stop depending on the frame loop of a page that has been asked
-to stop, and `until` on an observable is what the rest of this file does.
+**The deadline named it, and the reading was right.** `CDP_DEADLINE_MS` in
+`web/tools/browser-launch.mjs` gave `Cdp.send` the timeout it never had, and on
+`7ea20d0` the job failed in four and a half minutes instead of at the 20-minute
+cap, with the command quoted:
+
+```
+web e2e: Runtime.evaluate went unanswered for 30000 ms: {"expression":"new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))","awaitPromise":true,"returnByValue":true}
+  evaluating: new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))
+```
+
+So the frame wait after the corner click is the hang: on this runner the page
+delivers no animation frame for at least 30 seconds once the canvas has been
+blurred and the demo has paused. **Why** is still open. The blur moves focus to
+another element of the same visible page rather than hiding the tab, so
+Chromium's usual backgrounding rules do not obviously apply, and `browserFlags`
+in `web/tools/browser-launch.mjs` passes none of
+`--disable-renderer-backgrounding`, `--disable-backgrounding-occluded-windows`
+or `--disable-background-timer-throttling` — which is a candidate, not a
+diagnosis. Nothing local reproduces it: the same gate passes on this machine,
+and only a macOS runner has ever shown it.
+
+**The deadline is not the fix.** That wait has to stop depending on the frame
+loop of a page that has been asked to stop: `until` on an observable is what the
+rest of this file does, and the observable here is the one the check after it
+already reads — `document.activeElement` becoming the canvas. The claim that
+follows it, that focus alone did not resume the demo, is a negative and needs a
+bounded window of its own that does not assume the page paints.
+
+**A second bug the same log shows: an aborted run reports success.** After the
+rejection, the driver printed `web e2e: 25/25 checks passed` and then the touch
+guard's `the driver never dragged a finger across the canvas`, before exiting 1.
+The count is of checks _reached_, so a run cut off in group E advertises a clean
+sweep of the checks it managed, and the guard that fires because the run never
+got to the touch group reads as the failure. A run that did not finish its
+groups should say so instead of totalling what it ran.
 
 **Not reviewed:** whether the other 3D demo (lantern) does the same. The job
 dies at quarry before reaching it.
