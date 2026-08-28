@@ -169,44 +169,71 @@ goes red on the arm (`taskset -c 0,1` and `-c 0,1,2,3`, breaking on the
 observation rather than on the thread count) and that the whole gate, four red
 checks included, still passes.
 
-### shard's browser gate has a verdict at last, and it is 52/54 (2026-08-28)
+### `TIMEOUT_MS` is the one budget the slowdown does not scale (2026-08-28)
 
-**The first one it has ever produced.** Every earlier run either cancelled or
-killed the step on its cap; the `demos` fan-out gave it a clock of its own and
-it finished in 26m17s, inside the 45-minute bound. Two of its fifty-four checks
-fail, both on `web/tools/browser-e2e.mjs`'s 90-second `TIMEOUT_MS`, and both on
-a run whose heartbeat measured **88.9x** — "two HUD lines 22226 ms apart".
+**One cause, three failing checks, two demos, and it is flaky.** The Pages
+fan-out gave every demo a clock of its own and the gates went from "killed on a
+cap" to "reporting verdicts". Three of those verdicts are red, and all three are
+an `until()` poll that ran out of wall clock while the demo was still
+simulating.
 
-- **`C: and a foe's ability costs them health, which nothing before it did` — 0
-  damage arrived and hp held at 100**, after the full 90 s. The checks either
-  side of it pass: a foe engages, and a blow that reaches one fells it for 20
-  damage. So the character reaches the foe and the foe reaches the character;
-  what did not happen inside the window is the foe's _ability_. Whether that is
-  a cooldown longer than the window at this pace or a real gap in the ability
-  path is not established — nobody has run this check to a verdict before.
-- **`I: a steady-state frame gives back everything it takes` — the demo drew
-  fewer than 20 more frames in 90000 ms.** This one says in its own message that
-  it is not a verdict, which is the right shape: a window the demo cannot finish
-  inside the poll ceiling fails for want of frames rather than for anything it
-  holds on to. `FRAMES_WATCHED` is 20 and `WINDOWS` is 3, sized against quarry's
-  measured two frames per three seconds under SwiftShader; shard is slower again
-  and does not fit.
+`web/tools/browser-e2e.mjs` scales every wall-clock budget by a measured
+`slowdown` — `budget(ms)` at its definition, and the heartbeat control prints
+the factor. **`TIMEOUT_MS` is not one of them.** It is 90 000 ms, it is the
+default ceiling of `until(probe, timeout = TIMEOUT_MS)`, and it therefore bounds
+every poll in the file. On a runner where a demo advances one simulated second
+per 33 wall-clock seconds, those 90 seconds buy under three seconds of game
+time.
 
-**What it would take, and what it must not be.** `TIMEOUT_MS` is the one budget
-in that file the measured `slowdown` does **not** scale, so the obvious fix is
-to bound this window with `budget(TIMEOUT_MS)` like every other wait. It is not
-that simple: 88.9 × 90 s is 130 minutes for one window and three of them would
-not fit any job cap. What is missing before either number can be picked is the
-frame rate itself — the failure message says "fewer than 20" and never says how
-many. **Make it print the frames actually drawn and the elapsed time first**;
-the next run then supplies the measurement instead of another guess. Shrinking
-`FRAMES_WATCHED` to fit is the move to avoid: the check's own comment argues any
-size at all catches a per-frame leak, but a smaller window is more easily
-satisfied by noise, and the three-window rule is what is buying the teeth.
+The three:
 
-Neither of these is a regression from the fan-out — shard's gate had produced no
-verdict at all until this run, so both are first sightings rather than breakage.
-They do block the deploy, because `deploy` needs `demos`.
+- **puppet `C: the controller climbs the step inside its own step offset`**, and
+  the check paired with it about the step it must refuse. "it never got onto the
+  0.3 m step while pushing — climbed 0, blocked 0, feet 0.01 m". 48/50, at
+  33.3x. **puppet passed 50/50 on `c26d16e`, the run before**, in 12m57s against
+  14m33s — so this is runner variance deciding whether 90 s is enough, which
+  makes it the flakiest of the three and the one most likely to mislead.
+- **shard
+  `C: and a foe's ability costs them health, which nothing before it did`** — 0
+  damage, hp held at 100, after the full 90 s at 88.9x. The checks either side
+  pass: a foe engages the character, and a blow that reaches one fells it for 20
+  damage. So the paths around it work and the ability did not fire inside three
+  simulated seconds. Whether its cooldown is simply longer than that is **not
+  established** — nobody has run this check to a verdict before.
+- **shard `I: a steady-state frame gives back everything it takes`** — "drew
+  fewer than 20 more frames in 90000 ms", which the message itself calls a
+  non-verdict. `FRAMES_WATCHED` is 20 over `WINDOWS` of 3, sized against
+  quarry's measured two frames per three seconds under SwiftShader; shard is
+  slower again.
+
+**Group C is worse than the rest, because the factor is not known yet.** The
+heartbeat control that measures `slowdown` is in group **E**. Groups B and C run
+before it, so even the budgets that _are_ scaled are scaled by 1 there. Two of
+the three above are group C.
+
+**What it would take, and what it must not be.** The naive fix — default `until`
+to `budget(TIMEOUT_MS)` — does not work: 88.9 × 90 s is 133 minutes for a single
+failing poll, and no job cap fits that. Two things have to be settled first, and
+neither is a number to pick:
+
+1. **Move the beat measurement ahead of group B**, so a scaled budget is
+   available to every group rather than to E onwards.
+2. **Decide what a poll ceiling should be denominated in.** Wall clock is the
+   wrong unit for "the character walked up a step" — the demo needs simulated
+   time, which the harness already measures as `beat`. A ceiling in beats scales
+   by construction and cannot produce a 133-minute wait.
+
+Shrinking `FRAMES_WATCHED` to fit is the move to avoid: the check's own comment
+argues any size catches a per-frame leak, but a smaller window is more easily
+satisfied by noise and the three-window rule is what buys the teeth. Likewise,
+the failure message says "fewer than 20" and never says how many were drawn —
+**make it print the frames actually drawn and the elapsed time**, so a run
+supplies the frame rate instead of the next reader guessing it.
+
+None of this is a regression from the fan-out. shard's gate had produced no
+verdict at all before, and puppet's group C had never run at a 33x slowdown
+without something ahead of it dying first. It does block the deploy, because
+`deploy` needs `demos`.
 
 ### The macOS probe job hangs on quarry, and had not run in nine attempts (2026-08-28)
 
