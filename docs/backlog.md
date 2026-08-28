@@ -751,8 +751,12 @@ order:
   `render_scale` never needed: the page's sampler is created once in
   `with_scene` and bound into the shared bind group (`page_sampler`), so a
   runtime change means a `set_anisotropy` that recreates the sampler and
-  rewrites that bind group, on `set_render_scale`'s terms otherwise. The device
-  half is measured and in: 8× on radv against the 1× goldens moved none of the
+  rewrites that bind group, on `set_render_scale`'s terms otherwise. That knob
+  is also what `tests/tiling_e2e.rs`'s grazing floor wants for its isotropic
+  control on D3D12 and Metal, where a device holds every feature its adapter has
+  whether asked or not and "withheld" draws anisotropically too; there the test
+  holds its floor alone and prints that the control was not one. The device half
+  is measured and in: 8× on radv against the 1× goldens moved none of the
   thirteen render scenes, lantern's `room` within tolerance and `live` past it,
   both re-blessed at 8×.
 - **WebGPU's anisotropy ceiling** is reported as one and the feature withheld,

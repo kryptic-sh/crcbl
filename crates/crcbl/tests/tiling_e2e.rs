@@ -297,13 +297,25 @@ fn band_contrast(image: &Image, rows: std::ops::Range<u32>) -> f32 {
 }
 
 /// Draws the greybox floor from a camera lying almost on it and returns the
-/// far band's line contrast, on a device opened with `optional_features`.
+/// far band's line contrast, on a device opened with `optional_features`, and
+/// whether that device holds `SAMPLER_ANISOTROPY` — which is what the renderer
+/// read to pick the sampler's anisotropy.
 ///
 /// The same quad and material as [`tiled_surface_cells`], under a perspective
 /// camera looking along the floor instead of down at it — the one view where
 /// the page's sampler is asked for a footprint far longer than it is wide, and
 /// so the one view where its anisotropy is visible.
-fn grazing_floor_contrast(optional_features: Features) -> f32 {
+///
+/// **Asked and granted are not the same set on every backend.** A device that
+/// was asked for the feature and lacks it fails here by name, because the half
+/// this test is about cannot be drawn without it. A device that was *not*
+/// asked and holds it anyway is reported, not refused: `crcbl-vk` switches a
+/// feature on at creation and so intersects the adapter's set with the ask,
+/// but D3D12 and Metal have nothing to enable and report the adapter's caps
+/// verbatim, which is what `DeviceDesc::optional_features` permits ("check
+/// `Device::caps` afterwards"). On those the caller's control is not a control,
+/// and it is the caller that decides what that costs.
+fn grazing_floor_contrast(optional_features: Features) -> (f32, bool) {
     crcbl::core::log::init_logging();
 
     let setup = OffscreenSetup::open_forward_with(
@@ -354,11 +366,11 @@ fn grazing_floor_contrast(optional_features: Features) -> f32 {
     let mut setup = Offscreen::guard(SUITE, setup);
     assert_pins_arrived(&setup);
     let granted = setup.caps().features.contains(Features::SAMPLER_ANISOTROPY);
-    assert_eq!(
-        granted,
-        optional_features.contains(Features::SAMPLER_ANISOTROPY),
-        "the device was opened with what was asked for; one that does not offer \
-         SAMPLER_ANISOTROPY at all cannot draw the anisotropic half of this pair"
+    let asked = optional_features.contains(Features::SAMPLER_ANISOTROPY);
+    assert!(
+        granted || !asked,
+        "the device was asked for SAMPLER_ANISOTROPY and does not offer it, so the \
+         anisotropic half of this pair cannot be drawn on it"
     );
 
     let format = setup.format();
@@ -384,9 +396,13 @@ fn grazing_floor_contrast(optional_features: Features) -> f32 {
     let contrast = band_contrast(&image, rows(FAR_BAND.start)..rows(FAR_BAND.end));
     eprintln!(
         "crcbl tiling e2e: grazing floor with anisotropy {} — far band contrast {contrast:.1}",
-        if granted { "granted" } else { "withheld" }
+        match (asked, granted) {
+            (true, _) => "asked and granted",
+            (false, true) => "not asked, granted anyway",
+            (false, false) => "withheld",
+        }
     );
-    contrast
+    (contrast, granted)
 }
 
 /// A 2 m surface shows about twice the grid cells of a 1 m one — the whole of
@@ -430,21 +446,44 @@ fn a_two_metre_surface_shows_twice_the_tiles_of_a_one_metre_surface() {
 /// arithmetic, which the specification bounds rather than fixes. The withheld
 /// half is the control — `ForwardRenderer::anisotropy_for` answers one for it,
 /// so its sampler is the trilinear one every backend agrees on — and the
-/// granted half has to beat it by the margin below on every device this runs
-/// on. A renderer that asked for the feature and then built the sampler at one
-/// draws the two halves alike and fails here; nothing else can see a sampler's
-/// anisotropy on any backend.
+/// granted half has to beat it by [`FAR_BAND_CONTRAST_RATIO`]. A renderer that
+/// asked for the feature and then built the sampler at one draws the two
+/// halves alike and fails here; nothing else can see a sampler's anisotropy on
+/// any backend.
+///
+/// **The control exists only where the seam withholds a feature.** On D3D12
+/// and Metal a device holds every feature its adapter has whether or not it
+/// was asked — [`grazing_floor_contrast`] says why — so the "withheld" half
+/// there is drawn anisotropically too and the ratio would compare a frame with
+/// itself. There the anisotropic half is held to [`FAR_BAND_CONTRAST_FLOOR`]
+/// alone, which the sabotage that forces the clamp to one still fails (six
+/// against a floor of thirty), and the line printed says the control was not
+/// one. A renderer knob that set the anisotropy below the device's would give
+/// every backend the pair; `docs/backlog.md`'s `anisotropic_filtering` entry
+/// is where that knob is owed.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-tiling-e2e.sh"]
 fn the_far_floor_keeps_its_grid_where_the_device_filters_anisotropically() {
-    let withheld = grazing_floor_contrast(
+    let (withheld, control_is_anisotropic) = grazing_floor_contrast(
         OffscreenSetup::OPTIONAL_FEATURES.difference(Features::SAMPLER_ANISOTROPY),
     );
-    let granted = grazing_floor_contrast(OffscreenSetup::OPTIONAL_FEATURES);
+    let (granted, _) = grazing_floor_contrast(OffscreenSetup::OPTIONAL_FEATURES);
     assert!(
-        granted > FAR_BAND_CONTRAST_FLOOR && granted > withheld * FAR_BAND_CONTRAST_RATIO,
-        "the far band keeps its lines under anisotropic filtering: contrast {granted:.1} \
-         granted against {withheld:.1} withheld, wanting at least \
-         {FAR_BAND_CONTRAST_FLOOR} and {FAR_BAND_CONTRAST_RATIO}× the control"
+        granted > FAR_BAND_CONTRAST_FLOOR,
+        "the far band keeps its lines under anisotropic filtering: contrast {granted:.1}, \
+         wanting at least {FAR_BAND_CONTRAST_FLOOR}"
     );
+    if control_is_anisotropic {
+        eprintln!(
+            "crcbl tiling e2e: this backend enables every feature its adapter has, so the \
+             withheld half ({withheld:.1}) is no isotropic control; the floor stood alone"
+        );
+    } else {
+        assert!(
+            granted > withheld * FAR_BAND_CONTRAST_RATIO,
+            "the far band keeps its lines under anisotropic filtering: contrast {granted:.1} \
+             granted against {withheld:.1} withheld, wanting {FAR_BAND_CONTRAST_RATIO}× the \
+             control"
+        );
+    }
 }
