@@ -754,11 +754,24 @@ crate depending on another.
 through `audio_gains` and `[engine.video] render_scale` through `video`.
 Everything else the catalogue names — display mode, resolution, present mode,
 frame cap, the quality tiers — has a defined home in the TOML convention and
-nothing that reads it. The storage half is not the gap:
-`crates/crcbl-store/src/settings.rs` ships the layered stack, `set`, `save`, and
-a per-platform backend that is the config directory natively and OPFS on wasm.
-**The gap is that no application in the workspace has ever written a setting** —
-the only writer is `crates/crcbl-cli/src/settings_cmd.rs`.
+nothing that reads it.
+
+**The writer half is no longer the gap, as of 2026-08-28.**
+`SettingsStack::with_platform_storage` lends the storage `platform` used to
+resolve and drop, `SettingsStack::save_platform` writes the user layer back to
+it, and `crcbl::settings` has `set_video`, `set_video_effects`,
+`set_render_scale` and `set_audio_gain` beside its readers, with
+`SettingsSource::open` and `SettingsSource::save` as the pair a settings screen
+holds. What is left is the catalogue itself: the keys above still have neither a
+reader nor a writer, and no application in `apps/` calls any of this yet — the
+only caller of a writer remains `crates/crcbl-cli/src/settings_cmd.rs`.
+
+**Neither platform arm of `with_platform_storage` is covered by a test.** The
+round trips are through `MemoryStorage`, which is what `SettingsSource::Source`
+resolves; the native arm would write into whichever config directory the test
+ran in and the wasm arm needs an installed OPFS store, so both are exercised
+only by a person running a sample. The `None` arm — a platform naming no config
+directory — cannot be provoked at all, since `dirs::config_dir` decides it.
 
 Related and unowned: `crates/crcbl-store/src/lib.rs` records that an IndexedDB
 fallback for the browser is still to come, so OPFS is the only web backend and
@@ -2147,21 +2160,25 @@ under `[engine.video]`, `VideoSettings` carrying it beside the effect bits,
 `GpuContext::render_scale`, and `apps/viewer` handing it to the renderer at
 build and across a reload.
 
-Two things are still missing. **Nothing writes the key** — a player edits the
-TOML by hand, because no application in the workspace writes a setting at all
-(see the catalogue entry above). And **no `Shell` carries a render-scale
-request**, so a compositor that advertises `ShellCaps::HW_UPSCALE` cannot do the
-resample for free instead of the shader; that is a decision above `crcbl-shell`
-and is not needed for the settings menu.
+**The key became writable on 2026-08-28**: `crcbl::settings::set_render_scale`
+clamps to `MIN_RENDER_SCALE..=1.0` on the way in, and `SettingsSource::save`
+puts it back where `open` read it. What is still missing is a **caller** — no
+sample offers the control, so a player still edits the TOML by hand.
+
+And **no `Shell` carries a render-scale request**, so a compositor that
+advertises `ShellCaps::HW_UPSCALE` cannot do the resample for free instead of
+the shader; that is a decision above `crcbl-shell` and is not needed for the
+settings menu.
 
 The two window modes do exist in `crcbl-shell` (windowed and borderless on a
 named monitor). The fractional scale `crcbl-shell` handles is the compositor's
 HiDPI factor — a different quantity, and mistaking it for this is how the
 overview got optimistic about this row once already.
 
-**What it blocks:** the MVP feature row "Own windowing (2 modes, render scale)",
-and the resolution slider in the settings-menu work — the renderer answers it
-and the read reaches a sample, but a slider has to be able to save.
+**What it blocks:** the MVP feature row "Own windowing (2 modes, render scale)".
+The resolution slider in the settings-menu work is no longer blocked here — the
+renderer answers it, the read reaches a sample, and a slider can now save — but
+nothing draws the slider.
 
 ### Wasm game modules: no `crcbl-mod`, no host (2026-08-27)
 

@@ -16,6 +16,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A setting can now be written, which nothing in the workspace could do.**
+  `crcbl-store` shipped the layered stack, `SettingsStack::set` and `save`, but
+  `SettingsStack::platform` resolved the platform's storage, read the file and
+  dropped it — so a caller holding that stack had nothing to hand `save`, and
+  the only writer in the tree was `crcbl settings`. `platform` now has two
+  siblings: `SettingsStack::with_platform_storage` lends that storage for the
+  length of a call (a borrow, because the browser's OPFS store is an `Rc` and
+  cannot be a `Box<dyn StorageSource>`), and `SettingsStack::save_platform`
+  writes the user layer back to the same `SETTINGS_FILE`, erroring where the
+  platform names no settings directory rather than logging.
+
+  Above it, `crcbl::settings` grows a writer beside each reader — `set_video`,
+  `set_video_effects`, `set_render_scale` and `set_audio_gain` — each clamping
+  on the way in to the range its reader clamps on the way out, so a slider's
+  stored value is the one the next start-up draws at. An effect the player
+  leaves on is written as `true` rather than omitted, which the reader treats
+  alike but a settings screen cannot: the key it would have to remove to turn an
+  effect back on is the one it never wrote. A non-finite scale or gain is
+  refused rather than written. `SettingsSource::stack` becomes the public
+  `SettingsSource::open`, and `SettingsSource::save` writes a stack back where
+  that source read it — `SettingsSource::None` saves nothing and reports so,
+  because a golden run must not persist into whichever home directory it ran in.
+
 - **`[engine.video] render_scale`: the player can ask for a smaller internal
   frame.** `ForwardRenderer::set_render_scale` and the Catmull-Rom upscale pass
   have existed since 2026-08-27 with no caller above the renderer. The video

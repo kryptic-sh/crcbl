@@ -67,6 +67,7 @@
 
 use crcbl_audio::mixer::Bus;
 use crcbl_render::{MIN_RENDER_SCALE, RenderEffects};
+use crcbl_store::StorageError;
 use crcbl_store::settings::SettingsStack;
 
 /// The `[engine.video]` section, as a dotted key prefix.
@@ -219,6 +220,75 @@ pub fn render_scale(stack: &SettingsStack) -> f32 {
     }
 }
 
+/// Write the whole `[engine.video]` section into the stack's user layer.
+///
+/// The mirror of [`video`], key for key: every entry of [`VIDEO_KEYS`] and
+/// [`RENDER_SCALE_KEY`]. Nothing is persisted until the caller saves the stack
+/// — see [`SettingsStack::save_platform`].
+///
+/// # It writes the row that says "on", where the reader ignores it
+///
+/// The reader treats `true` and absent alike, because this layer may only clamp
+/// downward. A writer cannot: a settings screen that only ever wrote `false`
+/// could never turn an effect back *on*, since removing the key and writing
+/// `true` differ to a file and not to the reader. So every key in the table is
+/// written on every call, which also means the file a settings screen produces
+/// says what the player chose rather than only where they differed from the
+/// engine.
+///
+/// # Errors
+///
+/// [`SettingsStack::set`]'s: no user layer in the stack, or an ancestor of a
+/// key already holding a scalar in a hand-edited file.
+pub fn set_video(stack: &mut SettingsStack, video: VideoSettings) -> Result<(), StorageError> {
+    set_video_effects(stack, video.effects)?;
+    set_render_scale(stack, video.render_scale)
+}
+
+/// Write the effect rows of `[engine.video]`, one key per [`VIDEO_KEYS`] entry.
+///
+/// # Errors
+///
+/// [`set_video`]'s.
+pub fn set_video_effects(
+    stack: &mut SettingsStack,
+    allowed: RenderEffects,
+) -> Result<(), StorageError> {
+    for (key, effect) in VIDEO_KEYS {
+        stack.set(
+            &format!("{VIDEO_NAMESPACE}.{key}"),
+            &allowed.contains(effect),
+        )?;
+    }
+    Ok(())
+}
+
+/// Write `[engine.video] render_scale`, clamped to what [`render_scale`] reads.
+///
+/// **Clamped on the way in as well as on the way out**, so the file holds the
+/// scale the next start-up will actually draw at. A settings screen that stored
+/// a slider's raw 0.1 and read back 0.25 would show the player a control that
+/// jumps under their finger on the next launch, and the range is
+/// `MIN_RENDER_SCALE..=1.0` in both directions because
+/// [`ForwardRenderer::set_render_scale`](crcbl_render::ForwardRenderer::set_render_scale)
+/// is the one enforcing it.
+///
+/// # Errors
+///
+/// [`set_video`]'s, and a `scale` that is not finite: the readers warn about a
+/// `nan` in a hand-edited file because a player put it there, but a caller
+/// handing one to a writer has a bug, and writing `1.0` on its behalf would
+/// hide it in a file that then looks deliberate.
+pub fn set_render_scale(stack: &mut SettingsStack, scale: f32) -> Result<(), StorageError> {
+    let dotted = format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}");
+    if !scale.is_finite() {
+        return Err(StorageError::Other(format!(
+            "settings: `{dotted}` cannot be written as {scale}"
+        )));
+    }
+    stack.set(&dotted, &f64::from(scale.clamp(MIN_RENDER_SCALE, 1.0)))
+}
+
 /// The `[engine.audio]` section, as a dotted key prefix.
 pub const AUDIO_NAMESPACE: &str = "engine.audio";
 
@@ -263,6 +333,31 @@ pub fn audio_gains(stack: &SettingsStack) -> [(Bus, f32); Bus::ALL.len()] {
     })
 }
 
+/// Write one bus's gain into `[engine.audio]`, clamped to what
+/// [`audio_gains`] reads.
+///
+/// The bus is spelled by [`Bus::settings_key`], which is the reader's spelling
+/// too — a settings screen and a start-up disagreeing about the name of the
+/// music slider is a volume the player sets once and never hears again.
+///
+/// One bus rather than the whole array, unlike [`set_video`]: an audio key
+/// **is** the gain, so a bus the file does not mention is already at unity and
+/// there is no row a writer has to state to mean "on".
+///
+/// # Errors
+///
+/// [`set_video`]'s, and a `gain` that is not finite, for [`set_render_scale`]'s
+/// reason.
+pub fn set_audio_gain(stack: &mut SettingsStack, bus: Bus, gain: f32) -> Result<(), StorageError> {
+    let dotted = format!("{AUDIO_NAMESPACE}.{}", bus.settings_key());
+    if !gain.is_finite() {
+        return Err(StorageError::Other(format!(
+            "settings: `{dotted}` cannot be written as {gain}"
+        )));
+    }
+    stack.set(&dotted, &f64::from(gain.clamp(0.0, 1.0)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +365,123 @@ mod tests {
     use crcbl_store::MemoryStorage;
     use crcbl_store::StorageSource;
     use crcbl_store::settings::SETTINGS_FILE;
+
+    /// A stack over `storage`, edited by `edit`, saved back, and reloaded
+    /// through the real loader.
+    ///
+    /// **The round trip is the point.** A writer that serialises into an
+    /// in-memory table proves nothing about the file: the section header, the
+    /// TOML type each key lands as, and whether `save` ever ran are all between
+    /// the two halves, and every one of them is a way for a settings screen to
+    /// keep a value the next start-up will not read.
+    fn round_trip(edit: impl FnOnce(&mut SettingsStack)) -> (SettingsStack, String) {
+        let storage = MemoryStorage::new();
+        let path = std::path::Path::new(SETTINGS_FILE);
+        let mut stack = SettingsStack::from_storage(&storage);
+        edit(&mut stack);
+        stack.save(&storage, path).expect("memory storage saves");
+        let written = String::from_utf8(storage.read(path).expect("the save wrote a file"))
+            .expect("the writer emits UTF-8");
+        (SettingsStack::from_storage(&storage), written)
+    }
+
+    /// **What a settings screen writes is what the next start-up reads.**
+    ///
+    /// Every field of [`VideoSettings`] at once, and none of them at its
+    /// default: a round trip that carried nothing would still pass if the
+    /// values under test were the ones an empty file already answers.
+    #[test]
+    fn a_saved_video_section_reads_back_unchanged() {
+        let wanted = VideoSettings {
+            effects: RenderEffects::all() - RenderEffects::BLOOM - RenderEffects::SHADOWS,
+            render_scale: 0.5,
+        };
+        let (reloaded, _) = round_trip(|stack| {
+            set_video(stack, wanted).expect("a fresh user layer accepts every key");
+        });
+        assert_eq!(video(&reloaded), wanted);
+    }
+
+    /// **An effect left on is written as `true`, not left out.**
+    ///
+    /// The reader cannot tell those apart and a writer must: a screen that only
+    /// ever wrote `false` could turn an effect off and never back on, since the
+    /// key it would have to remove is the one it never wrote.
+    #[test]
+    fn an_effect_left_standing_is_still_a_row_in_the_file() {
+        let (_, written) = round_trip(|stack| {
+            set_video_effects(stack, RenderEffects::all() - RenderEffects::BLOOM)
+                .expect("a fresh user layer accepts every key");
+        });
+        assert!(
+            written.contains("shadows = true"),
+            "an effect the player kept is missing from the file:\n{written}"
+        );
+        assert!(
+            written.contains("bloom = false"),
+            "an effect the player switched off is missing from the file:\n{written}"
+        );
+    }
+
+    /// **The clamp is on the way in as well as on the way out**, so the file
+    /// holds the scale that will be drawn rather than the one that was asked
+    /// for.
+    #[test]
+    fn a_scale_below_the_floor_is_stored_at_the_floor() {
+        let (reloaded, written) = round_trip(|stack| {
+            set_render_scale(stack, 0.05).expect("a fresh user layer accepts every key");
+        });
+        assert!(
+            (render_scale(&reloaded) - MIN_RENDER_SCALE).abs() < f32::EPSILON,
+            "reads back {}",
+            render_scale(&reloaded)
+        );
+        assert!(
+            !written.contains("0.05"),
+            "the file kept the unclamped ask:\n{written}"
+        );
+    }
+
+    /// **A gain reaches its own bus and no other**, under
+    /// [`Bus::settings_key`]'s spelling on both sides.
+    #[test]
+    fn a_saved_gain_reads_back_on_its_own_bus() {
+        let (reloaded, _) = round_trip(|stack| {
+            set_audio_gain(stack, Bus::Sfx, 0.25).expect("a fresh user layer accepts every key");
+        });
+        for (bus, gain) in audio_gains(&reloaded) {
+            let wanted = if bus == Bus::Sfx { 0.25 } else { 1.0 };
+            assert!(
+                (gain - wanted).abs() < f32::EPSILON,
+                "{bus:?} reads {gain}, wanted {wanted}"
+            );
+        }
+    }
+
+    /// **A value arithmetic cannot use is refused, not written.**
+    ///
+    /// The readers warn about a `nan` a player hand-edited in; a caller handing
+    /// one to a writer has a bug, and a file holding it would look deliberate
+    /// to whoever read it next.
+    #[test]
+    fn a_scale_or_a_gain_that_is_not_a_number_is_refused() {
+        let storage = MemoryStorage::new();
+        let mut stack = SettingsStack::from_storage(&storage);
+        for bad in [f32::NAN, f32::INFINITY] {
+            assert!(
+                set_render_scale(&mut stack, bad).is_err(),
+                "a render scale of {bad} was accepted"
+            );
+            assert!(
+                set_audio_gain(&mut stack, Bus::Music, bad).is_err(),
+                "a music gain of {bad} was accepted"
+            );
+        }
+        assert!(
+            !stack.contains(&format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}")),
+            "a refused write still put the key in the stack"
+        );
+    }
 
     /// A stack over a settings file with `toml` in it, through the real
     /// loader — not a table built in memory, because the spelling of the

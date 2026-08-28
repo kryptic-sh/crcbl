@@ -238,34 +238,84 @@ impl SettingsStack {
     /// `SettingsLayer::UserFile(StorageSettingsFile::load(..))` last.
     #[must_use]
     pub fn platform(app_name: &str) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let file = match crate::NativeStorage::config_root(app_name) {
-            Some(root) => Self::user_file(&crate::NativeStorage::at(root)),
-            None => {
-                crcbl_core::log::warn!(
-                    "settings: this platform names no config directory; \
-                     {SETTINGS_FILE} will not be read"
-                );
-                StorageSettingsFile::empty()
-            }
-        };
-        #[cfg(target_arch = "wasm32")]
-        let file = {
-            let _ = app_name;
-            match crate::web::opfs::installed() {
-                Some(store) => Self::user_file(store.as_ref()),
-                None => {
-                    crcbl_core::log::info!(
-                        "settings: no OPFS store installed; {SETTINGS_FILE} will not be read"
-                    );
-                    StorageSettingsFile::empty()
-                }
-            }
-        };
+        let file = Self::with_platform_storage(app_name, Self::user_file).unwrap_or_else(|| {
+            #[cfg(not(target_arch = "wasm32"))]
+            crcbl_core::log::warn!(
+                "settings: this platform names no config directory; \
+                 {SETTINGS_FILE} will not be read"
+            );
+            #[cfg(target_arch = "wasm32")]
+            crcbl_core::log::info!(
+                "settings: no OPFS store installed; {SETTINGS_FILE} will not be read"
+            );
+            StorageSettingsFile::empty()
+        });
 
         let mut stack = Self::new();
         stack.add(SettingsLayer::UserFile(file));
         stack
+    }
+
+    /// Run `f` against the storage [`platform`](Self::platform) reads out of,
+    /// or answer `None` where that platform has none.
+    ///
+    /// **A borrow rather than a value, and that is the whole reason this shape
+    /// exists.** The two backends do not have one owned type between them: the
+    /// native arm builds a [`NativeStorage`](crate::NativeStorage) on the spot
+    /// and the browser arm hands out an `Rc` to the store the shim installed,
+    /// which is not `Send` and so cannot be a `Box<dyn StorageSource>`. Both
+    /// can be *lent* for the length of a call, and a settings screen only ever
+    /// needs it for the length of one.
+    ///
+    /// # This is what makes a setting writable
+    ///
+    /// [`platform`](Self::platform) resolves this storage, reads
+    /// [`SETTINGS_FILE`] out of it and drops it, so a caller holding the stack
+    /// it returned had nothing to hand [`save`](Self::save) — which is why no
+    /// application in this workspace could write a setting until this existed.
+    /// [`save_platform`](Self::save_platform) is the pairing that closes it.
+    pub fn with_platform_storage<R>(
+        app_name: &str,
+        f: impl FnOnce(&dyn StorageSource) -> R,
+    ) -> Option<R> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let root = crate::NativeStorage::config_root(app_name)?;
+            Some(f(&crate::NativeStorage::at(root)))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = app_name;
+            Some(f(crate::web::opfs::installed()?.as_ref()))
+        }
+    }
+
+    /// Write the user layer back to the file [`platform`](Self::platform) read
+    /// it from.
+    ///
+    /// The mirror of [`platform`](Self::platform), and here rather than at the
+    /// call site so that [`SETTINGS_FILE`] keeps the one spelling its own
+    /// documentation asks for: a settings screen that named the file itself
+    /// could save to a path the next start-up does not read.
+    ///
+    /// # A platform with nowhere to write is an error, where one with nothing
+    /// to read is not
+    ///
+    /// [`platform`](Self::platform) answers an empty stack for a machine that
+    /// names no config directory, because a first run has no file and that is
+    /// not a failure. The opposite direction is: a player who moved a slider
+    /// and pressed Save has been told their choice was kept, so a save that
+    /// went nowhere has to reach them rather than a log line.
+    pub fn save_platform(&self, app_name: &str) -> Result<(), StorageError> {
+        Self::with_platform_storage(app_name, |storage| {
+            self.save(storage, Path::new(SETTINGS_FILE))
+        })
+        .unwrap_or_else(|| {
+            Err(StorageError::Other(format!(
+                "no settings directory for `{app_name}` on this platform, so \
+                 {SETTINGS_FILE} cannot be written"
+            )))
+        })
     }
 
     /// The same one-layer stack over a [`StorageSource`] the caller already

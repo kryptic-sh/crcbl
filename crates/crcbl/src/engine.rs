@@ -116,7 +116,7 @@ use crcbl_shell::{
     CloseReply, DisplayMode, PhysicalSize, PointerMode, Shell, ShellError, ShellEvent, WindowId,
 };
 use crcbl_store::StorageSource;
-use crcbl_store::settings::SettingsStack;
+use crcbl_store::settings::{SETTINGS_FILE, SettingsStack};
 
 use crate::settings::VideoSettings;
 
@@ -731,11 +731,46 @@ impl SettingsSource<'_> {
     ///
     /// Every reader below starts here, so where a settings file comes from is
     /// decided in one place rather than once per group of keys.
-    fn stack(self, app_name: &str) -> Option<SettingsStack> {
+    ///
+    /// **Public because a settings screen needs the stack itself**, not one of
+    /// the readers' answers: it edits keys with `crate::settings`' writers and
+    /// hands the same stack back to [`save`](Self::save). The readers stay
+    /// convenience over this — a start-up wants the section, not the file.
+    #[must_use]
+    pub fn open(self, app_name: &str) -> Option<SettingsStack> {
         match self {
             Self::Platform => Some(SettingsStack::platform(app_name)),
             Self::Source(storage) => Some(SettingsStack::from_storage(storage)),
             Self::None => None,
+        }
+    }
+
+    /// Write `stack`'s user layer back to wherever [`open`](Self::open) read
+    /// it.
+    ///
+    /// [`Self::None`] writes nothing and says so — the arm exists so that a
+    /// golden run does not touch whichever home directory it executes in, and
+    /// silently persisting on its behalf would be the same defect as reading.
+    /// The bool is which happened, so a caller can tell "saved" from "there was
+    /// nowhere to save to" without inspecting the source it passed in.
+    ///
+    /// # Errors
+    ///
+    /// The backend's, and — for [`Self::Platform`] — a machine that names no
+    /// settings directory, on
+    /// [`SettingsStack::save_platform`](crcbl_store::settings::SettingsStack::save_platform)'s
+    /// terms: a player who pressed Save has to be told it did not happen.
+    pub fn save(
+        self,
+        app_name: &str,
+        stack: &SettingsStack,
+    ) -> Result<bool, crcbl_store::StorageError> {
+        match self {
+            Self::Platform => stack.save_platform(app_name).map(|()| true),
+            Self::Source(storage) => stack
+                .save(storage, std::path::Path::new(SETTINGS_FILE))
+                .map(|()| true),
+            Self::None => Ok(false),
         }
     }
 
@@ -751,7 +786,7 @@ impl SettingsSource<'_> {
     /// opened once, and a caller that wants the effects wants the render scale
     /// in the same breath.
     fn video(self, app_name: &str) -> VideoSettings {
-        self.stack(app_name)
+        self.open(app_name)
             .as_ref()
             .map_or_else(VideoSettings::unrestricted, crate::settings::video)
     }
@@ -775,7 +810,7 @@ impl SettingsSource<'_> {
         self,
         app_name: &str,
     ) -> [(crcbl_audio::mixer::Bus, f32); crcbl_audio::mixer::Bus::ALL.len()] {
-        self.stack(app_name).as_ref().map_or_else(
+        self.open(app_name).as_ref().map_or_else(
             || crcbl_audio::mixer::Bus::ALL.map(|bus| (bus, 1.0)),
             crate::settings::audio_gains,
         )
@@ -11822,6 +11857,58 @@ mod tests {
             SettingsSource::None.video("test"),
             VideoSettings::unrestricted(),
             "a run with no source must draw everything at full size",
+        );
+    }
+
+    /// **A source saves where it read, and a headless run saves nowhere.**
+    ///
+    /// The write half of `a_settings_source_carries_the_whole_video_section`,
+    /// and the pair is what a settings screen is: it opens the stack this
+    /// source resolves to, edits it, and hands the same stack back. A `save`
+    /// that resolved a *second* source — or that quietly persisted for
+    /// [`SettingsSource::None`] — would put a golden run's settings in whatever
+    /// home directory it executed in, which is the one thing that arm exists to
+    /// prevent.
+    #[test]
+    fn a_source_saves_where_it_read_and_a_headless_run_saves_nowhere() {
+        use crcbl_store::StorageSource;
+
+        let storage = crcbl_store::MemoryStorage::new();
+        let source = SettingsSource::Source(&storage);
+
+        let mut stack = source.open("test").expect("a source resolves to a stack");
+        crate::settings::set_render_scale(&mut stack, 0.5).expect("a fresh layer takes the key");
+        assert!(
+            source.save("test", &stack).expect("memory storage saves"),
+            "a source that resolved a stack must report that it saved it",
+        );
+        assert!(
+            (source.video("test").render_scale - 0.5).abs() < f32::EPSILON,
+            "the saved scale did not survive a fresh read of the same storage",
+        );
+
+        // The headless arm, against the file the arm above just wrote: a
+        // further edit handed to `None` must reach nothing. Checked as bytes
+        // rather than as an absent file, because the file is here by now — what
+        // is under test is that this save is a no-op, not that no save ever
+        // happened.
+        let path = std::path::Path::new(SETTINGS_FILE);
+        let before = storage.read(path).expect("the save above wrote a file");
+        crate::settings::set_render_scale(&mut stack, 0.25).expect("a fresh layer takes the key");
+        assert!(
+            SettingsSource::None.open("test").is_none(),
+            "a headless run must resolve no stack at all",
+        );
+        assert!(
+            !SettingsSource::None
+                .save("test", &stack)
+                .expect("saving nowhere is not a failure"),
+            "a headless run must report that it saved nothing",
+        );
+        assert_eq!(
+            storage.read(path).expect("the file is still there"),
+            before,
+            "the headless save reached storage it was never given",
         );
     }
 
