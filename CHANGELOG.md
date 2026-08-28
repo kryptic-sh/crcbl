@@ -33,11 +33,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   itself on every platform that has a lock — the request is what it comes back
   to when the lock ends.
 
-  **`breakout` hides its cursor while the paddle is being driven**, which is the
-  hook's `None` and the reason it exists: that game binds the pointer's `x`
-  straight to the paddle, so a visible arrow is a second pointer drawn a
-  paddle's height above the first. Every menu it has — start, pause, won, lost —
-  gets the arrow back, because a menu is not something a paddle can point at.
+  **`breakout` confines the pointer to the board and hides the cursor while the
+  paddle is being driven** — the pair GLFW calls `CAPTURED`, and the first use
+  of `PointerMode::Confined` anywhere in the workspace. That game binds the
+  pointer's absolute `x` straight to the paddle, so a visible arrow was a second
+  pointer drawn a paddle's height above the first, and a hand that ran past the
+  window's edge parked the paddle and left a dead zone to cross on the way back.
+  Every menu it has — start, pause, won, lost — frees the pointer and gives the
+  arrow back, because a menu is not something a paddle can point at; so does
+  focus loss, which pauses the loop before the reconcile runs. A browser has no
+  confine primitive, declines the request and says so in the log, and the demo
+  plays exactly as it did.
 
   **`viewer` is the first sample to answer it**: the whole canvas is a
   turntable, so it shows the open hand every model viewer shows, closes it into

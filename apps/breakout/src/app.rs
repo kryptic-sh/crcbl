@@ -34,7 +34,7 @@ use crcbl::engine::{
     TouchUpdate, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{CursorIcon, DisplayMode, ShellBackend as Backend, WindowId};
+use crcbl::shell::{CursorIcon, DisplayMode, PointerMode, ShellBackend as Backend, WindowId};
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::Gpu;
@@ -322,6 +322,36 @@ impl HostedGame for Breakout {
         }
         if pointer.released {
             self.game.pointer_button(false);
+        }
+    }
+
+    /// Confined to the board while the paddle is being driven, free under a
+    /// panel.
+    ///
+    /// The other half of [`Breakout::cursor`], and the pair together is what
+    /// GLFW calls `CAPTURED`: the pointer may not leave, and nothing is drawn
+    /// where it is. `pointer_event` binds the pointer's `x` to the paddle by
+    /// **absolute position**, so a hand that runs past the window's edge parks
+    /// the paddle at the end of its travel and then has a dead zone to cross on
+    /// the way back — the classic fault of every paddle game that did not
+    /// confine.
+    ///
+    /// The panel frees it for the reason `apps/breach` frees its lock: a player
+    /// who cannot reach their own cursor cannot leave, and the panels are the
+    /// only place this game has to be left from. Focus loss pauses the loop, so
+    /// the pointer is handed back on the frame the window stops being the one
+    /// in front — no window this game owns can hold a pointer nobody is
+    /// looking at.
+    ///
+    /// A browser has no confine primitive and declines this, which the loop
+    /// logs once and turns into [`PointerMode::Free`]; the demo plays exactly
+    /// as it did before. `docs/backlog.md` says why emulating it is not on the
+    /// table.
+    fn pointer_mode(&self) -> PointerMode {
+        if self.panel_up {
+            PointerMode::Free
+        } else {
+            PointerMode::Confined
         }
     }
 
@@ -1351,6 +1381,69 @@ mod tests {
             .shell_mut()
             .cursor(window)
             .expect("the loop's window is live")
+    }
+
+    /// The pointer mode the shell actually has this loop's window in.
+    fn the_mode_the_shell_is_in(engine: &mut Loop<HeadlessShell>) -> PointerMode {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .window_state(window)
+            .expect("the loop's window is live")
+            .pointer_mode
+    }
+
+    /// **The pointer is confined to the board while the paddle is being driven,
+    /// and handed back whenever a panel is up — focus loss included.**
+    ///
+    /// Read off the window rather than off [`Breakout::pointer_mode`], so what
+    /// this asserts is the whole path: this game's answer, the loop's poll and
+    /// the shell call.
+    ///
+    /// The focus-loss half is the one that would strand a player, and it is not
+    /// this game's code at all — `crcbl::engine::lose_focus` pauses, and the
+    /// pause is what frees the pointer. Asserted here because that is the only
+    /// place the two meet, and a loop that reconciled the pointer *before*
+    /// applying the pause would leave a window nobody is looking at holding it.
+    #[test]
+    fn the_pointer_is_confined_to_the_board_while_the_paddle_is_driven() {
+        let mut engine = scripted(&headless(120));
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(
+            the_mode_the_shell_is_in(&mut engine),
+            PointerMode::Free,
+            "the start menu is up and the pointer is already trapped",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, LAUNCH_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, LAUNCH_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 8);
+        assert_eq!(engine.game().game().state, GameState::Playing);
+        assert_eq!(
+            the_mode_the_shell_is_in(&mut engine),
+            PointerMode::Confined,
+            "the paddle is bound to a pointer that can walk off the board",
+        );
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused(), "focus loss did not pause the run");
+        assert_eq!(
+            the_mode_the_shell_is_in(&mut engine),
+            PointerMode::Free,
+            "the window lost focus and kept the pointer",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// **The cursor is hidden while the paddle is the pointer, and back under a

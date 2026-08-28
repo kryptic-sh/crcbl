@@ -3725,16 +3725,20 @@ on it. The split follows GLFW's (`GLFW_CURSOR_HIDDEN` is separate from
 `CAPTURED` and `DISABLED`) and Unity's (`CursorLockMode` plus `Cursor.visible`).
 Both shapes and hiding are exercised end to end — `apps/viewer` answers `Grab`,
 `Grabbing` and `Default`, `apps/breakout` answers `None` while the paddle is the
-pointer, and the browser gate reads all four. What is left:
+pointer, and the browser gate reads all four. `apps/breakout` also answers
+`PointerMode::Confined` while it plays, which is the workspace's only use of
+that mode. What is left:
 
-- **`PointerMode::Confined` is asked for by nothing.** Every backend but web
-  implements it and `crcbl::engine`'s reconcile has a headless test that drives
-  it, but no sample ever answers it, so on Wayland, X11, Win32 and AppKit the
-  confine path has never run outside that test — and the browser gate cannot
-  reach it at all, since web declines the mode. The honest use is a strategy
-  game or a windowed editor: the pointer must not leave the window while it
-  stays perfectly visible. Until one exists, treat "confined works" as untested
-  on real compositors.
+- **Nobody has watched a confined pointer on a real compositor.**
+  `apps/breakout` asks for it and the headless test asserts the mode reaches the
+  window, but every backend's confine — X11's `GrabPointer` with `confine_to`,
+  Wayland's pointer-constraints, `ClipCursor`, AppKit's — has still only been
+  exercised by a shell unit test. Nothing in CI can watch it either: every GPU
+  job is headless or a browser, and web declines the mode outright. So the claim
+  that the pointer really stops at the window edge, and really comes back on
+  focus loss, rests on reading each backend rather than on seeing it. Running
+  `cargo run -p breakout` windowed under openbox is what would settle it, and it
+  is a minute's work for whoever is at a desk.
 
 - **`PointerMode::Confined` is unsupported on web, deliberately.**
   `WebShell::caps` omits `ShellCaps::POINTER_CONFINE` and the mode errors rather
@@ -3750,6 +3754,24 @@ pointer, and the browser gate reads all four. What is left:
   cursor" in core Wayland), naming a shape needs `cursor-shape-v1`, which is not
   vendored. Unchanged by this work and noted here because the new hook is what
   finally lets a game ask.
+
+### A failing `until` in the browser gate reddens a second, unrelated check (2026-08-29)
+
+Seen twice while sabotage-testing the cursor and pointer checks, and worth
+knowing before someone reads a red gate run and chases the wrong failure. A
+`check` whose evidence comes from `until` burns the full poll ceiling — 90s on
+this machine — before it reports. The frame-sampling checks further down group C
+then run against a demo that has moved on, and
+`the canvas changes between frames while the simulation runs` failed with
+`1 distinct frame(s) across 16 samples` on a build whose only defect was the one
+the first check names.
+
+So a two-failure run is not necessarily two defects. Read the slowest-check line
+the driver prints: a check sitting at the poll ceiling is the cause, and the
+frame-sampling one below it is the symptom. Not fixed — the fix would be for a
+failed `until` to mark the run rather than let later timing-sensitive checks
+believe their window is still valid, and that is a change to how `check` and
+`until` compose rather than to any one check.
 
 ### Decision needed: Escape cannot pause a demo that holds the pointer lock (2026-08-26)
 

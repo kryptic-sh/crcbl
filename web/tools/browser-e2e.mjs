@@ -360,6 +360,14 @@ const EXPECTATIONS = {
     // cursor: see `Breakout::cursor`. Group B reads `default` above, with the
     // start menu still up — this is the other side of that.
     playingCursor: 'none',
+    // And the other pointer axis, which this backend cannot honour:
+    // `Breakout::pointer_mode` answers `PointerMode::Confined` on the same
+    // frame, no browser has a confine primitive, and the loop turns the request
+    // into a free pointer and says so. The demo plays identically either way,
+    // so the log line is the only place the refusal is visible — and it is what
+    // would notice `WebShell::caps` growing `POINTER_CONFINE` without an
+    // implementation behind it.
+    declined: 'breakout asked for pointer confinement',
     moving: /Ball x: (-?[\d.]+)/,
     movingLabel: 'the ball moves after the launch',
     // **What a finger can do here**, read by group F the way the rest of this
@@ -3002,6 +3010,18 @@ try {
     // Polled for the same reason group B's is: the shim applies the request
     // from a `requestAnimationFrame` loop of its own, so the HUD line that says
     // the run started can arrive first.
+    if (EXPECTED.declined) {
+      const line = await until(async () => said(EXPECTED.declined) ?? null);
+      check(
+        'C',
+        'the browser declines the pointer mode it has no primitive for',
+        Boolean(line),
+        line?.trim() ??
+          `no console line carried "${EXPECTED.declined}" — either the demo ` +
+            'stopped asking or this backend started claiming it can confine'
+      );
+    }
+
     if (EXPECTED.playingCursor) {
       const wanted = EXPECTED.playingCursor;
       const drawnNow = async () =>
