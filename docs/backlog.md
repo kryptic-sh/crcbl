@@ -3716,27 +3716,26 @@ Stated plainly, so the next session does not mistake silence for coverage.
   were `prettier --check`, `tools/check-doc-citations.sh` and
   `tools/check-wrapped-strings.sh`, all green.
 
-### What the cursor seam left owed (2026-08-28)
+### The two pointer axes: what is deliberate, and the arm nothing exercises (2026-08-28)
 
 `HostedGame::cursor` answers `Option<CursorIcon>` and `Loop::reconcile_cursor`
 passes it to `Shell::set_cursor` on a change, which is the second of the two
 pointer axes — `PointerMode` is where the pointer may go, this is what is drawn
 on it. The split follows GLFW's (`GLFW_CURSOR_HIDDEN` is separate from
 `CAPTURED` and `DISABLED`) and Unity's (`CursorLockMode` plus `Cursor.visible`).
-What it does not yet do:
+Both shapes and hiding are exercised end to end — `apps/viewer` answers `Grab`,
+`Grabbing` and `Default`, `apps/breakout` answers `None` while the paddle is the
+pointer, and the browser gate reads all four. What is left:
 
-- **Nothing hides the cursor.** `apps/viewer` answers the hook with `Grab`,
-  `Grabbing` and `Default`, and the browser gate reads all three — group B's
-  `the shim drew the cursor the engine asked for` against
-  `EXPECTATIONS.viewer`'s `cursor: 'grab'`, group C's
-  `the cursor closes into a fist while the turntable is held` mid-drag. So a
-  _changed_ shape is proven end to end on every platform the gate runs. The
-  `None` arm is not: the three samples that take the lock — `apps/breach`,
-  `apps/lantern`, `apps/quarry` — get a hidden cursor from the lock itself and
-  never ask, so `set_cursor(_, None)` and the `none` keyword it publishes have
-  unit tests either side and no demo between them. A shooter drawing its own
-  reticle with the pointer free is the honest case, and it needs a `cursor`
-  entry in that table like viewer's.
+- **`PointerMode::Confined` is asked for by nothing.** Every backend but web
+  implements it and `crcbl::engine`'s reconcile has a headless test that drives
+  it, but no sample ever answers it, so on Wayland, X11, Win32 and AppKit the
+  confine path has never run outside that test — and the browser gate cannot
+  reach it at all, since web declines the mode. The honest use is a strategy
+  game or a windowed editor: the pointer must not leave the window while it
+  stays perfectly visible. Until one exists, treat "confined works" as untested
+  on real compositors.
+
 - **`PointerMode::Confined` is unsupported on web, deliberately.**
   `WebShell::caps` omits `ShellCaps::POINTER_CONFINE` and the mode errors rather
   than silently doing nothing, which is right: no browser has a confine

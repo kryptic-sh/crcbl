@@ -34,7 +34,7 @@ use crcbl::engine::{
     TouchUpdate, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
+use crcbl::shell::{CursorIcon, DisplayMode, ShellBackend as Backend, WindowId};
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::Gpu;
@@ -120,6 +120,12 @@ pub struct Breakout {
     /// until a finger arrives, so a keyboard-and-mouse run is unchanged and no
     /// golden frame moves.
     pause: PauseControl,
+    /// Whether a panel is up, as [`Breakout::menu_kind`] last decided.
+    ///
+    /// Kept because [`Breakout::cursor`] is asked `&self` and the answer is the
+    /// menu's rather than the simulation's; `apps/viewer` and `apps/breach`
+    /// keep the same copy for the same reason.
+    panel_up: bool,
 }
 
 /// The loop breakout runs in.
@@ -228,6 +234,7 @@ fn assemble<S: Shell + ?Sized>(
             hud: HudStrings::default(),
             board: game::BoardStats::default(),
             pause: PauseControl::new(),
+            panel_up: false,
         },
         options.common.loop_config(),
     ))
@@ -318,6 +325,26 @@ impl HostedGame for Breakout {
         }
     }
 
+    /// Hidden while the paddle is being driven, and the arrow under a panel.
+    ///
+    /// **The paddle is the cursor here.** `pointer_event` above binds the
+    /// pointer's `x` straight to the paddle, so a visible arrow is a second
+    /// pointer drawn a paddle's height above the first — which is why every
+    /// game of this shape, from the original on, hides it. It is the honest use
+    /// of the hook's `None`: the pointer stays
+    /// [`Free`](crcbl::shell::PointerMode::Free), because nothing here wants
+    /// relative motion or a pointer that cannot leave.
+    ///
+    /// A panel gets it back, and has to: the start, pause, won and lost menus
+    /// are all clicked, and a menu is not something a paddle can point at.
+    fn cursor(&self) -> Option<CursorIcon> {
+        if self.panel_up {
+            Some(CursorIcon::Default)
+        } else {
+            None
+        }
+    }
+
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<Launch> {
         menu::launch_from_id(id)
     }
@@ -343,11 +370,15 @@ impl HostedGame for Breakout {
         paused: bool,
     ) -> MenuKind {
         let kind = MenuKind::of(paused, &self.render_state);
+        let panel_up = kind != MenuKind::None;
         // A panel takes the button away and a half-press with it, and the
         // contacts that arrive before the next call are hit-tested against this
         // answer — the same "last frame's menu" rule the loop applies to its own
         // pointer.
-        self.pause.set_panel_up(kind != MenuKind::None);
+        self.pause.set_panel_up(panel_up);
+        // Recorded as well as acted on: `cursor` is asked immediately after this
+        // and is handed no argument.
+        self.panel_up = panel_up;
         kind
     }
 
@@ -1309,6 +1340,88 @@ mod tests {
             engine.game().game().state,
             GameState::WaitingForLaunch,
             "a tap on the menu's backdrop served the ball",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The cursor the shell actually has on this loop's window.
+    fn the_cursor_the_shell_is_drawing(engine: &mut Loop<HeadlessShell>) -> Option<CursorIcon> {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .cursor(window)
+            .expect("the loop's window is live")
+    }
+
+    /// **The cursor is hidden while the paddle is the pointer, and back under a
+    /// panel.**
+    ///
+    /// Read off the window rather than off [`Breakout::cursor`], so what this
+    /// asserts is the whole path: this game's answer, the loop's poll, and the
+    /// shell call. A hook that returned the right value and was never polled
+    /// leaves the window on the arrow it was created with for the whole run.
+    ///
+    /// The panel halves are the ones that would strand a player: every menu
+    /// this game has is clicked, and a menu is not something a paddle can point
+    /// at.
+    #[test]
+    fn the_cursor_is_hidden_while_the_paddle_is_the_pointer() {
+        let mut engine = scripted(&headless(120));
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert!(engine.menu_layout().is_some(), "the start menu is up");
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            Some(CursorIcon::Default),
+            "the start menu is up and there is no cursor to click it with",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, LAUNCH_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, LAUNCH_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 8);
+        assert_eq!(engine.game().game().state, GameState::Playing);
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            None,
+            "the paddle is following the pointer under a visible arrow",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, crcbl::engine::PAUSE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, crcbl::engine::PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            Some(CursorIcon::Default),
+            "the pause panel is up and the cursor is still hidden",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, crcbl::engine::PAUSE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, crcbl::engine::PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(!engine.is_paused());
+        assert_eq!(
+            the_cursor_the_shell_is_drawing(&mut engine),
+            None,
+            "resuming left the arrow over the board",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

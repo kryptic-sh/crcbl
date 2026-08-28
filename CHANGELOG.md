@@ -33,6 +33,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   itself on every platform that has a lock — the request is what it comes back
   to when the lock ends.
 
+  **`breakout` hides its cursor while the paddle is being driven**, which is the
+  hook's `None` and the reason it exists: that game binds the pointer's `x`
+  straight to the paddle, so a visible arrow is a second pointer drawn a
+  paddle's height above the first. Every menu it has — start, pause, won, lost —
+  gets the arrow back, because a menu is not something a paddle can point at.
+
   **`viewer` is the first sample to answer it**: the whole canvas is a
   turntable, so it shows the open hand every model viewer shows, closes it into
   a fist while the hand is holding, and hands back the ordinary arrow while the

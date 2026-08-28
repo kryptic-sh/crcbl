@@ -356,6 +356,10 @@ const EXPECTATIONS = {
     started: (line) => line.includes('PLAYING'),
     startedLabel: 'Space launches the ball',
     startedFailure: 'the state never left WAITING',
+    // The paddle is bound to the pointer's `x`, so a playing frame hides the
+    // cursor: see `Breakout::cursor`. Group B reads `default` above, with the
+    // start menu still up — this is the other side of that.
+    playingCursor: 'none',
     moving: /Ball x: (-?[\d.]+)/,
     movingLabel: 'the ball moves after the launch',
     // **What a finger can do here**, read by group F the way the rest of this
@@ -2987,6 +2991,35 @@ try {
       Boolean(launched),
       (launched ?? EXPECTED.startedFailure).trim()
     );
+
+    // **And the cursor the run itself asks for**, which is a different answer
+    // from the one group B read: that one is taken with the demo's start menu
+    // still up, and a menu is clicked. `playingCursor` is for a demo whose
+    // *playing* frame wants something else — `none` where the game binds the
+    // pointer to something it draws itself, which is the only exercise the
+    // hook's hidden arm gets outside unit tests.
+    //
+    // Polled for the same reason group B's is: the shim applies the request
+    // from a `requestAnimationFrame` loop of its own, so the HUD line that says
+    // the run started can arrive first.
+    if (EXPECTED.playingCursor) {
+      const wanted = EXPECTED.playingCursor;
+      const drawnNow = async () =>
+        evaluate(page, `document.getElementById('canvas')?.style.cursor ?? ''`);
+      const took = await until(async () =>
+        (await drawnNow()) === wanted ? wanted : null
+      );
+      check(
+        'C',
+        'the run hides the cursor it is standing in for',
+        took === wanted,
+        took === wanted
+          ? `canvas.style.cursor is ${wanted} with the run in play`
+          : `canvas.style.cursor stayed "${await drawnNow()}" after the run ` +
+              `started and this demo asks for "${wanted}" — the paddle is ` +
+              'being driven under a visible arrow'
+      );
+    }
   }
 
   // The ball's x is in every HUD line, and two different values is the
