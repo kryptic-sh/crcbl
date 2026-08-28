@@ -113,7 +113,8 @@ use crcbl_hal::{
 use crcbl_hal::{Device, Instance};
 use crcbl_render::{EffectRequest, RenderEffects};
 use crcbl_shell::{
-    CloseReply, DisplayMode, PhysicalSize, PointerMode, Shell, ShellError, ShellEvent, WindowId,
+    CloseReply, CursorIcon, DisplayMode, PhysicalSize, PointerMode, Shell, ShellError, ShellEvent,
+    WindowId,
 };
 use crcbl_store::StorageSource;
 use crcbl_store::settings::{SETTINGS_FILE, SettingsStack};
@@ -4828,6 +4829,46 @@ pub trait HostedGame: Sized {
         PointerMode::Free
     }
 
+    /// The cursor's shape, or `None` to hide it, as of this frame.
+    ///
+    /// The second of the two axes [`PointerMode`] is the first of: that one is
+    /// about *where the pointer may go*, this one about *what is drawn where it
+    /// is*. They are deliberately not one setting — see the module docs on
+    /// [`PointerMode`] — and a game sets each without reference to the other. A
+    /// shooter that draws its own reticle hides the cursor while leaving the
+    /// pointer free; a strategy game confines the pointer to the window and
+    /// keeps it perfectly visible.
+    ///
+    /// **Polled and reconciled exactly like [`Self::pointer_mode`]**: asked
+    /// once a frame, and [`Shell::set_cursor`] is called only when the answer
+    /// changes, so a game that answers the same value every frame costs one
+    /// call here and no shell traffic. The two are asked at the same point in
+    /// the frame, after [`menu_kind`](Self::menu_kind), so a frame that opened
+    /// a panel can give the cursor back on that frame rather than one later.
+    ///
+    /// # A lock hides the cursor whether this asks for it or not
+    ///
+    /// [`PointerMode::Locked`] is a platform's "no pointer here" state and
+    /// every backend that has one draws nothing while it holds. So a
+    /// first-person game does not need to hide the cursor as well — and if it
+    /// does anyway, nothing conflicts: this axis is what the cursor goes back
+    /// to when the lock ends.
+    ///
+    /// # Not every backend can draw every shape
+    ///
+    /// Hiding works everywhere the engine runs. A *shape* may not: a Wayland
+    /// window without `cursor-shape-v1` has no way to name one, and
+    /// [`Shell::set_cursor`] there records the request and leaves the compositor
+    /// drawing its default. Nothing fails and nothing is logged twice; a game
+    /// that needs a particular pointer drawn should draw it itself.
+    ///
+    /// The visible default is the same argument as
+    /// [`pointer_mode`](Self::pointer_mode)'s free one: a game that never
+    /// overrides this is a game the player keeps their cursor in.
+    fn cursor(&self) -> Option<CursorIcon> {
+        Some(CursorIcon::Default)
+    }
+
     /// The game action a widget id names, or `None` for an id this game's menus
     /// do not use. Never asked about a reserved id — see [`FIRST_GAME_ID`].
     fn menu_action(id: crcbl_ui::WidgetId) -> Option<Self::MenuAction>;
@@ -5087,6 +5128,14 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// What the shell was last told, which is the request clamped to what
     /// [`Shell::caps`] says the backend can do.
     pointer_mode: PointerMode,
+    /// The cursor the shell was last told to draw, or `None` for hidden.
+    ///
+    /// One field where the pointer mode needs two: there is no capability to
+    /// clamp a cursor against, so what the game asked for and what the shell
+    /// was told cannot disagree. It starts where every backend's
+    /// [`Shell::create_window`] leaves it, so a game that never overrides
+    /// [`HostedGame::cursor`] issues no call at all.
+    cursor: Option<CursorIcon>,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -5149,6 +5198,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             menu_contact: None,
             pointer_asked: PointerMode::Free,
             pointer_mode: PointerMode::Free,
+            cursor: Some(CursorIcon::Default),
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -5493,6 +5543,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // than one later. Outside the draw span, because a shell round trip is
         // not time the frame spent drawing.
         self.reconcile_pointer_mode();
+        self.reconcile_cursor();
 
         let present = crcbl_core::trace::span(crate::perf::PRESENT_SPAN);
         let outcome = self.gpu.frame()?;
@@ -5551,6 +5602,33 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
         self.pointer_mode = want;
         log::info!("shell: switched to {}", want.as_str());
+    }
+
+    /// Brings the cursor in line with what the game answers this frame.
+    ///
+    /// The other half of [`Self::reconcile_pointer_mode`], and simpler for one
+    /// reason: there is no capability gating a cursor, so there is nothing to
+    /// clamp the request to and no declined-versus-asked pair to keep apart.
+    /// A backend that cannot draw a named shape still accepts the request and
+    /// falls back on its own — see [`HostedGame::cursor`] — so the only failure
+    /// left here is a window that has gone away.
+    ///
+    /// Returns nothing for the reason the pointer's reconcile does: a cursor
+    /// the shell would not take is a cosmetic loss, not a run the loop should
+    /// end.
+    fn reconcile_cursor(&mut self) {
+        let asked = self.game.cursor();
+        if asked == self.cursor {
+            return;
+        }
+        if let Err(error) = self.shell.set_cursor(self.window, asked) {
+            // Left as it was, exactly as the pointer's reconcile leaves its
+            // record: the shell did not move, so a game changing its mind again
+            // is what asks a second time.
+            log::warn!("shell: the cursor was refused: {error}");
+            return;
+        }
+        self.cursor = asked;
     }
 
     /// Closes the trace's frame and feeds the debug panel's budget row.
@@ -10376,6 +10454,22 @@ mod tests {
     /// same way the keyboard does rather than reaching past it.
     const SERVE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Space;
 
+    /// What [`HostedGame::cursor`] answers, defaulting to the hook's own
+    /// default.
+    ///
+    /// A newtype rather than a bare `Option<CursorIcon>` because that type's
+    /// `Default` is `None`, which is *hidden* — so a derived default would have
+    /// every other test in this module quietly hiding the cursor, and the one
+    /// test below could not tell a working hook from that.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct WantedCursor(Option<CursorIcon>);
+
+    impl Default for WantedCursor {
+        fn default() -> Self {
+            Self(Some(CursorIcon::Default))
+        }
+    }
+
     /// A game with no simulation in it, which records what the loop asked of it.
     #[derive(Debug, Default)]
     struct FakeGame {
@@ -10401,6 +10495,8 @@ mod tests {
         /// What [`HostedGame::pointer_mode`] answers, so a test can change this
         /// game's mind between frames.
         wanted_pointer: PointerMode,
+        /// What [`HostedGame::cursor`] answers, for the same reason.
+        wanted_cursor: WantedCursor,
     }
 
     /// This game's own summary: the shared half, plus a count only it kept.
@@ -10466,6 +10562,10 @@ mod tests {
 
         fn pointer_mode(&self) -> PointerMode {
             self.wanted_pointer
+        }
+
+        fn cursor(&self) -> Option<CursorIcon> {
+            self.wanted_cursor.0
         }
 
         /// Asserts rather than ignores: the loop promises never to ask about an
@@ -11301,6 +11401,97 @@ mod tests {
             shell_pointer_mode(&mut engine),
             PointerMode::Free,
             "the game stopped asking and the pointer was not given back",
+        );
+    }
+
+    /// The cursor the shell actually has on this loop's window.
+    ///
+    /// Read off the *shell* for the reason [`shell_pointer_mode`] is: a loop
+    /// that recorded the request without issuing it would answer its own field
+    /// correctly and leave the window untouched.
+    fn shell_cursor(engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>) -> Option<CursorIcon> {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .cursor(window)
+            .expect("the loop's window is live")
+    }
+
+    /// **The loop hides the cursor when the game asks, and only when the answer
+    /// changes.**
+    ///
+    /// The same three-part shape as the pointer-mode test above, because it is
+    /// the same contract on the other axis. The middle section — setting the
+    /// shell's cursor out from under the loop and watching it stay put — is the
+    /// only way to observe a call that did *not* happen, and it is what says
+    /// the hook is polled-and-diffed rather than re-issued every frame.
+    ///
+    /// The last section is the part that is specific to this axis: a game that
+    /// takes the pointer lock does not thereby give up its cursor request, so
+    /// the two settings must not be one setting wearing two names.
+    #[test]
+    fn the_loop_hides_the_cursor_when_the_game_asks_and_only_when_the_answer_changes() {
+        let mut engine = hosted(None);
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            shell_cursor(&mut engine),
+            Some(CursorIcon::Default),
+            "a game that never overrides the hook must keep the cursor it was given",
+        );
+
+        engine.game_mut().wanted_cursor = WantedCursor(None);
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            shell_cursor(&mut engine),
+            None,
+            "the game asked for a hidden cursor and the loop never passed it on",
+        );
+
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .set_cursor(window, Some(CursorIcon::Text))
+            .expect("the window is live");
+        for _ in 0..3 {
+            engine.frame().expect("the fake never fails");
+        }
+        assert_eq!(
+            shell_cursor(&mut engine),
+            Some(CursorIcon::Text),
+            "an unchanged answer re-issued the request, so the poll is not idle",
+        );
+
+        // A change of mind reaches the shell again, which is what says the
+        // silence above was the reconcile and not a hook that stopped working.
+        engine.game_mut().wanted_cursor = WantedCursor(Some(CursorIcon::Crosshair));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(shell_cursor(&mut engine), Some(CursorIcon::Crosshair));
+
+        // Two axes: taking the pointer changes where it may go and not what is
+        // drawn on it. A `Locked` platform hides the cursor itself, which is
+        // exactly why the loop must not fold the lock into this request — the
+        // request is what the cursor comes back to when the lock ends.
+        //
+        // What this catches is a reconcile that *derives* the cursor from the
+        // mode. It cannot catch a pointer reconcile that clears the cursor as a
+        // side effect, because this one runs after it on the same frame and
+        // would put it straight back; that ordering is deliberate and the
+        // assertion above about idleness is what would notice the extra call.
+        engine.game_mut().wanted_pointer = PointerMode::Locked;
+        engine.frame().expect("the fake never fails");
+        assert_eq!(shell_pointer_mode(&mut engine), PointerMode::Locked);
+        assert_eq!(
+            shell_cursor(&mut engine),
+            Some(CursorIcon::Crosshair),
+            "the lock took the game's cursor request with it",
+        );
+
+        engine.game_mut().wanted_cursor = WantedCursor::default();
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            shell_cursor(&mut engine),
+            Some(CursorIcon::Default),
+            "the game stopped asking and the cursor was not given back",
         );
     }
 

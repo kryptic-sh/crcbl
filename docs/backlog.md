@@ -3716,6 +3716,46 @@ Stated plainly, so the next session does not mistake silence for coverage.
   were `prettier --check`, `tools/check-doc-citations.sh` and
   `tools/check-wrapped-strings.sh`, all green.
 
+### What the cursor seam left owed (2026-08-28)
+
+`HostedGame::cursor` now answers `Option<CursorIcon>` and
+`Loop::reconcile_cursor` passes it to `Shell::set_cursor` on a change, which is
+the second of the two pointer axes — `PointerMode` is where the pointer may go,
+this is what is drawn on it. The split follows GLFW's (`GLFW_CURSOR_HIDDEN` is
+separate from `CAPTURED` and `DISABLED`) and Unity's (`CursorLockMode` plus
+`Cursor.visible`). What it does not yet do:
+
+- **The web backend records the request and draws nothing from it.**
+  `WebShell::set_cursor` in `crates/crcbl-shell/src/web/mod.rs` stores
+  `self.cursor` and there is no consumer: no shim export publishes it and
+  `web/engine/shell.js` never writes the canvas's CSS `cursor`. So a hidden
+  cursor is hidden on Wayland, X11, Win32 and AppKit and visible in a browser.
+  The fix has the shape the pointer lock already uses — publish the request,
+  poll it once a frame from the shim — and the value to publish is
+  `CursorIcon::as_css_name`, with `none` for `None`, because every variant of
+  that enum is already a CSS keyword. Publishing the string's pointer and length
+  out of wasm memory avoids a numbered table the JS would have to keep in sync.
+- **No sample sets a cursor.** The three that take the lock — `apps/breach`,
+  `apps/lantern`, `apps/quarry` — get a hidden cursor from the lock itself, so
+  nothing in the workspace exercises the hook and the browser gate asserts
+  nothing about it. A demo that hides the cursor while free — a shooter drawing
+  its own reticle is the honest case — is what would make the web half above
+  observable end to end.
+- **`PointerMode::Confined` is unsupported on web, deliberately.**
+  `WebShell::caps` omits `ShellCaps::POINTER_CONFINE` and the mode errors rather
+  than silently doing nothing, which is right: no browser has a confine
+  primitive. Pointer Lock is all-or-nothing and the Pointer Lock spec has no
+  bounded variant; nothing on the standards track offers one. So the browser has
+  three of the four states — free, locked, hidden once the item above lands —
+  and confined is the one it cannot have. Do not re-propose emulating it by
+  warping the pointer: the web backend has no warp either, and warp-based
+  confinement fights every real movement.
+- **Wayland records a cursor _shape_ and does not apply it.** Already stated in
+  `WaylandShell::set_cursor`'s own docs: hiding works (a null surface is "no
+  cursor" in core Wayland), naming a shape needs `cursor-shape-v1`, which is not
+  vendored. Unchanged by this work and noted here because the new hook is what
+  finally lets a game ask.
+
 ### Decision needed: Escape cannot pause a demo that holds the pointer lock (2026-08-26)
 
 `crcbl::engine::PAUSE_KEY` is `KeyCode::Escape` for every sample. **A browser

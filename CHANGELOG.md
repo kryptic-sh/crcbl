@@ -16,6 +16,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A game can hide its cursor, or name a shape for it.** `HostedGame::cursor`
+  answers `Option<CursorIcon>` — `None` hides — and the loop reconciles it
+  beside `HostedGame::pointer_mode`, calling `Shell::set_cursor` only when the
+  answer changes. Every backend already implemented the shell call and nothing
+  outside `crcbl-shell` had ever made one, so until now the shape was
+  unreachable from a game and a hidden cursor was not a thing the engine could
+  do.
+
+  It is the **second axis**, not a fourth pointer mode: `PointerMode` says where
+  the pointer may go, this says what is drawn on it. That is the split GLFW
+  arrived at (`GLFW_CURSOR_HIDDEN` versus `CAPTURED` and `DISABLED`) and the one
+  Unity uses (`CursorLockMode` plus `Cursor.visible`). A shooter drawing its own
+  reticle hides the cursor with the pointer free; a strategy game confines the
+  pointer and keeps it visible. `PointerMode::Locked` still hides the cursor by
+  itself on every platform that has a lock — the request is what it comes back
+  to when the lock ends.
+
+  Not yet honoured by the web backend, which records the request and draws
+  nothing from it; `docs/backlog.md` carries that.
+
 - **A slider row answers the keyboard.** `ArrowLeft` and `ArrowRight` move the
   highlighted slider by `Slider::KEY_STEP` — twenty presses end to end — through
   the new `Menu::nudge_slider` and the engine's `MENU_LEFT_KEY` /
