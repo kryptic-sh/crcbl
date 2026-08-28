@@ -24,8 +24,10 @@
 //! rather than a key nothing reads. The browser build sample rule 7 requires is
 //! here too, and the browser gate drives the whole round trip through it.
 //!
-//! What is **not** here is the video and graphics halves of the catalogue —
-//! milestones 2 and 3 — which `docs/backlog.md` carries.
+//! Milestone 2 has its first key: `[engine.video] frame_limit`, on a `FRAME CAP`
+//! row that steps a ladder of ceilings. What is **not** here is the rest of the
+//! video half and all of the graphics half — which `docs/backlog.md` carries,
+//! along with why each of the remaining video keys is harder than this one.
 //!
 //! # It steps no simulation and loads no art
 //!

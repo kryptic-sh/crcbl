@@ -30,7 +30,7 @@
 //! loud" a player is reaching for. [`handle_at`] is the same map backwards.
 
 use crcbl::audio::mixer::Bus;
-use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID};
+use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit};
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
 /// The id of `bus`'s fader, numbered in [`Bus::ALL`]'s order from the first id
@@ -53,16 +53,80 @@ pub fn bus_of(id: crcbl::ui::WidgetId) -> Option<Bus> {
 /// The id of the button that writes the file.
 pub const SAVE_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + Bus::ALL.len() as crcbl::ui::WidgetId;
 
-/// The id of the button that puts every bus back to unity.
+/// The id of the button that puts every setting back to its default.
 pub const RESET_ID: crcbl::ui::WidgetId = SAVE_ID + 1;
 
-/// What this sample's own two buttons do.
+/// The id of the row that steps `[engine.video] frame_limit`.
+pub const FRAME_CAP_ID: crcbl::ui::WidgetId = RESET_ID + 1;
+
+/// The ceilings the frame-cap row steps through, **in ascending order**.
+///
+/// A ladder rather than a groove because the value is a rate a display has and
+/// not a continuum: a slider over `u32` would let a player ask for 143 fps on a
+/// 144 Hz panel, which is a worse setting than either neighbour and one nobody
+/// means to pick.
+///
+/// The widget set has a button and a slider and no third thing, so the row is a
+/// button that steps forward — see [`next_frame_cap`]. Adding a cycler widget
+/// to `crcbl-ui` is the alternative and is its own change; `docs/backlog.md`
+/// carries it.
+///
+/// [`FrameLimit::unlimited`] sits at the end because that is where it sits in
+/// the ordering, not because it is a special case — see [`is_above`].
+pub const FRAME_CAPS: [FrameLimit; 7] = [
+    FrameLimit::fps(30),
+    FrameLimit::fps(60),
+    FrameLimit::fps(72),
+    FrameLimit::fps(120),
+    FrameLimit::fps(144),
+    FrameLimit::fps(240),
+    FrameLimit::unlimited(),
+];
+
+/// Whether `limit` is a higher ceiling than `than`.
+///
+/// Asked of [`FrameLimit::clamped_to`] rather than of the rates, because the
+/// ordering is that method's: holding `limit` under `than` yields `than`
+/// exactly when `than` is the lower of the two. Comparing
+/// [`FrameLimit::rate`]s directly is the thing that gets it backwards —
+/// unlimited is spelled zero and is the *largest* ceiling there is.
+#[must_use]
+pub fn is_above(limit: FrameLimit, than: FrameLimit) -> bool {
+    limit.clamped_to(than) == than && limit != than
+}
+
+/// The next ceiling up from `current`, wrapping round to the lowest.
+///
+/// **The first rung strictly above `current`**, so a file holding a rate that
+/// is not on the ladder at all — a player who typed `frame_limit = 90` — steps
+/// to the next rung up rather than to somewhere arbitrary.
+#[must_use]
+pub fn next_frame_cap(current: FrameLimit) -> FrameLimit {
+    FRAME_CAPS
+        .into_iter()
+        .find(|rung| is_above(*rung, current))
+        .unwrap_or(FRAME_CAPS[0])
+}
+
+/// How a ceiling is written beside its row.
+#[must_use]
+pub fn frame_cap_label(limit: FrameLimit) -> String {
+    match limit.rate() {
+        0 => "unlimited".to_string(),
+        fps => format!("{fps} fps"),
+    }
+}
+
+/// What this sample's own rows do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Write the edited settings back to wherever they were read from.
     Save,
-    /// Put every bus back to unity — which is what an absent key means.
+    /// Put every setting back to its default — which is what an absent key
+    /// means: every bus at unity and no frame ceiling.
     Reset,
+    /// Step the frame ceiling to the next rung of [`FRAME_CAPS`].
+    CycleFrameCap,
 }
 
 /// Which menu a frame shows. There is only one, and it is always on.
@@ -121,6 +185,13 @@ pub fn fader_hint(gain: f32, audible: bool) -> String {
 /// What [`fader_hint`] writes after the gain of a bus with nothing on it.
 pub const SILENT_MARK: &str = "(silent)";
 
+/// What the frame-cap row writes after a ceiling this run is not running under.
+///
+/// The loop takes its limit when it is built, so a cap chosen here is one the
+/// **next** start will use. Every other setting on this screen applies as it
+/// moves, which is exactly why this one has to say that it does not.
+pub const NEXT_START_MARK: &str = "(next start)";
+
 /// The label a bus wears on its row.
 #[must_use]
 pub const fn label(bus: Bus) -> &'static str {
@@ -145,6 +216,14 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
     let mut items = vec![
         MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
         MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+        // Beside `FULLSCREEN`, because both are `[engine.video]` and a player
+        // looking for one is looking for the other. Its hint is written every
+        // frame by `Screen::menu_kind`, like a fader's.
+        MenuItem::new(
+            FRAME_CAP_ID,
+            "FRAME CAP",
+            frame_cap_label(FrameLimit::unlimited()),
+        ),
     ];
     items.extend(gains.iter().map(|(bus, gain)| {
         MenuItem::slider(
@@ -165,6 +244,100 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The ladder is ascending, which everything else here assumes.**
+    ///
+    /// [`next_frame_cap`] wraps to `FRAME_CAPS[0]` when nothing is above the
+    /// current rung, so a table written out of order would wrap to whatever
+    /// happened to be first and step downwards from there. The order is also
+    /// the order a player sees, and a settings list that jumps about is a
+    /// different bug with the same cause.
+    #[test]
+    fn the_frame_cap_ladder_climbs() {
+        for pair in FRAME_CAPS.windows(2) {
+            assert!(
+                is_above(pair[1], pair[0]),
+                "{:?} does not sit above {:?}",
+                pair[1],
+                pair[0],
+            );
+        }
+        assert_eq!(
+            *FRAME_CAPS.last().expect("the ladder has rungs"),
+            FrameLimit::unlimited(),
+            "no ceiling is the highest ceiling, so it is the last rung",
+        );
+    }
+
+    /// **Unlimited is the largest ceiling, not the smallest.**
+    ///
+    /// It is spelled zero, so every comparison that reaches for the rate gets
+    /// this backwards — which is the whole reason [`is_above`] asks
+    /// [`FrameLimit::clamped_to`] instead.
+    #[test]
+    fn no_ceiling_sits_above_every_ceiling() {
+        for rung in FRAME_CAPS {
+            if rung == FrameLimit::unlimited() {
+                continue;
+            }
+            assert!(is_above(FrameLimit::unlimited(), rung), "{rung:?}");
+            assert!(!is_above(rung, FrameLimit::unlimited()), "{rung:?}");
+            assert!(!is_above(rung, rung), "a rung is not above itself");
+        }
+    }
+
+    /// Every rung steps to the next, and the last steps back to the first.
+    #[test]
+    fn the_ladder_steps_up_and_wraps_at_the_top() {
+        for (index, rung) in FRAME_CAPS.into_iter().enumerate() {
+            let expected = FRAME_CAPS[(index + 1) % FRAME_CAPS.len()];
+            assert_eq!(
+                next_frame_cap(rung),
+                expected,
+                "{rung:?} stepped somewhere other than {expected:?}",
+            );
+        }
+    }
+
+    /// **A rate that is not on the ladder steps to the next rung above it**,
+    /// rather than to an arbitrary place.
+    ///
+    /// A player who typed `frame_limit = 90` into the file by hand is the case:
+    /// the screen has to do something with it, and stepping down or jumping to
+    /// the end would silently take their setting further from what they asked
+    /// for than one press should.
+    #[test]
+    fn a_rate_between_rungs_steps_up_to_the_next_one() {
+        for rung in FRAME_CAPS {
+            let Some(rate) = rung.rate().checked_sub(1).filter(|rate| *rate > 0) else {
+                // Unlimited has no rate below it to sit under, and 30 minus one
+                // is below the whole ladder, which the next case covers.
+                continue;
+            };
+            assert_eq!(
+                next_frame_cap(FrameLimit::fps(rate)),
+                rung,
+                "{rate} fps did not step up to {rung:?}",
+            );
+        }
+        assert_eq!(
+            next_frame_cap(FrameLimit::fps(1)),
+            FRAME_CAPS[0],
+            "a rate under the whole ladder steps onto its bottom rung",
+        );
+    }
+
+    /// The row's text names the rate, and says so in words when there is none.
+    #[test]
+    fn a_ceiling_is_written_as_a_rate_and_no_ceiling_is_written_as_words() {
+        assert_eq!(frame_cap_label(FrameLimit::fps(144)), "144 fps");
+        assert_eq!(frame_cap_label(FrameLimit::unlimited()), "unlimited");
+        assert_eq!(
+            frame_cap_label(FrameLimit::fps(0)),
+            frame_cap_label(FrameLimit::unlimited()),
+            "zero is how the file spells no ceiling",
+        );
+    }
 
     /// Every bus has a row, no two rows share an id, and nothing on the screen
     /// claims an id the loop owns.

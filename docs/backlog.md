@@ -21664,13 +21664,37 @@ leaves:
   `web/demos/breach/main.js` reads `?map=`, since the gate already navigates
   with one to boot a second configuration.
 
-- **The video and graphics halves are untouched** — milestones 2 and 3. No
-  display mode, resolution, present mode or frame cap on the screen, and no
-  requested-versus-resolved display, which is the thing that makes
-  `docs/plan/39-capabilities.md`'s downward-only clamp visible instead of
-  confusing. The frame cap is the one key of those with a reader today
-  (`crcbl::settings::frame_limit`, applied by `Loop::new`), so it is the
-  cheapest of the four to put on the screen next.
+- **The video half is one key in; the graphics half is untouched.** `FRAME CAP`
+  landed on 2026-08-28 and is the whole of `[engine.video]` that has a screen.
+  Display mode, resolution and present mode are still absent, and each is harder
+  than the cap for the same reason: the cap is a number the loop reads once at
+  start-up, so a row that writes the key and says `(next start)` is the honest
+  whole of it, while the other three are applied to a **live window** and
+  therefore need a seam this sample does not have — something a screen can call
+  to re-mode or re-size the window it is drawn in, and something that reports
+  what the window system actually did with the request.
+
+- **Requested versus resolved is only half shown.** `menu::NEXT_START_MARK` says
+  "this run is not under the ceiling you picked", which is the _time_ half. What
+  no row shows is the **clamp**: the game's own `--fps` and the file's ceiling
+  are held together by `FrameLimit::clamped_to` inside `Loop::new`, so a player
+  who sets 240 in a sample launched with `--fps 60` gets 60 and the screen says
+  240 with no explanation. `docs/plan/39-capabilities.md`'s downward-only rule
+  is what this display exists to make visible, and it is a plan exit criterion.
+  The cost is passing the game's requested limit into `Screen::opened` — one
+  argument through `app::assemble`, which already has the `Options` — and a
+  second line on the row. Deliberately not done in the slice that added the cap:
+  the row's own round trip was the reviewable unit.
+
+- **The ladder is a button, because the widget set has no cycler.** `crcbl-ui`'s
+  `MenuItem` is a button or a slider and nothing else, so `FRAME CAP` steps
+  forward on `ENTER` and cannot step back — `Menu::nudge_slider` is the only
+  thing the arrows drive and it fires for sliders alone. Six rungs makes that
+  tolerable; a resolution list would not, and the display-mode and present-mode
+  rows above are both cyclers in every settings screen a player has used. Adding
+  one to `crcbl-ui` is its own change: a third `MenuItem` shape, a `MenuSet`
+  method beside `nudge_slider`, and the arrow bindings in `crcbl::engine`'s menu
+  pass that currently check `slider_highlighted`.
 
 - **`SettingsStack::dump` has no viewer**, though the plan's scope asks for "a
   view of the settings file as it stands". The screen shows six values and the

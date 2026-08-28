@@ -23,9 +23,17 @@
 //! The six `[engine.audio]` bus gains, which are the cheapest settings to make
 //! real: they need no renderer change and no restart to write, and three of them
 //! carry sound — see [`crate::audio`] — so a fader is audible while it moves.
-//! The video half of `docs/plan/sample/20-options.md` — display mode,
-//! resolution, present mode, frame cap, the quality tiers — is not here yet.
-//! `docs/backlog.md` carries it.
+//! And `[engine.video] frame_limit`, which is the cheapest of the video keys
+//! for the opposite reason: the loop reads it once, at start-up, so the row can
+//! write it honestly without a way to re-mode a live window. The rest of
+//! `docs/plan/sample/20-options.md`'s video half — display mode, resolution,
+//! present mode, the quality tiers — is not here yet, and `docs/backlog.md`
+//! says what each of them is waiting on.
+//!
+//! **The frame cap is the one row that does not apply as it moves.** Everything
+//! else here reaches its stage in the same call that writes its key; the
+//! ceiling reaches the loop only when a loop is built. The mark `Screen`'s frame
+//! writes on that row is what stops it being a silent lie.
 //!
 //! **Nothing in this process listens to these gains.** A settings file belongs
 //! to the application that wrote it — natively, `~/.config/<label>/` — so the
@@ -38,7 +46,7 @@
 use crcbl::audio::mixer::Bus;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, SettingsSource,
+    Booted, Clock, ExitReason, FrameInfo, FrameLimit, HostedGame, RunSummary, SettingsSource,
     wait_for_configure,
 };
 use crcbl::prelude::*;
@@ -220,6 +228,16 @@ pub struct Screen {
     logged_edits: u64,
     /// The cues the faders are heard on. See [`crate::audio`].
     audio: Audio,
+    /// `[engine.video] frame_limit` as the screen currently holds it.
+    cap: FrameLimit,
+    /// The ceiling this run **started** on.
+    ///
+    /// The loop takes its limit once, when `Loop::new` holds the game's own
+    /// `--fps` under the file's — so a cap changed on the screen is a cap the
+    /// next start will use and this one will not. Keeping what the run opened
+    /// with is the only way the row can say so; comparing against the stack
+    /// would compare the setting with itself.
+    opened_cap: FrameLimit,
 }
 
 /// The loop options runs in.
@@ -350,6 +368,7 @@ impl Screen {
     #[must_use]
     pub fn over(stack: SettingsStack, store: Store) -> Self {
         let gains = crcbl::settings::audio_gains(&stack).map(|(_, gain)| gain);
+        let cap = crcbl::settings::frame_limit(&stack);
         Self {
             stack,
             store,
@@ -365,6 +384,8 @@ impl Screen {
             saved: SaveState::default(),
             ticks: 0,
             logged_edits: 0,
+            cap,
+            opened_cap: cap,
         }
     }
 
@@ -374,7 +395,13 @@ impl Screen {
         self.gains[bus.index()]
     }
 
-    /// How many times a fader has moved.
+    /// The frame ceiling as this screen currently holds it.
+    #[must_use]
+    pub const fn cap(&self) -> FrameLimit {
+        self.cap
+    }
+
+    /// How many times a setting has been changed.
     #[must_use]
     pub const fn edits(&self) -> u64 {
         self.edits
@@ -411,7 +438,7 @@ impl Screen {
         }
         crcbl::log::info!(
             "[HUD] tick: {}  master: {}  music: {}  sfx: {}  ui: {}  voice: {}  \
-             ambience: {}  edits: {}  file: {}",
+             ambience: {}  cap: {}  edits: {}  file: {}",
             self.ticks,
             crate::menu::percent(self.gains[Bus::Master.index()]),
             crate::menu::percent(self.gains[Bus::Music.index()]),
@@ -419,6 +446,7 @@ impl Screen {
             crate::menu::percent(self.gains[Bus::Ui.index()]),
             crate::menu::percent(self.gains[Bus::Voice.index()]),
             crate::menu::percent(self.gains[Bus::Ambience.index()]),
+            crate::menu::frame_cap_label(self.cap),
             self.edits,
             self.saved,
         );
@@ -451,6 +479,32 @@ impl Screen {
         }
     }
 
+    /// Moves the frame ceiling, writing the key and marking the file unsaved.
+    ///
+    /// [`Screen::set`]'s rule for the other half of the screen: one place a
+    /// value changes, so the key and the unsaved marker cannot come apart.
+    /// Nothing is applied to the running loop — the loop took its limit when it
+    /// was built — which is why this is the one setting here whose row has
+    /// something to say beyond its value.
+    fn set_cap(&mut self, cap: FrameLimit) {
+        self.cap = cap;
+        self.edits += 1;
+        self.saved = SaveState::Unsaved;
+        if let Err(error) = crcbl::settings::set_frame_limit(&mut self.stack, cap) {
+            self.saved = SaveState::Failed(error.to_string());
+        }
+    }
+
+    /// What the row says: the ceiling, and whether this run is running under it.
+    fn cap_hint(&self) -> String {
+        let label = crate::menu::frame_cap_label(self.cap);
+        if self.cap == self.opened_cap {
+            label
+        } else {
+            format!("{label} {}", crate::menu::NEXT_START_MARK)
+        }
+    }
+
     /// Writes the edited settings back to wherever they were read from.
     fn save(&mut self) {
         let source = self.store.source();
@@ -473,12 +527,14 @@ impl Screen {
         };
     }
 
-    /// Puts every bus back to unity — which is what a file that says nothing
-    /// means, and so what a player asking for the defaults is asking for.
+    /// Puts every setting back to what a file that says nothing means — every
+    /// bus at unity and no frame ceiling — which is what a player asking for
+    /// the defaults is asking for.
     fn reset(&mut self) {
         for bus in Bus::ALL {
             self.set(bus, 1.0);
         }
+        self.set_cap(FrameLimit::unlimited());
     }
 }
 
@@ -540,6 +596,7 @@ impl HostedGame for Screen {
         match id {
             crate::menu::SAVE_ID => Some(Action::Save),
             crate::menu::RESET_ID => Some(Action::Reset),
+            crate::menu::FRAME_CAP_ID => Some(Action::CycleFrameCap),
             // A fader. Sliders fire nothing, so this arm is unreachable through
             // the loop — it is here because the ids exist and a `_ => None`
             // that swallowed a real button would be silent.
@@ -555,6 +612,7 @@ impl HostedGame for Screen {
         match action {
             Action::Save => self.save(),
             Action::Reset => self.reset(),
+            Action::CycleFrameCap => self.set_cap(crate::menu::next_frame_cap(self.cap)),
         }
     }
 
@@ -605,6 +663,7 @@ impl HostedGame for Screen {
                     crate::menu::fader_hint(self.gains[bus.index()], Audio::sounds(bus)),
                 );
             }
+            menu.set_item_hint(crate::menu::FRAME_CAP_ID, self.cap_hint());
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
         }
@@ -952,9 +1011,9 @@ mod tests {
         assert_eq!(screen.saved(), &SaveState::Unsaved);
     }
 
-    /// The two buttons are the only ids that fire, and a fader never does.
+    /// The three buttons are the only ids that fire, and a fader never does.
     #[test]
-    fn only_the_two_buttons_name_an_action() {
+    fn only_the_buttons_name_an_action() {
         assert_eq!(
             Screen::menu_action(crate::menu::SAVE_ID),
             Some(Action::Save)
@@ -963,8 +1022,115 @@ mod tests {
             Screen::menu_action(crate::menu::RESET_ID),
             Some(Action::Reset)
         );
+        assert_eq!(
+            Screen::menu_action(crate::menu::FRAME_CAP_ID),
+            Some(Action::CycleFrameCap)
+        );
         for bus in Bus::ALL {
             assert_eq!(Screen::menu_action(crate::menu::fader_id(bus)), None);
         }
+    }
+
+    /// **The frame cap round trips through the file, like a gain does.**
+    ///
+    /// Stepped on the screen, written to the key, and read back by a screen
+    /// that opens over the same storage — the same claim
+    /// `a_saved_gain_is_still_there_when_the_screen_opens_again` makes for
+    /// `[engine.audio]`, for the first `[engine.video]` key to reach a screen.
+    #[test]
+    fn a_saved_frame_cap_is_still_there_when_the_screen_opens_again() {
+        let storage = crcbl::store::MemoryStorage::new();
+        let mut screen = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        assert_eq!(
+            screen.cap(),
+            FrameLimit::unlimited(),
+            "an absent key is no cap"
+        );
+
+        screen.apply(Action::CycleFrameCap);
+        let stepped = screen.cap();
+        assert_eq!(
+            stepped,
+            crate::menu::FRAME_CAPS[0],
+            "the first step off unlimited is the lowest rung",
+        );
+        assert_eq!(screen.edits(), 1);
+        assert_eq!(screen.saved(), &SaveState::Unsaved);
+
+        screen.save_to(SettingsSource::Source(&storage));
+        assert_eq!(screen.saved(), &SaveState::Saved);
+
+        let reopened = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        assert_eq!(
+            reopened.cap(),
+            stepped,
+            "the restart came up on {:?} rather than the {stepped:?} that was saved",
+            reopened.cap(),
+        );
+    }
+
+    /// **The row says when the ceiling is not the one this run is under.**
+    ///
+    /// The loop takes its limit once, so a cap chosen on the screen is one the
+    /// next start will use — and a screen that showed the new number with
+    /// nothing beside it would be claiming an effect it has not had. Stepping
+    /// all the way round the ladder brings the mark back off again, which is
+    /// what tells a mark from a flag that is only ever set.
+    #[test]
+    fn a_cap_this_run_is_not_under_says_so_and_stops_saying_it() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+        let hint = |menus: &mut Menus| hint(menus, crate::menu::FRAME_CAP_ID);
+        assert_eq!(
+            hint(&mut menus),
+            crate::menu::frame_cap_label(FrameLimit::unlimited()),
+            "a run opened on its own ceiling has nothing to add",
+        );
+
+        screen.apply(Action::CycleFrameCap);
+        reconcile(&mut screen, &mut menus);
+        let marked = hint(&mut menus);
+        assert!(
+            marked.contains(crate::menu::NEXT_START_MARK),
+            "the row reads {marked:?} for a ceiling this run is not under",
+        );
+        assert!(
+            marked.contains(&crate::menu::frame_cap_label(screen.cap())),
+            "the row reads {marked:?} rather than the ceiling that was chosen",
+        );
+
+        // All the way round: the ladder is a cycle, so a rung's worth of steps
+        // from anywhere is back where it started — and one of them has already
+        // been taken above.
+        for _ in 1..crate::menu::FRAME_CAPS.len() {
+            screen.apply(Action::CycleFrameCap);
+        }
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            screen.cap(),
+            FrameLimit::unlimited(),
+            "the ladder did not wrap"
+        );
+        assert_eq!(
+            hint(&mut menus),
+            crate::menu::frame_cap_label(FrameLimit::unlimited()),
+            "the mark stayed on a ceiling the run is under",
+        );
+    }
+
+    /// `RESET` is the defaults of the whole screen, not only of the faders.
+    #[test]
+    fn reset_takes_the_frame_cap_back_to_no_ceiling_too() {
+        let (mut screen, mut menus) = screen("[engine.video]\nframe_limit = 60\n");
+        assert_eq!(screen.cap(), FrameLimit::fps(60));
+        reconcile(&mut screen, &mut menus);
+
+        screen.apply(Action::Reset);
+        assert_eq!(screen.cap(), FrameLimit::unlimited());
+        assert_eq!(
+            crcbl::settings::frame_limit(screen.stack()),
+            FrameLimit::unlimited(),
+            "the screen reset a number it never wrote",
+        );
     }
 }

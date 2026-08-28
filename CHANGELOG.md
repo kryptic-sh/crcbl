@@ -50,6 +50,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and their rows now say `(silent)` beside the percentage rather than leaving a
   player to wonder whether their audio is broken.
 
+  **`[engine.video] frame_limit` is the first video key on the screen.** A
+  `FRAME CAP` row steps through a ladder of ceilings — `menu::FRAME_CAPS`, from
+  30 fps up to no ceiling at all — writing the key as it goes, and `RESET` takes
+  the cap off along with the faders. It is the one row here that does not apply
+  as it moves: the loop takes its frame ceiling once, when `Loop::new` holds the
+  game's own `--fps` under the file's, so the row reads `(next start)` until a
+  run has actually started under the chosen cap. `menu::is_above` asks
+  `FrameLimit::clamped_to` which of two ceilings is higher rather than comparing
+  rates, because unlimited is spelled zero and is the largest ceiling there is.
+
   **It runs in a browser too**, at `/demos/options/`, from the same build that
   runs natively. That half is the point of the sample rather than a bonus: a tab
   has no filesystem, so the settings file goes to the origin's OPFS store, and

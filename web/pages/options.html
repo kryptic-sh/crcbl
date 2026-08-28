@@ -43,13 +43,13 @@ meta-->
   <ul class="keys">
     <li><kbd>↑</kbd><kbd>↓</kbd> pick a row</li>
     <li><kbd>←</kbd><kbd>→</kbd> move the fader under it</li>
-    <li><kbd>ENTER</kbd> press SAVE or RESET</li>
+    <li><kbd>ENTER</kbd> step FRAME CAP, or press SAVE or RESET</li>
     <!--include demo-loop-keys-->
   </ul>
   <p>
-    SAVE says where it went. RESET puts every bus back to 100% and leaves the
-    file alone until you save it — a reset you did not mean to keep is one
-    reload away from being undone.
+    SAVE says where it went. RESET puts every bus back to 100%, takes the frame
+    cap off, and leaves the file alone until you save it — a reset you did not
+    mean to keep is one reload away from being undone.
   </p>
 </section>
 
@@ -76,6 +76,23 @@ meta-->
     halving sounds. The percentage beside each row is the gain that reaches the
     file, not the position of the handle.
   </p>
+  <p>
+    And you can hear them. Three of the six buses carry something: a looping
+    tone on music, a tick once a second on effects, and a click on the interface
+    bus every time a fader passes a detent. They are told apart by behaviour
+    rather than by timbre, so the bus you are pulling down is the one you can
+    identify by ear — and master takes all three with it. Voice and ambience
+    carry nothing and their rows say <code>(silent)</code>, because a control
+    that does nothing is worse than one that admits it.
+  </p>
+  <p>
+    FRAME CAP is the first <code>[engine.video]</code> key on the screen and the
+    only row here that does not apply as you change it: the loop takes its frame
+    ceiling once, when it is built. So the row says
+    <code>(next start)</code> until a reload has run under the cap you chose —
+    which is the same honesty the silent buses get, applied to time instead of
+    to sound.
+  </p>
 </section>
 
 <section id="whats-running">
@@ -99,12 +116,11 @@ meta-->
     worst version of this bug.
   </p>
   <p>
-    What is not here yet is anything to <em>hear</em>. The buses are real keys
-    and real gain stages, but this sample plays nothing, so a volume is a number
-    you can watch rather than a level you can check by ear. The video half of
-    the catalogue — display mode, resolution, present mode, frame cap — is not
-    on the screen either. Both are written down in the repository's backlog
-    rather than implied by an empty row.
+    What is not here yet is the rest of the video half — display mode,
+    resolution, present mode, the graphics quality tiers — and the
+    requested-versus-resolved display that makes a device's downward-only clamp
+    visible instead of confusing. Those are written down in the repository's
+    backlog rather than implied by an empty row.
   </p>
   <!--include demo-console-note-->
 </section>

@@ -117,6 +117,15 @@ machinery. Verified against the tree on 2026-08-28:
   listened to it on hardware.** That is the gap between this and the exit
   criterion below.
 
+- **The frame cap is on the screen**, as of 2026-08-28, and is the first
+  `[engine.video]` key to reach one. `menu::FRAME_CAPS` is the ladder it steps
+  through and `menu::is_above` is the ordering, asked of
+  `FrameLimit::clamped_to` rather than of the rates. It is also the first
+  setting here that does **not** apply as it moves — the loop takes its ceiling
+  when it is built — so the row carries `menu::NEXT_START_MARK` until a run has
+  started under it. That is the honest half of requested-versus-resolved; the
+  other half, showing the game's own `--fps` and the device's clamp beside the
+  file's value, is still open and `docs/backlog.md` carries it.
 - **The screen runs in a browser**, as of 2026-08-28: `apps/options/src/web.rs`
   carries the `__crcbl_options_*` ABI, `web/demos/options/` and
   `web/pages/options.html` are the page, and both browser-gate jobs run it. Its
@@ -149,7 +158,12 @@ machinery. Verified against the tree on 2026-08-28:
    carries both, along with the one browser case still unreached — a page with
    no store installed, which is `SaveState::Nowhere`.
 2. **The video half**: display mode, resolution, present mode, frame cap, and
-   the requested-versus-resolved display of the clamp.
+   the requested-versus-resolved display of the clamp. **The frame cap is
+   done**, in `apps/options`'s `FRAME CAP` row — the cheapest of the four,
+   because `crcbl::settings::frame_limit` is the only one of them with a reader
+   today. What the other three need first is somewhere for a change to land: a
+   display mode or a resolution is applied to a live window, not read once at
+   start-up, so each of them wants a seam this sample does not have yet.
 3. **The graphics half**: the quality tiers over the technique ladders, the
    preset and its custom escape hatch.
 4. **The browser half held to the same bar**, including the no-store case.
