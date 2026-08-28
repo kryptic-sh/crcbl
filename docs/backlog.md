@@ -238,62 +238,69 @@ Shrinking `FRAMES_WATCHED` to fit is still the move to avoid: the check's own
 comment argues any size catches a per-frame leak, but a smaller window is more
 easily satisfied by noise and the three-window rule is what buys the teeth.
 
-### The macOS probe job hangs on quarry, twice, and the log's last line is not the hang point (2026-08-28)
+### The macOS probe job hangs after group E's pause window (2026-08-28)
 
-`probe the seam on macOS` was **skipped in every Pages run from `713da9d` to
-`80022df`** — nine in a row — because the `build` job it needs kept failing on
-its own cap. The fan-out let it start, and it has now timed out after 20 minutes
-on `Render quarry in a real browser` **twice**: on `9705f12` and again on
-`4bf0375`.
+`probe the seam on macOS` has timed out after 20 minutes on
+`Render quarry in a real browser` three times: on `9705f12`, `4bf0375` and
+`0bf541f`. This is not the pace failure the Linux gates had — that leg runs on a
+real Apple adapter and quarry's own heartbeat there read **1.1x**.
 
-This is not the pace failure the Linux gates had. That leg runs on a real Apple
-adapter and quarry's own heartbeat there read **1.1x**. Both runs printed
-`E — focus and pause` and then nothing at all until the cap.
+**The log was lying, and now is not.** The first two runs printed
+`E — focus and pause` and then nothing, which this entry twice tried to read as
+"the check after the group header never resolves". `0bf541f` made the gate's
+output synchronous — `say` and `warn` in `web/tools/browser-launch.mjs` go
+through `fs.writeSync` — and the very next run printed three more checks before
+the cap:
 
-**The obvious reading of that is wrong, and it was written here before.** This
-entry used to name the check after group E's pause window as the one that never
-resolves. It cannot be read off the log that way: every poll in the file goes
-through `until` in `web/tools/browser-launch.mjs`, which enforces a deadline,
-catches a throwing probe and sleeps on a plain `setTimeout` — so no poll can
-hang, and a poll that expired would have printed a `FAIL`. Nothing printed.
-Which means either something outside `until` is awaiting a promise that never
-settles, or the last line in the log is not the last line the run wrote.
+```
+  ok   a running demo logs its HUD from inside the tick
+  ok   blurring the canvas pauses the demo
+  ok   a paused demo runs no ticks at all — 0 HUD line(s) in 4000 ms
+```
 
-**The second half is settled as of 2026-08-28, and it was not the answer.**
-`say` and `warn` in `web/tools/browser-launch.mjs` write through `fs.writeSync`
-and do not return until the bytes are on the descriptor, and
-`web/tools/browser-e2e.mjs` prints through them exclusively — it has no
-`console` call left. This can only matter on macOS: Node documents its own
-stdout as asynchronous for a pipe there and synchronous for one on Linux and
-Windows, and CI runs this gate as `node … 2>&1 | tee`. Which is also why **it
-could not be verified from here**. Locally, 5000 lines printed with
-`console.log` and then `SIGKILL`ed all 5000 arrive — what a synchronous pipe
-looks like — so the change is a provable no-op on the platform available to test
-it on. The proof is a macOS log that reaches past `E — focus and pause`, and the
-next run of that job is the first chance to see one.
+So Node's stdout really was holding output on macOS, where it documents a pipe
+as asynchronous. Reading a hang backwards from a buffered log is guessing, and
+both earlier guesses here were wrong.
 
-**What is left is the hang**, with the two candidates unchanged: an `evaluate`
-that never settles — CDP has no deadline of its own here, unlike `until` — and
-the demo itself wedging. The log can now be read backwards to find out which.
+**Where it actually stops** is between `a paused demo runs no ticks at all` and
+`a click in the corner hands the canvas its keyboard back` in
+`web/tools/browser-e2e.mjs`. That stretch is two `Input.dispatchMouseEvent`
+sends and one `evaluate` of a promise that waits on two nested
+`requestAnimationFrame` callbacks. The suspect is the last of those: the page is
+blurred and the demo paused, which is exactly the state a browser stops
+delivering animation frames in, and the wait had nothing to give up on. That is
+a reading of the code plus a bounded log, **not a reproduction** — nothing local
+has driven `--headless` against an Apple adapter, and the same gate passes on
+this machine.
 
-**The other gates still print through `console`, and nothing stops it coming
-back.** `probe-e2e.mjs`, `render-harness-e2e.mjs`, `horde-threads-e2e.mjs`,
-`jobs-e2e.mjs`, `worker-gate.mjs`, `smoke.mjs` and `check-exports.mjs` in
-`web/tools/` are all run from CI steps, under a job cap or a step one, and all
-of them still print through `console`. Converting them is mechanical. The guard
-is the part worth having, since this is a property that reads as fine right up
-to the moment a job is killed, and the `shell (e2e harness guards)` job in
-`ci.yml` is where a check for it would sit.
+`Cdp.send` now has the deadline it never had: `CDP_DEADLINE_MS` in
+`web/tools/browser-launch.mjs`, with the offending method and expression in the
+failure. The next run of this job says which command it was instead of dying
+anonymously at the cap. If it is the frame wait, the deadline is not the fix —
+that wait has to stop depending on the frame loop of a page that has been asked
+to stop, and `until` on an observable is what the rest of this file does.
 
-**Not reviewed, and not reproduced:** this leg has never been green with the
-demo gates in it, so there is no earlier run to compare against, and nothing
-local has driven `--headless` against an Apple adapter. Whether the other 3D
-demo (lantern) does the same is unknown — the job dies at quarry before reaching
-it.
+**Not reviewed:** whether the other 3D demo (lantern) does the same. The job
+dies at quarry before reaching it.
 
 It does **not** block the deploy: `deploy` needs `build` and `demos`, and this
-job is neither — `4bf0375` deployed with this job red. It does fail the
+job is neither — `0bf541f` deployed with this job red. It does fail the
 workflow.
+
+### Seven gates in `web/tools/` still print through `console` (2026-08-28)
+
+`probe-e2e.mjs`, `render-harness-e2e.mjs`, `horde-threads-e2e.mjs`,
+`jobs-e2e.mjs`, `worker-gate.mjs`, `smoke.mjs` and `check-exports.mjs` are all
+run from CI steps under a job cap or a step one, and all of them still use
+`console.log` — so the last line of any of their logs is not necessarily the
+last line the run wrote, which is the thing that cost three wrong diagnoses
+above. `say` and `warn` are exported from `web/tools/browser-launch.mjs` and the
+conversion is mechanical.
+
+The part worth having is the guard: nothing stops a `console.log` coming back
+into `browser-e2e.mjs` either, and this is a property that reads as fine right
+up to the moment a job is killed. The `shell (e2e harness guards)` job in
+`.github/workflows/ci.yml` is where a check for it would sit.
 
 ### The browser gate's cap says "out of time", never "too slow" (2026-08-28)
 

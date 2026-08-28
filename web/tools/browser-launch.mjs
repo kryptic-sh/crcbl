@@ -558,6 +558,21 @@ export async function launch({
 // protocol is JSON both ways: `{ id, method, params }` out, `{ id, result }` or
 // `{ method, params }` back.
 
+/**
+ * How long one CDP command may go unanswered before the gate abandons it.
+ *
+ * Generous by two orders, on the evidence: instrumented on 2026-08-28, the
+ * slowest command in a whole quarry run was a 234 ms `Runtime.evaluate` that
+ * read the canvas back as a data URL, and every other one was under 50 ms. So
+ * this is not a budget any working command has to fit — it is the line past
+ * which waiting longer has stopped being useful, and the step caps it has to
+ * beat are measured in minutes.
+ */
+export const CDP_DEADLINE_MS = 30_000;
+
+/** How much of the command's own parameters that failure quotes back. */
+const CDP_PARAMS_REPORTED = 200;
+
 class Cdp {
   #socket;
   #next = 0;
@@ -602,7 +617,37 @@ class Cdp {
     this.#next += 1;
     const id = this.#next;
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      // **The deadline CDP does not have.** A command is a promise that
+      // settles when Chrome answers, and Chrome is under no obligation to:
+      // `Runtime.evaluate` with `awaitPromise` waits on a page promise that
+      // may never resolve, and nothing below this line would ever notice. The
+      // macOS leg of the Pages workflow has burnt its whole step cap three
+      // times over waiting for something it could not name, which is the state
+      // this removes: `until` has had a deadline all along, and this is the
+      // same guarantee for the layer underneath it. Giving up after
+      // {@link CDP_DEADLINE_MS} and naming the command turns a silent cap into
+      // a failure someone can act on.
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(
+          new Error(
+            `${method} went unanswered for ${CDP_DEADLINE_MS} ms: ` +
+              JSON.stringify(params).slice(0, CDP_PARAMS_REPORTED)
+          )
+        );
+      }, CDP_DEADLINE_MS);
+      // The timer must not be what keeps the process alive once the answer is
+      // in — it is cleared on either outcome, and `unref` covers the window
+      // before that.
+      timer.unref?.();
+      const settle = (/** @type {(value: any) => void} */ done) => (value) => {
+        clearTimeout(timer);
+        done(value);
+      };
+      this.#pending.set(id, {
+        resolve: settle(resolve),
+        reject: settle(reject),
+      });
       this.#socket.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -643,11 +688,23 @@ export async function openPage(browser) {
  * reason.
  */
 export async function evaluate(page, expression) {
-  const result = await page.send('Runtime.evaluate', {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
-  });
+  let result;
+  try {
+    result = await page.send('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+  } catch (error) {
+    // The command's own parameters carry the expression, but truncated to the
+    // first couple of hundred characters — and the checks here hand over whole
+    // page-side functions, which is exactly the case where the interesting
+    // part is not at the front. Say which expression, on one line, so the
+    // failure names a call site rather than a protocol method.
+    throw new Error(
+      `${error.message}\n  evaluating: ${expression.replace(/\s+/g, ' ').trim()}`
+    );
+  }
   if (result.exceptionDetails) {
     const details = result.exceptionDetails;
     throw new Error(
