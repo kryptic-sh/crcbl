@@ -189,17 +189,20 @@ The three:
 
 - **puppet `C: the controller climbs the step inside its own step offset`**, and
   the check paired with it about the step it must refuse. "it never got onto the
-  0.3 m step while pushing — climbed 0, blocked 0, feet 0.01 m". 48/50, at
-  33.3x. **puppet passed 50/50 on `c26d16e`, the run before**, in 12m57s against
-  14m33s — so this is runner variance deciding whether 90 s is enough, which
-  makes it the flakiest of the three and the one most likely to mislead.
-- **shard
-  `C: and a foe's ability costs them health, which nothing before it did`** — 0
-  damage, hp held at 100, after the full 90 s at 88.9x. The checks either side
-  pass: a foe engages the character, and a blow that reaches one fells it for 20
-  damage. So the paths around it work and the ability did not fire inside three
-  simulated seconds. Whether its cooldown is simply longer than that is **not
-  established** — nobody has run this check to a verdict before.
+  0.3 m step while pushing — climbed 0, blocked 0, feet 0.01 m". 48/50 twice —
+  at 33.3x on `a9af261` and 29.6x on `0552320`. **puppet passed 50/50 on
+  `c26d16e`**, the run before those, so the threshold sits somewhere near 30x
+  and which side of it a run lands on is the runner's mood. Both checks pass in
+  seconds locally under SwiftShader, so the controller itself is not the
+  subject.
+- **shard, whichever group C check the ceiling happens to land on.** 52/54 on
+  both runs, and **not the same two checks**: `c26d16e` failed "and a foe's
+  ability costs them health" while "a foe engages the character" passed at 85.8
+  s, and `0552320` failed "a foe engages the character" instead. At 88.9x and
+  89.1x a 90-second poll is about one simulated second, and which check runs out
+  of it first is not a fact about the game. **Nothing here is evidence of a
+  gameplay defect**, and going to read shard's ability cooldown on the strength
+  of it is the specific mistake this bullet exists to prevent.
 - **shard `I: a steady-state frame gives back everything it takes`** — "drew
   fewer than 20 more frames in 90000 ms", which the message itself calls a
   non-verdict. `FRAMES_WATCHED` is 20 over `WINDOWS` of 3, sized against
