@@ -243,6 +243,15 @@ pub struct Slider {
 }
 
 impl Slider {
+    /// How far one press of a menu key moves the handle, as a share of the
+    /// groove.
+    ///
+    /// Twenty presses end to end, which is the granularity a player expects of
+    /// a volume: fine enough to land where they meant and coarse enough to
+    /// cross the range without holding a key down. A pointer drag is not
+    /// quantised by this at all — it lands wherever the cursor is.
+    pub const KEY_STEP: f32 = 0.05;
+
     /// A slider whose handle sits `position` of the way along, clamped into
     /// `0.0..=1.0`.
     #[must_use]
@@ -528,6 +537,59 @@ impl Menu {
             return true;
         }
         false
+    }
+
+    /// Moves the highlighted slider one [`Slider::KEY_STEP`], and reports
+    /// whether a handle moved.
+    ///
+    /// **The keyboard's half of a slider**, and until it existed there was no
+    /// such half: [`Menu::activate`] reports nothing for a slider row by
+    /// design, so a player with no pointer could select a volume and then had
+    /// no way to change it. This module's own opening says the keyboard is the
+    /// primary input; a row that only a mouse could work was that claim being
+    /// false in the one place it is most visible.
+    ///
+    /// The **highlighted** row, on [`Menu::activate`]'s terms — the hovered one
+    /// when a pointer is over one, the selected one otherwise — so the key moves
+    /// what the player can see is about to move.
+    ///
+    /// `false` means nothing moved: the row is a button, there is no row, the
+    /// handle is already at that end of the groove, or the pointer has hold of
+    /// it. The last is [`Menu::set_slider`]'s rule and it is here for the same
+    /// reason: a drag is the newer of the two inputs.
+    pub fn nudge_slider(&mut self, forward: bool) -> bool {
+        let index = self.hovered.unwrap_or(self.selected);
+        if self.dragging == Some(index) {
+            return false;
+        }
+        let Some(item) = self.items.get_mut(index) else {
+            return false;
+        };
+        let MenuItemKind::Slider(slider) = &mut item.kind else {
+            return false;
+        };
+        let before = slider.position();
+        slider.set_position(if forward {
+            before + Slider::KEY_STEP
+        } else {
+            before - Slider::KEY_STEP
+        });
+        slider.position() != before
+    }
+
+    /// Whether the highlighted row is a slider.
+    ///
+    /// What a caller deciding whether a key belongs to the menu has to ask
+    /// **before** offering it: [`nudge_slider`](Self::nudge_slider) reports
+    /// whether a handle moved, which is also `false` at the end of the groove,
+    /// and a key claimed on that would be handed back to the game halfway
+    /// through a player holding it down.
+    #[must_use]
+    pub fn slider_highlighted(&self) -> bool {
+        matches!(
+            self.items.get(self.hovered.unwrap_or(self.selected)),
+            Some(item) if matches!(item.kind, MenuItemKind::Slider(_))
+        )
     }
 
     /// The value text a slider row draws, replaced.
@@ -1203,6 +1265,21 @@ impl<K: Copy + Eq> MenuSet<K> {
     /// Fires the highlighted button, reporting the [`WidgetId`] it carries.
     pub fn activate(&mut self) -> Option<WidgetId> {
         self.current_mut().and_then(Menu::activate)
+    }
+
+    /// Moves the highlighted slider one step, if there is a menu.
+    pub fn nudge_slider(&mut self, forward: bool) -> bool {
+        self.current_mut()
+            .is_some_and(|menu| menu.nudge_slider(forward))
+    }
+
+    /// Whether the showing menu's highlighted row is a slider.
+    ///
+    /// `false` when nothing is showing, so a caller asking "is this key the
+    /// menu's?" gets the answer for the panel the player can see.
+    #[must_use]
+    pub fn slider_highlighted(&self) -> bool {
+        self.current().is_some_and(Menu::slider_highlighted)
     }
 
     /// Whether a press is latched onto one of this set's buttons.
@@ -2290,6 +2367,70 @@ mod tests {
         assert_eq!(menu.slider(10), None, "the button row reported a value");
         assert_eq!(menu.slider(999), None, "an absent row reported a value");
         assert!(!menu.set_slider(10, 0.5), "a button row took a value");
+    }
+
+    /// **The keyboard moves the row the player can see is highlighted**, in
+    /// both directions and by the step the constant names.
+    #[test]
+    fn a_key_moves_the_highlighted_slider_and_nothing_else() {
+        let mut menu = slider_menu();
+        // The button row is selected first, so a nudge has no slider to move.
+        assert!(!menu.nudge_slider(true), "a button row took a nudge");
+        assert_eq!(menu.slider(DIAL), Some(0.5), "the far row moved anyway");
+
+        menu.select_next();
+        assert!(menu.nudge_slider(true), "the highlighted slider refused");
+        assert_eq!(menu.slider(DIAL), Some(0.5 + Slider::KEY_STEP));
+        assert!(menu.nudge_slider(false), "the slider refused to come back");
+        assert_eq!(menu.slider(DIAL), Some(0.5));
+    }
+
+    /// **The end of the groove is a place, and a key held against it stays
+    /// there.** The return value is what tells the two apart: nothing moved.
+    #[test]
+    fn a_nudge_at_the_end_of_the_groove_moves_nothing() {
+        let mut menu = slider_menu();
+        menu.select_next();
+        // Twenty steps is the whole groove from the middle twice over, so this
+        // arrives at the end whatever `KEY_STEP` is set to.
+        for _ in 0..(1.0 / Slider::KEY_STEP) as u32 + 1 {
+            menu.nudge_slider(true);
+        }
+        assert_eq!(menu.slider(DIAL), Some(1.0), "the handle left the groove");
+        assert!(
+            !menu.nudge_slider(true),
+            "a handle at the end reported that it moved"
+        );
+    }
+
+    /// **A drag is the newer input**, which is [`Menu::set_slider`]'s rule and
+    /// applies to a key for the same reason: a keyboard repeat arriving while
+    /// the player has the handle would fight the cursor for it.
+    #[test]
+    fn a_key_does_not_move_a_handle_the_pointer_is_holding() {
+        let extent = (960, 720);
+        let mut menu = slider_menu();
+        let mut ui = UiState::new();
+        let (track, _) = groove(&menu, extent);
+        let middle = Vec2::new((track.0.x + track.1.x) * 0.5, (track.0.y + track.1.y) * 0.5);
+        let layout = menu.layout(extent, &atlas());
+
+        menu.point(&layout, &mut ui, press_at(middle));
+        let held = menu.slider(DIAL).expect("the row is a slider");
+        assert!(!menu.nudge_slider(true), "a held handle took a key");
+        assert_eq!(menu.slider(DIAL), Some(held), "the held handle moved");
+
+        // And it takes one again once the pointer lets go, from the position
+        // the drag left it — not from the one the key would have written.
+        menu.point(&layout, &mut ui, release_at(middle));
+        assert!(
+            menu.nudge_slider(false),
+            "the released handle refused a key"
+        );
+        assert!(
+            menu.slider(DIAL).expect("still a slider") < held,
+            "the key moved it the wrong way, or not at all, from {held}"
+        );
     }
 
     /// **The groove is reserved, not squeezed in.** The panel grows by at least

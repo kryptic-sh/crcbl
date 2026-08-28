@@ -2904,10 +2904,10 @@ pub const FULLSCREEN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCod
 
 /// Moves the selection up, while a menu is showing.
 ///
-/// The three menu keys, like the three reserved ones above, are the engine's
-/// because the widget they drive is: [`crcbl_ui::menu::MenuSet`] owns the
-/// selection, and a sample that bound a different key would be describing the
-/// engine's list box. All five samples had spelled out the same three.
+/// The menu keys, like the three reserved ones above, are the engine's because
+/// the widget they drive is: [`crcbl_ui::menu::MenuSet`] owns the selection,
+/// and a sample that bound a different key would be describing the engine's
+/// list box. All five samples had spelled out the same three.
 ///
 /// They are consumed **only while a menu is showing**, so a frame with no menu
 /// on it forwards them to the game like any other key.
@@ -2918,6 +2918,24 @@ pub const MENU_DOWN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode
 
 /// Commits the selection. See [`MENU_UP_KEY`].
 pub const MENU_ACTIVATE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Enter;
+
+/// Moves the highlighted slider left, while a menu is showing.
+///
+/// **The keyboard's half of a slider row**, and the pair below is what a menu
+/// needed to be operable without a pointer at all:
+/// [`crcbl_ui::menu::Menu::activate`] reports nothing for a slider by design,
+/// so before these two a player could select a volume and then had no key that
+/// would change it.
+///
+/// Consumed **only while the highlighted row is a slider**, which is narrower
+/// than the three above and has to be: `apps/asteroids` turns the ship with
+/// these two, and every menu in this workspace but one is a list of buttons, so
+/// a panel that took the arrows outright would swallow a game's turn key every
+/// time it paused.
+pub const MENU_LEFT_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::ArrowLeft;
+
+/// Moves the highlighted slider right. See [`MENU_LEFT_KEY`].
+pub const MENU_RIGHT_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::ArrowRight;
 
 /// A loop that can be stepped and torn down.
 ///
@@ -3638,16 +3656,36 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         let code = *code;
         let pressed = matches!(state, crcbl_shell::ButtonState::Pressed);
 
-        let claimed =
-            self.showing && matches!(code, MENU_UP_KEY | MENU_DOWN_KEY | MENU_ACTIVATE_KEY);
+        // The arrows are claimed only over a slider row, where the other three
+        // are claimed whenever a panel is up. The asymmetry is what the games
+        // are already bound to: `apps/asteroids` turns with Left and Right, and
+        // a menu that took them from every panel would swallow the turn key of
+        // a game whose pause menu is a list of buttons — which is every menu in
+        // this workspace but one. A slider under the highlight is the case
+        // where the player is aiming at the panel.
+        let claimed = self.showing
+            && (matches!(code, MENU_UP_KEY | MENU_DOWN_KEY | MENU_ACTIVATE_KEY)
+                || (matches!(code, MENU_LEFT_KEY | MENU_RIGHT_KEY)
+                    && self.menus.slider_highlighted()));
         if claimed {
             match (code, pressed) {
                 // Repeats move the selection, because holding Down to walk a
-                // list is what a player expects.
+                // list is what a player expects — and holding Right to run a
+                // volume up is the same expectation of the same keyboard.
                 (MENU_UP_KEY, true) => self.menus.select_previous(),
                 (MENU_DOWN_KEY, true) => self.menus.select_next(),
                 (MENU_ACTIVATE_KEY, true) => self.menus.press(true),
                 (MENU_ACTIVATE_KEY, false) => self.activated = self.menus.activate(),
+                // The return value is "a handle moved", which is a fact about
+                // the end of the groove rather than about the key: the key is
+                // claimed either way, or a player holding Right at the top of a
+                // slider would start driving the game behind the panel.
+                (MENU_LEFT_KEY, true) => {
+                    self.menus.nudge_slider(false);
+                }
+                (MENU_RIGHT_KEY, true) => {
+                    self.menus.nudge_slider(true);
+                }
                 _ => {}
             }
         }
@@ -7080,6 +7118,102 @@ mod tests {
                 "Down moved the selection only when the menu had the key",
             );
         }
+    }
+
+    /// **A slider answers the arrow keys, and only while its menu is up.**
+    ///
+    /// The keyboard's half of a slider row: [`crcbl_ui::menu::Menu::activate`]
+    /// reports nothing for a slider, so before these two keys a player with no
+    /// pointer could select a volume and had nothing that would change it. The
+    /// second half of the claim is the same one the test above makes about Down
+    /// — a game that binds Right keeps it on every frame with no menu on
+    /// screen.
+    #[test]
+    fn the_arrow_keys_move_a_slider_only_while_its_menu_is_showing() {
+        const DIAL: crcbl_ui::WidgetId = 3;
+        let (mut shell, window) = shell();
+        let mut set = crcbl_ui::menu::MenuSet::new(
+            Panel::None,
+            vec![(
+                Panel::Shown,
+                crcbl_ui::menu::Menu::new(
+                    "PAUSED",
+                    vec![
+                        crcbl_ui::menu::MenuItem::new(1, "RESUME", "ESC"),
+                        crcbl_ui::menu::MenuItem::new(2, "QUIT", "Q"),
+                        crcbl_ui::menu::MenuItem::slider(DIAL, "VOLUME", "50%", 0.5),
+                    ],
+                ),
+            )],
+        );
+        set.show(Panel::Shown);
+        let mut held = Vec::new();
+
+        // The slider is the third row, so it takes two Downs to highlight —
+        // and those go through the same pump, which is the point: this drives
+        // the keyboard exactly as a player would.
+        for showing in [true, false] {
+            for key in [MENU_DOWN_KEY, MENU_DOWN_KEY, MENU_RIGHT_KEY] {
+                shell.key_press(window, key).expect("live");
+                shell.key_release(window, key).expect("live");
+            }
+
+            let before = set
+                .get_mut(Panel::Shown)
+                .and_then(|menu| menu.slider(DIAL))
+                .expect("the row is a slider");
+
+            let mut forwarded = Vec::new();
+            let mut pump = MenuPump::new(&mut set, &mut held, showing);
+            shell.pump(&mut |event| {
+                if let Some(key) = pump.observe(&event) {
+                    forwarded.push(key);
+                }
+            });
+
+            let seen: Vec<_> = forwarded.iter().map(|(code, _)| *code).collect();
+            assert_eq!(
+                seen.contains(&MENU_RIGHT_KEY),
+                !showing,
+                "Right must reach the game only when no menu is up",
+            );
+            let after = set
+                .get_mut(Panel::Shown)
+                .and_then(|menu| menu.slider(DIAL))
+                .expect("the row is a slider");
+            assert_eq!(
+                after > before,
+                showing,
+                "Right moved the handle only when the menu had the key \
+                 ({before} -> {after})",
+            );
+        }
+
+        // **And the narrower half: a panel showing does not take the arrows
+        // from a game whose highlighted row is a button.** `apps/asteroids`
+        // turns with these two keys and its start panel is a list of buttons,
+        // so claiming them per-panel rather than per-row swallowed its turn key
+        // — `losing_focus_releases_the_keys_the_game_still_thinks_are_down`
+        // there is what caught it.
+        assert!(
+            set.get_mut(Panel::Shown)
+                .expect("the panel is in the set")
+                .select_id(1),
+            "RESUME is a row of this panel",
+        );
+        shell.key_press(window, MENU_RIGHT_KEY).expect("live");
+        shell.key_release(window, MENU_RIGHT_KEY).expect("live");
+        let mut forwarded = Vec::new();
+        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        shell.pump(&mut |event| {
+            if let Some(key) = pump.observe(&event) {
+                forwarded.push(key);
+            }
+        });
+        assert!(
+            forwarded.iter().any(|(code, _)| *code == MENU_RIGHT_KEY),
+            "a button row kept the arrow key from the game",
+        );
     }
 
     /// **The commit key fires on release, not on press.**

@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A slider row answers the keyboard.** `ArrowLeft` and `ArrowRight` move the
+  highlighted slider by `Slider::KEY_STEP` — twenty presses end to end — through
+  the new `Menu::nudge_slider` and the engine's `MENU_LEFT_KEY` /
+  `MENU_RIGHT_KEY`. `Menu::activate` reports nothing for a slider by design, so
+  until now a player with no pointer could select a volume and had no key that
+  would change it, in a widget set whose stated primary input is the keyboard.
+
+  The two keys are claimed **only while the highlighted row is a slider**, which
+  is narrower than the other three menu keys: `apps/asteroids` turns the ship
+  with them, and every menu in the workspace but one is a list of buttons, so a
+  panel that took the arrows outright would swallow a game's turn key every time
+  it paused. `Menu::slider_highlighted` is the predicate.
+
 - **`options`, the first settings screen in the workspace.**
   `cargo run -p options` opens a panel of faders over the six `[engine.audio]`
   buses — master, music, effects, interface, voice, ambience — writes them to
