@@ -590,6 +590,19 @@ These belong here rather than there, because they are gaps rather than plans:
   further down this file, and the froxel path inherited it deliberately: it sits
   where the analytic fog sat so the two paths are comparable. `51-volumetrics`
   argues both should move after `ssr_blur.slang` together.
+
+  **Blocked on a fixture, not on the change.** Moving the composite is a small
+  edit in `ForwardRenderer::add_frame_passes`, and no golden in the tree would
+  move: the reorder is observable only on a frame that has a medium _and_
+  reflections, and nothing has both. Lantern is the reflective scene and hands
+  its renderer no `Fog` — the bullet above. `mesh_e2e`'s cube scene has a medium
+  and **no reflection at all**: drawn twice on radv with
+  `RenderEffects::REFLECTIONS` forced on and off and no fog, the two
+  `Rgba16Float` frames are identical, 0 of 49152 texels moved and the worst
+  channel delta is 0.00000 (2026-08-29). So the change would land unverified and
+  its own tests could not fail. What it needs first is a scene with both, which
+  is the same fixture the bullet above asks for.
+
 - **The composite's own partial slice is still only guarded by a text read.**
   `apps/lantern/tests/golden.rs`'s
   `the_air_scatters_the_sun_where_the_cascades_let_it_through` closed the
@@ -602,9 +615,24 @@ These belong here rather than there, because they are gaps rather than plans:
   `crates/crcbl/tests/mesh_e2e/froxels.rs` does not reach it either: that reads
   the buffers the two **compute** passes wrote, and the partial slice is work
   the composite does per pixel and stores nowhere. What would catch it is a
-  frame whose nearest surface is inside the first slice — a wall a fraction of a
-  unit from the eye — so the tail the composite integrates is most of what the
-  pixel sees. Meanwhile `crcbl_shaders::volumetric`'s
+  frame whose nearest surface is inside the first slice, so the tail the
+  composite integrates is most of what the pixel sees.
+
+  **And that frame needs the depth attachment on the host, which nothing can
+  reach.** The composite takes each pixel's view depth out of `scene_depth`, so
+  a host model of it needs the same number per pixel;
+  `ForwardRenderer::add_passes` hands back the scene image alone and the depth
+  is a graph transient with no accessor. The one depth a host already knows is
+  the far plane, and background pixels are exactly where the term is dead:
+  measured on radv (2026-08-29) the sun visibility is `0.000` for every froxel
+  in slices 0 to 7, mixed through slice 10, and exactly `1.000` from slice 11 —
+  6.8 units out — because `cascade_far` is `[4.70, 24, 24, 24]` and
+  `volumetric_sun_visibility` answers "lit" past the last cascade. A background
+  pixel lands in slice 23, where a constant `1.0` and the froxel's own
+  visibility are the same number. So the route is either an accessor for the
+  frame's depth image, or a surface at a depth the host can state exactly — a
+  slab perpendicular to the camera's forward axis, whose every covered pixel
+  shares one view depth. Meanwhile `crcbl_shaders::volumetric`'s
   `the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility`
   remains a text guard worth exactly what it says: the read is written down, not
   that it is right.
