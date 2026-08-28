@@ -561,14 +561,27 @@ export async function launch({
 /**
  * How long one CDP command may go unanswered before the gate abandons it.
  *
- * Generous by two orders, on the evidence: instrumented on 2026-08-28, the
- * slowest command in a whole quarry run was a 234 ms `Runtime.evaluate` that
- * read the canvas back as a data URL, and every other one was under 50 ms. So
- * this is not a budget any working command has to fit — it is the line past
- * which waiting longer has stopped being useful, and the step caps it has to
- * beat are measured in minutes.
+ * **Measured on the wrong machine first, and it cost a red gate.** Instrumented
+ * on this developer's desktop on 2026-08-28, the slowest command in a whole
+ * quarry run was a 234 ms `Runtime.evaluate` that read the canvas back as a data
+ * URL, and every other one was under 50 ms; 30 s looked generous by two orders.
+ * It was not. A CI runner drives SwiftShader, where shard's frames cost about a
+ * hundred times what they cost here, and group H's device-error provocation —
+ * an `evaluate` that opens a second adapter and awaits
+ * `onSubmittedWorkDone` — printed **30.0 s** after its group header on
+ * `7ea20d0` and passed. On `b6b0c32`, with the deadline in, the same command
+ * was cut off at 30 s and reddened the demo gate, which skipped the deploy.
+ *
+ * So the number has to clear the slowest **legitimate** command on the slowest
+ * runner, not the fastest machine's worst case. Five minutes is
+ * `POLL_WALL_CAP_MS`'s reasoning in `web/tools/browser-e2e.mjs` applied to a
+ * single command: an order above what has ever been observed to answer, and
+ * still far inside the 20- and 45-minute caps this exists to beat. A command
+ * that is going to answer at all answers long before it; one that never will —
+ * the macOS frame wait this was written for — still fails with its own name in
+ * the message instead of hanging.
  */
-export const CDP_DEADLINE_MS = 30_000;
+export const CDP_DEADLINE_MS = 300_000;
 
 /** How much of the command's own parameters that failure quotes back. */
 const CDP_PARAMS_REPORTED = 200;
