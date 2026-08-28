@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`[engine.video] render_scale`: the player can ask for a smaller internal
+  frame.** `ForwardRenderer::set_render_scale` and the Catmull-Rom upscale pass
+  have existed since 2026-08-27 with no caller above the renderer. The video
+  settings layer now reads a scale beside its four effect booleans:
+  `crcbl::settings::video` returns a `VideoSettings { effects, render_scale }`,
+  `GpuContext::render_scale` surfaces what the context read while it opened, and
+  `apps/viewer` hands it to the renderer at build and again across a reload. An
+  absent key is `1.0` — the whole extent and no upscale pass at all — so a run
+  with no settings file draws exactly what it drew before. The reader clamps to
+  the renderer's own `MIN_RENDER_SCALE..=1.0`, and a value that is not a usable
+  number (a string, `nan`, `inf`) warns naming the key and clamps nothing.
+  `crcbl::settings::video_effects` is unchanged and still the effects-only read.
+
 - **`crcbl_render::PassStats`: what each pass normally costs, not what one frame
   cost.** The engine's exit log used to print the newest `FrameTimings` the
   timers had resolved — one arbitrary, frames-latent sample, listed once per
@@ -39,12 +52,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl::settings::audio_gains`: the `[engine.audio]` bus volumes a player
   can set.** One key per bus — `master_volume`, `music_volume`, `sfx_volume`,
   `ui_volume`, `voice_volume`, `ambience_volume` — each a linear gain clamped to
-  `[0, 1]`, with an absent key meaning unity. `SettingsSource::audio_gains` is
-  the seam a game reads them through, and it is public where the video layer's
-  is not, because a `GpuContext` owns the renderer and nothing in the engine
-  owns a mixer. `apps/breakout` is the first consumer: it applies them in
-  `Audio::new`, from the platform settings file on a real run and from nothing
-  headless.
+  `[0, 1]`, with an absent key meaning unity, and a value that is not a usable
+  number (a string, `nan`, `inf`) warning naming the key and leaving the bus
+  where the game set it. `SettingsSource::audio_gains` is the seam a game reads
+  them through, and it is public where the video layer's is not, because a
+  `GpuContext` owns the renderer and nothing in the engine owns a mixer.
+  `apps/breakout` is the first consumer: it applies them in `Audio::new`, from
+  the platform settings file on a real run and from nothing headless.
 
 - **`crcbl_audio::mixer::Bus`: six fixed gain stages, so a player can turn the
   music down without turning the gunfire down.** `master`, `music`, `sfx`, `ui`,

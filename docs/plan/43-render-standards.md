@@ -410,6 +410,16 @@ that document had been asserting for a pass that did not exist. At full scale
 there is no second image and no pass: the earlier stage writes the caller's
 target directly, the same additive-zero shape the FXAA rung landed in.
 
+**A player can now ask for it**, as of 2026-08-28: `[engine.video] render_scale`
+is read by `crcbl::settings::video` into a `VideoSettings` beside the effect
+bits, surfaced as `GpuContext::render_scale`, and handed to the renderer by
+`apps/viewer`. It obeys the same clamp-downward rule the effect keys do — an
+absent key is `1.0`, which is the whole extent and no pass — and the reader
+clamps to the renderer's own `MIN_RENDER_SCALE..=1.0` so a typed-in extra digit
+cannot ask for a target larger than the surface. What is still missing is a
+writer: nothing in the workspace saves a setting, so the slider this exists for
+cannot yet persist what it moves.
+
 **The filter is Catmull-Rom**, sixteen taps, and it is Mitchell-Netravali at
 `B = 0, C = 0.5` — interpolating, so a texel that survives the scale reaches the
 frame unchanged, and a partition of unity by exact identity rather than by

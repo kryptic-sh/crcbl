@@ -118,6 +118,8 @@ use crcbl_shell::{
 use crcbl_store::StorageSource;
 use crcbl_store::settings::SettingsStack;
 
+use crate::settings::VideoSettings;
+
 use crate::backend::GpuBackend;
 
 pub mod pause;
@@ -709,30 +711,45 @@ impl Default for GpuContextDesc<'_> {
 }
 
 impl SettingsSource<'_> {
-    /// The effects the player allows, read now.
+    /// The stack this source resolves to, or `None` when there is nothing to
+    /// read.
     ///
-    /// `RenderEffects::all()` whenever there is nothing to read — no source, no
-    /// file, no settings directory — because this layer may only clamp
-    /// downward, so "the player has said nothing" and "the player allows
-    /// everything" are the same answer. `crate::settings` is where the keys
-    /// live.
-    fn video_effects(self, app_name: &str) -> RenderEffects {
+    /// Every reader below starts here, so where a settings file comes from is
+    /// decided in one place rather than once per group of keys.
+    fn stack(self, app_name: &str) -> Option<SettingsStack> {
         match self {
-            Self::Platform => crate::settings::video_effects(&SettingsStack::platform(app_name)),
-            Self::Source(storage) => {
-                crate::settings::video_effects(&SettingsStack::from_storage(storage))
-            }
-            Self::None => RenderEffects::all(),
+            Self::Platform => Some(SettingsStack::platform(app_name)),
+            Self::Source(storage) => Some(SettingsStack::from_storage(storage)),
+            Self::None => None,
         }
+    }
+
+    /// The whole `[engine.video]` section, read now.
+    ///
+    /// [`VideoSettings::unrestricted`] whenever there is nothing to read — no
+    /// source, no file, no settings directory — because this layer may only
+    /// clamp downward, so "the player has said nothing" and "the player allows
+    /// everything at full size" are the same answer. `crate::settings` is where
+    /// the keys live.
+    ///
+    /// One read for the whole section rather than one per key: the file is
+    /// opened once, and a caller that wants the effects wants the render scale
+    /// in the same breath.
+    fn video(self, app_name: &str) -> VideoSettings {
+        self.stack(app_name)
+            .as_ref()
+            .map_or_else(VideoSettings::unrestricted, crate::settings::video)
     }
 
     /// The bus gains the player has set, read now.
     ///
-    /// Unity for every bus whenever there is nothing to read, on
-    /// `video_effects`' terms and for the mirror of its reason: an audio key **is** the gain, so "the player has said nothing"
-    /// and "the player wants it at full" are the same answer.
+    /// Unity for every bus whenever there is nothing to read, on the video
+    /// reader's terms and for the mirror of its reason: an audio key **is** the
+    /// gain, so
+    /// "the player has said nothing" and "the player wants it at full" are the
+    /// same answer.
     ///
-    /// **Public where `video_effects` is not**, and the asymmetry is the state
+    /// **Public where the video reader is not**, and the asymmetry is the state
     /// of the engine rather than a choice about the API: a
     /// [`GpuContext`] owns the renderer and reads the video layer without being
     /// asked, and nothing here owns a mixer. A game builds its own, so a game is
@@ -743,13 +760,10 @@ impl SettingsSource<'_> {
         self,
         app_name: &str,
     ) -> [(crcbl_audio::mixer::Bus, f32); crcbl_audio::mixer::Bus::ALL.len()] {
-        match self {
-            Self::Platform => crate::settings::audio_gains(&SettingsStack::platform(app_name)),
-            Self::Source(storage) => {
-                crate::settings::audio_gains(&SettingsStack::from_storage(storage))
-            }
-            Self::None => crcbl_audio::mixer::Bus::ALL.map(|bus| (bus, 1.0)),
-        }
+        self.stack(app_name).as_ref().map_or_else(
+            || crcbl_audio::mixer::Bus::ALL.map(|bus| (bus, 1.0)),
+            crate::settings::audio_gains,
+        )
     }
 }
 
@@ -840,14 +854,14 @@ pub struct GpuContext {
     /// The frame this run was asked to write out, until it has been written.
     #[cfg(not(target_arch = "wasm32"))]
     screenshot: Option<ScreenshotRequest>,
-    /// What `[engine.video]` allowed when this context opened, from
+    /// What `[engine.video]` said when this context opened, from
     /// [`GpuContextDesc::settings`].
     ///
     /// Read once rather than per frame: a settings file the player edits mid-run
     /// is not something a frame should notice, and a settings *screen* applies
     /// its rows through the renderer's own request. See
-    /// [`GpuContext::effect_request`].
-    video_effects: RenderEffects,
+    /// [`GpuContext::effect_request`] and [`GpuContext::render_scale`].
+    video: VideoSettings,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -898,7 +912,7 @@ pub struct PendingGpuContext {
     /// The `[engine.video]` read, done when the open was *started* rather than
     /// when it finishes: it touches storage, and a browser drives the polls
     /// below from a frame callback that has no time for one.
-    video_effects: RenderEffects,
+    video: VideoSettings,
 }
 
 impl PendingGpuContext {
@@ -1055,7 +1069,7 @@ impl GpuContext {
             required_features: desc.required_features,
             optional_features: desc.optional_features,
             pacing: desc.pacing,
-            video_effects: desc.settings.video_effects(desc.label),
+            video: desc.settings.video(desc.label),
         };
         loop {
             if let Some(context) = pending.poll()? {
@@ -1115,7 +1129,7 @@ impl GpuContext {
             required_features: desc.required_features,
             optional_features: desc.optional_features,
             pacing: desc.pacing,
-            video_effects: desc.settings.video_effects(desc.label),
+            video: desc.settings.video(desc.label),
         })
     }
 
@@ -1305,7 +1319,7 @@ impl GpuContext {
             presented: 0,
             #[cfg(not(target_arch = "wasm32"))]
             screenshot: None,
-            video_effects: open.video_effects,
+            video: open.video,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
         })
@@ -1371,7 +1385,23 @@ impl GpuContext {
     /// *ceiling*, never a request — see [`EffectRequest::video`].
     #[must_use]
     pub const fn video_effects(&self) -> RenderEffects {
-        self.video_effects
+        self.video.effects
+    }
+
+    /// What fraction of the caller's extent the player asked to draw at, read
+    /// while this context opened.
+    ///
+    /// `1.0` for a run whose player has said nothing, which is the whole
+    /// extent and no upscale pass at all. A sample hands it to
+    /// [`ForwardRenderer::set_render_scale`](crcbl_render::ForwardRenderer::set_render_scale),
+    /// which is where the bound this shares with it is enforced.
+    ///
+    /// **Not on [`GpuContext::effect_request`]**, because that carries
+    /// [`RenderEffects`] bits and a scale is not one: the request answers which
+    /// passes may run, and this answers how big their target is.
+    #[must_use]
+    pub const fn render_scale(&self) -> f32 {
+        self.video.render_scale
     }
 
     /// The effect request a renderer built on this context should start from.
@@ -1392,7 +1422,7 @@ impl GpuContext {
     #[must_use]
     pub fn effect_request(&self) -> EffectRequest {
         EffectRequest {
-            video: self.video_effects,
+            video: self.video.effects,
             ..EffectRequest::default()
         }
     }
@@ -8010,7 +8040,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features,
             pacing,
-            video_effects: RenderEffects::all(),
+            video: VideoSettings::unrestricted(),
         };
         let gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8750,7 +8780,7 @@ mod tests {
             // A unit test is a run with no player: reading whoever's real
             // settings file would make this suite's answer depend on the
             // machine it ran on.
-            video_effects: RenderEffects::all(),
+            video: VideoSettings::unrestricted(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8869,7 +8899,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: Features::empty(),
             pacing: Pacing::default(),
-            video_effects: RenderEffects::all(),
+            video: VideoSettings::unrestricted(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -8999,7 +9029,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: Features::empty(),
             pacing: Pacing::default(),
-            video_effects: RenderEffects::all(),
+            video: VideoSettings::unrestricted(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -9108,7 +9138,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: Features::empty(),
             pacing: Pacing::default(),
-            video_effects: RenderEffects::all(),
+            video: VideoSettings::unrestricted(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -9239,7 +9269,7 @@ mod tests {
             required_features: Features::empty(),
             optional_features: optional,
             pacing,
-            video_effects: RenderEffects::all(),
+            video: VideoSettings::unrestricted(),
         };
         let gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -11728,5 +11758,39 @@ mod tests {
                 "no source must leave {bus:?} at unity, and it reads {gain}"
             );
         }
+    }
+
+    /// **A settings source carries the whole `[engine.video]` section**, both
+    /// the effect bits and the render scale, and [`SettingsSource::None`] is
+    /// unrestricted.
+    ///
+    /// One file setting both, because the two are read through one stack and a
+    /// reader that opened it twice — or that let the scale's warning path
+    /// swallow the bits — would still pass a test for either alone.
+    #[test]
+    fn a_settings_source_carries_the_whole_video_section() {
+        use crcbl_store::StorageSource;
+        use crcbl_store::settings::SETTINGS_FILE;
+
+        let storage = crcbl_store::MemoryStorage::new();
+        storage
+            .write(
+                std::path::Path::new(SETTINGS_FILE),
+                b"[engine.video]\nshadows = false\nrender_scale = 0.5\n",
+            )
+            .expect("memory storage accepts every write");
+
+        let read = SettingsSource::Source(&storage).video("test");
+        assert_eq!(
+            read.effects,
+            RenderEffects::all().difference(RenderEffects::SHADOWS)
+        );
+        assert!((read.render_scale - 0.5).abs() < f32::EPSILON);
+
+        assert_eq!(
+            SettingsSource::None.video("test"),
+            VideoSettings::unrestricted(),
+            "a run with no source must draw everything at full size",
+        );
     }
 }

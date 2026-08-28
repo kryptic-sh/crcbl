@@ -305,6 +305,11 @@ impl Gpu {
         // what it drew before. `reload` carries the answer across a document
         // change, beside the exposure and the wireframe.
         renderer.set_effect_request(ctx.effect_request());
+        // `[engine.video] render_scale`, from the same read. `1.0` for a player
+        // who has said nothing, which is the extent the surface already had and
+        // no upscale pass at all, so a run with no settings file draws what it
+        // drew before this line existed.
+        renderer.set_render_scale(ctx.render_scale());
         // `docs/plan/sample/05-viewer.md` milestone 1's grid floor — see the
         // [module docs](self) for why it is a pass rather than a mesh.
         //
@@ -594,6 +599,9 @@ impl Gpu {
         // quietly restore an effect the player's settings took away, and the
         // renderer being replaced is the only thing that knows what they were.
         next.set_effect_request(self.renderer.effect_request());
+        // Carried for the same reason the request above is: a reload must not
+        // quietly draw at full size again for a player who asked for less.
+        next.set_render_scale(self.renderer.render_scale());
         // Through the renderer rather than through `Gpu::set_wireframe`, which
         // logs: a device that refused the view once has already said so, and a
         // line per re-export is a log nobody reads. The answer is what the

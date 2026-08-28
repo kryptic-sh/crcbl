@@ -52,9 +52,21 @@
 //! [`RenderEffects::all`] and removes a bit only for a key that is present and
 //! `false`; `true` and absent are the same answer, which is why a settings file
 //! that says nothing cannot switch a frame's passes off.
+//!
+//! # A video key need not be a boolean, and [`render_scale`] is the first that
+//! is not
+//!
+//! The clamp-downward rule survives the change of type rather than being an
+//! exception to it: a render scale below one draws fewer pixels than the game
+//! asked for, and a value above one is clamped to one rather than asked for. So
+//! the key still only ever takes away, an absent key still takes nothing, and
+//! the range is the one
+//! [`ForwardRenderer::set_render_scale`](crcbl_render::ForwardRenderer::set_render_scale)
+//! already enforces — this reader clamps to the same bounds rather than
+//! trusting the file, because the two must not be able to disagree.
 
 use crcbl_audio::mixer::Bus;
-use crcbl_render::RenderEffects;
+use crcbl_render::{MIN_RENDER_SCALE, RenderEffects};
 use crcbl_store::settings::SettingsStack;
 
 /// The `[engine.video]` section, as a dotted key prefix.
@@ -118,6 +130,95 @@ pub fn video_effects(stack: &SettingsStack) -> RenderEffects {
     allowed
 }
 
+/// The `[engine.video]` key that sizes the renderer's internal target.
+///
+/// Spelled here for [`VIDEO_KEYS`]' reason and not put *in* that table: the
+/// table pairs a key with the [`RenderEffects`] bit it clears, and this key
+/// clears no bit. A settings screen writing the row and a start-up reading it
+/// back still go through one spelling.
+pub const RENDER_SCALE_KEY: &str = "render_scale";
+
+/// Everything the player's `[engine.video]` section says, read in one pass.
+///
+/// One type rather than a reader per key because a caller wants all of it at
+/// the same moment — [`GpuContext::open`](crate::engine::GpuContext::open)
+/// reads the section once while it is opening — and because building a
+/// [`SettingsStack`] per key would read the player's file once per key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VideoSettings {
+    /// Which of topic 18's effects the player allows; see [`video_effects`].
+    pub effects: RenderEffects,
+    /// What fraction of the caller's extent the renderer draws at; see
+    /// [`render_scale`].
+    pub render_scale: f32,
+}
+
+impl VideoSettings {
+    /// What a player who has said nothing gets: every effect standing and the
+    /// full extent.
+    ///
+    /// Also what [`SettingsSource::None`](crate::engine::SettingsSource::None)
+    /// answers, and the two are the same answer for the same reason — this
+    /// layer may only take away, so "nothing to read" and "nothing taken away"
+    /// cannot differ.
+    #[must_use]
+    pub fn unrestricted() -> Self {
+        Self {
+            effects: RenderEffects::all(),
+            render_scale: 1.0,
+        }
+    }
+}
+
+/// The whole `[engine.video]` section, off one stack.
+#[must_use]
+pub fn video(stack: &SettingsStack) -> VideoSettings {
+    VideoSettings {
+        effects: video_effects(stack),
+        render_scale: render_scale(stack),
+    }
+}
+
+/// What fraction of the caller's extent the player wants drawn, for
+/// [`ForwardRenderer::set_render_scale`](crcbl_render::ForwardRenderer::set_render_scale).
+///
+/// `1.0` for a stack that says nothing, and otherwise the file's value clamped
+/// to `MIN_RENDER_SCALE..=1.0` — the same bounds the setter enforces, so a file
+/// asking for a tenth and a file asking for a quarter produce the same frame
+/// and neither produces a target the renderer refused to size.
+///
+/// # A line that does nothing says so
+///
+/// A key holding something this cannot use — `render_scale = "half"`, and also
+/// `nan` and `inf`, which TOML spells and arithmetic cannot — leaves the scale
+/// at `1.0` and **warns**, naming the key, on [`video_effects`]' terms. A
+/// finite value outside the range does not warn: it is a number the player
+/// meant, and clamping it is this layer's job rather than a mistake to report.
+#[must_use]
+pub fn render_scale(stack: &SettingsStack) -> f32 {
+    let dotted = format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}");
+    let unreadable = || {
+        crcbl_core::log::warn!(
+            "settings: `{dotted}` is not a usable number, so it does nothing; \
+             the frame is drawn at the extent the game asked for"
+        );
+        1.0
+    };
+    match stack.get::<f64>(&dotted) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to [MIN_RENDER_SCALE, 1.0], where every f64 has an f32 within an ulp"
+        )]
+        // `clamp` answers NaN for NaN rather than a bound, so the finite check
+        // has to come first — a scale of NaN reaches `begin_frame` as an extent
+        // of zero pixels, where a nonsense string reaches it as a full frame.
+        Some(scale) if scale.is_finite() => (scale as f32).clamp(MIN_RENDER_SCALE, 1.0),
+        Some(_) => unreadable(),
+        None if stack.contains(&dotted) => unreadable(),
+        None => 1.0,
+    }
+}
+
 /// The `[engine.audio]` section, as a dotted key prefix.
 pub const AUDIO_NAMESPACE: &str = "engine.audio";
 
@@ -140,19 +241,23 @@ pub const AUDIO_NAMESPACE: &str = "engine.audio";
 pub fn audio_gains(stack: &SettingsStack) -> [(Bus, f32); Bus::ALL.len()] {
     Bus::ALL.map(|bus| {
         let dotted = format!("{AUDIO_NAMESPACE}.{}", bus.settings_key());
+        let unreadable = || {
+            crcbl_core::log::warn!(
+                "settings: `{dotted}` is not a usable number, so it does nothing; \
+                 the {bus:?} bus stays where the game set it"
+            );
+            (bus, 1.0)
+        };
         match stack.get::<f64>(&dotted) {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "a gain is clamped to [0, 1], where every f64 has an f32 within an ulp"
             )]
-            Some(gain) => (bus, gain.clamp(0.0, 1.0) as f32),
-            None if stack.contains(&dotted) => {
-                crcbl_core::log::warn!(
-                    "settings: `{dotted}` is not a number, so it does nothing; \
-                     the {bus:?} bus stays where the game set it"
-                );
-                (bus, 1.0)
-            }
+            // Finite first: `clamp` answers NaN for NaN, and a NaN gain
+            // multiplies every sample of the bus into silence-shaped garbage.
+            Some(gain) if gain.is_finite() => (bus, gain.clamp(0.0, 1.0) as f32),
+            Some(_) => unreadable(),
+            None if stack.contains(&dotted) => unreadable(),
             None => (bus, 1.0),
         }
     })
@@ -474,6 +579,115 @@ mod tests {
             video_effects(&stack),
             RenderEffects::all().difference(RenderEffects::SHADOWS),
             "the player's file must beat the layer under it for both keys"
+        );
+    }
+
+    /// The scale the reader answers off a file holding `toml`.
+    fn scale_of(toml: &str) -> f32 {
+        render_scale(&stack_from(toml))
+    }
+
+    /// **A file that says nothing draws the whole extent.**
+    ///
+    /// The scalar half of `an_absent_key_clamps_nothing`: a scale is not a bit,
+    /// but the rule this layer lives under is the same one, and `1.0` is what
+    /// "clamped nothing" spells for a size.
+    #[test]
+    fn an_absent_render_scale_draws_the_whole_extent() {
+        assert!((scale_of("") - 1.0).abs() < f32::EPSILON);
+        assert_eq!(video(&stack_from("")), VideoSettings::unrestricted());
+    }
+
+    /// **A scale is read, and clamped to the range the renderer enforces.**
+    ///
+    /// Both bounds, because the two are wrong in opposite directions and a
+    /// clamp written with one bound passes a test that only checks the other.
+    /// Above `1.0` matters most: `ForwardRenderer` would allocate a target
+    /// larger than the surface for a player who typed an extra digit.
+    #[test]
+    fn a_render_scale_is_clamped_to_the_range_the_renderer_enforces() {
+        let key = format!("[{VIDEO_NAMESPACE}]\n{RENDER_SCALE_KEY} = ");
+        assert!((scale_of(&format!("{key}0.5\n")) - 0.5).abs() < f32::EPSILON);
+        assert!((scale_of(&format!("{key}2.0\n")) - 1.0).abs() < f32::EPSILON);
+        assert!((scale_of(&format!("{key}0.01\n")) - MIN_RENDER_SCALE).abs() < f32::EPSILON);
+        assert!((scale_of(&format!("{key}-3.0\n")) - MIN_RENDER_SCALE).abs() < f32::EPSILON);
+    }
+
+    /// **A value no scale can be read out of draws the whole extent and warns,
+    /// naming the key.**
+    ///
+    /// `nan` and `inf` are here beside the string because TOML spells them and
+    /// `f32::clamp` answers NaN for NaN rather than a bound — so the arm that
+    /// catches the typo is not the arm that catches these, and a reader written
+    /// with only the type check would hand `begin_frame` an extent of zero
+    /// pixels.
+    #[test]
+    fn a_render_scale_that_is_not_a_usable_number_warns_and_draws_it_all() {
+        for value in ["\"half\"", "nan", "inf", "-inf"] {
+            let capture = crcbl_core::log::capture();
+            let toml = format!("[{VIDEO_NAMESPACE}]\n{RENDER_SCALE_KEY} = {value}\n");
+            let scale = scale_of(&toml);
+            assert!(
+                (scale - 1.0).abs() < f32::EPSILON,
+                "`{value}` was read as a scale of {scale}"
+            );
+
+            let warned: Vec<_> = capture
+                .records()
+                .into_iter()
+                .filter(|record| {
+                    record
+                        .message
+                        .contains(&format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"))
+                })
+                .collect();
+            assert_eq!(
+                warned.len(),
+                1,
+                "`{value}` should warn exactly once: {:?}",
+                capture.records()
+            );
+            assert_eq!(warned[0].level, crcbl_core::log::Level::Warn);
+        }
+    }
+
+    /// **A scale written without a decimal point is still a scale.**
+    ///
+    /// TOML tells an integer from a float, and `render_scale = 1` is what a
+    /// player writes for "all of it". Reading it as absent would be harmless
+    /// here and is not the point: the same reader would drop `0` too, which is
+    /// the value the clamp exists for.
+    #[test]
+    fn a_whole_number_is_read_as_a_scale() {
+        let key = format!("[{VIDEO_NAMESPACE}]\n{RENDER_SCALE_KEY} = ");
+        assert!((scale_of(&format!("{key}1\n")) - 1.0).abs() < f32::EPSILON);
+        assert!((scale_of(&format!("{key}0\n")) - MIN_RENDER_SCALE).abs() < f32::EPSILON);
+    }
+
+    /// **The two halves of `[engine.video]` are read from one file and neither
+    /// disturbs the other.**
+    ///
+    /// [`video`] is the only reader a caller uses, so a scale key that made
+    /// `video_effects` warn, or an effect key that cost the scale, would reach
+    /// every sample at once.
+    #[test]
+    fn the_scale_and_the_effect_bits_are_read_side_by_side() {
+        let capture = crcbl_core::log::capture();
+        let settings = video(&stack_from(&format!(
+            "[{VIDEO_NAMESPACE}]\nshadows = false\n{RENDER_SCALE_KEY} = 0.75\n"
+        )));
+        assert_eq!(
+            settings.effects,
+            RenderEffects::all().difference(RenderEffects::SHADOWS)
+        );
+        assert!((settings.render_scale - 0.75).abs() < f32::EPSILON);
+
+        let records = capture.records();
+        assert!(
+            records
+                .iter()
+                .all(|record| record.level != crcbl_core::log::Level::Warn),
+            "a file this layer can read whole warns about nothing: {records:?}"
         );
     }
 }

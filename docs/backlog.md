@@ -694,13 +694,14 @@ crate depending on another.
 
 `crates/crcbl/src/settings.rs` reads four boolean keys and maps each to a
 `RenderEffects` bit, and since 2026-08-28 the six `[engine.audio]` bus volumes
-through `audio_gains`. Everything else the catalogue names — display mode,
-resolution, render scale, present mode, frame cap, the quality tiers — has a
-defined home in the TOML convention and nothing that reads it. The storage half
-is not the gap: `crates/crcbl-store/src/settings.rs` ships the layered stack,
-`set`, `save`, and a per-platform backend that is the config directory natively
-and OPFS on wasm. **The gap is that no application in the workspace has ever
-written a setting** — the only writer is `crates/crcbl-cli/src/settings_cmd.rs`.
+through `audio_gains` and `[engine.video] render_scale` through `video`.
+Everything else the catalogue names — display mode, resolution, present mode,
+frame cap, the quality tiers — has a defined home in the TOML convention and
+nothing that reads it. The storage half is not the gap:
+`crates/crcbl-store/src/settings.rs` ships the layered stack, `set`, `save`, and
+a per-platform backend that is the config directory natively and OPFS on wasm.
+**The gap is that no application in the workspace has ever written a setting** —
+the only writer is `crates/crcbl-cli/src/settings_cmd.rs`.
 
 Related and unowned: `crates/crcbl-store/src/lib.rs` records that an IndexedDB
 fallback for the browser is still to come, so OPFS is the only web backend and
@@ -2079,32 +2080,31 @@ them.
 
 ## Overview (`docs/plan/00-overview.md`)
 
-### Render scale has no seam above the renderer (2026-08-27)
+### Render scale is read but not writable, and no shell does the resample (2026-08-28)
 
-**Half built.** The renderer half landed on 2026-08-27:
-`crcbl_render::ForwardRenderer::set_render_scale` sizes the internal target,
-`MIN_RENDER_SCALE` is its floor, and `shaders/upscale.slang` reconstructs that
-target into the caller's own after the tonemap and FXAA. Everything above the
-renderer is still missing — no settings key named `render_scale` is read
-anywhere, no `Shell` carries a render-scale request, and no window system is
-asked to do the resample instead of the shader. The knob is a method call whose
-only caller is `crates/crcbl/tests/mesh_e2e/render_scale.rs`.
+**Mostly built.** The renderer half landed on 2026-08-27
+(`ForwardRenderer::set_render_scale`, `MIN_RENDER_SCALE`, and
+`shaders/upscale.slang` reconstructing the internal target after the tonemap and
+FXAA), and the settings half on 2026-08-28: `crcbl::settings::RENDER_SCALE_KEY`
+under `[engine.video]`, `VideoSettings` carrying it beside the effect bits,
+`GpuContext::render_scale`, and `apps/viewer` handing it to the renderer at
+build and across a reload.
+
+Two things are still missing. **Nothing writes the key** — a player edits the
+TOML by hand, because no application in the workspace writes a setting at all
+(see the catalogue entry above). And **no `Shell` carries a render-scale
+request**, so a compositor that advertises `ShellCaps::HW_UPSCALE` cannot do the
+resample for free instead of the shader; that is a decision above `crcbl-shell`
+and is not needed for the settings menu.
 
 The two window modes do exist in `crcbl-shell` (windowed and borderless on a
 named monitor). The fractional scale `crcbl-shell` handles is the compositor's
 HiDPI factor — a different quantity, and mistaking it for this is how the
 overview got optimistic about this row once already.
 
-**What it would take:** a `render_scale` key in `crcbl::settings`' video block
-alongside the ones already spelled there, plumbed to `set_render_scale` the way
-`GpuContext::effect_request` plumbs the effect layer; and, separately, a
-render-scale request on the `Shell` seam so a compositor that advertises
-`ShellCaps::HW_UPSCALE` can do the resample for free instead. The second is a
-decision above `crcbl-shell` and is not needed for the settings menu.
-
 **What it blocks:** the MVP feature row "Own windowing (2 modes, render scale)",
-and the resolution slider in the settings-menu work — the renderer will answer
-it, nothing carries the answer yet.
+and the resolution slider in the settings-menu work — the renderer answers it
+and the read reaches a sample, but a slider has to be able to save.
 
 ### Wasm game modules: no `crcbl-mod`, no host (2026-08-27)
 
