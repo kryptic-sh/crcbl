@@ -304,12 +304,41 @@ the built site's copy: the check went red in 237 s naming the frames it did not
 get, where the old wait would have hung. The second frame wait, between
 breakout's `touchStart` and its `touchCancel`, went the same way.
 
-**What that does not do is explain the macOS runner.** The question it now asks
-is whether the demo's loop runs again after the corner click, and if the page
-still delivers no frames there, this check is what goes red — with the number,
-in four minutes rather than twenty. Whether the frames come back with the focus,
-and why they stopped at all, is what the next macOS run answers. The three
-backgrounding flags `browserFlags` does not pass remain the candidate.
+**And the next macOS run answered the question, which is now a different one.**
+On `b6b0c32` the job failed in seven minutes with findings instead of hanging,
+and what it found rules the browser-wide theories out:
+
+- **breakout, flappy, asteroids, horde and hud all pass**, blur and pause
+  included, on the same runner in the same job. hud scored 44/44. So this is not
+  Chromium backgrounding an occluded page — the three flags `browserFlags` does
+  not pass would apply to all six equally.
+- **quarry, and only quarry, wedges** — on `macos-15-arm64`, against the
+  **hardware** adapter (`apple`, `--use-angle=metal`), not SwiftShader.
+- **The page is alive; the frame loop is not.** Through the whole 90-second
+  wait, `Runtime.evaluate` kept answering: the driver read
+  `document.activeElement` back as the canvas and `crcbl.status()` as 6, and
+  both of those checks passed _after_ the frame check had already timed out.
+  What never advanced is `crcbl.frames()`. So JavaScript runs and
+  `requestAnimationFrame` callbacks do not.
+- **It never comes back.** `Escape resumes the demo` then fails with status 6
+  and `the simulation runs again after resuming` with 0 HUD lines, because the
+  loop that would have applied the key is the one that stopped. The touch
+  group's reboot then times out, and `Input.dispatchTouchEvent` itself goes
+  unanswered for 30 s — the first sign of anything below the page being stuck.
+- **Nothing was reported broken before it stopped.** Group D passed on the frame
+  before: no WebGPU device errors, 16 distinct frames across 16 samples, and the
+  cull-stats readback came back off the GPU.
+
+**This is a demo bug the gate now surfaces, not a gate bug.** A visitor on a Mac
+who clicks away from quarry and clicks back would find the same dead canvas.
+What has not been established is the mechanism: the swapchain is `Fifo` with two
+images, and a present that never completes on an occluded headless window would
+stall the compositor's frame production and with it `requestAnimationFrame`,
+which fits every observation above — but nothing here has instrumented it, and
+no machine on this end runs macOS. Candidate next steps, cheapest first: log the
+present path's return in the paused loop and read it off the next macOS run; try
+`Pacing` other than Fifo for the browser build; and only then the backgrounding
+flags, which this evidence has demoted.
 
 **A second bug the same log shows: an aborted run reports success.** After the
 rejection, the driver printed `web e2e: 25/25 checks passed` and then the touch
@@ -21566,6 +21595,17 @@ What that leaves:
   no store is installed the settings silently do not persist. `SaveState`
   already carries a `Nowhere` arm for exactly that and nothing has ever reached
   it on a real platform.
+
+  **What that slice runs into, from reading the gate rather than writing it:**
+  every row of `EXPECTATIONS` in `web/tools/browser-e2e.mjs` has a `moving`
+  pattern — a number in the demo's own log that changes under its own steam —
+  and the driver has no arm for a demo without one. `apps/options` prints no
+  heartbeat at all: `HostedGame::tick` is empty, and the screen is static by
+  design. It does still tick (`120 frames, 119 ticks` headless, `46` on x11 at
+  vsync), so the cheapest answer is a heartbeat line carrying the tick number
+  and the gains, which gives `waiting`, `moving` and the group E pause checks
+  their observable in one line. The OPFS round trip needs a check of its own on
+  top of that — save, reload the page, and read the fader back.
 
 - **The video and graphics halves are untouched** — milestones 2 and 3. No
   display mode, resolution, present mode or frame cap on the screen, and no
