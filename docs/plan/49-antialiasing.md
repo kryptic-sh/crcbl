@@ -1,4 +1,4 @@
-# Topic 49 — Antialiasing: FXAA, SMAA, TAA and the MSAA question
+# Topic 49 — Antialiasing: FXAA, SMAA, CMAA2, TAA and the MSAA question
 
 Split out of [18-render-features.md](18-render-features.md) on 2026-08-27,
 verbatim. That topic had grown past a hundred kilobytes and a reader after one
@@ -169,6 +169,12 @@ What the rung still owes is cross-backend evidence — Metal, DX12 and WebGPU
 compile the artifacts, and only CI has run them — which `docs/backlog.md`
 carries.
 
+**Superseded 2026-08-30**: the eighth decision below puts CMAA2 in this tier's
+place, and the three shaders, the two tables, `cook-smaa`, `crcbl_render::smaa`
+and the `smaa` key leave the tree with the slice that lands it. What stays is
+the observer's shape — `crates/crcbl/tests/mesh_e2e/smaa.rs`'s three
+measurements are what CMAA2 is held to, on the same scene.
+
 ### TAA is specified, still post-MVP, and the blocker is named exactly
 
 TAA needs four things this tree does not have:
@@ -255,7 +261,7 @@ What this tree has instead is **two independent bits**,
 row, so the panel can switch both on and the resolve slot picks between them out
 of sight. The next two rungs of this ladder are the CS2 shape:
 
-1. **One `antialiasing` cycler row** — `None`, `FXAA`, `SMAA`, then the MSAA
+1. **One `antialiasing` cycler row** — `None`, `FXAA`, `CMAA2`, then the MSAA
    rungs — so the two bits become one enum on the settings seam and one row in
    `apps/options`. This is a settings and options change with no shader in it,
    and it is the change that answers `docs/backlog.md`'s open question of which
@@ -263,7 +269,35 @@ of sight. The next two rungs of this ladder are the CS2 shape:
    steps off it themselves. It moves a `VIDEO_KEYS` entry, so
    `web/tools/browser-e2e.mjs`'s `toFader` moves with it and the options browser
    gate runs locally before it is pushed.
-2. **MSAA 2×, 4× and 8×** as the rungs above SMAA, on the price the seventh
+2. **CMAA2 in SMAA's place** — the user's call, 2026-08-30, taken with CS2's row
+   in front of them, and the trade is written out under the refusal below.
+   Intel's Conservative Morphological AA 2 (Strugar, 2018) is the same tier as
+   SMAA 1x — one frame's pixels, no history — in a different shape: an edge
+   detect writes a candidate list and only the candidates are classified and
+   blended, so the cost is proportional to the frame's edges rather than to its
+   pixels, which is the tier the software and browser paths most want. It
+   carries no lookup table, so nothing is cooked; its shape rules are analytic
+   and it is deliberately conservative — text and thin lines stay crisper than
+   SMAA leaves them, gentle slopes keep a little more of their step. Three
+   things about it are specific to this tree:
+   - **It is compute, not a fullscreen triangle**: an edge pass, a candidate
+     pass and a deferred colour-apply pass, with the candidate list and the
+     per-pixel blend items in storage buffers a work-group appends to. Those are
+     the AA stage's own buffers and stay under
+     `crcbl_hal::PORTABLE_STORAGE_BUFFERS_PER_STAGE`, which the forward pass
+     already sits against.
+   - **The blend items reach a pixel in atomic order**, and the reference sums
+     them in that order. A float sum in an order the hardware chooses is a frame
+     that is not a function of its inputs — this file's determinism argument —
+     so the apply pass accumulates in fixed point, or sorts a pixel's items
+     before it sums them. Which one is measured, on both rasterisers, before a
+     golden is blessed on it.
+   - **It is held to SMAA's observer**: the resolve moves a share of the frame
+     near a luma discontinuity and halves the count of pixels stepping by 96 of
+     255, on `mesh_e2e`'s scene, on radv and lavapipe. The SMAA tier leaves in
+     the same slice, so there is one morphological tier in the tree at any time
+     and the resolve slot still records one filter or the other.
+3. **MSAA 2×, 4× and 8×** as the rungs above CMAA2, on the price the seventh
    decision above put on it: the depth prepass goes multisampled, and one
    **depth resolve** pass writes the single-sample image `ssao.slang`,
    `ssr.slang` and the Hi-Z pyramid read today, so neither screen-space pass is
@@ -271,15 +305,16 @@ of sight. The next two rungs of this ladder are the CS2 shape:
    **opt-in**, never the default: the software and browser tiers pay for every
    sample, and 4× on lavapipe is the wrong default for a suite that runs there.
 
-**CMAA2 is declined**, and the reason is below.
-
 ### What is refused
 
-- **CMAA2.** Intel's morphological filter occupies the slot SMAA 1x already
-  holds — one frame's pixels, no history, an edge classification and a blend —
-  and it is cheaper by a pass. That is a second implementation of the tier this
-  tree has, gated and measured, not a rung above it; a menu with both is a row
-  nobody can choose between.
+- **Keeping SMAA 1x beside CMAA2.** Both are one tier — one frame's pixels, no
+  history, an edge classification and a blend — and a menu with both is a row
+  nobody can choose between. This section first declined CMAA2 on that ground,
+  with SMAA already built and measured; the user reversed it the same day
+  (2026-08-30) for CMAA2's cost model, which scales with edges rather than
+  pixels and so favours the lavapipe and browser tiers every golden runs on, and
+  for the crisper text its conservatism leaves. So SMAA is the one that goes,
+  and its retirement is part of the CMAA2 slice rather than a follow-up.
 
 - **DLSS.** Single-vendor and closed: it runs on one hardware line behind an
   SDK, where every other path in this engine is held to being the same code on

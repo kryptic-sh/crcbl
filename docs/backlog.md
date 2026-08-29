@@ -77,6 +77,11 @@ do:
 
 ### What the SMAA rung left owed (2026-08-30)
 
+**The tier is retired on paper**: `docs/plan/49-antialiasing.md`'s eighth
+decision (2026-08-30) puts CMAA2 in its place, and the SMAA shaders, tables,
+`cook-smaa`, `crcbl_render::smaa` and the `smaa` key leave with the slice that
+lands it. Every entry below closes with that removal; none is worth doing first.
+
 SMAA 1x draws: `smaa_edges.slang`, `smaa_weights.slang` and `smaa_blend.slang`
 against `crcbl_shaders::smaa`'s committed tables, recorded by
 `crcbl_render::smaa` under `RenderEffects::SMAA` and switched by the `smaa`

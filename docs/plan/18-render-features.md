@@ -29,7 +29,7 @@ churned in a move commit.
 | Ambient occlusion: SSAO, its blur, GTAO                                 | [46-ambient-occlusion.md](46-ambient-occlusion.md) |
 | Screen-space reflections: the march, roughness                          | [47-reflections.md](47-reflections.md)             |
 | The post-processing stack: order, HDR, tonemap, bloom                   | [48-post-processing.md](48-post-processing.md)     |
-| Antialiasing: FXAA, SMAA, TAA, MSAA                                     | [49-antialiasing.md](49-antialiasing.md)           |
+| Antialiasing: FXAA, SMAA, CMAA2, TAA, MSAA                              | [49-antialiasing.md](49-antialiasing.md)           |
 | Irradiance probes: the L1 grid                                          | [50-irradiance-probes.md](50-irradiance-probes.md) |
 | Volumetrics: height fog, the froxel column, light shafts                | [51-volumetrics.md](51-volumetrics.md)             |
 
