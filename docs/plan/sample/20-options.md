@@ -142,6 +142,15 @@ machinery. Verified against the tree on 2026-08-28:
   the faders' rule — placed from the file before it is read as a drag, following
   `RESET` back to the whole extent. It wears `menu::NEXT_START_MARK` for the
   anisotropy's reason, and drags silently: the detent click belongs to a bus.
+- **The effect switches are on the screen**, as of 2026-08-29, one row per entry
+  of `crcbl::settings::VIDEO_KEYS` — derived from the table rather than listed
+  again, so a key added there gets a row here without a second spelling.
+  `menu::effect_id` and `menu::effect_of` are the pair `fader_id` and `bus_of`
+  are for a bus; a press flips one bit and `Screen::set_effects` writes every
+  key, which is what `set_video_effects` does and what leaves the file saying
+  what was chosen for each switch. `RESET` allows everything, since that is what
+  an absent section means. The mark is per switch: `on (next start)` on a row
+  the run came up with off.
 - **The screen runs in a browser**, as of 2026-08-28: `apps/options/src/web.rs`
   carries the `__crcbl_options_*` ABI, `web/demos/options/` and
   `web/pages/options.html` are the page, and both browser-gate jobs run it. Its
@@ -177,11 +186,11 @@ machinery. Verified against the tree on 2026-08-28:
    the requested-versus-resolved display of the clamp. **The frame cap is
    done**, in `apps/options`'s `FRAME CAP` row — the cheapest of the four,
    because `crcbl::settings::frame_limit` is the only one of them with a reader
-   today — and the `ANISOTROPY` and `RENDER SCALE` rows are the graphics half's
-   first two keys on the screen, both value keys ahead of the tiers. What the
-   other three need first is somewhere for a change to land: a display mode or a
-   resolution is applied to a live window, not read once at start-up, so each of
-   them wants a seam this sample does not have yet.
+   today — and the `ANISOTROPY` and `RENDER SCALE` rows and the seven effect
+   switches are the graphics half's keys on the screen, ahead of the tiers. What
+   the other three need first is somewhere for a change to land: a display mode
+   or a resolution is applied to a live window, not read once at start-up, so
+   each of them wants a seam this sample does not have yet.
 3. **The graphics half**: the quality tiers over the technique ladders, the
    preset and its custom escape hatch.
 4. **The browser half held to the same bar**, including the no-store case.

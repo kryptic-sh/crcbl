@@ -1079,9 +1079,9 @@ the loop needs is already carried.
 the six `[engine.audio]` bus gains and saves them through
 `SettingsSource::save`, so `save_platform` has a caller a player can reach.
 `frame_limit` joined it on the same screen the same day, and
-`anisotropic_filtering` and `render_scale` on 2026-08-29. **What is still owed
-is a row for the rest** — the effect bits have writers and no screen — and the
-eight `Named` keys still face the ceiling question below.
+`anisotropic_filtering`, `render_scale` and the seven effect switches on
+2026-08-29 — every key with a reader now has a row. What is still owed is the
+eight `Named` keys, which face the ceiling question below.
 
 The keys still `Named` face a design question that `render_scale` and
 `frame_limit` did not: `docs/plan/15-windowing.md`'s rule 1 says
@@ -21783,17 +21783,17 @@ leaves:
   `web/demos/breach/main.js` reads `?map=`, since the gate already navigates
   with one to boot a second configuration.
 
-- **The video half is three keys in; the graphics tiers are untouched.**
-  `FRAME CAP` landed on 2026-08-28, `ANISOTROPY` and `RENDER SCALE` on
-  2026-08-29, and they are the whole of `[engine.video]` that has a screen.
-  Display mode, resolution and present mode are still absent, and each is harder
-  than those three for the same reason: the cap is a number the loop reads once
-  at start-up and the anisotropy and scale ones a renderer takes when it opens,
-  so a row that writes the key and says `(next start)` is the honest whole of
-  any of them, while the other three are applied to a **live window** and
-  therefore need a seam this sample does not have — something a screen can call
-  to re-mode or re-size the window it is drawn in, and something that reports
-  what the window system actually did with the request. Nothing but
+- **Every read key has a row; the graphics tiers are untouched.** `FRAME CAP`
+  landed on 2026-08-28; `ANISOTROPY`, `RENDER SCALE` and the seven effect
+  switches on 2026-08-29; and they are the whole of `[engine.video]` that has a
+  screen. Display mode, resolution and present mode are still absent, and each
+  is harder than those for the same reason: the cap is a number the loop reads
+  once at start-up and the anisotropy, scale and effects ones a renderer takes
+  when it opens, so a row that writes the key and says `(next start)` is the
+  honest whole of any of them, while the other three are applied to a **live
+  window** and therefore need a seam this sample does not have — something a
+  screen can call to re-mode or re-size the window it is drawn in, and something
+  that reports what the window system actually did with the request. Nothing but
   `apps/viewer` hands `anisotropic_filtering` to
   `ForwardRenderer::set_anisotropy`: lantern, quarry and the scaffold call
   neither `set_render_scale` nor `set_anisotropy`, and that pairing is one

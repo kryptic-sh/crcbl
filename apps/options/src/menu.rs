@@ -31,7 +31,8 @@
 
 use crcbl::audio::mixer::Bus;
 use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit};
-use crcbl::render::{DEFAULT_ANISOTROPY, MIN_RENDER_SCALE};
+use crcbl::render::{DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
+use crcbl::settings::VIDEO_KEYS;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
 /// The id of `bus`'s fader, numbered in [`Bus::ALL`]'s order from the first id
@@ -188,6 +189,40 @@ pub fn scale_handle_at(scale: f32) -> f32 {
     Slider::new((scale - MIN_RENDER_SCALE) / (1.0 - MIN_RENDER_SCALE)).position()
 }
 
+/// The id of the switch for the `index`th entry of [`VIDEO_KEYS`], numbered
+/// past the last video row in that table's order.
+///
+/// Read back off the set by [`effect_of`], the way a fader's id is by
+/// [`bus_of`] — the table is the one place the keys are spelled, so the rows
+/// are derived from it rather than listed again here.
+#[must_use]
+pub const fn effect_id(index: usize) -> crcbl::ui::WidgetId {
+    RENDER_SCALE_ID + 1 + index as crcbl::ui::WidgetId
+}
+
+/// The effect a switch id names, or `None` for an id that is not a switch.
+#[must_use]
+pub fn effect_of(id: crcbl::ui::WidgetId) -> Option<RenderEffects> {
+    VIDEO_KEYS
+        .iter()
+        .enumerate()
+        .find(|(index, _)| effect_id(*index) == id)
+        .map(|(_, (_, effect))| *effect)
+}
+
+/// The label a switch wears: its key, as the screen spells rows —
+/// `ambient_occlusion` is `AMBIENT OCCLUSION`.
+#[must_use]
+pub fn effect_label(key: &str) -> String {
+    key.replace('_', " ").to_uppercase()
+}
+
+/// How a switch's state is written beside it.
+#[must_use]
+pub const fn switch_label(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
 /// What this sample's own rows do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -201,6 +236,8 @@ pub enum Action {
     CycleFrameCap,
     /// Step the page's anisotropy to the next rung of [`ANISOTROPIES`].
     CycleAnisotropy,
+    /// Flip one effect's `[engine.video]` key.
+    ToggleEffect(RenderEffects),
 }
 
 /// Which menu a frame shows. There is only one, and it is always on.
@@ -263,9 +300,9 @@ pub const SILENT_MARK: &str = "(silent)";
 ///
 /// The loop takes its frame limit when it is built, so a cap chosen here is
 /// one the **next** start will use; and this sample draws no scene, so there is
-/// nothing here for an anisotropy or a render scale to reach until a renderer
-/// opens over the key. The faders apply as they move, which is exactly why the
-/// video rows have to say that they do not.
+/// nothing here for an anisotropy, a render scale or an effect switch to reach
+/// until a renderer opens over the key. The faders apply as they move, which is
+/// exactly why the video rows have to say that they do not.
 pub const NEXT_START_MARK: &str = "(next start)";
 
 /// The label a bus wears on its row.
@@ -312,6 +349,11 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
         // by the first frame, like a fader.
         MenuItem::slider(RENDER_SCALE_ID, "RENDER SCALE", percent(1.0), 1.0),
     ];
+    // One switch per effect key, on: what an absent key means, and what the
+    // first frame corrects to the file's answer.
+    items.extend(VIDEO_KEYS.iter().enumerate().map(|(index, (key, _))| {
+        MenuItem::new(effect_id(index), effect_label(key), switch_label(true))
+    }));
     items.extend(gains.iter().map(|(bus, gain)| {
         MenuItem::slider(
             fader_id(*bus),
@@ -580,6 +622,28 @@ mod tests {
                 "a handle at {position} came back at {back}",
             );
         }
+    }
+
+    /// **Every effect key has a switch of its own, and the ids name their
+    /// effects back** — so a press on one row cannot flip another's key.
+    #[test]
+    fn every_effect_key_has_a_switch_that_names_it_back() {
+        let mut menus = menus(&Bus::ALL.map(|bus| (bus, 1.0)));
+        menus.show(MenuKind::Settings);
+        let menu = menus.current().expect("the screen is always showing");
+        for (index, (key, effect)) in VIDEO_KEYS.iter().enumerate() {
+            let id = effect_id(index);
+            assert_eq!(effect_of(id), Some(*effect), "{key}'s id must name it back");
+            let row = menu
+                .items()
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{key} has no row"));
+            assert_eq!(row.label, effect_label(key));
+        }
+        assert_eq!(effect_of(RENDER_SCALE_ID), None);
+        assert_eq!(effect_of(effect_id(VIDEO_KEYS.len())), None);
+        assert_eq!(effect_label("ambient_occlusion"), "AMBIENT OCCLUSION");
     }
 
     /// A value the groove cannot reach lands at an end of it rather than off

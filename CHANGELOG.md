@@ -294,10 +294,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   leaves on is written as `true` rather than omitted, which the reader treats
   alike but a settings screen cannot: the key it would have to remove to turn an
   effect back on is the one it never wrote. A non-finite scale or gain is
-  refused rather than written. `SettingsSource::stack` becomes the public
-  `SettingsSource::open`, and `SettingsSource::save` writes a stack back where
-  that source read it — `SettingsSource::None` saves nothing and reports so,
-  because a golden run must not persist into whichever home directory it ran in.
+  refused rather than written. `apps/options` carries the seven effect keys as
+  switches, one row per `VIDEO_KEYS` entry: a press flips the bit and writes
+  every key, `RESET` allows everything, and a switch the run did not come up
+  with reads `(next start)`, since that screen draws no scene.
+  `SettingsSource::stack` becomes the public `SettingsSource::open`, and
+  `SettingsSource::save` writes a stack back where that source read it —
+  `SettingsSource::None` saves nothing and reports so, because a golden run must
+  not persist into whichever home directory it ran in.
 
 - **`[engine.video] render_scale`: the player can ask for a smaller internal
   frame.** `ForwardRenderer::set_render_scale` and the Catmull-Rom upscale pass

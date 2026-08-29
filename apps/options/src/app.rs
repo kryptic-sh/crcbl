@@ -23,20 +23,21 @@
 //! The six `[engine.audio]` bus gains, which are the cheapest settings to make
 //! real: they need no renderer change and no restart to write, and three of them
 //! carry sound — see [`crate::audio`] — so a fader is audible while it moves.
-//! And three `[engine.video]` keys: `frame_limit`, which is the cheapest of the
-//! video keys for the opposite reason — the loop reads it once, at start-up, so
-//! the row can write it honestly without a way to re-mode a live window — and
-//! `anisotropic_filtering` and `render_scale`, which a `ForwardRenderer` takes
+//! And the `[engine.video]` keys that have a reader: `frame_limit`, which is the
+//! cheapest of the video keys for the opposite reason — the loop reads it once,
+//! at start-up, so the row can write it honestly without a way to re-mode a
+//! live window — and `anisotropic_filtering`, `render_scale` and the effect
+//! switches of `crcbl::settings::VIDEO_KEYS`, which a `ForwardRenderer` takes
 //! and this sample has none to hand them to. The rest of
 //! `docs/plan/sample/20-options.md`'s video half — display mode, resolution,
 //! present mode, the quality tiers — is not here yet, and `docs/backlog.md`
 //! says what each of them is waiting on.
 //!
-//! **Those three rows do not apply as they move.** Everything else here reaches
+//! **The video rows do not apply as they move.** Everything else here reaches
 //! its stage in the same call that writes its key; the ceiling reaches the loop
-//! only when a loop is built, and the anisotropy and the scale reach a renderer
-//! only where a scene is drawn. The mark `Screen`'s frame writes on those rows
-//! is what stops any of them being a silent lie.
+//! only when a loop is built, and the anisotropy, the scale and the switches
+//! reach a renderer only where a scene is drawn. The mark `Screen`'s frame
+//! writes on those rows is what stops any of them being a silent lie.
 //!
 //! **Nothing in this process listens to these gains.** A settings file belongs
 //! to the application that wrote it — natively, `~/.config/<label>/` — so the
@@ -53,7 +54,7 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::render::DEFAULT_ANISOTROPY;
+use crcbl::render::{DEFAULT_ANISOTROPY, RenderEffects};
 use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 use crcbl::store::settings::SettingsStack;
 
@@ -255,6 +256,10 @@ pub struct Screen {
     scale_handle: f32,
     /// The scale this run **started** on, for `opened_anisotropy`'s reason.
     opened_scale: f32,
+    /// The effects `[engine.video]` allows, as the screen currently holds them.
+    effects: RenderEffects,
+    /// The effects this run **started** with, for `opened_anisotropy`'s reason.
+    opened_effects: RenderEffects,
 }
 
 /// The loop options runs in.
@@ -388,6 +393,7 @@ impl Screen {
         let cap = crcbl::settings::frame_limit(&stack);
         let anisotropy = crcbl::settings::anisotropic_filtering(&stack);
         let scale = crcbl::settings::render_scale(&stack);
+        let effects = crcbl::settings::video_effects(&stack);
         Self {
             stack,
             store,
@@ -410,6 +416,8 @@ impl Screen {
             scale,
             scale_handle: crate::menu::scale_handle_at(scale),
             opened_scale: scale,
+            effects,
+            opened_effects: effects,
         }
     }
 
@@ -435,6 +443,12 @@ impl Screen {
     #[must_use]
     pub const fn render_scale(&self) -> f32 {
         self.scale
+    }
+
+    /// The effects the screen currently allows.
+    #[must_use]
+    pub const fn effects(&self) -> RenderEffects {
+        self.effects
     }
 
     /// How many times a setting has been changed.
@@ -474,7 +488,8 @@ impl Screen {
         }
         crcbl::log::info!(
             "[HUD] tick: {}  master: {}  music: {}  sfx: {}  ui: {}  voice: {}  \
-             ambience: {}  cap: {}  aniso: {}  scale: {}  edits: {}  file: {}",
+             ambience: {}  cap: {}  aniso: {}  scale: {}  effects: {} of {}  \
+             edits: {}  file: {}",
             self.ticks,
             crate::menu::percent(self.gains[Bus::Master.index()]),
             crate::menu::percent(self.gains[Bus::Music.index()]),
@@ -485,6 +500,8 @@ impl Screen {
             crate::menu::frame_cap_label(self.cap),
             crate::menu::anisotropy_label(self.anisotropy),
             crate::menu::percent(self.scale),
+            self.effects.bits().count_ones(),
+            crcbl::settings::VIDEO_KEYS.len(),
             self.edits,
             self.saved,
         );
@@ -597,6 +614,33 @@ impl Screen {
         }
     }
 
+    /// Moves the effect set, writing every effect key and marking the file
+    /// unsaved, on [`Screen::set_cap`]'s terms — and applied to nothing, since
+    /// this sample draws no scene.
+    ///
+    /// Every key rather than the one that flipped, because that is what
+    /// `set_video_effects` writes and the file it leaves says what the player
+    /// chose for each switch rather than only where they differed.
+    fn set_effects(&mut self, effects: RenderEffects) {
+        self.effects = effects;
+        self.edits += 1;
+        self.saved = SaveState::Unsaved;
+        if let Err(error) = crcbl::settings::set_video_effects(&mut self.stack, effects) {
+            self.saved = SaveState::Failed(error.to_string());
+        }
+    }
+
+    /// What a switch says: on or off, and whether this run came up that way.
+    fn effect_hint(&self, effect: RenderEffects) -> String {
+        let on = self.effects.contains(effect);
+        let label = crate::menu::switch_label(on);
+        if on == self.opened_effects.contains(effect) {
+            label.to_string()
+        } else {
+            format!("{label} {}", crate::menu::NEXT_START_MARK)
+        }
+    }
+
     /// Writes the edited settings back to wherever they were read from.
     fn save(&mut self) {
         let source = self.store.source();
@@ -620,9 +664,9 @@ impl Screen {
     }
 
     /// Puts every setting back to what a file that says nothing means — every
-    /// bus at unity, no frame ceiling, the engine's own anisotropy and the
-    /// whole extent — which is what a player asking for the defaults is asking
-    /// for.
+    /// bus at unity, no frame ceiling, the engine's own anisotropy, the whole
+    /// extent and every effect allowed — which is what a player asking for the
+    /// defaults is asking for.
     fn reset(&mut self) {
         for bus in Bus::ALL {
             self.set(bus, 1.0);
@@ -630,6 +674,7 @@ impl Screen {
         self.set_cap(FrameLimit::unlimited());
         self.set_anisotropy(DEFAULT_ANISOTROPY);
         self.set_scale(1.0);
+        self.set_effects(RenderEffects::all());
     }
 }
 
@@ -693,10 +738,11 @@ impl HostedGame for Screen {
             crate::menu::RESET_ID => Some(Action::Reset),
             crate::menu::FRAME_CAP_ID => Some(Action::CycleFrameCap),
             crate::menu::ANISOTROPY_ID => Some(Action::CycleAnisotropy),
-            // A fader. Sliders fire nothing, so this arm is unreachable through
-            // the loop — it is here because the ids exist and a `_ => None`
-            // that swallowed a real button would be silent.
-            _ => None,
+            // A switch, or a groove. Sliders fire nothing, so the `None` here
+            // is unreachable through the loop — it is there because the ids
+            // exist and a catch-all that swallowed a real button would be
+            // silent.
+            _ => crate::menu::effect_of(id).map(Action::ToggleEffect),
         }
     }
 
@@ -711,6 +757,11 @@ impl HostedGame for Screen {
             Action::CycleFrameCap => self.set_cap(crate::menu::next_frame_cap(self.cap)),
             Action::CycleAnisotropy => {
                 self.set_anisotropy(crate::menu::next_anisotropy(self.anisotropy));
+            }
+            Action::ToggleEffect(effect) => {
+                let mut effects = self.effects;
+                effects.toggle(effect);
+                self.set_effects(effects);
             }
         }
     }
@@ -780,6 +831,9 @@ impl HostedGame for Screen {
             menu.set_item_hint(id, self.scale_hint());
             menu.set_item_hint(crate::menu::FRAME_CAP_ID, self.cap_hint());
             menu.set_item_hint(crate::menu::ANISOTROPY_ID, self.anisotropy_hint());
+            for (index, (_, effect)) in crcbl::settings::VIDEO_KEYS.iter().enumerate() {
+                menu.set_item_hint(crate::menu::effect_id(index), self.effect_hint(*effect));
+            }
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
         }
@@ -1146,9 +1200,111 @@ mod tests {
             Screen::menu_action(crate::menu::ANISOTROPY_ID),
             Some(Action::CycleAnisotropy)
         );
+        for (index, (key, effect)) in crcbl::settings::VIDEO_KEYS.iter().enumerate() {
+            assert_eq!(
+                Screen::menu_action(crate::menu::effect_id(index)),
+                Some(Action::ToggleEffect(*effect)),
+                "{key}'s switch",
+            );
+        }
         for bus in Bus::ALL {
             assert_eq!(Screen::menu_action(crate::menu::fader_id(bus)), None);
         }
+        assert_eq!(Screen::menu_action(crate::menu::RENDER_SCALE_ID), None);
+    }
+
+    /// **A switch round trips through the file, and flips only its own key.**
+    ///
+    /// An absent section allows everything; one press turns one effect off,
+    /// writes every key so the file says what was chosen, and a screen opened
+    /// over the same storage comes up with that effect off and the rest on.
+    #[test]
+    fn a_saved_switch_is_still_off_when_the_screen_opens_again() {
+        let storage = crcbl::store::MemoryStorage::new();
+        let mut screen = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        assert_eq!(
+            screen.effects(),
+            RenderEffects::all(),
+            "an absent section allows everything"
+        );
+
+        screen.apply(Action::ToggleEffect(RenderEffects::SHADOWS));
+        assert_eq!(
+            screen.effects(),
+            RenderEffects::all().difference(RenderEffects::SHADOWS),
+            "one press flipped more than its own switch",
+        );
+        assert_eq!(screen.edits(), 1);
+        assert_eq!(screen.saved(), &SaveState::Unsaved);
+
+        screen.save_to(SettingsSource::Source(&storage));
+        assert_eq!(screen.saved(), &SaveState::Saved);
+
+        let reopened = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        assert_eq!(
+            reopened.effects(),
+            RenderEffects::all().difference(RenderEffects::SHADOWS),
+            "the restart came up with a different set from the one saved",
+        );
+    }
+
+    /// **A switch says when this run did not come up its way, and stops saying
+    /// it when flipped back** — and a file that turned an effect off opens
+    /// with that row reading `off` and nothing beside it.
+    #[test]
+    fn a_switch_this_run_is_not_under_says_so_and_stops_saying_it() {
+        let (mut screen, mut menus) = screen("[engine.video]\nbloom = false\n");
+        reconcile(&mut screen, &mut menus);
+        let bloom = crcbl::settings::VIDEO_KEYS
+            .iter()
+            .position(|(_, effect)| *effect == RenderEffects::BLOOM)
+            .expect("bloom has a key");
+        let id = crate::menu::effect_id(bloom);
+        assert_eq!(
+            hint(&mut menus, id),
+            crate::menu::switch_label(false),
+            "a run opened with the effect off has nothing to add",
+        );
+        assert!(
+            !hint(&mut menus, crate::menu::effect_id(0)).contains(crate::menu::NEXT_START_MARK),
+            "an untouched switch wears the mark",
+        );
+
+        screen.apply(Action::ToggleEffect(RenderEffects::BLOOM));
+        reconcile(&mut screen, &mut menus);
+        let marked = hint(&mut menus, id);
+        assert!(
+            marked.starts_with(crate::menu::switch_label(true))
+                && marked.contains(crate::menu::NEXT_START_MARK),
+            "the row reads {marked:?} for an effect this run did not come up with",
+        );
+
+        screen.apply(Action::ToggleEffect(RenderEffects::BLOOM));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            hint(&mut menus, id),
+            crate::menu::switch_label(false),
+            "the mark stayed on a switch back where the run came up",
+        );
+    }
+
+    /// `RESET` allows every effect again, and writes the keys to say so.
+    #[test]
+    fn reset_allows_every_effect_again() {
+        let (mut screen, mut menus) = screen("[engine.video]\nbloom = false\nshadows = false\n");
+        assert_eq!(
+            screen.effects(),
+            RenderEffects::all().difference(RenderEffects::BLOOM | RenderEffects::SHADOWS),
+        );
+        reconcile(&mut screen, &mut menus);
+
+        screen.apply(Action::Reset);
+        assert_eq!(screen.effects(), RenderEffects::all());
+        assert_eq!(
+            crcbl::settings::video_effects(screen.stack()),
+            RenderEffects::all(),
+            "the screen reset a set it never wrote",
+        );
     }
 
     /// **The frame cap round trips through the file, like a gain does.**
