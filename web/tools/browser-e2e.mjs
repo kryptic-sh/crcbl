@@ -1245,8 +1245,10 @@ const EXPECTATIONS = {
       // ANISOTROPY, RENDER SCALE, a switch per `crcbl::settings::VIDEO_KEYS`,
       // a fader per `Bus::ALL` in that order, then SAVE and RESET. **A row
       // added anywhere above MUSIC moves both of these**, and the gate would
-      // then walk a groove nobody asked it to.
-      toFader: 13,
+      // then walk a groove nobody asked it to — the `smaa` key did exactly
+      // that on 2026-08-30, and the gate read MASTER moving while it waited
+      // on MUSIC.
+      toFader: 14,
       toSave: 5,
       // How far to walk the fader, in `Slider::KEY_STEP`s of a twentieth each.
       // Four steps down from the top is a handle at 0.8, and the square taper
