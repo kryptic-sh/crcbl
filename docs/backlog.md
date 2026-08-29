@@ -746,19 +746,18 @@ granted `SAMPLER_ANISOTROPY`, one where it was not. What the rung still owes, in
 order:
 
 - **The player's `anisotropic_filtering` key.** A value key on `render_scale`'s
-  pattern in `crcbl::settings`, with an `apps/options` row, clamped by
-  `anisotropy_for`'s rule; `1` turns it off. The renderer half is the part
-  `render_scale` never needed: the page's sampler is created once in
-  `with_scene` and bound into the shared bind group (`page_sampler`), so a
-  runtime change means a `set_anisotropy` that recreates the sampler and
-  rewrites that bind group, on `set_render_scale`'s terms otherwise. That knob
-  is also what `tests/tiling_e2e.rs`'s grazing floor wants for its isotropic
-  control on D3D12 and Metal, where a device holds every feature its adapter has
-  whether asked or not and "withheld" draws anisotropically too; there the test
-  holds its floor alone and prints that the control was not one. The device half
-  is measured and in: 8× on radv against the 1× goldens moved none of the
-  thirteen render scenes, lantern's `room` within tolerance and `live` past it,
-  both re-blessed at 8×.
+  pattern in `crcbl::settings` — reader, writer, `VideoSettings` field,
+  catalogue row, `GpuContext` accessor — with an `apps/options` row, handed to
+  `ForwardRenderer::set_anisotropy` beside `set_render_scale` wherever the
+  latter is called (`apps/viewer/src/gpu.rs` is the one today, at open and on
+  reload). The key clamps downward like the others: the knob's own clamp is the
+  device's ceiling where `SAMPLER_ANISOTROPY` was granted and one where not, so
+  the reader clamps to `1.0..=16.0` and the knob finishes the job; `1` turns it
+  off. The renderer half is in: `set_anisotropy` creates the sampler and each
+  frame slot rebuilds its mesh-layout groups at its own `begin_frame`. The
+  device half is measured and in: 8× on radv against the 1× goldens moved none
+  of the thirteen render scenes, lantern's `room` within tolerance and `live`
+  past it, both re-blessed at 8×.
 - **WebGPU's anisotropy ceiling** is reported as one and the feature withheld,
   so a browser draws the page isotropically while every native backend draws it
   at eight; the plan wants the desktop figure — the decision the same subsection

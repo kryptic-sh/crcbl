@@ -304,6 +304,14 @@ const SHADOW_ATLAS_BINDING: u32 = 15;
 /// The bind-group slot the shadow atlas's **comparison** sampler is bound to.
 const SHADOW_SAMPLER_BINDING: u32 = 16;
 
+/// The bind-group slot the base-colour page's sampler is bound to.
+///
+/// Named because it is the one entry [`ForwardRenderer::set_anisotropy`]
+/// rewrites in every group of the mesh layout: a sampler is a resource a group
+/// holds by handle, so a new sampler is a new group, and the rebuild finds the
+/// entry by this number.
+const PAGE_SAMPLER_BINDING: u32 = 8;
+
 /// The bind-group slot topic 18's light list is read through.
 ///
 /// **20, and the gap below it is `mesh_cluster.slang`'s** on
@@ -900,6 +908,22 @@ pub struct ForwardRenderer {
     base_color_page_extent: (u32, u32),
     /// The sampler the page is read through.
     base_color_sampler: SamplerHandle,
+    /// The anisotropy [`ForwardRenderer::base_color_sampler`] was created
+    /// with, after [`set_anisotropy`](ForwardRenderer::set_anisotropy)'s clamp.
+    anisotropy: f32,
+    /// `[frame]`: the page sampler that slot's mesh-layout groups name at
+    /// [`PAGE_SAMPLER_BINDING`].
+    ///
+    /// A slot moves onto [`ForwardRenderer::base_color_sampler`] at its own
+    /// `begin_frame` and not before — see
+    /// [`ForwardRenderer::adopt_page_sampler`] — so this is what says which
+    /// slots still name a sampler
+    /// [`set_anisotropy`](ForwardRenderer::set_anisotropy) replaced.
+    slot_page_samplers: Vec<SamplerHandle>,
+    /// Page samplers [`set_anisotropy`](ForwardRenderer::set_anisotropy)
+    /// replaced and some slot may still name. Each is destroyed as the last
+    /// slot naming it moves off, or at [`destroy`](ForwardRenderer::destroy).
+    retired_page_samplers: Vec<SamplerHandle>,
 
     /// The cull and draw-argument passes, and the indirect arguments they
     /// produce.
@@ -1279,6 +1303,14 @@ pub struct ForwardRenderer {
     /// [`AMBIENT_OCCLUSION_BINDING`]'s — differs between the stored list and what
     /// the rebuild writes.
     mesh_group_entries: Vec<Vec<BindGroupEntry>>,
+    /// `[frame]`: the entries [`ForwardRenderer::prepass_groups`] was built
+    /// from, and `[frame][view]` those of [`ForwardRenderer::shadow_groups`].
+    ///
+    /// Kept for one rebuild only: the page sampler's, which
+    /// [`ForwardRenderer::adopt_page_sampler`] performs on every group of the
+    /// mesh layout a slot holds. Handles, so the cost is a few words a group.
+    prepass_group_entries: Vec<Vec<BindGroupEntry>>,
+    shadow_group_entries: Vec<Vec<Vec<BindGroupEntry>>>,
     /// `[frame]`: the camera's group rebuilt against the blurred occlusion view,
     /// cached against that view.
     ///
@@ -1737,7 +1769,7 @@ impl MeshGroup {
                 resource: BindingResource::ImageView(shared.page),
             },
             BindGroupEntry {
-                binding: 8,
+                binding: PAGE_SAMPLER_BINDING,
                 array_index: 0,
                 resource: BindingResource::Sampler(shared.page_sampler),
             },
@@ -2509,33 +2541,10 @@ impl ForwardRenderer {
         )?;
         rollback.textures.push(base_color_page);
 
-        // **Trilinear over the whole chain, anisotropic where the device is** —
-        // `docs/plan/43-render-standards.md`'s filtering rung: a minified
-        // surface reads the level its footprint matches instead of shimmering
-        // through level 0, a magnified one blends four texels instead of
-        // stepping between them, and a surface at a grazing angle keeps its
-        // detail along the long axis of its footprint rather than blurring to
-        // the short one. The anisotropy is `Self::anisotropy_for`'s: the
-        // plan's default where the device granted the feature, one where it
-        // did not. A second sampler object rather than sharing the tonemap's,
-        // so a capture names each for what it filters.
-        //
-        // **`Repeat`, not `ClampToEdge`**, and that is what `mesh.slang`'s
-        // `TILING_PHYSICAL` needs: a physical UV runs to `world_extent /
-        // tile_metres`, past `0..1` on any face wider than one tile, and only a
-        // wrapping address mode makes the page tile across it rather than
-        // smearing its edge row. `TILING_AUTHORED` is unaffected — its UV is the
-        // vertex's, which the meshes author inside `0..1`, so a wrapped and a
-        // clamped read return the same nearest texel for it.
-        let base_color_sampler = device.create_sampler(&SamplerDesc {
-            label: Some("material base colour"),
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mip_filter: FilterMode::Linear,
-            address_mode: [SamplerAddressMode::Repeat; 3],
-            anisotropy: Self::anisotropy_for(&device.caps()),
-            ..SamplerDesc::default()
-        })?;
+        // The page's sampler at the device's default — see `create_page_sampler`
+        // for what it filters, and `set_anisotropy` for how a caller moves it.
+        let anisotropy = Self::anisotropy_for(&device.caps());
+        let base_color_sampler = Self::create_page_sampler(device, anisotropy)?;
         rollback.samplers.push(base_color_sampler);
 
         // The material table, before the instances: an instance is written with
@@ -3010,7 +3019,7 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             },
             BindGroupLayoutEntry {
-                binding: 8,
+                binding: PAGE_SAMPLER_BINDING,
                 visibility: geometry.union(ShaderStages::FRAGMENT),
                 kind: BindingKind::Sampler { comparison: false },
                 count: 1,
@@ -3611,6 +3620,8 @@ impl ForwardRenderer {
         let mut shadow_uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_selection = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut prepass_group_entries = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut shadow_group_entries = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for (frame, &slot_instances) in instance_buffers.iter().enumerate() {
             // Everything a group of this layout names that is the same in all of
             // this frame's. The per-group half is what `MeshGroup` below varies,
@@ -3712,6 +3723,8 @@ impl ForwardRenderer {
             rollback.bind_groups.push(group);
             prepass_groups.push(group);
             prepass_stats.push(stats);
+            // For the page sampler's rebuild — see [`ForwardRenderer::prepass_group_entries`].
+            prepass_group_entries.push(entries);
 
             // The same layout again, once per shadow view, differing in exactly
             // the things a view is: which matrix, and which cull's survivors.
@@ -3725,6 +3738,7 @@ impl ForwardRenderer {
             let mut frame_shadow_uniforms = Vec::with_capacity(SHADOW_VIEWS);
             let mut frame_shadow_groups = Vec::with_capacity(SHADOW_VIEWS);
             let mut frame_shadow_selection = Vec::with_capacity(SHADOW_VIEWS);
+            let mut frame_shadow_entries = Vec::with_capacity(SHADOW_VIEWS);
             for view in 0..SHADOW_VIEWS {
                 let buffers = &tile_buffers[if view < shadow::CASCADES {
                     view
@@ -3775,10 +3789,12 @@ impl ForwardRenderer {
                 rollback.bind_groups.push(group);
                 frame_shadow_uniforms.push(tile_uniforms);
                 frame_shadow_groups.push(group);
+                frame_shadow_entries.push(entries);
                 frame_shadow_selection.extend(tile_selection.get(view).map(|ring| ring[frame]));
             }
             shadow_uniforms.push(frame_shadow_uniforms);
             shadow_groups.push(frame_shadow_groups);
+            shadow_group_entries.push(frame_shadow_entries);
             shadow_selection.push(frame_shadow_selection);
         }
 
@@ -4084,6 +4100,10 @@ impl ForwardRenderer {
             base_color_page,
             base_color_page_extent: (scene.page.extent(), scene.page.extent()),
             base_color_sampler,
+            anisotropy,
+            // Every slot's groups were just built naming this sampler.
+            slot_page_samplers: vec![base_color_sampler; FRAMES_IN_FLIGHT],
+            retired_page_samplers: Vec::new(),
             draws: rollback.draws.take().unwrap_or_else(|| {
                 unreachable!("draw generation was placed in the rollback above")
             }),
@@ -4199,6 +4219,8 @@ impl ForwardRenderer {
             ambient_occlusion_placeholder,
             specular_albedo,
             mesh_group_entries,
+            prepass_group_entries,
+            shadow_group_entries,
             ambient_occlusion_groups: vec![None; instance_buffers.len()],
             prepass_groups,
             prepass_stats,
@@ -4729,6 +4751,10 @@ impl ForwardRenderer {
         light: &DirectionalLight,
         extent: (u32, u32),
     ) -> Result<(), HalError> {
+        // This slot's groups first, so everything below binds groups naming
+        // the sampler in force — see `adopt_page_sampler`.
+        self.adopt_page_sampler(device)?;
+
         // `docs/plan/39-capabilities.md`'s four layers, applied here and nowhere
         // else. Frozen for the frame because this call and `add_passes` have to
         // agree: the loops below skip a shadow cull's parameter write when
@@ -7307,6 +7333,67 @@ impl ForwardRenderer {
         self.render_scale
     }
 
+    /// The anisotropy the base-colour page is sampled with, in force from the
+    /// next [`begin_frame`](Self::begin_frame).
+    ///
+    /// `docs/plan/43-render-standards.md`'s filtering rung, the player's half:
+    /// [`anisotropy_for`](Self::anisotropy_for) is what a renderer nobody has
+    /// called this on samples with, and this is what a settings row moves it
+    /// to. Clamped to `1.0..=max_sampler_anisotropy` where the device was
+    /// granted [`Features::SAMPLER_ANISOTROPY`] and to exactly `1.0` where it
+    /// was not — the row can turn the filter off or push it to the device's
+    /// ceiling, and nothing it asks reaches a `create_sampler` that would
+    /// refuse it. A value that is not a number is the default, on
+    /// [`set_render_scale`](Self::set_render_scale)'s terms.
+    ///
+    /// **A sampler is a resource a bind group holds by handle**, so a new
+    /// anisotropy is a new sampler, and every group of the mesh layout has to
+    /// be rebuilt to name it. That happens per frame slot, at the slot's own
+    /// `begin_frame`, which is the moment the ring guarantees the slot's
+    /// previous submission has retired — the guarantee every host write in
+    /// that call already leans on — so a frame in flight goes on naming the
+    /// sampler it was recorded with, and the replaced sampler is destroyed once
+    /// no slot names it. This call creates the sampler and nothing else, and
+    /// asking for the anisotropy already in force creates nothing.
+    ///
+    /// # Errors
+    ///
+    /// `create_sampler`'s, and the renderer is unchanged — the sampler in force
+    /// stays in force.
+    pub fn set_anisotropy(&mut self, device: &dyn Device, anisotropy: f32) -> Result<(), HalError> {
+        let caps = device.caps();
+        let ceiling = if caps.features.contains(Features::SAMPLER_ANISOTROPY) {
+            caps.limits.max_sampler_anisotropy
+        } else {
+            1.0
+        };
+        let wanted = if anisotropy.is_finite() {
+            anisotropy.clamp(1.0, ceiling)
+        } else {
+            Self::anisotropy_for(&caps)
+        };
+        // Bit-equal rather than within an epsilon: both sides came out of the
+        // same clamp, and a row that lands on the value in force must not
+        // rebuild every group for it.
+        if wanted.to_bits() == self.anisotropy.to_bits() {
+            return Ok(());
+        }
+        let sampler = Self::create_page_sampler(device, wanted)?;
+        self.retired_page_samplers
+            .push(std::mem::replace(&mut self.base_color_sampler, sampler));
+        self.anisotropy = wanted;
+        Ok(())
+    }
+
+    /// The anisotropy in force, after the clamp
+    /// [`set_anisotropy`](Self::set_anisotropy) applied.
+    ///
+    /// The read-back half, on [`render_scale`](Self::render_scale)'s terms.
+    #[must_use]
+    pub const fn anisotropy(&self) -> f32 {
+        self.anisotropy
+    }
+
     /// The anisotropy the base-colour page's sampler is created with on a
     /// device of `caps`: [`DEFAULT_ANISOTROPY`] clamped to
     /// [`Limits::max_sampler_anisotropy`](crcbl_hal::Limits) where
@@ -7329,6 +7416,117 @@ impl ForwardRenderer {
         } else {
             1.0
         }
+    }
+
+    /// The base-colour page's sampler at `anisotropy`, which the caller has
+    /// already held to the device — [`anisotropy_for`](Self::anisotropy_for)
+    /// at build, [`set_anisotropy`](Self::set_anisotropy)'s clamp after.
+    ///
+    /// **Trilinear over the whole chain, anisotropic where the device is** —
+    /// `docs/plan/43-render-standards.md`'s filtering rung: a minified surface
+    /// reads the level its footprint matches instead of shimmering through
+    /// level 0, a magnified one blends four texels instead of stepping between
+    /// them, and a surface at a grazing angle keeps its detail along the long
+    /// axis of its footprint rather than blurring to the short one. A second
+    /// sampler object rather than sharing the tonemap's, so a capture names
+    /// each for what it filters.
+    ///
+    /// **`Repeat`, not `ClampToEdge`**, and that is what `mesh.slang`'s
+    /// `TILING_PHYSICAL` needs: a physical UV runs to `world_extent /
+    /// tile_metres`, past `0..1` on any face wider than one tile, and only a
+    /// wrapping address mode makes the page tile across it rather than
+    /// smearing its edge row. `TILING_AUTHORED` is unaffected — its UV is the
+    /// vertex's, which the meshes author inside `0..1`, so a wrapped and a
+    /// clamped read return the same nearest texel for it.
+    fn create_page_sampler(
+        device: &dyn Device,
+        anisotropy: f32,
+    ) -> Result<SamplerHandle, HalError> {
+        device.create_sampler(&SamplerDesc {
+            label: Some("material base colour"),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mip_filter: FilterMode::Linear,
+            address_mode: [SamplerAddressMode::Repeat; 3],
+            anisotropy,
+            ..SamplerDesc::default()
+        })
+    }
+
+    /// Moves this frame's slot onto [`ForwardRenderer::base_color_sampler`],
+    /// where [`set_anisotropy`](Self::set_anisotropy) replaced it since the
+    /// slot last drew.
+    ///
+    /// Every group of the mesh layout the slot holds — the camera's, the depth
+    /// prepass's and each shadow view's — is rebuilt from the entries it was
+    /// built from with [`PAGE_SAMPLER_BINDING`] rewritten, and the occlusion
+    /// cache is dropped, since it was built from the camera's entries and
+    /// names the old sampler too. **Every replacement is created before any
+    /// group is destroyed**, so a refusal leaves the slot whole on the sampler
+    /// it had and the next `begin_frame` tries again. A replaced sampler is
+    /// destroyed here the moment no slot names it.
+    ///
+    /// Called from `begin_frame_body` once the ring has rotated: that is the
+    /// point at which this slot's previous submission has retired, which is
+    /// what makes destroying its groups sound.
+    fn adopt_page_sampler(&mut self, device: &dyn Device) -> Result<(), HalError> {
+        let frame = self.frame;
+        let sampler = self.base_color_sampler;
+        if self.slot_page_samplers[frame] == sampler {
+            return Ok(());
+        }
+        let layout = self.mesh_layout;
+        let mut fresh = Vec::with_capacity(2 + self.shadow_groups[frame].len());
+        let lists = std::iter::once((&mut self.mesh_group_entries[frame], "mesh frame"))
+            .chain(std::iter::once((
+                &mut self.prepass_group_entries[frame],
+                "depth prepass",
+            )))
+            .chain(
+                self.shadow_group_entries[frame]
+                    .iter_mut()
+                    .map(|entries| (entries, "shadow view")),
+            );
+        for (entries, label) in lists {
+            match rebuilt_with_sampler(device, layout, sampler, entries, label) {
+                Ok(group) => fresh.push(group),
+                Err(error) => {
+                    for group in fresh {
+                        device.destroy_bind_group(group);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let mut fresh = fresh.into_iter();
+        let mut swap = |slot: &mut BindGroupHandle| {
+            let stale = std::mem::replace(
+                slot,
+                fresh
+                    .next()
+                    .unwrap_or_else(|| unreachable!("one fresh group per entry list")),
+            );
+            device.destroy_bind_group(stale);
+        };
+        swap(&mut self.mesh_groups[frame]);
+        swap(&mut self.prepass_groups[frame]);
+        for group in &mut self.shadow_groups[frame] {
+            swap(group);
+        }
+        if let Some((_, stale)) = self.ambient_occlusion_groups[frame].take() {
+            device.destroy_bind_group(stale);
+        }
+        self.slot_page_samplers[frame] = sampler;
+        let named = &self.slot_page_samplers;
+        self.retired_page_samplers.retain(|retired| {
+            if named.contains(retired) {
+                true
+            } else {
+                device.destroy_sampler(*retired);
+                false
+            }
+        });
+        Ok(())
     }
 
     /// The extent a frame handed `target` is actually drawn at.
@@ -8231,6 +8429,9 @@ impl ForwardRenderer {
         device.destroy_bind_group_layout(self.mesh_layout);
         self.base_color_page.destroy(device);
         device.destroy_sampler(self.base_color_sampler);
+        for sampler in self.retired_page_samplers {
+            device.destroy_sampler(sampler);
+        }
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }
@@ -8599,6 +8800,31 @@ fn named_entry(
     })
 }
 
+/// `entries` with [`PAGE_SAMPLER_BINDING`] rewritten to `sampler`, as a new
+/// group of `layout` — [`ForwardRenderer::adopt_page_sampler`]'s one step.
+///
+/// The rewrite is in place, so a list whose group the device refused is
+/// already right for the retry.
+fn rebuilt_with_sampler(
+    device: &dyn Device,
+    layout: BindGroupLayoutHandle,
+    sampler: SamplerHandle,
+    entries: &mut [BindGroupEntry],
+    label: &str,
+) -> Result<BindGroupHandle, HalError> {
+    let slot = entries
+        .iter_mut()
+        .find(|entry| entry.binding == PAGE_SAMPLER_BINDING)
+        .unwrap_or_else(|| unreachable!("{label}: every mesh-layout group names the page sampler"));
+    slot.resource = BindingResource::Sampler(sampler);
+    device.create_bind_group(&BindGroupDesc {
+        label: Some(label),
+        layout,
+        entries,
+        variable_count: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8607,7 +8833,7 @@ mod tests {
         DEMO_CUBE, DEMO_DUNES, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_TEXTURED, DEMO_TINTED,
         DEMO_UNTINTED,
     };
-    use crcbl_hal::null::{NullInstance, Recorder};
+    use crcbl_hal::null::{Event, NullInstance, ObjectKind, Recorder};
     use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
 
     fn open() -> (Recorder, Box<dyn Device>, QueueHandle) {
@@ -11937,6 +12163,164 @@ mod tests {
                 < f32::EPSILON,
             "a device that was not granted the feature gets one, whatever its limit says"
         );
+    }
+
+    /// A new anisotropy is a new sampler, and every slot moves onto it at its
+    /// own frame — the old one living until the last slot has left it.
+    ///
+    /// Counted on the null recorder rather than looked at: the sampler count
+    /// rises by one at the call, holds through every slot's frame but the
+    /// last, and falls back there, while the live group count never moves at
+    /// all — every rebuilt group replaced one. A rebuild that leaked, one that
+    /// destroyed a group a slot in flight still held, and one that never
+    /// happened each move one of those counts; a second lap of the ring
+    /// creating any group at all would be a rebuild that did not know it was
+    /// done.
+    #[test]
+    fn a_new_anisotropy_moves_each_slot_at_its_own_frame_and_retires_the_old() {
+        let (recorder, device, queue) =
+            open_with(Features::GPU_DRIVEN.union(Features::SAMPLER_ANISOTROPY));
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        assert!(
+            (renderer.anisotropy() - DEFAULT_ANISOTROPY).abs() < f32::EPSILON,
+            "a renderer nobody has called the setter on samples at the default"
+        );
+        let samplers = recorder.live_objects(ObjectKind::Sampler);
+        let groups = recorder.live_objects(ObjectKind::BindGroup);
+        let groups_created = || {
+            recorder
+                .events()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        Event::Created {
+                            kind: ObjectKind::BindGroup,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+
+        renderer
+            .set_anisotropy(device, DEFAULT_ANISOTROPY)
+            .expect("the device allows it");
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Sampler),
+            samplers,
+            "the value in force creates nothing"
+        );
+
+        renderer
+            .set_anisotropy(device, 4.0)
+            .expect("the device allows it");
+        assert!((renderer.anisotropy() - 4.0).abs() < f32::EPSILON);
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Sampler),
+            samplers + 1,
+            "the new sampler stands beside the one every slot still names"
+        );
+        assert_eq!(
+            recorder.live_objects(ObjectKind::BindGroup),
+            groups,
+            "no group moves until its slot's frame"
+        );
+
+        for round in 0..FRAMES_IN_FLIGHT {
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    (64, 48),
+                )
+                .expect("write");
+            let expected = if round + 1 < FRAMES_IN_FLIGHT {
+                samplers + 1
+            } else {
+                samplers
+            };
+            assert_eq!(
+                recorder.live_objects(ObjectKind::Sampler),
+                expected,
+                "round {round}: the replaced sampler lives until the last slot has left it"
+            );
+            assert_eq!(
+                recorder.live_objects(ObjectKind::BindGroup),
+                groups,
+                "round {round}: every rebuilt group replaced one"
+            );
+        }
+        let created = groups_created();
+        for _ in 0..FRAMES_IN_FLIGHT {
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    (64, 48),
+                )
+                .expect("write");
+        }
+        assert_eq!(
+            groups_created(),
+            created,
+            "a slot already on the sampler in force rebuilds nothing"
+        );
+
+        // The clamp: the device's ceiling above it, off below one, the default
+        // for a value that is not a number.
+        let ceiling = device.caps().limits.max_sampler_anisotropy;
+        renderer
+            .set_anisotropy(device, ceiling * 4.0)
+            .expect("clamped to what the device allows");
+        assert!((renderer.anisotropy() - ceiling).abs() < f32::EPSILON);
+        renderer
+            .set_anisotropy(device, 0.0)
+            .expect("one is the value that turns it off");
+        assert!((renderer.anisotropy() - 1.0).abs() < f32::EPSILON);
+        renderer
+            .set_anisotropy(device, f32::NAN)
+            .expect("the default is a sampler the device allows");
+        assert!((renderer.anisotropy() - DEFAULT_ANISOTROPY).abs() < f32::EPSILON);
+
+        recorder.assert_valid();
+        renderer.destroy(device);
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Sampler),
+            0,
+            "the samplers no slot ever adopted went with the renderer"
+        );
+    }
+
+    /// A device without the feature samples isotropically whatever is asked:
+    /// the ceiling is one, so the clamp lands on the value already in force and
+    /// no sampler is created that `create_sampler` would refuse.
+    #[test]
+    fn a_device_without_the_feature_keeps_the_page_isotropic_whatever_is_asked() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        assert!(
+            !device
+                .caps()
+                .features
+                .contains(Features::SAMPLER_ANISOTROPY),
+            "the default request does not name the feature"
+        );
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        assert!((renderer.anisotropy() - 1.0).abs() < f32::EPSILON);
+        let samplers = recorder.live_objects(ObjectKind::Sampler);
+
+        renderer
+            .set_anisotropy(device, DEFAULT_ANISOTROPY)
+            .expect("asks for nothing the device lacks");
+        assert!((renderer.anisotropy() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(recorder.live_objects(ObjectKind::Sampler), samplers);
+        renderer.destroy(device);
     }
 
     /// The knob clamps to the range it documents, in both directions and on a

@@ -30,10 +30,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   optional features, `OffscreenSetup::OPTIONAL_FEATURES` and the `crcbl new`
   scaffold now ask for it, and a game that names its own optional features has
   to add it to keep a grazing floor sharp. A browser samples isotropically —
-  `crcbl-webgpu` withholds the feature. The player's `anisotropic_filtering` row
-  is still to come. The lights fixture's sun (`dim_sun`) is halved so its pools
-  stay the brightest thing on their pyramids under a bilinear page. The page
-  costs a third again in device memory for the chain.
+  `crcbl-webgpu` withholds the feature. `ForwardRenderer::set_anisotropy` moves
+  it at runtime, clamped to one through the device's ceiling (exactly one where
+  the feature was withheld, the default for a `NaN`), with `anisotropy` reading
+  it back: a new sampler, and each frame slot's mesh-layout groups rebuilt at
+  that slot's own `begin_frame`, so a frame in flight keeps the sampler it was
+  recorded with. The player's `anisotropic_filtering` row is still to come. The
+  lights fixture's sun (`dim_sun`) is halved so its pools stay the brightest
+  thing on their pyramids under a bilinear page. The page costs a third again in
+  device memory for the chain.
 
 - **Auto-exposure: the frame measures its own exposure, and no readback stalls
   on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —

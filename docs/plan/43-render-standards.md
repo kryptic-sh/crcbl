@@ -150,10 +150,12 @@ clamped to the device where it was granted `Features::SAMPLER_ANISOTROPY`, one
 where it was not — and the page is `Rgba8UnormSrgb`, uncompressed. A minified
 texel is therefore a trilinear blend of the two levels nearest its footprint
 along the footprint's long axis, which `tests/tiling_e2e.rs`'s grazing floor
-holds against the isotropic control. What is still missing is the player's say —
-the anisotropy is the engine's default, not a settings row — and compression:
-`Format` holds BC1 through BC7 behind `Features::TEXTURE_COMPRESSION_BC` and
-nothing in the renderer asks.
+holds against the isotropic control. `ForwardRenderer::set_anisotropy` moves it
+at runtime — a new sampler, and each frame slot's mesh-layout groups rebuilt at
+that slot's own `begin_frame`. What is still missing is the player's say — the
+anisotropy is the engine's default until a settings row turns the knob — and
+compression: `Format` holds BC1 through BC7 behind
+`Features::TEXTURE_COMPRESSION_BC` and nothing in the renderer asks.
 
 **What it would take**, in the order the dependencies fall — and none of it
 waits on this section's stride decision, which is what makes it the cheapest
@@ -200,14 +202,21 @@ unblocked rung on this page:
    granted `Features::SAMPLER_ANISOTROPY`, and one where it was not. Granted,
    not supported: the feature is optional at every open site, so
    `GpuContextDesc`'s default optional features, `OffscreenSetup`'s and the
-   scaffold's all name it. `tests/tiling_e2e.rs` draws a grazing greybox floor
-   on a device with the feature and on one without and holds the far band's line
-   contrast apart — the one observation of a sampler's anisotropy any backend
-   allows. What is left is the player's `anisotropic_filtering` row — a value
-   key on `render_scale`'s pattern rather than a `RenderEffects` bit, the first
-   such key after it, and the sampler rebuilt when it changes. **On WebGPU the
-   reported limit is one**, by a decision `docs/backlog.md` carries — the API
-   has no query for the ceiling — so the browser filters isotropically until
+   scaffold's all name it. The renderer's knob is in:
+   `ForwardRenderer::set_anisotropy`, clamped to `1.0..=max_sampler_anisotropy`
+   where the feature was granted and to one where it was not, creates the
+   sampler and lets each frame slot rebuild its mesh-layout groups at its own
+   `begin_frame` — the moment that slot's previous submission has retired — so a
+   frame in flight keeps the sampler it was recorded with, and the replaced
+   sampler is destroyed once no slot names it. `tests/tiling_e2e.rs` draws a
+   grazing greybox floor through that knob at one and at the default and holds
+   the far band's line contrast apart on every backend — the one observation of
+   a sampler's anisotropy any backend allows. What is left is the player's
+   `anisotropic_filtering` row — a value key on `render_scale`'s pattern rather
+   than a `RenderEffects` bit, the first such key after it, with its
+   `apps/options` row, handed to the knob where `render_scale` is. **On WebGPU
+   the reported limit is one**, by a decision `docs/backlog.md` carries — the
+   API has no query for the ceiling — so the browser filters isotropically until
    that decision is revisited; the specification's own text is that an ask above
    the platform's maximum is clamped and never refused, which is the ground for
    reporting the desktop figure there instead.
@@ -719,22 +728,22 @@ listed here so a survey of gaps does not read as a list of things to build.
 Ordered by benefit per unit of work, which is not the order of the sections
 above.
 
-| Rung                                                                              | Why here                                                                                                                                                                                                                                                                                      |
-| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ~~Reserve the previous-transform slot in `GpuInstance`~~                          | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved                                                                                                                                                                               |
-| ~~Exponential height fog~~                                                        | §4 — **built 2026-08-27**: `crcbl_shaders::fog` answers the `exp` question, two rows of the frame block carry it, `set_fog` switches it on                                                                                                                                                    |
-| ~~Multi-scatter energy compensation~~                                             | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                                                                                                                                                                                                         |
-| **The `anisotropic_filtering` row**                                               | §2's filtering subsection — the chain, the trilinear sampler and the device's anisotropy are built (2026-08-29); what is left is the settings key with its `apps/options` row, the sampler rebuilt when it changes, and the WebGPU ceiling decision, and nothing about it waits on the stride |
-| **Normal maps: tangent, page, sampling**                                          | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                                                                                                                           |
-| **Emissive page** (the factor shipped 2026-08-27)                                 | §2 — rides the second texture page rung                                                                                                                                                                                                                                                       |
-| **Alpha-mask materials**                                                          | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                                                                                                                    |
-| ~~Render scale and a blit~~                                                       | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                                                                                                                              |
-| ~~A gradient sky feeding ambient and the SSR fallback~~                           | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame                                                                                                 |
-| ~~The sun's shaft through the froxel column~~                                     | §4 — **built 2026-08-28**: the buffer, the scatter, the scan, the composite, the sun's phase-scattered radiance and the cascade lookup that occludes it — [51-volumetrics.md](51-volumetrics.md) rungs 1a through 1b-ii                                                                       |
-| ~~Auto-exposure~~                                                                 | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads, the `AUTO_EXPOSURE` bit a view asks with, and the temporal roll between one frame's exposure and the next                                                                                                 |
-| **Blended transparency with GPU-sorted keys**                                     | §3 — the first rung here that touches the frame's structure                                                                                                                                                                                                                                   |
-| **Specular IBL: prefiltered radiance and a BRDF LUT**                             | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                                                                                                                 |
-| **Specular antialiasing (roughness regularisation)**                              | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                                                                                                    |
-| **Block-compressed pages: KTX2 and Basis at the bake, BC7/BC5/BC4 on the device** | §2's filtering subsection — a bake-tool rung, gated on an encoder the workspace does not have and the user has not chosen                                                                                                                                                                     |
-| Colour grading, DOF, lens artefacts                                               | §6 — polish, after the curve exists to grade against                                                                                                                                                                                                                                          |
-| SSGI, temporal SSR, TAA, temporal upscaling                                       | §9's slot first; each is its own rung after it                                                                                                                                                                                                                                                |
+| Rung                                                                              | Why here                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ~~Reserve the previous-transform slot in `GpuInstance`~~                          | §9 — **built 2026-08-27**: the field, the stride, four shader copies and the pool that fills it; no frame moved                                                                                                                                                            |
+| ~~Exponential height fog~~                                                        | §4 — **built 2026-08-27**: `crcbl_shaders::fog` answers the `exp` question, two rows of the frame block carry it, `set_fog` switches it on                                                                                                                                 |
+| ~~Multi-scatter energy compensation~~                                             | §5 — **built 2026-08-27**, both halves: the cooked table and the multiply on the lobe                                                                                                                                                                                      |
+| **The `anisotropic_filtering` row**                                               | §2's filtering subsection — the chain, the trilinear sampler, the device's anisotropy and `set_anisotropy` are built (2026-08-29); what is left is the settings key with its `apps/options` row, and the WebGPU ceiling decision, and nothing about it waits on the stride |
+| **Normal maps: tangent, page, sampling**                                          | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                                                                                                        |
+| **Emissive page** (the factor shipped 2026-08-27)                                 | §2 — rides the second texture page rung                                                                                                                                                                                                                                    |
+| **Alpha-mask materials**                                                          | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                                                                                                 |
+| ~~Render scale and a blit~~                                                       | §7 — **built 2026-08-27**, Catmull-Rom, one pass                                                                                                                                                                                                                           |
+| ~~A gradient sky feeding ambient and the SSR fallback~~                           | §8 — **built 2026-08-27**: the gradient, its L1 projection, the ambient it feeds, the environment a missed reflection falls back to, and the depth-tested pass that draws it behind the frame                                                                              |
+| ~~The sun's shaft through the froxel column~~                                     | §4 — **built 2026-08-28**: the buffer, the scatter, the scan, the composite, the sun's phase-scattered radiance and the cascade lookup that occludes it — [51-volumetrics.md](51-volumetrics.md) rungs 1a through 1b-ii                                                    |
+| ~~Auto-exposure~~                                                                 | §6 — **built 2026-08-29**: the histogram, the reduce, the buffer the tonemap reads, the `AUTO_EXPOSURE` bit a view asks with, and the temporal roll between one frame's exposure and the next                                                                              |
+| **Blended transparency with GPU-sorted keys**                                     | §3 — the first rung here that touches the frame's structure                                                                                                                                                                                                                |
+| **Specular IBL: prefiltered radiance and a BRDF LUT**                             | §5 — what makes a rough metal read as metal; one rung with the sky, and it reuses energy compensation's table                                                                                                                                                              |
+| **Specular antialiasing (roughness regularisation)**                              | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                                                                                 |
+| **Block-compressed pages: KTX2 and Basis at the bake, BC7/BC5/BC4 on the device** | §2's filtering subsection — a bake-tool rung, gated on an encoder the workspace does not have and the user has not chosen                                                                                                                                                  |
+| Colour grading, DOF, lens artefacts                                               | §6 — polish, after the curve exists to grade against                                                                                                                                                                                                                       |
+| SSGI, temporal SSR, TAA, temporal upscaling                                       | §9's slot first; each is its own rung after it                                                                                                                                                                                                                             |
