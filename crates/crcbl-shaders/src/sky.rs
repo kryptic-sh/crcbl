@@ -197,7 +197,7 @@ impl SkyGradient {
 /// Spelled out rather than reached for because `f32` has no `smoothstep`, and
 /// because the shader half of this gradient has to spell the same cubic: one
 /// factored form on both sides is one thing to compare.
-fn smoothstep(u: f32) -> f32 {
+pub(crate) fn smoothstep(u: f32) -> f32 {
     u * u * (3.0 - 2.0 * u)
 }
 

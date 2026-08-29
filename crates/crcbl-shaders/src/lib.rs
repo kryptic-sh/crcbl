@@ -317,6 +317,9 @@ pub mod upscale;
 
 pub mod dfg;
 
+// `sky_prefilter` carries its own `//!` header, for `fog`'s reason above.
+pub mod sky_prefilter;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

@@ -622,6 +622,13 @@ jobs:
       # `crates/crcbl-shaders/tools/cook-dfg.rs`.
       - name: Check the committed DFG table against its integrator
         run: cargo run --locked -p crcbl-shaders --example cook-dfg -- --check
+      # The sky prefilter table: the split-sum's other half, the same
+      # integrator pointed at the sky's blend, and Linux-only for the same
+      # reason.
+      - name: Check the committed sky prefilter table against its integrator
+        run:
+          cargo run --locked -p crcbl-shaders --example cook-sky-prefilter --
+          --check
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7

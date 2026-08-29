@@ -325,6 +325,19 @@ smallest thing that closes both is a gradient sky rendered into a small cube,
 prefiltered on the way in — which also gives §5's SSR miss a real radiance
 fallback in place of the L1 decode it approximates with today.
 
+**The prefilter is a table, not a cube, and it is cooked (2026-08-29).** The
+gradient is linear in its three colours and reads only a direction's `y`, so its
+convolution against the lobe is
+`far · W_far + opposite · W_opposite + horizon · (1 − W_far − W_opposite)` with
+two weights over `(|R.y|, roughness)` — `crcbl_shaders::sky_prefilter`, a
+64-square two-channel table committed as `tables/sky_prefilter.bin` on
+`cook-dfg`'s terms (`cook-sky-prefilter`, with `--check` in CI). The sky's
+colours stay a run-time parameter; only the lobe is baked. Facing the zenith,
+the roughest lobe sees 0.697 of it and the horizon for the rest.
+`prefiltered_radiance` is the sum on the CPU. What the rung still owes is the
+upload, the `DFG` pair as an image, and `mesh.slang`'s specular ambient term —
+`docs/backlog.md` carries the list.
+
 ### Rung 4 — Specular antialiasing, once normal maps exist
 
 A high-frequency normal map under a low roughness aliases: the shading signal

@@ -17,14 +17,9 @@
 //!
 //! # `--check` is pinned to one platform, deliberately
 //!
-//! Because the integrator is not bit-portable, a `--check` that demanded an
-//! exact match everywhere would fail on macOS and Windows for a reason that is
-//! not a defect. CI runs it in the `test (linux)` job only, beside
-//! `cook-clusters --check`, and this tool compares **within a tolerance** rather
-//! than byte for byte so that a developer on another machine gets a useful
-//! answer instead of a false alarm. The tolerance is far below the quantisation
-//! of anything that reads the table and far above any `libm` disagreement — see
-//! [`TOLERANCE`].
+//! `cook_table.rs` says why: the integrator is not bit-portable, so CI runs the
+//! check in the `test (linux)` job only and the comparison is within
+//! [`TOLERANCE`] rather than byte for byte.
 //!
 //! # Why an example and not a binary
 //!
@@ -32,16 +27,14 @@
 //! `cook-clusters.rs`, which are this crate's other two generators of committed
 //! artifacts, and an `[[example]]` because that is what those use.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crcbl_shaders::dfg::{self, DFG_BYTES, DFG_SAMPLES, DFG_SIZE};
 
+#[path = "cook_table.rs"]
+mod cook_table;
+
 /// Where the committed artifact lives, relative to this crate.
-///
-/// Resolved against `CARGO_MANIFEST_DIR` rather than the working directory, for
-/// `cook-clusters`' reason: a `--check` that silently compared against nothing
-/// because of a `cd` is worse than no check.
 const ARTIFACT: &str = "tables/dfg.bin";
 
 /// How far a freshly baked entry may sit from the committed one under `--check`.
@@ -56,16 +49,6 @@ const ARTIFACT: &str = "tables/dfg.bin";
 const TOLERANCE: f32 = 1e-5;
 
 fn main() -> ExitCode {
-    let check = match std::env::args().skip(1).collect::<Vec<String>>().as_slice() {
-        [] => false,
-        [flag] if flag == "--check" => true,
-        arguments => {
-            eprintln!("cook-dfg: unexpected arguments {arguments:?}");
-            eprintln!("usage: cook-dfg [--check]");
-            return ExitCode::from(2);
-        }
-    };
-
     let bytes = dfg::bake_bytes();
     assert_eq!(
         bytes.len(),
@@ -73,73 +56,7 @@ fn main() -> ExitCode {
         "the integrator produced a table the format cannot hold"
     );
     report(&bytes);
-
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(ARTIFACT);
-    if check {
-        let committed = match std::fs::read(&path) {
-            Ok(committed) => committed,
-            Err(error) => {
-                eprintln!("cook-dfg: cannot read {}: {error}", path.display());
-                return ExitCode::FAILURE;
-            }
-        };
-        if committed.len() != bytes.len() {
-            eprintln!(
-                "cook-dfg: {ARTIFACT} is {} bytes and the integrator produces {}",
-                committed.len(),
-                bytes.len()
-            );
-            eprintln!("  Regenerate with: cargo run -p crcbl-shaders --example cook-dfg");
-            return ExitCode::FAILURE;
-        }
-        match worst_difference(&committed, &bytes) {
-            Some((at, committed_value, fresh_value)) => {
-                eprintln!(
-                    "cook-dfg: {ARTIFACT} holds {committed_value} where the integrator \
-                     produces {fresh_value} at value {at}, past a tolerance of {TOLERANCE}"
-                );
-                eprintln!(
-                    "  the committed table is not what `crcbl_shaders::dfg::bake` \
-                     produces."
-                );
-                eprintln!("  Regenerate with: cargo run -p crcbl-shaders --example cook-dfg");
-                ExitCode::FAILURE
-            }
-            None => {
-                println!("cook-dfg: {ARTIFACT} matches the integrator to {TOLERANCE}");
-                ExitCode::SUCCESS
-            }
-        }
-    } else {
-        if let Some(directory) = path.parent()
-            && let Err(error) = std::fs::create_dir_all(directory)
-        {
-            eprintln!("cook-dfg: cannot create {}: {error}", directory.display());
-            return ExitCode::FAILURE;
-        }
-        if let Err(error) = std::fs::write(&path, &bytes) {
-            eprintln!("cook-dfg: cannot write {}: {error}", path.display());
-            return ExitCode::FAILURE;
-        }
-        println!("cook-dfg: wrote {ARTIFACT}");
-        ExitCode::SUCCESS
-    }
-}
-
-/// The first value past [`TOLERANCE`], as `(index, committed, fresh)`.
-///
-/// Decoded as `f32`s rather than compared as bytes, because two `f32`s a last
-/// place apart differ in three of their four bytes and a byte offset says
-/// nothing about how far apart the numbers are.
-fn worst_difference(committed: &[u8], fresh: &[u8]) -> Option<(usize, f32, f32)> {
-    let value_at = |bytes: &[u8], index: usize| {
-        let at = index * 4;
-        f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-    };
-    (0..committed.len() / 4).find_map(|index| {
-        let (left, right) = (value_at(committed, index), value_at(fresh, index));
-        ((left - right).abs() > TOLERANCE).then_some((index, left, right))
-    })
+    cook_table::run("cook-dfg", ARTIFACT, &bytes, TOLERANCE)
 }
 
 /// What the freshly baked table looks like, so a regeneration is readable

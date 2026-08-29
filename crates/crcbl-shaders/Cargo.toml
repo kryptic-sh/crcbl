@@ -71,3 +71,9 @@ path = "tools/cook-clusters.rs"
 [[example]]
 name = "cook-dfg"
 path = "tools/cook-dfg.rs"
+
+# The sky prefilter table's generator, on `cook-dfg`'s terms: the other half of
+# the split-sum, and the other table only one machine may bake.
+[[example]]
+name = "cook-sky-prefilter"
+path = "tools/cook-sky-prefilter.rs"

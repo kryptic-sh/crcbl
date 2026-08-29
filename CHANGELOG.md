@@ -616,6 +616,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   it and `cook-dfg --check` holds it to its integrator in CI, on the same terms
   as `cook-clusters` and the committed cluster DAG.
 
+- **The sky prefilter table: the gradient sky convolved against the GGX lobe.**
+  `crcbl_shaders::sky_prefilter` is the prefiltered-radiance half of specular
+  image-based lighting as one committed 64-square, two-channel table —
+  `crates/crcbl-shaders/tables/sky_prefilter.bin`. A gradient sky is linear in
+  its three colours and reads only a direction's `y`, so its convolution at
+  every roughness is two weights over `(|R.y|, roughness)` — the pole on the
+  reflection's side, the pole across the horizon, and the horizon for the rest —
+  and one table baked for the lobe serves every sky while the colours stay a
+  run-time parameter. `prefiltered_radiance` is the sum on the CPU; facing the
+  zenith, the roughest lobe sees 0.697 of it. `cook-sky-prefilter` regenerates
+  the table and `cook-sky-prefilter --check` holds it in CI, on `cook-dfg`'s
+  terms — the two tools now share one `tools/cook_table.rs` for that flow.
+  Nothing on the device reads it yet: the upload, the shader term and the
+  goldens that move are the rung's next slice.
+
 - **Render scale: the frame can be drawn at fewer pixels than the window.**
   `crcbl_render::ForwardRenderer::set_render_scale` sizes an internal colour
   target at a fraction of the caller's extent — down to `MIN_RENDER_SCALE`, a

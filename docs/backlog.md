@@ -736,6 +736,38 @@ chain itself was built 2026-08-29). Both read the row as it stands;
 multi-scatter compensation and the gradient sky were not blocked either, and are
 built.
 
+### Specular IBL: the prefilter table is cooked, the term is owed (2026-08-29)
+
+`44-lighting.md`'s rung 3 has both of its tables now — `crcbl_shaders::dfg` for
+the BRDF pair and `crcbl_shaders::sky_prefilter` for the gradient sky convolved
+against the lobe — and nothing on the device reads either as the split-sum. What
+the rung still owes, in order:
+
+- **The two images.** `sky_prefilter::bytes` uploaded the way
+  `dfg::albedo_texels` is — two 16-bit fixed-point channels, filtered in the
+  shader with four `Load`s, since a hardware filter is not blessable across four
+  rasterisers — and the `DFG` **pair** (scale and bias, not their sum) as a
+  second image from `dfg::bytes`. Both are `[0, 1]` shares, so the same encoding
+  serves. Each is a new binding in `mesh.slang` and in the hand-written
+  `msl/mesh.metal` argument table, after `specular_albedo`.
+- **The term.** In `fragmentMain`'s ambient sum, beside `sky_irradiance`:
+  `prefiltered · (f0 · scale + bias)`, with `prefiltered` the
+  `sky_prefilter::prefiltered_radiance` sum spelled in the shader over the three
+  sky rows the frame block already carries, at the reflection of the view about
+  the normal, and multiplied by the energy compensation the direct lobe already
+  takes. `Sky::NONE` projects to black, so a frame with no sky adds nothing and
+  no golden without a sky moves.
+- **The goldens with a sky move**, and are re-blessed on one machine:
+  `crates/crcbl/tests/mesh_e2e/hdr.rs`, `crates/crcbl/tests/render_e2e.rs` and
+  `crates/crcbl/src/screenshot.rs` set one. A metal under a sky is where the
+  change shows; a dielectric's `f0` of 0.04 moves little.
+- **SSR's miss fallback** can then take the prefiltered radiance at the
+  fragment's roughness in place of the gradient's mirror radiance it adds today,
+  which is what makes a rough reflection's miss match its hit.
+
+Verified: the table against an independent quadrature and the gradient's own
+blend, on the CPU only. Nothing here has been drawn.
+
 ### What the filtering rung still owes (2026-08-29)
 
 The page goes up with every layer's chain (`crcbl_render::mip::chain`,

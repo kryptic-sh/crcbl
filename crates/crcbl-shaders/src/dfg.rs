@@ -285,7 +285,7 @@ pub fn energy_compensation(f0: [f32; 3], n_dot_v: f32, roughness: f32) -> [f32; 
 /// exact on every machine. The sequence is what stratifies [`bake`]'s samples;
 /// its determinism is not what the committed table rests on, but it is why two
 /// bakes on one machine agree to the last bit.
-fn hammersley(i: u32, count: u32) -> (f64, f64) {
+pub(crate) fn hammersley(i: u32, count: u32) -> (f64, f64) {
     // `2^-32` exactly, so the reversed bits land in `[0, 1)` with no rounding.
     let radical = f64::from(i.reverse_bits()) * (1.0 / 4_294_967_296.0);
     (f64::from(i) / f64::from(count), radical)
