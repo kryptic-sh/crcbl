@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **SMAA 1x draws.** `docs/plan/49-antialiasing.md`'s higher rung: three passes
+  — `smaa_edges.slang`, `smaa_weights.slang`, `smaa_blend.slang`, transcribed
+  from the reference at `SMAA_PRESET_HIGH` with the diagonal and corner-rounding
+  paths in and the S2x/T2x subsample and reprojection paths left out — recorded
+  by `crcbl_render::smaa` against the tables the previous entry cooked. The new
+  `RenderEffects::SMAA` selects it, and the `smaa` `[engine.video]` key switches
+  it off. **It is not in the default stack**: a view that says nothing still
+  resolves with FXAA, so nothing a game already renders moves. The two tiers
+  share one resolve slot and are never both recorded — asking for both draws
+  SMAA — so the frame gains two passes over FXAA rather than four, and every
+  pass budget counts the more expensive of the two. Measured against the same
+  scene with no resolve at 256x192: SMAA moves 1.5% of the frame, all of it
+  within two pixels of a luma discontinuity, and halves the count of pixels
+  still stepping by 96 of 255 across a neighbour.
+
 - **SMAA's lookup tables are cooked.** `crcbl_shaders::smaa` transcribes the
   reference `AreaTex.py` and `SearchTex.py` operation for operation and commits
   `tables/smaa_area.bin` — the 160×80 `Rg8` offset-zero slab SMAA 1x reads; the

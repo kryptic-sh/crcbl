@@ -183,6 +183,7 @@ use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::skinning::{SkinRange, SkinnedMesh, Skinning, SkinningError};
 use crate::sky_pass::SkyPass;
+use crate::smaa::Smaa;
 use crate::ssao::{Ssao, cached_group};
 use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_mip_layers};
@@ -640,8 +641,22 @@ const RENDER_PASSES: u32 = 6
     + Volumetric::PASSES
     + Exposure::PASSES
     + Bloom::MAX_PASSES
-    + Fxaa::PASSES
+    + RESOLVE_PASSES
     + Upscale::PASSES;
+
+/// What the frame's one resolve slot costs at its widest: the larger of the two
+/// antialiasing tiers.
+///
+/// **The larger and not the sum**, because the two are never both recorded —
+/// [`RenderEffects::SMAA`] carries that in writing and [`fullscreen_passes`] is
+/// where the choice is made. So this is the all-effects-on count as well as the
+/// ceiling, which is the property [`RENDER_PASSES`] needs from every term it
+/// adds up.
+const RESOLVE_PASSES: u32 = if Fxaa::PASSES > Smaa::PASSES {
+    Fxaa::PASSES
+} else {
+    Smaa::PASSES
+};
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
@@ -712,7 +727,13 @@ fn fullscreen_passes(effects: RenderEffects, extent: (u32, u32), upscaling: bool
     if effects.contains(RenderEffects::BLOOM) {
         passes += u64::from(Bloom::passes_for(extent));
     }
-    if effects.contains(RenderEffects::ANTIALIASING) {
+    // **One resolve slot, and the higher tier takes it.** Both bits set is a
+    // frame with SMAA's three passes and no FXAA pass at all, which is what
+    // [`RenderEffects::SMAA`] means by the two never both running — so this is
+    // an `else if` rather than two independent terms.
+    if effects.contains(RenderEffects::SMAA) {
+        passes += Smaa::PASSES as u64;
+    } else if effects.contains(RenderEffects::ANTIALIASING) {
         passes += Fxaa::PASSES as u64;
     }
     if effects.contains(RenderEffects::VOLUMETRIC_FOG) {
@@ -1386,9 +1407,14 @@ pub struct ForwardRenderer {
     auto_exposure: Exposure,
     /// `docs/plan/18-render-features.md`'s bloom chain — see [`crate::bloom`].
     bloom: Bloom,
-    /// `docs/plan/18-render-features.md`'s antialiasing resolve — see
+    /// `docs/plan/49-antialiasing.md`'s cheap antialiasing tier — see
     /// [`crate::fxaa`].
     fxaa: Fxaa,
+    /// `docs/plan/49-antialiasing.md`'s higher antialiasing tier — see
+    /// [`crate::smaa`]. It takes the resolve slot from
+    /// [`fxaa`](Self::fxaa) on the frames [`RenderEffects::SMAA`] is set for,
+    /// and neither is built per frame: both exist, and at most one records.
+    smaa: Smaa,
     /// [`crate::upscale`], and it draws nothing at a
     /// [`render_scale`](Self::render_scale) of `1.0`.
     upscale: Upscale,
@@ -1502,9 +1528,13 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
     /// pipelines, two layouts, a sampler and a ring of blocks.
     bloom: Option<Bloom>,
-    /// `docs/plan/18-render-features.md`'s antialiasing resolve, which owns one
+    /// `docs/plan/49-antialiasing.md`'s cheap antialiasing tier, which owns one
     /// pipeline, one layout, a sampler and a ring of blocks.
     fxaa: Option<Fxaa>,
+    /// `docs/plan/49-antialiasing.md`'s higher antialiasing tier, which owns
+    /// three pipelines, three layouts, two samplers, two uploaded tables and a
+    /// ring of blocks.
+    smaa: Option<Smaa>,
     upscale: Option<Upscale>,
     /// The background pass, which owns one pipeline, one layout and a ring of
     /// blocks and groups.
@@ -1556,6 +1586,9 @@ impl Rollback {
         }
         if let Some(upscale) = self.upscale {
             upscale.destroy(device);
+        }
+        if let Some(smaa) = self.smaa {
+            smaa.destroy(device);
         }
         if let Some(fxaa) = self.fxaa {
             fxaa.destroy(device);
@@ -4048,6 +4081,21 @@ impl ForwardRenderer {
             Self::build_fullscreen,
         )?);
 
+        // --- the higher antialiasing tier ---
+        //
+        // The same slot, filled by SMAA's three passes instead of FXAA's one —
+        // see [`crate::smaa`], which says why the two are built together and at
+        // most one recorded. It is the only pass group in this frame that takes
+        // `queue`: its two lookup tables are committed bytes and are uploaded
+        // here, once, the way the `dfg` table above is.
+        rollback.smaa = Some(Smaa::new(
+            device,
+            queue,
+            instance_buffers.len(),
+            target_format,
+            Self::build_fullscreen,
+        )?);
+
         // --- the render-scale upscale ---
         //
         // The second pass that writes the caller's target rather than a
@@ -4261,6 +4309,10 @@ impl ForwardRenderer {
                 .fxaa
                 .take()
                 .unwrap_or_else(|| unreachable!("the resolve was placed in the rollback above")),
+            smaa: rollback
+                .smaa
+                .take()
+                .unwrap_or_else(|| unreachable!("the tier was placed in the rollback above")),
             upscale: rollback
                 .upscale
                 .take()
@@ -5106,6 +5158,10 @@ impl ForwardRenderer {
         // that use it is a block that is stale on the frame a caller switches
         // the effect on.
         self.fxaa.begin_frame(device, self.frame, extent)?;
+        // The higher tier's block: the same extent and its reciprocal, written
+        // on the resolve's terms above. Sixteen bytes, and a frame that resolves
+        // through the other tier pays for them and reads none.
+        self.smaa.begin_frame(device, self.frame, extent)?;
         // The upscale's block: the internal extent and its reciprocal. Written
         // on the two above's terms — a frame at full scale adds no upscale pass
         // and pays for sixteen bytes nobody reads, and a block written only on
@@ -6204,7 +6260,15 @@ impl ForwardRenderer {
         } else {
             target
         };
-        let display = if effects.contains(RenderEffects::ANTIALIASING) {
+        //
+        // **Two tiers share that slot and at most one fills it** — see
+        // [`RenderEffects::SMAA`], which is where "never both" is written down.
+        // The shape above is the same either way; what differs is what the
+        // resolve reads besides the tonemap's image, and SMAA's two working
+        // images are declared here beside it rather than inside the pass group,
+        // on [`Ssao::add_passes`]'s terms: a frame's images belong to the graph.
+        let resolving = effects.intersects(RenderEffects::ANTIALIASING.union(RenderEffects::SMAA));
+        let display = if resolving {
             graph.create_image(
                 "display-color",
                 TransientImageDesc::display_color(extent, self.target_format),
@@ -6212,6 +6276,12 @@ impl ForwardRenderer {
         } else {
             present
         };
+        let smaa_images = effects.contains(RenderEffects::SMAA).then(|| {
+            (
+                graph.create_image("smaa-edges", TransientImageDesc::smaa_edges(extent)),
+                graph.create_image("smaa-weights", TransientImageDesc::smaa_weights(extent)),
+            )
+        });
 
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
@@ -6758,17 +6828,30 @@ impl ForwardRenderer {
         // the caller after this, so its glyphs are never filtered — topic 18
         // refuses to antialias text in as many words.
         //
-        // `display` is `present` when the bit is off, and this is the branch
-        // that makes that true: no pass, no second image, and the frame the
-        // tonemap wrote is already where the frame ends.
+        // `display` is `present` when neither antialiasing bit is on, and this
+        // is the branch that makes that true: no pass, no second image, and the
+        // frame the tonemap wrote is already where the frame ends.
+        //
+        // **Which tier fills the slot is decided here, once.** SMAA is the
+        // higher one and takes it whenever its bit is on, whatever the FXAA bit
+        // says — the two are never both recorded, which is what
+        // [`RenderEffects::SMAA`] means by a tier that is off being a frame with
+        // fewer passes rather than a shader branch. Everything the paragraph
+        // above says about the grid, the UI and the ordering holds for either.
         if display != present {
-            self.fxaa.add_pass(graph, frame, display, present);
+            if let Some((edges, weights)) = smaa_images {
+                self.smaa
+                    .add_passes(graph, frame, display, edges, weights, present);
+            } else {
+                self.fxaa.add_pass(graph, frame, display, present);
+            }
         }
 
         // --- the render-scale upscale ---
         //
-        // **After the resolve, and that ordering is not interchangeable.** FXAA
-        // filters the edges the renderer actually drew; run the other way round
+        // **After the resolve, and that ordering is not interchangeable.**
+        // Either tier filters the edges the renderer actually drew; run the
+        // other way round
         // it would be filtering an interpolation of them, which is both more
         // expensive — the resolve would run at the target's extent rather than
         // the internal one — and worse, because the edge it is looking for has
@@ -8137,19 +8220,22 @@ impl ForwardRenderer {
     /// startup has no frame behind it yet, and printing what the last one drew
     /// would print a default.
     ///
-    /// **A debug view takes the antialiasing resolve off**, whatever the four
-    /// layers said. Those views are readouts rather than pictures — a pixel's
-    /// colour *is* the cluster's projected error or its DAG level, read back
-    /// against a legend — and a filter that blends two clusters' shades invents
-    /// a ramp position no cluster occupies. `apps/quarry`'s heatmap and LOD
-    /// tests are the consumers that count a frame's distinct colours.
+    /// **A debug view takes the antialiasing resolve off** — either tier of it
+    /// — whatever the four layers said. Those views are readouts rather than
+    /// pictures — a pixel's colour *is* the cluster's projected error or its
+    /// DAG level, read back against a legend — and a filter that blends two
+    /// clusters' shades invents a ramp position no cluster occupies.
+    /// `apps/quarry`'s heatmap and LOD tests are the consumers that count a
+    /// frame's distinct colours.
     #[must_use]
     pub fn resolved_effects(&self) -> RenderEffects {
         let resolved = self.effect_request.resolve(self.device_effects);
         if matches!(self.debug_view(), DebugView::Shaded) {
             resolved
         } else {
-            resolved.difference(RenderEffects::ANTIALIASING)
+            // **Both tiers**, because the slot is what a readout cannot have
+            // rather than one filter in particular.
+            resolved.difference(RenderEffects::ANTIALIASING.union(RenderEffects::SMAA))
         }
     }
 
@@ -8400,6 +8486,7 @@ impl ForwardRenderer {
         }
         self.sky_pass.destroy(device);
         self.upscale.destroy(device);
+        self.smaa.destroy(device);
         self.fxaa.destroy(device);
         self.bloom.destroy(device);
         self.auto_exposure.destroy(device);
@@ -12731,7 +12818,6 @@ mod tests {
                 ]
                 .as_slice(),
             ),
-            (RenderEffects::ANTIALIASING, ["fxaa"].as_slice()),
             (
                 RenderEffects::AUTO_EXPOSURE,
                 // All three go together and the tonemap stays: the pass reads
@@ -12769,6 +12855,66 @@ mod tests {
                 labels, expected,
                 "{off:?}: the frame must lose {gone:?}, gain nothing in their place, and keep \
                  every other pass"
+            );
+        }
+
+        // **The two antialiasing tiers share one resolve slot**, so neither is
+        // a plain removal and neither belongs in the loop above: switching SMAA
+        // off while FXAA stays on swaps three passes for one rather than losing
+        // three, and the loop's "gain nothing in their place" comparison is
+        // exactly what that violates. Three frames say it instead.
+        let both = all_on.clone();
+        let cheap = without(&mut renderer, RenderEffects::SMAA);
+        let neither = without(
+            &mut renderer,
+            RenderEffects::SMAA.union(RenderEffects::ANTIALIASING),
+        );
+        const SMAA_PASSES: [&str; 3] = ["smaa-edges", "smaa-weights", "smaa-blend"];
+        let resolve_of = |labels: &[String]| -> Vec<String> {
+            labels
+                .iter()
+                .filter(|label| *label == "fxaa" || SMAA_PASSES.contains(&label.as_str()))
+                .cloned()
+                .collect()
+        };
+        let without_resolve = |labels: &[String]| -> Vec<String> {
+            labels
+                .iter()
+                .filter(|label| *label != "fxaa" && !SMAA_PASSES.contains(&label.as_str()))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            resolve_of(&both),
+            SMAA_PASSES.map(str::to_string).to_vec(),
+            "with both bits set the higher tier takes the slot and the cheap one \
+             records nothing"
+        );
+        assert_eq!(
+            resolve_of(&cheap),
+            vec!["fxaa".to_string()],
+            "with only the cheap bit set the slot is FXAA's"
+        );
+        assert!(
+            resolve_of(&neither).is_empty(),
+            "with neither bit set the frame has no resolve at all: {neither:#?}"
+        );
+        // And nothing else moved: the tiers swap in one slot rather than
+        // rebuilding the frame around themselves.
+        assert_eq!(without_resolve(&both), without_resolve(&cheap));
+        assert_eq!(without_resolve(&both), without_resolve(&neither));
+        // The slot is where the ordering argument puts it — directly after the
+        // last pass that writes the display image, which at this extent is the
+        // tonemap.
+        for labels in [&both, &cheap] {
+            let at = labels
+                .iter()
+                .position(|label| label == "tonemap")
+                .expect("a frame has to reach the swapchain");
+            assert_eq!(
+                &labels[at + 1..=at + resolve_of(labels).len()],
+                resolve_of(labels).as_slice(),
+                "the resolve must follow the tonemap: {labels:#?}"
             );
         }
 
@@ -13896,7 +14042,8 @@ mod tests {
     const POST_EFFECTS: RenderEffects = RenderEffects::BLOOM
         .union(RenderEffects::ANTIALIASING)
         .union(RenderEffects::VOLUMETRIC_FOG)
-        .union(RenderEffects::AUTO_EXPOSURE);
+        .union(RenderEffects::AUTO_EXPOSURE)
+        .union(RenderEffects::SMAA);
 
     /// Every effect this renderer draws is either in the default stack or in
     /// [`POST_EFFECTS`].

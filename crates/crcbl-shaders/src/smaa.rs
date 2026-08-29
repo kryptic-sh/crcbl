@@ -603,6 +603,68 @@ pub fn bake_search() -> Vec<u8> {
     bytes
 }
 
+/// Bytes of the uniform block the three `smaa_*.slang` sources read: two
+/// `float2`s, which is one sixteen-byte constant-buffer row exactly.
+pub const PARAMS_SIZE: usize = 16;
+
+/// The uniform block, matching `struct SmaaParams` in `shaders/smaa_edges.slang`
+/// and the identical declaration in `smaa_weights.slang` and `smaa_blend.slang`.
+///
+/// One block for the three passes, on `crate::bloom`'s terms: they run at one
+/// extent, and a block each would be three things to keep in step. It carries
+/// the extent and nothing else — the reference's quality constants are
+/// `static const` in the sources, and `smaa_edges.slang`'s header says why.
+///
+/// The reference calls the pair `SMAA_RT_METRICS` and packs it as one `float4`;
+/// it is two `float2`s here because the two halves mean different things and a
+/// caller writing `source_size` into the reciprocal's lanes is a mistake a
+/// named field can prevent.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SmaaParams {
+    /// One over the extent of the image every SMAA pass reads, which is also
+    /// the extent each of them writes — the reference's `SMAA_RT_METRICS.xy`.
+    pub inv_source: [f32; 2],
+    /// That extent in texels — the reference's `SMAA_RT_METRICS.zw`. Only the
+    /// blend-weight pass reads it, to turn a texture coordinate back into a
+    /// pixel count.
+    pub source_size: [f32; 2],
+}
+
+impl SmaaParams {
+    /// The block for an image of `extent` texels.
+    ///
+    /// The reciprocal is taken here for [`crate::fxaa::FxaaParams::for_extent`]'s
+    /// reason: one division per frame instead of two per pixel, and a zero
+    /// extent is a thing a caller can be told about on the CPU.
+    ///
+    /// [`Default`] leaves both pairs zero, which is not a plausible frame and
+    /// is not meant to be — an unwritten block samples one texel over and over
+    /// rather than looking nearly right, which is the tell `FxaaParams` argues
+    /// for at length.
+    #[must_use]
+    pub fn for_extent(width: u32, height: u32) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
+        Self {
+            inv_source: [1.0 / width as f32, 1.0 / height as f32],
+            source_size: [width as f32, height as f32],
+        }
+    }
+
+    /// The block as the bytes a uniform buffer holds.
+    ///
+    /// Little-endian, and every byte of [`PARAMS_SIZE`] is written — a partial
+    /// write would leave the tail of the buffer undefined.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
+        let mut bytes = [0u8; PARAMS_SIZE];
+        bytes[0..4].copy_from_slice(&self.inv_source[0].to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.inv_source[1].to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.source_size[0].to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.source_size[1].to_le_bytes());
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,5 +817,189 @@ mod tests {
             filled > DIAG_BLOCK * DIAG_BLOCK / 2,
             "only {filled} diagonal texels are non-zero"
         );
+    }
+
+    /// The three sources the passes are built from, so a guard below runs over
+    /// each of them rather than over whichever one it was written against.
+    const SOURCES: [(&str, &str); 3] = [
+        (
+            "smaa_edges.slang",
+            include_str!("../shaders/smaa_edges.slang"),
+        ),
+        (
+            "smaa_weights.slang",
+            include_str!("../shaders/smaa_weights.slang"),
+        ),
+        (
+            "smaa_blend.slang",
+            include_str!("../shaders/smaa_blend.slang"),
+        ),
+    ];
+
+    /// The block the three shaders declare, member for member.
+    ///
+    /// [`crate::fxaa`]'s guard, over three sources instead of one — and the
+    /// third source is the reason it is worth having twice: `smaa_blend.slang`
+    /// reads only `inv_source`, so a reordered block there would compile, bind,
+    /// and displace every blend by the frame's width in texels. Reading the
+    /// sources is the check, and they are hash-pinned by the manifest, so they
+    /// are the files the committed artifacts were built from.
+    #[test]
+    fn the_uniform_block_matches_the_struct_every_smaa_source_declares() {
+        for (name, source) in SOURCES {
+            for member in ["float2 inv_source;", "float2 source_size;"] {
+                assert!(
+                    source.contains(member),
+                    "{name} does not declare `{member}`"
+                );
+            }
+            assert!(
+                source.contains("ConstantBuffer<SmaaParams> params;"),
+                "{name} does not bind the block `to_bytes` writes"
+            );
+        }
+    }
+
+    /// Each member lands in the word the shader will read it from.
+    #[test]
+    fn every_member_is_written_at_the_offset_the_block_declares() {
+        let params = SmaaParams {
+            inv_source: [0.5, 0.25],
+            source_size: [2.0, 4.0],
+        };
+        let bytes = params.to_bytes();
+        assert_eq!(bytes.len(), PARAMS_SIZE);
+        assert_eq!(&bytes[0..4], &0.5f32.to_le_bytes());
+        assert_eq!(&bytes[4..8], &0.25f32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &2.0f32.to_le_bytes());
+        assert_eq!(&bytes[12..16], &4.0f32.to_le_bytes());
+    }
+
+    /// The extent becomes a texel size and its own reciprocal, and a zero
+    /// extent becomes neither an infinity nor a zero divisor.
+    #[test]
+    fn the_texel_size_is_the_reciprocal_of_the_extent() {
+        let params = SmaaParams::for_extent(256, 192);
+        assert_eq!(params.source_size, [256.0, 192.0]);
+        assert!((params.inv_source[0] - 1.0 / 256.0).abs() < f32::EPSILON);
+        assert!((params.inv_source[1] - 1.0 / 192.0).abs() < f32::EPSILON);
+
+        let degenerate = SmaaParams::for_extent(0, 0);
+        assert!(degenerate.inv_source.iter().all(|v| v.is_finite()));
+        assert!(degenerate.source_size.iter().all(|v| *v > 0.0));
+
+        // A block nobody gave an extent to carries zeroes, which is the tell
+        // rather than a plausible-looking wrong answer.
+        assert_eq!(SmaaParams::default().inv_source, [0.0, 0.0]);
+        assert_eq!(SmaaParams::default().source_size, [0.0, 0.0]);
+    }
+
+    /// **`smaa_weights.slang` addresses the tables this module committed**, and
+    /// not the reference's differently-shaped ones.
+    ///
+    /// The one thing no rendered frame catches cheaply. The reference's area
+    /// texture is 160×560 and its pixel size is `1/(160, 560)`; the committed
+    /// slab is [`AREA_WIDTH`]×[`AREA_HEIGHT`], so a shader carrying the
+    /// reference's constant reads the right column of the right pattern at a
+    /// seventh of the right row — which is still a plausible blend weight, still
+    /// antialiases, and is wrong everywhere. Every expectation here is built
+    /// from this module's own constants rather than written out, so moving one
+    /// of them fails this rather than silently disagreeing with the shader.
+    #[test]
+    fn the_weights_shader_addresses_the_committed_tables() {
+        let source = include_str!("../shaders/smaa_weights.slang");
+        for expected in [
+            format!(
+                "static const float2 AREATEX_PIXEL_SIZE = float2(1.0 / {AREA_WIDTH}.0, 1.0 / {AREA_HEIGHT}.0);"
+            ),
+            format!(
+                "static const float2 SEARCHTEX_PACKED_SIZE = float2({SEARCH_WIDTH}.0, {SEARCH_HEIGHT}.0);"
+            ),
+            format!("static const float AREATEX_MAX_DISTANCE = {AREA_MAX_DISTANCE}.0;"),
+            format!("static const float AREATEX_MAX_DISTANCE_DIAG = {AREA_MAX_DISTANCE_DIAG}.0;"),
+            format!("static const float SEARCH_STEP_DECODE = 255.0 / {SEARCH_STEP_SCALE}.0;"),
+        ] {
+            assert!(
+                source.contains(&expected),
+                "smaa_weights.slang does not spell `{expected}`"
+            );
+        }
+
+        // The diagonal block starts at the table's halfway column, which is
+        // what makes the reference's `+= 0.5` still right for a slab of this
+        // width — and it is only right because the two blocks are equal.
+        assert_eq!(ORTHO_BLOCK * 2, AREA_WIDTH);
+        assert!(
+            source.contains("texcoord.x += 0.5;"),
+            "the diagonal lookup does not reach the table's right half"
+        );
+    }
+
+    /// **The 1x-only paths are absent rather than switched off.**
+    ///
+    /// [`bake_area_slab`] still takes the subsample offsets, because the
+    /// generator is held to the whole reference texture — but only the
+    /// offset-zero slab is committed, so a shader that so much as computed a
+    /// subtexture offset would be reading rows that are not there. Same for the
+    /// reprojection and predication paths, whose inputs this engine does not
+    /// draw: a dead branch reading a velocity buffer is a binding nothing
+    /// fills.
+    #[test]
+    fn no_smaa_source_carries_a_path_this_engine_does_not_draw() {
+        for (name, source) in SOURCES {
+            let code = strip_comments(source);
+            for absent in [
+                "SUBTEX",
+                "subsampleIndices",
+                "REPROJECTION",
+                "velocity",
+                "PREDICATION",
+                "predication",
+            ] {
+                assert!(
+                    !code.contains(absent),
+                    "{name} still mentions `{absent}`, which SMAA 1x has no input for"
+                );
+            }
+        }
+
+        // And the strip is what makes the loop above a claim about the code
+        // rather than about the whole file: `smaa_weights.slang`'s header names
+        // the reference constant it does *not* use, so a check over the raw
+        // text would fail on its own explanation.
+        let weights = include_str!("../shaders/smaa_weights.slang");
+        assert!(weights.contains("SMAA_AREATEX_SUBTEX_SIZE"));
+        assert!(!strip_comments(weights).contains("SUBTEX"));
+    }
+
+    /// A shader source with every `//` comment removed, so a guard about what
+    /// the code does is not answered by what a header says about it.
+    fn strip_comments(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **The preset is `SMAA_PRESET_HIGH`, spelled out where the shader reads
+    /// it.**
+    ///
+    /// Written as literals because they are the reference's, fixed outside this
+    /// code: a threshold of 0.1, sixteen orthogonal search steps, eight
+    /// diagonal ones and a corner rounding of 25. What this catches is a source
+    /// edited to another preset's numbers without the decision being taken —
+    /// each of those still draws an antialiased frame, at a different cost and
+    /// a different quality, and no golden in the tree would name the change.
+    #[test]
+    fn the_quality_constants_are_the_high_preset_s() {
+        let edges = include_str!("../shaders/smaa_edges.slang");
+        assert!(edges.contains("static const float THRESHOLD = 0.1;"));
+        assert!(edges.contains("static const float LOCAL_CONTRAST_ADAPTATION_FACTOR = 2.0;"));
+
+        let weights = include_str!("../shaders/smaa_weights.slang");
+        assert!(weights.contains("static const int MAX_SEARCH_STEPS = 16;"));
+        assert!(weights.contains("static const int MAX_SEARCH_STEPS_DIAG = 8;"));
+        assert!(weights.contains("static const float CORNER_ROUNDING_NORM = 25.0 / 100.0;"));
     }
 }

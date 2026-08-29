@@ -320,8 +320,9 @@ pub mod dfg;
 // `sky_prefilter` carries its own `//!` header, for `fog`'s reason above.
 pub mod sky_prefilter;
 
-// SMAA's two lookup tables, transcribed from the reference generators; its
-// own `//!` header for the same reason.
+// SMAA's two lookup tables, transcribed from the reference generators, and the
+// uniform block its three `smaa_*.slang` sources read; its own `//!` header for
+// the same reason.
 pub mod smaa;
 
 use std::sync::OnceLock;
@@ -1009,12 +1010,21 @@ mod tests {
         }
     }
 
-    /// The four shaders the render layer draws with each expose both graphics
-    /// stages out of one module, so each needs both containers from one call.
-    /// This is the concrete shape `crcbl-render`'s passes hand the seam.
+    /// Every shader the render layer draws with exposes both graphics stages
+    /// out of one module, so each needs both containers from one call. This is
+    /// the concrete shape `crcbl-render`'s passes hand the seam.
     #[test]
     fn the_graphics_shaders_offer_a_container_for_both_stages() {
-        for shader in [&MESH, &TONEMAP, &FXAA, &SPRITE, &UI] {
+        for shader in [
+            &MESH,
+            &TONEMAP,
+            &FXAA,
+            &SMAA_EDGES,
+            &SMAA_WEIGHTS,
+            &SMAA_BLEND,
+            &SPRITE,
+            &UI,
+        ] {
             let containers = shader.dxil_containers();
             for stage in [Stage::Vertex, Stage::Fragment] {
                 let entry_point = shader

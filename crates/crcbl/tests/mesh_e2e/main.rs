@@ -82,6 +82,7 @@ mod hdr;
 mod lod;
 mod render_scale;
 mod resize;
+mod smaa;
 mod two_dags;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because

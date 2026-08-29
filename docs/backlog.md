@@ -17,31 +17,41 @@ delivery table is the record of which. `apps/options` is sample 20; the other
 three samples are planned, not built. What follows is what the plans could not
 settle.
 
-### What the SMAA tables left owed (2026-08-30)
+### What the SMAA rung left owed (2026-08-30)
 
-`crcbl_shaders::smaa` holds SMAA's two lookup tables as committed bytes with
-`cook-smaa` behind them, verified byte-for-byte against the reference
-generators. Nothing reads them yet. Owed, in order:
+SMAA 1x draws: `smaa_edges.slang`, `smaa_weights.slang` and `smaa_blend.slang`
+against `crcbl_shaders::smaa`'s committed tables, recorded by
+`crcbl_render::smaa` under `RenderEffects::SMAA` and switched by the `smaa`
+`[engine.video]` key, checked by `crates/crcbl/tests/mesh_e2e/smaa.rs` on radv
+and lavapipe. What it did not do:
 
-- **The three passes**, on `fxaa.slang`'s fullscreen shape: edge detection,
-  blend weights (the pass that reads both tables) and the neighbourhood blend.
-  The reference `SMAA.hlsl` is the transcription target; its area lookup is
-  addressed by `AREA_WIDTH`/`AREA_HEIGHT` rather than `SMAA_AREATEX_PIXEL_SIZE`,
-  and `SMAA_AREATEX_SUBTEX_SIZE` selects nothing because only the offset-zero
-  slab is committed.
-- **The upload**: `area_bytes()` as an `Rg8Unorm` image and `search_bytes()` as
-  an `R8Unorm` one, both sampled bilinear and clamped — the area lookup relies
-  on linear filtering between texels, so a nearest sampler would be a silent
-  quality bug rather than a crash.
-- **A `RenderEffects` tier** so FXAA stays the cheap one, and its settings key
-  on `antialiasing`'s terms. Whether SMAA takes FXAA's place in `DEFAULT_STACK`
-  is the user's call once goldens show both; the plan only says FXAA stays
-  available.
-- **The browser-gate cost measured before it lands**: three passes where FXAA is
-  one, and the shadow-filter entry below records what a pass costs there.
-- Committed is the offset-zero slab only. `bake_area_slab` still produces the
-  S2x/T2x slabs; if either ever gets a rung, the table grows by committing them,
-  not by re-deriving anything.
+- **No backend but Vulkan has drawn it.** The Metal, DXIL and WGSL artifacts are
+  compiled and committed, and `crcbl-shaders`' guard tests read the sources, but
+  the only frames anyone has measured came out of radv and lavapipe. The mesh
+  e2e suite names no backend, so running it under `CRCBL_GPU=mtl`/`dx12`/`wgpu`
+  is the whole of the missing evidence — no new test.
+- **No demo asks for `SMAA`, so the browser has never run it.** The bit is not
+  in `DEFAULT_STACK` and nothing forces it on, which is what kept every
+  committed golden still. The browser-gate cost is therefore still unmeasured:
+  three passes where FXAA is one, and the shadow-filter entry below records what
+  a pass costs there.
+- **Whether SMAA should take FXAA's place in `DEFAULT_STACK` is still the user's
+  call.** It is a re-bless of every golden the bit would be on for — the set
+  `docs/plan/49-antialiasing.md` priced when FXAA landed, plus whatever has been
+  blessed with the bit on since (`crates/crcbl/tests/golden/` has grown). The
+  tiers share one resolve slot, so the flip is a one-line change to
+  `DEFAULT_STACK` and the bless.
+- **The reference's S2x/T2x and reprojection paths are not transcribed**, and
+  deliberately: they are not branched around in the shaders, they are absent, so
+  `SMAA_AREATEX_SUBTEX_SIZE` still selects nothing and only the offset-zero slab
+  is committed. `bake_area_slab` still produces the other slabs; a rung that
+  ever needs them commits them rather than re-deriving anything.
+- **The preset is `SMAA_PRESET_HIGH` and is not configurable.** Threshold, both
+  search-step counts and the corner rounding are `static const` in the shaders,
+  guarded by text assertions in `crcbl_shaders::smaa`. Two of them are loop trip
+  counts, so moving them into the params block would make the searches
+  dynamically bounded; a quality ladder would want separate pipelines, not a
+  uniform.
 
 ### What auto-exposure left owed (2026-08-29)
 

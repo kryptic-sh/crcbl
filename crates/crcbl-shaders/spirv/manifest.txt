@@ -284,6 +284,48 @@ dxil = vertexMain:dxil/sky.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91
 dxil = fragmentMain:dxil/sky.fragmentMain.dxil:d89cccadceed8183c0f7e38580e4f53b15dbf327c95a1dcbb1127cbf056a1ebf
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[smaa_blend]
+source = shaders/smaa_blend.slang
+source-sha256 = 31ae972a203e036f645c0a8cc1bcc5ab265e9071e39a997b69107b9fee0488cc
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/smaa_blend.spv
+spirv-sha256 = ea9c0e3dec70a266a97635419a86c8489ca9e5007ca3b259d044cc503ee3bd8d
+wgsl = wgsl/smaa_blend.wgsl
+wgsl-sha256 = 93366c390e7d7227f3bfeefa0574d32ad5eb83be59e2178b3bb3d6f49d725301
+msl = msl/smaa_blend.metal
+msl-sha256 = b92baba9ee4d095c510341c3aef863a41d92957ed05daded1f7e8ca00a9e06d8
+dxil = vertexMain:dxil/smaa_blend.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/smaa_blend.fragmentMain.dxil:5bf6e012ff5567b2ec67d0e85407f01e86cbff5f4e919183c0d2bd444a68ae0a
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[smaa_edges]
+source = shaders/smaa_edges.slang
+source-sha256 = 13e3897279fef0f484ffe750dfb9252387363f6cdad8ebddb8105738690a9041
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/smaa_edges.spv
+spirv-sha256 = adb3b876f93a80da33671c227b97d712e5b2e389fbba402e19639af688b70840
+wgsl = wgsl/smaa_edges.wgsl
+wgsl-sha256 = 8f3f9b184c9d1e3df4a4eb5a01273b634b9a05450495a02114385d529f05ff7f
+msl = msl/smaa_edges.metal
+msl-sha256 = 7fac72885386a3faddaf3156ba6c92c2148b5c54e0179ce672d53955f3a7c01f
+dxil = vertexMain:dxil/smaa_edges.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/smaa_edges.fragmentMain.dxil:3740dad418f68c5167e7c323ffd59a708683cba8278f2c5bad60231bf4420a39
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[smaa_weights]
+source = shaders/smaa_weights.slang
+source-sha256 = 9ce74530166b9c2de6f09f88d007c5000d99d543c01ed97c321920308ddb329b
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/smaa_weights.spv
+spirv-sha256 = 7d79d94b225168871fae3e75d3c3cfe354f3fa1afad8daeb740c0e7b844e0cdb
+wgsl = wgsl/smaa_weights.wgsl
+wgsl-sha256 = 76798bf449df2b9286dee56dc2d56a1cff8ef5bc94c7030ed1df764da14233cd
+msl = msl/smaa_weights.metal
+msl-sha256 = 5e5addf2d1f29f3f3ff76c29f6937cb13d4988b4c3624ade798e7921509da5c6
+dxil = vertexMain:dxil/smaa_weights.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/smaa_weights.fragmentMain.dxil:d345c8fb4d4c7a3d862725035e97bc12189eccc8d08ae0b90c27a3d49b1716dd
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [sprite]
 source = shaders/sprite.slang
 source-sha256 = 9f93c3c70fefed9fcb2b5653295fb497f9d18a8a27ed53dd5127a84d80363cc3

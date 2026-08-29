@@ -157,6 +157,35 @@ bitflags::bitflags! {
         /// tenths of a second. `docs/plan/48-post-processing.md` carries the
         /// adaptation as the next rung.
         const AUTO_EXPOSURE = 1 << 6;
+        /// SMAA 1x — the edge detection, the blend-weight pass that reads the
+        /// two committed lookup tables, and the neighbourhood blend.
+        ///
+        /// `docs/plan/49-antialiasing.md`'s antialiasing ladder, second rung and
+        /// **the higher of the two antialiasing tiers**. When it is set it takes
+        /// the resolve slot instead of [`ANTIALIASING`](Self::ANTIALIASING):
+        /// three passes where FXAA is one, over-blurring far less of the thin
+        /// geometry and text that is FXAA's known weakness.
+        ///
+        /// **The two are never both run**, and that is what "a tier that is off
+        /// is a frame with fewer passes" means here — the FXAA bit may stay set
+        /// beside this one and is simply not recorded, because there is one
+        /// resolve slot and this fills it.
+        /// [`ForwardRenderer::add_passes`] is where the choice is made, once,
+        /// and `crate::smaa` is the pass group.
+        ///
+        /// **Not in [`RenderEffects::DEFAULT_STACK`]**, on
+        /// [`ANTIALIASING`](Self::ANTIALIASING)'s original terms: it is a
+        /// resolve rather than a lens and belongs there on the merits, and what
+        /// keeps it out is that swapping the resolve moves every golden in the
+        /// suite at once. That flip is its own change with its own re-bless, and
+        /// which tier the default stack should carry is a decision to take once
+        /// goldens exist for both — `docs/backlog.md` holds the question.
+        ///
+        /// The bit is numbered after the tiers it postdates rather than beside
+        /// the one it replaces, so no existing flag's value moves.
+        ///
+        /// [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
+        const SMAA = 1 << 7;
     }
 }
 
@@ -173,20 +202,22 @@ impl RenderEffects {
     /// parameters)" — and a camera that has been given no stack has been given
     /// no lens.
     ///
-    /// [`ANTIALIASING`](Self::ANTIALIASING) is out for a different reason,
-    /// written on the bit itself: it belongs here on the merits and is held out
-    /// only until the re-bless it forces is taken deliberately.
-    /// [`VOLUMETRIC_FOG`](Self::VOLUMETRIC_FOG) is out for a third: it does not
-    /// add a term to the picture, it takes one away from the fragment stage and
-    /// computes it somewhere else, and which of the two a view wants is a cost
-    /// question rather than a correctness one.
-    /// [`AUTO_EXPOSURE`](Self::AUTO_EXPOSURE) is out for a fourth, written on
+    /// [`VOLUMETRIC_FOG`](Self::VOLUMETRIC_FOG) is out for a second reason: it
+    /// does not add a term to the picture, it takes one away from the fragment
+    /// stage and computes it somewhere else, and which of the two a view wants
+    /// is a cost question rather than a correctness one.
+    /// [`AUTO_EXPOSURE`](Self::AUTO_EXPOSURE) is out for a third, written on
     /// the bit: it takes a control away from the caller, and a view that set an
-    /// exposure has said what it wants done with it.
+    /// exposure has said what it wants done with it. [`SMAA`](Self::SMAA) is
+    /// out for a fourth, also written on the bit: the resolve slot is filled by
+    /// [`ANTIALIASING`](Self::ANTIALIASING), which *is* in here, and moving it
+    /// to the higher tier moves every golden in the suite — a decision to take
+    /// once both tiers have goldens rather than one to inherit.
     ///
-    /// So the default is the most correct picture and no lens, and a view that
-    /// wants the lens asks for it: through its own stack, or through
-    /// [`EffectOverride`], which is the layer that may move a decision upward.
+    /// So the default is the most correct picture, no lens and the cheap
+    /// antialiasing tier, and a view that wants more asks for it: through its
+    /// own stack, or through [`EffectOverride`], which is the layer that may
+    /// move a decision upward.
     ///
     /// This is what [`EffectRequest::default`]'s
     /// [`camera`](EffectRequest::camera) holds, and it is why adding the bloom
@@ -195,7 +226,8 @@ impl RenderEffects {
     pub const DEFAULT_STACK: Self = Self::all().difference(
         Self::BLOOM
             .union(Self::VOLUMETRIC_FOG)
-            .union(Self::AUTO_EXPOSURE),
+            .union(Self::AUTO_EXPOSURE)
+            .union(Self::SMAA),
     );
 
     /// Every effect and the one word a report spells it with, in bit order.
@@ -218,6 +250,7 @@ impl RenderEffects {
         (Self::ANTIALIASING, "aa"),
         (Self::VOLUMETRIC_FOG, "vfog"),
         (Self::AUTO_EXPOSURE, "autoexp"),
+        (Self::SMAA, "smaa"),
     ];
 
     /// This set as a debug panel row and a headless summary line spell it:
@@ -499,11 +532,12 @@ mod tests {
     /// consumer that does exactly that.
     ///
     /// What it guards is the claim [`RenderEffects::DEFAULT_STACK`]'s docs make:
-    /// the lens, the froxel volume and auto-exposure are what a view has to ask
-    /// for, and they are the **only** three. A default that quietly included one would have
-    /// re-blessed every golden image in the tree, and each of them would still
-    /// have been a plausible picture — which is the whole difficulty: a
-    /// wrongly-defaulted post pass does not look like a bug.
+    /// the lens, the froxel volume, auto-exposure and the higher antialiasing
+    /// tier are what a view has to ask for, and they are the **only** ones. A
+    /// default that quietly included one would have re-blessed every golden
+    /// image in the tree, and each of them would still have been a plausible
+    /// picture — which is the whole difficulty: a wrongly-defaulted post pass
+    /// does not look like a bug.
     ///
     /// The antialiasing resolve was held out on the same terms for exactly one
     /// change, which is what re-blessed the suite; it is in the default now, and
@@ -516,11 +550,13 @@ mod tests {
                 RenderEffects::BLOOM
                     .union(RenderEffects::VOLUMETRIC_FOG)
                     .union(RenderEffects::AUTO_EXPOSURE)
+                    .union(RenderEffects::SMAA)
             ),
         );
         let post = RenderEffects::BLOOM
             .union(RenderEffects::VOLUMETRIC_FOG)
-            .union(RenderEffects::AUTO_EXPOSURE);
+            .union(RenderEffects::AUTO_EXPOSURE)
+            .union(RenderEffects::SMAA);
         assert!(!EffectRequest::default().camera.contains(post));
         assert!(
             !EffectRequest::default()
@@ -543,7 +579,8 @@ mod tests {
                 .force(RenderEffects::BLOOM, Some(true))
                 .force(RenderEffects::ANTIALIASING, Some(true))
                 .force(RenderEffects::VOLUMETRIC_FOG, Some(true))
-                .force(RenderEffects::AUTO_EXPOSURE, Some(true)),
+                .force(RenderEffects::AUTO_EXPOSURE, Some(true))
+                .force(RenderEffects::SMAA, Some(true)),
             ..EffectRequest::default()
         };
         assert_eq!(forced.resolve(RenderEffects::all()), RenderEffects::all());

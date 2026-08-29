@@ -154,6 +154,7 @@ pub mod scene;
 pub mod shadow;
 pub mod skinning;
 mod sky_pass;
+mod smaa;
 pub mod sprite_pass;
 mod ssao;
 mod ssr;

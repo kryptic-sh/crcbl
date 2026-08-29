@@ -149,9 +149,25 @@ reference `AreaTex.py` and `SearchTex.py` operation for operation, committed as
 slabs have no rung here and stay uncommitted — and `tables/smaa_search.bin`
 (64×16), with `cook-smaa` regenerating them and its `--check` byte-exact in CI,
 since neither generator takes a transcendental. Verified against the reference
-scripts' own output at every subsample offset. The three passes, the
-`RenderEffects` tier and the upload are what the rung still owes;
-`docs/backlog.md` carries them.
+scripts' own output at every subsample offset.
+
+**And the rung draws (2026-08-30).** `smaa_edges.slang`, `smaa_weights.slang`
+and `smaa_blend.slang` transcribe the reference's 1x path at `SMAA_PRESET_HIGH`
+— diagonal search and corner rounding in, the S2x/T2x subsample offset and the
+reprojection pass left out rather than branched around — and
+`crcbl_render::smaa` records the three of them, uploading the two tables once
+beside the DFG table. `RenderEffects::SMAA` selects the tier and the `smaa`
+`[engine.video]` key switches it off. It is **not** in `DEFAULT_STACK`, which is
+what kept the re-bless this section priced above from happening a second time:
+no committed golden moved. The two tiers share the one resolve slot — a frame
+records SMAA's three passes or FXAA's one, never both, and `RENDER_PASSES`
+budgets the larger of the two. `crates/crcbl/tests/mesh_e2e/`'s `smaa` observer
+is the evidence: measured on radv and lavapipe, the resolve moves 1.5% of the
+frame, every changed pixel within two of a luma discontinuity, and the count of
+pixels still stepping by 96 of 255 across a neighbour falls from 332 to 164.
+What the rung still owes is cross-backend evidence — Metal, DX12 and WebGPU
+compile the artifacts, and only CI has run them — which `docs/backlog.md`
+carries.
 
 ### TAA is specified, still post-MVP, and the blocker is named exactly
 
