@@ -7402,6 +7402,10 @@ pub(crate) mod tests {
             sky_sh_r: [0.0; 4],
             sky_sh_g: [0.0; 4],
             sky_sh_b: [0.0; 4],
+            // The one frame this probe draws is its own previous frame, so the
+            // motion the geometry stages emit is zero — the same rule the
+            // renderer's first frame follows.
+            previous_view_proj: IDENTITY,
         };
 
         // One triangle over the centre of the target and neither corner, in
