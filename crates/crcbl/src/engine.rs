@@ -1475,10 +1475,28 @@ impl GpuContext {
         self.video.render_scale
     }
 
+    /// The anisotropy the player asked the base-colour page to be sampled
+    /// with, read while this context opened.
+    ///
+    /// [`DEFAULT_ANISOTROPY`](crcbl_render::DEFAULT_ANISOTROPY) for a run whose
+    /// player has said nothing, which is the sampler a renderer builds on its
+    /// own. A sample hands it to
+    /// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy),
+    /// whose clamp to the device's ceiling is the bound this layer's range
+    /// stops short of — see [`crate::settings::anisotropic_filtering`].
+    ///
+    /// **Not on [`GpuContext::effect_request`]**, for
+    /// [`render_scale`](Self::render_scale)'s reason.
+    #[must_use]
+    pub const fn anisotropic_filtering(&self) -> f32 {
+        self.video.anisotropic_filtering
+    }
+
     /// The whole `[engine.video]` section this context read while opening.
     ///
     /// The narrow accessors beside it — [`video_effects`](Self::video_effects),
     /// [`render_scale`](Self::render_scale),
+    /// [`anisotropic_filtering`](Self::anisotropic_filtering),
     /// [`frame_limit`](Self::frame_limit) — are what a caller wanting one key
     /// uses. This is for a caller that has to carry the section somewhere
     /// else, which is [`GameGpu::video`] and through it the loop.
@@ -12364,7 +12382,7 @@ mod tests {
         storage
             .write(
                 std::path::Path::new(SETTINGS_FILE),
-                b"[engine.video]\nshadows = false\nrender_scale = 0.5\n",
+                b"[engine.video]\nshadows = false\nrender_scale = 0.5\nanisotropic_filtering = 4\n",
             )
             .expect("memory storage accepts every write");
 
@@ -12374,6 +12392,7 @@ mod tests {
             RenderEffects::all().difference(RenderEffects::SHADOWS)
         );
         assert!((read.render_scale - 0.5).abs() < f32::EPSILON);
+        assert!((read.anisotropic_filtering - 4.0).abs() < f32::EPSILON);
 
         assert_eq!(
             SettingsSource::None.video("test"),

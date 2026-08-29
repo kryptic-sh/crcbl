@@ -745,19 +745,19 @@ and the sampler in `ForwardRenderer::with_scene` reads them trilinear at
 granted `SAMPLER_ANISOTROPY`, one where it was not. What the rung still owes, in
 order:
 
-- **The player's `anisotropic_filtering` key.** A value key on `render_scale`'s
-  pattern in `crcbl::settings` — reader, writer, `VideoSettings` field,
-  catalogue row, `GpuContext` accessor — with an `apps/options` row, handed to
-  `ForwardRenderer::set_anisotropy` beside `set_render_scale` wherever the
-  latter is called (`apps/viewer/src/gpu.rs` is the one today, at open and on
-  reload). The key clamps downward like the others: the knob's own clamp is the
-  device's ceiling where `SAMPLER_ANISOTROPY` was granted and one where not, so
-  the reader clamps to `1.0..=16.0` and the knob finishes the job; `1` turns it
-  off. The renderer half is in: `set_anisotropy` creates the sampler and each
-  frame slot rebuilds its mesh-layout groups at its own `begin_frame`. The
-  device half is measured and in: 8× on radv against the 1× goldens moved none
-  of the thirteen render scenes, lantern's `room` within tolerance and `live`
-  past it, both re-blessed at 8×.
+- **The `apps/options` row for `anisotropic_filtering`.** The key, the knob and
+  the viewer's wiring are in (`crcbl::settings::anisotropic_filtering`,
+  `ForwardRenderer::set_anisotropy`, `apps/viewer/src/gpu.rs`); what is left is
+  the screen's row. It is a ladder — `1`, `2`, `4`, `8`, `16`, the values
+  hardware steps in — on `FRAME_CAPS`' pattern in `apps/options/src/menu.rs`: a
+  button that steps up and wraps, since the widget set has no cycler (that gap
+  is its own entry). Like the frame cap it is not applied to the running screen:
+  the options sample draws no page, so the row says "next start" through
+  `NEXT_START_MARK` as the cap does. The reader accepts any value in range, so a
+  hand-written `6` steps to `8` on `next_frame_cap`'s terms. Nothing else in the
+  tree hands the key to the knob: lantern, quarry and the scaffold call neither
+  `set_render_scale` nor `set_anisotropy`, and that pairing is one decision —
+  when the samples pick the scale up, they pick this up beside it.
 - **WebGPU's anisotropy ceiling** is reported as one and the feature withheld,
   so a browser draws the page isotropically while every native backend draws it
   at eight; the plan wants the desktop figure — the decision the same subsection

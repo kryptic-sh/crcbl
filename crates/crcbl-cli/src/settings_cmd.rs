@@ -738,6 +738,7 @@ mod tests {
         for (key, wanted) in [
             ("engine.video.shadows", "read"),
             ("engine.video.render_scale", "read"),
+            ("engine.video.anisotropic_filtering", "read"),
             ("engine.audio.music_volume", "read"),
             ("engine.video.display_mode", "named"),
             ("engine.video.shadow", "unknown"),

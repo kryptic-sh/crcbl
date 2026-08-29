@@ -74,9 +74,24 @@
 //! [`FrameLimit::clamped_to`], where the ordering that makes it work — unlimited
 //! being above every rate rather than below it, though it is spelled zero —
 //! belongs to the type rather than to the file.
+//!
+//! # And [`anisotropic_filtering`] is the first key that may ask for more
+//!
+//! Every key above answers at most what the game asked for. This one runs from
+//! `1`, which turns the filter off, to [`MAX_ANISOTROPIC_FILTERING`], which is
+//! twice the engine's [`DEFAULT_ANISOTROPY`] — so a file can ask for *more*
+//! work than a run with no file does. It is allowed because the spend is
+//! bounded by the device and by nothing else: the seam's ceiling is
+//! `Limits::max_sampler_anisotropy`, and
+//! [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy)
+//! clamps to it, one on a device without the feature. This reader clamps to
+//! the range a file may spell and the setter finishes the job, which is why
+//! the file holds the player's ask rather than one machine's answer to it —
+//! the ask follows them to a machine with a different ceiling. An absent key is
+//! still the engine's own figure, as it is for every key here.
 
 use crcbl_audio::mixer::Bus;
-use crcbl_render::{MIN_RENDER_SCALE, RenderEffects};
+use crcbl_render::{DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
 
 use crate::engine::FrameLimit;
 use crcbl_store::StorageError;
@@ -158,6 +173,22 @@ pub const RENDER_SCALE_KEY: &str = "render_scale";
 /// [`frame_limit`].
 pub const FRAME_LIMIT_KEY: &str = "frame_limit";
 
+/// The `[engine.video]` key that sets the base-colour page's anisotropy.
+///
+/// Spelled here for [`RENDER_SCALE_KEY`]'s reason, and read by
+/// [`anisotropic_filtering`].
+pub const ANISOTROPIC_FILTERING_KEY: &str = "anisotropic_filtering";
+
+/// The most [`anisotropic_filtering`] reads: the desktop ceiling.
+///
+/// [`Limits::desktop`](crcbl_hal::Limits::desktop)'s figure rather than a
+/// number of this file's, so the key's top and the seam's desktop preset
+/// cannot drift apart. A device whose own ceiling is lower — and one without
+/// `SAMPLER_ANISOTROPY`, whose ceiling is one — is
+/// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy)'s
+/// clamp, not this one; see the [module docs](self).
+pub const MAX_ANISOTROPIC_FILTERING: f32 = crcbl_hal::Limits::desktop().max_sampler_anisotropy;
+
 /// Everything the player's `[engine.video]` section says, read in one pass.
 ///
 /// One type rather than a reader per key because a caller wants all of it at
@@ -171,6 +202,9 @@ pub struct VideoSettings {
     /// What fraction of the caller's extent the renderer draws at; see
     /// [`render_scale`].
     pub render_scale: f32,
+    /// The anisotropy the base-colour page is sampled with; see
+    /// [`anisotropic_filtering`].
+    pub anisotropic_filtering: f32,
     /// The ceiling the player puts on the loop's frame rate; see
     /// [`frame_limit`].
     ///
@@ -182,8 +216,8 @@ pub struct VideoSettings {
 }
 
 impl VideoSettings {
-    /// What a player who has said nothing gets: every effect standing and the
-    /// full extent.
+    /// What a player who has said nothing gets: every effect standing, the
+    /// full extent and the page at the engine's own anisotropy.
     ///
     /// Also what [`SettingsSource::None`](crate::engine::SettingsSource::None)
     /// answers, and the two are the same answer for the same reason — this
@@ -194,6 +228,7 @@ impl VideoSettings {
         Self {
             effects: RenderEffects::all(),
             render_scale: 1.0,
+            anisotropic_filtering: DEFAULT_ANISOTROPY,
             frame_limit: FrameLimit::unlimited(),
         }
     }
@@ -205,6 +240,7 @@ pub fn video(stack: &SettingsStack) -> VideoSettings {
     VideoSettings {
         effects: video_effects(stack),
         render_scale: render_scale(stack),
+        anisotropic_filtering: anisotropic_filtering(stack),
         frame_limit: frame_limit(stack),
     }
 }
@@ -249,6 +285,50 @@ pub fn render_scale(stack: &SettingsStack) -> f32 {
     }
 }
 
+/// The anisotropy the player wants the base-colour page sampled with, for
+/// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy).
+///
+/// [`DEFAULT_ANISOTROPY`] for a stack that says nothing, and otherwise the
+/// file's value clamped to `1.0..=MAX_ANISOTROPIC_FILTERING`. The lower bound
+/// is the value that turns the filter off; the upper is the desktop ceiling,
+/// and a device that offers less — or none — is the setter's clamp, so a file
+/// asking for sixteen on such a device gets what it has rather than a sampler
+/// it refuses. The [module docs](self) say why this is the one key that may
+/// ask for more than the engine's default.
+///
+/// # A line that does nothing says so
+///
+/// On [`render_scale`]'s terms exactly: a value this cannot use — a string,
+/// `nan`, `inf` — leaves the default and **warns**, naming the key, and a
+/// finite value outside the range is clamped without a word.
+#[must_use]
+pub fn anisotropic_filtering(stack: &SettingsStack) -> f32 {
+    let dotted = format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}");
+    let unreadable = || {
+        crcbl_core::log::warn!(
+            "settings: `{dotted}` is not a usable number, so it does nothing; \
+             the page is sampled at the engine's default anisotropy"
+        );
+        DEFAULT_ANISOTROPY
+    };
+    match stack.get::<f64>(&dotted) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to [1, MAX_ANISOTROPIC_FILTERING], where every f64 has an f32 within an ulp"
+        )]
+        // The finite check first, for `render_scale`'s reason: `clamp` answers
+        // NaN for NaN, and a NaN is the one value `set_anisotropy` reads as
+        // "the default" — which is right, and would hide that the file said
+        // something unusable.
+        Some(anisotropy) if anisotropy.is_finite() => {
+            (anisotropy as f32).clamp(1.0, MAX_ANISOTROPIC_FILTERING)
+        }
+        Some(_) => unreadable(),
+        None if stack.contains(&dotted) => unreadable(),
+        None => DEFAULT_ANISOTROPY,
+    }
+}
+
 /// The ceiling the player puts on the loop's frame rate, for
 /// [`FrameLimit::clamped_to`].
 ///
@@ -287,7 +367,8 @@ pub fn frame_limit(stack: &SettingsStack) -> FrameLimit {
 /// Write the whole `[engine.video]` section into the stack's user layer.
 ///
 /// The mirror of [`video`], key for key: every entry of [`VIDEO_KEYS`],
-/// [`RENDER_SCALE_KEY`] and [`FRAME_LIMIT_KEY`]. Nothing is persisted until the
+/// [`RENDER_SCALE_KEY`], [`ANISOTROPIC_FILTERING_KEY`] and [`FRAME_LIMIT_KEY`].
+/// Nothing is persisted until the
 /// caller saves the stack
 /// — see [`SettingsStack::save_platform`].
 ///
@@ -308,6 +389,7 @@ pub fn frame_limit(stack: &SettingsStack) -> FrameLimit {
 pub fn set_video(stack: &mut SettingsStack, video: VideoSettings) -> Result<(), StorageError> {
     set_video_effects(stack, video.effects)?;
     set_render_scale(stack, video.render_scale)?;
+    set_anisotropic_filtering(stack, video.anisotropic_filtering)?;
     set_frame_limit(stack, video.frame_limit)
 }
 
@@ -353,6 +435,35 @@ pub fn set_render_scale(stack: &mut SettingsStack, scale: f32) -> Result<(), Sto
         )));
     }
     stack.set(&dotted, &f64::from(scale.clamp(MIN_RENDER_SCALE, 1.0)))
+}
+
+/// Write `[engine.video] anisotropic_filtering`, clamped to what
+/// [`anisotropic_filtering`] reads.
+///
+/// Clamped on the way in on [`set_render_scale`]'s terms, and to this layer's
+/// range rather than the device's: the file is the player's ask, which follows
+/// them to a machine with a different ceiling, and
+/// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy)
+/// clamps to the device at the moment it matters.
+///
+/// # Errors
+///
+/// [`set_video`]'s, and a value that is not finite, for [`set_render_scale`]'s
+/// reason.
+pub fn set_anisotropic_filtering(
+    stack: &mut SettingsStack,
+    anisotropy: f32,
+) -> Result<(), StorageError> {
+    let dotted = format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}");
+    if !anisotropy.is_finite() {
+        return Err(StorageError::Other(format!(
+            "settings: `{dotted}` cannot be written as {anisotropy}"
+        )));
+    }
+    stack.set(
+        &dotted,
+        &f64::from(anisotropy.clamp(1.0, MAX_ANISOTROPIC_FILTERING)),
+    )
 }
 
 /// Write `[engine.video] frame_limit`, as the rate [`frame_limit`] reads back.
@@ -501,8 +612,9 @@ const NAMED_VIDEO_KEYS: [(&str, &str); 8] = [
 ///
 /// **Derived from the readers wherever there is a reader**, so a key cannot
 /// appear here under one spelling and be read under another: the effect rows
-/// come from [`VIDEO_KEYS`], the scale row from [`RENDER_SCALE_KEY`], and the
-/// volume rows from [`Bus::settings_key`]. Only the rows with no reader are
+/// come from [`VIDEO_KEYS`], the scale row from [`RENDER_SCALE_KEY`], the
+/// anisotropy row from [`ANISOTROPIC_FILTERING_KEY`], and the volume rows from
+/// [`Bus::settings_key`]. Only the rows with no reader are
 /// written out, because there is nothing to derive them from.
 ///
 /// A `Vec` rather than a `const`: a dotted key is its namespace and its name
@@ -526,6 +638,10 @@ pub fn catalogue() -> Vec<CatalogueKey> {
     keys.push(read(
         format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"),
         "fraction of the surface extent; clamped to the renderer's floor",
+    ));
+    keys.push(read(
+        format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"),
+        "1 to 16; 1 is off, and the device's own ceiling clamps it",
     ));
     keys.push(read(
         format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"),
@@ -593,12 +709,32 @@ mod tests {
         let wanted = VideoSettings {
             effects: RenderEffects::all() - RenderEffects::BLOOM - RenderEffects::SHADOWS,
             render_scale: 0.5,
+            anisotropic_filtering: 4.0,
             frame_limit: FrameLimit::fps(60),
         };
         let (reloaded, _) = round_trip(|stack| {
             set_video(stack, wanted).expect("a fresh user layer accepts every key");
         });
         assert_eq!(video(&reloaded), wanted);
+    }
+
+    /// **The anisotropy is clamped on the way in as well as on the way out**,
+    /// to this layer's range and not the device's — the file is the ask, and
+    /// the setter meets the device.
+    #[test]
+    fn an_anisotropy_past_the_desktop_ceiling_is_stored_at_the_ceiling() {
+        let (reloaded, written) = round_trip(|stack| {
+            set_anisotropic_filtering(stack, 64.0).expect("a fresh user layer accepts every key");
+        });
+        assert!(
+            (anisotropic_filtering(&reloaded) - MAX_ANISOTROPIC_FILTERING).abs() < f32::EPSILON,
+            "reads back {}",
+            anisotropic_filtering(&reloaded)
+        );
+        assert!(
+            !written.contains("64"),
+            "the file kept the unclamped ask:\n{written}"
+        );
     }
 
     /// **An effect left on is written as `true`, not left out.**
@@ -672,6 +808,10 @@ mod tests {
                 "a render scale of {bad} was accepted"
             );
             assert!(
+                set_anisotropic_filtering(&mut stack, bad).is_err(),
+                "an anisotropy of {bad} was accepted"
+            );
+            assert!(
                 set_audio_gain(&mut stack, Bus::Music, bad).is_err(),
                 "a music gain of {bad} was accepted"
             );
@@ -703,6 +843,7 @@ mod tests {
             .map(|(key, _)| format!("{VIDEO_NAMESPACE}.{key}"))
             .collect();
         wanted.push(format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"));
+        wanted.push(format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"));
         wanted.extend(Bus::ALL.map(|bus| format!("{AUDIO_NAMESPACE}.{}", bus.settings_key())));
 
@@ -1172,6 +1313,69 @@ mod tests {
         let key = format!("[{VIDEO_NAMESPACE}]\n{RENDER_SCALE_KEY} = ");
         assert!((scale_of(&format!("{key}1\n")) - 1.0).abs() < f32::EPSILON);
         assert!((scale_of(&format!("{key}0\n")) - MIN_RENDER_SCALE).abs() < f32::EPSILON);
+    }
+
+    /// The anisotropy the reader answers off a file holding `toml`.
+    fn anisotropy_of(toml: &str) -> f32 {
+        anisotropic_filtering(&stack_from(toml))
+    }
+
+    /// **A file that says nothing samples at the engine's default**, not at
+    /// the ceiling: "nothing asked" is the engine's own figure here as it is
+    /// for every key, even though this one may ask above it.
+    #[test]
+    fn an_absent_anisotropy_is_the_engines_default() {
+        assert!((anisotropy_of("") - DEFAULT_ANISOTROPY).abs() < f32::EPSILON);
+    }
+
+    /// **An anisotropy is read, and clamped to this layer's range.**
+    ///
+    /// Both bounds and the whole-number spelling, which is the one a player
+    /// writes: `anisotropic_filtering = 16`. Above the ceiling is the ceiling
+    /// and not a refusal; below one is one, the value that turns the filter
+    /// off.
+    #[test]
+    fn an_anisotropy_is_clamped_to_the_range_the_file_may_spell() {
+        let key = format!("[{VIDEO_NAMESPACE}]\n{ANISOTROPIC_FILTERING_KEY} = ");
+        assert!((anisotropy_of(&format!("{key}4\n")) - 4.0).abs() < f32::EPSILON);
+        assert!((anisotropy_of(&format!("{key}2.0\n")) - 2.0).abs() < f32::EPSILON);
+        assert!(
+            (anisotropy_of(&format!("{key}64\n")) - MAX_ANISOTROPIC_FILTERING).abs() < f32::EPSILON
+        );
+        assert!((anisotropy_of(&format!("{key}0\n")) - 1.0).abs() < f32::EPSILON);
+        assert!((anisotropy_of(&format!("{key}-8\n")) - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// **A value no anisotropy can be read out of is the default and warns,
+    /// naming the key** — `render_scale`'s test, for the same arms.
+    #[test]
+    fn an_anisotropy_that_is_not_a_usable_number_warns_and_is_the_default() {
+        for value in ["\"lots\"", "nan", "inf", "-inf"] {
+            let capture = crcbl_core::log::capture();
+            let toml = format!("[{VIDEO_NAMESPACE}]\n{ANISOTROPIC_FILTERING_KEY} = {value}\n");
+            let anisotropy = anisotropy_of(&toml);
+            assert!(
+                (anisotropy - DEFAULT_ANISOTROPY).abs() < f32::EPSILON,
+                "`{value}` was read as an anisotropy of {anisotropy}"
+            );
+
+            let warned: Vec<_> = capture
+                .records()
+                .into_iter()
+                .filter(|record| {
+                    record
+                        .message
+                        .contains(&format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"))
+                })
+                .collect();
+            assert_eq!(
+                warned.len(),
+                1,
+                "`{value}` should warn exactly once: {:?}",
+                capture.records()
+            );
+            assert_eq!(warned[0].level, crcbl_core::log::Level::Warn);
+        }
     }
 
     /// **The two halves of `[engine.video]` are read from one file and neither

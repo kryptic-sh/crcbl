@@ -35,10 +35,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the feature was withheld, the default for a `NaN`), with `anisotropy` reading
   it back: a new sampler, and each frame slot's mesh-layout groups rebuilt at
   that slot's own `begin_frame`, so a frame in flight keeps the sampler it was
-  recorded with. The player's `anisotropic_filtering` row is still to come. The
-  lights fixture's sun (`dim_sun`) is halved so its pools stay the brightest
-  thing on their pyramids under a bilinear page. The page costs a third again in
-  device memory for the chain.
+  recorded with. The player's key is `[engine.video] anisotropic_filtering`:
+  `crcbl::settings::anisotropic_filtering` reads it — `1` off, up to
+  `MAX_ANISOTROPIC_FILTERING` (sixteen, the desktop preset's), the default when
+  absent, the first key that may ask for more than the engine's default —
+  `set_anisotropic_filtering` writes it, `VideoSettings::anisotropic_filtering`
+  carries it, `GpuContext::anisotropic_filtering` hands it over, and
+  `apps/viewer` applies it at open and on reload; `crcbl settings list` names
+  it. The `apps/options` row is still to come. The lights fixture's sun
+  (`dim_sun`) is halved so its pools stay the brightest thing on their pyramids
+  under a bilinear page. The page costs a third again in device memory for the
+  chain.
 
 - **Auto-exposure: the frame measures its own exposure, and no readback stalls
   on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —

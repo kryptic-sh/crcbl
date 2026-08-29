@@ -327,6 +327,17 @@ impl Gpu {
             ctx.destroy()?;
             return Err(GpuError::Hal(error));
         }
+        // `[engine.video] anisotropic_filtering`, from the same read as the
+        // scale: the engine's default for a player who has said nothing, which
+        // is the sampler `with_scene` already built, so the call creates
+        // nothing. Before the first frame, so that frame's slot rebuilds its
+        // groups at its own `begin_frame` rather than a frame late. Unwound by
+        // hand for the grid's reason.
+        if let Err(error) = renderer.set_anisotropy(ctx.device(), ctx.anisotropic_filtering()) {
+            renderer.destroy(ctx.device());
+            ctx.destroy()?;
+            return Err(GpuError::Hal(error));
+        }
 
         // Unwound by hand, because `Gpu` has no `Drop`: a `?` here would leak
         // every pipeline and buffer the renderer just made.
@@ -570,6 +581,14 @@ impl Gpu {
         // Unwound by hand from here down, for `Gpu::open`'s reason: a `?` would
         // drop the half-built renderer without releasing a pipeline of it.
         if let Err(error) = next.set_ground_grid(device, Some(GridStyle::for_extent(grid_extent))) {
+            next.destroy(device);
+            return Err(error);
+        }
+        // Carried for the render scale's reason below: a reload must not
+        // quietly sample at the engine's default again for a player who asked
+        // for less — or for more. Here rather than beside it because this one
+        // can fail, and here the unwind is still one call.
+        if let Err(error) = next.set_anisotropy(device, self.renderer.anisotropy()) {
             next.destroy(device);
             return Err(error);
         }
