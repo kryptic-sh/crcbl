@@ -363,24 +363,24 @@ mod tests {
         }
     }
 
-    /// A zero probe volume must leave a hit's old `hit_color * fresnel * confidence`
+    /// A zero probe volume must leave a hit's old `hit_color * env_brdf * confidence`
     /// arithmetic byte-for-byte intact; only the miss share is added.
     #[test]
     fn zero_environment_keeps_the_hit_multiplication_order() {
         let source = include_str!("../shaders/ssr.slang");
         assert!(
             source.contains(
-                "reflection = hit_color * fresnel * confidence\n                    + environment * fresnel * (1.0 - confidence);"
+                "reflection = hit_color * env_brdf * confidence\n                    + environment * env_brdf * (1.0 - confidence);"
             ),
-            "ssr.slang must retain hit_color * fresnel * confidence before adding the probe fallback"
+            "ssr.slang must retain hit_color * env_brdf * confidence before adding the probe fallback"
         );
 
         let hit = 0.700_000_05f32;
-        let fresnel = 0.300_000_04f32;
+        let env_brdf = 0.300_000_04f32;
         let confidence = 0.900_000_04f32;
-        let old = hit * fresnel * confidence;
+        let old = hit * env_brdf * confidence;
         let with_zero_environment =
-            hit * fresnel * confidence + 0.0f32 * fresnel * (1.0 - confidence);
+            hit * env_brdf * confidence + 0.0f32 * env_brdf * (1.0 - confidence);
         assert_eq!(
             with_zero_environment.to_bits(),
             old.to_bits(),
@@ -396,7 +396,7 @@ mod tests {
         let march = include_str!("../shaders/ssr.slang");
         assert!(
             march.contains(
-                "if (sharpness <= 0.0)\n    {\n        return float4(environment * fresnel, 0.0);\n    }"
+                "if (sharpness <= 0.0)\n    {\n        return float4(environment * env_brdf, 0.0);\n    }"
             ),
             "rough surfaces must return their probe fallback with zero sharpness before march setup"
         );
@@ -410,10 +410,10 @@ mod tests {
 
         let lit = 0.125f32;
         let environment = 0.6f32;
-        let fresnel = 0.8f32;
-        let fallback = environment * fresnel;
+        let env_brdf = 0.8f32;
+        let fallback = environment * env_brdf;
         assert_eq!(lit + fallback, 0.605);
-        assert_eq!(lit + 0.0f32 * fresnel, lit);
+        assert_eq!(lit + 0.0f32 * env_brdf, lit);
     }
 
     /// Positive sharpness blends continuously from the direct centre fallback to

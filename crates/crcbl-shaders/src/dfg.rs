@@ -142,11 +142,10 @@ pub const ALBEDO_BYTES: usize = DFG_SIZE * DFG_SIZE * ALBEDO_TEXEL_BYTES;
 /// compensation needs, encoded for upload as an `Rg8Unorm` image.
 ///
 /// [`directional_albedo`] at every texel centre — `scale + bias`, the table at
-/// `f0 = 1` — rather than the two channels the entry holds. Compensation is the
-/// only reader today and it wants the sum; the second split-sum consumer,
-/// image-based specular lighting, wants the pair and will upload its own image
-/// from the same [`bytes`], so nothing is lost by keeping this one at what its
-/// caller reads.
+/// `f0 = 1` — rather than the two channels the entry holds. Compensation wants
+/// the sum; the other split-sum consumer, the reflection pass's environment
+/// term, wants the pair and uploads its own image from [`pair_texels`], so
+/// nothing is lost by keeping this one at what its caller reads.
 ///
 /// Row-major with `roughness` slow and `N·V` fast, which is [`entry`]'s order
 /// and the order a 2D image upload expects.
@@ -162,6 +161,39 @@ pub fn albedo_texels() -> Vec<u8> {
             let quantised = ((scale + bias).clamp(0.0, 1.0) * 65535.0).round() as u32;
             texels.push((quantised >> 8) as u8);
             texels.push((quantised & 0xff) as u8);
+        }
+    }
+    texels
+}
+
+/// Bytes one texel of [`pair_texels`] occupies: `scale` then `bias`, each as
+/// 16-bit fixed point with its high byte first, in an `Rgba8Unorm` image —
+/// [`ALBEDO_TEXEL_BYTES`]'s encoding with both channels kept.
+pub const PAIR_TEXEL_BYTES: usize = 4;
+
+/// The length of [`pair_texels`], one [`PAIR_TEXEL_BYTES`] per texel of a
+/// [`DFG_SIZE`]-square image.
+pub const PAIR_BYTES: usize = DFG_SIZE * DFG_SIZE * PAIR_TEXEL_BYTES;
+
+/// The committed table's two channels encoded for upload as an `Rgba8Unorm`
+/// image, in [`entry`]'s order — row-major, `roughness` slow and `N·V` fast.
+///
+/// The split-sum's second half as `ssr.slang` reads it: `f0 · scale + bias` is
+/// what a lobe's Fresnel and visibility integrate to over the environment it
+/// gathers, and the pass scales its prefiltered environment by that in place
+/// of Schlick along the one mirror direction. `decode_fixed_pair` there is the
+/// read, [`decode_albedo`]'s arithmetic once per channel.
+#[must_use]
+pub fn pair_texels() -> Vec<u8> {
+    let mut texels = Vec::with_capacity(PAIR_BYTES);
+    for roughness in 0..DFG_SIZE {
+        for n_dot_v in 0..DFG_SIZE {
+            for share in entry(n_dot_v, roughness) {
+                // Clamped before quantising, for `albedo_texels`' reason.
+                let quantised = (share.clamp(0.0, 1.0) * 65535.0).round() as u32;
+                texels.push((quantised >> 8) as u8);
+                texels.push((quantised & 0xff) as u8);
+            }
         }
     }
     texels
@@ -723,6 +755,59 @@ mod tests {
             "a texel is {worst} from the entry it was baked from, past the {TEXEL_TOLERANCE} \
              half-step rounding to nearest allows"
         );
+    }
+
+    /// Every texel of the pair image decodes, through the shader's own
+    /// arithmetic, to the entry it was written from within half a fixed-point
+    /// step — and the image is exactly the size the upload will declare.
+    #[test]
+    fn the_pair_texels_encode_the_committed_table_to_a_quantisation_step() {
+        let texels = pair_texels();
+        assert_eq!(
+            texels.len(),
+            PAIR_BYTES,
+            "an Rgba8Unorm image of a {DFG_SIZE}-square table is {PAIR_BYTES} bytes"
+        );
+        let mut worst = 0.0f32;
+        for roughness in 0..DFG_SIZE {
+            for n_dot_v in 0..DFG_SIZE {
+                let at = (roughness * DFG_SIZE + n_dot_v) * PAIR_TEXEL_BYTES;
+                let channel = |i: usize| f32::from(texels[at + i]) / 255.0;
+                let decoded = [
+                    decode_albedo(channel(0), channel(1)),
+                    decode_albedo(channel(2), channel(3)),
+                ];
+                for (got, want) in decoded.iter().zip(entry(n_dot_v, roughness)) {
+                    worst = worst.max((got - want.clamp(0.0, 1.0)).abs());
+                }
+            }
+        }
+        assert!(
+            worst <= TEXEL_TOLERANCE,
+            "a pair texel decodes {worst} from its entry, past the {TEXEL_TOLERANCE} half-step \
+             rounding to nearest allows"
+        );
+        // Anti-vacuity: the two channels are not the same number, so a texel
+        // that swapped them would not have passed above by accident.
+        let [scale, bias] = entry(DFG_SIZE / 2, DFG_SIZE / 2);
+        assert!((scale - bias).abs() > TEXEL_TOLERANCE);
+    }
+
+    /// `ssr.slang` scales its environment by the pair, `f0 · scale + bias`,
+    /// read at `(N·V, roughness)` — the split-sum's second half, not Schlick.
+    #[test]
+    fn the_shader_scales_the_environment_by_the_pair() {
+        let source = include_str!("../shaders/ssr.slang");
+        for line in [
+            "float2 dfg_terms = dfg_at(n_dot_v, surface.a);",
+            "float3 env_brdf = f0 * dfg_terms.x + dfg_terms.y;",
+        ] {
+            assert!(
+                source.contains(line),
+                "ssr.slang no longer contains `{line}`, so the reflection pass is not scaling \
+                 its environment by the DFG pair"
+            );
+        }
     }
 
     #[test]

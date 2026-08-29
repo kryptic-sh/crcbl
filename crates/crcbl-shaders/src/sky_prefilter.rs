@@ -136,7 +136,7 @@ pub const PREFILTER_IMAGE_BYTES: usize = PREFILTER_SIZE * PREFILTER_SIZE * PREFI
 /// [`entry`]'s order — row-major, `roughness` slow and `|R.y|` fast.
 ///
 /// `crate::dfg::albedo_texels`'s encoding with both channels kept, since the
-/// consumer wants the pair: `ssr.slang`'s `decode_sky_weights` is the read.
+/// consumer wants the pair: `ssr.slang`'s `decode_fixed_pair` is the read.
 #[must_use]
 pub fn texels() -> Vec<u8> {
     let mut texels = Vec::with_capacity(PREFILTER_IMAGE_BYTES);
@@ -360,7 +360,7 @@ mod tests {
         ] {
             assert!(
                 source.contains(line),
-                "ssr.slang's `decode_sky_weights` no longer contains `{line}`"
+                "ssr.slang's `decode_fixed_pair` no longer contains `{line}`"
             );
         }
     }

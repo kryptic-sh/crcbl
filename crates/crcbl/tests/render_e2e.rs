@@ -1241,20 +1241,27 @@ const SKY_FALLBACK_FLOOR: f32 = 6.0;
 /// was set against measures exactly zero.
 const SKY_UNTOUCHED: f32 = 2.0;
 
-/// How much a sky lit only **below** the horizon must add to a **fully rough**
+/// The least a sky lit only **below** the horizon may add to a **fully rough**
 /// floor whose rays leave it upward.
 ///
 /// The mirror floor's rays see next to none of that sky — its row of
 /// `crcbl_shaders::sky_prefilter`'s table gives the opposite pole a share
 /// under a hundredth at the band — and the roughest row gives it an eighth.
-/// An eighth of [`SKY_POLE`] is still well over the tonemapper's knee on a
-/// floor that is otherwise dark in this channel, which is why the measured
-/// delta is far larger than the share alone suggests: 74.1 on radv and 73.9
-/// on lavapipe in the sweep of 2026-08-29. Half of that, so a
-/// rasteriser's own drift cannot cross it, while every wrong reading of the
-/// table — its mirror row, its axes swapped, the one mirror direction — lands
-/// at the mirror floor's own single digits.
-const ROUGH_SKY_BELOW_FLOOR: f32 = 37.0;
+/// Half of the 17.1 on radv and 17.0 on lavapipe the sweep of 2026-08-29
+/// measured, so a rasteriser's own drift cannot cross it, while every wrong
+/// reading of the sky table — its mirror row, its axes swapped, the one
+/// mirror direction — lands at the mirror floor's own single digits.
+const ROUGH_SKY_BELOW_FLOOR: f32 = 8.0;
+
+/// The most that same sky may add to the rough floor, which is the `DFG`
+/// pair's claim: `f0 · scale + bias` at the band's grazing `N·V` on the
+/// roughest row is under a third of Schlick along the one reflected
+/// direction, and the environment scaled by Schlick measured 74.1 on radv and
+/// 73.9 on lavapipe before the pair replaced it. Twice the pair's own
+/// measurement and under half of Schlick's, so the split-sum's second half
+/// being dropped for Schlick — or the pair read at roughness zero, whose row
+/// is Schlick — fails here while the sky half stays untouched.
+const ROUGH_SKY_BELOW_CEILING: f32 = 35.0;
 
 /// **The sky is the environment a missed ray falls back to**, and it is read
 /// along the ray rather than applied as a constant.
@@ -1291,6 +1298,13 @@ const ROUGH_SKY_BELOW_FLOOR: f32 = 37.0;
 /// mirror's upward rays see nothing of it, and the roughest lobe, which
 /// reaches across the horizon, does. A table read at the wrong axis, at
 /// roughness zero, or not at all fails here and nowhere else.
+///
+/// **The same pair has a ceiling, and that is the `DFG` half.** What the rough
+/// floor takes of that sky is the prefiltered gradient scaled by
+/// `f0 · scale + bias` at its grazing `N·V`, and on the roughest row that pair
+/// is well under Schlick along one direction — [`ROUGH_SKY_BELOW_CEILING`]
+/// says by how much. A pass that scaled by Schlick again passes the floor and
+/// fails the ceiling.
 ///
 /// **What this scene cannot see, stated rather than implied:** every reflected
 /// ray in it leaves the floor *upward*, so the branch that picks the ground
@@ -1406,6 +1420,13 @@ fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
          horizon and the table's `W_opposite` says how far; a fallback that read the table at \
          roughness zero, along the mirror direction alone, or not at all leaves this at the \
          mirror's zero"
+    );
+    assert!(
+        rough_from_below <= ROUGH_SKY_BELOW_CEILING,
+        "a sky lit only below the horizon added {rough_from_below:.1} to a fully rough floor, \
+         more than the `DFG` pair at a grazing N·V on the roughest row allows; the environment \
+         is being scaled by Schlick along one direction, or by the pair's roughness-zero row, \
+         which is the same number"
     );
 }
 

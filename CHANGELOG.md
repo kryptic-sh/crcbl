@@ -262,6 +262,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A reflection's environment is scaled by the split-sum's `DFG` pair.**
+  `ssr.slang` binds `crcbl_shaders::dfg::pair_texels` — the table's `scale` and
+  `bias` as 16-bit fixed point in a second `Rgba8Unorm` image
+  `crcbl_render::ssr::Ssr::new` uploads — and multiplies its environment, sky
+  and probes alike, by `f0 · scale + bias` at `(N·V, roughness)` in place of
+  Schlick along the reflected direction. The roughness-zero row is Schlick, so
+  mirrors are unchanged; a rough metal takes less of its environment at grazing
+  angles, which is the energy one direction over-counted. `44-lighting.md`'s
+  rung 3 is built.
 - **The reflectivity attachment's alpha is the lobe's roughness**, not the
   screen-space march's sharpness ramp. `mesh.slang` rounds it to the
   `Rgba8Unorm` target's levels before the store (`REFLECTIVITY_LEVELS`, mirrored

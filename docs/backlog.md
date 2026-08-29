@@ -736,25 +736,15 @@ chain itself was built 2026-08-29). Both read the row as it stands;
 multi-scatter compensation and the gradient sky were not blocked either, and are
 built.
 
-### Specular IBL: the sky is prefiltered, the DFG pair is owed (2026-08-29)
+### Specular IBL: what rung 3 left (2026-08-29)
 
-`44-lighting.md`'s rung 3 has its prefiltered half in the frame: `ssr.slang`'s
-miss fallback reads the gradient through `crcbl_shaders::sky_prefilter`'s table
-(`sky_prefilter::texels` as an `Rgba8Unorm` image bound by
-`crcbl_render::ssr::Ssr::new`, `sky_prefiltered` in the shader) at the surface's
-roughness. What it still owes:
+`44-lighting.md`'s rung 3 is built, both halves: `ssr.slang`'s miss fallback
+reads the gradient through `crcbl_shaders::sky_prefilter`'s table at the
+surface's roughness (`sky_prefiltered`), and scales its environment by
+`crcbl_shaders::dfg`'s pair — `dfg::pair_texels` as a second `Rgba8Unorm` image
+`crcbl_render::ssr::Ssr::new` uploads, `f0 · scale + bias` at `(N·V, roughness)`
+in place of Schlick. What it leaves:
 
-- **The `DFG` pair as an image and the term that reads it.** The fallback scales
-  the prefiltered sky by Schlick, `f0 + (1 − f0)(1 − N·V)⁵`, where the split-sum
-  wants `f0 · scale + bias` — `crcbl_shaders::dfg::entry`'s two channels rather
-  than the sum `dfg::albedo_texels` uploads for energy compensation. A second
-  image from `dfg::bytes`, encoded as `sky_prefilter::texels` is (two 16-bit
-  fixed-point shares a texel, the same `[0, 1]` range), bound after
-  `sky_prefilter` in `ssr.slang`, and `fresnel` replaced by the pair at
-  `(N·V, roughness)`. A mirror's Schlick and its `scale + bias` agree; the rough
-  rows are where the pair is darker than Schlick, which is the energy the single
-  ray was over-counting. Goldens with a rough metal under a sky move a second
-  time.
 - **A frame with `RenderEffects::REFLECTIONS` off keeps no ambient specular on
   metals**, as before this rung: the term lives in the reflection pass because
   that is where the gradient's rows are and where metals take their specular by
@@ -762,16 +752,25 @@ roughness. What it still owes:
   whenever the pass is on. Whether the off state deserves the prefiltered sky
   alone is a decision, not a gap.
 
-Verified for the prefiltered half: the texels decode to the table within half a
-fixed-point step, the shader's sum is held to `prefiltered_radiance` line by
-line, and `tests/render_e2e.rs`'s
+Verified: the texels of both images decode to their tables within half a
+fixed-point step, the shader's sky sum is held to `prefiltered_radiance` line by
+line and its `f0 * dfg_terms.x + dfg_terms.y` to a line test, and
+`tests/render_e2e.rs`'s
 `a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` holds a fully
 rough floor (`screenshot::ssr_rough_floor_forward`, the tinted row at a
-roughness of one) under a sky lit only below the horizon against the mirror
-floor: the lobe reaches across the horizon and the mirror's rays do not, 74
-against 4 on radv and lavapipe, and the fallback read at roughness zero left the
-rough floor at exactly the mirror's zero. No golden moved: every reflector in
-them is a mirror, and lantern has no sky, which is why that pair exists.
+roughness of one) under a sky lit only below the horizon from both sides: the
+lobe reaches across the horizon and the mirror's rays do not (17 against 4 on
+radv and lavapipe; the sky table read at roughness zero left it at the mirror's
+zero), and the pair takes under half of what Schlick took (Schlick restored, or
+the pair read at its roughness-zero row, both measured 74). No golden moved for
+the sky half — every reflector in them is a mirror, and lantern has no sky. The
+pair moved lantern's two: its probe-lit rough walls and crate sides sit at
+grazing angles, and every differing pixel is a shade darker, none structural.
+Re-blessed on lavapipe — `tests/golden/room.png` at 1183 pixels over tolerance
+(2.41%), max channel delta 34, ssim 0.9967; `tests/golden/live.png`, the screen
+that shows the room, at 13908 over (2.01%), max channel delta 46, ssim 0.9987.
+`render_e2e`'s `ssr` golden moved within tolerance (246 over on lavapipe, 0.50%,
+max delta 6) and was left.
 
 Two gaps from the roughness slice itself, both measured on 2026-08-29:
 

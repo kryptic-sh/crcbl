@@ -347,9 +347,16 @@ and where metals take their ambient specular; a term in both would count the sky
 twice. The roughness axis shows in exactly one frame of the suite — the fully
 rough floor `tests/render_e2e.rs` holds under a sky lit only below the horizon,
 which a mirror's rays cannot see and the lobe can — and the goldens, all
-mirrors, did not move. What the rung still owes is the `DFG` pair as an image
-and the `f0 · scale + bias` that scales the prefiltered sky in place of Schlick
-— `docs/backlog.md` carries it.
+mirrors, did not move. **And the `DFG` half is in the frame since the same
+day**: `dfg::pair_texels` is the table's two channels as a second `Rgba8Unorm`
+image the pass binds beside the sky's, filtered by the same four-`Load` helper
+(`fixed_pair_at`), and `f0 · scale + bias` at `(N·V, roughness)` scales the
+environment — sky and probes alike — in place of Schlick along the reflected
+direction. The roughness-zero row is Schlick, so mirrors take what they took;
+the rough floor in `tests/render_e2e.rs` takes under a quarter of what Schlick
+gave it at its grazing `N·V`, and the test holds that from both sides. The rung
+is built; what it leaves — no ambient specular when `REFLECTIONS` is off — is a
+decision `docs/backlog.md` records.
 
 ### Rung 4 — Specular antialiasing, once normal maps exist
 

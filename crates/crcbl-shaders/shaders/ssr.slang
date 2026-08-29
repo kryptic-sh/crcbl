@@ -232,6 +232,17 @@ DepthTexture2D hiz_5;
 [[vk::binding(10, 0)]]
 Texture2D<float4> sky_prefilter;
 
+/// The split-sum's other half, `crcbl_shaders::dfg`'s table as an `Rgba8Unorm`
+/// image: `rg` is `scale` and `ba` is `bias`, each a 16-bit fixed-point share
+/// with its high byte first, over `(N·V, roughness)` —
+/// `crcbl_shaders::dfg::pair_texels`. `mesh.slang` reads the same table summed
+/// to one channel for energy compensation; a reflection wants the pair,
+/// because `f0 * scale + bias` is what the lobe's Fresnel and visibility
+/// integrate to over the environment it gathers, and Schlick along one
+/// direction is only that at a roughness of zero.
+[[vk::binding(11, 0)]]
+Texture2D<float4> dfg;
+
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` declares under this name.
 ///
@@ -587,48 +598,61 @@ static const float PROBE_TRANSFER_L1 = 2.0943951023931954923;
 /// direction. The stored coefficients are irradiance: undo the clamped-cosine
 /// transfer per band before evaluating them. A zero volume addresses row zero of
 /// the zeroed table and returns exactly zero.
-/// One texel of `sky_prefilter` as the two weights it encodes.
+/// One texel of `sky_prefilter` or of `dfg` as the two shares it encodes.
 ///
 /// Each channel pair arrives as the stored bytes over 255, a conversion every
 /// backend defines exactly; multiplying back by 255 recovers the bytes, and
 /// `high * 256 + low` over 65535 is the fixed point the cook wrote —
-/// `crcbl_shaders::dfg::decode_albedo`'s arithmetic, once per weight.
+/// `crcbl_shaders::dfg::decode_albedo`'s arithmetic, once per share.
 /// `crcbl_shaders::sky_prefilter`'s
-/// `the_texels_encode_the_committed_table_to_a_quantisation_step` holds the
-/// encoding to it and `the_shader_decodes_the_texels_this_module_writes`
-/// holds this spelling.
-float2 decode_sky_weights(float4 texel)
+/// `the_texels_encode_the_committed_table_to_a_quantisation_step` and
+/// `crcbl_shaders::dfg`'s `the_pair_texels_encode_the_committed_table_to_a_
+/// quantisation_step` hold the two encodings to it, and
+/// `the_shader_decodes_the_texels_this_module_writes` holds this spelling.
+float2 decode_fixed_pair(float4 texel)
 {
     return float2(texel.r * 65280.0 + texel.g * 255.0, texel.b * 65280.0 + texel.a * 255.0)
          / 65535.0;
 }
 
-/// `W_far` and `W_opposite` at `(up, roughness)`, bilinear over the four texels
-/// around the point with the addressing a clamped sampler would use — the
-/// table is baked on texel centres, so the axis maps to `value * size - 0.5`
-/// and both ends clamp to the edge texel. `crcbl_shaders::sky_prefilter::sample`
-/// is the same filter on the CPU, and `mesh.slang`'s `specular_albedo_at` the
-/// same shape over the other table.
-float2 sky_prefilter_at(float up, float roughness)
+/// A fixed-point pair table at `at`, bilinear over the four texels around the
+/// point with the addressing a clamped sampler would use — both tables are
+/// baked on texel centres, so an axis maps to `value * size - 0.5` and both
+/// ends clamp to the edge texel. `crcbl_shaders::sky_prefilter::sample` and
+/// `crcbl_shaders::dfg::sample` are the same filter on the CPU, and
+/// `mesh.slang`'s `specular_albedo_at` the same shape over one channel.
+float2 fixed_pair_at(Texture2D<float4> table, float2 at)
 {
     uint width;
     uint height;
-    sky_prefilter.GetDimensions(width, height);
+    table.GetDimensions(width, height);
     float2 extent = float2(float(width), float(height));
-    float2 scaled = float2(saturate(up), saturate(roughness)) * extent - 0.5;
+    float2 scaled = saturate(at) * extent - 0.5;
     float2 low = clamp(floor(scaled), float2(0.0, 0.0), extent - 1.0);
     float2 high = min(low + 1.0, extent - 1.0);
     float2 weight = clamp(scaled - low, 0.0, 1.0);
 
     int2 lo = int2(low);
     int2 hi = int2(high);
-    float2 top = lerp(decode_sky_weights(sky_prefilter.Load(int3(lo.x, lo.y, 0))),
-                      decode_sky_weights(sky_prefilter.Load(int3(hi.x, lo.y, 0))),
+    float2 top = lerp(decode_fixed_pair(table.Load(int3(lo.x, lo.y, 0))),
+                      decode_fixed_pair(table.Load(int3(hi.x, lo.y, 0))),
                       weight.x);
-    float2 bottom = lerp(decode_sky_weights(sky_prefilter.Load(int3(lo.x, hi.y, 0))),
-                         decode_sky_weights(sky_prefilter.Load(int3(hi.x, hi.y, 0))),
+    float2 bottom = lerp(decode_fixed_pair(table.Load(int3(lo.x, hi.y, 0))),
+                         decode_fixed_pair(table.Load(int3(hi.x, hi.y, 0))),
                          weight.x);
     return lerp(top, bottom, weight.y);
+}
+
+/// `W_far` and `W_opposite` at `(up, roughness)`.
+float2 sky_prefilter_at(float up, float roughness)
+{
+    return fixed_pair_at(sky_prefilter, float2(up, roughness));
+}
+
+/// `scale` and `bias` at `(n_dot_v, roughness)`.
+float2 dfg_at(float n_dot_v, float roughness)
+{
+    return fixed_pair_at(dfg, float2(n_dot_v, roughness));
 }
 
 /// The gradient sky as a lobe of `roughness` about `direction` sees it:
@@ -756,26 +780,28 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // The sky at the surface's roughness, not along the one mirror direction:
     // a rough lobe gathers the gradient from a cone about the reflection, and
     // `docs/plan/44-lighting.md`'s rung 3 cooked that gather into
-    // `sky_prefilter`. This is the split-sum's prefiltered half; the `DFG`
-    // pair that scales it is still the Schlick term below.
+    // `sky_prefilter`. This is the split-sum's prefiltered half; `env_brdf`
+    // below is the other.
     float3 environment = probe_environment(world_position, reflection_direction)
                        + sky_prefiltered(reflection_direction, surface.a);
 
-    // Schlick, and it is `mesh.slang`'s expansion rather than a `pow`: the same
-    // fragment evaluated the same Fresnel term for its lights, and a reflection
-    // is the same lobe pointed at the room instead of at a light.
+    // The split-sum's second half: the `DFG` pair at `(N·V, roughness)`, and
+    // `f0 * scale + bias` is what the lobe's Fresnel and visibility integrate
+    // to over the environment it gathers. The table's roughness-zero row is
+    // Schlick's expansion exactly, so a mirror takes what it took when this
+    // was Schlick along the one reflected direction; a rough surface takes
+    // less, which is the energy that single direction was over-counting.
     float n_dot_v = saturate(dot(normal, -towards));
     float3 f0 = surface.rgb;
-    float grazing = 1.0 - n_dot_v;
-    float grazing2 = grazing * grazing;
-    float3 fresnel = f0 + (float3(1.0, 1.0, 1.0) - f0) * (grazing2 * grazing2 * grazing);
+    float2 dfg_terms = dfg_at(n_dot_v, surface.a);
+    float3 env_brdf = f0 * dfg_terms.x + dfg_terms.y;
 
     // A probe is a blurry environment, so it remains valid when a single
     // screen-space ray is not. Its zero alpha keeps it out of the sharpness
     // kernel; `ssr_blur.slang` composites this centre value directly.
     if (sharpness <= 0.0)
     {
-        return float4(environment * fresnel, 0.0);
+        return float4(environment * env_brdf, 0.0);
     }
 
     // A ray retracing the view ray asks about a point behind the camera.
@@ -789,7 +815,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float4 clip_ray = mul(camera.proj, float4(ray, 0.0));
     if (clip_start.w <= 0.0)
     {
-        return float4(environment * fresnel, sharpness);
+        return float4(environment * env_brdf, sharpness);
     }
     float2 at_start = pixel_of(clip_start.xy / clip_start.w, size);
 
@@ -802,7 +828,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float rate = length(screen_rate);
     if (rate < 1e-6)
     {
-        return float4(environment * fresnel, sharpness);
+        return float4(environment * env_brdf, sharpness);
     }
     float2 forward = screen_rate / rate;
 
@@ -870,7 +896,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     travel = max(travel, 0.0);
     if (travel <= BOUNDARY_NUDGE)
     {
-        return float4(environment * fresnel, sharpness);
+        return float4(environment * env_brdf, sharpness);
     }
 
     // The ray parameter at the far end, solved on the screen axis the segment
@@ -889,7 +915,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // happens to answer `false` to.
     if (!(when_end > 0.0) || !isfinite(when_end))
     {
-        return float4(environment * fresnel, sharpness);
+        return float4(environment * env_brdf, sharpness);
     }
 
     // `1/w` and `view/w` are the quantities linear in the *screen* parameter, so
@@ -904,7 +930,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // The march begins at the ray's own origin, which sits [`NORMAL_OFFSET`] in
     // front of the surface it left — so it starts on the near side of
     // everything, which is what a crossing is measured from.
-    float3 reflection = environment * fresnel;
+    float3 reflection = environment * env_brdf;
     uint max_level = min(camera.hiz.x, MAX_HIZ_LEVEL);
 
     // --- the hierarchical march ---
@@ -1002,8 +1028,8 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 
                 float confidence = sharpness * facing * border * distance * bound;
                 float3 hit_color = scene_color.Load(int3(hit, 0)).rgb;
-                reflection = hit_color * fresnel * confidence
-                    + environment * fresnel * (1.0 - confidence);
+                reflection = hit_color * env_brdf * confidence
+                    + environment * env_brdf * (1.0 - confidence);
                 break;
             }
             // Past the bound: the tap is no evidence and the march continues

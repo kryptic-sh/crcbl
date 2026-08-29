@@ -38,7 +38,7 @@ use crcbl_hal::{
     PipelineLayoutHandle, QueueHandle, SampleType, ShaderStages, StoreOp,
     check_portable_storage_buffers,
 };
-use crcbl_shaders::{SSR, SSR_BLUR, sky_prefilter, ssr};
+use crcbl_shaders::{SSR, SSR_BLUR, dfg, sky_prefilter, ssr};
 
 use crate::graph::{ImageId, RenderGraph};
 use crate::ssao::cached_group;
@@ -51,6 +51,12 @@ const SKY_PREFILTER_BINDING: u32 = 5 + crate::hiz::MAX_LEVELS;
 
 /// [`sky_prefilter::PREFILTER_SIZE`] as an image extent.
 const SKY_PREFILTER_SIZE: u32 = sky_prefilter::PREFILTER_SIZE as u32;
+
+/// The binding `ssr.slang` reads [`dfg`]'s pair through, beside the sky table.
+const DFG_BINDING: u32 = SKY_PREFILTER_BINDING + 1;
+
+/// [`dfg::DFG_SIZE`] as an image extent.
+const DFG_SIZE: u32 = dfg::DFG_SIZE as u32;
 
 /// Vertices in the over-sized full-screen triangle `ssr.slang` and
 /// `ssr_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
@@ -129,6 +135,12 @@ pub(crate) struct Ssr {
     /// only reader — the DFG table beside it in the forward pass has a reader
     /// there.
     sky_prefilter: UploadedTexture,
+    /// `crcbl_shaders::dfg`'s pair as the `Rgba8Unorm` image `ssr.slang`
+    /// scales its environment by — `f0 · scale + bias`, the split-sum's second
+    /// half. The same table [`crate::forward`] uploads summed to one channel
+    /// for energy compensation; this pass wants both channels, so it carries
+    /// its own image of them.
+    dfg: UploadedTexture,
 }
 
 impl Ssr {
@@ -171,6 +183,15 @@ impl Ssr {
             SKY_PREFILTER_SIZE,
             SKY_PREFILTER_SIZE,
             &sky_prefilter::texels(),
+        )?;
+        let dfg_pair = upload_texture(
+            device,
+            queue,
+            "dfg pair table",
+            Format::Rgba8Unorm,
+            DFG_SIZE,
+            DFG_SIZE,
+            &dfg::pair_texels(),
         )?;
 
         // **No sampler**, which is the whole of what reading by `Load` buys —
@@ -251,6 +272,16 @@ impl Ssr {
                 view_type: ImageViewType::D2,
                 // An ordinary colour image the shader `Load`s and filters
                 // itself; no sampler, like every other read in the pass.
+                sample_type: SampleType::Float,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
+        entries.push(BindGroupLayoutEntry {
+            binding: DFG_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
                 sample_type: SampleType::Float,
             },
             count: 1,
@@ -384,6 +415,7 @@ impl Ssr {
             blur_pipeline,
             blur_groups: vec![None; frames],
             sky_prefilter,
+            dfg: dfg_pair,
         })
     }
 
@@ -438,6 +470,7 @@ impl Ssr {
         let layout = self.layout;
         let uniforms = self.uniforms[frame];
         let sky_prefilter_view = self.sky_prefilter.view;
+        let dfg_view = self.dfg.view;
         // Split so the two closures below borrow different halves of `self`, on
         // `Ssao::add_passes`' terms: one `&mut self` shared between them is what
         // the borrow checker refuses, and it would be refusing something
@@ -524,6 +557,11 @@ impl Ssr {
                     binding: SKY_PREFILTER_BINDING,
                     array_index: 0,
                     resource: BindingResource::ImageView(sky_prefilter_view),
+                },
+                BindGroupEntry {
+                    binding: DFG_BINDING,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(dfg_view),
                 },
             ];
             let pyramid_views = pyramid.map(|level| ctx.image_view(level));
@@ -635,5 +673,6 @@ impl Ssr {
             device.destroy_buffer(buffer);
         }
         self.sky_prefilter.destroy(device);
+        self.dfg.destroy(device);
     }
 }
