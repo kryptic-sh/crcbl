@@ -31,7 +31,7 @@
 
 use crcbl::audio::mixer::Bus;
 use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit};
-use crcbl::render::DEFAULT_ANISOTROPY;
+use crcbl::render::{DEFAULT_ANISOTROPY, MIN_RENDER_SCALE};
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
 /// The id of `bus`'s fader, numbered in [`Bus::ALL`]'s order from the first id
@@ -163,6 +163,31 @@ pub fn anisotropy_label(anisotropy: f32) -> String {
     }
 }
 
+/// The id of the groove that sets `[engine.video] render_scale`.
+pub const RENDER_SCALE_ID: crcbl::ui::WidgetId = ANISOTROPY_ID + 1;
+
+/// The render scale a handle `position` of the way along the groove names.
+///
+/// A groove rather than a ladder, because the key is a continuum the renderer
+/// clamps to `MIN_RENDER_SCALE..=1.0` and every point of it is a frame a player
+/// might mean — unlike a frame rate or an anisotropy, which hardware steps.
+/// Linear across that range, so the left end of the groove is the smallest
+/// frame the renderer draws and the right end is the whole extent; there is no
+/// perceptual taper to apply to a pixel count.
+///
+/// Through the widget's own clamp for [`gain_at`]'s reason: a `NaN` lands at
+/// the left end rather than being handed back by `f32::clamp`.
+#[must_use]
+pub fn scale_at(position: f32) -> f32 {
+    MIN_RENDER_SCALE + Slider::new(position).position() * (1.0 - MIN_RENDER_SCALE)
+}
+
+/// Where the handle sits for `scale` — [`scale_at`] the other way round.
+#[must_use]
+pub fn scale_handle_at(scale: f32) -> f32 {
+    Slider::new((scale - MIN_RENDER_SCALE) / (1.0 - MIN_RENDER_SCALE)).position()
+}
+
 /// What this sample's own rows do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -237,10 +262,10 @@ pub const SILENT_MARK: &str = "(silent)";
 /// What a row writes after a value this run is not running under.
 ///
 /// The loop takes its frame limit when it is built, so a cap chosen here is
-/// one the **next** start will use; and this sample draws no page, so there is
-/// nothing here for an anisotropy to reach until a renderer opens over the key.
-/// The faders apply as they move, which is exactly why these two rows have to
-/// say that they do not.
+/// one the **next** start will use; and this sample draws no scene, so there is
+/// nothing here for an anisotropy or a render scale to reach until a renderer
+/// opens over the key. The faders apply as they move, which is exactly why the
+/// video rows have to say that they do not.
 pub const NEXT_START_MARK: &str = "(next start)";
 
 /// The label a bus wears on its row.
@@ -282,6 +307,10 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
             "ANISOTROPY",
             anisotropy_label(DEFAULT_ANISOTROPY),
         ),
+        // The third video key, a groove: the whole extent at the right end,
+        // which is what an absent key means. Walked down to the file's value
+        // by the first frame, like a fader.
+        MenuItem::slider(RENDER_SCALE_ID, "RENDER SCALE", percent(1.0), 1.0),
     ];
     items.extend(gains.iter().map(|(bus, gain)| {
         MenuItem::slider(
@@ -532,5 +561,35 @@ mod tests {
         assert_eq!(percent(gain_at(0.5)), "25%");
         assert_eq!(percent(1.0), "100%");
         assert_eq!(percent(0.0), "0%");
+    }
+
+    /// **The scale groove spans exactly what the renderer accepts**, its two
+    /// conversions are each other's inverse, and it is linear — the middle of
+    /// the groove is the middle of the range, not a quarter of it.
+    #[test]
+    fn the_scale_groove_runs_from_the_smallest_frame_to_the_whole_extent() {
+        assert_eq!(scale_at(0.0), MIN_RENDER_SCALE, "the left end is the floor");
+        assert_eq!(scale_at(1.0), 1.0, "the right end is the whole extent");
+        let middle = f32::midpoint(MIN_RENDER_SCALE, 1.0);
+        assert!((scale_at(0.5) - middle).abs() < 1e-6, "{}", scale_at(0.5));
+        for step in 0_u8..=20 {
+            let position = f32::from(step) / 20.0;
+            let back = scale_handle_at(scale_at(position));
+            assert!(
+                (back - position).abs() < 1e-5,
+                "a handle at {position} came back at {back}",
+            );
+        }
+    }
+
+    /// A value the groove cannot reach lands at an end of it rather than off
+    /// it, and a `NaN` lands at the left end like a fader's does.
+    #[test]
+    fn a_scale_off_the_groove_lands_at_an_end_of_it() {
+        assert_eq!(scale_handle_at(2.0), 1.0);
+        assert_eq!(scale_handle_at(0.0), 0.0);
+        assert_eq!(scale_handle_at(f32::NAN), 0.0);
+        assert_eq!(scale_at(f32::NAN), MIN_RENDER_SCALE);
+        assert_eq!(scale_at(2.0), 1.0);
     }
 }

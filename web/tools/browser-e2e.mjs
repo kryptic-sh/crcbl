@@ -1242,10 +1242,10 @@ const EXPECTATIONS = {
       // How many `ArrowDown`s reach the MUSIC fader from the row the panel
       // opens on, and how many more reach `SAVE`. `apps/options/src/menu.rs`'s
       // `menus` lays the panel out as FULLSCREEN, DEBUG PANEL, FRAME CAP,
-      // ANISOTROPY, a fader per `Bus::ALL` in that order, then SAVE and RESET.
-      // **A row added anywhere above MUSIC moves both of these**, and the gate
-      // would then walk a fader nobody asked it to.
-      toFader: 5,
+      // ANISOTROPY, RENDER SCALE, a fader per `Bus::ALL` in that order, then
+      // SAVE and RESET. **A row added anywhere above MUSIC moves both of
+      // these**, and the gate would then walk a groove nobody asked it to.
+      toFader: 6,
       toSave: 5,
       // How far to walk the fader, in `Slider::KEY_STEP`s of a twentieth each.
       // Four steps down from the top is a handle at 0.8, and the square taper

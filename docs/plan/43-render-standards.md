@@ -585,8 +585,9 @@ absent key is `1.0`, which is the whole extent and no pass — and the reader
 clamps to the renderer's own `MIN_RENDER_SCALE..=1.0` so a typed-in extra digit
 cannot ask for a target larger than the surface. The writer arrived the same day
 — `crcbl::settings::set_render_scale` beside the reader, saved through
-`SettingsSource::save` — and `apps/options` is the screen; what that screen does
-not yet carry is a row for this key.
+`SettingsSource::save` — and `apps/options` carries it, since 2026-08-29, on a
+`RENDER SCALE` groove that runs linearly from `MIN_RENDER_SCALE` to the whole
+extent, wearing `NEXT_START_MARK` because that screen draws no scene.
 
 **The filter is Catmull-Rom**, sixteen taps, and it is Mitchell-Netravali at
 `B = 0, C = 0.5` — interpolating, so a texel that survives the scale reaches the

@@ -24,12 +24,13 @@
 //! rather than a key nothing reads. The browser build sample rule 7 requires is
 //! here too, and the browser gate drives the whole round trip through it.
 //!
-//! Milestone 2 has two keys: `[engine.video] frame_limit`, on a `FRAME CAP` row
-//! that steps a ladder of ceilings, and `anisotropic_filtering`, on an
-//! `ANISOTROPY` row that steps the powers of two. What is **not** here is the
-//! rest of the video half and all of the graphics half — which
+//! Milestone 2 has three keys: `[engine.video] frame_limit`, on a `FRAME CAP`
+//! row that steps a ladder of ceilings; `anisotropic_filtering`, on an
+//! `ANISOTROPY` row that steps the powers of two; and `render_scale`, on a
+//! `RENDER SCALE` groove over the range the renderer draws. What is **not**
+//! here is the rest of the video half and the graphics tiers — which
 //! `docs/backlog.md` carries, along with why each of the remaining video keys
-//! is harder than these two.
+//! is harder than these three.
 //!
 //! # It steps no simulation and loads no art
 //!

@@ -23,19 +23,20 @@
 //! The six `[engine.audio]` bus gains, which are the cheapest settings to make
 //! real: they need no renderer change and no restart to write, and three of them
 //! carry sound — see [`crate::audio`] — so a fader is audible while it moves.
-//! And two `[engine.video]` keys: `frame_limit`, which is the cheapest of the
+//! And three `[engine.video]` keys: `frame_limit`, which is the cheapest of the
 //! video keys for the opposite reason — the loop reads it once, at start-up, so
 //! the row can write it honestly without a way to re-mode a live window — and
-//! `anisotropic_filtering`, which a renderer takes at open and this sample has
-//! no renderer to hand it to. The rest of `docs/plan/sample/20-options.md`'s
-//! video half — display mode, resolution, present mode, the quality tiers — is
-//! not here yet, and `docs/backlog.md` says what each of them is waiting on.
+//! `anisotropic_filtering` and `render_scale`, which a `ForwardRenderer` takes
+//! and this sample has none to hand them to. The rest of
+//! `docs/plan/sample/20-options.md`'s video half — display mode, resolution,
+//! present mode, the quality tiers — is not here yet, and `docs/backlog.md`
+//! says what each of them is waiting on.
 //!
-//! **Those two rows do not apply as they move.** Everything else here reaches
+//! **Those three rows do not apply as they move.** Everything else here reaches
 //! its stage in the same call that writes its key; the ceiling reaches the loop
-//! only when a loop is built, and the anisotropy reaches a sampler only where a
-//! page is drawn. The mark `Screen`'s frame writes on those rows is what stops
-//! either being a silent lie.
+//! only when a loop is built, and the anisotropy and the scale reach a renderer
+//! only where a scene is drawn. The mark `Screen`'s frame writes on those rows
+//! is what stops any of them being a silent lie.
 //!
 //! **Nothing in this process listens to these gains.** A settings file belongs
 //! to the application that wrote it — natively, `~/.config/<label>/` — so the
@@ -247,6 +248,13 @@ pub struct Screen {
     /// renderer takes the key when it opens, and this sample opens none, so the
     /// value the run came up with is the only one it can claim to be under.
     opened_anisotropy: f32,
+    /// `[engine.video] render_scale` as the screen currently holds it.
+    scale: f32,
+    /// What the scale groove was last seen holding — `handles`' rule for the
+    /// one groove that is not a fader.
+    scale_handle: f32,
+    /// The scale this run **started** on, for `opened_anisotropy`'s reason.
+    opened_scale: f32,
 }
 
 /// The loop options runs in.
@@ -379,6 +387,7 @@ impl Screen {
         let gains = crcbl::settings::audio_gains(&stack).map(|(_, gain)| gain);
         let cap = crcbl::settings::frame_limit(&stack);
         let anisotropy = crcbl::settings::anisotropic_filtering(&stack);
+        let scale = crcbl::settings::render_scale(&stack);
         Self {
             stack,
             store,
@@ -398,6 +407,9 @@ impl Screen {
             opened_cap: cap,
             anisotropy,
             opened_anisotropy: anisotropy,
+            scale,
+            scale_handle: crate::menu::scale_handle_at(scale),
+            opened_scale: scale,
         }
     }
 
@@ -417,6 +429,12 @@ impl Screen {
     #[must_use]
     pub const fn anisotropy(&self) -> f32 {
         self.anisotropy
+    }
+
+    /// The render scale as this screen currently holds it.
+    #[must_use]
+    pub const fn render_scale(&self) -> f32 {
+        self.scale
     }
 
     /// How many times a setting has been changed.
@@ -456,7 +474,7 @@ impl Screen {
         }
         crcbl::log::info!(
             "[HUD] tick: {}  master: {}  music: {}  sfx: {}  ui: {}  voice: {}  \
-             ambience: {}  cap: {}  aniso: {}  edits: {}  file: {}",
+             ambience: {}  cap: {}  aniso: {}  scale: {}  edits: {}  file: {}",
             self.ticks,
             crate::menu::percent(self.gains[Bus::Master.index()]),
             crate::menu::percent(self.gains[Bus::Music.index()]),
@@ -466,6 +484,7 @@ impl Screen {
             crate::menu::percent(self.gains[Bus::Ambience.index()]),
             crate::menu::frame_cap_label(self.cap),
             crate::menu::anisotropy_label(self.anisotropy),
+            crate::menu::percent(self.scale),
             self.edits,
             self.saved,
         );
@@ -551,6 +570,33 @@ impl Screen {
         }
     }
 
+    /// Moves the render scale, writing the key and marking the file unsaved,
+    /// on [`Screen::set_cap`]'s terms — and applied to nothing, since this
+    /// sample draws no scene. `apps/viewer` is where the key reaches
+    /// `ForwardRenderer::set_render_scale`.
+    ///
+    /// Like [`Screen::set`] it does not touch `scale_handle`: the groove is
+    /// the authority on where its handle is.
+    fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+        self.edits += 1;
+        self.saved = SaveState::Unsaved;
+        if let Err(error) = crcbl::settings::set_render_scale(&mut self.stack, scale) {
+            self.saved = SaveState::Failed(error.to_string());
+        }
+    }
+
+    /// What the groove says: the scale, and whether this run came up on it,
+    /// compared by bits for [`Screen::anisotropy_hint`]'s reason.
+    fn scale_hint(&self) -> String {
+        let label = crate::menu::percent(self.scale);
+        if self.scale.to_bits() == self.opened_scale.to_bits() {
+            label
+        } else {
+            format!("{label} {}", crate::menu::NEXT_START_MARK)
+        }
+    }
+
     /// Writes the edited settings back to wherever they were read from.
     fn save(&mut self) {
         let source = self.store.source();
@@ -574,14 +620,16 @@ impl Screen {
     }
 
     /// Puts every setting back to what a file that says nothing means — every
-    /// bus at unity, no frame ceiling and the engine's own anisotropy — which
-    /// is what a player asking for the defaults is asking for.
+    /// bus at unity, no frame ceiling, the engine's own anisotropy and the
+    /// whole extent — which is what a player asking for the defaults is asking
+    /// for.
     fn reset(&mut self) {
         for bus in Bus::ALL {
             self.set(bus, 1.0);
         }
         self.set_cap(FrameLimit::unlimited());
         self.set_anisotropy(DEFAULT_ANISOTROPY);
+        self.set_scale(1.0);
     }
 }
 
@@ -714,6 +762,22 @@ impl HostedGame for Screen {
                     crate::menu::fader_hint(self.gains[bus.index()], Audio::sounds(bus)),
                 );
             }
+            // The scale groove, reconciled both ways on the faders' rule — and
+            // silently, since the detent click is a bus's and this is no bus.
+            let id = crate::menu::RENDER_SCALE_ID;
+            match menu.slider(id) {
+                Some(position) if self.placed && position != self.scale_handle => {
+                    self.set_scale(crate::menu::scale_at(position));
+                    self.scale_handle = position;
+                }
+                _ => {
+                    menu.set_slider(id, crate::menu::scale_handle_at(self.scale));
+                    if let Some(position) = menu.slider(id) {
+                        self.scale_handle = position;
+                    }
+                }
+            }
+            menu.set_item_hint(id, self.scale_hint());
             menu.set_item_hint(crate::menu::FRAME_CAP_ID, self.cap_hint());
             menu.set_item_hint(crate::menu::ANISOTROPY_ID, self.anisotropy_hint());
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
@@ -1298,6 +1362,97 @@ mod tests {
             hint(&mut menus, crate::menu::ANISOTROPY_ID),
             crate::menu::anisotropy_label(DEFAULT_ANISOTROPY),
             "the mark stayed on a value the run came up on",
+        );
+    }
+
+    /// **The scale groove is placed from the file before it is read as a drag,
+    /// a drag writes the key, and the row says the run is not under it.**
+    ///
+    /// The faders' first-frame rule, for the one groove that is not a fader: a
+    /// screen opened over `render_scale = 0.5` finds the handle at the right
+    /// end and has to walk it down without calling that an edit. Then a drag
+    /// to the left end is the smallest frame the renderer draws, written to
+    /// the key and marked, since nothing in this process draws at it.
+    #[test]
+    fn the_scale_groove_is_placed_from_the_file_and_a_drag_writes_the_key() {
+        let (mut screen, mut menus) = screen("[engine.video]\nrender_scale = 0.5\n");
+        assert_eq!(screen.render_scale(), 0.5);
+        reconcile(&mut screen, &mut menus);
+        let groove = |menus: &mut Menus| {
+            menus
+                .get_mut(MenuKind::Settings)
+                .expect("the one menu")
+                .slider(crate::menu::RENDER_SCALE_ID)
+                .expect("the scale groove")
+        };
+        let expected = crate::menu::scale_handle_at(0.5);
+        assert!(
+            (groove(&mut menus) - expected).abs() < 1e-6,
+            "the handle was not walked down to the file's half",
+        );
+        assert_eq!(screen.edits(), 0, "placing the handle is not an edit");
+        assert_eq!(
+            hint(&mut menus, crate::menu::RENDER_SCALE_ID),
+            crate::menu::percent(0.5),
+            "a run opened on its own scale has nothing to add",
+        );
+
+        menus
+            .get_mut(MenuKind::Settings)
+            .expect("the one menu")
+            .set_slider(crate::menu::RENDER_SCALE_ID, 0.0);
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            screen.render_scale(),
+            crcbl::render::MIN_RENDER_SCALE,
+            "the left end of the groove is the renderer's floor",
+        );
+        assert_eq!(
+            crcbl::settings::render_scale(screen.stack()),
+            crcbl::render::MIN_RENDER_SCALE,
+            "the drag did not reach the key",
+        );
+        assert_eq!(screen.edits(), 1);
+        assert_eq!(screen.saved(), &SaveState::Unsaved);
+        let marked = hint(&mut menus, crate::menu::RENDER_SCALE_ID);
+        assert!(
+            marked.contains(crate::menu::NEXT_START_MARK)
+                && marked.contains(&crate::menu::percent(crcbl::render::MIN_RENDER_SCALE)),
+            "the row reads {marked:?}",
+        );
+
+        // Held still, the next frame reads no drag.
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.edits(), 1, "a handle at rest was read as a drag");
+    }
+
+    /// `RESET` takes the scale back to the whole extent, and the groove
+    /// follows the number rather than the other way round.
+    #[test]
+    fn reset_takes_the_scale_back_to_the_whole_extent_and_the_groove_follows() {
+        let (mut screen, mut menus) = screen("[engine.video]\nrender_scale = 0.5\n");
+        reconcile(&mut screen, &mut menus);
+
+        screen.apply(Action::Reset);
+        assert_eq!(screen.render_scale(), 1.0);
+        assert_eq!(
+            crcbl::settings::render_scale(screen.stack()),
+            1.0,
+            "the screen reset a number it never wrote",
+        );
+        reconcile(&mut screen, &mut menus);
+        let position = menus
+            .get_mut(MenuKind::Settings)
+            .expect("the one menu")
+            .slider(crate::menu::RENDER_SCALE_ID)
+            .expect("the scale groove");
+        assert_eq!(position, 1.0, "the groove did not follow the reset");
+        let edits = screen.edits();
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            edits,
+            screen.edits(),
+            "following a reset was read as a drag"
         );
     }
 

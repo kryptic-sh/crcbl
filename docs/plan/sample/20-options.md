@@ -135,6 +135,13 @@ machinery. Verified against the tree on 2026-08-28:
   key means. It wears `menu::NEXT_START_MARK` too: this sample draws no page, so
   the key reaches `ForwardRenderer::set_anisotropy` only where a renderer opens
   over it, which today is `apps/viewer`.
+- **The render scale is on the screen**, as of 2026-08-29, and it is a groove
+  rather than a ladder because the key is a continuum: `menu::scale_at` and
+  `menu::scale_handle_at` map the handle linearly over `MIN_RENDER_SCALE..=1.0`,
+  the range the renderer clamps to, and the screen reconciles it both ways on
+  the faders' rule — placed from the file before it is read as a drag, following
+  `RESET` back to the whole extent. It wears `menu::NEXT_START_MARK` for the
+  anisotropy's reason, and drags silently: the detent click belongs to a bus.
 - **The screen runs in a browser**, as of 2026-08-28: `apps/options/src/web.rs`
   carries the `__crcbl_options_*` ABI, `web/demos/options/` and
   `web/pages/options.html` are the page, and both browser-gate jobs run it. Its
@@ -170,11 +177,11 @@ machinery. Verified against the tree on 2026-08-28:
    the requested-versus-resolved display of the clamp. **The frame cap is
    done**, in `apps/options`'s `FRAME CAP` row — the cheapest of the four,
    because `crcbl::settings::frame_limit` is the only one of them with a reader
-   today — and the `ANISOTROPY` row is the first of the graphics half's keys on
-   the screen, one value key ahead of the tiers. What the other three need first
-   is somewhere for a change to land: a display mode or a resolution is applied
-   to a live window, not read once at start-up, so each of them wants a seam
-   this sample does not have yet.
+   today — and the `ANISOTROPY` and `RENDER SCALE` rows are the graphics half's
+   first two keys on the screen, both value keys ahead of the tiers. What the
+   other three need first is somewhere for a change to land: a display mode or a
+   resolution is applied to a live window, not read once at start-up, so each of
+   them wants a seam this sample does not have yet.
 3. **The graphics half**: the quality tiers over the technique ladders, the
    preset and its custom escape hatch.
 4. **The browser half held to the same bar**, including the no-store case.

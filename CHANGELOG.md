@@ -310,7 +310,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   with no settings file draws exactly what it drew before. The reader clamps to
   the renderer's own `MIN_RENDER_SCALE..=1.0`, and a value that is not a usable
   number (a string, `nan`, `inf`) warns naming the key and clamps nothing.
-  `crcbl::settings::video_effects` is unchanged and still the effects-only read.
+  `apps/options` sets it on a `RENDER SCALE` groove, linear over that same
+  range, placed from the file at start and returned to the whole extent by
+  `RESET`; it reads `(next start)` beside a value the run did not come up on,
+  since that screen draws no scene. `crcbl::settings::video_effects` is
+  unchanged and still the effects-only read.
 
 - **`crcbl_render::PassStats`: what each pass normally costs, not what one frame
   cost.** The engine's exit log used to print the newest `FrameTimings` the
