@@ -750,23 +750,47 @@ the rung still owes, in order:
   second image from `dfg::bytes`. Both are `[0, 1]` shares, so the same encoding
   serves. Each is a new binding in `mesh.slang` and in the hand-written
   `msl/mesh.metal` argument table, after `specular_albedo`.
-- **The term.** In `fragmentMain`'s ambient sum, beside `sky_irradiance`:
-  `prefiltered · (f0 · scale + bias)`, with `prefiltered` the
+- **The term.** `prefiltered · (f0 · scale + bias)`, with `prefiltered` the
   `sky_prefilter::prefiltered_radiance` sum spelled in the shader over the three
-  sky rows the frame block already carries, at the reflection of the view about
-  the normal, and multiplied by the energy compensation the direct lobe already
-  takes. `Sky::NONE` projects to black, so a frame with no sky adds nothing and
-  no golden without a sky moves.
+  sky rows, at the reflection of the view about the normal, and multiplied by
+  the energy compensation the direct lobe already takes. `Sky::NONE` projects to
+  black, so a frame with no sky adds nothing and no golden without a sky moves.
+  **It belongs in `ssr.slang`'s miss fallback, not `fragmentMain`'s ambient
+  sum:** `SsrParams.sky` already carries the gradient rows the mesh frame block
+  does not, metals take their ambient specular from SSR by design, and a term in
+  both passes would count the environment twice. Since 2026-08-29 the
+  reflectivity attachment's alpha is the lobe's roughness (`ssr.slang`'s
+  `sharpness_of` derives the ramp from it), so the pass has the table's index
+  where it matters — past the cutoff, where the ramp is zero. A frame with
+  `RenderEffects::REFLECTIONS` off keeps no ambient specular on metals, as
+  today.
 - **The goldens with a sky move**, and are re-blessed on one machine:
   `crates/crcbl/tests/mesh_e2e/hdr.rs`, `crates/crcbl/tests/render_e2e.rs` and
   `crates/crcbl/src/screenshot.rs` set one. A metal under a sky is where the
   change shows; a dielectric's `f0` of 0.04 moves little.
-- **SSR's miss fallback** can then take the prefiltered radiance at the
-  fragment's roughness in place of the gradient's mirror radiance it adds today,
-  which is what makes a rough reflection's miss match its hit.
+- **The miss fallback takes the prefiltered radiance** at the fragment's
+  roughness in place of the gradient's mirror radiance `sky_radiance` adds
+  today, which is what makes a rough reflection's miss match its hit.
 
 Verified: the table against an independent quadrature and the gradient's own
 blend, on the CPU only. Nothing here has been drawn.
+
+Two gaps from the roughness slice itself, both measured on 2026-08-29:
+
+- **The shader's quantisation has no local observer.** A raw store of
+  `roughness` passed `tests/forward_e2e/depth_probe.rs` on radv and on lavapipe
+  — both round the cutoff's `127.5` up, so the level `mesh.slang` rounds to is
+  the one they would have picked anyway. What holds the contract is the CPU
+  mirror (`crcbl_shaders::ssr::stored_roughness`,
+  `untinted_reloads_above_the_cutoff`) and the probe test's `assert_eq!` on the
+  reloaded level, which reds on any backend that rounds the tie down. CI's WARP
+  and Metal legs are where that would show; neither has.
+- **The renderer's `NO_REFLECTION` clear has no pixel observer.** Clearing
+  `ForwardRenderer`'s reflectivity attachment to zero instead passed
+  `run-render-e2e.sh` on radv: a zero `F0` leaves the reflection nothing to
+  scale, so a sky pixel that marches and one that takes the early return draw
+  the same. The alpha buys the early return, not a picture — a counter of
+  marches started would observe it, and none exists.
 
 ### What the filtering rung still owes (2026-08-29)
 

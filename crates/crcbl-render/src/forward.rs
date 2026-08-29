@@ -6405,9 +6405,13 @@ impl ForwardRenderer {
             // pass that will read this marches a ray from whatever it finds
             // there — so the value that has to be in it is the one that says
             // "nothing reflects here", not the last frame's or an undefined
-            // one. Zero in every channel is that value: an `F0` of zero
-            // reflects nothing whatever the roughness beside it says.
-            .clear_color(reflectivity, [0.0; 4])
+            // one. `NO_REFLECTION` is that value: no `F0`, and fully rough —
+            // the alpha is a roughness, so a zero there would read as a
+            // mirror. No picture tells the two apart, because a zero `F0`
+            // leaves the reflection nothing to scale but Schlick's grazing
+            // tail; what the alpha buys is that `ssr.slang` takes its early
+            // return on every uncovered pixel instead of marching the sky.
+            .clear_color(reflectivity, ssr::NO_REFLECTION)
             // **Cleared and then *stored*, where every frame before the
             // reflection slice discarded it.** `PassBuilder::clear_depth` is
             // `LoadOp::Clear` with `StoreOp::Discard`, which is right for a pass

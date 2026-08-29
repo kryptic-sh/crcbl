@@ -103,6 +103,11 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32) -> FullscreenOutput_0
     return output_0;
 }
 
+fn sharpness_of_0( roughness_0 : f32) -> f32
+{
+    return saturate(1.0f - roughness_0 / 0.5f);
+}
+
 fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
 {
     var _S9 : vec3<i32> = vec3<i32>(clamp(pixel_0, vec2<i32>(i32(0), i32(0)), extent_0 - vec2<i32>(i32(1), i32(1))), i32(0));
@@ -366,7 +371,7 @@ fn fragmentMain( _S44 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
     const NOTHING_0 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
     var _S50 : vec3<i32> = vec3<i32>(_S49, i32(0));
     var surface_0 : vec4<f32> = (textureLoad((reflectivity_0), ((_S50)).xy, ((_S50)).z));
-    var sharpness_0 : f32 = surface_0.w;
+    var sharpness_0 : f32 = sharpness_of_0(surface_0.w);
     var depth_3 : f32 = depth_at_0(_S49, extent_4);
     if(depth_3 <= 0.0f)
     {

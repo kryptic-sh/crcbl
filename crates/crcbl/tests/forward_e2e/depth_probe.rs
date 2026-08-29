@@ -1265,10 +1265,11 @@ fn render_probe(
         graph
             .add_render_pass("probe")
             .clear_color(target, PROBE_CLEAR)
-            // **Cleared to zero, and the corner assertion is what reads it.** A
-            // pixel no fragment covered has no material, and zero is the triple
-            // that says so.
-            .clear_color(reflectivity, [0.0; 4])
+            // **Cleared to `NO_REFLECTION`, and the corner assertion is what
+            // reads it.** A pixel no fragment covered has no material: no `F0`
+            // and fully rough is the quadruple that says so, as it is in
+            // `crcbl::render::forward`.
+            .clear_color(reflectivity, crcbl::shaders::ssr::NO_REFLECTION)
             // The reversed-Z clear: `depth::CLEAR` = 0.0, so any geometry beats
             // the empty buffer under `Greater`.
             .clear_depth(depth)
@@ -1552,7 +1553,7 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 /// **The second colour attachment carries the material row the instance named.**
 ///
 /// `docs/plan/18-render-features.md`'s screen-space reflections read `F0` and
-/// SSR sharpness out of a target the forward pass writes beside its colour, and
+/// roughness out of a target the forward pass writes beside its colour, and
 /// **nothing in a rendered picture shows what is in it**: a wrong channel, a
 /// wrong row, or a target the fragment stage never wrote all leave the frame
 /// exactly as every golden already has it. So this reads the attachment back and
@@ -1562,15 +1563,16 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 /// `F0` is its albedo and therefore coloured, with all three channels distinct.
 /// Three things are asserted, each failing a different mistake:
 ///
-/// * The centre carries that row's `F0` and SSR sharpness. A swap of the `rgb`
+/// * The centre carries that row's `F0` and roughness. A swap of the `rgb`
 ///   and `a` halves fails all four channels; so does a target left at its clear.
 /// * It is not the neighbouring row's answer: that row is a dielectric, whose
-///   `F0` is grey whatever its albedo, and its sharpness differs by design.
-/// * A corner no fragment covered is exactly zero — the clear the design asks
-///   for, so a later march cannot start from a pixel that has no material.
+///   `F0` is grey whatever its albedo, and its roughness differs by design.
+/// * A corner no fragment covered is `NO_REFLECTION` — no `F0`, fully rough:
+///   the clear the design asks for, so a later march cannot start from a pixel
+///   that has no material, nor read a mirror in it.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
-fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing_drew() {
+fn the_reflectivity_target_carries_the_bound_material_row_and_no_reflection_where_nothing_drew() {
     let headless = Headless::open_for_mesh();
     let mut probe = DepthProbe::new(&headless);
     let mut pool = crcbl::render::TransientPool::new();
@@ -1588,14 +1590,14 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
     let row = PROBE_MATERIALS[PROBE_REFLECTIVE_ROW];
     let plain = PROBE_MATERIALS[PROBE_PLAIN_ROW];
     // **Derived from the fixture rather than written down.** `metallic` is 1.0,
-    // factor times the page's white texel — and alpha is SSR's sharpness ramp.
-    // A hand-written quadruple here would go on describing the old material the
-    // day either constant moves.
+    // factor times the page's white texel — and alpha is the lobe's roughness,
+    // as `mesh.slang` rounds it for the store. A hand-written quadruple here
+    // would go on describing the old material the day either constant moves.
     let expected = [
         NEAR_QUAD_COLOR[0] * row.base_color[0],
         NEAR_QUAD_COLOR[1] * row.base_color[1],
         NEAR_QUAD_COLOR[2] * row.base_color[2],
-        (1.0 - row.roughness / crcbl::shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0),
+        crcbl::shaders::ssr::stored_roughness(row.roughness),
     ];
 
     let centre = PROBE_CENTRE;
@@ -1610,9 +1612,10 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
              \x20 * All four channels wrong, with `rgb` holding what `a` should: \
              the two halves of `mesh.slang`'s `FragmentOutput.reflectivity` are \
              swapped.\n\
-             \x20 * All four zero: no fragment wrote here, or the pipeline's \
-             second target and the pass's second attachment disagree — the pass \
-             would have cleared it and nothing else would have touched it."
+             \x20 * `rgb` zero and `a` full: no fragment wrote here, or the \
+             pipeline's second target and the pass's second attachment disagree \
+             — the pass would have cleared it and nothing else would have \
+             touched it."
         );
     }
 
@@ -1627,13 +1630,12 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
          {PROBE_PLAIN_ROW} produces, so either the fragment stage resolved that \
          row or it ignored `metallic`."
     );
-    let sharpness = f32::from(pixel[3]) / 255.0;
-    let plain_sharpness =
-        (1.0 - plain.roughness / crcbl::shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0);
+    let roughness = f32::from(pixel[3]) / 255.0;
+    let plain_roughness = crcbl::shaders::ssr::stored_roughness(plain.roughness);
     assert!(
-        (sharpness - expected[3]).abs() < (sharpness - plain_sharpness).abs(),
-        "the reflectivity alpha at {centre:?} is {sharpness}, which is nearer row \
-         {PROBE_PLAIN_ROW}'s sharpness of {plain_sharpness} than the bound row \
+        (roughness - expected[3]).abs() < (roughness - plain_roughness).abs(),
+        "the reflectivity alpha at {centre:?} is {roughness}, which is nearer row \
+         {PROBE_PLAIN_ROW}'s roughness of {plain_roughness} than the bound row \
          {PROBE_REFLECTIVE_ROW}'s {}. The two rows differ by design; reading the wrong one is \
          what this separation exists to catch.",
         expected[3],
@@ -1644,17 +1646,18 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
     // centre and the far one 60 — so this is the attachment's load op and
     // nothing else.
     let corner = frame.pixel(0, 0).expect("inside");
+    let no_reflection = crcbl::shaders::ssr::NO_REFLECTION.map(|channel| (channel * 255.0) as u8);
     assert_eq!(
-        corner, [0; 4],
-        "a pixel no geometry covered must hold zero in every channel: it has no \
-         material, and `docs/plan/18-render-features.md` asks for the clear that \
-         says so rather than one a later march would read as a reflective \
-         surface. Got {corner:?}."
+        corner, no_reflection,
+        "a pixel no geometry covered must hold `NO_REFLECTION` — no `F0`, fully \
+         rough: it has no material, and `docs/plan/18-render-features.md` asks \
+         for the clear that says so rather than one a later march would read as \
+         a reflective surface, which a zero alpha now is. Got {corner:?}."
     );
 
     eprintln!(
         "crcbl forward e2e: reflectivity at {centre:?} is {pixel:?} — row \
-         {PROBE_REFLECTIVE_ROW}'s F0 {:?} and sharpness {}",
+         {PROBE_REFLECTIVE_ROW}'s F0 {:?} and roughness {}",
         [expected[0], expected[1], expected[2]],
         expected[3],
     );
@@ -1721,18 +1724,25 @@ fn a_fragment_reads_the_one_texel_occlusion_placeholder_as_no_occlusion() {
         .reflectivity
         .pixel(centre.0, centre.1)
         .expect("inside");
+    let no_reflection = crcbl::shaders::ssr::NO_REFLECTION.map(|channel| (channel * 255.0) as u8);
     assert_ne!(
-        reflectivity, [0; 4],
+        reflectivity, no_reflection,
         "no fragment wrote the second attachment at {centre:?}, so nothing was \
          shaded there and the colour below cannot say anything about the \
          occlusion read. Look at the geometry, the depth state and the \
          projection — not at `mesh.slang`'s occlusion fetch."
     );
+    // The row is `UNTINTED`, whose roughness sits on `ROUGHNESS_CUTOFF`; the
+    // shader's rounding must land it on the level above, on every backend, so
+    // the ramp `ssr.slang` derives is exactly zero and no march starts.
+    let stored = crcbl::shaders::ssr::stored_roughness(PROBE_MATERIALS[PROBE_PLAIN_ROW].roughness);
+    assert!(stored >= crcbl::shaders::ssr::ROUGHNESS_CUTOFF);
     assert_eq!(
-        reflectivity[3], 0,
-        "the cutoff material's reflectivity alpha at {centre:?} must survive the \
-         Rgba8Unorm attachment as exact zero so SSR cannot start a march; got \
-         {reflectivity:?}"
+        f32::from(reflectivity[3]),
+        stored * 255.0,
+        "the cutoff material's reflectivity alpha at {centre:?} must reload from \
+         the Rgba8Unorm attachment as the level `mesh.slang` rounded it to, so \
+         SSR derives a zero ramp and cannot start a march; got {reflectivity:?}"
     );
 
     // What `mesh.slang` computes when ambient is the whole of the light: the

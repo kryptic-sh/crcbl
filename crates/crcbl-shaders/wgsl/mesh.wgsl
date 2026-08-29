@@ -765,14 +765,14 @@ fn fragmentMain( _S71 : pixelInput_0, @builtin(position) position_4 : vec4<f32>)
         var value_0 : f32 = occlusion_at_0(position_4.xy);
         var occlusion_0 : FragmentOutput_0;
         occlusion_0.lit_0 = vec4<f32>(value_0, value_0, value_0, 1.0f);
-        occlusion_0.reflectivity_0 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
+        occlusion_0.reflectivity_0 = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
         return occlusion_0;
     }
     if((frame_0.ambient_0.w) >= 1.5f)
     {
         var tint_0 : FragmentOutput_0;
         tint_0.lit_0 = vec4<f32>(_S71.color_3.xyz, 1.0f);
-        tint_0.reflectivity_0 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
+        tint_0.reflectivity_0 = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
         return tint_0;
     }
     if((frame_0.ambient_0.w) >= 0.5f)
@@ -780,7 +780,7 @@ fn fragmentMain( _S71 : pixelInput_0, @builtin(position) position_4 : vec4<f32>)
         var normals_0 : FragmentOutput_0;
         var _S72 : vec3<f32> = vec3<f32>(0.5f);
         normals_0.lit_0 = vec4<f32>(normal_4 * _S72 + _S72, 1.0f);
-        normals_0.reflectivity_0 = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
+        normals_0.reflectivity_0 = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
         return normals_0;
     }
     var to_eye_0 : vec3<f32> = normalize(frame_0.camera_position_0.xyz - _S71.world_position_9);
@@ -898,7 +898,7 @@ fn fragmentMain( _S71 : pixelInput_0, @builtin(position) position_4 : vec4<f32>)
     var fog_survives_0 : f32 = fog_transmittance_0(fog_optical_depth_0(frame_0.fog_params_0.x, frame_0.fog_params_0.y, frame_0.camera_position_0.y - frame_0.fog_params_0.z, _S71.world_position_9.y - frame_0.fog_params_0.z, length(frame_0.camera_position_0.xyz - _S71.world_position_9)));
     var output_1 : FragmentOutput_0;
     output_1.lit_0 = vec4<f32>((lit_1 + _S92) * vec3<f32>(fog_survives_0) + frame_0.fog_color_0.xyz * vec3<f32>((1.0f - fog_survives_0)), albedo_0.w);
-    output_1.reflectivity_0 = vec4<f32>(f0_2, saturate(1.0f - roughness_3 / 0.5f));
+    output_1.reflectivity_0 = vec4<f32>(f0_2, floor(roughness_3 * 255.0f + 0.5f) / 255.0f);
     return output_1;
 }
 

@@ -224,8 +224,15 @@ should say.
   `Rgba16Float` transient of its own and `ssr_blur.slang` writes the sum — which
   also means the off-switch is now the pair rather than the one pass.
 - **The second weight is the sharpness ramp carried through the reflection.**
-  `mesh.slang` computes `saturate(1 - roughness/cutoff)` before `Rgba8Unorm`
-  storage, and the march copies that value into the reflection alpha. Zero
+  `mesh.slang` stores the lobe's roughness in the `Rgba8Unorm` attachment,
+  quantised to the target's levels in the shader because a raw store of the
+  cutoff is a rounding tie the output merger resolves per backend; `ssr.slang`'s
+  `sharpness_of` derives `saturate(1 - roughness/cutoff)` from the reload, and
+  the march copies that value into the reflection alpha. (Until 2026-08-29 the
+  attachment held the ramp itself, which left the pass blind to roughness past
+  the cutoff — exactly where the prefiltered environment of `44-lighting.md`'s
+  rung 3 needs it. Where nothing drew, the attachment holds `NO_REFLECTION`: no
+  `F0` and fully rough, since a zero alpha now reads as a mirror.) Zero
   sharpness returns the probe fallback before march setup and the blur
   composites that centre value directly. Positive sharpness uses
   `lerp(centre, filtered, sqrt(sharpness))`, so approaching the cutoff is

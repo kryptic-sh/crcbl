@@ -252,6 +252,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The reflectivity attachment's alpha is the lobe's roughness**, not the
+  screen-space march's sharpness ramp. `mesh.slang` rounds it to the
+  `Rgba8Unorm` target's levels before the store (`REFLECTIVITY_LEVELS`, mirrored
+  as `crcbl_shaders::ssr::REFLECTIVITY_LEVELS` with `stored_roughness` as the
+  same rounding on the CPU), so a material at the cutoff reloads as the same
+  level on every backend, and `ssr.slang`'s `sharpness_of` derives the ramp from
+  it — `ROUGHNESS_CUTOFF` is now declared in that one shader. A pixel nothing
+  drew, and every debug view, holds `crcbl_shaders::ssr::NO_REFLECTION` (no
+  `F0`, fully rough) rather than zero, since a zero alpha would read as a
+  mirror; SSR takes the fallback it always took there. What the pass renders
+  does not change; what changes is that it can now read a rough surface's
+  roughness, which the specular IBL term needs.
 - **`Loop::new` no longer takes `LoopConfig::limit` at face value.** It applies
   the player's `[engine.video] frame_limit` first. A run whose player set no
   ceiling is unaffected; one whose player capped the rate lower now starts

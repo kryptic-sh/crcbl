@@ -1211,12 +1211,26 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
 /// further buys aliasing rather than sharpness.
 static const float MIN_ROUGHNESS = 0.045;
 
-/// The roughness where SSR's sharpness ramp reaches zero.
+/// The levels an `Rgba8Unorm` channel has above zero, which is what the
+/// reflectivity attachment's alpha is quantised to before it is stored.
 ///
-/// This mirrors `ssr.slang`'s constant. The attachment stores the resulting
-/// ramp, rather than this value, because zero round-trips exactly through
-/// `Rgba8Unorm`.
-static const float ROUGHNESS_CUTOFF = 0.5;
+/// The alpha carries the lobe's roughness for `ssr.slang`, and a raw store
+/// would hand the output merger a value such as `0.5 * 255 = 127.5` — a
+/// rounding tie, which every API leaves to the implementation, so one backend
+/// would reload `GpuMaterial::UNTINTED` as 127 and another as 128, and the
+/// sharpness ramp `ssr.slang` derives from the reload would be zero on one and
+/// not on the other. `floor(x + 0.5)` is arithmetic every backend defines, so
+/// what is handed over is a level exactly and the merger has no tie to break.
+/// `crcbl_shaders::ssr::REFLECTIVITY_LEVELS` is the Rust mirror, and
+/// `crcbl_shaders::ssr::stored_roughness` is this rounding on the CPU.
+static const float REFLECTIVITY_LEVELS = 255.0;
+
+/// What the reflectivity attachment holds where nothing reflects: no `F0` and
+/// a fully rough surface, so `ssr.slang` marches nothing from the pixel and
+/// reads no mirror in it. `crcbl_shaders::ssr::NO_REFLECTION` is the Rust
+/// mirror — the clear `crcbl_render::forward` loads the attachment with — and
+/// the debug views below write it.
+static const float4 NO_REFLECTION = float4(0.0, 0.0, 0.0, 1.0);
 
 /// The dielectric normal-incidence reflectance every non-metal is given.
 ///
@@ -2682,12 +2696,14 @@ struct FragmentOutput
     /// The shaded colour, into the `Rgba16Float` scene target.
     float4 lit : SV_Target0;
     /// The reflectivity channel, into an `Rgba8Unorm` target: `rgb` is `F0` and
-    /// `a` is SSR's already-evaluated sharpness ramp.
+    /// `a` is the lobe's roughness, quantised to `REFLECTIVITY_LEVELS` here so
+    /// the store has no rounding tie to break.
     ///
-    /// The ramp is stored rather than roughness: `Rgba8Unorm` cannot preserve the
-    /// cutoff exactly, while its zero endpoint does. `ssr.slang` therefore reads
-    /// alpha directly and a material at the cutoff skips marching on every
-    /// backend.
+    /// Roughness rather than the sharpness ramp it used to hold. `ssr.slang`
+    /// derives the ramp from it, which keeps the cutoff one constant in one
+    /// file; and the roughness itself is what the split-sum's prefiltered
+    /// environment is indexed by, where the ramp is zero for every surface
+    /// rougher than the cutoff — exactly the surfaces that lookup is for.
     float4 reflectivity : SV_Target1;
 };
 
@@ -2805,7 +2821,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         occlusion.lit = float4(value, value, value, 1.0);
         // Not reflective, for the normals view's reason: `ssr.slang` must march
         // nothing off a debug picture.
-        occlusion.reflectivity = float4(0.0, 0.0, 0.0, 0.0);
+        occlusion.reflectivity = NO_REFLECTION;
         return occlusion;
     }
 
@@ -2816,7 +2832,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         // chosen by the stage that knew the level and this one must not shade
         // it, or two levels with similar tints become one under a light.
         tint.lit = float4(input.color.rgb, 1.0);
-        tint.reflectivity = float4(0.0, 0.0, 0.0, 0.0);
+        tint.reflectivity = NO_REFLECTION;
         return tint;
     }
 
@@ -2835,7 +2851,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         // Schlick's grazing tail, so a renderer running `RenderEffects::REFLECTIONS`
         // over a scene with probes in it adds a faint environment along the
         // silhouette — the one place this view is not the encoded normal alone.
-        normals.reflectivity = float4(0.0, 0.0, 0.0, 0.0);
+        normals.reflectivity = NO_REFLECTION;
         return normals;
     }
 
@@ -3116,10 +3132,9 @@ FragmentOutput fragmentMain(VertexOutput input)
     // pass is what maps this into the swapchain. A `saturate` here would throw
     // away the very range HDR-from-P1 exists to carry — see `tonemap.slang`.
     output.lit = float4(lit, albedo.a);
-    // `roughness` is the clamped lobe input. Store SSR's already-evaluated
-    // sharpness ramp: its zero endpoint survives `Rgba8Unorm` exactly, unlike
-    // the cutoff roughness it replaces.
-    float sharpness = saturate(1.0 - roughness / ROUGHNESS_CUTOFF);
-    output.reflectivity = float4(f0, sharpness);
+    // `roughness` is the clamped lobe input, stored as the level it will
+    // reload as — `REFLECTIVITY_LEVELS` says why the rounding happens here.
+    output.reflectivity =
+        float4(f0, floor(roughness * REFLECTIVITY_LEVELS + 0.5) / REFLECTIVITY_LEVELS);
     return output;
 }

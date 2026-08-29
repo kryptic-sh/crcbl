@@ -171,11 +171,14 @@ DepthTexture2D scene_depth;
 [[vk::binding(2, 0)]]
 Texture2D<float4> scene_color;
 
-/// The reflectivity attachment: `rgb` is the surface's `F0` and `a` is SSR's
-/// already-evaluated sharpness ramp.
+/// The reflectivity attachment: `rgb` is the surface's `F0` and `a` is the
+/// lobe's roughness.
 ///
-/// `mesh.slang` evaluates the ramp before writing its `Rgba8Unorm` attachment,
-/// so the zero at [`ROUGHNESS_CUTOFF`] reloads exactly on every backend.
+/// `mesh.slang` quantises the roughness to the attachment's own levels before
+/// the store, so it reloads as the same level on every backend and the ramp
+/// [`sharpness_of`] derives from it is the same number everywhere. A surface at
+/// [`ROUGHNESS_CUTOFF`] — `GpuMaterial::UNTINTED` — reloads as the level above
+/// it and derives exactly zero.
 [[vk::binding(3, 0)]]
 Texture2D<float4> reflectivity;
 
@@ -246,6 +249,17 @@ static const float DEPTH_FAR = 0.0;
 /// `crcbl_shaders::ssr::ROUGHNESS_CUTOFF` is the Rust mirror, and it is what
 /// lets a sample's own tests say which of its materials this pass can see.
 static const float ROUGHNESS_CUTOFF = 0.5;
+
+/// The sharpness ramp at `roughness`: full strength at a mirror, nothing at
+/// [`ROUGHNESS_CUTOFF`], linear between.
+///
+/// Derived here from the roughness the attachment carries rather than stored by
+/// `mesh.slang`, so the cutoff is one constant in one file and the attachment
+/// keeps the roughness itself for the environment lookup.
+float sharpness_of(float roughness)
+{
+    return saturate(1.0 - roughness / ROUGHNESS_CUTOFF);
+}
 
 /// How far a ray may reach, as a share of the frame's shorter axis.
 ///
@@ -658,7 +672,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     const float4 NOTHING = float4(0.0, 0.0, 0.0, 0.0);
 
     float4 surface = reflectivity.Load(int3(pixel, 0));
-    float sharpness = surface.a;
+    float sharpness = sharpness_of(surface.a);
     float depth = depth_at(pixel, extent);
     // The far plane has no surface, so it has neither a probe lookup nor a ray.
     if (depth <= DEPTH_FAR)

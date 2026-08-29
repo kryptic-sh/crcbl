@@ -23,11 +23,14 @@
 pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 16 + 48;
 
 /// The roughness at which SSR's sharpness ramp reaches zero, matching
-/// `static const float ROUGHNESS_CUTOFF` in both shader sources.
+/// `static const float ROUGHNESS_CUTOFF` in `ssr.slang` — the one shader that
+/// declares it.
 ///
-/// `mesh.slang` evaluates the ramp before storing it in `Rgba8Unorm`, so the
-/// cutoff's zero endpoint reloads exactly; `ssr.slang` reads that sharpness
-/// directly rather than reconstructing it from quantized roughness.
+/// `mesh.slang` stores the lobe's roughness in the `Rgba8Unorm` attachment,
+/// quantised to [`REFLECTIVITY_LEVELS`] so the store has no rounding tie, and
+/// `ssr.slang` derives the ramp from the reload with its `sharpness_of`;
+/// [`stored_roughness`] is the quantisation on the CPU, and the tests below pin
+/// that [`crate::mesh::GpuMaterial::UNTINTED`] reloads above the cutoff.
 ///
 /// Half, so [`crate::mesh::GpuMaterial::UNTINTED`]'s roughness lands on the zero
 /// end exactly. Public because a *sample* has to distinguish materials the
@@ -55,6 +58,31 @@ const _: () = assert!(
     "GpuMaterial::UNTINTED's roughness is under ssr.slang's cutoff, so every surface nobody \
      gave a material to would reflect"
 );
+
+/// The levels an `Rgba8Unorm` channel has above zero, matching
+/// `static const float REFLECTIVITY_LEVELS` in `mesh.slang`, which quantises
+/// the reflectivity attachment's alpha to them before the store.
+///
+/// The rounding happens in the shader because a raw store of `0.5 * 255` is a
+/// tie the output merger resolves as it likes — one backend would reload
+/// `UNTINTED` as 127 and another as 128, and only one of those derives a zero
+/// ramp. A level handed over exactly leaves the merger nothing to decide.
+pub const REFLECTIVITY_LEVELS: f32 = 255.0;
+
+/// What the reflectivity attachment holds where nothing reflects, matching
+/// `static const float4 NO_REFLECTION` in `mesh.slang`: no `F0` and a fully
+/// rough surface, so `ssr.slang` marches nothing from the pixel and reads no
+/// mirror in it. `crcbl_render::forward` clears the attachment to it and
+/// `mesh.slang`'s debug views write it.
+pub const NO_REFLECTION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// The roughness the reflectivity attachment reloads for a stored `roughness`:
+/// `mesh.slang`'s rounding to [`REFLECTIVITY_LEVELS`], on the CPU, so a test can
+/// say what the attachment holds without re-deriving the shader's arithmetic.
+#[must_use]
+pub fn stored_roughness(roughness: f32) -> f32 {
+    (roughness * REFLECTIVITY_LEVELS + 0.5).floor() / REFLECTIVITY_LEVELS
+}
 
 /// The uniform block, matching `struct SsrParams` in `shaders/ssr.slang`.
 ///
@@ -253,22 +281,57 @@ mod tests {
         }
     }
 
-    /// The cutoff's source copies and Rust mirror must name the same roughness.
+    /// The cutoff's shader copy and Rust mirror must name the same roughness,
+    /// and `ssr.slang` must be the only shader that has one.
     ///
-    /// `mesh.slang` uses it to encode the sharpness ramp while `ssr.slang` names
-    /// its zero endpoint for the contract; a drift makes the attachment lie.
+    /// `mesh.slang` used to carry a second copy to encode the ramp with; now it
+    /// stores roughness and the ramp is `ssr.slang`'s alone, so a copy
+    /// reappearing there is a drift waiting to happen.
     #[test]
-    fn the_roughness_cutoff_matches_every_shader_source_copy() {
+    fn the_roughness_cutoff_is_ssr_slangs_alone() {
         let declaration = format!("static const float ROUGHNESS_CUTOFF = {ROUGHNESS_CUTOFF:.1};");
-        for (name, source) in [
-            ("mesh.slang", include_str!("../shaders/mesh.slang")),
-            ("ssr.slang", include_str!("../shaders/ssr.slang")),
-        ] {
-            assert!(
-                source.contains(&declaration),
-                "{name} does not declare `{declaration}`; ROUGHNESS_CUTOFF has drifted"
-            );
-        }
+        assert!(
+            include_str!("../shaders/ssr.slang").contains(&declaration),
+            "ssr.slang does not declare `{declaration}`; ROUGHNESS_CUTOFF has drifted"
+        );
+        assert!(
+            !include_str!("../shaders/mesh.slang").contains("ROUGHNESS_CUTOFF"),
+            "mesh.slang names ROUGHNESS_CUTOFF again; the ramp belongs to ssr.slang"
+        );
+    }
+
+    /// The attachment's quantisation and its empty value are spelled the same in
+    /// `mesh.slang` and here.
+    #[test]
+    fn the_reflectivity_attachment_constants_match_mesh_slang() {
+        let source = include_str!("../shaders/mesh.slang");
+        let levels = format!("static const float REFLECTIVITY_LEVELS = {REFLECTIVITY_LEVELS:.1};");
+        assert!(
+            source.contains(&levels),
+            "mesh.slang does not declare `{levels}`; REFLECTIVITY_LEVELS has drifted"
+        );
+        let [r, g, b, a] = NO_REFLECTION;
+        let empty =
+            format!("static const float4 NO_REFLECTION = float4({r:.1}, {g:.1}, {b:.1}, {a:.1});");
+        assert!(
+            source.contains(&empty),
+            "mesh.slang does not declare `{empty}`; NO_REFLECTION has drifted"
+        );
+    }
+
+    /// `UNTINTED`'s roughness sits on the cutoff, which a raw store would round
+    /// either way; the shader's rounding lands it on the level above, so the
+    /// ramp `ssr.slang` derives is exactly zero.
+    #[test]
+    fn untinted_reloads_above_the_cutoff() {
+        assert!(stored_roughness(crate::mesh::GpuMaterial::UNTINTED.roughness) >= ROUGHNESS_CUTOFF);
+        assert_eq!(stored_roughness(0.0), 0.0, "a mirror is level zero");
+        assert_eq!(stored_roughness(1.0), 1.0, "fully rough is the top level");
+        assert_eq!(
+            stored_roughness(0.25),
+            64.0 / REFLECTIVITY_LEVELS,
+            "the probe scene's conductor rounds its tie up"
+        );
     }
 
     /// The shader and Rust mirror undo the same per-band irradiance transfer.
