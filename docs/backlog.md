@@ -797,6 +797,127 @@ chain itself was built 2026-08-29). Both read the row as it stands;
 multi-scatter compensation and the gradient sky were not blocked either, and are
 built.
 
+### DECISION NEEDED — the global-illumination direction (2026-08-30)
+
+A survey of what Frostbite, Unreal, Godot and Unity ship for GI, scored against
+this tree's five standing constraints rather than in the abstract (the full
+report lives outside the tree; this entry is its durable part):
+
+- **C1 — no ninth storage buffer.** `PORTABLE_STORAGE_BUFFERS_PER_STAGE` in
+  `crcbl_hal::pipeline` is what a WebGPU device promises, and the mesh
+  bind-group layout in `crcbl_render::forward` is at it. GI arrives as a sampled
+  image or as rows in the probe buffer `mesh.slang` already reads, or it does
+  not arrive on the browser tier.
+- **C2 — a frame is a function of its own inputs.** `Tolerance::RASTERISER`,
+  `47-reflections.md`'s SSR-history refusal and `50-irradiance-probes.md`'s DDGI
+  refusal all say so.
+- **C3 — the budget.** The whole frame is 0.990 ms p50 at 1920×1080 on an RX
+  7900 XTX (`46-ambient-occlusion.md`, the 2026-08-28 distribution).
+- **C4 — the software and browser tiers pay for every pass** at ~40× the desktop
+  cost.
+- **C5 — what exists.** L1 SH probes (`GpuProbe`, `probe_irradiance`), a Hi-Z
+  pyramid, GTAO and its blur, SSR; no SDF, no 3D image path (`transient.rs` is
+  `ImageType::D2`), no triangle intersector, no triangle BVH — `crcbl_phys::Bvh`
+  is SAH over AABBs with ray-vs-sphere and ray-vs-AABB leaves.
+
+**What the four engines say.** Every _runtime_ GI they ship carries state across
+frames — Lumen (TSR + probe history), SDFGI/VoxelGI/DFAO/Brixelizer
+(incrementally updated cascades), Enlighten (frame-rate decoupled), GIBS
+(amortised) — so every one fails C2, and the RT-hardware ones (Lumen HW, Unity
+RTGI, DDGI) have no WebGPU path at all; GIBS could trace on a compute BVH but is
+the amortisation, see below. Every _baked_ one — Frostbite Flux, Unreal
+Lightmass / Volumetric Lightmaps, Godot LightmapGI, Unity Adaptive Probe Volumes
+— is exactly deterministic, costs zero passes, and two of the four engines name
+it the recommended default for the hardware tier this engine targets. All three
+probe formats converged on 4×4×4 bricks of low-order SH: the format `GpuProbe`
+already is. What they have that this tree lacks is the thing that fills it — an
+offline path tracer.
+
+**The candidates, in order.**
+
+1. **A cooked irradiance-probe volume** (the APV / Flux shape). An offline CPU
+   gather that writes the probe rows, committed with a `--check` like `dfg.bin`
+   and `sky_prefilter.bin`. Clears C1–C5 by construction: zero passes,
+   byte-compared as an artifact rather than blessed as a golden, identical on
+   every tier; ~384 KB for an 8192-probe volume. First slice touches no renderer
+   code: `ray_vs_triangle` (Möller–Trumbore, tested against literature values)
+   and a triangle-leaf `Bvh`, red-checked by sabotaging the intersector. Second:
+   `cook-probes` on `cook-dfg`'s terms. Third: `apps/lantern` swaps its analytic
+   `bounce` for the general bake — the two must agree on a box. Static geometry
+   and, alone, static lights. Overturns `43-render-standards.md`'s "no baked GI"
+   as a decision, closes `50-irradiance-probes.md`'s deferred bake, and makes
+   P7C's ray-traced GI row worth re-arguing as reflections and shadows only.
+2. **Bake the transport, not the answer** (the Enlighten reduction). Per probe,
+   the L1 response to a small basis of sun directions plus a sky term; the host
+   folds the live sun into a weighted sum of rows before the upload `ProbeTable`
+   already does. No shader change, no binding, zero passes; the basis multiplies
+   committed bytes (six directions ≈ 2.3 MB for 8192 probes), not device memory.
+   Anti-vacuity: a basis of one reproduces candidate 1 bit for bit. Strictly
+   after candidate 1.
+3. **Non-temporal SSGI over the Hi-Z pyramid, delivered as an image.** The
+   plan's SSGI row, with one correction: `43-render-standards.md` §9 and
+   `49-antialiasing.md` file it behind motion vectors for temporal accumulation,
+   and that is a choice — GTAO's fixed-pattern-plus-blur determinism argument
+   transfers to a cosine gather. Costs: it needs an albedo the tree does not
+   expose (the scene target is shaded colour; `47-reflections.md` refuses a
+   G-buffer), so it opens with a third attachment or a visible approximation;
+   without accumulation the only quieting tool is a wider blur, which confines
+   it to contact scale; and two GTAO-class passes is roughly a doubling of the
+   frame. The only candidate that gives dynamic objects any indirect response.
+
+**Considered and rejected — do not re-propose without answering the reason:**
+Lumen software (8 ms at 1080p against a 0.990 ms frame; TSR-dependent; per-mesh
+SDFs, card atlas, virtual texturing); every RT-hardware family (no WebGPU ray
+tracing in 2026; all temporal); Godot SDFGI and AMD Brixelizer (the best RT-free
+runtime answers, but SDF generator + 3D images + cascade state — reconsider only
+if question 1 below is "fully dynamic"); Godot HDDAGI (unmerged, re-check in a
+year); voxel cone tracing (thin-wall leaks, already "largely superseded" in
+`43-render-standards.md`); radiance cascades in 3D (right philosophy, "remains
+an open problem" per radiance.wiki, the 0.3 ms figure is a 2023 demo); NRC
+(training signal is live path-traced rays); Frostbite/SEED surfel GI, "GIBS"
+(read in depth after the survey, and the survey's one-liner was wrong twice:
+surfels spawn from the G-buffer in 16×16 screen tiles, not at ray hits, and only
+6 of its >50 dispatches trace rays, so a compute BVH can stand in for RT
+hardware — but the point of the cache is temporal amortisation, 1–2 rays per
+surfel per frame over a multi-scale mean estimator, with six frame-carried
+states of which surfel placement cannot be shed without collapsing into
+screen-probe SSGI; shipped at 2.5 ms on XBSX at 1440p and frozen during gameplay
+in College Football 25 to fit 2 ms at 60 Hz; the WebGPU port's integrate pass
+binds 10 storage buffers against the 8 this tree pins, and needs a storage image
+no `.slang` here uses yet); full Enlighten (custom clustering pipeline;
+candidate 2 is the part worth having); lightmaps before probes (needs UV unwrap,
+atlas and a denoiser on top of everything probes need); parallax-corrected
+cubemap probes (cube arrays, mip chains, `SampleLevel` — all refused in
+`50-irradiance-probes.md`; the specular twin of candidate 1, re-open after it);
+SH L2 (priced in `50-irradiance-probes.md`; a contained escalation later).
+
+**The questions, and the one that decides the rest:**
+
+1. **Must indirect light respond to geometry that moves** — doors, destruction,
+   player-built structures? Yes means candidates 1 and 2 are insufficient and
+   the answer is a cascaded SDF, at the cost of an SDF generator, a 3D-image
+   path across four backends and per-frame determinism for the GI term. Static
+   geometry with dynamic lights means 1 + 2 beat anything in the plan for zero
+   milliseconds. Every engine surveyed recommends the baked answer for this
+   hardware tier.
+2. May a golden ever carry a temporal component? If the answer is a permanent
+   no, it belongs in `43-render-standards.md` §5 as one constraint rather than
+   three scattered refusals.
+3. What is the GI budget in milliseconds, on which tier — is candidate 3's
+   doubling acceptable on desktop if off by default on the web tier?
+4. Is a bake step acceptable in the content pipeline? A scene acquires a
+   committed, `--check`ed artifact and a scene edit means a rebake. Everything
+   above depends on this being yes.
+5. Do `ray_vs_triangle` and the triangle BVH live in `crcbl-phys` (available to
+   gameplay queries too) or bake-only beside the `cook-*` tools? No new
+   dependency either way.
+6. Does `apps/lantern` stay the GI acceptance fixture, or does GI want its own
+   demo (which joins every list `tools/check-browser-gate-demos.sh` enforces)?
+7. The lantern downlight question below becomes moot under candidate 1 — every
+   static source is in the gather — so it can close with that slice.
+
+Nothing here is started until question 1 is answered.
+
 ### Specular IBL: what rung 3 left (2026-08-29)
 
 `44-lighting.md`'s rung 3 is built, both halves: `ssr.slang`'s miss fallback
