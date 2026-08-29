@@ -174,7 +174,7 @@ pub const FRAME_UNIFORMS_SIZE: usize = 96
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
-/// Two `float4x4` (64 each) then five `uint` (4 each) and three `uint` of
+/// Two `float4x4` (64 each) then six `uint` (4 each) and two `uint` of
 /// explicit padding, which is what makes the record the same size on all four
 /// targets:
 /// `std430`, WGSL and MSL round a struct up to its alignment and DXIL's
@@ -191,7 +191,7 @@ pub const INSTANCE_STRIDE: usize = 160;
 /// untouched and `the_instance_layout_matches_the_offsets_slangc_emits` has to
 /// find exactly this many zeroed — see [`INSTANCE_STRIDE`], which is where the
 /// four targets' disagreement about an implicit tail is written out.
-pub const INSTANCE_PAD_WORDS: usize = 3;
+pub const INSTANCE_PAD_WORDS: usize = 2;
 
 /// Bytes per [`GpuMesh`], and the stride of the mesh-table storage buffer.
 ///
@@ -767,6 +767,25 @@ pub struct GpuInstance {
     /// the base belongs to the *selected* level, not to the entry the instance
     /// names.
     pub base_vertex: u32,
+    /// The pool vertex the **previous frame's** deformation of this instance
+    /// was written into, read only when [`GpuInstance::BASE_VERTEX_OVERRIDE`]
+    /// is set in [`GpuInstance::flags`] and ignored when it is not.
+    ///
+    /// What makes a skinned instance's motion vector its own. The geometry
+    /// stages take a fragment's previous clip position from
+    /// [`previous_transform`](GpuInstance::previous_transform) applied to the
+    /// vertex at this base; without it they apply that matrix to the vertex at
+    /// [`base_vertex`](GpuInstance::base_vertex), which is the pose *this*
+    /// frame's dispatch wrote — so a limb that swung reports the motion of the
+    /// body it hangs off and nothing else.
+    ///
+    /// **It is a pool vertex and not a region half**: [`crate::skinning`]'s
+    /// output region is two runs a frame alternates between, and this is
+    /// whichever of them the frame before this one filled.
+    /// `crcbl_render::ForwardRenderer::point_skinned_instances` is what writes
+    /// it, beside the current base, and a rigid instance leaves both at zero
+    /// along with the bit.
+    pub previous_base_vertex: u32,
 }
 
 impl GpuInstance {
@@ -818,6 +837,7 @@ impl GpuInstance {
             self.sector,
             self.flags,
             self.base_vertex,
+            self.previous_base_vertex,
         ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
@@ -866,6 +886,7 @@ impl GpuInstance {
             sector: uint_at(136),
             flags: uint_at(140),
             base_vertex: uint_at(144),
+            previous_base_vertex: uint_at(148),
         }
     }
 }
@@ -2011,6 +2032,14 @@ mod tests {
     /// mesh-shader frame whose previous position came from the current camera
     /// would disagree with a raster frame of the same scene, and only a device
     /// with a mesh stage would ever see it.
+    ///
+    /// **And the vertex it carries is the previous frame's, not this one's.**
+    /// A deformed instance's vertices are rewritten every frame, so the stage
+    /// that put *this* frame's deformed vertex through the previous transform
+    /// would draw a swinging limb with the motion of the body it hangs off —
+    /// a field that is right everywhere a mesh is rigid, which is everywhere
+    /// this crate's own scenes look. [`GpuInstance::previous_base_vertex`] is
+    /// where the other run is named and the fetch below is what has to read it.
     #[test]
     fn both_geometry_stages_emit_the_previous_clip_position() {
         let mesh = include_str!("../shaders/mesh.slang");
@@ -2022,9 +2051,23 @@ mod tests {
                  buffer"
             );
             assert!(
-                source
-                    .contains("mul(instance.previous_transform, float4(vertex.position.xyz, 1.0))"),
+                source.contains("mul(instance.previous_transform, float4(previous_position, 1.0))"),
                 "{name} declares `previous_view_proj` and never carries a vertex through it"
+            );
+            assert!(
+                !source
+                    .contains("mul(instance.previous_transform, float4(vertex.position.xyz, 1.0))"),
+                "{name} puts this frame's vertex through the previous transform, which is the \
+                 reading a skinned instance's deformation is invisible to"
+            );
+            assert!(
+                source.contains("instance.previous_base_vertex"),
+                "{name} never reads the base the previous frame's skinning dispatch wrote, so \
+                 its previous position cannot be a deformed one"
+            );
+            assert!(
+                source.contains("vertices[index + previous_base"),
+                "{name} does not fetch its previous position out of that base"
             );
             assert!(
                 source.contains("frame.previous_view_proj,"),
@@ -2480,9 +2523,10 @@ mod tests {
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the
-    /// disassembly. The five ids are the same width and would silently
-    /// permute — a mesh id read as a material id is a picture, not a crash —
-    /// so the byte each lands on is pinned rather than assumed.
+    /// disassembly. The trailing ids are all the same width and would silently
+    /// permute — a mesh id read as a material id is a picture, not a crash, and
+    /// a base vertex read as the previous frame's is a motion field that looks
+    /// plausible — so the byte each lands on is pinned rather than assumed.
     #[test]
     fn the_instance_layout_matches_the_offsets_slangc_emits() {
         // `OpDecorate %_runtimearr_GpuInstance_std430 ArrayStride 160`, and
@@ -2504,6 +2548,7 @@ mod tests {
             sector: 4,
             flags: 5,
             base_vertex: 6,
+            previous_base_vertex: 7,
         };
         let bytes = instance.to_bytes();
         assert_eq!(bytes.len(), INSTANCE_STRIDE);
@@ -2520,18 +2565,19 @@ mod tests {
         assert_eq!(uint_at(136), 4, "sector at offset 136");
         assert_eq!(uint_at(140), 5, "flags at offset 140");
         assert_eq!(uint_at(144), 6, "base_vertex at offset 144");
+        assert_eq!(uint_at(148), 7, "previous_base_vertex at offset 148");
         // The lanes `std430`'s rounding-up adds are padding, and a record that
         // wrote a field into them would be a field the shader reads at another
         // offset. Written rather than assumed: this buffer is uploaded whole.
         let pad = INSTANCE_STRIDE - INSTANCE_PAD_WORDS * size_of::<u32>();
-        assert_eq!(pad, 148, "the last field ends at byte 148");
+        assert_eq!(pad, 152, "the last field ends at byte 152");
         assert!(
             bytes[pad..].iter().all(|byte| *byte == 0),
             "the tail past the last field is padding and is zero: {:?}",
             &bytes[pad..]
         );
 
-        // And the decode agrees with the encode, field for field — five `u32`s
+        // And the decode agrees with the encode, field for field — six `u32`s
         // in a row would permute silently, and this is what says they did not.
         assert_eq!(GpuInstance::from_bytes(&bytes), instance);
     }
@@ -2556,6 +2602,7 @@ mod tests {
             0
         );
         assert_eq!(GpuInstance::default().base_vertex, 0);
+        assert_eq!(GpuInstance::default().previous_base_vertex, 0);
 
         // And the bit survives the round trip through the bytes a shader reads,
         // beside a base a shader would resolve.

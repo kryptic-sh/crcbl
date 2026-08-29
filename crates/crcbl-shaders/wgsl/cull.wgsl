@@ -20,7 +20,7 @@ struct GpuInstance_std430_0
     @align(8) sector_0 : u32,
     @align(4) flags_0 : u32,
     @align(16) base_vertex_0 : u32,
-    @align(4) pad0_0 : u32,
+    @align(4) previous_base_vertex_0 : u32,
     @align(8) pad1_0 : u32,
     @align(4) pad2_0 : u32,
 };

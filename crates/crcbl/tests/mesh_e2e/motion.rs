@@ -73,7 +73,7 @@ const REST_TOLERANCE: f32 = HALF_STEP_BELOW_REST / MOTION_VIEW_SCALE;
 /// Where the instance that moves stands: the point the camera looks at, so its
 /// motion is a translation across the screen rather than a magnification about
 /// the frame's centre.
-const MOVING_AT: Vec3 = Vec3::ZERO;
+pub(crate) const MOVING_AT: Vec3 = Vec3::ZERO;
 
 /// Where the instance that stands still stands, far enough along `-X` to land in
 /// its own part of the frame — [`nearer_first`] is what tells the two apart, and
@@ -91,7 +91,7 @@ const STILL_AT: Vec3 = Vec3::new(-2.4, 0.0, 0.0);
 /// Measured on radv: this puts the projected centre 0.0372 of the frame's width
 /// to the right, which is three orders above [`REST_TOLERANCE`] and still leaves
 /// the instance on its own side of the frame.
-const MOVE_BY: Vec3 = Vec3::new(0.25, 0.0, 0.0);
+pub(crate) const MOVE_BY: Vec3 = Vec3::new(0.25, 0.0, 0.0);
 
 /// How far the moving instance moves between two frames, in world units along
 /// `+Y`, for the test that asks about the other component.
@@ -155,7 +155,7 @@ const CAMERA_PAN: Vec3 = Vec3::new(0.2, 0.0, 0.0);
 /// smaller is what turns "the geometry drew" into an assertion rather than an
 /// assumption — a scene that drew nothing would otherwise pass every loop in
 /// this file by iterating over an empty set.
-const COVERED_FLOOR: usize = 200;
+pub(crate) const COVERED_FLOOR: usize = 200;
 
 /// How far a texel's own motion may sit either side of the projected centre's,
 /// as a factor of it.
@@ -167,7 +167,7 @@ const COVERED_FLOOR: usize = 200;
 /// here are those with room either side, and they are still far tighter than the
 /// mistakes this test exists to catch — a dropped factor of one half is 2.0, and
 /// a subtraction done before the perspective divide is not near 1 at all.
-const MOTION_BAND: (f32, f32) = (0.8, 1.35);
+pub(crate) const MOTION_BAND: (f32, f32) = (0.8, 1.35);
 
 /// The smallest `u` displacement a panning camera may produce before this file
 /// stops believing the camera moved.
@@ -176,12 +176,12 @@ const MOTION_BAND: (f32, f32) = (0.8, 1.35);
 /// of the frame's width, all of them leftward. Half the smallest is a floor no
 /// rounding reaches and no unadvanced history clears, which is the only pair of
 /// values it has to separate.
-const CAMERA_MOTION_FLOOR: f32 = 0.008;
+pub(crate) const CAMERA_MOTION_FLOOR: f32 = 0.008;
 
 /// The camera every frame in this file is drawn with: [`mesh_camera`] pulled
 /// back far enough to hold both instances, on `goldens.rs`'s `two_mesh_camera`
 /// terms exactly.
-fn motion_camera() -> Camera {
+pub(crate) fn motion_camera() -> Camera {
     let mut camera = mesh_camera(Projection::default());
     camera.eye *= 1.7;
     camera
@@ -204,13 +204,42 @@ fn panned_camera() -> Camera {
 /// with it. `crates/crcbl-shaders/shaders/ssr.slang`'s `ndc_to_pixel` is the
 /// same mapping inside the engine, which makes this the third copy rather than a
 /// guess.
-fn project(camera: &Camera, point: Vec3) -> [f32; 2] {
+pub(crate) fn project(camera: &Camera, point: Vec3) -> [f32; 2] {
     let aspect = MESH_EXTENT.0 as f32 / MESH_EXTENT.1 as f32;
     let clip = camera.view_projection(aspect) * point.extend(1.0);
     [
         (clip.x / clip.w * 0.5 + 0.5) * MESH_EXTENT.0 as f32,
         (0.5 - clip.y / clip.w * 0.5) * MESH_EXTENT.1 as f32,
     ]
+}
+
+/// Turns `renderer`'s frames into a motion field a test can read as data.
+///
+/// **Every effect that writes into or composites over the scene target, off**,
+/// and then the motion view on. These suites read that target as data rather
+/// than as a picture: the reflection composite, the bloom chain, the froxel
+/// composite and either antialiasing tier each add a term to the very texels
+/// the encoding is read out of, and a blend of two neighbouring motion vectors
+/// is a motion no fragment wrote. Shadows and ambient occlusion are left alone,
+/// because the motion view's branch returns before anything they feed is
+/// touched.
+///
+/// Shared with [`crate::skinned_motion`], whose scene is a skinned cube rather
+/// than these two instances but whose readback is this one: a second copy of
+/// this list is a second thing to keep in step with the pass.
+pub(crate) fn arm_motion_view(renderer: &mut ForwardRenderer) {
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none().force(
+            RenderEffects::REFLECTIONS
+                .union(RenderEffects::BLOOM)
+                .union(RenderEffects::VOLUMETRIC_FOG)
+                .union(RenderEffects::ANTIALIASING)
+                .union(RenderEffects::SMAA),
+            Some(false),
+        ),
+        ..EffectRequest::default()
+    });
+    renderer.set_motion_view(true);
 }
 
 /// The two instances and the fixture they are drawn on, so a test can render
@@ -237,26 +266,7 @@ impl MotionScene {
         let mut renderer =
             ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
                 .expect("the forward renderer builds");
-        // **Every effect that writes into or composites over the scene target,
-        // off.** This file reads that target as data rather than as a picture:
-        // the reflection composite, the bloom chain, the froxel composite and
-        // either antialiasing tier each add a term to the very texels the
-        // encoding is read out of, and a blend of two neighbouring motion
-        // vectors is a motion no fragment wrote. Shadows and ambient occlusion
-        // are left alone, because the motion view's branch returns before
-        // anything they feed is touched.
-        renderer.set_effect_request(EffectRequest {
-            programmatic: EffectOverride::none().force(
-                RenderEffects::REFLECTIONS
-                    .union(RenderEffects::BLOOM)
-                    .union(RenderEffects::VOLUMETRIC_FOG)
-                    .union(RenderEffects::ANTIALIASING)
-                    .union(RenderEffects::SMAA),
-                Some(false),
-            ),
-            ..EffectRequest::default()
-        });
-        renderer.set_motion_view(true);
+        arm_motion_view(&mut renderer);
         let moving = place_cube_at(&mut renderer, MOVING_AT);
         let _still = place_cube_at(&mut renderer, STILL_AT);
         Self {
@@ -334,7 +344,7 @@ fn place_cube_at(renderer: &mut ForwardRenderer, at: Vec3) -> InstanceHandle {
 /// true — a clear colour that gained a zero blue channel would turn this into a
 /// mask of the whole frame, and every test here would then be passing on the
 /// background.
-fn covered(frame: &HdrTarget) -> Vec<Option<[f32; 4]>> {
+pub(crate) fn covered(frame: &HdrTarget) -> Vec<Option<[f32; 4]>> {
     const {
         assert!(
             SCENE_CLEAR[2] != 0.0,
@@ -353,7 +363,7 @@ fn covered(frame: &HdrTarget) -> Vec<Option<[f32; 4]>> {
 }
 
 /// The motion the encoding carries, in texture coordinates.
-fn decode(encoded: [f32; 4]) -> [f32; 2] {
+pub(crate) fn decode(encoded: [f32; 4]) -> [f32; 2] {
     [
         (encoded[0] - REST) / MOTION_VIEW_SCALE,
         (encoded[1] - REST) / MOTION_VIEW_SCALE,
@@ -362,12 +372,12 @@ fn decode(encoded: [f32; 4]) -> [f32; 2] {
 
 /// Whether this texel's motion is rest, within what the target's rounding leaves
 /// of it — see [`REST_TOLERANCE`].
-fn at_rest(motion: [f32; 2]) -> bool {
+pub(crate) fn at_rest(motion: [f32; 2]) -> bool {
     motion[0].abs() <= REST_TOLERANCE && motion[1].abs() <= REST_TOLERANCE
 }
 
 /// Where in the frame the texel at `index` sits.
-fn texel_at(index: usize) -> (u32, u32) {
+pub(crate) fn texel_at(index: usize) -> (u32, u32) {
     (index as u32 % MESH_EXTENT.0, index as u32 / MESH_EXTENT.0)
 }
 

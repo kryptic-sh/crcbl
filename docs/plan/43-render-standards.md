@@ -713,12 +713,17 @@ encoding the vector as `motion * MOTION_VIEW_SCALE + 0.5`.
 `crates/crcbl/tests/mesh_e2e/motion.rs` is the observer: a still scene reads
 rest, a moved instance reads its own motion while its neighbour reads rest, a
 panning camera moves every covered pixel, and the frame after a move is back at
-rest.
+rest. `crates/crcbl/tests/mesh_e2e/skinned_motion.rs` is the second observer: a
+cube whose palette carried it across the frame reads that displacement while its
+instance transform never changed, which is
+`crcbl_shaders::mesh::GpuInstance::previous_base_vertex` — the pool vertex the
+frame before deformed it into — being read on the override arm.
 
 So the five features below are blocked **on their own work only** — a rigid
-body's motion is in the target, and the two things it does not yet carry are
-`docs/backlog.md`'s: a skinned instance's deformation, and the camera's motion
-where the sky shows through.
+body's and a deformed surface's motion are both in the target, and the two
+things it does not yet carry are `docs/backlog.md`'s: the camera's motion where
+the sky shows through, and a skinned instance's own transform motion, which the
+per-frame re-point in `ForwardRenderer::point_skinned_instances` erases.
 
 Those five, in the order they would be wanted:
 

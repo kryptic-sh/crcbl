@@ -272,10 +272,15 @@ struct GpuInstance
     /// dispatch wrote it into here, so the bucket, the level tables and the
     /// bounding box all still resolve through the mesh it was made from.
     uint base_vertex;
+    /// The pool vertex the **previous frame's** deformation of this instance was
+    /// written into, matching `mesh.slang`'s copy — read only when
+    /// `INSTANCE_BASE_VERTEX_OVERRIDE` is set, and then it is the half of the
+    /// skinning region the frame before this one filled. `emit_cluster` below
+    /// takes a fragment's previous clip position from the vertex at this base.
+    uint previous_base_vertex;
     /// Pads the record to a multiple of the transform's alignment, matching
     /// `mesh.slang` — where the four targets' disagreement about the tail is
     /// written out.
-    uint pad0;
     uint pad1;
     uint pad2;
 };
@@ -1347,6 +1352,17 @@ void emit_cluster(
         ? instance.base_vertex
         : mesh.base_vertex;
 
+    // **And where those vertices were**, on `mesh.slang`'s vertex stage's terms
+    // exactly: the run above is the pose this frame's dispatch wrote, so a
+    // deformed instance putting it through the previous transform would report
+    // its body's motion for a limb that swung. The override arm names the half
+    // the previous frame's dispatch filled; without the bit it is the same base
+    // the current vertex is read from, so a rigid draw names the same vertex
+    // rather than a second one.
+    uint previous_base = (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) != 0u
+        ? instance.previous_base_vertex
+        : base_vertex;
+
     // Once for the cluster, not once per vertex: the instance is fixed for the
     // whole meshlet, so the three cross products are amortised over every
     // vertex the loop below writes.
@@ -1377,11 +1393,13 @@ void emit_cluster(
         // Both clip positions, undivided, exactly as `mesh.slang`'s vertex
         // stage emits them — the fragment stage is the same one for both paths,
         // so a mesh-shader frame's motion vectors have to be the same
-        // subtraction as a raster frame's.
+        // subtraction as a raster frame's, previous vertex included.
+        float3 previous_position =
+            vertices[index + previous_base + level_base].position.xyz;
         output.clip_position = output.position;
         output.previous_clip_position = mul(
             frame.previous_view_proj,
-            mul(instance.previous_transform, float4(vertex.position.xyz, 1.0)));
+            mul(instance.previous_transform, float4(previous_position, 1.0)));
         verts[v] = output;
     }
 

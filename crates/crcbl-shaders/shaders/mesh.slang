@@ -589,16 +589,26 @@ struct GpuInstance
     /// dispatch wrote it into here, so the bucket, the level tables and the
     /// bounding box all still resolve through the mesh it was made from.
     uint base_vertex;
+    /// The pool vertex the **previous frame's** deformation of this instance was
+    /// written into, read **only** when `INSTANCE_BASE_VERTEX_OVERRIDE` is set
+    /// in `flags` and ignored when it is not — and then it is the half of the
+    /// skinning region the frame before this one filled, not the half the field
+    /// above names.
+    ///
+    /// The vertex stage below takes a fragment's previous clip position from
+    /// the vertex at this base. Without it the previous transform would be
+    /// applied to *this* frame's deformed vertex, and a limb that swung would
+    /// report the motion of the body it hangs off.
+    uint previous_base_vertex;
     /// Pads the record to a multiple of the transform's 16-byte alignment.
     ///
     /// **Spelled out rather than left to the layout rules**, because the four
     /// targets do not agree about the tail: `std430` and Metal round the struct
     /// up to that alignment and DXIL's structured-buffer stride does not, so a
     /// record ending at the field above is 160 bytes in SPIR-V, WGSL and MSL and
-    /// 148 in DXIL — one buffer, two element sizes, and nothing that reports it.
+    /// 152 in DXIL — one buffer, two element sizes, and nothing that reports it.
     /// `DrawConstants` below carries the same pair for `std140`'s version of the
     /// same rule.
-    uint pad0;
     uint pad1;
     uint pad2;
 };
@@ -1240,6 +1250,17 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
         ? instance.base_vertex
         : mesh.base_vertex;
     MeshVertex vertex = vertices[index + base_vertex];
+    // **And where this vertex was**, which for a deformed instance is not this
+    // vertex at all: the run above is the pose *this* frame's dispatch wrote,
+    // so putting it through the previous transform says a swinging limb moved
+    // exactly as its body did. The override arm names the half the previous
+    // frame's dispatch filled — `GpuInstance::previous_base_vertex` — and
+    // without the bit it is the base the line above already read from, so a
+    // rigid draw names the same vertex rather than a second one.
+    uint previous_base = (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) != 0u
+        ? instance.previous_base_vertex
+        : base_vertex;
+    float3 previous_position = vertices[index + previous_base].position.xyz;
 
     float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
 
@@ -1267,13 +1288,14 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     output.material = instance.material;
     output.uv = vertex.uv.xy;
     // Both clip positions, undivided — see `VertexOutput::clip_position`. The
-    // previous one is this instance's previous transform seen through last
-    // frame's camera, which is the whole of a rigid body's motion: where the
-    // object went and where the viewer went, in one subtraction.
+    // previous one is last frame's vertex under this instance's previous
+    // transform seen through last frame's camera, which is the whole of the
+    // motion: where the surface went, where the object went and where the
+    // viewer went, in one subtraction.
     output.clip_position = output.position;
     output.previous_clip_position = mul(
         frame.previous_view_proj,
-        mul(instance.previous_transform, float4(vertex.position.xyz, 1.0)));
+        mul(instance.previous_transform, float4(previous_position, 1.0)));
     return output;
 }
 

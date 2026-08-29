@@ -2259,8 +2259,24 @@ impl ResidentMesh {
 struct SkinnedInstance {
     handle: InstanceHandle,
     /// Indexed by parity, in [`crate::skinning::SkinnedRegion::base`]'s
-    /// indexing.
+    /// indexing — so the half a frame of parity `p` draws out of is
+    /// `bases[p & 1]` and the half the frame before it filled is
+    /// `bases[(p ^ 1) & 1]`, which is
+    /// [`SkinnedRegion::previous_base`](crate::skinning::SkinnedRegion::previous_base)'s
+    /// answer for the same `p`.
     bases: [u32; 2],
+    /// Whether a frame has already pointed this entry at a half of the region
+    /// it now names.
+    ///
+    /// **What makes the previous base meaningful.** The half a frame did not
+    /// write holds whatever its reservation came with until a dispatch fills
+    /// it, so an object's first frame out of a region has no previous
+    /// deformation to point at — naming that half would give it a motion vector
+    /// against undefined vertices. Such an entry is put at rest instead, which
+    /// is the rule [`InstancePool::insert`](crate::instance_pool::InstancePool::insert)
+    /// applies to `previous_transform` for the same reason: a spawn did not
+    /// travel from anywhere.
+    pointed: bool,
 }
 
 /// The two base vertices an object drawn out of `mesh` alternates between, in
@@ -5632,6 +5648,7 @@ impl ForwardRenderer {
         self.skinned_instances.push(SkinnedInstance {
             handle,
             bases: skinned_bases(desc.mesh),
+            pointed: false,
         });
         Ok(handle)
     }
@@ -5662,10 +5679,22 @@ impl ForwardRenderer {
             .iter_mut()
             .find(|entry| entry.handle == handle)
         {
-            Some(entry) => entry.bases = bases,
-            None => self
-                .skinned_instances
-                .push(SkinnedInstance { handle, bases }),
+            // **A different region is a fresh entry.** The half this object has
+            // never been drawn out of holds whatever its reservation came with,
+            // so the next pointing owes it rest rather than a previous
+            // deformation — see [`SkinnedInstance::pointed`]. The pair of bases
+            // is what "different" means here: two calls naming one region give
+            // the same two runs, so rewriting an object's material or transform
+            // is not a change of region.
+            Some(entry) => {
+                entry.pointed &= entry.bases == bases;
+                entry.bases = bases;
+            }
+            None => self.skinned_instances.push(SkinnedInstance {
+                handle,
+                bases,
+                pointed: false,
+            }),
         }
     }
 
@@ -5681,36 +5710,65 @@ impl ForwardRenderer {
         desc: &SkinnedInstanceDesc<'_>,
         parity: u32,
     ) -> mesh::GpuInstance {
+        let base_vertex = desc.mesh.region().base(parity);
         mesh::GpuInstance {
             transform: desc.transform.to_cols_array(),
             mesh: desc.mesh.mesh_id(),
             material: self.material_ids[desc.material],
             flags: mesh::GpuInstance::BASE_VERTEX_OVERRIDE,
-            base_vertex: desc.mesh.region().base(parity),
+            base_vertex,
+            // At rest, which is what a record this call writes has to be: the
+            // object has not been drawn out of this region yet, so the other
+            // half holds whatever its reservation came with. A frame that runs
+            // [`point_skinned_instances`](Self::point_skinned_instances) is
+            // what starts pointing this at the half before.
+            previous_base_vertex: base_vertex,
             ..mesh::GpuInstance::default()
         }
     }
 
     /// Points every skinned object at the half of its region a frame of this
-    /// parity fills, and forgets the ones whose instance has gone.
+    /// parity fills **and at the half the frame before it filled**, and forgets
+    /// the ones whose instance has gone.
     ///
     /// Called between the instance ring's rotation and its upload, which is the
     /// whole reason those two are separate calls — see
     /// [`InstancePool::rotate`](crate::instance_pool::InstancePool::rotate).
+    ///
+    /// The second base is what a skinned fragment's motion vector is subtracted
+    /// against — see
+    /// [`GpuInstance::previous_base_vertex`](mesh::GpuInstance::previous_base_vertex).
+    /// **A region this frame's `ranges` left out was not skinned this frame**,
+    /// so the half this points at as the current one already holds an earlier
+    /// frame's pose. That is pre-existing — it is what a caller driving a
+    /// skinned object through plain [`begin_frame`](Self::begin_frame) gets, and
+    /// it predates this second base — and the previous half is then no worse off
+    /// than the current one.
     fn point_skinned_instances(&mut self, parity: u32) {
         let Self {
             instances,
             skinned_instances,
             ..
         } = self;
-        skinned_instances.retain(|entry| {
+        skinned_instances.retain_mut(|entry| {
             // The record as the pool holds it, so the transform, the material
-            // and the mesh the caller last set survive: only the base vertex is
+            // and the mesh the caller last set survive: only the two bases are
             // this call's.
             let Some(mut instance) = instances.get(entry.handle) else {
                 return false;
             };
+            // `SkinnedRegion::base`'s indexing and `SkinnedRegion::previous_base`'s,
+            // applied to the entry's own copy of the pair — see
+            // [`SkinnedInstance::bases`].
             instance.base_vertex = entry.bases[(parity & 1) as usize];
+            instance.previous_base_vertex = if entry.pointed {
+                entry.bases[((parity ^ 1) & 1) as usize]
+            } else {
+                // Nothing has been written into the other half for this object,
+                // so it is put at rest — see [`SkinnedInstance::pointed`].
+                instance.base_vertex
+            };
+            entry.pointed = true;
             instances.set(entry.handle, &instance);
             true
         });
@@ -13764,6 +13822,31 @@ mod tests {
             .count()
     }
 
+    /// The record `handle` names, out of the ring buffer **this frame draws
+    /// from** rather than out of the pool's host mirror.
+    ///
+    /// A mirror and a buffer that disagree is exactly the defect a re-pointing
+    /// design can have, so every claim about a skinned instance's bases is read
+    /// off the bytes a shader would.
+    fn instance_record(
+        recorder: &Recorder,
+        renderer: &ForwardRenderer,
+        handle: InstanceHandle,
+    ) -> mesh::GpuInstance {
+        let buffer = renderer.instances.buffers()[renderer.frame()];
+        let bytes = recorder.buffer_bytes(buffer).expect("the ring is live");
+        let index = renderer
+            .instances
+            .index(handle)
+            .expect("the object is live") as usize;
+        let at = index * mesh::INSTANCE_STRIDE;
+        mesh::GpuInstance::from_bytes(
+            bytes[at..at + mesh::INSTANCE_STRIDE]
+                .try_into()
+                .expect("one whole instance"),
+        )
+    }
+
     /// **A skinned primitive takes no mesh-table entry of its own, and nothing
     /// rewrites the one it draws through.**
     ///
@@ -13890,20 +13973,7 @@ mod tests {
         for _ in 0..2 {
             fixture.begin(device);
             let parity = fixture.skinning.parity();
-            let frame = fixture.renderer.frame();
-            let buffer = fixture.renderer.instances.buffers()[frame];
-            let bytes = recorder.buffer_bytes(buffer).expect("the ring is live");
-            let index = fixture
-                .renderer
-                .instances
-                .index(handle)
-                .expect("the object is live") as usize;
-            let at = index * mesh::INSTANCE_STRIDE;
-            let instance = mesh::GpuInstance::from_bytes(
-                bytes[at..at + mesh::INSTANCE_STRIDE]
-                    .try_into()
-                    .expect("one whole instance"),
-            );
+            let instance = instance_record(&recorder, &fixture.renderer, handle);
             assert_eq!(
                 instance.base_vertex,
                 fixture.skinned.region().base(parity),
@@ -13928,6 +13998,122 @@ mod tests {
              ignored the parity entirely would pass this"
         );
 
+        fixture.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A skinned object's record names the half the frame before it filled**,
+    /// and it starts at rest.
+    ///
+    /// The other half of a skinned motion vector. The base above is where a
+    /// fragment *is*; this is where it *was*, and without it the geometry stages
+    /// put the previous transform through this frame's deformed vertex — so a
+    /// limb that swung reports the motion of the body it hangs off. See
+    /// [`GpuInstance::previous_base_vertex`](mesh::GpuInstance::previous_base_vertex).
+    ///
+    /// Four claims, and the first and last are what stop the middle two being a
+    /// restatement of the parity:
+    ///
+    /// * the **first** frame of a fresh object writes the base it draws out of,
+    ///   because the other half holds whatever its reservation came with and a
+    ///   motion vector against undefined vertices is worse than no motion;
+    /// * the frames after it write
+    ///   [`SkinnedRegion::previous_base`](crate::skinning::SkinnedRegion::previous_base),
+    ///   which must also **differ** from the base they draw out of — a renderer
+    ///   that wrote the current base into both lanes would satisfy every "it is
+    ///   a legal base" reading of this and leave every skinned instance at rest;
+    /// * and moving the object onto a **different region** puts it back at rest
+    ///   for one frame, because the halves it now names are two runs it has
+    ///   never been drawn out of.
+    #[test]
+    fn a_skinned_draw_carries_the_previous_half_and_starts_at_rest() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        let handle = fixture
+            .renderer
+            .add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+            })
+            .expect("a pool of thousands has room for one object");
+
+        for frame in 1..=3u32 {
+            fixture.begin(device);
+            let parity = fixture.skinning.parity();
+            let instance = instance_record(&recorder, &fixture.renderer, handle);
+            assert_eq!(
+                instance.base_vertex,
+                fixture.skinned.region().base(parity),
+                "frame {frame} must draw out of the half parity {parity} fills"
+            );
+            if frame == 1 {
+                assert_eq!(
+                    instance.previous_base_vertex, instance.base_vertex,
+                    "a fresh object has no previous deformation, so its first frame owes rest \
+                     rather than a half no dispatch has written"
+                );
+            } else {
+                assert_eq!(
+                    instance.previous_base_vertex,
+                    fixture.skinned.region().previous_base(parity),
+                    "frame {frame} must subtract against the half the frame before it filled"
+                );
+                assert_ne!(
+                    instance.previous_base_vertex, instance.base_vertex,
+                    "frame {frame} named one half twice, which is every skinned fragment at \
+                     rest however far its surface moved"
+                );
+            }
+        }
+
+        // The same object, moved onto a region it has never been drawn out of:
+        // both halves are runs no dispatch of this object's has filled, so the
+        // rule that put the first frame at rest applies again.
+        let second = fixture
+            .renderer
+            .reserve_skinned(DEMO_CUBE)
+            .expect("a default pool has room for two more halves of a cube");
+        assert_ne!(
+            second.region().base(0),
+            fixture.skinned.region().base(0),
+            "the second reservation is the same two runs as the first, so nothing below is \
+             about a change of region at all"
+        );
+        fixture.renderer.set_skinned_instance(
+            handle,
+            &SkinnedInstanceDesc {
+                mesh: &second,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+            },
+        );
+
+        for frame in 1..=2u32 {
+            fixture.begin(device);
+            let parity = fixture.skinning.parity();
+            let instance = instance_record(&recorder, &fixture.renderer, handle);
+            assert_eq!(
+                instance.base_vertex,
+                second.region().base(parity),
+                "frame {frame} after the move must draw out of the new region"
+            );
+            if frame == 1 {
+                assert_eq!(
+                    instance.previous_base_vertex, instance.base_vertex,
+                    "the first frame on a new region owes rest, exactly as a fresh object does"
+                );
+            } else {
+                assert_eq!(
+                    instance.previous_base_vertex,
+                    second.region().previous_base(parity),
+                    "and the frame after it is subtracting against the new region's other half"
+                );
+            }
+        }
+
+        fixture.renderer.release_skinned(second);
         fixture.destroy(device);
         recorder.assert_valid();
     }

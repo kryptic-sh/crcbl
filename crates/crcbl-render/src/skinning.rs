@@ -36,7 +36,7 @@
 //! scattered into, the levels it selects through and the box it is culled
 //! against are all the ones the undeformed mesh already had.
 //!
-//! # The region is double-buffered, and nothing reads the previous half yet
+//! # The region is double-buffered, and the motion-vector pass reads the other half
 //!
 //! `docs/plan/17-animation.md`'s 2026-07-27 correction: "TAA motion vectors for
 //! skinned meshes need previous-frame skinned **positions**, not just a previous
@@ -45,13 +45,20 @@
 //! a skinning-pipeline rewrite later."
 //!
 //! So [`SkinnedRegion`] reserves **two** runs and [`Skinning::begin_frame`]
-//! alternates which one a frame writes. **There is no reader of the other one.**
-//! There is no TAA pass in the engine, [`SkinnedRegion::previous_base`] has no
-//! caller outside this module's tests, and the memory the prev half occupies is
-//! bought today and spent later. That is the correction being followed
-//! deliberately, not an unfinished half of this module: the alternative is
-//! shipping a pass whose output has one home and then re-pointing every bind
-//! group, every barrier and every draw that names it.
+//! alternates which one a frame writes. **What reads the other one is the
+//! motion-vector pass**:
+//! [`ForwardRenderer::point_skinned_instances`](crate::forward::ForwardRenderer)
+//! writes its base into
+//! [`GpuInstance::previous_base_vertex`](crcbl_shaders::mesh::GpuInstance::previous_base_vertex)
+//! every frame, beside the current half's, and `mesh.slang`'s vertex stage and
+//! `mesh_cluster.slang`'s `emit_cluster` take a fragment's previous clip
+//! position from the vertex there. Subtracting the *current* deformed vertex
+//! instead — which is what a record with no previous base leaves them doing —
+//! gives a swinging limb the motion of the body it hangs off.
+//!
+//! The correction was followed ahead of that reader, and the alternative it
+//! avoided was shipping a pass whose output has one home and then re-pointing
+//! every bind group, every barrier and every draw that names it.
 //!
 //! # One dispatch per range, one bind group per range
 //!
@@ -114,8 +121,7 @@ use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolError};
 /// [`SkinnedRegion::release`]. Neither [`Clone`] nor [`Copy`], because a copy
 /// is a second thing that would try to release the same two runs.
 ///
-/// See the [module docs](self) for why there are two runs when only one has a
-/// reader.
+/// See the [module docs](self) for what each of the two runs is for.
 #[derive(Debug)]
 pub struct SkinnedRegion {
     /// The two runs' first vertices, indexed by a frame's parity.
@@ -178,9 +184,14 @@ impl SkinnedRegion {
 
     /// The other half: what the frame before this one skinned.
     ///
-    /// **Nothing reads this yet** — see the [module docs](self). It is the half
-    /// TAA's motion vectors will need, and it exists now so that the pool layout
-    /// does not have to change when they arrive.
+    /// **The half a motion vector is subtracted against** — see the
+    /// [module docs](self).
+    /// [`ForwardRenderer::point_skinned_instances`](crate::forward::ForwardRenderer)
+    /// puts this number in every skinned instance's
+    /// [`GpuInstance::previous_base_vertex`](crcbl_shaders::mesh::GpuInstance::previous_base_vertex),
+    /// off its own copy of the two bases rather than through this call, because
+    /// a placed object keeps the pair and not the region; this is where that
+    /// indexing is defined and what a test compares against.
     #[must_use]
     pub const fn previous_base(&self, parity: u32) -> u32 {
         self.bases[((parity ^ 1) & 1) as usize]

@@ -83,6 +83,7 @@ mod lod;
 mod motion;
 mod render_scale;
 mod resize;
+mod skinned_motion;
 mod smaa;
 mod two_dags;
 

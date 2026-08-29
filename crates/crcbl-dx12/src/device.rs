@@ -7583,6 +7583,7 @@ pub(crate) mod tests {
                 sector: 0,
                 flags: GpuInstance::LIVE,
                 base_vertex: 0,
+                previous_base_vertex: 0,
             }
             .to_bytes(),
         );

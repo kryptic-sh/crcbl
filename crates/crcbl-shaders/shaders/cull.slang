@@ -99,10 +99,14 @@ struct GpuInstance
     /// dispatch wrote it into here, so the bucket, the level tables and the
     /// bounding box all still resolve through the mesh it was made from.
     uint base_vertex;
+    /// The pool vertex the **previous frame's** deformation of this instance
+    /// was written into, on the same terms as the field above — read by the two
+    /// geometry stages when the override bit is set, and by nothing here:
+    /// this pass decides what is on screen, and neither question is where a fragment was.
+    uint previous_base_vertex;
     /// Pads the record to a multiple of the transform's alignment, matching
     /// `mesh.slang` — where the four targets' disagreement about the tail is
     /// written out.
-    uint pad0;
     uint pad1;
     uint pad2;
 };

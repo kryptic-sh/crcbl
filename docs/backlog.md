@@ -26,18 +26,24 @@ settle.
 `crates/crcbl/tests/mesh_e2e/motion.rs` on radv and lavapipe. What it did not
 do:
 
-- **A skinned instance carries only its transform's motion.** The deformed
-  previous positions exist — `crcbl_render::skinning`'s `SkinnedRegion` carries
-  `previous_base` and its module docs say the previous half has no reader — but
-  `crcbl_shaders::mesh::GpuInstance` has no previous base, so the vertex stage
-  reads a skinned instance's _current_ deformed position through the previous
-  transform and a limb that swung reads its body's motion. `mesh.slang`'s
-  `GpuInstance` ends in three padding words — `INSTANCE_PAD_WORDS` on the Rust
-  side — so `pad0` is a free lane that could carry the previous base without
-  widening `INSTANCE_STRIDE`; the vertex stage would then read
-  `vertices[index + previous_base]` for the previous position exactly as it
-  reads `vertices[index + base_vertex]` for the current one. Not attempted: the
-  change is in the instance record and the pool, not in this pass.
+- **A skinned instance's _transform_ motion is always zero**, and this is not
+  the deformation half — that one shipped as
+  `crcbl_shaders::mesh::GpuInstance::previous_base_vertex`.
+  `ForwardRenderer::point_skinned_instances` re-points every skinned object
+  through `InstancePool::set`, and that call takes the previous transform from
+  the record it is overwriting — so the record already carries this frame's
+  transform by the time the re-point runs, and `previous_transform` is set equal
+  to `transform` on every frame. Measured, not inferred: a throwaway test that
+  called `set_skinned_instance` with a translation of 5 along `X` and then
+  `begin_skinned_frame` read the instance ring back with `transform` and
+  `previous_transform` both holding that translation. So a skinned character
+  that _walks_ contributes nothing to the motion target from the walk, only from
+  its deformation. The fix is for the re-point to preserve the record's previous
+  transform rather than go through the caller-facing setter — a new
+  `InstancePool` entry point, or a `set` that is told what the previous
+  transform is — and it wants a record-level observer beside
+  `a_skinned_draw_carries_the_previous_half_and_starts_at_rest`. Not attempted
+  here: it is a change to the pool's API, not to the instance record.
 - **The sky and every uncovered pixel read zero motion.** The `forward` pass
   clears the target to zero, and the sky pass writes no motion at all, so a
   consumer sees a static background under a moving camera. What is wanted is the

@@ -191,12 +191,15 @@ TAA needs four things this tree does not have:
   both geometry stages feed. **The convention is texture-coordinate space,
   current minus previous, `+y` down**, so this rung's history buffer is sampled
   at `uv - motion` — written on the format constant and on
-  `TransientImageDesc::motion`, and observed by `DebugView::Motion` and
-  `crates/crcbl/tests/mesh_e2e/motion.rs`. What the target does not yet carry is
-  a skinned instance's deformation and the camera's motion where the sky shows
-  through; both are `docs/backlog.md`'s and both are this rung's to finish. The
-  AA row in [48-post-processing.md](48-post-processing.md) carries the history
-  of the earlier correction and nothing here repeats it.
+  `TransientImageDesc::motion`, and observed by `DebugView::Motion`,
+  `crates/crcbl/tests/mesh_e2e/motion.rs` and — for a deformed surface, through
+  `GpuInstance::previous_base_vertex` —
+  `crates/crcbl/tests/mesh_e2e/skinned_motion.rs`. What the target does not yet
+  carry is the camera's motion where the sky shows through, and a skinned
+  instance's own transform motion, which the per-frame re-point erases; both are
+  `docs/backlog.md`'s and this rung's to finish. The AA row in
+  [48-post-processing.md](48-post-processing.md) carries the history of the
+  earlier correction and nothing here repeats it.
 
 `crcbl_render::skinning`'s `SkinnedRegion::previous_base` was the half of the
 reservation taken first: topic 17's 2026-07-27 correction double-buffers the

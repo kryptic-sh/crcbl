@@ -746,6 +746,7 @@ mod tests {
             sector: n + 2,
             flags: n + 3,
             base_vertex: n + 4,
+            previous_base_vertex: n + 5,
         }
     }
 

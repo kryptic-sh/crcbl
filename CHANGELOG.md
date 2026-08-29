@@ -31,9 +31,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   writes zero. Nothing samples the target yet — `DebugView::Motion` is the
   observer, encoding the vector as `motion * MOTION_VIEW_SCALE + 0.5` into the
   scene target, and `crates/crcbl/tests/mesh_e2e/motion.rs` is what holds the
-  subtraction to it. A skinned instance still carries only its transform's
-  motion, and the sky reads zero rather than the camera's; both are
-  `docs/backlog.md`'s.
+  subtraction to it. The sky reads zero rather than the camera's motion, and a
+  skinned instance's own transform contributes nothing to the target because the
+  re-point overwrites its previous transform; both are `docs/backlog.md`'s.
+- **A skinned instance's motion vector follows its deformation.**
+  `crcbl_shaders::mesh::GpuInstance` gains `previous_base_vertex` in place of
+  one of its padding words, so `INSTANCE_STRIDE` is unchanged at 160 and
+  `INSTANCE_PAD_WORDS` drops to two. It is the pool vertex the **previous**
+  frame's skinning dispatch wrote this instance into, read by `mesh.slang`'s
+  vertex stage and `mesh_cluster.slang`'s `emit_cluster` only when
+  `GpuInstance::BASE_VERTEX_OVERRIDE` is set: the previous clip position then
+  comes from that vertex instead of from the one this frame's dispatch deformed,
+  which is what stops a swinging limb reporting the motion of the body it hangs
+  off. A rigid draw names the same vertex it already read, so nothing changes on
+  that path and no golden moved. `ForwardRenderer::point_skinned_instances`
+  fills the field beside the current base every frame, at the half
+  `SkinnedRegion::previous_base` names — except on an object's **first** frame
+  out of a region, whether it was just `add_skinned_instance`d or moved onto a
+  different region by `set_skinned_instance`, where it writes the current base
+  so that a fresh object is at rest rather than subtracted against a half
+  nothing has written. `crates/crcbl/tests/mesh_e2e/skinned_motion.rs` is the
+  observer: a cube whose palette carries it across the frame reads that
+  displacement while its instance transform never changes at all.
 - **SMAA 1x draws.** `docs/plan/49-antialiasing.md`'s higher rung: three passes
   — `smaa_edges.slang`, `smaa_weights.slang`, `smaa_blend.slang`, transcribed
   from the reference at `SMAA_PRESET_HIGH` with the diagonal and corner-rounding
