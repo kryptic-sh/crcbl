@@ -76,6 +76,8 @@ crcbl_pin_vk_icd "crcbl tiling e2e"
 
 # shellcheck source=tools/nextest-summary.sh
 source "${REPO_ROOT}/tools/nextest-summary.sh"
+# shellcheck source=tools/vk-validation-log.sh
+source "${REPO_ROOT}/tools/vk-validation-log.sh"
 
 if [ -z "${CRCBL_GPU:-}" ]; then
     cat >&2 <<'NOBACKEND'
@@ -87,6 +89,14 @@ crcbl tiling e2e: CRCBL_GPU is not set, so nothing would pin the backend and a
     CRCBL_GPU=dx12 $0     # Direct3D 12, Windows
 NOBACKEND
     exit 1
+fi
+
+# A vk run validates whatever the shell says: the check after the run reads
+# what the layer said, and a `CRCBL_VK_VALIDATION=0` left over from profiling
+# would hand it a log with no messenger in it — which it rejects, for the
+# wrong reason.
+if [ "$CRCBL_GPU" = vk ]; then
+    export CRCBL_VK_VALIDATION=1
 fi
 
 cd "$REPO_ROOT"
@@ -123,6 +133,18 @@ fi
 # digits next to "tests run" — a check that then fires on a suite which ran
 # everything and passed.
 crcbl_nextest_plain "$LOG" "${LOG}.plain"
+
+# What the validation layer said, which nothing here read until a forward_e2e
+# run went green on radv with an `ERROR … vk validation:` line in its log: a
+# violation reaches `crcbl_core::log::error!` and the test still passes, because
+# the fixture's `finish` checks only the seam's out-of-band channel.
+# `tools/vk-validation-log.sh` asks both halves — the layer announced itself,
+# and then said nothing — and `CRCBL_VK_VALIDATION_SELF_TEST=1` is how to watch
+# this go red.
+if [ "$CRCBL_GPU" = vk ] \
+    && ! crcbl_validation_saw_nothing "${LOG}.plain" "the crcbl tiling e2e suite"; then
+    exit 1
+fi
 
 # nextest reports its own totals; counting lines of its output would silently
 # pick up headers and land a number that is close and wrong.

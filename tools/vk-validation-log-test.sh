@@ -3,8 +3,8 @@
 #
 #   tools/vk-validation-log-test.sh
 #
-# Four e2e harnesses decide whether a Vulkan run was clean by calling that
-# helper, and a guard nothing exercises is worse than no guard —
+# Every e2e harness that runs under Vulkan decides whether the run was clean
+# by calling that helper, and a guard nothing exercises is worse than no guard —
 # `docs/plan/12-testing.md` makes that the rule and `tools/nextest-summary-test.sh`
 # is the other half of it. The helper's whole reason for existing is that a
 # *quiet* log and a *clean* log are different things, and only one of the two

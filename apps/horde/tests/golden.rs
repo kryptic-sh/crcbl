@@ -247,6 +247,13 @@ fn screenshot_from_a_real_run(backend: &str) -> (Image, String) {
         "horde exited {:?} on {backend}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
     );
+    // The binary's log, re-emitted whether or not it passed. `.output()` keeps
+    // the child's stderr, and until now a green run showed none of it — so a
+    // `vk validation:` line the layer wrote there reached nothing.
+    // `tests/run-horde-golden.sh` reads this suite's log for exactly that line
+    // and for the messenger's own announcement, and both live in the child's
+    // stderr, not this process's.
+    eprint!("{stderr}");
     assert!(
         stdout.contains(&format!("{FRAMES} frames")),
         "the summary does not say the run presented {FRAMES} frames:\n{stdout}"

@@ -849,14 +849,6 @@ order:
   refuse an empty mesh list by name in `check_scene` (and rename the glTF test),
   or teach draw generation an empty bucket list so an empty document renders a
   sky. Neither was taken.
-- **`tests/forward_e2e/` does not fail on a Vulkan validation error.** The page
-  test first ran with the page image lacking `TRANSFER_SRC`; radv logged
-  `VUID-VkImageMemoryBarrier2-oldLayout-01212` as an `ERROR` line and the test
-  passed. `tests/gpu_scene/harness.rs`'s header says there is no cross-backend
-  equivalent of the validation report and `finish` checks only the seam's
-  out-of-band channel; `run-forward-e2e.sh` greps for nothing. A
-  `vk validation:` `ERROR` line in the runner's output is a red the runner could
-  raise itself. Not done — a gate change, not a rendering one.
 
 ### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
 
@@ -1009,14 +1001,6 @@ binding is a reading of the declaration, and getting one wrong writes a false
 assertion rather than a failing one. Worth doing with the completeness check the
 doc already implies: a case per shader in the artifact directory, so a new
 shader cannot be missed the way these were.
-
-### Nothing lets a running sample toggle antialiasing (2026-08-27)
-
-`RenderEffects::ANTIALIASING` is in `RenderEffects::DEFAULT_STACK` now, so every
-frame resolves and the suite was re-blessed for it. What is still missing is a
-**runtime** switch: `crcbl`'s `VIDEO_KEYS` carries an `antialiasing` row, so a
-settings file can ask for it, but no sample has a key bound and `apps/lantern`
-has no flag. The lantern is the natural place, on its bloom flag's terms.
 
 ### The Hi-Z march trusts a genuine crossing less than the strided one did (2026-08-27)
 
