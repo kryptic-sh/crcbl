@@ -91,6 +91,11 @@ static const float FOG_RATIO_KERNEL[5] = {
 /// answer in `lighting`.
 static const uint SHADOW_CASCADES = 2;
 
+/// Tiles in the atlas's light region, matching
+/// `crcbl_shaders::mesh::SHADOW_LIGHT_TILES`. Read here for the same reason
+/// as the count above: it sizes the block's second matrix array.
+static const uint SHADOW_LIGHT_TILES = 14;
+
 /// The block `volumetric.slang` declares, bound here unchanged so a pixel's
 /// froxel and the froxel the column was written into are one arithmetic.
 struct VolumetricParams
@@ -124,6 +129,9 @@ struct VolumetricParams
     uint viewport_y;
     uint froxel_count;
     uint pad0;
+    /// World → light tile `i`'s shadow clip. Declared and not read, for
+    /// `shadow_view_proj`'s reason; sized by `SHADOW_LIGHT_TILES` above.
+    float4x4 light_view_proj[SHADOW_LIGHT_TILES];
 };
 
 [[vk::binding(0, 0)]]

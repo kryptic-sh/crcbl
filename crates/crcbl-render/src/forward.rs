@@ -4931,6 +4931,7 @@ impl ForwardRenderer {
                 fog: self.fog,
                 sun: light,
                 cascades: &cascades,
+                light_view_proj: &light_view_proj,
             },
         )?;
 

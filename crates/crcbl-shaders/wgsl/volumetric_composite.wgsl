@@ -10,6 +10,11 @@ struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E2_0
     @align(16) data_1 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(2)>,
 };
 
+struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E14_0
+{
+    @align(16) data_2 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(14)>,
+};
+
 struct VolumetricParams_std140_0
 {
     @align(16) inverse_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,
@@ -30,6 +35,7 @@ struct VolumetricParams_std140_0
     @align(4) viewport_y_0 : u32,
     @align(8) froxel_count_0 : u32,
     @align(4) pad0_0 : u32,
+    @align(16) light_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E14_0,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : VolumetricParams_std140_0;

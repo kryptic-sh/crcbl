@@ -124,6 +124,13 @@ static const uint KIND_SPOT = 2;
 static const uint CLUSTER_LIGHT_CAPACITY = 16;
 static const uint CLUSTER_STRIDE = 17;
 
+/// The atlas's light region in tiles, and how many of them one point light
+/// owns — `mesh.slang`'s `SHADOW_LIGHT_TILES` and `SHADOW_POINT_FACES`, held
+/// to it by `both_shaders_spell_the_same_atlas_walk`. The first sizes the
+/// block's `light_view_proj`; both bound the tile a row may name.
+static const uint SHADOW_LIGHT_TILES = 14;
+static const uint SHADOW_POINT_FACES = 6;
+
 /// One light, matching `struct GpuLight` in `light_cluster.slang`, in
 /// `mesh.slang` and in `crcbl_shaders::light::GpuLight` — copied letter for
 /// letter, there being no `#include`, and held to `mesh.slang`'s by
@@ -216,6 +223,18 @@ struct VolumetricParams
     /// Froxels the buffer holds, which both dispatches bound their writes by.
     uint froxel_count;
     uint pad0;
+    /// World → light tile `i`'s shadow clip, one matrix per tile of the atlas's
+    /// light region — the same rows `FrameUniforms::light_view_proj` carries,
+    /// so a lamp's glow and the surface it lights are occluded by one map.
+    /// Perspective and reversed-Z, and **indexed by tile rather than by
+    /// light**: a row's `shadow_tile` names the first of a light's tiles and
+    /// `point_face` adds the face, on `mesh.slang`'s terms exactly.
+    ///
+    /// **After the pad rather than beside the cascades**, so no member before
+    /// it moved when it arrived — which is what kept every golden byte-identical
+    /// across the change that introduced it. The pad still ends the word run on
+    /// the 16-byte boundary a matrix has to start on.
+    float4x4 light_view_proj[SHADOW_LIGHT_TILES];
 };
 
 [[vk::binding(0, 0)]]
@@ -477,11 +496,22 @@ float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)
 ///
 /// Every light shares the medium's anisotropy: the lobe is the air's, not the
 /// light's, and `cos_theta` is the angle between the direction to *this* light
-/// and the view ray, on `volumetric_phase`'s convention. Unoccluded: the
-/// shadow tile a punctual row names is `mesh.slang`'s to read and not this
-/// pass's yet, which the plan carries.
-float3 volumetric_punctual(uint froxel, float3 at, float3 view_direction)
+/// and the view ray, on `volumetric_phase`'s convention.
+///
+/// **Occluded by the light's own map**, where its row names one: the same two
+/// tile checks `mesh.slang`'s loop makes, and the same lookup with the biases
+/// dropped — `volumetric_punctual_visibility`, which says why. A lamp behind
+/// a wall glows on its own side of it and not in the room it does not light.
+/// `pixel` is what dithers the filter's rotation, on `scatterMain`'s terms.
+float3 volumetric_punctual(uint froxel, float3 at, float3 view_direction, float2 pixel)
 {
+    if (params.sun_radiance.w <= 0.0)
+    {
+        // The off-switch, taken before the walk rather than after it: at a
+        // zero coefficient every term below is a zero, and the map lookups
+        // are the expensive part of computing one.
+        return float3(0.0, 0.0, 0.0);
+    }
     uint base = froxel * CLUSTER_STRIDE;
     uint count = min(cluster_lights[base], CLUSTER_LIGHT_CAPACITY);
     float3 total = float3(0.0, 0.0, 0.0);
@@ -500,10 +530,43 @@ float3 volumetric_punctual(uint froxel, float3 at, float3 view_direction)
         {
             reach *= spot_cone(to_light, light.direction.xyz, light.direction.w, light.cos_inner);
         }
+        if (reach <= 0.0)
+        {
+            // Past the radius or outside the cone, where the window is exactly
+            // zero rather than small: nothing to occlude, so no map to read.
+            continue;
+        }
+        // `mesh.slang`'s two checks, with its reason for the subtraction: a
+        // point light's faces are `shadow_tile .. + SHADOW_POINT_FACES`, and
+        // `NO_SHADOW_TILE` is `0xffffffff`, so the sum would wrap and an
+        // unshadowed point light would sample tile 5.
+        if (light.kind == KIND_POINT)
+        {
+            if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
+            {
+                reach *= volumetric_punctual_visibility(
+                    light.shadow_tile + point_face(at - light.position.xyz), at, pixel);
+            }
+        }
+        else if (light.shadow_tile < SHADOW_LIGHT_TILES)
+        {
+            reach *= volumetric_punctual_visibility(light.shadow_tile, at, pixel);
+        }
         float cos_theta = dot(to_light, view_direction);
         total += light.color.rgb * reach * volumetric_phase(params.sun_direction.w, cos_theta);
     }
     return total * params.sun_radiance.w;
+}
+
+/// Which atlas tile light tile `tile` of the light region was rendered into:
+/// the cascades take the first `SHADOW_CASCADES` tiles and the lights the rest.
+///
+/// `mesh.slang`'s function of the same name, letter for letter, and held to it
+/// with `atlas_uv` below — `crcbl_render::shadow::light_tile` is the writing
+/// side of the same arithmetic.
+uint light_tile(uint tile)
+{
+    return SHADOW_CASCADES + tile;
 }
 
 /// Where tile `tile` puts `tile_uv` in the whole atlas.
@@ -702,6 +765,61 @@ float volumetric_sun_visibility(float3 world_position, float2 pixel)
     return tile_pcf(cascade, tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
 }
 
+/// Which of a point light's six faces `from_light` — the direction from the
+/// light towards the point — belongs to.
+///
+/// `mesh.slang`'s function of the same name, letter for letter, and held to it
+/// by `both_shaders_spell_the_same_atlas_walk`: the host built the six matrices
+/// in `crcbl_render::shadow::face_axis`' order, and a copy that picked a
+/// different face for the same direction would read a map of somewhere else.
+uint point_face(float3 from_light)
+{
+    float3 axis = abs(from_light);
+    if (axis.x >= axis.y && axis.x >= axis.z)
+    {
+        return from_light.x >= 0.0 ? 0u : 1u;
+    }
+    if (axis.y >= axis.z)
+    {
+        return from_light.y >= 0.0 ? 2u : 3u;
+    }
+    return from_light.z >= 0.0 ? 4u : 5u;
+}
+
+/// The fraction of a punctual light's map a point in the medium can see:
+/// `1.0` fully lit, `0.0` fully shadowed, the values between the PCF filter.
+///
+/// `mesh.slang`'s `punctual_visibility` on `volumetric_sun_visibility`'s
+/// terms: both biases dropped, the `n_dot_l` early return with them, and the
+/// texel footprint that sized them not computed at all — every one of the
+/// three is about a receiving facet, and a froxel is a volume of air with no
+/// facet to shadow itself. What stays is the projection and the two tests that
+/// are a punctual map's difference from a cascade's: `w` first, because a
+/// perspective matrix mirrors a point *behind* the light into its frustum, and
+/// the far plane, because the map ends where the light's radius does.
+///
+/// Outside the map it is lit, for the cascade walk's reason: a map knows
+/// nothing about what it never rendered, and the falloff has already closed by
+/// its edge.
+float volumetric_punctual_visibility(uint tile, float3 world_position, float2 pixel)
+{
+    float4 clip = mul(params.light_view_proj[tile], float4(world_position, 1.0));
+    if (clip.w <= 0.0)
+    {
+        return 1.0;
+    }
+    float3 ndc = clip.xyz / clip.w;
+    if (any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0 || ndc.z > 1.0)
+    {
+        return 1.0;
+    }
+
+    // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
+    // push into the viewport rather than into the matrix.
+    float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    return tile_pcf(light_tile(tile), tile_uv, ndc.z, pixel, SHADOW_FILTER_TEXELS);
+}
+
 /// What one slice of the medium does, given the segment of the tile's centre
 /// ray it occupies.
 ///
@@ -775,14 +893,15 @@ void scatterMain(uint3 thread: SV_DispatchThreadID)
     // same rotation and neighbouring columns take different ones, which is the
     // property the lattice is built for.
     float3 middle = (from + to) * 0.5;
-    float visibility = volumetric_sun_visibility(middle, float2(float(tile_x), float(tile_y)));
+    float2 pixel = float2(float(tile_x), float(tile_y));
+    float visibility = volumetric_sun_visibility(middle, pixel);
     // The direction the slice is looked along, for every phase function in it.
     // A degenerate segment cannot be normalised, and its `1 - survives` is zero
     // anyway, so the axis it falls back to is unobservable.
     float3 segment = to - from;
     float length_of = length(segment);
     float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
-    float4 lit = float4(volumetric_punctual(froxel, middle, view_direction), visibility);
+    float4 lit = float4(volumetric_punctual(froxel, middle, view_direction, pixel), visibility);
     lighting[froxel] = lit;
     volumetrics[froxel] = volumetric_slice(from, to, view_direction, lit);
 }

@@ -156,11 +156,17 @@ impl Column {
 /// Draws the shaft fixture through the froxel path and copies the column back.
 ///
 /// The scene is [`hdr`](crate::hdr)'s shaft one — the fixture cube, the slab
-/// standing between the sun and half the frustum, and the cascades on — because
-/// that is the arrangement already known to put a *varying* visibility in the
-/// buffer. A column whose froxels all see the whole sun would compare just as
-/// well and would say nothing about the term the second buffer carries.
-fn draw_and_read_the_column(fog: Fog) -> Column {
+/// standing between the sun and half the frustum — because that is the
+/// arrangement already known to put a *varying* visibility in the buffer. A
+/// column whose froxels all see the whole sun would compare just as well and
+/// would say nothing about the term the second buffer carries.
+///
+/// `shadows` is whether the atlas is drawn into this frame. Off, the light rows
+/// still name their tiles and the scatter pass still reads through them, but
+/// the atlas holds its reversed-Z clear and every comparison against it comes
+/// back lit — the column the glow model is checked against, and the control
+/// the occlusion test measures the maps from.
+fn draw_and_read_the_column(fog: Fog, shadows: bool) -> Column {
     let headless = Headless::open_for_mesh();
     let mut pool = TransientPool::new();
     let mut renderer =
@@ -170,7 +176,7 @@ fn draw_and_read_the_column(fog: Fog) -> Column {
         programmatic: EffectOverride::none()
             .force(RenderEffects::ANTIALIASING, Some(false))
             .force(RenderEffects::REFLECTIONS, Some(false))
-            .force(RenderEffects::SHADOWS, Some(true))
+            .force(RenderEffects::SHADOWS, Some(shadows))
             .force(RenderEffects::VOLUMETRIC_FOG, Some(true)),
         ..EffectRequest::default()
     });
@@ -556,7 +562,7 @@ const FROXEL_FLOOR: f32 = 1e-4;
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn the_froxel_column_is_the_scan_of_the_slabs_the_medium_scatters() {
-    let column = draw_and_read_the_column(COLUMN_FOG);
+    let column = draw_and_read_the_column(COLUMN_FOG, true);
     let count = column.count();
     assert!(
         count > 0,
@@ -652,10 +658,15 @@ const GLOW_RELATIVE: f32 = 1e-3;
 /// its radius into lit and dark (so `spot_cone` is load-bearing and not a
 /// constant one), and the glow clears the floor the relative bound is asked
 /// over.
+///
+/// The host's walk is unoccluded, so the frame is drawn with the atlas at its
+/// clear: the pass reads every lamp's tiles and finds nothing in them.
+/// `a_lamp_s_glow_stops_at_the_wall_its_map_holds` is what checks that the
+/// clear really reads as lit before this leans on it.
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn the_glow_in_the_buffer_is_the_froxel_s_list_walked_at_its_midpoint() {
-    let column = draw_and_read_the_column(COLUMN_FOG);
+    let column = draw_and_read_the_column(COLUMN_FOG, false);
     let count = column.count();
     assert!(
         count > 0,
@@ -746,5 +757,112 @@ fn the_glow_in_the_buffer_is_the_froxel_s_list_walked_at_its_midpoint() {
          the {GLOW_RELATIVE} two evaluations of this arithmetic differ by — the scatter pass \
          is summing something other than mesh.slang's falloff, cone and the medium's phase, \
          or the clustering pass left a light out of a froxel it reaches"
+    );
+}
+
+/// The fraction of its lit glow a froxel has to lose to the lamps' maps to be
+/// counted as occluded.
+///
+/// A froxel wholly behind the cube from a lamp loses that lamp entirely; one
+/// the filter's edge brushes loses a sliver, and one reached by both lamps
+/// with only one occluded loses whatever share that lamp had. The count this
+/// gates is only asked to be non-zero, so the bar is set where a froxel is
+/// plainly in a shadow rather than at its rim — well above the rounding
+/// [`GLOW_RELATIVE`] allows, which is what "untouched" is measured by.
+const OCCLUDED_FRACTION: f32 = 0.5;
+
+/// **A lamp's glow stops at the wall its map holds.**
+///
+/// The column drawn twice — the atlas written, and the atlas left at its clear
+/// — and the glow lanes compared froxel by froxel. With the atlas clear, every
+/// comparison against it comes back lit: the sun lane is exactly one in every
+/// froxel, which is checked first because the glow test above rests on it. So
+/// the whole difference between the two columns is what the maps hold.
+///
+/// Occlusion can only take. No froxel glows brighter with the maps than
+/// without; some glow plainly darker, because the cube stands between the
+/// point light and the far half of the frustum and the spot's cone falls on
+/// the cube's top and the floor around it; and most glowing froxels are
+/// untouched, which is what says the maps took *somewhere* rather than a
+/// coefficient taking everywhere.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_lamp_s_glow_stops_at_the_wall_its_map_holds() {
+    let lit = draw_and_read_the_column(COLUMN_FOG, false);
+    let shadowed = draw_and_read_the_column(COLUMN_FOG, true);
+    let count = lit.count();
+    assert!(
+        count > 0,
+        "the frame wrote no froxels at all, so this compared nothing"
+    );
+    assert!(
+        shadowed.count() == count && shadowed.params.eye == lit.params.eye,
+        "the two frames cut different grids, so their froxels do not correspond"
+    );
+
+    let clear_reads_lit = lit.lighting[..count].iter().all(|lane| lane[3] == 1.0);
+    assert!(
+        clear_reads_lit,
+        "with the atlas unwritten some froxel still saw less than the whole sun, so the clear \
+         is not reading as lit and the glow model above is being compared against occluded \
+         lamps"
+    );
+
+    let mut glowing = 0usize;
+    let mut occluded = 0usize;
+    let mut untouched = 0usize;
+    let mut deepest = 0.0f32;
+    let mut brightest_gain = 0.0f32;
+    let mut gain_at = 0usize;
+    for froxel in 0..count {
+        let [r, g, b, _] = lit.lighting[froxel];
+        let without = Vec3::new(r, g, b);
+        let [r, g, b, _] = shadowed.lighting[froxel];
+        let with = Vec3::new(r, g, b);
+        if without.max_element() <= FROXEL_FLOOR {
+            assert!(
+                with.max_element() <= FROXEL_FLOOR,
+                "froxel {froxel} glows {with} with the maps and {without} without them, and a \
+                 map can only take"
+            );
+            continue;
+        }
+        glowing += 1;
+        let scale = without.max_element();
+        let gain = (with - without).max_element() / scale;
+        if gain > brightest_gain {
+            brightest_gain = gain;
+            gain_at = froxel;
+        }
+        let loss = (without - with).max_element() / scale;
+        if loss >= OCCLUDED_FRACTION {
+            occluded += 1;
+            deepest = deepest.max(loss);
+        } else if loss <= GLOW_RELATIVE {
+            untouched += 1;
+        }
+    }
+
+    eprintln!(
+        "{}: froxel occlusion — {count} froxel(s), {glowing} glowing, {occluded} occluded past \
+         {OCCLUDED_FRACTION} (deepest {deepest:.3}), {untouched} untouched, brightest gain \
+         {brightest_gain:.5} at froxel {gain_at}",
+        crate::SUITE
+    );
+
+    assert!(
+        brightest_gain <= GLOW_RELATIVE,
+        "froxel {gain_at} glows {brightest_gain} brighter with its lamps' maps than without \
+         them, and a map can only take"
+    );
+    assert!(
+        occluded > 0,
+        "no glowing froxel lost {OCCLUDED_FRACTION} of its glow to a map, so the scatter pass \
+         is not reading the lamps' tiles and a lamp glows through the cube"
+    );
+    assert!(
+        untouched * 2 > glowing,
+        "only {untouched} of {glowing} glowing froxel(s) kept their glow under the maps, so \
+         the maps dimmed the column everywhere rather than behind the cube"
     );
 }

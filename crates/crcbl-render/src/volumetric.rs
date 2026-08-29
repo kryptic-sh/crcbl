@@ -61,7 +61,8 @@
 //! argument for why that is a buffer rather than a second cascade walk. Rung 2
 //! put the froxel's punctual lights beside it: the scatter pass walks the
 //! froxel's own cluster list — the one `crate::light_grid` built for the mesh
-//! pass — at the slice's midpoint, and the glow rides the same row.
+//! pass — at the slice's midpoint, and the glow rides the same row, occluded
+//! by the lamp's own shadow tiles where its row names them.
 //!
 //! [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
 
@@ -160,6 +161,13 @@ pub(crate) struct Medium<'a> {
     /// The cascades that sun was shadowed through, which is what occludes the
     /// shaft.
     pub(crate) cascades: &'a Cascades,
+    /// One matrix per light tile of the atlas, as the frame block carries them
+    /// — the maps the frame's shadowed lamps were drawn into, which is what
+    /// stops a lamp's glow at a wall. The frame's own, on `cascades`' terms:
+    /// `shadow::Selection` handed out the tiles the light rows name, and a
+    /// block with another frame's matrices would read the right tile of the
+    /// wrong map.
+    pub(crate) light_view_proj: &'a [[f32; 16]; shadow::LIGHT_TILES],
 }
 
 /// Everything the froxel volume owns.
@@ -504,7 +512,12 @@ impl Volumetric {
         view: FrameView,
         medium: Medium<'_>,
     ) -> Result<(), HalError> {
-        let Medium { fog, sun, cascades } = medium;
+        let Medium {
+            fog,
+            sun,
+            cascades,
+            light_view_proj,
+        } = medium;
         // Row 3 of the view-projection, so a shader can take a point's view
         // depth with one dot product — [`crate::light_grid`]'s block carries the
         // same row for the same reason, and both come from this one matrix so
@@ -557,6 +570,7 @@ impl Volumetric {
                 viewport_x: view.extent.0.max(1),
                 viewport_y: view.extent.1.max(1),
                 froxel_count: grid.froxels(),
+                light_view_proj: *light_view_proj,
             }
             .to_bytes(),
         )

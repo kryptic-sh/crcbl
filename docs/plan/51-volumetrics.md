@@ -81,12 +81,23 @@ The copy is guarded as the decision below says it has to be:
 `punctual_falloff`, `spot_cone` and the list walk's load-bearing lines to
 `mesh.slang`'s, and `crcbl_shaders::light`'s constants guard now names
 `volumetric.slang` beside the two files that already carried the kinds and the
-stride. What the rung left: a lamp glows **unoccluded** — the shadow tile its
-row names is `mesh.slang`'s to read and not the scatter pass's yet — and a light
-whose radius is shorter than the slice it sits in is missed when the midpoint is
-outside it, which the far slices' length makes ordinary for a small light far
-away. Rung 3's jitter along the slice is what recovers the second;
-`docs/backlog.md` carries both.
+stride.
+
+**And the lamps occlude** — the same day. The params block gained
+`FrameUniforms::light_view_proj` after its pad, so no golden moved;
+`volumetric_punctual_visibility` is `mesh.slang`'s `punctual_visibility` on the
+cascade walk's terms — both biases dropped, the `n_dot_l` return with them, the
+`w` test and the far-plane test kept, because those are what a perspective map
+needs that an orthographic one does not — and `point_face` and `light_tile` are
+copied letter for letter. The walk makes `mesh.slang`'s two tile checks before
+it reads, and skips a light its window has already closed. Checked by drawing
+the column with the atlas written and with it left at its clear (2026-08-29,
+radv): no froxel brightens, 3 of 105 glowing froxels lose more than half their
+glow — the deepest all of it — and 101 keep it to the digit. What the rung left:
+a light whose radius is shorter than the slice it sits in is missed when the
+midpoint is outside it, which the far slices' length makes ordinary for a small
+light far away. Rung 3's jitter along the slice is what recovers it;
+`docs/backlog.md` carries it.
 
 ## The decisions
 
@@ -191,7 +202,10 @@ Rung 2 made the copy, and the guard is `crcbl_shaders::volumetric`'s
 functions compared as bodies with comments dropped, and the walk's own lines —
 the count clamp, the row fetch, the two `reach` multiplies — compared as text,
 because the walk is inline in both files rather than a function either could
-name.
+name. The shadow tile — the third of the three answers above — joined the same
+guard when the lamps started to occlude: `point_face` and `light_tile` as
+bodies, the two tile checks and the map's frustum test as lines both files
+spell, and the unbiased lookup as a line only `volumetric.slang` does.
 
 ### The froxel's visibility leaves the scatter pass in a buffer of its own
 
@@ -337,3 +351,14 @@ What the passes owe on top of that is the part the host cannot see:
   byte. The last is the falloff window's claim, and a falloff without it lights
   the whole frame a little: 4096 of 39110 texels unmoved where the fixture
   measures 33713.
+- **A lamp's glow stops at the wall its map holds.** _Built_ —
+  `crates/crcbl/tests/mesh_e2e/froxels.rs`'s
+  `a_lamp_s_glow_stops_at_the_wall_its_map_holds` reads the column twice, with
+  the atlas drawn into and with it left at its reversed-Z clear, and compares
+  the glow lanes froxel by froxel. It first asks that the clear reads as lit —
+  the sun lane exactly one everywhere — because the glow test above rests on
+  that; then that no froxel brightens, that some lose more than half their glow
+  to a map, and that most glowing froxels keep it to the digit, which is what
+  separates a map from a dimmer. Returning `1.0` from the lookup left 0 of 105
+  glowing froxels occluded and reddened it; the glow test stayed green, as it
+  should, because it was drawn against the clear.

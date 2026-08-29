@@ -27,9 +27,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   The froxel's second buffer widened from one `float` to a `float4`
   (`crcbl_shaders::volumetric::LIGHTING_STRIDE`, formerly `VISIBILITY_STRIDE`;
   `FroxelBuffers::lighting`, formerly `visibility`) so the composite's partial
-  slice adds the same glow. Lamps glow unoccluded for now — a light's shadow
-  tile is not consulted in the medium — and a light smaller than the slice it
-  sits in can be missed at the midpoint.
+  slice adds the same glow. A shadowed lamp's glow stops at the wall its map
+  holds: `VolumetricParams` carries the frame's `light_view_proj` after its pad
+  word, and the scatter pass reads a light's tiles through it with the biases a
+  surface needs dropped, as the cascade walk already did. A light smaller than
+  the slice it sits in can still be missed at the midpoint.
 - **A missed reflection sees the sky through the prefilter table.** `ssr.slang`
   binds `crcbl_shaders::sky_prefilter`'s table — `sky_prefilter::texels`, the
   two weights as 16-bit fixed point in an `Rgba8Unorm` image

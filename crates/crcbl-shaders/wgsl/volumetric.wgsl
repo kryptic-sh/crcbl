@@ -8,6 +8,11 @@ struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E2_0
     @align(16) data_1 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(2)>,
 };
 
+struct _Array_std140_matrixx3Cfloatx2C4x2C4x3E14_0
+{
+    @align(16) data_2 : array<_MatrixStorage_float4x4_ColMajorstd140_0, i32(14)>,
+};
+
 struct VolumetricParams_std140_0
 {
     @align(16) inverse_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,
@@ -28,6 +33,7 @@ struct VolumetricParams_std140_0
     @align(4) viewport_y_0 : u32,
     @align(8) froxel_count_0 : u32,
     @align(4) pad0_0 : u32,
+    @align(16) light_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E14_0,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : VolumetricParams_std140_0;
@@ -214,24 +220,116 @@ fn spot_cone_0( to_light_0 : vec3<f32>,  axis_0 : vec3<f32>,  cos_outer_0 : f32,
     return saturate((dot((vec3<f32>(0) - to_light_0), normalize(axis_0)) - cos_outer_0) / max(cos_inner_1 - cos_outer_0, 0.00009999999747379f));
 }
 
+fn point_face_0( from_light_0 : vec3<f32>) -> u32
+{
+    var axis_1 : vec3<f32> = abs(from_light_0);
+    var _S9 : f32 = axis_1.x;
+    var _S10 : f32 = axis_1.y;
+    var _S11 : bool;
+    if(_S9 >= _S10)
+    {
+        _S11 = _S9 >= (axis_1.z);
+    }
+    else
+    {
+        _S11 = false;
+    }
+    var _S12 : u32;
+    if(_S11)
+    {
+        if((from_light_0.x) >= 0.0f)
+        {
+            _S12 = u32(0);
+        }
+        else
+        {
+            _S12 = u32(1);
+        }
+        return _S12;
+    }
+    if(_S10 >= (axis_1.z))
+    {
+        if((from_light_0.y) >= 0.0f)
+        {
+            _S12 = u32(2);
+        }
+        else
+        {
+            _S12 = u32(3);
+        }
+        return _S12;
+    }
+    if((from_light_0.z) >= 0.0f)
+    {
+        _S12 = u32(4);
+    }
+    else
+    {
+        _S12 = u32(5);
+    }
+    return _S12;
+}
+
+fn light_tile_0( tile_3 : u32) -> u32
+{
+    return u32(2) + tile_3;
+}
+
+fn volumetric_punctual_visibility_0( tile_4 : u32,  world_position_1 : vec3<f32>,  pixel_4 : vec2<f32>) -> f32
+{
+    var clip_1 : vec4<f32> = (((vec4<f32>(world_position_1, 1.0f)) * (mat4x4<f32>(params_0.light_view_proj_0.data_2[tile_4].data_0[i32(0)][i32(0)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(1)][i32(0)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(2)][i32(0)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(3)][i32(0)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(0)][i32(1)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(1)][i32(1)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(2)][i32(1)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(3)][i32(1)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(0)][i32(2)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(1)][i32(2)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(2)][i32(2)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(3)][i32(2)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(0)][i32(3)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(1)][i32(3)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(2)][i32(3)], params_0.light_view_proj_0.data_2[tile_4].data_0[i32(3)][i32(3)]))));
+    var _S13 : f32 = clip_1.w;
+    if(_S13 <= 0.0f)
+    {
+        return 1.0f;
+    }
+    var ndc_2 : vec3<f32> = clip_1.xyz / vec3<f32>(_S13);
+    var _S14 : bool;
+    if((any(((abs(ndc_2.xy)) > vec2<f32>(1.0f)))))
+    {
+        _S14 = true;
+    }
+    else
+    {
+        _S14 = (ndc_2.z) <= 0.0f;
+    }
+    if(_S14)
+    {
+        _S14 = true;
+    }
+    else
+    {
+        _S14 = (ndc_2.z) > 1.0f;
+    }
+    if(_S14)
+    {
+        return 1.0f;
+    }
+    return tile_pcf_0(light_tile_0(tile_4), vec2<f32>(ndc_2.x * 0.5f + 0.5f, 0.5f - ndc_2.y * 0.5f), ndc_2.z, pixel_4, 2.0f);
+}
+
 fn volumetric_phase_0( g_0 : f32,  cos_theta_0 : f32) -> f32
 {
     var a_0 : f32 = clamp(g_0, -0.99000000953674316f, 0.99000000953674316f);
-    var _S9 : f32 = a_0 * a_0;
-    var d_0 : f32 = 1.0f + _S9 - 2.0f * a_0 * clamp(cos_theta_0, -1.0f, 1.0f);
-    return 0.07957746833562851f * (1.0f - _S9) / (d_0 * sqrt(d_0));
+    var _S15 : f32 = a_0 * a_0;
+    var d_0 : f32 = 1.0f + _S15 - 2.0f * a_0 * clamp(cos_theta_0, -1.0f, 1.0f);
+    return 0.07957746833562851f * (1.0f - _S15) / (d_0 * sqrt(d_0));
 }
 
-fn volumetric_punctual_0( froxel_0 : u32,  at_0 : vec3<f32>,  view_direction_0 : vec3<f32>) -> vec3<f32>
+fn volumetric_punctual_0( froxel_0 : u32,  at_0 : vec3<f32>,  view_direction_0 : vec3<f32>,  pixel_5 : vec2<f32>) -> vec3<f32>
 {
+    if((params_0.sun_radiance_0.w) <= 0.0f)
+    {
+        return vec3<f32>(0.0f, 0.0f, 0.0f);
+    }
     var base_0 : u32 = froxel_0 * u32(17);
-    var _S10 : u32 = min(cluster_lights_0[base_0], u32(16));
-    const _S11 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
+    var _S16 : u32 = min(cluster_lights_0[base_0], u32(16));
+    const _S17 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
     var slot_0 : u32 = u32(0);
-    var total_0 : vec3<f32> = _S11;
+    var total_0 : vec3<f32> = _S17;
     for(;;)
     {
-        if(slot_0 < _S10)
+        if(slot_0 < _S16)
         {
         }
         else
@@ -244,7 +342,8 @@ fn volumetric_punctual_0( froxel_0 : u32,  at_0 : vec3<f32>,  view_direction_0 :
             slot_0 = slot_0 + u32(1);
             continue;
         }
-        var offset_0 : vec3<f32> = light_0.position_0.xyz - at_0;
+        var _S18 : vec3<f32> = light_0.position_0.xyz;
+        var offset_0 : vec3<f32> = _S18 - at_0;
         var distance_1 : f32 = length(offset_0);
         var to_light_1 : vec3<f32> = offset_0 / vec3<f32>(max(distance_1, 9.99999997475242708e-07f));
         var reach_0 : f32 = punctual_falloff_0(distance_1, light_0.position_0.w);
@@ -257,7 +356,35 @@ fn volumetric_punctual_0( froxel_0 : u32,  at_0 : vec3<f32>,  view_direction_0 :
         {
             reach_1 = reach_0;
         }
-        total_0 = total_0 + light_0.color_0.xyz * vec3<f32>(reach_1) * vec3<f32>(volumetric_phase_0(params_0.sun_direction_0.w, dot(to_light_1, view_direction_0)));
+        if(reach_1 <= 0.0f)
+        {
+            slot_0 = slot_0 + u32(1);
+            continue;
+        }
+        var reach_2 : f32;
+        if((light_0.kind_0) == u32(1))
+        {
+            if((light_0.shadow_tile_0) <= u32(8))
+            {
+                reach_2 = reach_1 * volumetric_punctual_visibility_0(light_0.shadow_tile_0 + point_face_0(at_0 - _S18), at_0, pixel_5);
+            }
+            else
+            {
+                reach_2 = reach_1;
+            }
+        }
+        else
+        {
+            if((light_0.shadow_tile_0) < u32(14))
+            {
+                reach_2 = reach_1 * volumetric_punctual_visibility_0(light_0.shadow_tile_0, at_0, pixel_5);
+            }
+            else
+            {
+                reach_2 = reach_1;
+            }
+        }
+        total_0 = total_0 + light_0.color_0.xyz * vec3<f32>(reach_2) * vec3<f32>(volumetric_phase_0(params_0.sun_direction_0.w, dot(to_light_1, view_direction_0)));
         slot_0 = slot_0 + u32(1);
     }
     return total_0 * vec3<f32>(params_0.sun_radiance_0.w);
@@ -267,7 +394,7 @@ fn fog_exp_neg_0( x_0 : f32) -> f32
 {
     var clamped_0 : f32 = clamp(x_0, -87.0f, 87.0f);
     var n_0 : f32 = floor(clamped_0 * 1.4426950216293335f + 0.5f);
-    var _S12 : f32 = - (clamped_0 - n_0 * 0.693115234375f - n_0 * 0.00003194618329871f);
+    var _S19 : f32 = - (clamped_0 - n_0 * 0.693115234375f - n_0 * 0.00003194618329871f);
     var kernel_0 : f32 = 0.0001984127011383f;
     var term_0 : i32 = i32(6);
     for(;;)
@@ -279,9 +406,9 @@ fn fog_exp_neg_0( x_0 : f32) -> f32
         {
             break;
         }
-        var _S13 : f32 = kernel_0 * _S12 + FOG_KERNEL_0[term_0];
+        var _S20 : f32 = kernel_0 * _S19 + FOG_KERNEL_0[term_0];
         var term_1 : i32 = term_0 - i32(1);
-        kernel_0 = _S13;
+        kernel_0 = _S20;
         term_0 = term_1;
     }
     return kernel_0 * (bitcast<f32>(((u32(i32(127) - i32(n_0)) << (u32(23))))));
@@ -291,7 +418,7 @@ fn fog_one_minus_exp_over_0( d_1 : f32) -> f32
 {
     if((abs(d_1)) < 0.125f)
     {
-        var _S14 : f32 = - d_1;
+        var _S21 : f32 = - d_1;
         var series_0 : f32 = 0.00833333376795053f;
         var term_2 : i32 = i32(3);
         for(;;)
@@ -303,9 +430,9 @@ fn fog_one_minus_exp_over_0( d_1 : f32) -> f32
             {
                 break;
             }
-            var _S15 : f32 = series_0 * _S14 + FOG_RATIO_KERNEL_0[term_2];
+            var _S22 : f32 = series_0 * _S21 + FOG_RATIO_KERNEL_0[term_2];
             var term_3 : i32 = term_2 - i32(1);
-            series_0 = _S15;
+            series_0 = _S22;
             term_2 = term_3;
         }
         return series_0;
@@ -340,23 +467,23 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
 {
     var froxel_1 : u32 = thread_0.x;
     var tiles_0 : u32 = max(params_0.grid_x_0, u32(1)) * max(params_0.grid_y_0, u32(1));
-    var _S16 : u32 = max(params_0.slices_0, u32(1));
-    var _S17 : bool;
-    if(froxel_1 >= (tiles_0 * _S16))
+    var _S23 : u32 = max(params_0.slices_0, u32(1));
+    var _S24 : bool;
+    if(froxel_1 >= (tiles_0 * _S23))
     {
-        _S17 = true;
+        _S24 = true;
     }
     else
     {
-        _S17 = froxel_1 >= (params_0.froxel_count_0);
+        _S24 = froxel_1 >= (params_0.froxel_count_0);
     }
-    if(_S17)
+    if(_S24)
     {
         return;
     }
     var tile_x_1 : u32 = froxel_1 % max(params_0.grid_x_0, u32(1));
-    var _S18 : u32 = froxel_1 / max(params_0.grid_x_0, u32(1));
-    var tile_y_1 : u32 = _S18 % max(params_0.grid_y_0, u32(1));
+    var _S25 : u32 = froxel_1 / max(params_0.grid_x_0, u32(1));
+    var tile_y_1 : u32 = _S25 % max(params_0.grid_y_0, u32(1));
     var slice_0 : u32 = froxel_1 / tiles_0;
     var near_point_1 : vec3<f32>;
     var near_depth_1 : f32;
@@ -371,20 +498,21 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         from_depth_0 = volumetric_slice_start_0(slice_0);
     }
-    var _S19 : u32 = slice_0 + u32(1);
+    var _S26 : u32 = slice_0 + u32(1);
     var to_depth_0 : f32;
-    if(_S19 == _S16)
+    if(_S26 == _S23)
     {
         to_depth_0 = 1000.0f;
     }
     else
     {
-        to_depth_0 = volumetric_slice_start_0(_S19);
+        to_depth_0 = volumetric_slice_start_0(_S26);
     }
     var from_1 : vec3<f32> = params_0.eye_0.xyz + along_0 * vec3<f32>(from_depth_0);
     var to_1 : vec3<f32> = params_0.eye_0.xyz + along_0 * vec3<f32>(to_depth_0);
     var middle_0 : vec3<f32> = (from_1 + to_1) * vec3<f32>(0.5f);
-    var visibility_2 : f32 = volumetric_sun_visibility_0(middle_0, vec2<f32>(f32(tile_x_1), f32(tile_y_1)));
+    var pixel_6 : vec2<f32> = vec2<f32>(f32(tile_x_1), f32(tile_y_1));
+    var visibility_2 : f32 = volumetric_sun_visibility_0(middle_0, pixel_6);
     var segment_0 : vec3<f32> = to_1 - from_1;
     var length_of_0 : f32 = length(segment_0);
     var view_direction_3 : vec3<f32>;
@@ -396,7 +524,7 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         view_direction_3 = vec3<f32>(0.0f, 0.0f, 1.0f);
     }
-    var lit_2 : vec4<f32> = vec4<f32>(volumetric_punctual_0(froxel_1, middle_0, view_direction_3), visibility_2);
+    var lit_2 : vec4<f32> = vec4<f32>(volumetric_punctual_0(froxel_1, middle_0, view_direction_3, pixel_6), visibility_2);
     lighting_0[froxel_1] = lit_2;
     volumetrics_0[froxel_1] = volumetric_slice_0(from_1, to_1, view_direction_3, lit_2);
     return;
@@ -406,27 +534,27 @@ fn scatterMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
 @workgroup_size(64, 1, 1)
 fn integrateMain(@builtin(global_invocation_id) thread_1 : vec3<u32>)
 {
-    var tile_3 : u32 = thread_1.x;
+    var tile_5 : u32 = thread_1.x;
     var tiles_1 : u32 = max(params_0.grid_x_0, u32(1)) * max(params_0.grid_y_0, u32(1));
-    if(tile_3 >= tiles_1)
+    if(tile_5 >= tiles_1)
     {
         return;
     }
-    var _S20 : u32 = max(params_0.slices_0, u32(1));
-    const _S21 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
+    var _S27 : u32 = max(params_0.slices_0, u32(1));
+    const _S28 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
     var slice_1 : u32 = u32(0);
-    var accumulated_0 : vec3<f32> = _S21;
+    var accumulated_0 : vec3<f32> = _S28;
     var through_0 : f32 = 1.0f;
     for(;;)
     {
-        if(slice_1 < _S20)
+        if(slice_1 < _S27)
         {
         }
         else
         {
             break;
         }
-        var froxel_2 : u32 = tile_3 + slice_1 * tiles_1;
+        var froxel_2 : u32 = tile_5 + slice_1 * tiles_1;
         if(froxel_2 >= (params_0.froxel_count_0))
         {
             break;

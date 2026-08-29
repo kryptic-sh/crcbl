@@ -626,22 +626,12 @@ Rungs 1 and 2 of `docs/plan/51-volumetrics.md` are closed:
 `RenderEffects::VOLUMETRIC_FOG`, proved against the closed form on radv, the sun
 scatters into them through a Henyey-Greenstein lobe, the cascades occlude it per
 froxel, and since 2026-08-29 every point and spot light in a froxel's cluster
-list glows in it, scaled by `Fog::light_scattering`. Rungs 3 and 4 — a 3D target
-with temporal reprojection, a density field — are argued there and neither is
+list glows in it, scaled by `Fog::light_scattering` and occluded by the light's
+own shadow tiles where its row names them. Rungs 3 and 4 — a 3D target with
+temporal reprojection, a density field — are argued there and neither is
 scheduled.
 
 These belong here rather than there, because they are gaps rather than plans:
-
-- **A lamp glows through a wall.** `volumetric_punctual` in `volumetric.slang`
-  reaches every froxel inside a light's radius and consults nothing: the
-  `shadow_tile` its row names is read by `mesh.slang`'s `spot_visibility` and
-  `point_visibility` for the surfaces and by nothing for the air, so a spot
-  behind a door glows in the room it does not light. The plan's decision on the
-  light loop names the shadow tile as the third thing the copy has to carry;
-  what it takes is those two lookups copied into the scatter pass on
-  `tile_pcf`'s terms — the atlas and its comparison sampler are already bound
-  there — with the froxel's midpoint as the receiver, no bias, and the guard
-  widened to name them. Verified only that the row's field is unread there.
 
 - **A small light in a far slice is missed at the midpoint.** The glow is
   evaluated once per froxel, where the sun's visibility is, and the froxel's

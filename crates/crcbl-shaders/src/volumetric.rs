@@ -153,8 +153,10 @@ pub fn integrate_slice(source: f32, extinction: f32, thickness: f32) -> SliceInt
 /// declaration in `shaders/volumetric_composite.slang`.
 ///
 /// One `float4x4` (64), [`crate::mesh::SHADOW_CASCADES`] more of them, eight
-/// `float4` (16 each) and eight `uint`s (32).
-pub const PARAMS_SIZE: usize = 64 + crate::mesh::SHADOW_CASCADES * 64 + 8 * 16 + 8 * 4;
+/// `float4` (16 each), eight `uint`s (32) and
+/// [`crate::mesh::SHADOW_LIGHT_TILES`] `float4x4` more after the pad.
+pub const PARAMS_SIZE: usize =
+    64 + crate::mesh::SHADOW_CASCADES * 64 + 8 * 16 + 8 * 4 + crate::mesh::SHADOW_LIGHT_TILES * 64;
 
 /// Bytes one froxel occupies in the column buffer: one `float4`.
 ///
@@ -277,6 +279,16 @@ pub struct VolumetricParams {
     pub viewport_y: u32,
     /// Froxels the column buffer holds, which every pass bounds its indices by.
     pub froxel_count: u32,
+    /// World → light tile `i`'s shadow clip, column-major, one per tile of the
+    /// atlas's light region — `crcbl_shaders::mesh::FrameUniforms`'
+    /// `light_view_proj`, handed to the scatter pass so a lamp's glow is
+    /// occluded by the same map as the surface it lights. A row's
+    /// `shadow_tile` indexes it, plus the face for a point light; a tile no
+    /// light holds carries the identity and is read by nothing.
+    ///
+    /// **After the pad word**, so no field before it moved when it arrived —
+    /// the terms `mesh.slang` added its own copy on.
+    pub light_view_proj: [[f32; 16]; crate::mesh::SHADOW_LIGHT_TILES],
 }
 
 impl VolumetricParams {
@@ -313,9 +325,14 @@ impl VolumetricParams {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        // The trailing `pad0` stays zero: it exists so the block's size is the
-        // multiple of 16 bytes a uniform buffer needs, and nothing reads it.
-        debug_assert_eq!(at + 4, PARAMS_SIZE, "a field escaped the writer");
+        // `pad0` stays zero: it exists so the matrices after it start on the
+        // 16-byte boundary a `float4x4` needs, and nothing reads it.
+        at += 4;
+        for value in self.light_view_proj.into_iter().flatten() {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        debug_assert_eq!(at, PARAMS_SIZE, "a field escaped the writer");
         bytes
     }
 
@@ -328,8 +345,8 @@ impl VolumetricParams {
     /// a wrong camera, a wrong grid or a wrong cascade matrix, because the same
     /// mistake would be in both sides of the comparison.
     ///
-    /// The trailing pad is not read, for the reason [`to_bytes`] does not write
-    /// it.
+    /// The pad word is stepped over and not read, for the reason [`to_bytes`]
+    /// does not write it.
     ///
     /// [`to_bytes`]: VolumetricParams::to_bytes
     #[must_use]
@@ -374,6 +391,10 @@ impl VolumetricParams {
             viewport_x: word(bytes, at),
             viewport_y: word(bytes, at),
             froxel_count: word(bytes, at),
+            light_view_proj: {
+                *at += 4;
+                core::array::from_fn(|_| floats(bytes, at))
+            },
         }
     }
 }
@@ -731,6 +752,7 @@ mod tests {
             viewport_x: 19,
             viewport_y: 23,
             froxel_count: 29,
+            light_view_proj: [[11.5; 16]; crate::mesh::SHADOW_LIGHT_TILES],
         };
         let bytes = params.to_bytes();
         assert_eq!(bytes.len(), PARAMS_SIZE);
@@ -768,6 +790,13 @@ mod tests {
             assert_eq!(uint_at(offset), value, "the word at byte {offset}");
         }
         assert_eq!(uint_at(348), 0, "the pad word is not written");
+        // The first matrix after the pad and the last one the block holds.
+        assert_eq!(float_at(352), 11.5, "the first light matrix");
+        assert_eq!(
+            float_at(PARAMS_SIZE - 4),
+            11.5,
+            "the last light matrix's last cell"
+        );
     }
 
     /// Reading the block back gives the block that was written, field for
@@ -805,6 +834,7 @@ mod tests {
             viewport_x: 19,
             viewport_y: 23,
             froxel_count: 29,
+            light_view_proj: core::array::from_fn(|_| row(next, 128.0)),
         };
         assert_eq!(
             VolumetricParams::from_bytes(&params.to_bytes()),
@@ -899,6 +929,25 @@ mod tests {
                  atlas is not the one `crcbl_render::shadow` fills"
             );
         }
+        // The light region is a layout number too — it sizes the block's
+        // second matrix array — so both files carry it. The face count is the
+        // walk's alone: only the scatter pass picks a point light's face.
+        let light_tiles = crate::mesh::SHADOW_LIGHT_TILES;
+        for (file, source) in SHADERS {
+            let spelling = format!("static const uint SHADOW_LIGHT_TILES = {light_tiles};");
+            assert!(
+                source.contains(&spelling),
+                "{file} does not declare `{spelling}`, so the block it binds is a \
+                 different size from the one the other shader binds"
+            );
+        }
+        let faces = crate::mesh::SHADOW_POINT_FACES;
+        let spelling = format!("static const uint SHADOW_POINT_FACES = {faces};");
+        assert!(
+            VOLUMETRIC.contains(&spelling),
+            "volumetric.slang does not declare `{spelling}`, so a point light's run of \
+             tiles is not the one `crcbl_render::shadow` assigns"
+        );
 
         // The filter's shape, which `tile_pcf` reads and neither file computes:
         // two tap counts, a reach and three tables. Compared as text, because
@@ -922,7 +971,9 @@ mod tests {
         }
 
         for signature in [
+            "uint light_tile(uint tile)",
             "float2 atlas_uv(uint tile, float2 tile_uv)",
+            "uint point_face(float3 from_light)",
             "float2 shadow_rotation(float2 pixel)",
             "float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, \
              float reference)",
@@ -1059,6 +1110,12 @@ mod tests {
     /// the two functions are compared as bodies with comments dropped, on
     /// [`both_shaders_spell_the_same_atlas_walk`]'s terms; the walk itself is
     /// inline in both files, so its load-bearing lines are compared as text.
+    ///
+    /// The shadow tile is the third thing the plan named the copy has to carry,
+    /// and it is held the same way: the two tile checks and the map's own
+    /// frustum test are lines both files spell, and the lookup the scatter
+    /// pass makes through them — unbiased, at the froxel's own point — is a
+    /// line only it spells.
     #[test]
     fn both_shaders_spell_the_same_punctual_light() {
         const MESH: &str = include_str!("../shaders/mesh.slang");
@@ -1084,6 +1141,9 @@ mod tests {
             "to_light = offset / max(distance, 1e-6);",
             "reach = punctual_falloff(distance, light.position.w);",
             "reach *= spot_cone(to_light, light.direction.xyz, light.direction.w, light.cos_inner);",
+            "if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)",
+            "else if (light.shadow_tile < SHADOW_LIGHT_TILES)",
+            "if (any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0 || ndc.z > 1.0)",
         ] {
             for (file, source) in [("mesh.slang", MESH), ("volumetric.slang", VOLUMETRIC)] {
                 assert!(
@@ -1091,6 +1151,17 @@ mod tests {
                     "{file} does not walk its froxel's list with `{line}`"
                 );
             }
+        }
+        for line in [
+            "mul(params.light_view_proj[tile], float4(world_position, 1.0))",
+            "light.shadow_tile + point_face(at - light.position.xyz), at, pixel);",
+            "reach *= volumetric_punctual_visibility(light.shadow_tile, at, pixel);",
+        ] {
+            assert!(
+                VOLUMETRIC.contains(line),
+                "volumetric.slang no longer reads a lamp's map with `{line}`, so a lamp \
+                 glows through the wall its map holds"
+            );
         }
     }
 
