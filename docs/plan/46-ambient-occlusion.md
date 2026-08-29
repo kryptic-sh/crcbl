@@ -373,3 +373,26 @@ pass from a rounding step.
 This is milestone 1 of [sample/19-alcove.md](sample/19-alcove.md)'s three parts,
 and the one that document says to build first. The scene and the live radius and
 intensity controls are the other two, and neither exists.
+
+### Half resolution, taken 2026-08-30: the pass runs at half, and one upsample serves three
+
+GTAO is the most expensive pass in lantern's frame, measured, and the industry
+answer is not a cheaper integral but a smaller one: the pass runs at **half
+resolution** over a half-resolution depth, and a **depth-aware bilateral
+upsample** brings it back — a 2×2 gather weighted by how close each source
+texel's depth is to the target's, so an edge keeps its edge and a flat surface
+gets the average. Four times fewer horizon walks for the same picture at every
+edge the eye checks, and the pattern is as fixed as it is today, so the
+determinism argument this file rests on is untouched.
+
+**The upsample is one shader with three readers**, and it is written once: this
+pass, `47-reflections.md`'s march (its "no half-resolution SSR" row is priced on
+exactly this being owed and unmeasured) and `51-volumetrics.md`'s composite,
+which already samples a froxel grid far below the frame's resolution and would
+trade its trilinear lookup for a depth-aware one. Each of the three lands as its
+own rung on the shared pass, this one first.
+
+**What it is checked by**: the occlusion view's existing observer at both
+resolutions, the count of occluded texels within a stated share of the
+full-resolution count, and the cost row `40-profiling.md`'s baseline reads — the
+rung exists for the number, so the number is the evidence.

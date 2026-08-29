@@ -78,6 +78,17 @@ The struck items below have since been closed; the rest still stand.
    numbers get produced.
 3. **No baseline or regression detection.** Nothing stores a previous run to
    compare against, so "is this slower than last week" is unanswerable.
+   **Scheduled 2026-08-30 as the next slice of this topic**, because the render
+   ladders now land a pass a day and nothing measures what each one costs: the
+   per-pass GPU timestamps `PassStats` already collects are written by
+   `crcbl bench` to a baseline file **per machine** (never committed, never
+   compared across hosts), a rerun reports each pass as a ratio against it, and
+   a pass above 1.15× is the red line — **locally**, on the developer's own
+   adapter, which is the only place the 2026-08-13 decision below allows a
+   timing to fail. Three tiers are what a rung is priced on: the desktop
+   adapter, lavapipe, and the browser, and `43-render-standards.md`'s delivery
+   table carries the rule that a rung's cost row is filled before it is called
+   built.
 4. **No trace export.** Nothing a real profiler UI can open.
 5. **No memory or occupancy accounting.** Pool residency, buffer bytes,
    descriptor counts, staging-ring pressure — all invisible.
@@ -271,13 +282,13 @@ the wrong row.
 
 ## Delivery
 
-| Slice                                                                            | Phase                                                                                                                                                              |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                                                            |
-| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | **Started** — the subcommand and the `jobs` and `phys` scenarios (`crates/crcbl-cli/src/bench/`); the sample-owned scenarios, which need a device, are not written |
-| Per-pass GPU distributions in the exit log                                       | **Built 2026-08-28** — `crcbl_render::PassStats`, fed by `Loop::record_frame_cost` and reported by `Loop::finish`                                                  |
-| Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                                                                                                                                 |
-| Baseline storage + `--compare` + thresholds                                      | P8                                                                                                                                                                 |
-| Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)                                                                                                                 |
-| The rest of the debug panel's perf rows; freeze toggle                           | P10 (with the UI slice that owns the panel)                                                                                                                        |
-| Tracy or another external profiler, if wanted                                    | later, on demonstrated need and a dependency decision                                                                                                              |
+| Slice                                                                                                       | Phase                                                                                                                                                              |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row                            | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats`                                                            |
+| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output                                       | **Started** — the subcommand and the `jobs` and `phys` scenarios (`crates/crcbl-cli/src/bench/`); the sample-owned scenarios, which need a device, are not written |
+| Per-pass GPU distributions in the exit log                                                                  | **Built 2026-08-28** — `crcbl_render::PassStats`, fed by `Loop::record_frame_cost` and reported by `Loop::finish`                                                  |
+| Trace export (Chrome Trace JSON) + job-system tracks                                                        | P8                                                                                                                                                                 |
+| Baseline storage + `--compare` + thresholds, per machine, 1.15× per pass — the next slice here (2026-08-30) | P8                                                                                                                                                                 |
+| Memory/occupancy accounting and its rows                                                                    | P9 (assets and pools are what make it interesting)                                                                                                                 |
+| The rest of the debug panel's perf rows; freeze toggle                                                      | P10 (with the UI slice that owns the panel)                                                                                                                        |
+| Tracy or another external profiler, if wanted                                                               | later, on demonstrated need and a dependency decision                                                                                                              |

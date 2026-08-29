@@ -153,6 +153,26 @@ request.
   games/samples tune without engine edits; settings UI (topic 14 P10) exposes
   quality toggles.
 
+### Pass fusion, taken 2026-08-30: two round trips the stack does not need
+
+Each pass in the stack is a fullscreen write and a fullscreen read, and on the
+software and browser tiers that traffic is the pass. Two of them fold:
+
+- **Tonemap and the AA edge detect are one pass.** FXAA reads tonemapped luma
+  and CMAA2's edge pass reads the same, so the tonemap writes its luma into the
+  alpha channel it already owns and the resolve reads it back without a second
+  image — the resolve's first stage is the tonemap's last. One fullscreen round
+  trip gone from every frame the engine draws.
+- **Auto-exposure's histogram reads the bloom chain's first downsample**, not
+  the full scene target: a quarter-area image with the same distribution to
+  within the bins' width, and a chain that already exists on every frame bloom
+  is on for. On a frame without bloom the histogram builds its own quarter
+  level, which is still a quarter of the reads it does today.
+
+Both are checked by the goldens they must not move — the exposure e2e's
+percentile and the AA observer's counts — and priced on
+[40-profiling.md](40-profiling.md)'s baseline.
+
 ### Where the toggles live
 
 Every feature in this document is switchable at three layers, resolved in one

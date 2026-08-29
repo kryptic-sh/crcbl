@@ -114,6 +114,16 @@ every light that reaches a fragment? — and `43-render-standards.md` §10 lists
 deferred and visibility buffers among what is refused on this section's
 authority.
 
+**And a budget on the attachments the rule allows (2026-08-30)**: the forward
+pass writes at most **16 bytes a pixel** on the software and browser tiers — and
+that is where it stands today with no headroom: the lit target's eight,
+`TransientImageDesc::reflectivity`'s four (`Rgba8Unorm`) and
+`TransientImageDesc::motion`'s four (`Rg16Float`) — so a fourth attachment lands
+only by paying for itself, with a measured frame on lavapipe beside it, per
+`43-render-standards.md`'s pricing rule. Past that figure the pass has bought a
+G-buffer's bandwidth without a G-buffer's savings, which on a bandwidth-bound
+tier is the whole cost of the frame.
+
 ### What it costs and what is budgeted
 
 - **A light is a row**: position, radius, colour premultiplied by intensity,

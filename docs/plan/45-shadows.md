@@ -26,11 +26,12 @@ The list exists now, so these are settled.
   order-dependent, and hysteresis on the selection is owed for the same reason
   it was owed for LOD: a light drifting across the cutoff should not flicker its
   shadow on and off.
-- **The atlas is a fixed tile grid.** The sun's cascades take the first tiles,
-  and the rest are handed out one per spot and six per point until they run out.
-  A light that gets no tile **still lights and simply does not occlude**, which
-  is the honest degradation and is what makes the budget a quality knob rather
-  than a correctness cliff.
+- **The atlas is a fixed tile grid** — and the rung that replaces the grid is
+  pulled forward below, 2026-08-30. The sun's cascades take the first tiles, and
+  the rest are handed out one per spot and six per point until they run out. A
+  light that gets no tile **still lights and simply does not occlude**, which is
+  the honest degradation and is what makes the budget a quality knob rather than
+  a correctness cliff.
 
 **Order of work: spot before point**, even though point is the MVP row and spot
 is polish. A spot is one tile and one matrix — the sun's machinery with a
@@ -230,8 +231,48 @@ within tolerance and was left alone.
   sampling path. What a frame budgets is therefore tiles and cull slots —
   `LIGHT_TILES` and `LIGHT_SLOTS` in that module, which the 2026-08-26 re-tiling
   of the atlas widened to two point cubes and two spot cones by shrinking the
-  tile rather than growing the image. Static-geometry caching (cached cascades)
-  stays post-MVP, for when a sample's perf numbers demand it.
+  tile rather than growing the image. **Cascade cadence is the next rung
+  (2026-08-30)**, ahead of static-geometry caching: the far cascades are
+  re-rendered every second and fourth frame, keyed to the frame index so a
+  golden at a stated frame is the same golden, and the near cascade every frame.
+  A shadow pass is a whole geometry pass, and there are as many as there are
+  cascades and lit tiles, so this is the largest geometry saving short of
+  occlusion culling. The cost is the cadence table in `crcbl_render::shadow` and
+  a frame-index observer; a moving light or camera cut resets it. Static caching
+  — the map's geometry rendered once per cascade and only dynamic instances
+  re-drawn — stays the rung above, for when the cadence is measured and still
+  short.
+- **The atlas proper, pulled forward from post-MVP on 2026-08-30** because the
+  user wants shadows that hold up on a scene with many lights sooner than the
+  ladder had it. What the fixed grid gives today is `SHADOW_ATLAS_COLUMNS` by
+  `SHADOW_ATLAS_ROWS` tiles of `SHADOW_TILE` texels, `LIGHT_SLOTS` cull slots,
+  and so two shadowed point lights and two spots beside the sun; a fifth light
+  lights and does not occlude. The rung makes the atlas an **allocator rather
+  than a grid**, in the shape Doom 2016 and Unity HDRP ship:
+  1. **Variable tile sizes** from a quadtree over the one atlas image —
+     `SHADOW_TILE` down through halvings to a floor — so a far or small light
+     takes a sixteenth of what a near one takes and the same image holds ten
+     times the lights.
+  2. **A priority per light per frame**: projected screen coverage of the
+     light's reach, scaled down by distance, with hysteresis so a light on the
+     cutoff does not flicker its shadow, which is the LOD rule this section
+     already keeps for the shadow bit itself.
+  3. **A budget in tiles and in rendered faces per frame**, with the cadence
+     rung above spending it: the highest-priority lights re-render every frame,
+     the next tier every second, the rest hold their tile until they move. A
+     light past the budget is unshadowed, as today.
+  4. **The shader reads a rect per light** — scale and offset into the atlas in
+     the light's own row — in place of a tile index into a fixed grid, which is
+     what lets tile size vary without a second sampling path; `LIGHT_SLOTS`
+     becomes the pool the allocator hands out from.
+  5. **Static caching** rides on it once tiles are stable across frames: a tile
+     whose light and covered instances did not move is not re-rendered at all.
+
+  Checked by the goldens that stand — the sun's cascades and the four lights
+  lantern shadows must not move — plus a scene with more lights than tiles that
+  reads every tile allocated, the priority order observed, and the cost row
+  `40-profiling.md`'s baseline supplies.
+
 - **Under `LightingPath::RayTraced` this whole section is bypassed**, not
   augmented: shadows come from ray queries against the TLAS, for every light
   type, with no cascades and no shadow atlas. The two are alternatives, which is

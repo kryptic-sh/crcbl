@@ -213,6 +213,15 @@ its tests rather than values recorded from its own output.
 - **Monotonic error is what makes a cut well-defined.** A parent's error is at
   least its children's, so the descent has a single stopping point per branch
   and no cluster is ever drawn while an ancestor covering it is also drawn.
+- **A floor on the pixel threshold (2026-08-30)**: the descent never selects a
+  level whose triangles fall below about two pixels across on screen, whatever
+  the threshold a caller asks for. A forward renderer shades a full 2×2 quad for
+  every triangle a pixel touches, so triangles under a pixel cost four fragments
+  each — the failure mode a visibility buffer exists to fix, and
+  [44-lighting.md](44-lighting.md) refuses that buffer, so the floor is what
+  stands in for it. The floor is a constant beside the threshold in
+  `crcbl_render::cull`'s reference and `cull.slang`, and a test that a cut at
+  the floor draws no smaller triangle than it names.
 - **Hysteresis** on the threshold (switch-up and switch-down differ) kills
   boundary flicker: a group starts expanding above the budget and keeps
   expanding until its error falls to a fraction of it. **The history is per

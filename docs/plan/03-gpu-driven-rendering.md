@@ -157,9 +157,16 @@ An animated material is what makes it a ring.
   indirect-count call per bucket; `IndirectPerBatch` walks the compacted list
   and issues one `draw_indirect` per bucket. **The cull pass itself is identical
   in all three** — only what consumes its output differs.
-- Occlusion culling (depth pyramid / two-phase) is **post-MVP**; leave the
-  compute pass structured so it can be inserted (visibility buffer slot in the
-  pass inputs).
+- Occlusion culling (depth pyramid / two-phase) was **post-MVP**, and is
+  **pulled forward on 2026-08-30**: the depth pyramid it needs has existed since
+  2026-08-27 as `crates/crcbl-shaders/shaders/hiz.slang`, built for the
+  reflection march, so the half that was the work is in the tree. The rung is
+  the cull reading the previous frame's pyramid — draw what it passes, test the
+  rest against this frame's depth, draw the survivors — and it is what bounds
+  overdraw and draw count in every dense scene (towers, horde). The "visibility
+  buffer slot" this bullet named is that pass's input, an occlusion-cull input
+  and not a visibility-buffer renderer, which [44-lighting.md](44-lighting.md)'s
+  forward rule refuses.
 
 **Built, less the occlusion row.** `crcbl_render::cull` is the CPU reference
 `cull.slang` is checked against, `crcbl_render::draw_gen` runs that dispatch and

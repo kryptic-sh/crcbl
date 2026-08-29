@@ -866,6 +866,14 @@ take the derivative route for tangents and pay nothing — which
 `43-render-standards.md` §2 rejects on mirrored UVs, not on determinism (see the
 2026-08-27 correction there).
 
+**Rides on this, whichever way it goes (2026-08-30):** a **position-only vertex
+stream** for the depth prepass and every shadow pass. Those passes fetch the
+whole `MeshVertex` today and read twelve bytes of it, and there are as many of
+them per frame as there are cascades and lit tiles; a split stream cuts their
+vertex traffic to the position and is the standard forward-renderer layout. It
+is a `MeshVertex` layout change, so it belongs in the one bump this decision is,
+not in a churn of its own.
+
 **Not blocked on this:** specular IBL, and the trilinear anisotropic sampler
 over the page's mip chain (`43-render-standards.md`'s filtering subsection; the
 chain itself was built 2026-08-29). Both read the row as it stands;
