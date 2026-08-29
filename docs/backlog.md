@@ -745,19 +745,6 @@ and the sampler in `ForwardRenderer::with_scene` reads them trilinear at
 granted `SAMPLER_ANISOTROPY`, one where it was not. What the rung still owes, in
 order:
 
-- **The `apps/options` row for `anisotropic_filtering`.** The key, the knob and
-  the viewer's wiring are in (`crcbl::settings::anisotropic_filtering`,
-  `ForwardRenderer::set_anisotropy`, `apps/viewer/src/gpu.rs`); what is left is
-  the screen's row. It is a ladder — `1`, `2`, `4`, `8`, `16`, the values
-  hardware steps in — on `FRAME_CAPS`' pattern in `apps/options/src/menu.rs`: a
-  button that steps up and wraps, since the widget set has no cycler (that gap
-  is its own entry). Like the frame cap it is not applied to the running screen:
-  the options sample draws no page, so the row says "next start" through
-  `NEXT_START_MARK` as the cap does. The reader accepts any value in range, so a
-  hand-written `6` steps to `8` on `next_frame_cap`'s terms. Nothing else in the
-  tree hands the key to the knob: lantern, quarry and the scaffold call neither
-  `set_render_scale` nor `set_anisotropy`, and that pairing is one decision —
-  when the samples pick the scale up, they pick this up beside it.
 - **WebGPU's anisotropy ceiling** is reported as one and the feature withheld,
   so a browser draws the page isotropically while every native backend draws it
   at eight; the plan wants the desktop figure — the decision the same subsection
@@ -21795,15 +21782,20 @@ leaves:
   `web/demos/breach/main.js` reads `?map=`, since the gate already navigates
   with one to boot a second configuration.
 
-- **The video half is one key in; the graphics half is untouched.** `FRAME CAP`
-  landed on 2026-08-28 and is the whole of `[engine.video]` that has a screen.
-  Display mode, resolution and present mode are still absent, and each is harder
-  than the cap for the same reason: the cap is a number the loop reads once at
-  start-up, so a row that writes the key and says `(next start)` is the honest
-  whole of it, while the other three are applied to a **live window** and
-  therefore need a seam this sample does not have — something a screen can call
-  to re-mode or re-size the window it is drawn in, and something that reports
-  what the window system actually did with the request.
+- **The video half is two keys in; the graphics tiers are untouched.**
+  `FRAME CAP` landed on 2026-08-28 and `ANISOTROPY` on 2026-08-29, and they are
+  the whole of `[engine.video]` that has a screen. Display mode, resolution and
+  present mode are still absent, and each is harder than those two for the same
+  reason: the cap is a number the loop reads once at start-up and the anisotropy
+  one a renderer takes when it opens, so a row that writes the key and says
+  `(next start)` is the honest whole of either, while the other three are
+  applied to a **live window** and therefore need a seam this sample does not
+  have — something a screen can call to re-mode or re-size the window it is
+  drawn in, and something that reports what the window system actually did with
+  the request. Nothing but `apps/viewer` hands `anisotropic_filtering` to
+  `ForwardRenderer::set_anisotropy`: lantern, quarry and the scaffold call
+  neither `set_render_scale` nor `set_anisotropy`, and that pairing is one
+  decision — when the samples pick the scale up, they pick this up beside it.
 
 - **Requested versus resolved is only half shown.** `menu::NEXT_START_MARK` says
   "this run is not under the ceiling you picked", which is the _time_ half. What

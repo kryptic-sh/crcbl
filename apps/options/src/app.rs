@@ -23,17 +23,19 @@
 //! The six `[engine.audio]` bus gains, which are the cheapest settings to make
 //! real: they need no renderer change and no restart to write, and three of them
 //! carry sound — see [`crate::audio`] — so a fader is audible while it moves.
-//! And `[engine.video] frame_limit`, which is the cheapest of the video keys
-//! for the opposite reason: the loop reads it once, at start-up, so the row can
-//! write it honestly without a way to re-mode a live window. The rest of
-//! `docs/plan/sample/20-options.md`'s video half — display mode, resolution,
-//! present mode, the quality tiers — is not here yet, and `docs/backlog.md`
-//! says what each of them is waiting on.
+//! And two `[engine.video]` keys: `frame_limit`, which is the cheapest of the
+//! video keys for the opposite reason — the loop reads it once, at start-up, so
+//! the row can write it honestly without a way to re-mode a live window — and
+//! `anisotropic_filtering`, which a renderer takes at open and this sample has
+//! no renderer to hand it to. The rest of `docs/plan/sample/20-options.md`'s
+//! video half — display mode, resolution, present mode, the quality tiers — is
+//! not here yet, and `docs/backlog.md` says what each of them is waiting on.
 //!
-//! **The frame cap is the one row that does not apply as it moves.** Everything
-//! else here reaches its stage in the same call that writes its key; the
-//! ceiling reaches the loop only when a loop is built. The mark `Screen`'s frame
-//! writes on that row is what stops it being a silent lie.
+//! **Those two rows do not apply as they move.** Everything else here reaches
+//! its stage in the same call that writes its key; the ceiling reaches the loop
+//! only when a loop is built, and the anisotropy reaches a sampler only where a
+//! page is drawn. The mark `Screen`'s frame writes on those rows is what stops
+//! either being a silent lie.
 //!
 //! **Nothing in this process listens to these gains.** A settings file belongs
 //! to the application that wrote it — natively, `~/.config/<label>/` — so the
@@ -50,6 +52,7 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
+use crcbl::render::DEFAULT_ANISOTROPY;
 use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 use crcbl::store::settings::SettingsStack;
 
@@ -238,6 +241,12 @@ pub struct Screen {
     /// with is the only way the row can say so; comparing against the stack
     /// would compare the setting with itself.
     opened_cap: FrameLimit,
+    /// `[engine.video] anisotropic_filtering` as the screen currently holds it.
+    anisotropy: f32,
+    /// The anisotropy this run **started** on, for `opened_cap`'s reason: a
+    /// renderer takes the key when it opens, and this sample opens none, so the
+    /// value the run came up with is the only one it can claim to be under.
+    opened_anisotropy: f32,
 }
 
 /// The loop options runs in.
@@ -369,6 +378,7 @@ impl Screen {
     pub fn over(stack: SettingsStack, store: Store) -> Self {
         let gains = crcbl::settings::audio_gains(&stack).map(|(_, gain)| gain);
         let cap = crcbl::settings::frame_limit(&stack);
+        let anisotropy = crcbl::settings::anisotropic_filtering(&stack);
         Self {
             stack,
             store,
@@ -386,6 +396,8 @@ impl Screen {
             logged_edits: 0,
             cap,
             opened_cap: cap,
+            anisotropy,
+            opened_anisotropy: anisotropy,
         }
     }
 
@@ -399,6 +411,12 @@ impl Screen {
     #[must_use]
     pub const fn cap(&self) -> FrameLimit {
         self.cap
+    }
+
+    /// The page anisotropy as this screen currently holds it.
+    #[must_use]
+    pub const fn anisotropy(&self) -> f32 {
+        self.anisotropy
     }
 
     /// How many times a setting has been changed.
@@ -438,7 +456,7 @@ impl Screen {
         }
         crcbl::log::info!(
             "[HUD] tick: {}  master: {}  music: {}  sfx: {}  ui: {}  voice: {}  \
-             ambience: {}  cap: {}  edits: {}  file: {}",
+             ambience: {}  cap: {}  aniso: {}  edits: {}  file: {}",
             self.ticks,
             crate::menu::percent(self.gains[Bus::Master.index()]),
             crate::menu::percent(self.gains[Bus::Music.index()]),
@@ -447,6 +465,7 @@ impl Screen {
             crate::menu::percent(self.gains[Bus::Voice.index()]),
             crate::menu::percent(self.gains[Bus::Ambience.index()]),
             crate::menu::frame_cap_label(self.cap),
+            crate::menu::anisotropy_label(self.anisotropy),
             self.edits,
             self.saved,
         );
@@ -505,6 +524,33 @@ impl Screen {
         }
     }
 
+    /// Moves the page anisotropy, writing the key and marking the file unsaved,
+    /// on [`Screen::set_cap`]'s terms — and applied to nothing, since this
+    /// sample draws no page. `apps/viewer` is where the key reaches
+    /// `ForwardRenderer::set_anisotropy`.
+    fn set_anisotropy(&mut self, anisotropy: f32) {
+        self.anisotropy = anisotropy;
+        self.edits += 1;
+        self.saved = SaveState::Unsaved;
+        if let Err(error) = crcbl::settings::set_anisotropic_filtering(&mut self.stack, anisotropy)
+        {
+            self.saved = SaveState::Failed(error.to_string());
+        }
+    }
+
+    /// What the row says: the anisotropy, and whether this run came up on it.
+    ///
+    /// Compared by bits rather than by `==`, so a `NaN` the file could never
+    /// hold does not read as a change on every frame.
+    fn anisotropy_hint(&self) -> String {
+        let label = crate::menu::anisotropy_label(self.anisotropy);
+        if self.anisotropy.to_bits() == self.opened_anisotropy.to_bits() {
+            label
+        } else {
+            format!("{label} {}", crate::menu::NEXT_START_MARK)
+        }
+    }
+
     /// Writes the edited settings back to wherever they were read from.
     fn save(&mut self) {
         let source = self.store.source();
@@ -528,13 +574,14 @@ impl Screen {
     }
 
     /// Puts every setting back to what a file that says nothing means — every
-    /// bus at unity and no frame ceiling — which is what a player asking for
-    /// the defaults is asking for.
+    /// bus at unity, no frame ceiling and the engine's own anisotropy — which
+    /// is what a player asking for the defaults is asking for.
     fn reset(&mut self) {
         for bus in Bus::ALL {
             self.set(bus, 1.0);
         }
         self.set_cap(FrameLimit::unlimited());
+        self.set_anisotropy(DEFAULT_ANISOTROPY);
     }
 }
 
@@ -597,6 +644,7 @@ impl HostedGame for Screen {
             crate::menu::SAVE_ID => Some(Action::Save),
             crate::menu::RESET_ID => Some(Action::Reset),
             crate::menu::FRAME_CAP_ID => Some(Action::CycleFrameCap),
+            crate::menu::ANISOTROPY_ID => Some(Action::CycleAnisotropy),
             // A fader. Sliders fire nothing, so this arm is unreachable through
             // the loop — it is here because the ids exist and a `_ => None`
             // that swallowed a real button would be silent.
@@ -613,6 +661,9 @@ impl HostedGame for Screen {
             Action::Save => self.save(),
             Action::Reset => self.reset(),
             Action::CycleFrameCap => self.set_cap(crate::menu::next_frame_cap(self.cap)),
+            Action::CycleAnisotropy => {
+                self.set_anisotropy(crate::menu::next_anisotropy(self.anisotropy));
+            }
         }
     }
 
@@ -664,6 +715,7 @@ impl HostedGame for Screen {
                 );
             }
             menu.set_item_hint(crate::menu::FRAME_CAP_ID, self.cap_hint());
+            menu.set_item_hint(crate::menu::ANISOTROPY_ID, self.anisotropy_hint());
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
         }
@@ -1011,7 +1063,7 @@ mod tests {
         assert_eq!(screen.saved(), &SaveState::Unsaved);
     }
 
-    /// The three buttons are the only ids that fire, and a fader never does.
+    /// The buttons are the only ids that fire, and a fader never does.
     #[test]
     fn only_the_buttons_name_an_action() {
         assert_eq!(
@@ -1025,6 +1077,10 @@ mod tests {
         assert_eq!(
             Screen::menu_action(crate::menu::FRAME_CAP_ID),
             Some(Action::CycleFrameCap)
+        );
+        assert_eq!(
+            Screen::menu_action(crate::menu::ANISOTROPY_ID),
+            Some(Action::CycleAnisotropy)
         );
         for bus in Bus::ALL {
             assert_eq!(Screen::menu_action(crate::menu::fader_id(bus)), None);
@@ -1130,6 +1186,134 @@ mod tests {
         assert_eq!(
             crcbl::settings::frame_limit(screen.stack()),
             FrameLimit::unlimited(),
+            "the screen reset a number it never wrote",
+        );
+    }
+
+    /// **The anisotropy round trips through the file, like the cap does.**
+    ///
+    /// Stepped on the screen, written to the key, and read back by a screen
+    /// that opens over the same storage. An absent key is the engine's default,
+    /// and the first step off it is the rung above — not the bottom of the
+    /// ladder, which is where a step from the *cap's* absent value lands, since
+    /// no ceiling is that ladder's top and eight is this one's middle.
+    #[test]
+    fn a_saved_anisotropy_is_still_there_when_the_screen_opens_again() {
+        let storage = crcbl::store::MemoryStorage::new();
+        let mut screen = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        assert_eq!(
+            screen.anisotropy(),
+            DEFAULT_ANISOTROPY,
+            "an absent key is the engine's default"
+        );
+
+        screen.apply(Action::CycleAnisotropy);
+        let stepped = screen.anisotropy();
+        assert_eq!(
+            stepped,
+            crate::menu::next_anisotropy(DEFAULT_ANISOTROPY),
+            "the first step off the default is the rung above it",
+        );
+        assert_ne!(stepped, DEFAULT_ANISOTROPY);
+        assert_eq!(screen.edits(), 1);
+        assert_eq!(screen.saved(), &SaveState::Unsaved);
+
+        screen.save_to(SettingsSource::Source(&storage));
+        assert_eq!(screen.saved(), &SaveState::Saved);
+
+        let reopened = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        assert_eq!(
+            reopened.anisotropy(),
+            stepped,
+            "the restart came up on {} rather than the {stepped} that was saved",
+            reopened.anisotropy(),
+        );
+    }
+
+    /// **The row says when the anisotropy is not the one this run came up on,
+    /// and a file value between rungs steps to the rung above it.**
+    ///
+    /// The same mark the cap wears, for a related reason: nothing in this
+    /// process samples a page, so a value chosen here reaches a sampler only
+    /// where the next renderer opens over the key. Round the ladder and back
+    /// brings the mark off again.
+    #[test]
+    fn an_anisotropy_this_run_is_not_on_says_so_and_a_value_between_rungs_steps_up() {
+        let (mut screen, mut menus) = screen("[engine.video]\nanisotropic_filtering = 6\n");
+        assert_eq!(
+            screen.anisotropy(),
+            6.0,
+            "the reader accepts what is in range"
+        );
+        reconcile(&mut screen, &mut menus);
+        let hint = |menus: &mut Menus| hint(menus, crate::menu::ANISOTROPY_ID);
+        assert_eq!(
+            hint(&mut menus),
+            crate::menu::anisotropy_label(6.0),
+            "a run opened on its own value has nothing to add",
+        );
+
+        screen.apply(Action::CycleAnisotropy);
+        assert_eq!(screen.anisotropy(), 8.0, "six steps up to eight");
+        reconcile(&mut screen, &mut menus);
+        let marked = hint(&mut menus);
+        assert!(
+            marked.contains(crate::menu::NEXT_START_MARK),
+            "the row reads {marked:?} for an anisotropy this run is not on",
+        );
+        assert!(
+            marked.contains(&crate::menu::anisotropy_label(8.0)),
+            "the row reads {marked:?} rather than the value that was chosen",
+        );
+
+        // Round the whole ladder from eight lands on eight again — but the run
+        // came up on six, which is not a rung, so the mark stays until the
+        // screen is reset back to the file's own value.
+        for _ in 0..crate::menu::ANISOTROPIES.len() {
+            screen.apply(Action::CycleAnisotropy);
+        }
+        assert_eq!(screen.anisotropy(), 8.0, "the ladder did not wrap");
+        reconcile(&mut screen, &mut menus);
+        assert!(hint(&mut menus).contains(crate::menu::NEXT_START_MARK));
+    }
+
+    /// Round the ladder from a value that is a rung brings the mark back off,
+    /// which is what tells a mark from a flag that is only ever set.
+    #[test]
+    fn stepping_round_the_anisotropy_ladder_brings_the_mark_off_again() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+        screen.apply(Action::CycleAnisotropy);
+        reconcile(&mut screen, &mut menus);
+        assert!(
+            hint(&mut menus, crate::menu::ANISOTROPY_ID).contains(crate::menu::NEXT_START_MARK)
+        );
+
+        for _ in 1..crate::menu::ANISOTROPIES.len() {
+            screen.apply(Action::CycleAnisotropy);
+        }
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.anisotropy(), DEFAULT_ANISOTROPY);
+        assert_eq!(
+            hint(&mut menus, crate::menu::ANISOTROPY_ID),
+            crate::menu::anisotropy_label(DEFAULT_ANISOTROPY),
+            "the mark stayed on a value the run came up on",
+        );
+    }
+
+    /// `RESET` takes the anisotropy back to the engine's default, which is what
+    /// an absent key means — not to the bottom of the ladder.
+    #[test]
+    fn reset_takes_the_anisotropy_back_to_the_engines_default() {
+        let (mut screen, mut menus) = screen("[engine.video]\nanisotropic_filtering = 16\n");
+        assert_eq!(screen.anisotropy(), 16.0);
+        reconcile(&mut screen, &mut menus);
+
+        screen.apply(Action::Reset);
+        assert_eq!(screen.anisotropy(), DEFAULT_ANISOTROPY);
+        assert_eq!(
+            crcbl::settings::anisotropic_filtering(screen.stack()),
+            DEFAULT_ANISOTROPY,
             "the screen reset a number it never wrote",
         );
     }

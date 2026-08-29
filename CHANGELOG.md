@@ -42,10 +42,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `set_anisotropic_filtering` writes it, `VideoSettings::anisotropic_filtering`
   carries it, `GpuContext::anisotropic_filtering` hands it over, and
   `apps/viewer` applies it at open and on reload; `crcbl settings list` names
-  it. The `apps/options` row is still to come. The lights fixture's sun
-  (`dim_sun`) is halved so its pools stay the brightest thing on their pyramids
-  under a bilinear page. The page costs a third again in device memory for the
-  chain.
+  it; and `apps/options` steps it on an `ANISOTROPY` row — `menu::ANISOTROPIES`,
+  the powers of two from off to sixteen, with `RESET` returning it to the
+  engine's default and `(next start)` beside a value the run did not come up on,
+  since that screen draws no page. The lights fixture's sun (`dim_sun`) is
+  halved so its pools stay the brightest thing on their pyramids under a
+  bilinear page. The page costs a third again in device memory for the chain.
 
 - **Auto-exposure: the frame measures its own exposure, and no readback stalls
   on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —

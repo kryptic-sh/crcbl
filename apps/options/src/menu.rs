@@ -31,6 +31,7 @@
 
 use crcbl::audio::mixer::Bus;
 use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit};
+use crcbl::render::DEFAULT_ANISOTROPY;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
 /// The id of `bus`'s fader, numbered in [`Bus::ALL`]'s order from the first id
@@ -117,16 +118,64 @@ pub fn frame_cap_label(limit: FrameLimit) -> String {
     }
 }
 
+/// The id of the row that steps `[engine.video] anisotropic_filtering`.
+pub const ANISOTROPY_ID: crcbl::ui::WidgetId = FRAME_CAP_ID + 1;
+
+/// The anisotropies the row steps through, **in ascending order**.
+///
+/// A ladder for [`FRAME_CAPS`]' reason: the value is a count of taps a sampler
+/// takes along a footprint, and hardware steps it in powers of two, so a groove
+/// over the range would let a player ask for `6` and get `8`'s cost with a
+/// number that says otherwise. Its top is
+/// [`MAX_ANISOTROPIC_FILTERING`](crcbl::settings::MAX_ANISOTROPIC_FILTERING) —
+/// the desktop ceiling the key reads up to — and a device whose own ceiling is lower clamps below the screen's back,
+/// which the renderer does and this row cannot see.
+///
+/// The row is a button that steps forward, like the cap's; the cycler this
+/// would rather be is `docs/backlog.md`'s entry.
+pub const ANISOTROPIES: [f32; 5] = [1.0, 2.0, 4.0, 8.0, 16.0];
+
+/// The next anisotropy up from `current`, wrapping round to the lowest.
+///
+/// **The first rung strictly above `current`**, on [`next_frame_cap`]'s terms:
+/// the key's reader accepts any number in range, so a file holding a
+/// hand-written `6` steps to `8` rather than somewhere arbitrary. A `NaN` sits
+/// above nothing and wraps to the bottom.
+#[must_use]
+pub fn next_anisotropy(current: f32) -> f32 {
+    ANISOTROPIES
+        .into_iter()
+        .find(|rung| *rung > current)
+        .unwrap_or(ANISOTROPIES[0])
+}
+
+/// How an anisotropy is written beside its row: `off` at one, since one tap is
+/// no anisotropy at all, and the count with an `x` above it.
+///
+/// An ASCII `x` rather than `×`, because the menu's atlas holds the printable
+/// ASCII range and draws anything else as `.notdef`.
+#[must_use]
+pub fn anisotropy_label(anisotropy: f32) -> String {
+    if anisotropy <= 1.0 {
+        "off".to_string()
+    } else {
+        format!("{anisotropy}x")
+    }
+}
+
 /// What this sample's own rows do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Write the edited settings back to wherever they were read from.
     Save,
     /// Put every setting back to its default — which is what an absent key
-    /// means: every bus at unity and no frame ceiling.
+    /// means: every bus at unity, no frame ceiling and the engine's own
+    /// anisotropy.
     Reset,
     /// Step the frame ceiling to the next rung of [`FRAME_CAPS`].
     CycleFrameCap,
+    /// Step the page's anisotropy to the next rung of [`ANISOTROPIES`].
+    CycleAnisotropy,
 }
 
 /// Which menu a frame shows. There is only one, and it is always on.
@@ -185,11 +234,13 @@ pub fn fader_hint(gain: f32, audible: bool) -> String {
 /// What [`fader_hint`] writes after the gain of a bus with nothing on it.
 pub const SILENT_MARK: &str = "(silent)";
 
-/// What the frame-cap row writes after a ceiling this run is not running under.
+/// What a row writes after a value this run is not running under.
 ///
-/// The loop takes its limit when it is built, so a cap chosen here is one the
-/// **next** start will use. Every other setting on this screen applies as it
-/// moves, which is exactly why this one has to say that it does not.
+/// The loop takes its frame limit when it is built, so a cap chosen here is
+/// one the **next** start will use; and this sample draws no page, so there is
+/// nothing here for an anisotropy to reach until a renderer opens over the key.
+/// The faders apply as they move, which is exactly why these two rows have to
+/// say that they do not.
 pub const NEXT_START_MARK: &str = "(next start)";
 
 /// The label a bus wears on its row.
@@ -224,6 +275,13 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
             "FRAME CAP",
             frame_cap_label(FrameLimit::unlimited()),
         ),
+        // The other `[engine.video]` key, beside the first, and written every
+        // frame the same way.
+        MenuItem::new(
+            ANISOTROPY_ID,
+            "ANISOTROPY",
+            anisotropy_label(DEFAULT_ANISOTROPY),
+        ),
     ];
     items.extend(gains.iter().map(|(bus, gain)| {
         MenuItem::slider(
@@ -244,6 +302,7 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl::settings::MAX_ANISOTROPIC_FILTERING;
 
     /// **The ladder is ascending, which everything else here assumes.**
     ///
@@ -336,6 +395,69 @@ mod tests {
             frame_cap_label(FrameLimit::fps(0)),
             frame_cap_label(FrameLimit::unlimited()),
             "zero is how the file spells no ceiling",
+        );
+    }
+
+    /// **The anisotropy ladder is ascending and spans the key's whole range**:
+    /// its bottom is the one tap that is no anisotropy, its top is the ceiling
+    /// the key reads up to, and the engine's default is a rung — so `RESET`
+    /// lands on a value the row could have stepped to.
+    #[test]
+    fn the_anisotropy_ladder_climbs_from_off_to_the_keys_ceiling() {
+        for pair in ANISOTROPIES.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "{} does not sit above {}",
+                pair[1],
+                pair[0]
+            );
+        }
+        assert_eq!(ANISOTROPIES[0], 1.0, "the bottom rung is off");
+        assert_eq!(
+            *ANISOTROPIES.last().expect("the ladder has rungs"),
+            MAX_ANISOTROPIC_FILTERING,
+            "the top rung is the most the key reads",
+        );
+        assert!(
+            ANISOTROPIES.contains(&DEFAULT_ANISOTROPY),
+            "the engine's default {DEFAULT_ANISOTROPY} is not a rung",
+        );
+    }
+
+    /// Every rung steps to the next, the last wraps to the first, and a value
+    /// between rungs — a hand-written `6` — steps up to the rung above it.
+    #[test]
+    fn the_anisotropy_ladder_steps_up_wraps_and_lifts_a_value_between_rungs() {
+        for (index, rung) in ANISOTROPIES.into_iter().enumerate() {
+            let expected = ANISOTROPIES[(index + 1) % ANISOTROPIES.len()];
+            assert_eq!(
+                next_anisotropy(rung),
+                expected,
+                "{rung} stepped somewhere other than {expected}",
+            );
+        }
+        assert_eq!(next_anisotropy(6.0), 8.0);
+        assert_eq!(next_anisotropy(0.5), ANISOTROPIES[0]);
+        assert_eq!(
+            next_anisotropy(f32::NAN),
+            ANISOTROPIES[0],
+            "a number above nothing wraps to the bottom",
+        );
+    }
+
+    /// One tap is written as `off`; a count is written with its `x`, and a
+    /// value the file spelled between rungs is written as it stands.
+    #[test]
+    fn an_anisotropy_is_written_as_a_count_and_one_is_written_as_off() {
+        assert_eq!(anisotropy_label(1.0), "off");
+        assert_eq!(anisotropy_label(8.0), "8x");
+        assert_eq!(anisotropy_label(16.0), "16x");
+        assert_eq!(anisotropy_label(6.0), "6x");
+        assert!(
+            anisotropy_label(DEFAULT_ANISOTROPY)
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic()),
+            "the label has to be in the atlas",
         );
     }
 

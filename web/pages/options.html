@@ -43,13 +43,16 @@ meta-->
   <ul class="keys">
     <li><kbd>↑</kbd><kbd>↓</kbd> pick a row</li>
     <li><kbd>←</kbd><kbd>→</kbd> move the fader under it</li>
-    <li><kbd>ENTER</kbd> step FRAME CAP, or press SAVE or RESET</li>
+    <li>
+      <kbd>ENTER</kbd> step FRAME CAP or ANISOTROPY, or press SAVE or RESET
+    </li>
     <!--include demo-loop-keys-->
   </ul>
   <p>
     SAVE says where it went. RESET puts every bus back to 100%, takes the frame
-    cap off, and leaves the file alone until you save it — a reset you did not
-    mean to keep is one reload away from being undone.
+    cap off, puts the anisotropy back to the engine's own, and leaves the file
+    alone until you save it — a reset you did not mean to keep is one reload
+    away from being undone.
   </p>
 </section>
 
@@ -86,12 +89,13 @@ meta-->
     that does nothing is worse than one that admits it.
   </p>
   <p>
-    FRAME CAP is the first <code>[engine.video]</code> key on the screen and the
-    only row here that does not apply as you change it: the loop takes its frame
-    ceiling once, when it is built. So the row says
-    <code>(next start)</code> until a reload has run under the cap you chose —
-    which is the same honesty the silent buses get, applied to time instead of
-    to sound.
+    FRAME CAP and ANISOTROPY are the two <code>[engine.video]</code> keys on the
+    screen and the only rows here that do not apply as you change them: the loop
+    takes its frame ceiling once, when it is built, and a renderer takes its
+    anisotropy when it opens over a page — and this screen draws none. So each
+    row says <code>(next start)</code> until a reload has come up on the value
+    you chose — which is the same honesty the silent buses get, applied to time
+    instead of to sound.
   </p>
 </section>
 
