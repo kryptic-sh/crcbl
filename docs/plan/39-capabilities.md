@@ -135,6 +135,16 @@ camera stack declares what the view wants
   → device capability clamps it downward, last and absolutely
 ```
 
+**Quality presets are a foundation rung (2026-08-30)** on the `[engine.video]`
+line of that order, in `43-render-standards.md`'s foundations block: `low`,
+`medium` and `high`, each a named set of values for every knob a rung exposes —
+the half-resolution passes, the shadow atlas budget and cadence, the froxel
+sample count, the AA tier, anisotropy — spelled in `crcbl::settings` beside
+`VIDEO_KEYS` so a preset is a layer of keys and not a second mechanism. The
+software and browser tiers ship on `low` deterministically, and
+`40-profiling.md`'s baseline measures each preset, which is what turns "priced
+on three tiers" into three numbers a rung can be held to.
+
 The per-camera layer exists because it is genuinely per view: a
 render-to-texture camera feeding a security monitor or a planar reflection does
 not want reflections of its own, and that is a property of the camera rather

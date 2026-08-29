@@ -272,7 +272,15 @@ Surfaces for instrumentation that already exists:
    transport as `Command` messages — the console works identically over a
    network connection (server-authoritative debugging, free).
 5. **Debug draw controls** — toggle the stage 3 debug-draw categories (AABBs,
-   system overlays) per system.
+   system overlays) per system. **The layer those controls toggle is itself
+   unbuilt, and it is a foundation rung (2026-08-30)** in
+   `43-render-standards.md`'s foundations block: lines, boxes, spheres, frusta
+   and world-anchored text, drawn pre-tonemap in HDR as
+   `18-render-features.md`'s interaction rule already fixes, from an
+   immediate-mode buffer any system appends to. It is scheduled early because
+   four owed views wait on it — `45-shadows.md`'s cascade overlay and atlas
+   view, `25-lod.md`'s cluster bounds and `44-lighting.md`'s light reach — and
+   each halves the time to debug the rung it belongs to.
 6. **UI inspector** (the web-dev devtools payoff): hover any element → its box
    outlines (content/padding/margin), matched style rules, computed values,
    id/class path. Nearly free because the tree + resolved styles are real data

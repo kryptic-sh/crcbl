@@ -25,7 +25,10 @@ The list exists now, so these are settled.
   Ties break by light index so a frame's selection is stable rather than
   order-dependent, and hysteresis on the selection is owed for the same reason
   it was owed for LOD: a light drifting across the cutoff should not flicker its
-  shadow on and off.
+  shadow on and off. Since 2026-08-30 that hysteresis is
+  [25-lod.md](25-lod.md)'s shared importance helper, a foundation rung, and this
+  selection and the atlas priority below both read it rather than keeping a band
+  of their own.
 - **The atlas is a fixed tile grid** — and the rung that replaces the grid is
   pulled forward below, 2026-08-30. The sun's cascades take the first tiles, and
   the rest are handed out one per spot and six per point until they run out. A

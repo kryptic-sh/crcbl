@@ -231,6 +231,15 @@ its tests rather than values recorded from its own output.
   rule stays monotone because a parent's error is at least its children's and
   its sphere contains theirs, so from an all-zero start every later frame is
   monotone by induction.
+- **The importance metric and its hysteresis are one shared helper
+  (2026-08-30)**, a foundation rung in `43-render-standards.md`'s block:
+  "projected screen size of a bounding sphere, with a switch-up and a
+  switch-down band" is what this descent, `45-shadows.md`'s shadow bit and its
+  atlas priority, and the light grid's per-light culling all compute, and today
+  only this file has it. One function in `crcbl_render::cull`'s CPU reference
+  and one in a shared `.slang` include, read by every consumer with its own
+  thresholds, so a fix to the band lands once and the observers that check it
+  are the same observer.
 - **Transitions**: instant swap MVP (correct thresholds make pops sub-pixel by
   definition — the error metric _is_ the pop size); dithered crossfade later if
   hero assets demand it (pairs with TAA era).

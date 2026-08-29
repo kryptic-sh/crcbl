@@ -17,6 +17,14 @@ or the browser.
 
 ## Status
 
+> **Breaking changes, every release, until 1.0.** Crucible is early in its
+> development and nothing is locked: the public API, the settings keys, the
+> scene and mesh formats, the shader interfaces and the save layout all change
+> whenever the engine is better for it, with no migration path. Every versioned
+> format is **v0** — a number that says "may change without notice", not a
+> promise. Pin a commit if you build on it, and read `CHANGELOG.md`'s `Breaking`
+> sections before moving.
+
 **Pre-1.0 and moving.** Frames draw on every backend, several samples are
 playable, and six of them ship as browser demos that double as the engine's
 continuous cross-backend regression test. The API breaks when a caller needs it

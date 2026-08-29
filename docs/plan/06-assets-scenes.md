@@ -66,6 +66,32 @@ registration — scene ↔ ECS ↔ replication stay the same shape. Assets refer
 by canonical path (hashed to `AssetId` on load). Versioned header + serde
 defaults for forward-compat; no migration machinery in MVP.
 
+### The cooked mesh is born v0, in the compact vertex layout (decided 2026-08-30)
+
+The mesh row above — "packed binary matching GPU pool layout" — is unbuilt:
+nothing in the workspace writes or reads a cooked mesh, and every mesh the
+engine draws is imported from glTF or built from RON at load. So the vertex
+layout decision `43-render-standards.md` §2 records is **not** a migration:
+there is no file to migrate. What it binds is the format this row will have when
+it is built:
+
+- **It carries a format version in its header from its first byte**, and the
+  loader refuses a version it does not know rather than reading it as the
+  current one. That version is **0** and stays 0 until 1.0 — the user's rule,
+  2026-08-30: the engine is early, nothing is locked, and a format marked v0 may
+  change shape without a migration; the header exists so a stale file fails
+  loudly, not so it is carried forward. The layout it holds is
+  `crcbl_shaders::mesh::MeshVertex`'s compact, quantised, split-stream one from
+  §2, and the four-`float4` layout is never a cooked format at all.
+- **Two streams in the file, as in the pool**: positions alone, then attributes,
+  each a contiguous run, so the loader uploads each to its own buffer without
+  repacking. Cluster and LOD tables (25-lod.md) sit beside them and index the
+  position stream.
+- **The migration rung this section once deferred** ("no migration machinery in
+  MVP") is not owed before 1.0 at all: a v0 file that no longer loads is
+  re-imported from its glTF, which the import pipeline below already does on
+  every load today.
+
 ### Deterministic writer (90% of git-friendliness)
 
 - Canonical field order; entities sorted by stable ID.

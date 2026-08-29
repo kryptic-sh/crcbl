@@ -214,7 +214,15 @@ dispatches them cannot disagree.
   degrading past it. The first real rule arrives with the ray-traced variants,
   which `LightingPath` selects.
 - **Camera stack** is a field nothing writes: there is no render-stack RON, and
-  nothing in the workspace reads or writes RON at all.
+  nothing in the workspace reads or writes RON at all. **It is a foundation rung
+  (2026-08-30)**, scheduled by `43-render-standards.md`'s foundations block
+  ahead of the feature rungs that would be cheaper with it: a RON per camera
+  naming the passes and their parameters, `RenderEffects` becoming the compiled
+  form of that file, and the `[engine.video]` layer overlaying it in the order
+  `39-capabilities.md` fixes. Once it exists a quality tier, a sample's tuning
+  and an A/B measurement on `40-profiling.md`'s baseline are each a file and not
+  an engine edit — which is what makes every later rung's cost row cheap to
+  fill.
 - **`[engine.video]`** is wired: `GpuContext` reads the player's settings file
   while it opens — `SettingsSource::Platform` by default, so every sample and
   the `crcbl new` scaffold get it without asking — and
