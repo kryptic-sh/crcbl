@@ -68,10 +68,10 @@ pub const FRAME_CAP_ID: crcbl::ui::WidgetId = RESET_ID + 1;
 /// 144 Hz panel, which is a worse setting than either neighbour and one nobody
 /// means to pick.
 ///
-/// The widget set has a button and a slider and no third thing, so the row is a
-/// button that steps forward — see [`next_frame_cap`]. Adding a cycler widget
-/// to `crcbl-ui` is the alternative and is its own change; `docs/backlog.md`
-/// carries it.
+/// The row is a button that steps forward — see [`next_frame_cap`] — from
+/// before `crcbl-ui` had a cycler. It has one now (`MenuItem::cycler`, built
+/// 2026-08-29), and moving this row and the anisotropy's onto it is the next
+/// slice; `docs/backlog.md` carries it.
 ///
 /// [`FrameLimit::unlimited`] sits at the end because that is where it sits in
 /// the ordering, not because it is a special case — see [`is_above`].
@@ -132,8 +132,8 @@ pub const ANISOTROPY_ID: crcbl::ui::WidgetId = FRAME_CAP_ID + 1;
 /// the desktop ceiling the key reads up to — and a device whose own ceiling is lower clamps below the screen's back,
 /// which the renderer does and this row cannot see.
 ///
-/// The row is a button that steps forward, like the cap's; the cycler this
-/// would rather be is `docs/backlog.md`'s entry.
+/// The row is a button that steps forward, like the cap's; the move onto
+/// `crcbl-ui`'s cycler is `docs/backlog.md`'s entry.
 pub const ANISOTROPIES: [f32; 5] = [1.0, 2.0, 4.0, 8.0, 16.0];
 
 /// The next anisotropy up from `current`, wrapping round to the lowest.

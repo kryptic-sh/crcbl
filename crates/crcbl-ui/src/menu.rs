@@ -52,6 +52,17 @@
 //! The pointer is [`Menu::point`], is entirely optional, and when a cursor is
 //! over an item it takes over the highlight for as long as it is there. A game
 //! that never calls it behaves exactly as if there were no mouse.
+//!
+//! # Three kinds of row
+//!
+//! A row fires, or it carries a value — see [`MenuItemKind`]. A **button**
+//! reports its id from the commit key or a click. A **slider** carries a
+//! position along a groove and reports nothing; the arrows and a drag move it.
+//! A **cycler** carries one choice of a fixed list and reports nothing either:
+//! the arrows walk the list and stop at its ends, the commit key and a click
+//! walk it forward and round. The two value rows are read back by id —
+//! [`Menu::slider`] and [`Menu::cycler`] — rather than fired, so no value ever
+//! reaches a game's action table looking like a button press.
 
 use glam::Vec2;
 
@@ -287,6 +298,97 @@ fn clamp_unit(position: f32) -> f32 {
     }
 }
 
+/// A row that holds one choice of a fixed, ordered list — a display mode, a
+/// frame cap, an on/off switch.
+///
+/// It knows how many choices there are and which is chosen, and **not what
+/// they are**: the caller owns the list and its spellings, and writes the
+/// chosen one's caption in as the row's hint, exactly as a [`Slider`] leaves
+/// the mapping from a position to a value with the caller. What the widget
+/// owns is the stepping, and it has two rules because a player's hands have
+/// two: the arrows walk the list and **stop at its ends** — [`Menu::nudge_cycler`],
+/// which draws a chevron only on the side a step would go — and the commit
+/// key or a click walks it **forward and round** — [`Menu::activate`] and
+/// [`Menu::point`] — so one key reaches every choice, which is what a row that
+/// was a button did before this existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cycler {
+    chosen: usize,
+    count: usize,
+}
+
+impl Cycler {
+    /// `count` choices with `chosen` picked, clamped to the last of them.
+    ///
+    /// No choices at all is a cycler with nothing chosen: [`Cycler::chosen`]
+    /// reads zero and every step is refused, rather than a wrap that would
+    /// divide by the count.
+    #[must_use]
+    pub fn new(count: usize, chosen: usize) -> Self {
+        let mut cycler = Self { chosen: 0, count };
+        cycler.choose(chosen);
+        cycler
+    }
+
+    /// How many choices there are.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Which choice is picked: an index into the caller's list, always below
+    /// [`Cycler::count`] unless that is zero.
+    #[must_use]
+    pub const fn chosen(&self) -> usize {
+        self.chosen
+    }
+
+    /// Picks a choice, clamped to the last one.
+    pub fn choose(&mut self, index: usize) {
+        self.chosen = index.min(self.count.saturating_sub(1));
+    }
+
+    /// Steps one choice along, and reports whether the choice changed.
+    ///
+    /// Without `wrap` a step past either end stays at that end; with it the
+    /// step goes round. `false` means the choice is where it was, which at an
+    /// end without `wrap` is the ordinary way a held key arrives.
+    pub fn step(&mut self, forward: bool, wrap: bool) -> bool {
+        if self.count == 0 {
+            return false;
+        }
+        let last = self.count - 1;
+        let next = match (forward, wrap) {
+            (true, _) if self.chosen < last => self.chosen + 1,
+            (true, true) => 0,
+            (false, _) if self.chosen > 0 => self.chosen - 1,
+            (false, true) => last,
+            _ => return false,
+        };
+        let moved = next != self.chosen;
+        self.chosen = next;
+        moved
+    }
+
+    /// Whether a step in that direction, without a wrap, would move.
+    #[must_use]
+    pub const fn can_step(&self, forward: bool) -> bool {
+        if forward {
+            self.chosen + 1 < self.count
+        } else {
+            self.chosen > 0
+        }
+    }
+}
+
+/// What a cycler's caption is drawn between: a chevron on each side a step
+/// would go, and the same width of nothing on a side it would not — so the
+/// caption stays put as the chevrons come and go, which needs every glyph to
+/// advance alike and the built-in atlas's do.
+const BACK_CHEVRON: &str = "< ";
+const FORWARD_CHEVRON: &str = " >";
+const NO_CHEVRON: &str = "  ";
+
 /// What a menu row *is*: something that fires, or something that carries a
 /// value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -296,6 +398,9 @@ pub enum MenuItemKind {
     /// A slider. It never fires — see [`Menu::activate`] — and the caller reads
     /// its value with [`Menu::slider`] instead.
     Slider(Slider),
+    /// A cycler. The commit key and a click step it rather than fire it, and
+    /// the caller reads which choice is picked with [`Menu::cycler`].
+    Cycler(Cycler),
 }
 
 /// One line of a menu: what it says, what key does it, and what it is called.
@@ -317,7 +422,10 @@ pub struct MenuItem {
     ///
     /// A [`MenuItemKind::Slider`] row has no key of its own to advertise, so
     /// this is where its **value** goes — the formatted number the caller
-    /// refreshes as the handle moves. Right-aligned either way.
+    /// refreshes as the handle moves. Right-aligned either way. A
+    /// [`MenuItemKind::Cycler`] row's is the caption of the choice it holds,
+    /// which the caller refreshes as the choice changes; it is drawn between
+    /// chevrons — see [`MenuItem::caption`].
     pub hint: String,
     /// Whether this row fires or carries a value.
     pub kind: MenuItemKind,
@@ -349,6 +457,54 @@ impl MenuItem {
             label: label.into(),
             hint: value.into(),
             kind: MenuItemKind::Slider(Slider::new(position)),
+        }
+    }
+
+    /// A cycler row: a label, one of `count` choices with `chosen` picked, and
+    /// that choice's `caption` drawn where a key hint would be.
+    #[must_use]
+    pub fn cycler(
+        id: WidgetId,
+        label: impl Into<String>,
+        caption: impl Into<String>,
+        count: usize,
+        chosen: usize,
+    ) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            hint: caption.into(),
+            kind: MenuItemKind::Cycler(Cycler::new(count, chosen)),
+        }
+    }
+
+    /// What this row draws where a key hint goes.
+    ///
+    /// The hint itself for a button or a slider. For a cycler, the hint between
+    /// a `<` and a `>` — each present only on the side a step without a wrap
+    /// would go, and replaced by blank of the same width on the side it would
+    /// not, so the caption does not shift as they come and go.
+    #[must_use]
+    pub fn caption(&self) -> std::borrow::Cow<'_, str> {
+        match self.kind {
+            MenuItemKind::Cycler(cycler) => {
+                let chevron = |forward: bool, chevron: &'static str| {
+                    if cycler.can_step(forward) {
+                        chevron
+                    } else {
+                        NO_CHEVRON
+                    }
+                };
+                std::borrow::Cow::Owned(format!(
+                    "{}{}{}",
+                    chevron(false, BACK_CHEVRON),
+                    self.hint,
+                    chevron(true, FORWARD_CHEVRON)
+                ))
+            }
+            MenuItemKind::Action | MenuItemKind::Slider(_) => {
+                std::borrow::Cow::Borrowed(self.hint.as_str())
+            }
         }
     }
 }
@@ -475,14 +631,24 @@ impl Menu {
     /// see is about to happen, whichever device put the highlight there.
     /// A [`MenuItemKind::Slider`] row reports **nothing**: there is no press of
     /// a commit key that means anything to a value, and an id fired from one
-    /// would reach the game's action table as if a button had been clicked.
+    /// would reach the game's action table as if a button had been clicked. A
+    /// [`MenuItemKind::Cycler`] row reports nothing for the same reason, and
+    /// the press **steps it forward, round the end** — the one-key walk of the
+    /// whole list the caller reads back with [`Menu::cycler`].
     pub fn activate(&mut self) -> Option<WidgetId> {
         self.pressed = false;
         self.pressed_index = None;
         let index = self.hovered.unwrap_or(self.selected);
-        match self.items.get(index) {
-            Some(item) if item.kind == MenuItemKind::Action => Some(item.id),
-            _ => None,
+        match self.items.get_mut(index) {
+            Some(item) => match &mut item.kind {
+                MenuItemKind::Action => Some(item.id),
+                MenuItemKind::Cycler(cycler) => {
+                    cycler.step(true, true);
+                    None
+                }
+                MenuItemKind::Slider(_) => None,
+            },
+            None => None,
         }
     }
 
@@ -592,6 +758,68 @@ impl Menu {
         )
     }
 
+    /// Which choice the cycler row named `id` holds: an index into the
+    /// caller's list.
+    ///
+    /// `None` for an id this menu has no row for, and for a row that is not a
+    /// cycler.
+    #[must_use]
+    pub fn cycler(&self, id: WidgetId) -> Option<usize> {
+        self.items.iter().find_map(|item| match item.kind {
+            MenuItemKind::Cycler(cycler) if item.id == id => Some(cycler.chosen()),
+            _ => None,
+        })
+    }
+
+    /// Picks the choice of the cycler row named `id`, clamped to its last, and
+    /// reports whether there was such a row.
+    ///
+    /// Nothing refuses it: a cycler is never dragged, so the caller's write is
+    /// always the newer of the two inputs and mirroring a value back in every
+    /// frame is safe — the row it mirrors into is the row it read.
+    pub fn set_cycler(&mut self, id: WidgetId, chosen: usize) -> bool {
+        self.items
+            .iter_mut()
+            .find(|item| item.id == id)
+            .is_some_and(|item| match &mut item.kind {
+                MenuItemKind::Cycler(cycler) => {
+                    cycler.choose(chosen);
+                    true
+                }
+                _ => false,
+            })
+    }
+
+    /// Steps the highlighted cycler one choice, **stopping at the ends**, and
+    /// reports whether the choice changed.
+    ///
+    /// The arrows' half of a cycler, beside [`Menu::nudge_slider`]: the same
+    /// keys, the same highlighted row, and the same `false` at the end of the
+    /// list that a slider gives at the end of its groove — a key held against
+    /// the last choice does not come round to the first, because a player
+    /// holding Right to reach the top of a list would overshoot it. The commit
+    /// key is the one that goes round; see [`Menu::activate`].
+    pub fn nudge_cycler(&mut self, forward: bool) -> bool {
+        let index = self.hovered.unwrap_or(self.selected);
+        match self.items.get_mut(index).map(|item| &mut item.kind) {
+            Some(MenuItemKind::Cycler(cycler)) => cycler.step(forward, false),
+            _ => false,
+        }
+    }
+
+    /// Whether the highlighted row is a cycler — [`slider_highlighted`]'s
+    /// question for the other row the arrows drive, and asked for the same
+    /// reason.
+    ///
+    /// [`slider_highlighted`]: Self::slider_highlighted
+    #[must_use]
+    pub fn cycler_highlighted(&self) -> bool {
+        matches!(
+            self.items.get(self.hovered.unwrap_or(self.selected)),
+            Some(item) if matches!(item.kind, MenuItemKind::Cycler(_))
+        )
+    }
+
     /// The value text a slider row draws, replaced.
     ///
     /// Separate from [`Menu::set_slider`] because the two move for different
@@ -687,10 +915,20 @@ impl Menu {
             }
             // A release over a slider ends a drag; it is not a click, and an id
             // reported from one would reach the game's action table as though a
-            // button had been pressed.
-            if fired && !is_slider {
-                clicked = Some(item.id);
-                self.selected = index;
+            // button had been pressed. A release over a cycler is its step
+            // forward and round, `activate`'s rule, and reports nothing either.
+            if fired {
+                match self.items.get_mut(index).map(|item| &mut item.kind) {
+                    Some(MenuItemKind::Action) => {
+                        clicked = Some(item.id);
+                        self.selected = index;
+                    }
+                    Some(MenuItemKind::Cycler(cycler)) => {
+                        cycler.step(true, true);
+                        self.selected = index;
+                    }
+                    _ => {}
+                }
             }
         }
         self.hovered = hovered;
@@ -777,7 +1015,8 @@ impl Menu {
                     // in the face the art actually draws, and half the difference
                     // puts it back in the middle of what is visible.
                     + (inner.top - inner.bottom) * 0.5;
-                let hint_width = text_width(atlas, &item.hint, style.item_size);
+                let caption = item.caption();
+                let hint_width = text_width(atlas, &caption, style.item_size);
                 let hint_x = item_max.x - inner.right - style.button_padding.x - hint_width;
                 // The groove takes everything between the label and the value,
                 // so the slider row of a panel widened by a longer label
@@ -786,10 +1025,10 @@ impl Menu {
                 // the span is never shorter than that on the row that sets the
                 // panel's width.
                 let track = match item.kind {
-                    MenuItemKind::Action => None,
+                    MenuItemKind::Action | MenuItemKind::Cycler(_) => None,
                     MenuItemKind::Slider(_) => {
                         let label_end = label_x + text_width(atlas, &item.label, style.item_size);
-                        let right = if item.hint.is_empty() {
+                        let right = if caption.is_empty() {
                             hint_x
                         } else {
                             hint_x - style.hint_gap
@@ -842,14 +1081,15 @@ impl Menu {
         let inner = style.button_corners();
         for item in &self.items {
             let label = text_width(atlas, &item.label, style.item_size);
-            let hint = text_width(atlas, &item.hint, style.item_size);
-            let gap = if item.hint.is_empty() {
+            let caption = item.caption();
+            let hint = text_width(atlas, &caption, style.item_size);
+            let gap = if caption.is_empty() {
                 0.0
             } else {
                 style.hint_gap
             };
             let track = match item.kind {
-                MenuItemKind::Action => 0.0,
+                MenuItemKind::Action | MenuItemKind::Cycler(_) => 0.0,
                 MenuItemKind::Slider(_) => style.hint_gap + style.track_width,
             };
             width = width.max(
@@ -912,10 +1152,11 @@ impl Menu {
                 style.label_color,
                 style.item_size,
             );
-            if !item.hint.is_empty() {
+            let caption = item.caption();
+            if !caption.is_empty() {
                 dl.text(
                     placed.hint_pos,
-                    item.hint.as_str(),
+                    caption.into_owned(),
                     style.hint_color,
                     style.item_size,
                 );
@@ -1280,6 +1521,21 @@ impl<K: Copy + Eq> MenuSet<K> {
     #[must_use]
     pub fn slider_highlighted(&self) -> bool {
         self.current().is_some_and(Menu::slider_highlighted)
+    }
+
+    /// Steps the highlighted cycler one choice, stopping at the ends, if there
+    /// is a menu.
+    pub fn nudge_cycler(&mut self, forward: bool) -> bool {
+        self.current_mut()
+            .is_some_and(|menu| menu.nudge_cycler(forward))
+    }
+
+    /// Whether the showing menu's highlighted row is a cycler. `false` when
+    /// nothing is showing, as [`slider_highlighted`](Self::slider_highlighted)
+    /// is.
+    #[must_use]
+    pub fn cycler_highlighted(&self) -> bool {
+        self.current().is_some_and(Menu::cycler_highlighted)
     }
 
     /// Whether a press is latched onto one of this set's buttons.
@@ -2530,5 +2786,177 @@ mod tests {
             widths[0] < widths[1] && widths[1] < widths[2],
             "the fill widths were {widths:?}",
         );
+    }
+    // -----------------------------------------------------------------------
+    // Cyclers
+    // -----------------------------------------------------------------------
+
+    /// The id of the cycler row in [`cycler_menu`].
+    const MODE: WidgetId = 30;
+
+    /// The captions the cycler row in [`cycler_menu`] walks, in order — the
+    /// caller's list, which the widget never sees.
+    const MODES: [&str; 3] = ["windowed", "borderless", "exclusive"];
+
+    /// A panel whose second row is a cycler holding the middle of three
+    /// choices, with a button above it for the same reason [`slider_menu`]
+    /// has one.
+    fn cycler_menu() -> Menu {
+        Menu::new(
+            "OPTIONS",
+            vec![
+                MenuItem::new(10, "BACK", "ESC"),
+                MenuItem::cycler(MODE, "DISPLAY", MODES[1], MODES.len(), 1),
+            ],
+        )
+    }
+
+    /// **The arrows walk the list and stop at its ends.** The return value is
+    /// what tells a step from a key held against the end, exactly as
+    /// [`Menu::nudge_slider`] reports the end of a groove — and a button row
+    /// under the highlight takes no step at all.
+    #[test]
+    fn a_key_steps_the_highlighted_cycler_and_stops_at_its_ends() {
+        let mut menu = cycler_menu();
+        assert!(
+            !menu.cycler_highlighted(),
+            "the button row read as a cycler"
+        );
+        assert!(!menu.nudge_cycler(true), "a button row took a step");
+        assert_eq!(menu.cycler(MODE), Some(1), "the far row stepped anyway");
+
+        menu.select_next();
+        assert!(menu.cycler_highlighted());
+        assert!(menu.nudge_cycler(true), "the highlighted cycler refused");
+        assert_eq!(menu.cycler(MODE), Some(2));
+        assert!(
+            !menu.nudge_cycler(true),
+            "the last choice reported a step forward"
+        );
+        assert_eq!(menu.cycler(MODE), Some(2), "a key at the end went round");
+
+        assert!(menu.nudge_cycler(false));
+        assert!(menu.nudge_cycler(false));
+        assert_eq!(menu.cycler(MODE), Some(0));
+        assert!(
+            !menu.nudge_cycler(false),
+            "the first choice reported a step back"
+        );
+        assert_eq!(menu.cycler(MODE), Some(0), "a key at the start went round");
+    }
+
+    /// **The commit key and a click step a cycler forward and round, and
+    /// neither reports an id.** One key reaches every choice, which is what
+    /// the row did when it was a button; and nothing from it arrives at the
+    /// game's action table, which is the slider's rule for the same reason.
+    #[test]
+    fn the_commit_key_and_a_click_step_a_cycler_round_and_report_nothing() {
+        let extent = (960, 720);
+        let mut menu = cycler_menu();
+        let mut ui = UiState::new();
+
+        menu.select_next();
+        menu.press(true);
+        assert_eq!(menu.activate(), None, "the commit key fired the cycler");
+        assert_eq!(menu.cycler(MODE), Some(2));
+        assert_eq!(menu.activate(), None);
+        assert_eq!(
+            menu.cycler(MODE),
+            Some(0),
+            "the commit key stopped at the end"
+        );
+
+        let layout = menu.layout(extent, &atlas());
+        let row = layout.items()[1];
+        let at = (row.min + row.max) * 0.5;
+        menu.point(&layout, &mut ui, press_at(at));
+        assert_eq!(
+            menu.point(&layout, &mut ui, release_at(at)),
+            None,
+            "a click on a cycler was reported as a click",
+        );
+        assert_eq!(menu.cycler(MODE), Some(1), "the click did not step it");
+
+        // And the button above it still fires, so the suppression is the
+        // cycler's and not a menu that stopped firing altogether.
+        menu.select_previous();
+        assert_eq!(menu.activate(), Some(10));
+    }
+
+    /// Asking a button row for a choice, or a row that is not there, is `None`
+    /// rather than an index the caller would look up; a write past the end
+    /// lands on the last choice, and a write to a button row is refused.
+    #[test]
+    fn only_a_cycler_row_has_a_choice() {
+        let mut menu = cycler_menu();
+        assert_eq!(menu.cycler(10), None, "the button row reported a choice");
+        assert_eq!(menu.cycler(999), None, "an absent row reported a choice");
+        assert!(!menu.set_cycler(10, 1), "a button row took a choice");
+        assert!(menu.set_cycler(MODE, 99));
+        assert_eq!(menu.cycler(MODE), Some(MODES.len() - 1));
+        assert!(menu.set_cycler(MODE, 0));
+        assert_eq!(menu.cycler(MODE), Some(0));
+    }
+
+    /// **A chevron is drawn only on the side a step would go, and the caption
+    /// does not move as they come and go.** The blank that stands in for a
+    /// missing chevron is the same width, which the built-in atlas's uniform
+    /// advance guarantees and this checks rather than assumes — with one
+    /// caption for every choice, so the only thing that changes between the
+    /// three layouts is the chevrons.
+    #[test]
+    fn a_cycler_draws_a_chevron_only_where_a_step_would_go() {
+        let atlas = atlas();
+        let extent = (960, 720);
+        let mut menu = cycler_menu();
+        assert!(menu.set_item_hint(MODE, "same"));
+        let mut seen = Vec::new();
+        for (chosen, expected) in [(1, "< same >"), (0, "  same >"), (2, "< same  ")] {
+            assert!(menu.set_cycler(MODE, chosen));
+            let layout = menu.layout(extent, &atlas);
+            let row = layout.items()[1];
+            assert!(row.track.is_none(), "a cycler row was given a groove");
+            let mut dl = DrawList::new();
+            menu.render(&mut dl, &layout);
+            let texts: Vec<&str> = dl
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCommand::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                texts.contains(&expected),
+                "choice {chosen} drew {texts:?}, not {expected:?}"
+            );
+            seen.push((row.hint_pos, layout.panel_size()));
+        }
+        let (anchor, panel) = seen[0];
+        for (pos, size) in &seen[1..] {
+            assert_eq!(*pos, anchor, "the caption moved as the chevrons changed");
+            assert_eq!(*size, panel, "the panel resized as the chevrons changed");
+        }
+    }
+
+    /// A cycler with no choices has nothing to step to and says so from both
+    /// keys, rather than wrapping through a division by nothing; and a choice
+    /// past the end lands on the last one.
+    #[test]
+    fn a_cycler_with_no_choices_refuses_every_step() {
+        let mut empty = Cycler::new(0, 3);
+        assert_eq!(empty.chosen(), 0);
+        for (forward, wrap) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert!(!empty.step(forward, wrap), "an empty cycler stepped");
+        }
+        assert_eq!(Cycler::new(3, 9).chosen(), 2);
+
+        let mut round = Cycler::new(3, 2);
+        assert!(round.step(true, true), "a wrap from the end did not move");
+        assert_eq!(round.chosen(), 0);
+        assert!(round.step(false, true));
+        assert_eq!(round.chosen(), 2);
+        assert!(!round.step(true, false));
+        assert_eq!(round.chosen(), 2);
     }
 }

@@ -21799,15 +21799,25 @@ leaves:
   neither `set_render_scale` nor `set_anisotropy`, and that pairing is one
   decision — when the samples pick the scale up, they pick this up beside it.
 
-- **The ladder is a button, because the widget set has no cycler.** `crcbl-ui`'s
-  `MenuItem` is a button or a slider and nothing else, so `FRAME CAP` steps
-  forward on `ENTER` and cannot step back — `Menu::nudge_slider` is the only
-  thing the arrows drive and it fires for sliders alone. Six rungs makes that
-  tolerable; a resolution list would not, and the display-mode and present-mode
-  rows above are both cyclers in every settings screen a player has used. Adding
-  one to `crcbl-ui` is its own change: a third `MenuItem` shape, a `MenuSet`
-  method beside `nudge_slider`, and the arrow bindings in `crcbl::engine`'s menu
-  pass that currently check `slider_highlighted`.
+- **The ladders are still buttons, though the widget set has a cycler now
+  (2026-08-29).** `crcbl-ui`'s `MenuItem::cycler` exists — the arrows step it
+  and stop at the ends (`Menu::nudge_cycler`, claimed by `crcbl::engine`'s menu
+  pass through `cycler_highlighted`), `ENTER` and a click step it forward and
+  round, and it draws a chevron only on the side a step would go — but
+  `FRAME CAP`, `ANISOTROPY` and the effect switches in `apps/options` are the
+  buttons they were, stepping forward on `ENTER` only. The move is one slice:
+  build the three rows with `MenuItem::cycler` over `FRAME_CAPS`, `ANISOTROPIES`
+  and an on/off pair, read the chosen index back in `Screen::menu_kind` the way
+  the `RENDER SCALE` groove is, and retire `Action::CycleFrameCap`,
+  `Action::CycleAnisotropy` and `Action::ToggleEffect` with their `menu_action`
+  arms. A saved anisotropy between rungs still lands on the rung above it,
+  `next_anisotropy`'s rule. The browser gate's `toFader` walk does not move —
+  the row count is the same — but `web/demos/options/main.js`'s hint and
+  `web/pages/options.html` say `ENTER` steps the ladders and would then say the
+  arrows do. **Considered and declined for the widget:** a click on the `<` half
+  of the caption stepping back — the whole row steps forward, as a button did,
+  and a pointer user goes round; hit-testing halves of a caption is more layout
+  than the three rows justify until a longer list arrives.
 
 - **`SettingsStack::dump` has no viewer**, though the plan's scope asks for "a
   view of the settings file as it stands". The screen shows six values and the

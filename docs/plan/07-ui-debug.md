@@ -37,13 +37,13 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   those arrive with real fonts, and nothing has needed one yet.
 - **`widget`** — `Label`, `Button`, `Style`, `SkinInsets`, `PointerInput`,
   `UiState`, `WidgetId`. The rest of the MVP widget set below is unbuilt.
-- **`menu`** — `Menu`, `MenuItem`, `Slider`, `MenuSet`: keyboard-first, with the
-  pointer optional. Worth reading before designing on top of it, because it
-  already meets one constraint this document has not: the UI pass's atlas is a
-  single-channel glyph coverage mask and `DrawList` has no textured-quad
-  command, so a menu's nine-sliced frames live in `crcbl_render::MenuArt` and
-  `Menu::render` emits text alone. Any styled widget with a picture in it splits
-  the same way.
+- **`menu`** — `Menu`, `MenuItem`, `Slider`, `Cycler`, `MenuSet`:
+  keyboard-first, with the pointer optional. Worth reading before designing on
+  top of it, because it already meets one constraint this document has not: the
+  UI pass's atlas is a single-channel glyph coverage mask and `DrawList` has no
+  textured-quad command, so a menu's nine-sliced frames live in
+  `crcbl_render::MenuArt` and `Menu::render` emits text alone. Any styled widget
+  with a picture in it splits the same way.
 - **`touch`** — `TouchStick`, `TouchButton`; see [19-input.md](19-input.md).
 - **`debug`** and **`budget`** — the modular panel described under "Debug tools"
   below, and the frame CPU-vs-GPU row [40-profiling.md](40-profiling.md) owns.

@@ -234,6 +234,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the method, and its `const _` guard makes a bundle that forgets an `E0599`
   naming `video` rather than an infinite recursion.
 
+- **A cycler row for menus.** `crcbl_ui::menu::MenuItem::cycler` builds a row
+  that holds one choice of a fixed list — `MenuItemKind::Cycler` over the new
+  `Cycler` type, which knows the count and the chosen index and not the
+  captions, which stay the caller's. The arrows step it and stop at the ends
+  (`Menu::nudge_cycler` and `MenuSet::nudge_cycler`, beside the slider's);
+  `ENTER` and a click step it forward and round the end, and report no id, the
+  slider's rule. The row draws its caption between `<` and `>` chevrons, each
+  present only on the side a step would go (`MenuItem::caption`); the caller
+  reads the choice back with `Menu::cycler` and writes it with
+  `Menu::set_cycler`. `crcbl::engine`'s menu pass claims Left and Right over a
+  cycler row as it does over a slider (`MenuSet::cycler_highlighted`).
+
 ### Changed
 
 - **`Loop::new` no longer takes `LoopConfig::limit` at face value.** It applies
