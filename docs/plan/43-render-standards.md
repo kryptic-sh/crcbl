@@ -685,7 +685,7 @@ provide.** A gradient sky and an irradiance/radiance pair generated from it
 would close part of §5 and all of §8 at once, which is why it is grouped here
 rather than filed as scenery.
 
-## 9. The one blocker that gates five features
+## 9. The blocker that gated five features
 
 **Motion vectors, and the previous-frame transform they need.** The transform
 half was **built 2026-08-27**: `crcbl_shaders::mesh::GpuInstance` now carries
@@ -695,12 +695,32 @@ came from, an insert is at rest because a spawn did not travel from anywhere,
 and a rotate puts back at rest whatever moved a frame ago and has not moved
 again. So every instance can now say where it was last frame.
 
-What is still missing is the **pass**: a motion-vector target, the subtraction
-that writes it, and the previous frame's view-projection in the frame block.
-Until those exist the five features below are still blocked — but on a pass each
-of them needs anyway rather than on a format nothing could change cheaply.
+The **pass** was **built 2026-08-30**, which is the other three pieces this
+section named. `crcbl_render::forward`'s `MOTION_FORMAT` is an `Rg16Float`
+transient created by `TransientImageDesc::motion`, attached to the `forward`
+pass as its third colour target and cleared to zero;
+`crcbl_shaders::mesh::FrameUniforms::previous_view_proj` is the camera-side twin
+of `GpuInstance::previous_transform`, last in the block and advanced on the same
+frame boundary `InstancePool::rotate` measures on; and `mesh.slang`'s
+`motion_vector` is the subtraction, fed by two undivided clip positions both
+geometry stages emit and divided in the fragment stage.
 
-That absence blocks, in the order they would be wanted:
+**The convention, which a consumer must not have to guess**: texture-coordinate
+space, current minus previous, `+y` down — so a history buffer is read at
+`uv - motion`. It is written on `MOTION_FORMAT` and on
+`TransientImageDesc::motion`, and `DebugView::Motion` is what makes it visible,
+encoding the vector as `motion * MOTION_VIEW_SCALE + 0.5`.
+`crates/crcbl/tests/mesh_e2e/motion.rs` is the observer: a still scene reads
+rest, a moved instance reads its own motion while its neighbour reads rest, a
+panning camera moves every covered pixel, and the frame after a move is back at
+rest.
+
+So the five features below are blocked **on their own work only** — a rigid
+body's motion is in the target, and the two things it does not yet carry are
+`docs/backlog.md`'s: a skinned instance's deformation, and the camera's motion
+where the sky shows through.
+
+Those five, in the order they would be wanted:
 
 1. **TAA** — [49-antialiasing.md](49-antialiasing.md)'s ladder names it exactly.
 2. **Temporal SSR**, which is what makes a rough reflection quiet.
@@ -770,4 +790,5 @@ above.
 | **Specular antialiasing (roughness regularisation)**                              | §2's normal maps first — the aliasing it removes is the one no AA rung can                                                                                                                                                                                                                                                                                                                                                       |
 | **Block-compressed pages: KTX2 and Basis at the bake, BC7/BC5/BC4 on the device** | §2's filtering subsection — a bake-tool rung, gated on an encoder the workspace does not have and the user has not chosen                                                                                                                                                                                                                                                                                                        |
 | Colour grading, DOF, lens artefacts                                               | §6 — polish, after the curve exists to grade against                                                                                                                                                                                                                                                                                                                                                                             |
-| SSGI, temporal SSR, TAA, temporal upscaling                                       | §9's slot first; each is its own rung after it                                                                                                                                                                                                                                                                                                                                                                                   |
+| ~~The motion-vector pass~~                                                        | §9 — **built 2026-08-30**: the `Rg16Float` target, `FrameUniforms::previous_view_proj`, the subtraction on both geometry paths, and `DebugView::Motion` with the e2e suite that reads it                                                                                                                                                                                                                                         |
+| SSGI, temporal SSR, TAA, temporal upscaling                                       | §9's pass is built; each is its own rung now                                                                                                                                                                                                                                                                                                                                                                                     |

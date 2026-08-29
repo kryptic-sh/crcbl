@@ -185,12 +185,18 @@ TAA needs four things this tree does not have:
   [47-reflections.md](47-reflections.md) already refuses in writing for SSR
   history, and [50-irradiance-probes.md](50-irradiance-probes.md) again for
   DDGI.
-- **A motion-vector pass.** The prev-transform slot this list used to name is in
-  the record as of 2026-08-27 — `GpuInstance::previous_transform`, filled by
-  `crcbl_render::InstancePool` — so what is left is the target, the subtraction
-  and the previous frame's view-projection. The AA row in
-  [48-post-processing.md](48-post-processing.md) carries the history of that
-  correction and nothing here repeats it.
+- ~~**A motion-vector pass.**~~ **Built 2026-08-30**, and no longer this list's
+  to want: `crcbl_render::forward`'s `MOTION_FORMAT` target,
+  `crcbl_shaders::mesh::FrameUniforms::previous_view_proj`, and the subtraction
+  both geometry stages feed. **The convention is texture-coordinate space,
+  current minus previous, `+y` down**, so this rung's history buffer is sampled
+  at `uv - motion` — written on the format constant and on
+  `TransientImageDesc::motion`, and observed by `DebugView::Motion` and
+  `crates/crcbl/tests/mesh_e2e/motion.rs`. What the target does not yet carry is
+  a skinned instance's deformation and the camera's motion where the sky shows
+  through; both are `docs/backlog.md`'s and both are this rung's to finish. The
+  AA row in [48-post-processing.md](48-post-processing.md) carries the history
+  of the earlier correction and nothing here repeats it.
 
 `crcbl_render::skinning`'s `SkinnedRegion::previous_base` was the half of the
 reservation taken first: topic 17's 2026-07-27 correction double-buffers the

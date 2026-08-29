@@ -158,12 +158,19 @@ const _: () = assert!(
 ///
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
 /// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
-/// `float4x4`, the irradiance grid's [`PROBE_VOLUME_SIZE`] header, and the LOD
-/// and fog rows, and the sky's three spherical-harmonic rows. Checked against
-/// the `Offset` decorations `slangc` emits by this module's
-/// `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize =
-    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE + 16 + 32 + 48;
+/// `float4x4`, the irradiance grid's [`PROBE_VOLUME_SIZE`] header, the LOD and
+/// fog rows, the sky's three spherical-harmonic rows, and the previous frame's
+/// `float4x4`. Checked against the `Offset` decorations `slangc` emits by this
+/// module's `the_uniform_block_matches_the_offsets_slangc_emits`.
+pub const FRAME_UNIFORMS_SIZE: usize = 96
+    + 64 * SHADOW_CASCADES
+    + 48
+    + 64 * SHADOW_LIGHT_TILES
+    + PROBE_VOLUME_SIZE
+    + 16
+    + 32
+    + 48
+    + 64;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -419,6 +426,24 @@ pub struct FrameUniforms {
     pub sky_sh_g: [f32; 4],
     /// The blue channel of the same, on [`sky_sh_r`](Self::sky_sh_r)'s terms.
     pub sky_sh_b: [f32; 4],
+    /// World → clip **as the previous frame's camera saw it**, column-major:
+    /// the camera-side twin of
+    /// [`GpuInstance::previous_transform`](GpuInstance::previous_transform).
+    ///
+    /// A rigid body's motion vector is made of exactly two things — where the
+    /// object went and where the viewer went — and this is the second.
+    /// `mesh.slang`'s `motion_vector` is what subtracts them, and its docs carry
+    /// the convention the result is in.
+    ///
+    /// **`crcbl_render::ForwardRenderer` owns the advance**, once per frame at
+    /// the boundary `crcbl_render::InstancePool::rotate` settles a transform's
+    /// previous value on. The first frame carries its own
+    /// [`view_proj`](Self::view_proj): a camera that has not moved yet has not
+    /// moved, and a zero matrix here would put every pixel of the first frame in
+    /// motion.
+    ///
+    /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms.
+    pub previous_view_proj: [f32; 16],
 }
 
 impl FrameUniforms {
@@ -509,6 +534,28 @@ impl FrameUniforms {
     /// `crcbl_render::ForwardRenderer::set_occlusion_view` is what writes it.
     pub const OCCLUSION_VIEW_ON: f32 = 4.0;
 
+    /// [`ambient`](Self::ambient)`.w` for the **motion view**: `mesh.slang`'s
+    /// fragment stage draws the motion vector it is about to write into its
+    /// third target, stretched by [`MOTION_VIEW_SCALE`] and centred on grey,
+    /// instead of shading.
+    ///
+    /// **The outermost sentinel now**, and this is the one the shader has to
+    /// test first — it clears every threshold below it.
+    /// `the_motion_view_threshold_lies_above_the_occlusion_view` holds the
+    /// interleaving.
+    ///
+    /// A **fragment**-stage view like the occlusion one, so it draws on every
+    /// `GeometryPath` rather than on the mesh-shader path alone: both geometry
+    /// stages emit the two clip positions the subtraction needs.
+    ///
+    /// **It is the motion-vector target's only observer today.** Nothing reads
+    /// the attachment yet — `docs/plan/49-antialiasing.md`'s TAA is the first
+    /// pass that will — so this view is what says the subtraction is the right
+    /// one, and `crates/crcbl/tests/mesh_e2e/motion.rs` is what reads it.
+    ///
+    /// `crcbl_render::ForwardRenderer::set_motion_view` is what writes it.
+    pub const MOTION_VIEW_ON: f32 = 5.0;
+
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; FRAME_UNIFORMS_SIZE] {
@@ -556,10 +603,28 @@ impl FrameUniforms {
         put(&mut bytes, &mut at, &self.sky_sh_r);
         put(&mut bytes, &mut at, &self.sky_sh_g);
         put(&mut bytes, &mut at, &self.sky_sh_b);
+        put(&mut bytes, &mut at, &self.previous_view_proj);
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
 }
+
+/// How far the motion view stretches a motion vector before centring it on
+/// grey, and `static const float MOTION_VIEW_SCALE` in `mesh.slang`.
+///
+/// Declared on both sides because a test reading the encoded picture has to
+/// undo the encoding, and the shader is where it is applied. A motion of
+/// `0.5 / MOTION_VIEW_SCALE` of the frame in one frame lands on the end of the
+/// ramp; the `Rgba16Float` scene target carries anything past that unclamped.
+/// `the_motion_view_scale_is_the_one_the_host_declares` holds the two equal.
+///
+/// **A pixel at rest encodes to one half in both channels, give or take one
+/// half-float step**: the subtraction behind it is two multiplication chains
+/// over equal inputs, not one, so it lands a last bit either side of zero and
+/// the colour export rounds that into the step below one half. The shader's
+/// copy carries the account, and `crates/crcbl/tests/mesh_e2e/motion.rs`'s
+/// `REST_TOLERANCE` is that step measured.
+pub const MOTION_VIEW_SCALE: f32 = 8.0;
 
 /// One drawable object, matching `struct GpuInstance` in `shaders/mesh.slang`.
 ///
@@ -1861,6 +1926,121 @@ mod tests {
         );
     }
 
+    /// **The motion view's threshold lies above the occlusion view's**, so one
+    /// lane can carry six states.
+    ///
+    /// [`the_occlusion_view_threshold_lies_above_the_heatmap`]'s claim one
+    /// sentinel further out, and for its reason exactly: the sentinels ascend,
+    /// so the outermost clears every threshold below it and only the *order* of
+    /// the tests keeps it out of the five lower branches.
+    ///
+    /// The motion view is `mesh.slang`'s alone, like the occlusion view: it
+    /// reads two interpolants the geometry stages produce but never look at, so
+    /// `mesh_cluster.slang` declares no `MOTION_VIEW`. The absence is asserted,
+    /// because one appearing there later would be a second place the
+    /// interleaving has to hold.
+    ///
+    /// [`the_occlusion_view_threshold_lies_above_the_heatmap`]: fn@the_occlusion_view_threshold_lies_above_the_heatmap
+    #[test]
+    fn the_motion_view_threshold_lies_above_the_occlusion_view() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let motion = shader_float(mesh, "MOTION_VIEW");
+        assert!(
+            FrameUniforms::OCCLUSION_VIEW_ON < motion && motion < FrameUniforms::MOTION_VIEW_ON,
+            "mesh.slang switches at {motion}, which does not separate the occlusion view's {} \
+             from the motion view's {}",
+            FrameUniforms::OCCLUSION_VIEW_ON,
+            FrameUniforms::MOTION_VIEW_ON,
+        );
+
+        let motion_at = mesh
+            .find("if (frame.ambient.w >= MOTION_VIEW)")
+            .expect("mesh.slang's fragment stage tests the motion view");
+        let occlusion_at = mesh
+            .find("if (frame.ambient.w >= OCCLUSION_VIEW)")
+            .expect("mesh.slang's fragment stage tests the occlusion view");
+        assert!(
+            motion_at < occlusion_at,
+            "the motion test must come first, or a frame asking for it is caught by the \
+             occlusion threshold and draws the ambient-occlusion channel instead"
+        );
+
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        assert!(
+            !cluster.contains("MOTION_VIEW"),
+            "mesh_cluster.slang has grown a MOTION_VIEW; the interleaving now has to hold in two \
+             files and this test only checks one"
+        );
+    }
+
+    /// The scale the motion view encodes with is the one this crate declares.
+    ///
+    /// Written on both sides because the shader applies it and a test reading
+    /// the picture has to undo it, and a constant written twice is one that can
+    /// drift — the same argument every threshold check here is made on. The
+    /// failure it prevents is silent: a scale that disagreed would leave a
+    /// picture that still looks like a motion field and decode to the wrong
+    /// magnitudes.
+    #[test]
+    fn the_motion_view_scale_is_the_one_the_host_declares() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        assert_eq!(
+            shader_float(mesh, "MOTION_VIEW_SCALE"),
+            MOTION_VIEW_SCALE,
+            "mesh.slang and this crate disagree about the motion view's scale"
+        );
+        assert!(
+            mesh.contains("motion * MOTION_VIEW_SCALE + 0.5"),
+            "mesh.slang no longer encodes with the constant it declares, so this crate's copy is \
+             a number nothing applies"
+        );
+    }
+
+    /// **Both geometry stages carry the previous position the block exists
+    /// for**, and the fragment stage subtracts it.
+    ///
+    /// `the_uniform_block_matches_the_offsets_slangc_emits` says the member is
+    /// at the offset the host writes it to; it cannot say that anything reads
+    /// it. A `mesh.slang` that declared `previous_view_proj` and never
+    /// multiplied by it would leave the renderer advancing a matrix nothing
+    /// looks at, and the target would hold a plausible field — the *camera's*
+    /// motion missing from every pixel — with no error anywhere. That is the
+    /// same gap `the_fragment_stage_still_adds_the_sky_it_declares` exists for.
+    ///
+    /// Both files, because the two geometry stages feed one fragment stage: a
+    /// mesh-shader frame whose previous position came from the current camera
+    /// would disagree with a raster frame of the same scene, and only a device
+    /// with a mesh stage would ever see it.
+    #[test]
+    fn both_geometry_stages_emit_the_previous_clip_position() {
+        let mesh = include_str!("../shaders/mesh.slang");
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        for (name, source) in [("mesh.slang", mesh), ("mesh_cluster.slang", cluster)] {
+            assert!(
+                source.contains("float4x4 previous_view_proj;"),
+                "{name} does not declare `previous_view_proj`, so the two blocks are not one \
+                 buffer"
+            );
+            assert!(
+                source
+                    .contains("mul(instance.previous_transform, float4(vertex.position.xyz, 1.0))"),
+                "{name} declares `previous_view_proj` and never carries a vertex through it"
+            );
+            assert!(
+                source.contains("frame.previous_view_proj,"),
+                "{name} transforms the previous position through something other than the \
+                 previous frame's camera"
+            );
+        }
+        // And the fragment stage subtracts the pair rather than only receiving
+        // it. Two interpolants nothing differences are two interpolants.
+        assert!(
+            mesh.contains("motion_vector(input.clip_position, input.previous_clip_position)"),
+            "mesh.slang no longer subtracts the two clip positions, so the motion target holds \
+             whatever the last branch happened to leave"
+        );
+    }
+
     /// **The heatmap's threshold lies above the LOD view's**, so one lane can
     /// carry four states.
     ///
@@ -2079,12 +2259,12 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1312,
+            FRAME_UNIFORMS_SIZE, 1376,
             "at two cascades and fourteen light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
         // 224, 240, 256, 272, 1168, 1184, 1200, 1216, 1232, 1248, 1264, 1280,
-        // 1296 — and
+        // 1296, 1312 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
         // `%_arr_mat4v4float_int_14`, which is the light array's own length.
         // Three of the middle rows are the grid header's, which this side
@@ -2109,6 +2289,7 @@ mod tests {
             192 + cascades + lights + PROBE_VOLUME_SIZE,
             208 + cascades + lights + PROBE_VOLUME_SIZE,
             224 + cascades + lights + PROBE_VOLUME_SIZE,
+            240 + cascades + lights + PROBE_VOLUME_SIZE,
         ];
         let sizes = [
             64usize,
@@ -2126,6 +2307,7 @@ mod tests {
             16,
             16,
             16,
+            64,
         ];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
@@ -2173,6 +2355,11 @@ mod tests {
             sky_sh_r: [100.0, 101.0, 102.0, 103.0],
             sky_sh_g: [110.0, 111.0, 112.0, 113.0],
             sky_sh_b: [120.0, 121.0, 122.0, 123.0],
+            // A range nothing above uses, and every lane of it filled: a
+            // `to_bytes` that wrote `view_proj` here — which is what a renderer
+            // that forgot to advance the camera's history would upload — is the
+            // one mistake this member has, and equal values would hide it.
+            previous_view_proj: core::array::from_fn(|lane| 130.0 + lane as f32),
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -2275,6 +2462,19 @@ mod tests {
                 [at(at_row), at(at_row + 4), at(at_row + 8), at(at_row + 12)],
                 [base, base + 1.0, base + 2.0, base + 3.0],
                 "the sky's spherical-harmonic row {row}"
+            );
+        }
+        // And the previous frame's camera past them, which is where the block
+        // now ends. Lane by lane, because a matrix written transposed or one
+        // column short is a reprojection that lands every pixel somewhere
+        // plausible and wrong — and no picture of a still scene tells it from
+        // the right one.
+        let previous = sky + 48;
+        for lane in 0..16 {
+            assert_eq!(
+                at(previous + lane * 4),
+                130.0 + lane as f32,
+                "lane {lane} of the previous frame's view-projection"
             );
         }
     }

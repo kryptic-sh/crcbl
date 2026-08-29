@@ -247,6 +247,35 @@ const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).forma
 /// picks the wrong aspects.
 const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 
+/// The format the motion-vector target is created with: two channels of half
+/// float, `docs/plan/43-render-standards.md` §9's third colour attachment.
+///
+/// **Named here rather than in [`TransientImageDesc::motion`]**, on
+/// [`crate::smaa`]'s `EDGES_FORMAT` terms: the description and
+/// [`MeshModules::COLOR_TARGETS`] have to agree, and the pass that builds the
+/// pipeline is the one that owns the answer.
+///
+/// # The convention the target holds, so a consumer never has to guess it
+///
+/// **Current minus previous, in texture coordinates, `+y` down.** A pass
+/// holding the previous frame reads its history at `uv - motion`, and a surface
+/// travelling right and down the screen has both components positive.
+/// `mesh.slang`'s `motion_vector` is where the mapping is written out and this
+/// is the same sentence on the host side, because the first consumer will read
+/// one of the two and not both.
+///
+/// # Two channels and half float
+///
+/// A motion vector is a screen-space offset and has no third component. Half
+/// float rather than a normalised integer because the value is signed and
+/// unbounded — an object crossing the frame in one frame is a motion past `1.0`
+/// — and because the interesting magnitudes are small: a surface moving a
+/// tenth of a pixel is the case a temporal filter is most sensitive to, and
+/// eight or even sixteen unsigned bits over a `-1..1` range would quantise it
+/// into rest. It is also the format `crcbl_hal::Format::Rg16Float`'s own doc
+/// names motion vectors as the use for.
+pub(crate) const MOTION_FORMAT: Format = Format::Rg16Float;
+
 /// Which picture the colour pass draws instead of the shaded one.
 ///
 /// The engine's debug views, as one value rather than as independent booleans,
@@ -257,10 +286,12 @@ const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// answers with — so a menu row, a debug panel and the picture cannot disagree
 /// about which view is on.
 ///
-/// The variants are in **precedence order**, outermost first, which is also the
-/// order of the sentinels in
-/// [`FrameUniforms`](crcbl_shaders::mesh::FrameUniforms) — see its
-/// `HEATMAP_VIEW_ON`.
+/// **The declaration order is not the precedence** — each view was appended as
+/// it arrived, and [`ForwardRenderer::debug_view`] is the one place the order is
+/// decided. The sentinels in
+/// [`FrameUniforms`](crcbl_shaders::mesh::FrameUniforms) ascend with it, though:
+/// see its `HEATMAP_VIEW_ON`, and the shaders test the outermost threshold
+/// first.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DebugView {
     /// The lit picture. What every frame draws unless a caller asked otherwise.
@@ -277,6 +308,9 @@ pub enum DebugView {
     /// The ambient-occlusion channel alone, as grey —
     /// [`ForwardRenderer::set_occlusion_view`].
     AmbientOcclusion,
+    /// The motion vector each fragment wrote, stretched and centred on grey —
+    /// [`ForwardRenderer::set_motion_view`]. **Wins over every other view.**
+    Motion,
 }
 
 impl DebugView {
@@ -289,6 +323,7 @@ impl DebugView {
             Self::LodTint => "lod tint",
             Self::Normals => "normals",
             Self::AmbientOcclusion => "ambient occlusion",
+            Self::Motion => "motion",
         }
     }
 }
@@ -1125,6 +1160,17 @@ pub struct ForwardRenderer {
     /// this side to it.
     occlusion_view: bool,
 
+    /// Whether the colour pass draws the motion vector instead of shading — see
+    /// [`set_motion_view`](ForwardRenderer::set_motion_view).
+    ///
+    /// **Wins over every other view**, on [`occlusion_view`](Self::occlusion_view)'s
+    /// terms and for its reason: one uniform lane, outermost threshold first.
+    /// `crcbl_shaders`' `the_motion_view_threshold_lies_above_the_occlusion_view`
+    /// is what keeps that order true, and
+    /// `the_debug_views_resolve_in_one_order_however_they_are_set` is what holds
+    /// this side to it.
+    motion_view: bool,
+
     /// Where [`begin_frame`](ForwardRenderer::begin_frame) projects
     /// `docs/plan/25-lod.md`'s selection from, when that is not the camera's own
     /// eye — see
@@ -1389,6 +1435,29 @@ pub struct ForwardRenderer {
     /// a grid drawn through a camera the frame is not drawn with lands on the
     /// wrong pixels while still looking like a grid.
     camera_view_proj: Mat4,
+
+    /// The view-projection the **previous** frame was drawn with, or [`None`]
+    /// before there was one.
+    ///
+    /// The camera-side twin of
+    /// [`GpuInstance::previous_transform`](crcbl_shaders::mesh::GpuInstance::previous_transform):
+    /// the pool says where each object was and this says where the viewer was,
+    /// and `mesh.slang`'s `motion_vector` is what turns the pair into a screen
+    /// offset. It reaches the shader as
+    /// [`FrameUniforms::previous_view_proj`](crcbl_shaders::mesh::FrameUniforms::previous_view_proj).
+    ///
+    /// **Advanced once per frame, in
+    /// [`begin_frame_body`](ForwardRenderer::begin_frame_body)** — which runs
+    /// exactly once per [`InstancePool::rotate`], so the camera's history and
+    /// the instances' settle on the same boundary. Advancing it anywhere a
+    /// frame can reach twice would report a camera that moved half as far as it
+    /// did, and a still scene would never come back to rest.
+    ///
+    /// [`None`] means the first frame, which is drawn with its own matrix in
+    /// both slots: a camera that has not moved yet has not moved, and an
+    /// identity or a zero here would put every pixel of the first frame in
+    /// motion.
+    previous_view_projection: Option<Mat4>,
 
     /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
     ssao: Ssao,
@@ -4230,6 +4299,7 @@ impl ForwardRenderer {
             lod_view: false,
             heatmap: false,
             occlusion_view: false,
+            motion_view: false,
             // Following the camera, on the line above's terms: the selection eye
             // is the camera's until a caller pins it, so a renderer nobody calls
             // `set_frozen_selection_eye` on hands `begin_frame` exactly what it
@@ -4281,6 +4351,9 @@ impl ForwardRenderer {
             // Replaced by every `begin_frame`, which `add_passes` documents as
             // having to run first.
             camera_view_proj: Mat4::IDENTITY,
+            // No frame has been drawn, so there is no previous camera — see the
+            // field, which says why that is not the identity.
+            previous_view_projection: None,
             ssao: rollback
                 .ssao
                 .take()
@@ -5052,7 +5125,19 @@ impl ForwardRenderer {
             sky_sh_r: sky.sh_r,
             sky_sh_g: sky.sh_g,
             sky_sh_b: sky.sh_b,
+            // **Last frame's camera, and this frame's on the first frame** —
+            // see the field, which says why the fallback is this matrix rather
+            // than the identity.
+            previous_view_proj: self
+                .previous_view_projection
+                .unwrap_or(view_projection)
+                .to_cols_array(),
         };
+        // Advanced here, between writing the block that reads it and anything
+        // else that could look at it: this function runs exactly once per
+        // `InstancePool::rotate`, so the camera's history moves on the same
+        // frame boundary the instances' does. See the field.
+        self.previous_view_projection = Some(view_projection);
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
         // The extent auto-exposure bins, which is the internal one this
@@ -5269,6 +5354,14 @@ impl ForwardRenderer {
                     self.shadow_lod_params[2],
                     0.0,
                 ],
+                // **This view's own matrix, so the interpolant is zero motion**
+                // rather than a reprojection through the camera. Nothing reads
+                // it: `MeshModules::depth_pipeline` names no fragment stage, so
+                // the previous clip position the geometry stages emit here dies
+                // with the stage that produced it. Carrying the camera's matrix
+                // would still be a block that says a cascade moved the way the
+                // viewer did.
+                previous_view_proj: view_proj.to_cols_array(),
                 ..uniforms
             };
             device.write_buffer(self.shadow_uniforms[self.frame][view], 0, &block.to_bytes())
@@ -6147,11 +6240,18 @@ impl ForwardRenderer {
             (raw, blurred)
         });
         // **Created whatever the reflections are doing**, unlike the pair above.
-        // It is the forward pass's second colour attachment, which is in that
+        // It is one of the forward pass's colour attachments, which is in that
         // pipeline whether or not anything reads what it wrote — see the
         // `clear_color` on it below.
         let reflectivity =
             graph.create_image("reflectivity", TransientImageDesc::reflectivity(extent));
+        // **Created whatever else the frame is doing**, on the reflectivity
+        // attachment's terms exactly: it is the forward pass's third colour
+        // attachment, which is in that pipeline whether or not anything reads
+        // what it wrote. Nothing does yet — `docs/plan/49-antialiasing.md`'s
+        // TAA is the first pass that will, and until then `DebugView::Motion`
+        // is what observes the subtraction.
+        let motion = graph.create_image("motion", TransientImageDesc::motion(extent));
         // The march's output and the blur's, and both are the scene target's
         // description exactly. The blur writes the scene colour plus a term, so
         // a narrower image there would tonemap a truncated frame; the march
@@ -6485,6 +6585,15 @@ impl ForwardRenderer {
             // tail; what the alpha buys is that `ssr.slang` takes its early
             // return on every uncovered pixel instead of marching the sky.
             .clear_color(reflectivity, ssr::NO_REFLECTION)
+            // `mesh.slang`'s third target, **cleared to zero** on the
+            // reflectivity attachment's terms: a pixel no geometry covered has
+            // no motion of its own, and zero is what a consumer reading its
+            // history at `uv - motion` needs there — it reads the same pixel
+            // back. It is not the *right* answer for the sky, whose motion is
+            // the camera's and is owed to the pass that first wants it; it is
+            // the answer that reprojects onto itself rather than onto
+            // somewhere undefined. `docs/backlog.md` carries what is owed.
+            .clear_color(motion, [0.0; 4])
             // **Cleared and then *stored*, where every frame before the
             // reflection slice discarded it.** `PassBuilder::clear_depth` is
             // `LoadOp::Clear` with `StoreOp::Discard`, which is right for a pass
@@ -7990,6 +8099,47 @@ impl ForwardRenderer {
         self.occlusion_view
     }
 
+    /// Draws each fragment's motion vector instead of shading it.
+    ///
+    /// The two components are stretched by
+    /// [`MOTION_VIEW_SCALE`](crcbl_shaders::mesh::MOTION_VIEW_SCALE) and centred
+    /// on grey, into red and green, with blue left at zero. A pixel at rest is
+    /// grey in both channels to within one half-float step —
+    /// [`MOTION_VIEW_SCALE`](crcbl_shaders::mesh::MOTION_VIEW_SCALE) says why
+    /// not exactly — and a surface travelling right and down the screen
+    /// brightens both.
+    ///
+    /// # It is the motion-vector target's only reader today
+    ///
+    /// The forward pass writes a motion vector into a third colour attachment on
+    /// every frame — see [`TransientImageDesc::motion`] — and no pass reads it
+    /// yet; `docs/plan/49-antialiasing.md`'s TAA is the first that will. This
+    /// view is therefore what says the subtraction behind it is the right one,
+    /// which is why it exists ahead of a consumer.
+    ///
+    /// # It builds nothing and adds no pass
+    ///
+    /// One lane of the frame's uniform block, on
+    /// [`set_normals_view`](Self::set_normals_view)'s terms exactly, and like
+    /// the occlusion view it needs nothing from the geometry stage that a
+    /// shaded frame does not already produce — so it draws on every
+    /// [`GeometryPath`].
+    ///
+    /// **Wins over every other view when several are on**; see
+    /// [`debug_view`](Self::debug_view), which is that order stated once.
+    pub const fn set_motion_view(&mut self, on: bool) {
+        self.motion_view = on;
+    }
+
+    /// Whether the colour pass draws the motion vector instead of shading.
+    ///
+    /// **What was asked for, not what is drawn**, on
+    /// [`lod_view`](Self::lod_view)'s terms.
+    #[must_use]
+    pub const fn motion_view(&self) -> bool {
+        self.motion_view
+    }
+
     /// Pins the eye `docs/plan/25-lod.md`'s selection is projected from, so the
     /// cut stops following the camera.
     ///
@@ -8095,7 +8245,9 @@ impl ForwardRenderer {
     /// differently by a menu row, a debug panel and the picture.
     #[must_use]
     pub const fn debug_view(&self) -> DebugView {
-        if self.occlusion_view {
+        if self.motion_view {
+            DebugView::Motion
+        } else if self.occlusion_view {
             DebugView::AmbientOcclusion
         } else if self.heatmap {
             DebugView::Heatmap
@@ -8112,6 +8264,7 @@ impl ForwardRenderer {
     /// carries.
     const fn debug_view_lane(&self) -> f32 {
         match self.debug_view() {
+            DebugView::Motion => mesh::FrameUniforms::MOTION_VIEW_ON,
             DebugView::AmbientOcclusion => mesh::FrameUniforms::OCCLUSION_VIEW_ON,
             DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
             DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
@@ -8557,7 +8710,7 @@ impl ForwardRenderer {
 /// and [`ForwardRenderer::set_wireframe`], which makes the colour pipeline again
 /// in [`PolygonMode::Line`] long after `build` released its modules. The
 /// alternative was a second copy of a descriptor that names two modules, three
-/// entry points, two colour targets and a depth state — the pair that drifts.
+/// entry points, the colour targets and a depth state — the pair that drifts.
 ///
 /// Short-lived: created, used to build pipelines, and [`MeshModules::destroy`]ed
 /// in the same function. A module is not needed once the pipeline exists.
@@ -8588,16 +8741,23 @@ struct ClusterStages {
 }
 
 impl MeshModules {
-    /// **Two targets, one fragment stage.** `mesh.slang`'s `FragmentOutput`
-    /// writes the shaded colour at 0 and `docs/plan/18-render-features.md`'s
-    /// reflectivity channel at 1, and both pipeline shapes name that same entry
-    /// point — so the second target is one element of this array and not a third
-    /// pipeline, a second entry point or a new interpolant. The refusal the AO
-    /// section records was about the depth prepass, which has no fragment stage
-    /// and no colour target at all; it does not reach this array.
-    const COLOR_TARGETS: [ColorTargetState; 2] = [
+    /// **Three targets, one fragment stage.** `mesh.slang`'s `FragmentOutput`
+    /// writes the shaded colour, then `docs/plan/18-render-features.md`'s
+    /// reflectivity channel, then `docs/plan/43-render-standards.md` §9's motion
+    /// vector — and both pipeline shapes name that same entry point, so each
+    /// target is one more element of this array and not a second pipeline, a
+    /// second entry point or a new interpolant. The refusal the AO section
+    /// records was about the depth prepass, which has no fragment stage and no
+    /// colour target at all; it does not reach this array.
+    ///
+    /// Element order is `SV_Target` order, and each format is the one the
+    /// matching `TransientImageDesc` creates: a pipeline built for a format the
+    /// attachment is not in is a validation error on WebGPU and a silent
+    /// reinterpretation elsewhere.
+    const COLOR_TARGETS: [ColorTargetState; 3] = [
         ColorTargetState::opaque(Format::Rgba16Float),
         ColorTargetState::opaque(Format::Rgba8Unorm),
+        ColorTargetState::opaque(MOTION_FORMAT),
     ];
 
     /// Invocations per mesh workgroup, which is `mesh_cluster.slang`'s
@@ -9197,10 +9357,11 @@ mod tests {
     /// Every one of them rides in one float lane and the shaders test the
     /// outermost threshold first, so a renderer with two switches on draws
     /// exactly one picture — and which one has to be a rule rather than
-    /// whichever branch a caller's setter happened to run last. All sixteen
-    /// combinations are walked, because a precedence written as an `if` chain is
-    /// right for most of them by accident: a chain in the wrong order agrees
-    /// with this one on every combination where at most one switch is set.
+    /// whichever branch a caller's setter happened to run last. Every
+    /// combination of the switches is walked, because a precedence written as an
+    /// `if` chain is right for most of them by accident: a chain in the wrong
+    /// order agrees with this one on every combination where at most one switch
+    /// is set.
     ///
     /// [`ForwardRenderer::debug_view`] is asserted beside the lane, so the value
     /// a panel reads back and the value the shader branches on cannot drift —
@@ -9218,66 +9379,76 @@ mod tests {
         let camera = Camera::default();
         let light = DirectionalLight::default();
 
-        for occlusion in [false, true] {
-            for heatmap in [false, true] {
-                for lod in [false, true] {
-                    for normals in [false, true] {
-                        renderer.set_occlusion_view(occlusion);
-                        renderer.set_heatmap(heatmap);
-                        renderer.set_lod_view(lod);
-                        renderer.set_normals_view(normals);
-                        // Each switch reads back what it was set to, whatever the
-                        // others are: a caller's toggle is about the caller's
-                        // setting, and only `debug_view` is about the picture.
-                        assert_eq!(renderer.occlusion_view(), occlusion);
-                        assert_eq!(renderer.heatmap(), heatmap);
-                        assert_eq!(renderer.lod_view(), lod);
-                        assert_eq!(renderer.normals_view(), normals);
+        for motion in [false, true] {
+            for occlusion in [false, true] {
+                for heatmap in [false, true] {
+                    for lod in [false, true] {
+                        for normals in [false, true] {
+                            renderer.set_motion_view(motion);
+                            renderer.set_occlusion_view(occlusion);
+                            renderer.set_heatmap(heatmap);
+                            renderer.set_lod_view(lod);
+                            renderer.set_normals_view(normals);
+                            let set = format!(
+                                "motion={motion} occlusion={occlusion} heatmap={heatmap} \
+                                 lod={lod} normals={normals}"
+                            );
+                            // Each switch reads back what it was set to, whatever
+                            // the others are: a caller's toggle is about the
+                            // caller's setting, and only `debug_view` is about the
+                            // picture.
+                            assert_eq!(renderer.motion_view(), motion);
+                            assert_eq!(renderer.occlusion_view(), occlusion);
+                            assert_eq!(renderer.heatmap(), heatmap);
+                            assert_eq!(renderer.lod_view(), lod);
+                            assert_eq!(renderer.normals_view(), normals);
 
-                        let expected = if occlusion {
-                            DebugView::AmbientOcclusion
-                        } else if heatmap {
-                            DebugView::Heatmap
-                        } else if lod {
-                            DebugView::LodTint
-                        } else if normals {
-                            DebugView::Normals
-                        } else {
-                            DebugView::Shaded
-                        };
-                        assert_eq!(
-                            renderer.debug_view(),
-                            expected,
-                            "occlusion={occlusion} heatmap={heatmap} lod={lod} normals={normals}"
-                        );
+                            let expected = if motion {
+                                DebugView::Motion
+                            } else if occlusion {
+                                DebugView::AmbientOcclusion
+                            } else if heatmap {
+                                DebugView::Heatmap
+                            } else if lod {
+                                DebugView::LodTint
+                            } else if normals {
+                                DebugView::Normals
+                            } else {
+                                DebugView::Shaded
+                            };
+                            assert_eq!(renderer.debug_view(), expected, "{set}");
 
-                        renderer
-                            .begin_frame(device.as_ref(), &camera, &light, (64, 48))
-                            .expect("write");
-                        let block = recorder
-                            .buffer_bytes(renderer.uniforms[renderer.frame])
-                            .expect("begin_frame wrote the block");
-                        let sentinel = match expected {
-                            DebugView::AmbientOcclusion => mesh::FrameUniforms::OCCLUSION_VIEW_ON,
-                            DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
-                            DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
-                            DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
-                            DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
-                        };
-                        assert_eq!(
-                            &block[AMBIENT_W..AMBIENT_W + 4],
-                            &sentinel.to_le_bytes(),
-                            "occlusion={occlusion} heatmap={heatmap} lod={lod} \
-                         normals={normals} resolved to {expected:?}, and the lane says otherwise"
-                        );
-                        // And the resolve comes off for all three of them: these
-                        // frames are read back as data, so their colours have to
-                        // stay the ones the shader wrote — see `resolved_effects`.
-                        assert_eq!(
-                            renderer.effects().contains(RenderEffects::ANTIALIASING),
-                            expected == DebugView::Shaded,
-                            "occlusion={occlusion} heatmap={heatmap} lod={lod} normals={normals}"
-                        );
+                            renderer
+                                .begin_frame(device.as_ref(), &camera, &light, (64, 48))
+                                .expect("write");
+                            let block = recorder
+                                .buffer_bytes(renderer.uniforms[renderer.frame])
+                                .expect("begin_frame wrote the block");
+                            let sentinel = match expected {
+                                DebugView::Motion => mesh::FrameUniforms::MOTION_VIEW_ON,
+                                DebugView::AmbientOcclusion => {
+                                    mesh::FrameUniforms::OCCLUSION_VIEW_ON
+                                }
+                                DebugView::Heatmap => mesh::FrameUniforms::HEATMAP_VIEW_ON,
+                                DebugView::LodTint => mesh::FrameUniforms::LOD_VIEW_ON,
+                                DebugView::Normals => mesh::FrameUniforms::NORMALS_VIEW_ON,
+                                DebugView::Shaded => mesh::FrameUniforms::NORMALS_VIEW_OFF,
+                            };
+                            assert_eq!(
+                                &block[AMBIENT_W..AMBIENT_W + 4],
+                                &sentinel.to_le_bytes(),
+                                "{set} resolved to {expected:?}, and the lane says otherwise"
+                            );
+                            // And the resolve comes off for every one of them:
+                            // these frames are read back as data, so their colours
+                            // have to stay the ones the shader wrote — see
+                            // `resolved_effects`.
+                            assert_eq!(
+                                renderer.effects().contains(RenderEffects::ANTIALIASING),
+                                expected == DebugView::Shaded,
+                                "{set}"
+                            );
+                        }
                     }
                 }
             }

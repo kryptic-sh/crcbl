@@ -17,6 +17,58 @@ delivery table is the record of which. `apps/options` is sample 20; the other
 three samples are planned, not built. What follows is what the plans could not
 settle.
 
+### What the motion-vector pass left owed (2026-08-30)
+
+`docs/plan/43-render-standards.md` §9's pass is built — `MOTION_FORMAT`'s
+`Rg16Float` target from `TransientImageDesc::motion`,
+`crcbl_shaders::mesh::FrameUniforms::previous_view_proj`, `mesh.slang`'s
+`motion_vector` on both geometry paths, `DebugView::Motion`, and
+`crates/crcbl/tests/mesh_e2e/motion.rs` on radv and lavapipe. What it did not
+do:
+
+- **A skinned instance carries only its transform's motion.** The deformed
+  previous positions exist — `crcbl_render::skinning`'s `SkinnedRegion` carries
+  `previous_base` and its module docs say the previous half has no reader — but
+  `crcbl_shaders::mesh::GpuInstance` has no previous base, so the vertex stage
+  reads a skinned instance's _current_ deformed position through the previous
+  transform and a limb that swung reads its body's motion. `mesh.slang`'s
+  `GpuInstance` ends in three padding words — `INSTANCE_PAD_WORDS` on the Rust
+  side — so `pad0` is a free lane that could carry the previous base without
+  widening `INSTANCE_STRIDE`; the vertex stage would then read
+  `vertices[index + previous_base]` for the previous position exactly as it
+  reads `vertices[index + base_vertex]` for the current one. Not attempted: the
+  change is in the instance record and the pool, not in this pass.
+- **The sky and every uncovered pixel read zero motion.** The `forward` pass
+  clears the target to zero, and the sky pass writes no motion at all, so a
+  consumer sees a static background under a moving camera. What is wanted is the
+  camera's own motion there — reproject the far plane through
+  `previous_view_proj`. Owed to whichever rung first samples the target;
+  `docs/plan/49-antialiasing.md`'s TAA is the one that will notice.
+- **Nothing consumes the target.** `DebugView::Motion` observes the
+  _subtraction_ — it encodes the vector into the scene target and the e2e suite
+  reads it there — so the attachment itself is written and never sampled, and it
+  carries neither `SAMPLED` nor `TRANSFER_SRC` usage. The first consumer is the
+  attachment's observer, and adding the usage bit is part of that rung.
+- **Only Vulkan has drawn it.** The Metal, DXIL and WGSL artifacts are compiled
+  and committed and the workspace's shader guards read the sources, but every
+  frame measured came out of radv and lavapipe. The mesh e2e suite names no
+  backend, so `CRCBL_GPU=mtl`/`dx12`/`wgpu` over
+  `crates/crcbl/tests/run-mesh-e2e.sh` is the whole of the missing evidence.
+- **Rest is one half-float step wide rather than exact, and the reason is the
+  colour export.** `motion.rs`'s `REST_TOLERANCE` documents the measurement: on
+  radv a still frame's covered texels read either exactly `0.5` or exactly one
+  step under it, never over, which is what a round-toward-zero `f32`→`f16`
+  export does to a subtraction that came out a last-bit below zero. Not a defect
+  and not worth chasing — it is 0.008 texels of screen movement — but it is why
+  no assertion in that file is an equality.
+- **The mesh-shader path is compiled and guarded but not measured.**
+  `mesh_cluster.slang` emits both clip positions and `crcbl_shaders::mesh`'s
+  `both_geometry_stages_emit_the_previous_clip_position` holds the two paths
+  together textually, but this machine's mesh e2e run selected
+  `GeometryPath::IndirectCount`, so no frame in the record was drawn through the
+  mesh stage's copy of the subtraction. A device that selects the mesh path
+  running the same suite is the missing evidence.
+
 ### What the SMAA rung left owed (2026-08-30)
 
 SMAA 1x draws: `smaa_edges.slang`, `smaa_weights.slang` and `smaa_blend.slang`

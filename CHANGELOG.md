@@ -16,6 +16,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A motion-vector pass.** `docs/plan/43-render-standards.md` §9's remaining
+  half, and the last thing TAA, temporal SSR, temporal upscaling, per-object
+  motion blur and SSGI's accumulation were jointly blocked on. The forward pass
+  gains a third colour target — `crcbl_render::forward`'s `MOTION_FORMAT`, an
+  `Rg16Float` transient from `TransientImageDesc::motion`, cleared to zero — and
+  `crcbl_shaders::mesh::FrameUniforms` gains `previous_view_proj` as its last
+  member, the camera-side twin of `GpuInstance::previous_transform` that
+  `ForwardRenderer` advances once a frame on the boundary `InstancePool::rotate`
+  measures on. Both geometry paths hand the fragment stage two undivided clip
+  positions and `mesh.slang`'s `motion_vector` subtracts them. **The convention
+  is texture-coordinate space, current minus previous, `+y` down**, so a
+  consumer reads history at `uv - motion`; a previous position behind the eye
+  writes zero. Nothing samples the target yet — `DebugView::Motion` is the
+  observer, encoding the vector as `motion * MOTION_VIEW_SCALE + 0.5` into the
+  scene target, and `crates/crcbl/tests/mesh_e2e/motion.rs` is what holds the
+  subtraction to it. A skinned instance still carries only its transform's
+  motion, and the sky reads zero rather than the camera's; both are
+  `docs/backlog.md`'s.
 - **SMAA 1x draws.** `docs/plan/49-antialiasing.md`'s higher rung: three passes
   — `smaa_edges.slang`, `smaa_weights.slang`, `smaa_blend.slang`, transcribed
   from the reference at `SMAA_PRESET_HIGH` with the diagonal and corner-rounding

@@ -354,9 +354,10 @@ struct FrameUniforms
     /// Where probe `(0, 0, 0)` of the irradiance grid is, in world space; `w`
     /// unused. Matching `crcbl_shaders::probe::ProbeVolume`.
     ///
-    /// **These three are last in the block**, on `light_view_proj`'s terms
-    /// exactly: no existing member's offset moves, so every golden blessed
-    /// before the grid existed still matches.
+    /// **These three were last in the block when they arrived**, on
+    /// `light_view_proj`'s terms exactly: no existing member's offset moved, so
+    /// every golden blessed before the grid existed still matched. The rows
+    /// below have each been appended the same way since.
     float4 probe_origin;
     /// One over the grid's spacing on each axis; `w` unused.
     ///
@@ -428,6 +429,19 @@ struct FrameUniforms
     float4 sky_sh_g;
     /// The blue channel of the same. See `sky_sh_r`.
     float4 sky_sh_b;
+    /// World → clip **as the previous frame's camera saw it**: the camera-side
+    /// twin of `GpuInstance::previous_transform`, and the other half of what a
+    /// motion vector is made of.
+    ///
+    /// `crcbl_render::ForwardRenderer` advances it once per frame, at the same
+    /// boundary `crcbl_render::InstancePool::rotate` settles a transform's
+    /// previous value on, and the first frame carries its own `view_proj` — a
+    /// camera that has not moved yet has not moved.
+    ///
+    /// **Last in the block**, on `lod_params`' terms: no existing member's
+    /// offset moves, so every golden blessed before this member existed still
+    /// matches.
+    float4x4 previous_view_proj;
 };
 
 /// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
@@ -481,6 +495,42 @@ static const float LOD_VIEW = 1.5;
 /// vertex on a view that exists to be looked at, and is the price of one lane
 /// carrying five states instead of a second lane carrying one.
 static const float OCCLUSION_VIEW = 3.5;
+
+/// The switch for the **motion view**, which draws the motion vector this
+/// fragment wrote to `FragmentOutput::motion` instead of shading it.
+///
+/// The same lane once more, one sentinel further out again:
+/// `crcbl_shaders::mesh::FrameUniforms::MOTION_VIEW_ON` is what the host
+/// writes, and this threshold has to lie above the occlusion view's so the
+/// outermost test wins.
+/// `the_motion_view_threshold_lies_above_the_occlusion_view` is what holds the
+/// interleaving.
+///
+/// A sentinel this far out clears every threshold below it, and the vertex and
+/// mesh stages act on that exactly as they do for the occlusion view: the
+/// overlay they write into `output.color` is computed and discarded, because
+/// this view's fragment branch returns before the interpolated colour is
+/// touched.
+static const float MOTION_VIEW = 4.5;
+
+/// How far the motion view stretches a motion vector before centring it on
+/// grey.
+///
+/// `crcbl_shaders::mesh::MOTION_VIEW_SCALE` is the host's copy and
+/// `the_motion_view_scale_is_the_one_the_host_declares` holds the two equal.
+/// A motion of `0.5 / MOTION_VIEW_SCALE` of the frame in one frame lands on the
+/// end of the ramp; the `Rgba16Float` scene target carries anything past that
+/// unclamped, and only the tonemap's `saturate` on the way to the swapchain
+/// flattens it.
+///
+/// **A pixel at rest encodes to one half in both channels, give or take one
+/// half-float step.** The two clip positions are the same vertex through equal
+/// matrices, but they are two multiplication chains and not one, so the
+/// subtraction comes out a last bit either side of zero rather than at it —
+/// and the colour export rounds that into the step below one half, never the
+/// step above. `crates/crcbl/tests/mesh_e2e/motion.rs`'s `REST_TOLERANCE` is
+/// that one step measured, and why nothing there is an exact comparison.
+static const float MOTION_VIEW_SCALE = 8.0;
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
 ///
@@ -1145,6 +1195,28 @@ struct VertexOutput
     /// vertex. Interpolated, unlike `material` above: a UV *is* a quantity, and
     /// the point of it is to vary across the primitive.
     float2 uv : TEXCOORD1;
+    /// This vertex's clip position — the same value as `position` above,
+    /// carried as an ordinary interpolant so the fragment stage can divide it
+    /// itself.
+    ///
+    /// **`SV_Position` is not that value.** By the time a fragment stage reads
+    /// it the rasteriser has already divided by `w` and mapped the result into
+    /// pixels, and this block carries no viewport extent to undo that with.
+    ///
+    /// **The divide belongs in the fragment stage**, which is why this and
+    /// `previous_clip_position` both cross the boundary undivided. Interpolation
+    /// is linear in clip space and the perspective divide is not, so a divide
+    /// performed at the corners and interpolated across the primitive names the
+    /// screen position of a point that is not this fragment — and the
+    /// subtraction below would then be wrong everywhere except at the corners.
+    float4 clip_position : TEXCOORD2;
+    /// Where this vertex was last frame, in last frame's clip space:
+    /// `FrameUniforms::previous_view_proj` applied to
+    /// `GpuInstance::previous_transform`.
+    ///
+    /// Undivided, on `clip_position`'s terms. `motion_vector` below is what
+    /// subtracts the two, and it is the only reader of either.
+    float4 previous_clip_position : TEXCOORD3;
 };
 
 [shader("vertex")]
@@ -1194,6 +1266,14 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // fragment stage's to read now, for the reason its binding gives.
     output.material = instance.material;
     output.uv = vertex.uv.xy;
+    // Both clip positions, undivided — see `VertexOutput::clip_position`. The
+    // previous one is this instance's previous transform seen through last
+    // frame's camera, which is the whole of a rigid body's motion: where the
+    // object went and where the viewer went, in one subtraction.
+    output.clip_position = output.position;
+    output.previous_clip_position = mul(
+        frame.previous_view_proj,
+        mul(instance.previous_transform, float4(vertex.position.xyz, 1.0)));
     return output;
 }
 
@@ -2705,6 +2785,16 @@ struct FragmentOutput
     /// environment is indexed by, where the ramp is zero for every surface
     /// rougher than the cutoff — exactly the surfaces that lookup is for.
     float4 reflectivity : SV_Target1;
+    /// The motion vector, into a two-channel half-float target —
+    /// `crcbl_render::forward::MOTION_FORMAT` names the format and
+    /// `crcbl_render::TransientImageDesc::motion` describes the image.
+    ///
+    /// **Current minus previous, in texture coordinates, `+y` down**, which is
+    /// `motion_vector`'s convention and stated there in full. Written on every
+    /// path through this stage, the debug views included: a member left
+    /// unwritten on one branch is an undefined texel in a target a later pass
+    /// reprojects with.
+    float2 motion : SV_Target2;
 };
 
 /// `TILING_PHYSICAL`'s sampling UV: the surface's world-space position along the
@@ -2767,6 +2857,38 @@ float occlusion_at(float2 position)
     return ambient_occlusion.Load(int3(texel, 0));
 }
 
+/// This fragment's motion vector: where it is now minus where it was last
+/// frame, in texture coordinates.
+///
+/// # The convention, stated once so no consumer has to guess it
+///
+/// **Current minus previous, in UV space, `+y` down.** A pass holding the
+/// previous frame therefore reads its history at `uv - motion`, and a surface
+/// travelling right and down the screen has both components positive. The
+/// `float2(0.5, -0.5)` is the whole of the mapping: an NDC `x` of `-1..1` is a
+/// `u` of `0..1`, and `v` runs the other way because a framebuffer's rows start
+/// at the top.
+///
+/// Both positions arrive undivided and are divided here rather than at the
+/// corners — `VertexOutput::clip_position` argues that at length.
+///
+/// # A previous position behind the eye writes zero
+///
+/// Its `w` is zero or negative, so the divide is either a division by zero or a
+/// point mirrored through the eye onto the wrong side of the screen. Neither is
+/// a motion, and a NaN or a wild vector here is one a temporal consumer would
+/// reproject with rather than reject. Zero is the honest answer and it is the
+/// same "nothing moved here" the attachment is cleared to, so a consumer needs
+/// no second rule for it.
+float2 motion_vector(float4 current, float4 previous)
+{
+    if (previous.w <= 0.0)
+    {
+        return float2(0.0, 0.0);
+    }
+    return (current.xy / current.w - previous.xy / previous.w) * float2(0.5, -0.5);
+}
+
 [shader("fragment")]
 FragmentOutput fragmentMain(VertexOutput input)
 {
@@ -2775,6 +2897,29 @@ FragmentOutput fragmentMain(VertexOutput input)
     // and would make the normals view below read a shortened normal as a darker
     // colour, which is a picture of the interpolation rather than of the surface.
     float3 normal = normalize(input.world_normal);
+
+    // **Computed before the first branch, because every branch writes it.** The
+    // debug views below return early and each one owes this target a value —
+    // see `FragmentOutput::motion`.
+    float2 motion = motion_vector(input.clip_position, input.previous_clip_position);
+
+    // **The motion view, outermost because its sentinel is.** The vector this
+    // fragment is about to write, drawn instead of the shaded picture: `r` and
+    // `g` are the two components stretched by `MOTION_VIEW_SCALE` and centred
+    // on grey, and `b` is zero so the channels that carry something are the two
+    // the eye separates. A pixel at rest is grey in `rg` to within one
+    // half-float step — `MOTION_VIEW_SCALE` says why not exactly — and it is
+    // the only observer the subtraction has until a pass reads the attachment.
+    if (frame.ambient.w >= MOTION_VIEW)
+    {
+        FragmentOutput moved;
+        moved.lit = float4(motion * MOTION_VIEW_SCALE + 0.5, 0.0, 1.0);
+        // Not reflective, for the normals view's reason: `ssr.slang` must march
+        // nothing off a debug picture.
+        moved.reflectivity = NO_REFLECTION;
+        moved.motion = motion;
+        return moved;
+    }
 
     // **The normals view, and it is *world*-space normals.**
     //
@@ -2822,6 +2967,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         // Not reflective, for the normals view's reason: `ssr.slang` must march
         // nothing off a debug picture.
         occlusion.reflectivity = NO_REFLECTION;
+        occlusion.motion = motion;
         return occlusion;
     }
 
@@ -2833,6 +2979,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         // it, or two levels with similar tints become one under a light.
         tint.lit = float4(input.color.rgb, 1.0);
         tint.reflectivity = NO_REFLECTION;
+        tint.motion = motion;
         return tint;
     }
 
@@ -2852,6 +2999,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         // over a scene with probes in it adds a faint environment along the
         // silhouette — the one place this view is not the encoded normal alone.
         normals.reflectivity = NO_REFLECTION;
+        normals.motion = motion;
         return normals;
     }
 
@@ -3136,5 +3284,6 @@ FragmentOutput fragmentMain(VertexOutput input)
     // reload as — `REFLECTIVITY_LEVELS` says why the rounding happens here.
     output.reflectivity =
         float4(f0, floor(roughness * REFLECTIVITY_LEVELS + 0.5) / REFLECTIVITY_LEVELS);
+    output.motion = motion;
     return output;
 }

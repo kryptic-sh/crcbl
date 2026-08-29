@@ -919,16 +919,18 @@ impl DepthProbe {
                 dxil: &crcbl::shaders::MESH.dxil_containers(),
             })
             .expect("the committed SPIR-V is accepted");
-        // **Two, because `fragmentMain` writes two.** A fragment stage writing
-        // location 1 into a pipeline with one attachment is a validation error
-        // under WebGPU's rules and, on Vulkan, a warning at best — so a
-        // hand-built pipeline that kept one target would be this suite passing
-        // while the real forward pass gained an output. The second's format is
-        // the one `crcbl::render::TransientImageDesc::reflectivity` names, and
-        // the pass below attaches an image of exactly that description.
+        // **One per `SV_Target` `fragmentMain` writes.** A fragment stage
+        // writing a location a pipeline has no attachment for is a validation
+        // error under WebGPU's rules and, on Vulkan, a warning at best — so a
+        // hand-built pipeline short of a target would be this suite passing
+        // while the real forward pass gained an output. Each format is the one
+        // the matching `crcbl::render::TransientImageDesc` names —
+        // `reflectivity` and `motion` — and the pass below attaches images of
+        // exactly those descriptions.
         let color_targets = [
             crcbl::hal::ColorTargetState::opaque(headless.format),
             crcbl::hal::ColorTargetState::opaque(Format::Rgba8Unorm),
+            crcbl::hal::ColorTargetState::opaque(Format::Rg16Float),
         ];
         let pipeline = device.create_graphics_pipeline(&crcbl::hal::GraphicsPipelineDesc {
             label: Some("depth probe"),
@@ -1166,6 +1168,14 @@ fn render_probe(
         sky_sh_r: [0.0; 4],
         sky_sh_g: [0.0; 4],
         sky_sh_b: [0.0; 4],
+        // The frame this probe draws is the only one there is, so the previous
+        // camera is this one: every fragment's motion vector is exactly zero,
+        // which is what the two quads standing still deserve. The attachment it
+        // lands in is read by nothing here — this file's claims are about the
+        // depth test and the reflectivity channel — and a probe whose motion
+        // target held a reprojection through some other matrix would be a
+        // difference between two frames that are one frame.
+        previous_view_proj: view_proj.to_cols_array(),
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())
@@ -1262,6 +1272,15 @@ fn render_probe(
             "probe-reflectivity",
             crcbl::render::TransientImageDesc::reflectivity(MESH_EXTENT),
         );
+        // `mesh.slang`'s third output, on the second's terms exactly: the
+        // pipeline above names a target for it, so the pass has to attach one.
+        // Nothing here reads it back — the block above says why every texel of
+        // it is zero — but an attachment the pipeline declares and the pass does
+        // not provide is the validation error this file exists to not have.
+        let motion = graph.create_image(
+            "probe-motion",
+            crcbl::render::TransientImageDesc::motion(MESH_EXTENT),
+        );
         graph
             .add_render_pass("probe")
             .clear_color(target, PROBE_CLEAR)
@@ -1270,6 +1289,9 @@ fn render_probe(
             // and fully rough is the quadruple that says so, as it is in
             // `crcbl::render::forward`.
             .clear_color(reflectivity, crcbl::shaders::ssr::NO_REFLECTION)
+            // Zero, exactly as `crcbl::render::forward` clears its own: a pixel
+            // no fragment covered has no motion.
+            .clear_color(motion, [0.0; 4])
             // The reversed-Z clear: `depth::CLEAR` = 0.0, so any geometry beats
             // the empty buffer under `Greater`.
             .clear_depth(depth)

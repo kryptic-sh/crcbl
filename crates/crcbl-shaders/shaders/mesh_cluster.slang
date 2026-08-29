@@ -212,6 +212,11 @@ struct FrameUniforms
     float4 sky_sh_g;
     /// The blue channel of the same. See `sky_sh_r`.
     float4 sky_sh_b;
+    /// Last frame's world → clip, and this file **reads** it: the mesh stage
+    /// emits the previous clip position beside the current one, exactly as
+    /// `mesh.slang`'s vertex stage does, because the two feed one fragment
+    /// stage and it subtracts them. That file's copy carries the account.
+    float4x4 previous_view_proj;
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.
@@ -961,6 +966,11 @@ struct VertexOutput
     /// interpolating one produces a fragment reading a row no vertex named.
     nointerpolation uint material : TEXCOORD0;
     float2 uv : TEXCOORD1;
+    /// This vertex's clip position and where it was last frame, both undivided.
+    /// `mesh.slang` declares them with the whole argument for why the
+    /// perspective divide happens in the fragment stage rather than here.
+    float4 clip_position : TEXCOORD2;
+    float4 previous_clip_position : TEXCOORD3;
 };
 
 /// Corner `corner` of the packed corner array.
@@ -1364,6 +1374,14 @@ void emit_cluster(
         output.color = frame.ambient.w >= LOD_VIEW ? overlay : vertex.color;
         output.material = instance.material;
         output.uv = vertex.uv.xy;
+        // Both clip positions, undivided, exactly as `mesh.slang`'s vertex
+        // stage emits them — the fragment stage is the same one for both paths,
+        // so a mesh-shader frame's motion vectors have to be the same
+        // subtraction as a raster frame's.
+        output.clip_position = output.position;
+        output.previous_clip_position = mul(
+            frame.previous_view_proj,
+            mul(instance.previous_transform, float4(vertex.position.xyz, 1.0)));
         verts[v] = output;
     }
 

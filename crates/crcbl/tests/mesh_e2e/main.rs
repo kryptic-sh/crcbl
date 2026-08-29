@@ -80,6 +80,7 @@ mod froxels;
 mod goldens;
 mod hdr;
 mod lod;
+mod motion;
 mod render_scale;
 mod resize;
 mod smaa;

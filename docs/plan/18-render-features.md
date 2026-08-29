@@ -126,5 +126,9 @@ under both paths side by side. Exit criteria of the other samples inherit
   `InstancePool` that fills it without the caller. Two features were owed it
   rather than one, since temporal SSR is blocked on the same slot, and
   `SkinnedRegion`'s double-buffered half of the reservation now has its
-  instance-side counterpart. What is left for both is a motion-vector pass,
-  which is work either of them would have done anyway.
+  instance-side counterpart. The motion-vector pass both were left waiting on
+  was **built 2026-08-30** — `crcbl_render::forward`'s `MOTION_FORMAT` target,
+  `crcbl_shaders::mesh::FrameUniforms::previous_view_proj` and the subtraction —
+  in texture-coordinate space, current minus previous, `+y` down, so a history
+  buffer is read at `uv - motion`. Neither feature is blocked on anything but
+  itself now.

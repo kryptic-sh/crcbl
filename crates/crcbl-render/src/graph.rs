@@ -3157,6 +3157,42 @@ impl TransientImageDesc {
         }
     }
 
+    /// The motion-vector channel: `crate::forward`'s `MOTION_FORMAT`, written
+    /// by the forward pass beside its colour and reflectivity targets.
+    ///
+    /// `docs/plan/43-render-standards.md` §9's third attachment — the one that
+    /// blocked TAA, temporal SSR, temporal upscaling, per-object motion blur and
+    /// SSGI's accumulation. What it holds is **current minus previous, in
+    /// texture coordinates, `+y` down**: a pass holding the previous frame reads
+    /// its history at `uv - motion`. `mesh.slang`'s `motion_vector` writes it
+    /// and `MOTION_FORMAT` states the convention on the host side.
+    ///
+    /// The format is named there rather than here for [`ambient_occlusion`]'s
+    /// reason inverted, exactly as [`smaa_edges`] gives it: the shader's return
+    /// struct and the pipeline's colour target have to agree, and the pass that
+    /// builds the pipeline is the one that owns the answer.
+    ///
+    /// **Cleared to zero, and no `TRANSFER_SRC` or `SAMPLED` yet.** Nothing
+    /// reads the attachment — `crcbl_render::forward`'s `DebugView::Motion`
+    /// observes the *subtraction*, through the scene target, rather than this
+    /// image — and a usage flag naming a use nothing makes is a claim about a
+    /// resource rather than a fact about one, which is [`bloom_mip`]'s argument.
+    /// The first consumer is the one that adds the flag it needs.
+    ///
+    /// [`ambient_occlusion`]: TransientImageDesc::ambient_occlusion
+    /// [`bloom_mip`]: TransientImageDesc::bloom_mip
+    /// [`smaa_edges`]: TransientImageDesc::smaa_edges
+    #[must_use]
+    pub const fn motion(extent: (u32, u32)) -> Self {
+        Self {
+            extent,
+            format: crate::forward::MOTION_FORMAT,
+            usage: ImageUsage::COLOR_ATTACHMENT,
+            samples: 1,
+            mip_levels: 1,
+        }
+    }
+
     /// SMAA's edge mask: `crate::smaa`'s `EDGES_FORMAT`, rendered into by the
     /// first of that tier's three passes and sampled by the second.
     ///
