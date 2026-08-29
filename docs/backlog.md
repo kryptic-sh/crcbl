@@ -736,44 +736,42 @@ chain itself was built 2026-08-29). Both read the row as it stands;
 multi-scatter compensation and the gradient sky were not blocked either, and are
 built.
 
-### Specular IBL: the prefilter table is cooked, the term is owed (2026-08-29)
+### Specular IBL: the sky is prefiltered, the DFG pair is owed (2026-08-29)
 
-`44-lighting.md`'s rung 3 has both of its tables now — `crcbl_shaders::dfg` for
-the BRDF pair and `crcbl_shaders::sky_prefilter` for the gradient sky convolved
-against the lobe — and nothing on the device reads either as the split-sum. What
-the rung still owes, in order:
+`44-lighting.md`'s rung 3 has its prefiltered half in the frame: `ssr.slang`'s
+miss fallback reads the gradient through `crcbl_shaders::sky_prefilter`'s table
+(`sky_prefilter::texels` as an `Rgba8Unorm` image bound by
+`crcbl_render::ssr::Ssr::new`, `sky_prefiltered` in the shader) at the surface's
+roughness. What it still owes:
 
-- **The two images.** `sky_prefilter::bytes` uploaded the way
-  `dfg::albedo_texels` is — two 16-bit fixed-point channels, filtered in the
-  shader with four `Load`s, since a hardware filter is not blessable across four
-  rasterisers — and the `DFG` **pair** (scale and bias, not their sum) as a
-  second image from `dfg::bytes`. Both are `[0, 1]` shares, so the same encoding
-  serves. Each is a new binding in `mesh.slang` and in the hand-written
-  `msl/mesh.metal` argument table, after `specular_albedo`.
-- **The term.** `prefiltered · (f0 · scale + bias)`, with `prefiltered` the
-  `sky_prefilter::prefiltered_radiance` sum spelled in the shader over the three
-  sky rows, at the reflection of the view about the normal, and multiplied by
-  the energy compensation the direct lobe already takes. `Sky::NONE` projects to
-  black, so a frame with no sky adds nothing and no golden without a sky moves.
-  **It belongs in `ssr.slang`'s miss fallback, not `fragmentMain`'s ambient
-  sum:** `SsrParams.sky` already carries the gradient rows the mesh frame block
-  does not, metals take their ambient specular from SSR by design, and a term in
-  both passes would count the environment twice. Since 2026-08-29 the
-  reflectivity attachment's alpha is the lobe's roughness (`ssr.slang`'s
-  `sharpness_of` derives the ramp from it), so the pass has the table's index
-  where it matters — past the cutoff, where the ramp is zero. A frame with
-  `RenderEffects::REFLECTIONS` off keeps no ambient specular on metals, as
-  today.
-- **The goldens with a sky move**, and are re-blessed on one machine:
-  `crates/crcbl/tests/mesh_e2e/hdr.rs`, `crates/crcbl/tests/render_e2e.rs` and
-  `crates/crcbl/src/screenshot.rs` set one. A metal under a sky is where the
-  change shows; a dielectric's `f0` of 0.04 moves little.
-- **The miss fallback takes the prefiltered radiance** at the fragment's
-  roughness in place of the gradient's mirror radiance `sky_radiance` adds
-  today, which is what makes a rough reflection's miss match its hit.
+- **The `DFG` pair as an image and the term that reads it.** The fallback scales
+  the prefiltered sky by Schlick, `f0 + (1 − f0)(1 − N·V)⁵`, where the split-sum
+  wants `f0 · scale + bias` — `crcbl_shaders::dfg::entry`'s two channels rather
+  than the sum `dfg::albedo_texels` uploads for energy compensation. A second
+  image from `dfg::bytes`, encoded as `sky_prefilter::texels` is (two 16-bit
+  fixed-point shares a texel, the same `[0, 1]` range), bound after
+  `sky_prefilter` in `ssr.slang`, and `fresnel` replaced by the pair at
+  `(N·V, roughness)`. A mirror's Schlick and its `scale + bias` agree; the rough
+  rows are where the pair is darker than Schlick, which is the energy the single
+  ray was over-counting. Goldens with a rough metal under a sky move a second
+  time.
+- **A frame with `RenderEffects::REFLECTIONS` off keeps no ambient specular on
+  metals**, as before this rung: the term lives in the reflection pass because
+  that is where the gradient's rows are and where metals take their specular by
+  design, and a copy in `mesh.slang`'s ambient sum would count the sky twice
+  whenever the pass is on. Whether the off state deserves the prefiltered sky
+  alone is a decision, not a gap.
 
-Verified: the table against an independent quadrature and the gradient's own
-blend, on the CPU only. Nothing here has been drawn.
+Verified for the prefiltered half: the texels decode to the table within half a
+fixed-point step, the shader's sum is held to `prefiltered_radiance` line by
+line, and `tests/render_e2e.rs`'s
+`a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` holds a fully
+rough floor (`screenshot::ssr_rough_floor_forward`, the tinted row at a
+roughness of one) under a sky lit only below the horizon against the mirror
+floor: the lobe reaches across the horizon and the mirror's rays do not, 74
+against 4 on radv and lavapipe, and the fallback read at roughness zero left the
+rough floor at exactly the mirror's zero. No golden moved: every reflector in
+them is a mirror, and lantern has no sky, which is why that pair exists.
 
 Two gaps from the roughness slice itself, both measured on 2026-08-29:
 
@@ -838,12 +836,14 @@ order:
 
 ### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
 
-`ssr.slang`'s `sky_radiance` picks between the gradient's zenith and its ground
-on the sign of the ray's `y`. Every reflective surface in this tree is a floor
-whose normal is `+Y`, so every reflected ray leaves it upward and the ground arm
-is never the right answer for any pixel in any suite.
+`ssr.slang`'s `sky_prefiltered` (until 2026-08-29 `sky_radiance`) picks between
+the gradient's zenith and its ground on the sign of the ray's `y`. Every
+reflective surface in this tree is a floor whose normal is `+Y`, so every
+reflected ray leaves it upward and the ground arm is never the right answer for
+any pixel in any suite.
 
-**Measured, not suspected.** Replacing the branch with `far = camera.sky[0].rgb`
+**Measured, not suspected**, on `sky_radiance`; the selection moved into
+`sky_prefiltered` unchanged. Replacing the branch with `far = camera.sky[0].rgb`
 outright — the zenith always, the ground band read by nothing — leaves the whole
 render e2e suite green,
 `a_missed_reflection_falls_back_to_the_sky_along_its_own_ray` included. Three

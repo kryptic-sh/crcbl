@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A missed reflection sees the sky through the prefilter table.** `ssr.slang`
+  binds `crcbl_shaders::sky_prefilter`'s table — `sky_prefilter::texels`, the
+  two weights as 16-bit fixed point in an `Rgba8Unorm` image
+  `crcbl_render::ssr::Ssr::new` uploads once (it now takes the queue) — and its
+  miss fallback adds `sky_prefiltered(direction, roughness)`, the gradient
+  convolved against the surface's lobe, in place of the mirror-direction
+  `sky_radiance` it added before. A mirror still sees the gradient itself; a
+  rough metal now sees the cone it gathers, so its reflection of the sky is
+  softer and nearer the horizon. `44-lighting.md`'s rung 3 is prefiltered on the
+  sky side; the `DFG` pair that should scale it is still Schlick.
 - **The base-colour page carries a mip chain.** `crcbl_render::mip` builds one
   on the host — `resample`, the alpha-weighted box filter in linear light the
   glTF importer already packed textures with, now shared, and `chain`, that

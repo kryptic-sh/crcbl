@@ -125,7 +125,9 @@ pub struct SsrParams {
     /// wants the radiance along one direction, and reconstructing that from
     /// four irradiance coefficients would blur a gradient this side can
     /// evaluate exactly for three multiplies. [`crate::sky::SkyGradient`] owns
-    /// the arithmetic and `ssr.slang`'s `sky_radiance` is its mirror.
+    /// the bands; `ssr.slang`'s `sky_prefiltered` weights them by
+    /// [`crate::sky_prefilter`]'s table at the surface's roughness, so a mirror
+    /// reads the gradient itself and a rough lobe the cone it gathers.
     ///
     /// **Zero is exactly off**: a black sky adds nothing to the probe
     /// environment a missed ray already fell back to, so this rung arrived

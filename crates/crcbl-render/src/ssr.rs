@@ -35,12 +35,22 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ClearValue, ColorTargetState, Device, Format, GraphicsPipelineHandle, HalError,
     ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
-    PipelineLayoutHandle, SampleType, ShaderStages, StoreOp, check_portable_storage_buffers,
+    PipelineLayoutHandle, QueueHandle, SampleType, ShaderStages, StoreOp,
+    check_portable_storage_buffers,
 };
-use crcbl_shaders::{SSR, SSR_BLUR, ssr};
+use crcbl_shaders::{SSR, SSR_BLUR, sky_prefilter, ssr};
 
 use crate::graph::{ImageId, RenderGraph};
 use crate::ssao::cached_group;
+use crate::texture::{UploadedTexture, upload_texture};
+
+/// The binding `ssr.slang` reads [`sky_prefilter`]'s table through — after the
+/// pyramid's slots, so Metal's declaration-order argument numbering stays
+/// aligned with this layout.
+const SKY_PREFILTER_BINDING: u32 = 5 + crate::hiz::MAX_LEVELS;
+
+/// [`sky_prefilter::PREFILTER_SIZE`] as an image extent.
+const SKY_PREFILTER_SIZE: u32 = sky_prefilter::PREFILTER_SIZE as u32;
 
 /// Vertices in the over-sized full-screen triangle `ssr.slang` and
 /// `ssr_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
@@ -113,6 +123,12 @@ pub(crate) struct Ssr {
     /// block the march does — and a single cache keyed on the views alone would
     /// hand the even frames' block to the odd frames.
     blur_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+    /// `crcbl_shaders::sky_prefilter`'s table as the `Rgba8Unorm` image
+    /// `ssr.slang` reads the sky through at a surface's roughness. Uploaded
+    /// once here rather than by [`crate::forward`], because this pass is its
+    /// only reader — the DFG table beside it in the forward pass has a reader
+    /// there.
+    sky_prefilter: UploadedTexture,
 }
 
 impl Ssr {
@@ -133,6 +149,7 @@ impl Ssr {
     /// caller holds a rollback, and this is stored in it whole.
     pub(crate) fn new(
         device: &dyn Device,
+        queue: QueueHandle,
         frames: usize,
         build_fullscreen: impl Fn(
             &dyn Device,
@@ -142,6 +159,20 @@ impl Ssr {
             &[ColorTargetState],
         ) -> Result<GraphicsPipelineHandle, HalError>,
     ) -> Result<Self, HalError> {
+        // The committed table, fixed point in four bytes a texel — see
+        // `sky_prefilter::PREFILTER_TEXEL_BYTES`. Not baked here, for the DFG
+        // table's reason in `crate::forward`: the integrator is a Monte Carlo
+        // sum and four backends would bake four tables.
+        let sky_prefilter = upload_texture(
+            device,
+            queue,
+            "sky prefilter table",
+            Format::Rgba8Unorm,
+            SKY_PREFILTER_SIZE,
+            SKY_PREFILTER_SIZE,
+            &sky_prefilter::texels(),
+        )?;
+
         // **No sampler**, which is the whole of what reading by `Load` buys —
         // and it buys more here than in the occlusion pass, because what a tap
         // fetches is a colour rather than a fraction a blur will average. See
@@ -213,6 +244,18 @@ impl Ssr {
         // will index without a binding array — see that shader's `hiz_at`.
         // Level 0 is binding 1 above, which is the prepass itself.
         let mut entries = entries.to_vec();
+        entries.push(BindGroupLayoutEntry {
+            binding: SKY_PREFILTER_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+                // An ordinary colour image the shader `Load`s and filters
+                // itself; no sampler, like every other read in the pass.
+                sample_type: SampleType::Float,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
         entries.extend(
             (0..crate::hiz::MAX_LEVELS).map(|level| BindGroupLayoutEntry {
                 binding: 5 + level,
@@ -340,6 +383,7 @@ impl Ssr {
             blur_pipeline_layout,
             blur_pipeline,
             blur_groups: vec![None; frames],
+            sky_prefilter,
         })
     }
 
@@ -393,6 +437,7 @@ impl Ssr {
         let pipeline_layout = self.pipeline_layout;
         let layout = self.layout;
         let uniforms = self.uniforms[frame];
+        let sky_prefilter_view = self.sky_prefilter.view;
         // Split so the two closures below borrow different halves of `self`, on
         // `Ssao::add_passes`' terms: one `&mut self` shared between them is what
         // the borrow checker refuses, and it would be refusing something
@@ -472,6 +517,13 @@ impl Ssr {
                     binding: 4,
                     array_index: 0,
                     resource: BindingResource::whole_buffer(probes),
+                },
+                // Static, like the uniforms and the probes: not part of the
+                // cache key below, which holds the views that change.
+                BindGroupEntry {
+                    binding: SKY_PREFILTER_BINDING,
+                    array_index: 0,
+                    resource: BindingResource::ImageView(sky_prefilter_view),
                 },
             ];
             let pyramid_views = pyramid.map(|level| ctx.image_view(level));
@@ -582,5 +634,6 @@ impl Ssr {
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }
+        self.sky_prefilter.destroy(device);
     }
 }

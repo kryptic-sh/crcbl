@@ -1122,13 +1122,65 @@ pub fn ssr_forward(
     sky: crcbl_render::Sky,
     effects: crcbl_render::RenderEffects,
 ) -> Result<ForwardScene, OffscreenError> {
-    let mut renderer = ForwardRenderer::new(device, queue, format)?;
+    ssr_forward_on(
+        device,
+        queue,
+        format,
+        sky,
+        effects,
+        &crate::render::scene::demo(),
+        DEMO_TINTED,
+    )
+}
+
+/// [`ssr_forward`] with its floor **fully rough**: the same scene through a
+/// fourth material row, `DEMO_TINTED` at a roughness of one.
+///
+/// A floor the march skips — one is past `ssr.slang`'s cutoff — takes the
+/// environment fallback alone, and at that roughness the fallback reads the sky
+/// through `crcbl_shaders::sky_prefilter`'s roughest row rather than along the
+/// one mirror direction. `tests/render_e2e.rs` holds the two floors against
+/// each other under a sky lit only *below* the horizon: the mirror floor's
+/// upward rays see none of it, and the rough floor's lobe does.
+///
+/// # Errors
+///
+/// [`OffscreenError::Hal`] if the renderer cannot be built.
+pub fn ssr_rough_floor_forward(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    sky: crcbl_render::Sky,
+    effects: crcbl_render::RenderEffects,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut scene = crate::render::scene::demo();
+    let rough = scene.materials.len();
+    scene.materials.push(crate::shaders::mesh::GpuMaterial {
+        roughness: 1.0,
+        ..scene.materials[DEMO_TINTED]
+    });
+    ssr_forward_on(device, queue, format, sky, effects, &scene, rough)
+}
+
+/// The ssr scene over `scene`, with its floor shaded through material row
+/// `floor`: [`ssr_forward`] and [`ssr_rough_floor_forward`] differ in nothing
+/// else.
+fn ssr_forward_on(
+    device: &dyn Device,
+    queue: QueueHandle,
+    format: Format,
+    sky: crcbl_render::Sky,
+    effects: crcbl_render::RenderEffects,
+    scene: &crate::render::scene::SceneDesc<'_>,
+    floor: usize,
+) -> Result<ForwardScene, OffscreenError> {
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, scene)?;
     renderer.set_effect_request(EffectRequest {
         camera: effects,
         ..EffectRequest::default()
     });
     renderer.set_sky(sky);
-    place(&mut renderer, DEMO_CUBE, DEMO_TINTED, spot_floor());
+    place(&mut renderer, DEMO_CUBE, floor, spot_floor());
     place(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, ssr_pyramid());
     Ok(ForwardScene {
         camera: ssr_camera(),

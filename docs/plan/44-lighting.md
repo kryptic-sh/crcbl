@@ -334,9 +334,22 @@ two weights over `(|R.y|, roughness)` — `crcbl_shaders::sky_prefilter`, a
 `cook-dfg`'s terms (`cook-sky-prefilter`, with `--check` in CI). The sky's
 colours stay a run-time parameter; only the lobe is baked. Facing the zenith,
 the roughest lobe sees 0.697 of it and the horizon for the rest.
-`prefiltered_radiance` is the sum on the CPU. What the rung still owes is the
-upload, the `DFG` pair as an image, and `mesh.slang`'s specular ambient term —
-`docs/backlog.md` carries the list.
+`prefiltered_radiance` is the sum on the CPU.
+
+**The prefiltered half is in the frame (2026-08-29).** The table goes up once as
+an `Rgba8Unorm` image (`sky_prefilter::texels`, two 16-bit fixed-point shares a
+texel) bound to `ssr.slang`, which filters it with four `Load`s on
+`specular_albedo_at`'s terms and reads the sky through it at the surface's
+roughness — `sky_prefiltered`, in place of the mirror-direction `sky_radiance`
+the miss fallback added before. It lives in the reflection pass and not in
+`mesh.slang`'s ambient sum because that is where the gradient's rows already are
+and where metals take their ambient specular; a term in both would count the sky
+twice. The roughness axis shows in exactly one frame of the suite — the fully
+rough floor `tests/render_e2e.rs` holds under a sky lit only below the horizon,
+which a mirror's rays cannot see and the lobe can — and the goldens, all
+mirrors, did not move. What the rung still owes is the `DFG` pair as an image
+and the `f0 · scale + bias` that scales the prefiltered sky in place of Schlick
+— `docs/backlog.md` carries it.
 
 ### Rung 4 — Specular antialiasing, once normal maps exist
 

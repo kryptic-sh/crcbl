@@ -1241,6 +1241,21 @@ const SKY_FALLBACK_FLOOR: f32 = 6.0;
 /// was set against measures exactly zero.
 const SKY_UNTOUCHED: f32 = 2.0;
 
+/// How much a sky lit only **below** the horizon must add to a **fully rough**
+/// floor whose rays leave it upward.
+///
+/// The mirror floor's rays see next to none of that sky — its row of
+/// `crcbl_shaders::sky_prefilter`'s table gives the opposite pole a share
+/// under a hundredth at the band — and the roughest row gives it an eighth.
+/// An eighth of [`SKY_POLE`] is still well over the tonemapper's knee on a
+/// floor that is otherwise dark in this channel, which is why the measured
+/// delta is far larger than the share alone suggests: 74.1 on radv and 73.9
+/// on lavapipe in the sweep of 2026-08-29. Half of that, so a
+/// rasteriser's own drift cannot cross it, while every wrong reading of the
+/// table — its mirror row, its axes swapped, the one mirror direction — lands
+/// at the mirror floor's own single digits.
+const ROUGH_SKY_BELOW_FLOOR: f32 = 37.0;
+
 /// **The sky is the environment a missed ray falls back to**, and it is read
 /// along the ray rather than applied as a constant.
 ///
@@ -1263,9 +1278,19 @@ const SKY_UNTOUCHED: f32 = 2.0;
 /// * **Bright above.** The floor's rays leave it upward, so the fallback must
 ///   arrive. A block that declared the rows and never read them fails here.
 /// * **Bright below.** The same radiance, pointed where these rays do not
-///   look. A `sky_radiance` that collapsed the gradient to an average of its
-///   bands, or took the two poles in the wrong order, brightens this pair
-///   instead of leaving it alone; both were run and both fail here.
+///   look. A `sky_prefiltered` that collapsed the gradient to an average of
+///   its bands, or took the two poles in the wrong order, brightens this pair
+///   instead of leaving it alone; both were run against its predecessor
+///   `sky_radiance` and both fail here.
+///
+/// **A fourth pair, on a fully rough floor, is what sees the lobe.** The
+/// fallback reads the sky through `crcbl_shaders::sky_prefilter`'s table at the
+/// surface's roughness, and a mirror reads the gradient itself — so the three
+/// pairs above pass on a fallback that ignored roughness altogether. The rough
+/// floor under the sky lit *below* is where the two differ in kind: the
+/// mirror's upward rays see nothing of it, and the roughest lobe, which
+/// reaches across the horizon, does. A table read at the wrong axis, at
+/// roughness zero, or not at all fails here and nowhere else.
 ///
 /// **What this scene cannot see, stated rather than implied:** every reflected
 /// ray in it leaves the floor *upward*, so the branch that picks the ground
@@ -1281,10 +1306,18 @@ const SKY_UNTOUCHED: f32 = 2.0;
 fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
     crcbl_core::log::init_logging();
 
-    let frame = |sky: crcbl::render::Sky, effects| {
+    type Build = fn(
+        &dyn crcbl::hal::Device,
+        crcbl::hal::QueueHandle,
+        crcbl::hal::Format,
+        crcbl::render::Sky,
+        RenderEffects,
+    )
+        -> Result<crcbl::screenshot::ForwardScene, crcbl::screenshot::OffscreenError>;
+    let frame = |build: Build, sky: crcbl::render::Sky, effects| {
         let setup =
             OffscreenSetup::open_forward(EXTENT.0, EXTENT.1, move |device, queue, format| {
-                crcbl::screenshot::ssr_forward(device, queue, format, sky, effects)
+                build(device, queue, format, sky, effects)
             })
             .unwrap_or_else(|why| panic!("a GPU backend opens for the ssr scene: {why}"));
         let mut setup = Offscreen::guard(SUITE, setup);
@@ -1323,14 +1356,22 @@ fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
 
     let with_reflections = RenderEffects::DEFAULT_STACK;
     let without = RenderEffects::DEFAULT_STACK.difference(RenderEffects::REFLECTIONS);
-    let contribution = |sky| missed(&frame(sky, with_reflections)) - missed(&frame(sky, without));
+    let contribution = |build: Build, sky| {
+        missed(&frame(build, sky, with_reflections)) - missed(&frame(build, sky, without))
+    };
 
-    let unlit = contribution(crcbl::render::Sky::NONE);
-    let from_above = contribution(above);
-    let from_below = contribution(below);
+    let mirror: Build = crcbl::screenshot::ssr_forward;
+    let rough: Build = crcbl::screenshot::ssr_rough_floor_forward;
+    let unlit = contribution(mirror, crcbl::render::Sky::NONE);
+    let from_above = contribution(mirror, above);
+    let from_below = contribution(mirror, below);
+    let rough_unlit = contribution(rough, crcbl::render::Sky::NONE);
+    let rough_from_above = contribution(rough, above);
+    let rough_from_below = contribution(rough, below);
     eprintln!(
         "crcbl render e2e: ssr sky fallback — no sky {unlit:.1}, bright above {from_above:.1}, \
-         bright below {from_below:.1}"
+         bright below {from_below:.1}; rough floor: no sky {rough_unlit:.1}, bright above \
+         {rough_from_above:.1}, bright below {rough_from_below:.1}"
     );
 
     assert!(
@@ -1348,6 +1389,23 @@ fn a_missed_reflection_falls_back_to_the_sky_along_its_own_ray() {
         "a sky bright above added {from_above:.1} and the same sky turned upside down added \
          {from_below:.1}; these rays look up, so a fallback that read its direction would not \
          confuse the two"
+    );
+
+    // The rough floor: the same three skies, and the one that separates a lobe
+    // from a mirror is the sky lit below.
+    assert!(
+        rough_unlit.abs() <= SKY_UNTOUCHED,
+        "with no sky the reflection pass moved a missed ray off the rough floor by \
+         {rough_unlit:.1}, so a fully rough surface is compositing something that is not an \
+         environment"
+    );
+    assert!(
+        rough_from_below >= ROUGH_SKY_BELOW_FLOOR,
+        "a sky lit only below the horizon added {rough_from_below:.1} to a fully rough floor, \
+         against {from_below:.1} on the mirror one. The roughest lobe reaches across the \
+         horizon and the table's `W_opposite` says how far; a fallback that read the table at \
+         roughness zero, along the mirror direction alone, or not at all leaves this at the \
+         mirror's zero"
     );
 }
 

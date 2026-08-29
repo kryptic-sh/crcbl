@@ -491,8 +491,10 @@ mod tests {
         }
     }
 
-    /// `ssr.slang` spells this module's gradient a second time, because Slang
-    /// has no `#include` and the two sides cannot share a line.
+    /// `sky.slang` spells this module's gradient a second time, because Slang
+    /// has no `#include` and the two sides cannot share a line. (`ssr.slang`
+    /// used to as well; since 2026-08-29 it reads the sky through
+    /// `crate::sky_prefilter`'s table, whose own tests hold that spelling.)
     ///
     /// So the guard is a **numeric** one: parse the blend out of the shader and
     /// evaluate it against this module's own, rather than compare spellings.
@@ -505,10 +507,7 @@ mod tests {
         // Every shader source carrying a copy of this gradient. A pass that
         // copied `sky_radiance` and was not listed here is a copy this guard
         // does not hold, which is the state the guard exists to end.
-        for (name, source) in [
-            ("ssr.slang", include_str!("../shaders/ssr.slang")),
-            ("sky.slang", include_str!("../shaders/sky.slang")),
-        ] {
+        for (name, source) in [("sky.slang", include_str!("../shaders/sky.slang"))] {
             let body = source
                 .split_once("float3 sky_radiance(float3 direction)\n{")
                 .unwrap_or_else(|| panic!("{name} declares `sky_radiance`"))

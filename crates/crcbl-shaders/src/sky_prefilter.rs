@@ -119,6 +119,42 @@ pub const fn bytes() -> &'static [u8; PREFILTER_BYTES] {
     TABLE
 }
 
+/// Bytes one texel of [`texels`] occupies: `W_far` then `W_opposite`, each as
+/// 16-bit fixed point with its high byte first, in an `Rgba8Unorm` image.
+///
+/// Fixed point and not half precision, for [`crate::dfg::ALBEDO_TEXEL_BYTES`]'s
+/// reasons: a share in `[0, 1]` is finer at `1 / 65535` than binary16 is
+/// anywhere near one, and the split is integer arithmetic this crate can
+/// perform without a dependency.
+pub const PREFILTER_TEXEL_BYTES: usize = 4;
+
+/// The length of [`texels`], one [`PREFILTER_TEXEL_BYTES`] per texel of a
+/// [`PREFILTER_SIZE`]-square image.
+pub const PREFILTER_IMAGE_BYTES: usize = PREFILTER_SIZE * PREFILTER_SIZE * PREFILTER_TEXEL_BYTES;
+
+/// The committed table encoded for upload as an `Rgba8Unorm` image, in
+/// [`entry`]'s order — row-major, `roughness` slow and `|R.y|` fast.
+///
+/// `crate::dfg::albedo_texels`'s encoding with both channels kept, since the
+/// consumer wants the pair: `ssr.slang`'s `decode_sky_weights` is the read.
+#[must_use]
+pub fn texels() -> Vec<u8> {
+    let mut texels = Vec::with_capacity(PREFILTER_IMAGE_BYTES);
+    for roughness in 0..PREFILTER_SIZE {
+        for up in 0..PREFILTER_SIZE {
+            for weight in entry(up, roughness) {
+                // Clamped before quantising: the table is a Monte Carlo
+                // estimate and a share can land a rounding above one, which
+                // would wrap the high byte to zero.
+                let quantised = (weight.clamp(0.0, 1.0) * 65535.0).round() as u32;
+                texels.push((quantised >> 8) as u8);
+                texels.push((quantised & 0xff) as u8);
+            }
+        }
+    }
+    texels
+}
+
 /// The table sampled bilinearly at `(|R.y|, roughness)`, the way a shader's
 /// linear filter reads it, clamped at both edges rather than wrapped.
 ///
@@ -154,11 +190,12 @@ pub fn sample(up: f32, roughness: f32) -> [f32; 2] {
 /// gives way to the horizon's, which is what a rough metal facing the sky is
 /// supposed to show.
 ///
-/// **The same arithmetic the shader term will spell**, so the sum is written
-/// with the horizon's weight as `1 − W_far − W_opposite` rather than stored as
-/// a third channel: two channels are what the table holds, and a third that
-/// had to agree with the first two to the last bit would be one more thing to
-/// compare.
+/// **The same arithmetic `ssr.slang`'s `sky_prefiltered` spells**, so the sum
+/// is written with the horizon's weight as `1 − W_far − W_opposite` rather than
+/// stored as a third channel: two channels are what the table holds, and a
+/// third that had to agree with the first two to the last bit would be one
+/// more thing to compare. `the_shader_spells_the_prefiltered_sum` holds the
+/// two spellings together.
 #[must_use]
 pub fn prefiltered_radiance(sky: &SkyGradient, direction: [f32; 3], roughness: f32) -> [f32; 3] {
     let up = direction[1].clamp(-1.0, 1.0);
@@ -274,6 +311,87 @@ pub fn bake_bytes() -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::sky::smoothstep;
+
+    /// How far a texel's decoded weight may sit from the table entry it
+    /// encodes: half a fixed-point step, plus the `f32` rounding of the decode.
+    const TEXEL_STEP: f32 = 0.5 / 65535.0 + 1e-6;
+
+    /// Every texel decodes, through the shader's own arithmetic, to the entry
+    /// it was written from within half a fixed-point step — and the image is
+    /// exactly the size the upload will declare.
+    #[test]
+    fn the_texels_encode_the_committed_table_to_a_quantisation_step() {
+        let texels = texels();
+        assert_eq!(texels.len(), PREFILTER_IMAGE_BYTES);
+        let mut worst = 0.0f32;
+        for roughness in 0..PREFILTER_SIZE {
+            for up in 0..PREFILTER_SIZE {
+                let at = (roughness * PREFILTER_SIZE + up) * PREFILTER_TEXEL_BYTES;
+                let channel = |i: usize| f32::from(texels[at + i]) / 255.0;
+                let decoded = [
+                    crate::dfg::decode_albedo(channel(0), channel(1)),
+                    crate::dfg::decode_albedo(channel(2), channel(3)),
+                ];
+                let expected = entry(up, roughness);
+                for (got, want) in decoded.iter().zip(expected) {
+                    worst = worst.max((got - want).abs());
+                }
+            }
+        }
+        assert!(
+            worst <= TEXEL_STEP,
+            "a texel decodes {worst} from its entry; the encoding and `decode_albedo` disagree"
+        );
+        // Anti-vacuity: the two channels are not the same number, so a texel
+        // that swapped them would not have passed above by accident.
+        let [far, opposite] = entry(PREFILTER_SIZE / 2, PREFILTER_SIZE / 2);
+        assert!((far - opposite).abs() > TEXEL_STEP);
+    }
+
+    /// `ssr.slang` decodes a texel with the arithmetic [`crate::dfg::decode_albedo`]
+    /// transcribes, once per weight, and sums the bands the way
+    /// [`prefiltered_radiance`] does.
+    #[test]
+    fn the_shader_decodes_the_texels_this_module_writes() {
+        let source = include_str!("../shaders/ssr.slang");
+        for line in [
+            "return float2(texel.r * 65280.0 + texel.g * 255.0, texel.b * 65280.0 + texel.a * 255.0)",
+            "/ 65535.0;",
+        ] {
+            assert!(
+                source.contains(line),
+                "ssr.slang's `decode_sky_weights` no longer contains `{line}`"
+            );
+        }
+    }
+
+    /// The three lines of [`prefiltered_radiance`] that decide what the shader
+    /// computes rather than how it reads: the clamp, the pole selection on the
+    /// sign of `y`, and the horizon taking what the two weights leave.
+    #[test]
+    fn the_shader_spells_the_prefiltered_sum() {
+        let body = include_str!("../shaders/ssr.slang")
+            .split_once("float3 sky_prefiltered(float3 direction, float roughness)\n{")
+            .expect("ssr.slang declares `sky_prefiltered`")
+            .1
+            .split_once("\n}")
+            .expect("the function has a body")
+            .0;
+        for line in [
+            "float up = clamp(direction.y, -1.0, 1.0);",
+            "float2 weights = sky_prefilter_at(abs(up), roughness);",
+            "float3 far = up >= 0.0 ? camera.sky[0].rgb : camera.sky[2].rgb;",
+            "float3 opposite = up >= 0.0 ? camera.sky[2].rgb : camera.sky[0].rgb;",
+            "float horizon = 1.0 - weights.x - weights.y;",
+            "return camera.sky[1].rgb * horizon + far * weights.x + opposite * weights.y;",
+        ] {
+            assert!(
+                body.contains(line),
+                "ssr.slang's `sky_prefiltered` no longer contains `{line}`, so it and \
+                 `prefiltered_radiance` are summing different skies"
+            );
+        }
+    }
 
     /// How far a weight may sit outside its range, or a pair's sum past one,
     /// before it stops being a share of the lobe.

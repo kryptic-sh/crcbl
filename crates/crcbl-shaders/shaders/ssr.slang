@@ -127,9 +127,10 @@ struct SsrParams
     /// direction, and rebuilding that from four irradiance coefficients would
     /// blur a gradient this pass can evaluate exactly.
     ///
-    /// `crcbl_shaders::sky::SkyGradient` is the host side, `sky_radiance`
-    /// below is the mirror, and a zeroed sky adds nothing to the probe
-    /// environment a missed ray already had.
+    /// `crcbl_shaders::sky::SkyGradient` is the host side; `sky_prefiltered`
+    /// below weights these rows by `sky_prefilter`'s table at the surface's
+    /// roughness, and a zeroed sky adds nothing to the probe environment a
+    /// missed ray already had.
     ///
     /// **Last in the block**, so no member above it moves.
     float4 sky[3];
@@ -218,6 +219,18 @@ DepthTexture2D hiz_4;
 
 [[vk::binding(9, 0)]]
 DepthTexture2D hiz_5;
+
+/// The gradient sky convolved against the lobe, `crcbl_shaders::sky_prefilter`'s
+/// table as an `Rgba8Unorm` image: `rg` is `W_far` and `ba` is `W_opposite`,
+/// each a 16-bit fixed-point share with its high byte first, over
+/// `(|R.y|, roughness)`. **After the pyramid**, so Metal's declaration-order
+/// argument numbering stays aligned with the renderer layout.
+///
+/// Read with four `Load`s and filtered here, on `mesh.slang`'s
+/// `specular_albedo_at` terms: a hardware filter is not blessable across four
+/// rasterisers, and the table is baked on texel centres.
+[[vk::binding(10, 0)]]
+Texture2D<float4> sky_prefilter;
 
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` declares under this name.
@@ -574,25 +587,70 @@ static const float PROBE_TRANSFER_L1 = 2.0943951023931954923;
 /// direction. The stored coefficients are irradiance: undo the clamped-cosine
 /// transfer per band before evaluating them. A zero volume addresses row zero of
 /// the zeroed table and returns exactly zero.
-/// The gradient sky's radiance along `direction`.
+/// One texel of `sky_prefilter` as the two weights it encodes.
 ///
-/// `crcbl_shaders::sky::SkyGradient::radiance`, and the one place in this file
-/// that spells arithmetic another crate also spells — `crcbl_shaders::sky`'s
-/// `the_shader_spells_the_same_gradient` is what keeps the two from drifting,
-/// since Slang has no `#include` for either side to share.
+/// Each channel pair arrives as the stored bytes over 255, a conversion every
+/// backend defines exactly; multiplying back by 255 recovers the bytes, and
+/// `high * 256 + low` over 65535 is the fixed point the cook wrote —
+/// `crcbl_shaders::dfg::decode_albedo`'s arithmetic, once per weight.
+/// `crcbl_shaders::sky_prefilter`'s
+/// `the_texels_encode_the_committed_table_to_a_quantisation_step` holds the
+/// encoding to it and `the_shader_decodes_the_texels_this_module_writes`
+/// holds this spelling.
+float2 decode_sky_weights(float4 texel)
+{
+    return float2(texel.r * 65280.0 + texel.g * 255.0, texel.b * 65280.0 + texel.a * 255.0)
+         / 65535.0;
+}
+
+/// `W_far` and `W_opposite` at `(up, roughness)`, bilinear over the four texels
+/// around the point with the addressing a clamped sampler would use — the
+/// table is baked on texel centres, so the axis maps to `value * size - 0.5`
+/// and both ends clamp to the edge texel. `crcbl_shaders::sky_prefilter::sample`
+/// is the same filter on the CPU, and `mesh.slang`'s `specular_albedo_at` the
+/// same shape over the other table.
+float2 sky_prefilter_at(float up, float roughness)
+{
+    uint width;
+    uint height;
+    sky_prefilter.GetDimensions(width, height);
+    float2 extent = float2(float(width), float(height));
+    float2 scaled = float2(saturate(up), saturate(roughness)) * extent - 0.5;
+    float2 low = clamp(floor(scaled), float2(0.0, 0.0), extent - 1.0);
+    float2 high = min(low + 1.0, extent - 1.0);
+    float2 weight = clamp(scaled - low, 0.0, 1.0);
+
+    int2 lo = int2(low);
+    int2 hi = int2(high);
+    float2 top = lerp(decode_sky_weights(sky_prefilter.Load(int3(lo.x, lo.y, 0))),
+                      decode_sky_weights(sky_prefilter.Load(int3(hi.x, lo.y, 0))),
+                      weight.x);
+    float2 bottom = lerp(decode_sky_weights(sky_prefilter.Load(int3(lo.x, hi.y, 0))),
+                         decode_sky_weights(sky_prefilter.Load(int3(hi.x, hi.y, 0))),
+                         weight.x);
+    return lerp(top, bottom, weight.y);
+}
+
+/// The gradient sky as a lobe of `roughness` about `direction` sees it:
+/// `crcbl_shaders::sky_prefilter::prefiltered_radiance`, spelled again because
+/// Slang has no `#include` for either side to share, and
+/// `the_shader_spells_the_prefiltered_sum` is what keeps the two together.
 ///
-/// A smoothstep and not a `pow`: `docs/plan/44-lighting.md`'s rule forbids a
-/// transcendental reaching a colour, and a sky is nothing but colour. The blend
-/// is written `horizon * (1 - t) + far * t` rather than `horizon + (far -
-/// horizon) * t` so that both ends return their band exactly, which is what
-/// makes a uniform sky one radiance everywhere and a black sky exactly zero.
-float3 sky_radiance(float3 direction)
+/// The gradient is linear in its three colours, so the convolution is the
+/// three bands weighted: the pole on `direction`'s side of the horizon takes
+/// `W_far`, the opposite pole `W_opposite` and the horizon the rest. A mirror
+/// reads the gradient itself — the table's first column is the sky's own
+/// smoothstep — and the roughest lobe sees the horizon from every direction.
+/// No `pow` anywhere: `docs/plan/44-lighting.md`'s rule forbids a
+/// transcendental reaching a colour, and the lobe was integrated at the cook.
+float3 sky_prefiltered(float3 direction, float roughness)
 {
     float up = clamp(direction.y, -1.0, 1.0);
+    float2 weights = sky_prefilter_at(abs(up), roughness);
     float3 far = up >= 0.0 ? camera.sky[0].rgb : camera.sky[2].rgb;
-    float u = abs(up);
-    float blend = u * u * (3.0 - 2.0 * u);
-    return camera.sky[1].rgb * (1.0 - blend) + far * blend;
+    float3 opposite = up >= 0.0 ? camera.sky[2].rgb : camera.sky[0].rgb;
+    float horizon = 1.0 - weights.x - weights.y;
+    return camera.sky[1].rgb * horizon + far * weights.x + opposite * weights.y;
 }
 
 float3 probe_environment(float3 world_position, float3 direction)
@@ -694,8 +752,14 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // leaves the probes alone, which is what made each of them land switched
     // off. `docs/plan/43-render-standards.md` §8 is why the sky is here at all:
     // the environment a missed ray falls back to is the term a sky provides.
+    //
+    // The sky at the surface's roughness, not along the one mirror direction:
+    // a rough lobe gathers the gradient from a cone about the reflection, and
+    // `docs/plan/44-lighting.md`'s rung 3 cooked that gather into
+    // `sky_prefilter`. This is the split-sum's prefiltered half; the `DFG`
+    // pair that scales it is still the Schlick term below.
     float3 environment = probe_environment(world_position, reflection_direction)
-                       + sky_radiance(reflection_direction);
+                       + sky_prefiltered(reflection_direction, surface.a);
 
     // Schlick, and it is `mesh.slang`'s expansion rather than a `pow`: the same
     // fragment evaluated the same Fresnel term for its lights, and a reflection

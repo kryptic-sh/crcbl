@@ -3977,6 +3977,7 @@ impl ForwardRenderer {
         // `Rollback::run` releases in the reverse order of construction.
         rollback.ssr = Some(Ssr::new(
             device,
+            queue,
             instance_buffers.len(),
             Self::build_fullscreen,
         )?);
