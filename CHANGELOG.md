@@ -16,6 +16,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Point and spot lights glow in the froxel medium.**
+  `docs/plan/51-volumetrics.md`'s rung 2: `volumetric.slang`'s scatter pass
+  binds the frame's light rows and the froxel grid `light_cluster.slang` filled
+  — the same buffers `mesh.slang` shades with — and sums every punctual light in
+  a froxel's own list at its slice midpoint, through `mesh.slang`'s
+  `punctual_falloff` and `spot_cone` and the medium's phase function.
+  `crcbl_render::Fog` gained `light_scattering`, the coefficient that scales the
+  sum; it defaults to zero, so a scene that does not set it renders what it did.
+  The froxel's second buffer widened from one `float` to a `float4`
+  (`crcbl_shaders::volumetric::LIGHTING_STRIDE`, formerly `VISIBILITY_STRIDE`;
+  `FroxelBuffers::lighting`, formerly `visibility`) so the composite's partial
+  slice adds the same glow. Lamps glow unoccluded for now — a light's shadow
+  tile is not consulted in the medium — and a light smaller than the slice it
+  sits in can be missed at the midpoint.
 - **A missed reflection sees the sky through the prefilter table.** `ssr.slang`
   binds `crcbl_shaders::sky_prefilter`'s table — `sky_prefilter::texels`, the
   two weights as 16-bit fixed point in an `Rgba8Unorm` image
@@ -129,9 +143,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   rendered claim about the froxel path anywhere: two arms in the same medium
   differing only in `Fog::sun_scattering`, asserting that a block whose column
   is sunlit air gains and a block whose column the cascades shut out does not
-  move. Replacing the scatter pass's own `visibilities[froxel]` with `1.0` — a
-  sabotage `docs/backlog.md` records as leaving all 28 `mesh_e2e` tests green to
-  the digit — now reddens it.
+  move. Replacing the scatter pass's own visibility lane (then a buffer of its
+  own, `visibilities[froxel]`) with `1.0` — a sabotage `docs/backlog.md` records
+  as leaving all 28 `mesh_e2e` tests green to the digit — now reddens it.
 
 - **A game can hide its cursor, or name a shape for it.** `HostedGame::cursor`
   answers `Option<CursorIcon>` — `None` hides — and the loop reconciles it

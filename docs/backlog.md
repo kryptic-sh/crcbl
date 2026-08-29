@@ -621,14 +621,46 @@ were scratch and are not in the tree.
 
 ### The froxel column casts its shaft and no demo turns it on (2026-08-28)
 
-Rung 1 of `docs/plan/51-volumetrics.md` is closed: `crcbl_render::volumetric`'s
-three passes are switched by `RenderEffects::VOLUMETRIC_FOG`, proved against the
-closed form on radv, the sun scatters into them through a Henyey-Greenstein lobe
-and the cascades occlude it per froxel. Rungs 2 to 4 — punctual lights, a 3D
-target with temporal reprojection, a density field — are argued there and none
-is scheduled.
+Rungs 1 and 2 of `docs/plan/51-volumetrics.md` are closed:
+`crcbl_render::volumetric`'s three passes are switched by
+`RenderEffects::VOLUMETRIC_FOG`, proved against the closed form on radv, the sun
+scatters into them through a Henyey-Greenstein lobe, the cascades occlude it per
+froxel, and since 2026-08-29 every point and spot light in a froxel's cluster
+list glows in it, scaled by `Fog::light_scattering`. Rungs 3 and 4 — a 3D target
+with temporal reprojection, a density field — are argued there and neither is
+scheduled.
 
 These belong here rather than there, because they are gaps rather than plans:
+
+- **A lamp glows through a wall.** `volumetric_punctual` in `volumetric.slang`
+  reaches every froxel inside a light's radius and consults nothing: the
+  `shadow_tile` its row names is read by `mesh.slang`'s `spot_visibility` and
+  `point_visibility` for the surfaces and by nothing for the air, so a spot
+  behind a door glows in the room it does not light. The plan's decision on the
+  light loop names the shadow tile as the third thing the copy has to carry;
+  what it takes is those two lookups copied into the scatter pass on
+  `tile_pcf`'s terms — the atlas and its comparison sampler are already bound
+  there — with the froxel's midpoint as the receiver, no bias, and the guard
+  widened to name them. Verified only that the row's field is unread there.
+
+- **A small light in a far slice is missed at the midpoint.** The glow is
+  evaluated once per froxel, where the sun's visibility is, and the froxel's
+  slice is long at the far end of the exponential split: a light whose radius is
+  shorter than its slice contributes nothing when the midpoint is outside it,
+  though the clustering pass listed it. Rung 3's jitter along the slice — and
+  the history it is reprojected against — is what the plan names as the fix;
+  `column_lights` in `crates/crcbl/tests/mesh_e2e/froxels.rs` keeps both fixture
+  lights in the near half for exactly this reason. Not measured: how far out a
+  lamp of a given radius starts to flicker between slices as the camera moves.
+
+- **`apps/lantern`'s air keeps `light_scattering` at zero.** The room has lamps
+  and the `AIR` medium that
+  `the_air_scatters_the_sun_where_the_cascades_let_it_through` draws, so a
+  coefficient there would put a glow around every one of them — and move both
+  goldens and the near-zero acceptance claims the bullet below already counts
+  against a medium. Same decision as the bullet below, and the same route: a
+  claim set restated against a vacuum arm, or a demo whose charter is the
+  medium.
 
 - **No demo you can run draws a medium.** `apps/lantern` now asks for the effect
   — `room::View::Main`'s stack carries `VOLUMETRIC_FOG`, so every backend that
@@ -684,7 +716,10 @@ These belong here rather than there, because they are gaps rather than plans:
   the buffers the two **compute** passes wrote, and the partial slice is work
   the composite does per pixel and stores nowhere. What would catch it is a
   frame whose nearest surface is inside the first slice, so the tail the
-  composite integrates is most of what the pixel sees.
+  composite integrates is most of what the pixel sees. Since rung 2 the same
+  read carries the froxel's punctual glow in `lighting[froxel].rgb`, and the
+  same text guard is all that stands between the composite and a lamp's glow
+  ending at every slice boundary in front of a surface.
 
   **And that frame needs the depth attachment on the host, which nothing can
   reach.** The composite takes each pixel's view depth out of `scene_depth`, so
@@ -701,7 +736,7 @@ These belong here rather than there, because they are gaps rather than plans:
   frame's depth image, or a surface at a depth the host can state exactly — a
   slab perpendicular to the camera's forward axis, whose every covered pixel
   shares one view depth. Meanwhile `crcbl_shaders::volumetric`'s
-  `the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility`
+  `the_composite_scatters_its_partial_slice_through_the_froxel_s_lighting`
   remains a text guard worth exactly what it says: the read is written down, not
   that it is right.
 

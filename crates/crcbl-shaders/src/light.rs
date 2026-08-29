@@ -426,6 +426,7 @@ mod tests {
 
     const SOURCE: &str = include_str!("../shaders/light_cluster.slang");
     const MESH_SOURCE: &str = include_str!("../shaders/mesh.slang");
+    const VOLUMETRIC_SOURCE: &str = include_str!("../shaders/volumetric.slang");
 
     #[test]
     fn the_workgroup_size_matches_the_numthreads_light_cluster_slang_declares() {
@@ -443,18 +444,33 @@ mod tests {
     /// picture, not an error.
     #[test]
     fn the_shaders_declare_the_grid_constants_this_module_names() {
+        // The list's shape, in every shader that walks it: the two that shade
+        // with it and the one that fills it. The overflow word is the filler's
+        // and the fragment stage's alone — `volumetric.slang` reads the count
+        // and never the word.
         for (name, value) in [
             ("CLUSTER_LIGHT_CAPACITY", CLUSTER_LIGHT_CAPACITY),
             ("CLUSTER_STRIDE", CLUSTER_STRIDE),
-            ("CLUSTER_OVERFLOW_WORD", CLUSTER_OVERFLOW_WORD),
         ] {
             let declaration = format!("static const uint {name} = {value};");
-            for (file, source) in [("light_cluster.slang", SOURCE), ("mesh.slang", MESH_SOURCE)] {
+            for (file, source) in [
+                ("light_cluster.slang", SOURCE),
+                ("mesh.slang", MESH_SOURCE),
+                ("volumetric.slang", VOLUMETRIC_SOURCE),
+            ] {
                 assert!(
                     source.contains(&declaration),
                     "{file} must declare `{declaration}`"
                 );
             }
+        }
+        let overflow =
+            format!("static const uint CLUSTER_OVERFLOW_WORD = {CLUSTER_OVERFLOW_WORD};");
+        for (file, source) in [("light_cluster.slang", SOURCE), ("mesh.slang", MESH_SOURCE)] {
+            assert!(
+                source.contains(&overflow),
+                "{file} must declare `{overflow}`"
+            );
         }
         for (file, source) in [("light_cluster.slang", SOURCE), ("mesh.slang", MESH_SOURCE)] {
             let declaration =
@@ -470,7 +486,11 @@ mod tests {
             ("KIND_SPOT", KIND_SPOT),
         ] {
             let declaration = format!("static const uint {name} = {value};");
-            for (file, source) in [("light_cluster.slang", SOURCE), ("mesh.slang", MESH_SOURCE)] {
+            for (file, source) in [
+                ("light_cluster.slang", SOURCE),
+                ("mesh.slang", MESH_SOURCE),
+                ("volumetric.slang", VOLUMETRIC_SOURCE),
+            ] {
                 assert!(
                     source.contains(&declaration),
                     "{file} must declare `{declaration}`"

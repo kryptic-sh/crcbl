@@ -4008,6 +4008,7 @@ impl ForwardRenderer {
             crate::light_grid::FROXEL_CAPACITY,
             shadow_atlas_view,
             shadow_sampler,
+            lights,
             Self::build_fullscreen,
         )?);
 
@@ -6568,6 +6569,7 @@ impl ForwardRenderer {
                         composited,
                         shadow_atlas,
                     },
+                    light_grid,
                 );
                 composited
             }

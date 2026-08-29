@@ -62,6 +62,32 @@ stands in, which reads as a lit rim along every shaft.
 The answer leaves the pass in a **second buffer**, one `float` per froxel, and
 that is the design decision this rung turned on — see below.
 
+**Built.** The lamps in the medium — rung 2, 2026-08-29. `scatterMain` walks
+each froxel's own cluster list — the one `light_cluster.slang` cut for the mesh
+pass, bound to the scatter layout beside the light rows — at the slice's
+midpoint, and sums every point and spot light in it through `mesh.slang`'s
+`punctual_falloff` and `spot_cone` and the medium's phase function against the
+slab's own view direction. `crcbl_render::Fog` gained `light_scattering`, the
+coefficient the sum is scaled by, carried in the params block's
+`sun_radiance.w`; it defaults to zero, so the term is additive over rung 1
+exactly as the sun was, and no frame in the tree moved. The sum leaves the pass
+in the second buffer, which widened from a `float` to a `float4` — the glow in
+`rgb`, the sun's visibility in `w` — so the composite's partial slice adds the
+same glow the froxel around it got without walking the list per pixel;
+`crcbl_shaders::volumetric::LIGHTING_STRIDE` carries the argument.
+
+The copy is guarded as the decision below says it has to be:
+`both_shaders_spell_the_same_punctual_light` holds `struct GpuLight`,
+`punctual_falloff`, `spot_cone` and the list walk's load-bearing lines to
+`mesh.slang`'s, and `crcbl_shaders::light`'s constants guard now names
+`volumetric.slang` beside the two files that already carried the kinds and the
+stride. What the rung left: a lamp glows **unoccluded** — the shadow tile its
+row names is `mesh.slang`'s to read and not the scatter pass's yet — and a light
+whose radius is shorter than the slice it sits in is missed when the midpoint is
+outside it, which the far slices' length makes ordinary for a small light far
+away. Rung 3's jitter along the slice is what recovers the second;
+`docs/backlog.md` carries both.
+
 ## The decisions
 
 ### The scattering target is a storage buffer on the existing froxel grid, not a 3D texture
@@ -160,6 +186,13 @@ is the sun alone: the cascaded directional shadow is one lookup shared by every
 froxel in a column, the punctual set is where the copy gets wide, and a shaft of
 sunlight through a window is the thing anyone means by volumetrics.
 
+Rung 2 made the copy, and the guard is `crcbl_shaders::volumetric`'s
+`both_shaders_spell_the_same_punctual_light`: the row struct and the two
+functions compared as bodies with comments dropped, and the walk's own lines —
+the count clamp, the row fetch, the two `reach` multiplies — compared as text,
+because the walk is inline in both files rather than a function either could
+name.
+
 ### The froxel's visibility leaves the scatter pass in a buffer of its own
 
 `volumetric_composite.slang` integrates the last partial slice along the pixel's
@@ -179,8 +212,10 @@ to get it there, and only one of them is cheap:
   touch: a fraction of the column buffer beside it, one extra storage binding on
   each of the two layouts, and the cascade walk exists in exactly one shader.
 
-The third. `crcbl_shaders::volumetric::VISIBILITY_STRIDE` carries the argument
-where the size is defined.
+The third. `crcbl_shaders::volumetric::LIGHTING_STRIDE` carries the argument
+where the size is defined — and since rung 2 the punctual glow rides the same
+row, for the same reason: the composite's partial slice owes its froxel's whole
+source, and the list walk is the scatter pass's to make once.
 
 ## The rungs
 
@@ -189,7 +224,7 @@ where the size is defined.
 | **1a — the column** _(built)_                         | The frame a shaft will be drawn into, proved against the closed form             | The froxel buffer, a scatter pass, an integrate pass and a composite pass                                       |
 | **1b-i — the sun in the medium** _(built)_            | The sun's glow through the air, and the forward lobe that makes it a direction   | The phase function copied into both shaders, and the sun's direction in the params block                        |
 | **1b-ii — the shaft** _(built)_                       | The dark between the shafts: the sun occluded per froxel, not per pixel          | The cascade lookup copied once into `scatterMain`, a visibility buffer, and the drift guard over the copy       |
-| **2 — punctual lights**                               | Glow around every point and spot light, cones made visible                       | The froxel light list in the scatter pass, and the attenuation and cone copy that goes with it                  |
+| **2 — punctual lights** _(built)_                     | Glow around every point and spot light, cones made visible                       | The froxel light list in the scatter pass, and the attenuation and cone copy that goes with it                  |
 | **3 — a 3D target and temporal reprojection**         | The filtered lookup, and enough samples per froxel to stop a shaft from crawling | A volume in the transient pool, the engine's first 3D image on four backends, and a history buffer to reproject |
 | **4 — a density field rather than a constant medium** | Fog banks, ground mist, a medium that is somewhere rather than everywhere        | A source for the field, which is a content question and not only a rendering one                                |
 
@@ -229,9 +264,9 @@ What the passes owe on top of that is the part the host cannot see:
 - **The buffer holds what the host says it should.** _Built_ —
   `crates/crcbl/tests/mesh_e2e/froxels.rs`'s
   `the_froxel_column_is_the_scan_of_the_slabs_the_medium_scatters` copies the
-  parameter block, the column and the visibilities back, rebuilds every slab out
-  of the block the two shaders were handed, scans it on the host and compares
-  the result froxel by froxel. The frame-level equality above is the cheaper
+  parameter block, the column and the lighting back, rebuilds every slab out of
+  the block the two shaders were handed, scans it on the host and compares the
+  result froxel by froxel. The frame-level equality above is the cheaper
   statement of part of the same thing; this is what separates a wrong scatter
   from a wrong scan, and what names the froxel rather than the frame. Two
   mistakes put into `integrateMain` in turn — the scan made inclusive, and its
@@ -281,3 +316,24 @@ What the passes owe on top of that is the part the host cannot see:
 - **Switching volumetrics on does not darken an unlit frame.** The two-media
   rule above, stated as a test: a scene with no lights and the same fog rows
   renders the same whichever path carries the transmittance.
+- **The glow lanes hold the froxel's list walked at its midpoint.** _Built_ —
+  `crates/crcbl/tests/mesh_e2e/froxels.rs`'s
+  `the_glow_in_the_buffer_is_the_froxel_s_list_walked_at_its_midpoint` puts a
+  point light and a spot light in the column's medium, walks **every** light in
+  the scene from each slab's midpoint on the host — the rows the renderer
+  uploads, through `mesh.slang`'s falloff and cone and the medium's phase — and
+  demands the buffer's `rgb` froxel by froxel. Every light rather than the
+  froxel's list, so a light the clustering pass left out of a froxel it reaches
+  fails here too. Non-vacuous by construction: some froxels glow and some are
+  exactly dark, and the spot's radius holds froxels both in its beam and out of
+  it. Dropping the cone reddened it at froxel 96; dropping the falloff window
+  reddened it and the frame test below.
+- **A lamp in the medium glows, and only where the lamp is.** _Built_ —
+  `a_lamp_in_the_medium_glows_and_only_where_the_lamp_is` draws the fixture in a
+  black, sunless medium with one green lamp ahead of the eye, at
+  `light_scattering` zero and then two, and asks three things of the background:
+  no texel darkens, the brightest lifts by a measured amount, and three quarters
+  of them — the columns the lamp's radius never reaches — do not move byte for
+  byte. The last is the falloff window's claim, and a falloff without it lights
+  the whole frame a little: 4096 of 39110 texels unmoved where the fixture
+  measures 33713.

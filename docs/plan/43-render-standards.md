@@ -324,10 +324,11 @@ caller asks; and the froxel column that carries the sun's shaft, behind
 `RenderEffects::VOLUMETRIC_FOG` — three passes over the clustering pass's own
 subdivision, proved against the closed form, with the sun scattering into it
 through a Henyey-Greenstein lobe and occluded per froxel by the same cascades
-the surfaces are shadowed by. Rung 1 of [51-volumetrics.md](51-volumetrics.md)
-is closed. What is open above it is punctual lights in the medium, a 3D target
-with temporal reprojection, and a density field — none scheduled, and each
-argued there.
+the surfaces are shadowed by, and every point and spot light glowing in it
+through the froxel's own cluster list since 2026-08-29. Rungs 1 and 2 of
+[51-volumetrics.md](51-volumetrics.md) are closed. What is open above them is a
+3D target with temporal reprojection, and a density field — neither scheduled,
+and each argued there.
 
 **Why this is the cheapest large win on the list.** The froxel grid volumetric
 fog wants is the froxel grid `light_cluster.slang` **already builds** — same

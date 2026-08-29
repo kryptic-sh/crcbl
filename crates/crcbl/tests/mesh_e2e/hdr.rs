@@ -19,8 +19,8 @@ use crate::mesh_scene::{
     MESH_EXTENT, mesh_camera, place_cube, place_cube_at, render_mesh, render_mesh_lit,
 };
 use crcbl::render::{
-    DirectionalLight, EffectOverride, EffectRequest, Fog, ForwardRenderer, Projection,
-    RenderEffects, Sky, TransientPool,
+    DirectionalLight, EffectOverride, EffectRequest, Fog, ForwardRenderer, Light, PointLight,
+    Projection, RenderEffects, Sky, TransientPool,
 };
 use crcbl_shaders::tonemap::TonemapCurve;
 
@@ -944,6 +944,155 @@ fn sun_scattered_cube_hdr(
     pool.destroy(device);
     headless.finish();
     HdrTarget(hdr)
+}
+
+/// The fixture cube in a medium with a point light hanging in it, through the
+/// froxel path, at the coefficient the caller says.
+///
+/// The medium is black and sunless — `color` zero, `sun_scattering` zero — so
+/// the only radiance a background column can carry is what the lamp puts into
+/// it; the lamp is green so that channel is the lamp's alone. It hangs a little
+/// ahead of the eye and to its right, with a radius short enough that the
+/// columns on the frame's far side never come within it: those are the texels
+/// the glow must leave byte for byte.
+fn lamplit_cube_hdr(light_scattering: f32) -> HdrTarget {
+    let headless = Headless::open_for_mesh();
+    let mut pool = TransientPool::new();
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::ANTIALIASING, Some(false))
+            .force(RenderEffects::REFLECTIONS, Some(false))
+            .force(RenderEffects::VOLUMETRIC_FOG, Some(true)),
+        ..EffectRequest::default()
+    });
+    renderer.set_fog(Fog {
+        density: SUN_DENSITY,
+        light_scattering,
+        ..Fog::NONE
+    });
+    let camera = mesh_camera(Projection::default());
+    let forward = (camera.target - camera.eye).normalize();
+    let right = forward.cross(camera.up).normalize();
+    renderer.set_lights(&[Light::Point(PointLight {
+        position: camera.eye + forward * LAMP_AHEAD + right * LAMP_ASIDE,
+        radius: LAMP_RADIUS,
+        color: crcbl::math::Vec3::new(0.0, 4.0, 0.0),
+    })]);
+    place_cube(&mut renderer);
+    let mut hdr = Vec::new();
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera, Some(&mut hdr));
+    let device = headless.device.as_ref();
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    HdrTarget(hdr)
+}
+
+/// How far ahead of the eye [`lamplit_cube_hdr`]'s lamp hangs, along the view
+/// axis.
+///
+/// Swept rather than chosen: at `1.4` the lamp's disc covers half the
+/// background — 19207 of 39110 texels unmoved on radv — and at `2.0` it covers
+/// a seventh, which is what makes the unmoved majority below a real claim
+/// while the lamp still sits a unit clear of the cube.
+const LAMP_AHEAD: f32 = 2.0;
+
+/// And how far to the eye's right, so the glow is on one side of the frame and
+/// the other side is its control.
+const LAMP_ASIDE: f32 = 0.35;
+
+/// The lamp's radius: the hard bound on where a column can glow.
+const LAMP_RADIUS: f32 = 0.5;
+
+/// The least a background texel must brighten, at the peak of the glow, in
+/// linear green.
+///
+/// **Measured, not chosen.** The fixture's lamp lifts its brightest background
+/// texel by 0.0450 on radv and on lavapipe alike — a background column is
+/// opaque at [`SUN_DENSITY`], so the number is the scattering source and not a
+/// fraction of it. This sits at under half of that and three orders above
+/// `Rgba16Float`'s resolution at zero.
+const LAMP_GLOW_FLOOR: f32 = 0.02;
+
+/// **A lamp in the medium glows, and only where the lamp is.**
+///
+/// `docs/plan/51-volumetrics.md`'s rung 2 seen from the frame: the same scene
+/// with the medium's punctual coefficient at zero and at a value, so the only
+/// difference between the two frames is whether the froxel column reads the
+/// froxel's light list. Three claims, and each rules out a different way of
+/// being wrong:
+///
+/// * **No background texel is darker with the lamp scattering.** The glow is a
+///   term added to the scattering source; one that multiplied, or reached the
+///   transmittance, darkens somewhere.
+/// * **The brightest background texel brightens meaningfully.** A list never
+///   bound, a coefficient never carried, a kind test that skipped every row —
+///   each draws the frame the fixture had and fails only this.
+/// * **Most of the background does not move at all.** The lamp's radius is a
+///   hard bound and the columns on the frame's far side never come inside it,
+///   so their glow is exactly zero — byte for byte, not nearly. A falloff
+///   without the window, or a light evaluated everywhere rather than through
+///   the list, lights the whole frame a little and fails this. Three quarters
+///   is the bar; the fixture measures 33713 of 39110 on both drivers.
+///
+/// The mesh's own texels are excluded because the lamp lights the cube through
+/// `mesh.slang` in both frames, and the medium in front of a surface is the
+/// composite's partial slice, which
+/// `crates/crcbl/tests/mesh_e2e/froxels.rs` says why nothing here reaches.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_lamp_in_the_medium_glows_and_only_where_the_lamp_is() {
+    let dark = lamplit_cube_hdr(0.0);
+    let glowing = lamplit_cube_hdr(2.0);
+
+    let background = background_texels();
+    let mut still = 0usize;
+    let mut peak = 0.0f32;
+    let mut peak_at = (0u32, 0u32);
+    for (x, y) in &background {
+        let before = dark.pixel(*x, *y);
+        let after = glowing.pixel(*x, *y);
+        for channel in 0..3 {
+            assert!(
+                after[channel] >= before[channel],
+                "background texel ({x}, {y}) channel {channel} fell from {} to {} with the lamp \
+                 scattering, so the glow is not a term added to the source",
+                before[channel],
+                after[channel]
+            );
+        }
+        let lift = after[1] - before[1];
+        if before == after {
+            still += 1;
+        }
+        if lift > peak {
+            peak = lift;
+            peak_at = (*x, *y);
+        }
+    }
+
+    eprintln!(
+        "{}: lamp glow — {} background texel(s), {still} unmoved, peak lift {peak:.4} at {:?}",
+        crate::SUITE,
+        background.len(),
+        peak_at
+    );
+
+    assert!(
+        peak >= LAMP_GLOW_FLOOR,
+        "the lamp lifted its brightest background texel by only {peak}, under \
+         {LAMP_GLOW_FLOOR}: the column is not reading the froxel's light list"
+    );
+    assert!(
+        still * 4 >= background.len() * 3,
+        "only {still} of {} background texels are byte for byte unmoved, so the lamp is \
+         reaching columns its radius does not",
+        background.len()
+    );
 }
 
 /// Which texels the mesh does not cover, taken off a frame with no medium in it

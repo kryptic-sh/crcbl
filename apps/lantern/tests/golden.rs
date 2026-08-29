@@ -425,6 +425,7 @@ const AIR: Fog = Fog {
     reference_height: 0.0,
     color: Vec3::new(0.10, 0.12, 0.16),
     sun_scattering: 1.0,
+    light_scattering: 0.0,
     anisotropy: 0.0,
 };
 
@@ -1313,9 +1314,9 @@ const SHAFT_LIFT: f32 = 1.05;
 ///   it gains cannot be a change in how that surface is lit.
 /// * The **control** block is [`room::TINTED_PLASTER`], high on the back wall
 ///   beyond the window's throw. Its whole column is out of the sun, so a scatter
-///   pass that ignored `visibilities[froxel]` — the sabotage `docs/backlog.md`
-///   records as leaving all 28 `mesh_e2e` tests green to the digit — lights it
-///   too. Measured here at exactly 0.00%.
+///   pass that ignored the visibility lane of `lighting[froxel]` — the
+///   sabotage `docs/backlog.md` records as leaving all 28 `mesh_e2e` tests
+///   green to the digit — lights it too. Measured here at exactly 0.00%.
 ///
 /// Nothing is blessed: the room this draws is not the room this suite ships, and
 /// a golden of it would be a second picture to keep in step for no claim the

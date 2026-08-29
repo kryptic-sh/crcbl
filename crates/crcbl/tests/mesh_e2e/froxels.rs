@@ -29,13 +29,21 @@
 //! # What is modelled and what is read
 //!
 //! Everything the scatter pass computes is rebuilt here **except the shadow
-//! lookup**, which is read out of the visibility buffer that pass writes beside
+//! lookup**, which is read out of the lighting buffer that pass writes beside
 //! the column. That is not a gap: the atlas walk is `mesh.slang`'s, letter for
 //! letter, and `crcbl_shaders::volumetric`'s `both_shaders_spell_the_same_atlas_walk`
 //! is what holds the two copies together. What this module needs from it is a
 //! number per froxel, and the buffer is where the composite reads that number
 //! too — see
-//! [`VISIBILITY_STRIDE`](crcbl::shaders::volumetric::VISIBILITY_STRIDE).
+//! [`LIGHTING_STRIDE`](crcbl::shaders::volumetric::LIGHTING_STRIDE).
+//!
+//! The other three lanes of that buffer — what the froxel's punctual lights
+//! scatter into it — are **not** read back into the model but rebuilt from the
+//! fixture's own two lights and compared, in
+//! [`the_glow_in_the_buffer_is_the_froxel_s_list_walked_at_its_midpoint`]:
+//! the cluster list is a GPU decision too, and a light that the clustering pass
+//! left out of a froxel it reaches shows up here as a slab the host lit and the
+//! shader did not.
 //!
 //! The parameter block is **read back** rather than derived a second time. A
 //! model built from the host's own camera, grid and cascades would agree with a
@@ -51,13 +59,13 @@ use crcbl::hal::{
 };
 use crcbl::math::{Mat4, Vec3, Vec4};
 use crcbl::render::{
-    DirectionalLight, EffectOverride, EffectRequest, Fog, ForwardRenderer, FroxelBuffers,
-    Projection, RenderEffects, TransientPool,
+    DirectionalLight, EffectOverride, EffectRequest, Fog, ForwardRenderer, FroxelBuffers, Light,
+    PointLight, Projection, RenderEffects, SpotLight, TransientPool,
 };
 use crcbl::shaders::fog::{exp_neg, optical_depth};
-use crcbl::shaders::light::{CLUSTER_FAR, CLUSTER_NEAR, SLICE_RATIO};
+use crcbl::shaders::light::{CLUSTER_FAR, CLUSTER_NEAR, KIND_SPOT, SLICE_RATIO};
 use crcbl::shaders::volumetric::{
-    FROXEL_STRIDE, PARAMS_SIZE, VISIBILITY_STRIDE, VolumetricParams, phase,
+    FROXEL_STRIDE, LIGHTING_STRIDE, PARAMS_SIZE, VolumetricParams, phase,
 };
 
 /// The medium this module reads the column under.
@@ -81,14 +89,45 @@ use crcbl::shaders::volumetric::{
 /// * **The sun is scattered**, so the visibility read out of the second buffer
 ///   is load-bearing: at `sun_scattering = 0` the whole sun term is zero and a
 ///   visibility of anything at all gives the same column.
+/// * **And so are the lamps**, for the same reason: at `light_scattering = 0`
+///   the glow lanes are zero whatever the list walk did.
 const COLUMN_FOG: Fog = Fog {
     density: 0.15,
     falloff: 6.0,
     reference_height: -1.0,
     color: Vec3::new(0.7, 1.3, 2.1),
     sun_scattering: 4.0,
+    light_scattering: 2.0,
     anisotropy: 0.8,
 };
+
+/// The two punctual lights the column is read under: one of each kind.
+///
+/// Both stand inside the frustum's near half, where the slices are short enough
+/// that a radius of a unit or two spans several of them — a light out among the
+/// far slices is missed at their midpoints, which `volumetric_punctual` says is
+/// the rung's limit rather than this fixture's. The point light sits between
+/// the eye and the cube; the spot hangs above the scene and points down, so its
+/// cone closes inside its own radius and the froxels around it split into lit,
+/// penumbral and dark — which is what makes `spot_cone` load-bearing here.
+/// Three distinct colours, so a channel swapped in the sum fails.
+fn column_lights() -> [Light; 2] {
+    [
+        Light::Point(PointLight {
+            position: Vec3::new(0.9, 0.5, 1.1),
+            radius: 1.6,
+            color: Vec3::new(3.0, 1.0, 0.5),
+        }),
+        Light::Spot(SpotLight {
+            position: Vec3::new(-0.4, 1.6, 0.4),
+            radius: 2.5,
+            color: Vec3::new(0.5, 2.0, 4.0),
+            direction: Vec3::new(0.1, -1.0, 0.05),
+            inner_angle: 0.35,
+            outer_angle: 0.6,
+        }),
+    ]
+}
 
 /// One frame's froxel column, as the host read it.
 struct Column {
@@ -98,9 +137,10 @@ struct Column {
     /// `[froxel]`: the column in front of that slab — `rgb` its accumulated
     /// radiance, `a` its transmittance — as `integrateMain` left it.
     froxels: Vec<[f32; 4]>,
-    /// `[froxel]`: what fraction of the sun that slab sees, as `scatterMain`
-    /// left it and the scan did not touch it.
-    visibility: Vec<f32>,
+    /// `[froxel]`: what that slab's lights put into it — the punctual glow in
+    /// `rgb`, what fraction of the sun it sees in `a` — as `scatterMain` left
+    /// it and the scan did not touch it.
+    lighting: Vec<[f32; 4]>,
 }
 
 impl Column {
@@ -135,6 +175,7 @@ fn draw_and_read_the_column(fog: Fog) -> Column {
         ..EffectRequest::default()
     });
     renderer.set_fog(fog);
+    renderer.set_lights(&column_lights());
     place_cube(&mut renderer);
     place_cube_at(&mut renderer, occluder_transform());
     let light = DirectionalLight {
@@ -161,12 +202,12 @@ fn draw_and_read_the_column(fog: Fog) -> Column {
     column
 }
 
-/// Copies the parameter block, the column and the visibilities out of the
-/// buffers the frame left them in.
+/// Copies the parameter block, the column and the lighting out of the buffers
+/// the frame left them in.
 ///
 /// One encoder for the three, and one barrier each way: all three are in
 /// [`ResourceState::ShaderRead`] when a frame ends — the composite is the last
-/// pass to read the column and the visibilities, and the parameter block is a
+/// pass to read the column and the lighting, and the parameter block is a
 /// uniform buffer nothing writes but the host.
 fn read_back(headless: &Headless, buffers: FroxelBuffers) -> Column {
     let device = headless.device.as_ref();
@@ -174,7 +215,7 @@ fn read_back(headless: &Headless, buffers: FroxelBuffers) -> Column {
     // the block this is copying, so there is nothing to size a shorter copy by
     // until it has been read.
     let froxel_bytes = u64::from(crcbl::render::FROXEL_CAPACITY) * FROXEL_STRIDE as u64;
-    let visibility_bytes = u64::from(crcbl::render::FROXEL_CAPACITY) * VISIBILITY_STRIDE as u64;
+    let lighting_bytes = u64::from(crcbl::render::FROXEL_CAPACITY) * LIGHTING_STRIDE as u64;
     let staging = |label: &str, size: u64| {
         device
             .create_buffer(&BufferDesc {
@@ -197,9 +238,9 @@ fn read_back(headless: &Headless, buffers: FroxelBuffers) -> Column {
             froxel_bytes,
         ),
         (
-            buffers.visibility,
-            staging("froxel visibility", visibility_bytes),
-            visibility_bytes,
+            buffers.lighting,
+            staging("froxel lighting", lighting_bytes),
+            lighting_bytes,
         ),
     ];
 
@@ -248,7 +289,7 @@ fn read_back(headless: &Headless, buffers: FroxelBuffers) -> Column {
     };
     let params = read(0);
     let froxels = read(1);
-    let visibility = read(2);
+    let lighting = read(2);
     device.destroy_command_buffer(commands);
 
     Column {
@@ -259,9 +300,9 @@ fn read_back(headless: &Headless, buffers: FroxelBuffers) -> Column {
             .chunks_exact(FROXEL_STRIDE)
             .map(|cell| core::array::from_fn(|lane| float_at(cell, lane * 4)))
             .collect(),
-        visibility: visibility
-            .chunks_exact(VISIBILITY_STRIDE)
-            .map(|cell| float_at(cell, 0))
+        lighting: lighting
+            .chunks_exact(LIGHTING_STRIDE)
+            .map(|cell| core::array::from_fn(|lane| float_at(cell, lane * 4)))
             .collect(),
     }
 }
@@ -287,11 +328,16 @@ fn slice_start(index: u32) -> f32 {
     (0..index).fold(CLUSTER_NEAR, |start, _| start * SLICE_RATIO)
 }
 
-/// Every froxel's own slab, and then the exclusive prefix of the column in
-/// front of it — `scatterMain` and `integrateMain`, on the host.
-///
-/// `visibility` is the buffer the scatter pass wrote, per this module's header.
-fn modelled_column(params: &VolumetricParams, visibility: &[f32], count: usize) -> Vec<[f32; 4]> {
+/// One froxel's slab of air, as `scatterMain` cuts it: its two ends along the
+/// tile's centre ray and the direction it is looked along.
+struct Slab {
+    from: Vec3,
+    to: Vec3,
+    view_direction: Vec3,
+}
+
+/// Froxel `froxel`'s slab, rebuilt from the block the shaders were handed.
+fn slab(params: &VolumetricParams, froxel: usize) -> Slab {
     let grid_x = params.grid_x.max(1);
     let grid_y = params.grid_y.max(1);
     let tiles = (grid_x * grid_y) as usize;
@@ -299,55 +345,86 @@ fn modelled_column(params: &VolumetricParams, visibility: &[f32], count: usize) 
     let inverse = Mat4::from_cols_array(&params.inverse_view_proj);
     let depth_row = Vec4::from_array(params.depth_row);
     let eye = Vec4::from_array(params.eye).truncate();
-    let sun_direction = Vec4::from_array(params.sun_direction).truncate();
-    let sun_radiance = Vec4::from_array(params.sun_radiance).truncate();
-    let fog_color = Vec4::from_array(params.fog_color).truncate();
-    let [density, falloff, reference, _] = params.fog_params;
     let viewport = (
         params.viewport_x.max(1) as f32,
         params.viewport_y.max(1) as f32,
     );
 
+    let tile_x = froxel as u32 % grid_x;
+    let tile_y = (froxel as u32 / grid_x) % grid_y;
+    let slice = froxel / tiles;
+
+    // The tile's centre ray, and the secant factor that goes with it: a point
+    // at view depth `d` is `eye + along * d`, so a froxel at the corner of the
+    // frame is longer than its depth range.
+    let pixel = (
+        (tile_x as f32 + 0.5) * params.tile_pixels as f32,
+        (tile_y as f32 + 0.5) * params.tile_pixels as f32,
+    );
+    let ndc = (
+        pixel.0 / viewport.0 * 2.0 - 1.0,
+        1.0 - pixel.1 / viewport.1 * 2.0,
+    );
+    let clip = inverse * Vec4::new(ndc.0, ndc.1, depth::NEAR, 1.0);
+    let near_point = clip.truncate() / clip.w;
+    let near_depth = depth_row.dot(near_point.extend(1.0)).max(1e-6);
+    let along = (near_point - eye) / near_depth;
+
+    // Slice zero starts at the eye and the last one ends at the camera's far
+    // plane, neither of which is where the light grid cuts — `scatterMain`
+    // says why.
+    let from_depth = if slice == 0 {
+        0.0
+    } else {
+        slice_start(slice as u32)
+    };
+    let to_depth = if slice + 1 == slices {
+        CLUSTER_FAR
+    } else {
+        slice_start(slice as u32 + 1)
+    };
+    let from = eye + along * from_depth;
+    let to = eye + along * to_depth;
+    let segment = to - from;
+    let length_of = segment.length();
+    let view_direction = if length_of > 1e-6 {
+        segment / length_of
+    } else {
+        Vec3::Z
+    };
+    Slab {
+        from,
+        to,
+        view_direction,
+    }
+}
+
+/// Every froxel's own slab, and then the exclusive prefix of the column in
+/// front of it — `scatterMain` and `integrateMain`, on the host.
+///
+/// `lighting` is the buffer the scatter pass wrote, per this module's header:
+/// the sun's visibility is its `a`, and the punctual glow its `rgb`, which the
+/// source adds whole exactly as the shader does.
+fn modelled_column(
+    params: &VolumetricParams,
+    lighting: &[[f32; 4]],
+    count: usize,
+) -> Vec<[f32; 4]> {
+    let tiles = (params.grid_x.max(1) * params.grid_y.max(1)) as usize;
+    let slices = params.slices.max(1) as usize;
+    let sun_direction = Vec4::from_array(params.sun_direction).truncate();
+    let sun_radiance = Vec4::from_array(params.sun_radiance).truncate();
+    let fog_color = Vec4::from_array(params.fog_color).truncate();
+    let [density, falloff, reference, _] = params.fog_params;
+
     let own: Vec<[f32; 4]> = (0..count)
         .map(|froxel| {
-            let tile_x = froxel as u32 % grid_x;
-            let tile_y = (froxel as u32 / grid_x) % grid_y;
-            let slice = froxel / tiles;
-
-            // The tile's centre ray, and the secant factor that goes with it:
-            // a point at view depth `d` is `eye + along * d`, so a froxel at
-            // the corner of the frame is longer than its depth range.
-            let pixel = (
-                (tile_x as f32 + 0.5) * params.tile_pixels as f32,
-                (tile_y as f32 + 0.5) * params.tile_pixels as f32,
-            );
-            let ndc = (
-                pixel.0 / viewport.0 * 2.0 - 1.0,
-                1.0 - pixel.1 / viewport.1 * 2.0,
-            );
-            let clip = inverse * Vec4::new(ndc.0, ndc.1, depth::NEAR, 1.0);
-            let near_point = clip.truncate() / clip.w;
-            let near_depth = depth_row.dot(near_point.extend(1.0)).max(1e-6);
-            let along = (near_point - eye) / near_depth;
-
-            // Slice zero starts at the eye and the last one ends at the
-            // camera's far plane, neither of which is where the light grid cuts
-            // — `scatterMain` says why.
-            let from_depth = if slice == 0 {
-                0.0
-            } else {
-                slice_start(slice as u32)
-            };
-            let to_depth = if slice + 1 == slices {
-                CLUSTER_FAR
-            } else {
-                slice_start(slice as u32 + 1)
-            };
-            let from = eye + along * from_depth;
-            let to = eye + along * to_depth;
-
-            let segment = to - from;
-            let length_of = segment.length();
+            let Slab {
+                from,
+                to,
+                view_direction,
+            } = slab(params, froxel);
+            let length_of = (to - from).length();
             let tau = optical_depth(
                 density,
                 falloff,
@@ -356,14 +433,11 @@ fn modelled_column(params: &VolumetricParams, visibility: &[f32], count: usize) 
                 length_of,
             );
             let survives = exp_neg(tau);
-            let view_direction = if length_of > 1e-6 {
-                segment / length_of
-            } else {
-                Vec3::Z
-            };
             let cos_theta = sun_direction.dot(view_direction);
+            let [glow_r, glow_g, glow_b, visibility] = lighting[froxel];
             let source = fog_color
-                + sun_radiance * phase(params.sun_direction[3], cos_theta) * visibility[froxel];
+                + sun_radiance * phase(params.sun_direction[3], cos_theta) * visibility
+                + Vec3::new(glow_r, glow_g, glow_b);
             let scattered = source * (1.0 - survives);
             [scattered.x, scattered.y, scattered.z, survives]
         })
@@ -385,6 +459,60 @@ fn modelled_column(params: &VolumetricParams, visibility: &[f32], count: usize) 
         }
     }
     prefix
+}
+
+/// What one froxel's punctual lights scatter into it, as `volumetric_punctual`
+/// sums them: every light in `lights`, reached from the slab's midpoint, through
+/// the falloff window, the cone for a spot, and the medium's phase function
+/// against the slab's own view direction — then the coefficient the block
+/// carries in `sun_radiance.w`.
+///
+/// **Every light in the scene rather than the froxel's list**, which is the
+/// point: the list is `light_cluster.slang`'s decision, and a light this walk
+/// reaches is one whose sphere meets the slab, so a list that left it out is a
+/// froxel the host lights and the shader does not. The rows are the ones the
+/// renderer uploads — [`Light::row`] — so the radius, the axis and the two
+/// cosines are the numbers the shader read and not a second derivation.
+fn modelled_glow(params: &VolumetricParams, lights: &[Light], froxel: usize) -> Vec3 {
+    let Slab {
+        from,
+        to,
+        view_direction,
+    } = slab(params, froxel);
+    let middle = (from + to) * 0.5;
+    let anisotropy = params.sun_direction[3];
+    let mut total = Vec3::ZERO;
+    for light in lights {
+        let row = light.row(None);
+        let position = Vec4::from_array(row.position);
+        let offset = position.truncate() - middle;
+        let distance = offset.length();
+        let to_light = offset / distance.max(1e-6);
+        let mut reach = punctual_falloff(distance, position.w);
+        if row.kind == KIND_SPOT {
+            let axis = Vec4::from_array(row.direction);
+            reach *= spot_cone(to_light, axis.truncate(), axis.w, row.cos_inner);
+        }
+        let color = Vec4::from_array(row.color).truncate();
+        total += color * reach * phase(anisotropy, to_light.dot(view_direction));
+    }
+    total * params.sun_radiance[3]
+}
+
+/// `mesh.slang`'s `punctual_falloff`, which `volumetric.slang` copies: the
+/// window that reaches exactly zero at the radius, over the inverse square
+/// kept finite at the light.
+fn punctual_falloff(distance: f32, radius: f32) -> f32 {
+    let ratio = distance / radius.max(1e-6);
+    let window = (1.0 - ratio * ratio * ratio * ratio).clamp(0.0, 1.0);
+    window * window / (distance * distance + 1.0)
+}
+
+/// `mesh.slang`'s `spot_cone`, likewise — negation included, because
+/// `to_light` points at the light and the cone points away from it.
+fn spot_cone(to_light: Vec3, axis: Vec3, cos_outer: f32, cos_inner: f32) -> f32 {
+    let cosine = (-to_light).dot(axis.normalize_or_zero());
+    ((cosine - cos_outer) / (cos_inner - cos_outer).max(1e-4)).clamp(0.0, 1.0)
 }
 
 /// How far a modelled froxel may sit from the one the GPU wrote, relative to
@@ -434,9 +562,9 @@ fn the_froxel_column_is_the_scan_of_the_slabs_the_medium_scatters() {
         count > 0,
         "the frame wrote no froxels at all, so this compared nothing"
     );
-    let modelled = modelled_column(&column.params, &column.visibility, count);
+    let modelled = modelled_column(&column.params, &column.lighting, count);
 
-    let seen = &column.visibility[..count];
+    let seen: Vec<f32> = column.lighting[..count].iter().map(|lit| lit[3]).collect();
     let darkest = seen.iter().copied().fold(f32::INFINITY, f32::min);
     let brightest = seen.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let thinnest = modelled[..count]
@@ -492,5 +620,131 @@ fn the_froxel_column_is_the_scan_of_the_slabs_the_medium_scatters() {
          built from implies, past the {FROXEL_RELATIVE} two evaluations of this arithmetic \
          differ by — one of the scatter and the scan is wrong, and comparing the composed \
          frame against the closed form cannot say which"
+    );
+}
+
+/// How far the modelled glow may sit from the lane the GPU wrote, relative to
+/// the larger of the two.
+///
+/// **Measured, not chosen**, on [`FROXEL_RELATIVE`]'s terms and looser than
+/// it: a glow is a sum over lights of a length, a normalisation, a fourth
+/// power and a phase function, so there is more arithmetic for two `f32`
+/// evaluations to disagree in. The fixture's own lights give `0.00008` on
+/// radv and `0.00007` on lavapipe, at different froxels; this sits an order
+/// above that and three orders under the factor a dropped cone or a dropped
+/// phase function is out by.
+const GLOW_RELATIVE: f32 = 1e-3;
+
+/// **The glow lanes hold the froxel's list walked at its slice midpoint.**
+///
+/// `docs/plan/51-volumetrics.md`'s rung 2, checked where it happens: the
+/// scatter pass sums the punctual lights in a froxel's cluster list — falloff,
+/// cone and phase — at the slab's midpoint, and writes the sum to the buffer
+/// beside the column. The host walks every light in the scene from the same
+/// point and demands the same number, which says three things at once: that
+/// the arithmetic is `mesh.slang`'s, that the phase function is evaluated
+/// against the slab's own direction, and that the clustering pass listed every
+/// light in every froxel it reaches.
+///
+/// Three things have to hold for it to be evidence rather than arithmetic:
+/// some froxels glow and some are exactly dark (the radius window is a real
+/// bound and not a fade to nothing), the spot's cone splits the froxels inside
+/// its radius into lit and dark (so `spot_cone` is load-bearing and not a
+/// constant one), and the glow clears the floor the relative bound is asked
+/// over.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn the_glow_in_the_buffer_is_the_froxel_s_list_walked_at_its_midpoint() {
+    let column = draw_and_read_the_column(COLUMN_FOG);
+    let count = column.count();
+    assert!(
+        count > 0,
+        "the frame wrote no froxels at all, so this compared nothing"
+    );
+    let lights = column_lights();
+    let spot = lights
+        .iter()
+        .find(|light| matches!(light, Light::Spot(_)))
+        .expect("the fixture has a spot")
+        .row(None);
+
+    let mut worst = 0.0f32;
+    let mut worst_at = 0usize;
+    let mut compared = 0usize;
+    let mut glowing = 0usize;
+    let mut dark = 0usize;
+    let mut inside_lit = 0usize;
+    let mut inside_dark = 0usize;
+    for froxel in 0..count {
+        let mine = modelled_glow(&column.params, &lights, froxel);
+        let [r, g, b, _] = column.lighting[froxel];
+        let theirs = Vec3::new(r, g, b);
+        if mine.max_element() > FROXEL_FLOOR {
+            glowing += 1;
+        } else if mine == Vec3::ZERO && theirs == Vec3::ZERO {
+            dark += 1;
+        }
+        for lane in 0..3 {
+            let (a, b) = (mine[lane], theirs[lane]);
+            let scale = a.abs().max(b.abs());
+            if scale < FROXEL_FLOOR {
+                continue;
+            }
+            let relative = (a - b).abs() / scale;
+            if relative > worst {
+                worst = relative;
+                worst_at = froxel;
+            }
+            compared += 1;
+        }
+
+        // The spot's own cone, at the same midpoint: a froxel inside its
+        // radius is either in the beam or out of it.
+        let Slab { from, to, .. } = slab(&column.params, froxel);
+        let position = Vec4::from_array(spot.position);
+        let offset = position.truncate() - (from + to) * 0.5;
+        if offset.length() < position.w {
+            let axis = Vec4::from_array(spot.direction);
+            let cone = spot_cone(
+                offset / offset.length().max(1e-6),
+                axis.truncate(),
+                axis.w,
+                spot.cos_inner,
+            );
+            if cone > 0.0 {
+                inside_lit += 1;
+            } else {
+                inside_dark += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "{}: froxel glow — {count} froxel(s), {glowing} glowing, {dark} dark, {compared} lane(s) \
+         compared, worst relative gap {worst:.5} at froxel {worst_at}, spot radius splits \
+         {inside_lit} lit / {inside_dark} dark",
+        crate::SUITE
+    );
+
+    assert!(
+        glowing > 0 && dark > 0,
+        "{glowing} froxel(s) glow and {dark} are dark, so either no light reaches the column or \
+         the radius bounds nothing"
+    );
+    assert!(
+        inside_lit > 0 && inside_dark > 0,
+        "inside the spot's radius {inside_lit} froxel(s) are in the beam and {inside_dark} out \
+         of it, so the cone is not being tested"
+    );
+    assert!(
+        compared > 0,
+        "no lane cleared the {FROXEL_FLOOR} floor, so every comparison was skipped"
+    );
+    assert!(
+        worst <= GLOW_RELATIVE,
+        "froxel {worst_at}'s glow is {worst} away from its list walked at its midpoint, past \
+         the {GLOW_RELATIVE} two evaluations of this arithmetic differ by — the scatter pass \
+         is summing something other than mesh.slang's falloff, cone and the medium's phase, \
+         or the clustering pass left a light out of a froxel it reaches"
     );
 }

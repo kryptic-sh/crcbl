@@ -88,7 +88,7 @@ static const float FOG_RATIO_KERNEL[5] = {
 ///
 /// Read here only to size the block's matrix array: nothing in this file walks
 /// a cascade, because `scatterMain` already did it once per froxel and left the
-/// answer in `visibilities`.
+/// answer in `lighting`.
 static const uint SHADOW_CASCADES = 2;
 
 /// The block `volumetric.slang` declares, bound here unchanged so a pixel's
@@ -102,7 +102,9 @@ struct VolumetricParams
     float4 fog_color;
     /// Towards the sun in `xyz`, the anisotropy in `w`.
     float4 sun_direction;
-    /// What the medium scatters out of the sun per unit length, in `rgb`.
+    /// What the medium scatters out of the sun per unit length, in `rgb`, and
+    /// out of a punctual light in `w`. Declared and not read: the punctual
+    /// term arrives in `lighting`, already scaled.
     float4 sun_radiance;
     /// World → cascade `i`'s shadow clip. Declared and not read — see
     /// `SHADOW_CASCADES` above; the block is one layout, so both files carry
@@ -145,14 +147,17 @@ Texture2D<float4> scene_color;
 [[vk::binding(3, 0)]]
 StructuredBuffer<float4> volumetrics;
 
-/// What fraction of the sun each froxel could see, as `scatterMain` measured
-/// it — untouched by the scan, which is over `volumetrics` alone.
+/// What each froxel's lights put into it, as `scatterMain` measured them —
+/// what the punctual lights in its list scatter in `rgb`, what fraction of
+/// the sun it could see in `w` — untouched by the scan, which is over
+/// `volumetrics` alone.
 ///
 /// The partial slice below is a piece of one froxel, so it owes that froxel's
-/// scattering source; reading the number back is what keeps the cascade walk in
-/// one shader instead of running it again for every pixel on screen.
+/// scattering source; reading the numbers back is what keeps the cascade walk
+/// and the light loop in one shader instead of running them again for every
+/// pixel on screen.
 [[vk::binding(4, 0)]]
-StructuredBuffer<float> visibilities;
+StructuredBuffer<float4> lighting;
 
 struct FullscreenOutput
 {
@@ -261,16 +266,18 @@ float volumetric_phase(float g, float cos_theta)
 /// leaves `fog_color` untouched bit for bit, and the column stays the closed
 /// form the fragment stage was computing.
 ///
-/// `visibility` scales the sun term alone, because the environment term is what
+/// `lit.w` scales the sun term alone, because the environment term is what
 /// reaches the medium from every direction and an occluder in front of the sun
-/// does not remove it. It arrives from `visibilities` rather than from a
-/// cascade walk of this file's own — `volumetric.slang` has the only copy.
-float3 volumetric_source(float3 view_direction, float visibility)
+/// does not remove it. It arrives from `lighting` rather than from a cascade
+/// walk of this file's own — `volumetric.slang` has the only copy — and so
+/// does `lit.rgb`, the punctual lights' share, which that file's
+/// `volumetric_punctual` summed through the phase function once per froxel.
+float3 volumetric_source(float3 view_direction, float4 lit)
 {
     float cos_theta = dot(params.sun_direction.xyz, view_direction);
     float3 sun = params.sun_radiance.rgb
-               * volumetric_phase(params.sun_direction.w, cos_theta) * visibility;
-    return params.fog_color.rgb + sun;
+               * volumetric_phase(params.sun_direction.w, cos_theta) * lit.w;
+    return params.fog_color.rgb + sun + lit.rgb;
 }
 
 [shader("vertex")]
@@ -372,12 +379,13 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // degenerate segment scatters nothing, so its fallback axis is
     // unobservable.
     float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
-    // The froxel's own visibility, not a second lookup: this segment is inside
+    // The froxel's own lighting, not a second lookup: this segment is inside
     // the slice `scatterMain` measured, so charging it a different fraction of
-    // the sun than the froxel around it would put a seam at every slice
-    // boundary — the one place the composite is meant to be exact.
+    // the sun or a different glow than the froxel around it would put a seam
+    // at every slice boundary — the one place the composite is meant to be
+    // exact.
     float3 partial_radiance =
-        volumetric_source(view_direction, visibilities[froxel]) * (1.0 - partial_survives);
+        volumetric_source(view_direction, lighting[froxel]) * (1.0 - partial_survives);
 
     float3 lit = scene.rgb * (prefix.a * partial_survives) + prefix.rgb
                + prefix.a * partial_radiance;

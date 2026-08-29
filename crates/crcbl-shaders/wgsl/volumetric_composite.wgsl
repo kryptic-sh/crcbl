@@ -37,7 +37,7 @@ struct VolumetricParams_std140_0
 
 @binding(3) @group(0) var<storage, read> volumetrics_0 : array<vec4<f32>>;
 
-@binding(4) @group(0) var<storage, read> visibilities_0 : array<f32>;
+@binding(4) @group(0) var<storage, read> lighting_0 : array<vec4<f32>>;
 
 var<private> FOG_RATIO_KERNEL_0 : array<f32, i32(5)> = array<f32, i32(5)>( 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f );
 var<private> FOG_KERNEL_0 : array<f32, i32(8)> = array<f32, i32(8)>( 1.0f, 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f, 0.00138888892251998f, 0.0001984127011383f );
@@ -130,9 +130,9 @@ fn volumetric_phase_0( g_0 : f32,  cos_theta_0 : f32) -> f32
     return 0.07957746833562851f * (1.0f - _S6) / (d_1 * sqrt(d_1));
 }
 
-fn volumetric_source_0( view_direction_0 : vec3<f32>,  visibility_0 : f32) -> vec3<f32>
+fn volumetric_source_0( view_direction_0 : vec3<f32>,  lit_0 : vec4<f32>) -> vec3<f32>
 {
-    return params_0.fog_color_0.xyz + params_0.sun_radiance_0.xyz * vec3<f32>(volumetric_phase_0(params_0.sun_direction_0.w, dot(params_0.sun_direction_0.xyz, view_direction_0))) * vec3<f32>(visibility_0);
+    return params_0.fog_color_0.xyz + params_0.sun_radiance_0.xyz * vec3<f32>(volumetric_phase_0(params_0.sun_direction_0.w, dot(params_0.sun_direction_0.xyz, view_direction_0))) * vec3<f32>(lit_0.w) + lit_0.xyz;
 }
 
 struct pixelOutput_0
@@ -225,7 +225,7 @@ fn fragmentMain( _S7 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
         view_direction_1 = vec3<f32>(0.0f, 0.0f, 1.0f);
     }
     var _S23 : f32 = prefix_0.w;
-    var _S24 : pixelOutput_0 = pixelOutput_0( vec4<f32>(scene_0.xyz * vec3<f32>((_S23 * partial_survives_0)) + prefix_0.xyz + vec3<f32>(_S23) * (volumetric_source_0(view_direction_1, visibilities_0[froxel_0]) * vec3<f32>((1.0f - partial_survives_0))), scene_0.w) );
+    var _S24 : pixelOutput_0 = pixelOutput_0( vec4<f32>(scene_0.xyz * vec3<f32>((_S23 * partial_survives_0)) + prefix_0.xyz + vec3<f32>(_S23) * (volumetric_source_0(view_direction_1, lighting_0[froxel_0]) * vec3<f32>((1.0f - partial_survives_0))), scene_0.w) );
     return _S24;
 }
 

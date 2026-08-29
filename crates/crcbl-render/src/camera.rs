@@ -431,6 +431,23 @@ pub struct Fog {
     ///
     /// [`RenderEffects::VOLUMETRIC_FOG`]: crate::RenderEffects::VOLUMETRIC_FOG
     pub sun_scattering: f32,
+    /// What fraction of a point or spot light's radiance the medium scatters
+    /// towards the eye, per unit length — the glow around every punctual light
+    /// in the scene, and the cone a spot cuts through the air.
+    ///
+    /// One coefficient for every light rather than one per light: the medium
+    /// is what scatters, and it is the same air around all of them. Separate
+    /// from [`sun_scattering`](Self::sun_scattering) because a scene's sun and
+    /// its lamps are authored in different units, and a haze that reads right
+    /// against the sun would swamp the frame around a lamp of the same number.
+    ///
+    /// Read only by the froxel path, on `sun_scattering`'s terms, and zero is
+    /// exactly off for the same reason: the term is added to the scattering
+    /// source and a zero adds nothing. A light's glow is evaluated once per
+    /// froxel, at its slice's midpoint, and is not occluded — the shadow tile
+    /// the light's surfaces read is not consulted here yet;
+    /// `docs/plan/51-volumetrics.md` carries both.
+    pub light_scattering: f32,
     /// How the medium redistributes what it scatters: positive forward, zero
     /// evenly, negative back.
     ///
@@ -457,6 +474,7 @@ impl Fog {
         reference_height: 0.0,
         color: Vec3::ZERO,
         sun_scattering: 0.0,
+        light_scattering: 0.0,
         anisotropy: 0.0,
     };
 }

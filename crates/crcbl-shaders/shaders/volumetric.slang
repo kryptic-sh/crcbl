@@ -115,6 +115,38 @@ static const uint SHADOW_ATLAS_COLUMNS = 4;
 /// Tiles down it, matching `crcbl_shaders::mesh::SHADOW_ATLAS_ROWS`.
 static const uint SHADOW_ATLAS_ROWS = 4;
 
+/// `light_cluster.slang`'s three kinds of row, and the shape of the grid it
+/// fills — the numbers `mesh.slang` declares, held to `crcbl_shaders::light`
+/// by `the_shaders_declare_the_grid_constants_this_module_names`.
+static const uint KIND_DIRECTIONAL = 0;
+static const uint KIND_POINT = 1;
+static const uint KIND_SPOT = 2;
+static const uint CLUSTER_LIGHT_CAPACITY = 16;
+static const uint CLUSTER_STRIDE = 17;
+
+/// One light, matching `struct GpuLight` in `light_cluster.slang`, in
+/// `mesh.slang` and in `crcbl_shaders::light::GpuLight` — copied letter for
+/// letter, there being no `#include`, and held to `mesh.slang`'s by
+/// `crcbl_shaders::volumetric`'s `both_shaders_spell_the_same_punctual_light`.
+struct GpuLight
+{
+    /// World-space position in `xyz`, influence radius in `w`.
+    float4 position;
+    /// Colour premultiplied by intensity in `rgb`; `w` unused.
+    float4 color;
+    /// Towards the light for a directional; the cone axis for a spot. `w` is the
+    /// cosine of a spot's outer half-angle.
+    float4 direction;
+    uint kind;
+    /// The cosine of a spot's inner half-angle.
+    float cos_inner;
+    /// The shadow tile `mesh.slang` occludes this light through. **Unread
+    /// here**: a punctual light reaches every froxel in its radius, occluded by
+    /// nothing — see `docs/plan/51-volumetrics.md`'s rung 2.
+    uint shadow_tile;
+    uint pad1;
+};
+
 /// What neither dispatch can derive for itself, matching
 /// `crcbl_shaders::volumetric::VolumetricParams`.
 ///
@@ -146,13 +178,16 @@ struct VolumetricParams
     /// The unit vector **towards** the sun in `xyz` — `mesh.slang`'s
     /// `to_light` — and the medium's anisotropy in `w`.
     float4 sun_direction;
-    /// What the medium scatters out of the sun per unit length, in `rgb`; `w`
-    /// unused.
+    /// What the medium scatters out of the sun per unit length, in `rgb`, and
+    /// out of every punctual light in `w` — `Fog::light_scattering`, which
+    /// scales a light's own colour rather than arriving premultiplied because
+    /// there is one coefficient and many lights.
     ///
-    /// **Zero is exactly no sun.** The source below is a sum, so a zero here
-    /// leaves the environment term bit for bit — which is what keeps a column
-    /// with no sun in it algebraically the closed form, and is the state every
-    /// frame is in until a caller sets `Fog::sun_scattering`.
+    /// **Zero is exactly no sun, and zero is exactly no glow.** The source
+    /// below is a sum, so a zero in either leaves the environment term bit for
+    /// bit — which is what keeps a column with no sun in it algebraically the
+    /// closed form, and is the state every frame is in until a caller sets
+    /// `Fog::sun_scattering` or `Fog::light_scattering`.
     float4 sun_radiance;
     /// World → cascade `i`'s shadow clip, one matrix per cascade — the same
     /// rows `mesh.slang`'s `FrameUniforms` carries, so a froxel and a fragment
@@ -213,18 +248,34 @@ DepthTexture2D shadow_atlas;
 [[vk::binding(3, 0)]]
 SamplerComparisonState shadow_sampler;
 
-/// What fraction of the sun each froxel can see, written by `scatterMain` and
-/// read by `volumetric_composite.slang`.
+/// What each froxel's lights put into it, written by `scatterMain` and read by
+/// `volumetric_composite.slang`: the radiance the punctual lights in its list
+/// scatter towards the eye in `rgb`, and what fraction of the sun it can see
+/// in `w`.
 ///
-/// **The cascade walk happens once per froxel and this is how the answer
-/// leaves.** The composite integrates the partial slice a pixel sits inside
-/// along that pixel's own ray, and it needs the same scattering source this
-/// pass gave the whole froxel; without a number to read it would have to walk
-/// the atlas again, per pixel, which is the cost the froxel grid exists to
-/// avoid. `integrateMain` neither reads nor writes it — the scan is over the
-/// column buffer alone, and this survives it untouched.
+/// **The cascade walk and the light loop happen once per froxel and this is
+/// how their answers leave.** The composite integrates the partial slice a
+/// pixel sits inside along that pixel's own ray, and it needs the same
+/// scattering source this pass gave the whole froxel; without a number to read
+/// it would have to walk the atlas and the list again, per pixel, which is the
+/// cost the froxel grid exists to avoid. `integrateMain` neither reads nor
+/// writes it — the scan is over the column buffer alone, and this survives it
+/// untouched.
 [[vk::binding(4, 0)]]
-RWStructuredBuffer<float> visibilities;
+RWStructuredBuffer<float4> lighting;
+
+/// The frame's light rows — the buffer `mesh.slang` binds at its 20, and the
+/// same rows: the sun is among them and is skipped below by its kind, because
+/// its share of a froxel is the cascade walk's and not this loop's.
+[[vk::binding(5, 0)]]
+StructuredBuffer<GpuLight> lights;
+
+/// The froxel grid `light_cluster.slang` filled — `mesh.slang`'s binding 21 —
+/// and the reason a froxel can afford a light loop at all: it is cut into the
+/// same froxels this pass walks, so a slab reads the list built for exactly its
+/// own volume rather than testing every light in the scene.
+[[vk::binding(6, 0)]]
+StructuredBuffer<uint> cluster_lights;
 
 /// `e^-x`, without calling a transcendental.
 /// `crcbl_shaders::fog::exp_neg`; see `mesh.slang`'s copy for the derivation.
@@ -368,17 +419,91 @@ float volumetric_phase(float g, float cos_theta)
 /// leaves `fog_color` untouched bit for bit, and the column stays the closed
 /// form the fragment stage was computing.
 ///
-/// `visibility` is what `volumetric_sun_visibility` gave this froxel: it scales
-/// the sun term alone, because the environment term is what reaches the medium
-/// from everywhere and an occluder in front of the sun does not remove it.
-/// **That is what makes this a shaft rather than a dimmer**: the shadowed air
-/// keeps its ambient glow and loses the beam.
-float3 volumetric_source(float3 view_direction, float visibility)
+/// `lit` is what this froxel's lights gave it: `w` is what
+/// `volumetric_sun_visibility` answered, and it scales the sun term alone,
+/// because the environment term is what reaches the medium from everywhere and
+/// an occluder in front of the sun does not remove it. **That is what makes
+/// this a shaft rather than a dimmer**: the shadowed air keeps its ambient glow
+/// and loses the beam. `rgb` is what `volumetric_punctual` summed over the
+/// froxel's list, already through the phase function, and it is added whole.
+float3 volumetric_source(float3 view_direction, float4 lit)
 {
     float cos_theta = dot(params.sun_direction.xyz, view_direction);
     float3 sun = params.sun_radiance.rgb
-               * volumetric_phase(params.sun_direction.w, cos_theta) * visibility;
-    return params.fog_color.rgb + sun;
+               * volumetric_phase(params.sun_direction.w, cos_theta) * lit.w;
+    return params.fog_color.rgb + sun + lit.rgb;
+}
+
+/// How much of a punctual light at `distance` reaches a point, given the radius
+/// its influence ends at.
+///
+/// `mesh.slang`'s function of the same name, letter for letter — the window
+/// that goes to exactly zero at the radius is what makes the clustering pass's
+/// cull and this loop's reach the same statement, there as here.
+float punctual_falloff(float distance, float radius)
+{
+    float ratio = distance / max(radius, 1e-6);
+    float window = saturate(1.0 - ratio * ratio * ratio * ratio);
+    return window * window / (distance * distance + 1.0);
+}
+
+/// How much of a spot light this direction is inside its cone for: `1` within
+/// the inner angle, `0` outside the outer one, smooth between.
+///
+/// `mesh.slang`'s, letter for letter, negation included: `to_light` points at
+/// the light and `axis` points along the cone.
+float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)
+{
+    float cosine = dot(-to_light, normalize(axis));
+    return saturate((cosine - cos_outer) / max(cos_inner - cos_outer, 1e-4));
+}
+
+/// What the punctual lights in froxel `froxel`'s list scatter towards the eye
+/// at `at`, looked at along `view_direction` — `docs/plan/51-volumetrics.md`'s
+/// rung 2.
+///
+/// **The list, not the scene.** `cluster_lights` was cut into these froxels by
+/// `light_cluster.slang`, so a slab reads only the lights whose radius reaches
+/// its own volume — the same walk `mesh.slang`'s fragment stage makes, with
+/// the same guard on the count. The sun is in every list and is skipped by its
+/// kind: its share of the froxel is the cascade walk's.
+///
+/// Evaluated at one point, which `scatterMain` makes the slice's midpoint —
+/// the approximation the sun's visibility already takes, and it has the same
+/// limit: a light whose radius is shorter than the slice it sits in is missed
+/// when the midpoint is outside it, which the far slices' length makes the
+/// ordinary case for a small light far away. Rung 3's jitter along the slice
+/// is what recovers those.
+///
+/// Every light shares the medium's anisotropy: the lobe is the air's, not the
+/// light's, and `cos_theta` is the angle between the direction to *this* light
+/// and the view ray, on `volumetric_phase`'s convention. Unoccluded: the
+/// shadow tile a punctual row names is `mesh.slang`'s to read and not this
+/// pass's yet, which the plan carries.
+float3 volumetric_punctual(uint froxel, float3 at, float3 view_direction)
+{
+    uint base = froxel * CLUSTER_STRIDE;
+    uint count = min(cluster_lights[base], CLUSTER_LIGHT_CAPACITY);
+    float3 total = float3(0.0, 0.0, 0.0);
+    for (uint slot = 0; slot < count; ++slot)
+    {
+        GpuLight light = lights[cluster_lights[base + 1 + slot]];
+        if (light.kind == KIND_DIRECTIONAL)
+        {
+            continue;
+        }
+        float3 offset = light.position.xyz - at;
+        float distance = length(offset);
+        float3 to_light = offset / max(distance, 1e-6);
+        float reach = punctual_falloff(distance, light.position.w);
+        if (light.kind == KIND_SPOT)
+        {
+            reach *= spot_cone(to_light, light.direction.xyz, light.direction.w, light.cos_inner);
+        }
+        float cos_theta = dot(to_light, view_direction);
+        total += light.color.rgb * reach * volumetric_phase(params.sun_direction.w, cos_theta);
+    }
+    return total * params.sun_radiance.w;
 }
 
 /// Where tile `tile` puts `tile_uv` in the whole atlas.
@@ -588,19 +713,14 @@ float volumetric_sun_visibility(float3 world_position, float2 pixel)
 /// the property `crcbl`'s `mesh_e2e` measures. The sun is added on top of that
 /// and is zero until a caller asks for it, so the equality is an off-switch
 /// rather than a rung that has been left behind.
-float4 volumetric_slice(float3 from, float3 to, float visibility)
+float4 volumetric_slice(float3 from, float3 to, float3 view_direction, float4 lit)
 {
     float reference = params.fog_params.z;
-    float3 segment = to - from;
-    float length_of = length(segment);
+    float length_of = length(to - from);
     float tau = fog_optical_depth(params.fog_params.x, params.fog_params.y, from.y - reference,
                                   to.y - reference, length_of);
     float survives = fog_exp_neg(tau);
-    // The direction the slice is looked along, for the phase function. A
-    // degenerate segment cannot be normalised, and its `1 - survives` is zero
-    // anyway, so the axis it falls back to is unobservable.
-    float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
-    return float4(volumetric_source(view_direction, visibility) * (1.0 - survives), survives);
+    return float4(volumetric_source(view_direction, lit) * (1.0 - survives), survives);
 }
 
 /// Invocations per workgroup, matching
@@ -654,10 +774,17 @@ void scatterMain(uint3 thread: SV_DispatchThreadID)
     // what dithers the filter's rotation. Every slice of one column takes the
     // same rotation and neighbouring columns take different ones, which is the
     // property the lattice is built for.
-    float visibility =
-        volumetric_sun_visibility((from + to) * 0.5, float2(float(tile_x), float(tile_y)));
-    visibilities[froxel] = visibility;
-    volumetrics[froxel] = volumetric_slice(from, to, visibility);
+    float3 middle = (from + to) * 0.5;
+    float visibility = volumetric_sun_visibility(middle, float2(float(tile_x), float(tile_y)));
+    // The direction the slice is looked along, for every phase function in it.
+    // A degenerate segment cannot be normalised, and its `1 - survives` is zero
+    // anyway, so the axis it falls back to is unobservable.
+    float3 segment = to - from;
+    float length_of = length(segment);
+    float3 view_direction = length_of > 1e-6 ? segment / length_of : float3(0.0, 0.0, 1.0);
+    float4 lit = float4(volumetric_punctual(froxel, middle, view_direction), visibility);
+    lighting[froxel] = lit;
+    volumetrics[froxel] = volumetric_slice(from, to, view_direction, lit);
 }
 
 /// One invocation per screen tile: the exclusive prefix scan down its column.

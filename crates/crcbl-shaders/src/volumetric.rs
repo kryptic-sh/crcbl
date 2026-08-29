@@ -163,7 +163,9 @@ pub const PARAMS_SIZE: usize = 64 + crate::mesh::SHADOW_CASCADES * 64 + 8 * 16 +
 /// slice after `integrateMain` — which `volumetric.slang`'s header argues.
 pub const FROXEL_STRIDE: usize = 16;
 
-/// Bytes one froxel occupies in the visibility buffer: one `float`.
+/// Bytes one froxel occupies in the lighting buffer: one `float4` — what the
+/// punctual lights in its list scatter towards the eye in `rgb`, and what
+/// fraction of the sun it sees in `w`.
 ///
 /// **A second buffer rather than a component of the first**, and the reason is
 /// what each of the two is for. The column buffer's four components are all
@@ -173,11 +175,16 @@ pub const FROXEL_STRIDE: usize = 16;
 ///
 /// And it has to survive the scan because `volumetric_composite.slang`
 /// integrates the last partial slice along the pixel's own ray, which needs the
-/// same scattering source `scatterMain` used for the whole froxel. Reading a
-/// scalar back is what lets the cascade lookup exist in exactly one shader:
-/// the alternative is a second copy of the atlas walk in the composite, run
-/// per pixel, which is the cost the froxel grid exists to avoid.
-pub const VISIBILITY_STRIDE: usize = 4;
+/// same scattering source `scatterMain` used for the whole froxel. Reading the
+/// numbers back is what lets the cascade lookup and the light loop exist in
+/// exactly one shader: the alternative is a second copy of each in the
+/// composite, run per pixel, which is the cost the froxel grid exists to avoid.
+///
+/// It was one `float` — the visibility — until `docs/plan/51-volumetrics.md`'s
+/// rung 2 put the punctual lights beside it: the same argument, and a lane the
+/// composite would otherwise have had to earn by walking the froxel's list
+/// again.
+pub const LIGHTING_STRIDE: usize = 16;
 
 /// Invocations per workgroup in both of `volumetric.slang`'s entry points.
 pub const WORKGROUP_SIZE: u32 = 64;
@@ -217,15 +224,18 @@ pub struct VolumetricParams {
     /// both, and a frame that had one from this camera and the other from the
     /// last would light a shaft that points nowhere.
     pub sun_direction: [f32; 4],
-    /// What the medium scatters out of the sun, per unit length, in `rgb`; `w`
-    /// unused.
+    /// What the medium scatters out of the sun, per unit length, in `rgb`, and
+    /// out of every punctual light in `w` — a coefficient rather than a
+    /// radiance, because the lights carry their own colours in the rows the
+    /// scatter pass reads and there is one medium for all of them.
     ///
-    /// **Zero is exactly no sun**, which is what makes this row an off-switch:
-    /// the scattering source is a sum, and a zero term leaves the environment
-    /// term it is added to bit for bit. That is the state every frame is in
-    /// until a caller sets `crcbl_render::Fog`'s `sun_scattering` — named
-    /// rather than linked, this crate having no dependencies at all — and it is
-    /// what lets the column stay algebraically equal to the closed form.
+    /// **Zero is exactly no sun, and zero is exactly no glow**, which is what
+    /// makes this row an off-switch: the scattering source is a sum, and a zero
+    /// term leaves the environment term it is added to bit for bit. That is
+    /// the state every frame is in until a caller sets `crcbl_render::Fog`'s
+    /// `sun_scattering` or `light_scattering` — named rather than linked, this
+    /// crate having no dependencies at all — and it is what lets the column
+    /// stay algebraically equal to the closed form.
     pub sun_radiance: [f32; 4],
     /// World → cascade `i`'s shadow clip, column-major, one matrix per cascade
     /// — `crcbl_shaders::mesh::FrameUniforms::shadow_view_proj`, handed to the
@@ -233,7 +243,7 @@ pub struct VolumetricParams {
     /// question.
     ///
     /// The scatter pass reads these and the composite does not: the whole point
-    /// of the buffer [`VISIBILITY_STRIDE`] measures is that the shadow lookup
+    /// of the buffer [`LIGHTING_STRIDE`] measures is that the shadow lookup
     /// happens once per froxel rather than once per pixel. They are in the
     /// shared block anyway because there is one block, and a second one
     /// declared by one shader alone is a layout the two could disagree about.
@@ -1024,13 +1034,64 @@ mod tests {
     /// is worth exactly what it says: the read is written down, not that it is
     /// right.
     #[test]
-    fn the_composite_scatters_its_partial_slice_through_the_froxel_s_visibility() {
+    fn the_composite_scatters_its_partial_slice_through_the_froxel_s_lighting() {
         const COMPOSITE: &str = include_str!("../shaders/volumetric_composite.slang");
         assert!(
-            COMPOSITE.contains("volumetric_source(view_direction, visibilities[froxel])"),
+            COMPOSITE.contains("volumetric_source(view_direction, lighting[froxel])"),
             "volumetric_composite.slang no longer sources its partial slice from the \
-             froxel's own visibility, so the shadow ends at the slice boundary"
+             froxel's own lighting, so the shadow and the glow end at the slice boundary"
         );
+        assert!(
+            COMPOSITE.contains("return params.fog_color.rgb + sun + lit.rgb;"),
+            "volumetric_composite.slang's source no longer adds the froxel's punctual \
+             share, so a light's glow ends at the slice boundary"
+        );
+    }
+
+    /// `volumetric.slang`'s light row, attenuation, cone and list walk are
+    /// `mesh.slang`'s.
+    ///
+    /// `docs/plan/51-volumetrics.md`'s "the light loop will exist twice, and
+    /// the guard has to say so": the fragment stage and the scatter pass read
+    /// the same rows out of the same list, and a copy that drifted would put a
+    /// light's glow somewhere other than the surface it lights — a cone that
+    /// closes at one angle in the air and another on the wall. The struct and
+    /// the two functions are compared as bodies with comments dropped, on
+    /// [`both_shaders_spell_the_same_atlas_walk`]'s terms; the walk itself is
+    /// inline in both files, so its load-bearing lines are compared as text.
+    #[test]
+    fn both_shaders_spell_the_same_punctual_light() {
+        const MESH: &str = include_str!("../shaders/mesh.slang");
+        const VOLUMETRIC: &str = include_str!("../shaders/volumetric.slang");
+
+        // `struct GpuLight` is named in prose before it is declared in both
+        // files, so the signature carries its own line breaks.
+        for signature in [
+            "\nstruct GpuLight\n",
+            "float punctual_falloff(float distance, float radius)",
+            "float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)",
+        ] {
+            assert_eq!(
+                one_function(MESH, signature, "frame."),
+                one_function(VOLUMETRIC, signature, "params."),
+                "`{}` has drifted between mesh.slang and volumetric.slang",
+                signature.trim()
+            );
+        }
+        for line in [
+            "uint count = min(cluster_lights[base], CLUSTER_LIGHT_CAPACITY);",
+            "GpuLight light = lights[cluster_lights[base + 1 + slot]];",
+            "to_light = offset / max(distance, 1e-6);",
+            "reach = punctual_falloff(distance, light.position.w);",
+            "reach *= spot_cone(to_light, light.direction.xyz, light.direction.w, light.cos_inner);",
+        ] {
+            for (file, source) in [("mesh.slang", MESH), ("volumetric.slang", VOLUMETRIC)] {
+                assert!(
+                    source.contains(line),
+                    "{file} does not walk its froxel's list with `{line}`"
+                );
+            }
+        }
     }
 
     /// Every shader that spells the phase function is in [`SHADERS`].
