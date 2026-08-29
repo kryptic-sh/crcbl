@@ -459,6 +459,16 @@ It does **not** block the deploy: `deploy` needs `build` and `demos`, and this
 job is neither — `0bf541f` deployed with this job red. It does fail the
 workflow.
 
+**Switched off (2026-08-30).** `probe-macos` carries `if: false` in `pages.yml`
+while Metal work is deferred: every Pages run since `b6b0c32` was red on this
+job alone, which made a red Pages run mean nothing and let the real miss on
+`f5672b4` (the options gate) look like more of the same. Nothing above is
+resolved by that — the quarry wedge on the Apple adapter stands exactly as
+described, and taking it up means deleting the `if` and reading the next macOS
+run. Until then the seam's only macOS evidence is `ci.yml`'s `mtl-e2e` job and
+the golden-harness matrix's macOS leg, neither of which drives a browser through
+group E.
+
 ### Seven gates in `web/tools/` still print through `console` (2026-08-28)
 
 `probe-e2e.mjs`, `render-harness-e2e.mjs`, `horde-threads-e2e.mjs`,
