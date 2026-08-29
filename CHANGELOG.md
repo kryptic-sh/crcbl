@@ -206,6 +206,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   run has actually started under the chosen cap. `menu::is_above` asks
   `FrameLimit::clamped_to` which of two ceilings is higher rather than comparing
   rates, because unlimited is spelled zero and is the largest ceiling there is.
+  The row also shows the clamp: `Screen::opened` takes the game's own limit, and
+  a ceiling above it reads `held to` the rate the run resolves to —
+  `240 fps, held to 60 fps` — so requested and resolved are shown apart wherever
+  they differ.
 
   **It runs in a browser too**, at `/demos/options/`, from the same build that
   runs natively. That half is the point of the sample rather than a bonus: a tab

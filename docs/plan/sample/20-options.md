@@ -124,9 +124,12 @@ machinery. Verified against the tree on 2026-08-28:
   `FrameLimit::clamped_to` rather than of the rates. It is also the first
   setting here that does **not** apply as it moves — the loop takes its ceiling
   when it is built — so the row carries `menu::NEXT_START_MARK` until a run has
-  started under it. That is the honest half of requested-versus-resolved; the
-  other half, showing the game's own `--fps` and the device's clamp beside the
-  file's value, is still open and `docs/backlog.md` carries it.
+  started under it. That is the _time_ half of requested-versus-resolved; the
+  _clamp_ half landed 2026-08-29: `Screen::opened` takes the game's own limit —
+  `LoopConfig::limit`, the `--fps` `Loop::new` holds under the file's ceiling —
+  and the row writes `menu::HELD_MARK` and the rate that resolves to wherever it
+  is lower than the ceiling shown, so `frame_limit = 240` in a binary launched
+  at 60 reads `240 fps, held to 60 fps`.
 - **The anisotropy is on the screen**, as of 2026-08-29, on the cap's pattern:
   `menu::ANISOTROPIES` is the ladder — `1`, `2`, `4`, `8`, `16`, the powers of
   two hardware steps in — `menu::next_anisotropy` lifts a hand-written value

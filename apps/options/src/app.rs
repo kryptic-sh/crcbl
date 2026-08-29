@@ -243,6 +243,12 @@ pub struct Screen {
     /// with is the only way the row can say so; comparing against the stack
     /// would compare the setting with itself.
     opened_cap: FrameLimit,
+    /// The ceiling the **game** asked for — its `--fps`, or the default it was
+    /// built with — which the file's ceiling is held against in `Loop::new`.
+    ///
+    /// Kept so the row can show the rate the run resolves to beside the one
+    /// the file names, when the two differ; see [`crate::menu::HELD_MARK`].
+    asked: FrameLimit,
     /// `[engine.video] anisotropic_filtering` as the screen currently holds it.
     anisotropy: f32,
     /// The anisotropy this run **started** on, for `opened_cap`'s reason: a
@@ -346,10 +352,13 @@ fn assemble<S: Shell + ?Sized>(booted: Booted<S, Gpu>, options: &Options) -> Loo
         }
         booted
     };
+    let config = options.common.loop_config();
     Loop::new(
         booted,
-        Screen::opened(Store::for_run(options.common.headless)),
-        options.common.loop_config(),
+        // The game's own limit goes to the screen as well as to the loop, so
+        // the row can show what the file's ceiling resolves to against it.
+        Screen::opened(Store::for_run(options.common.headless), config.limit),
+        config,
     )
 }
 
@@ -374,21 +383,26 @@ fn open_the_window<S: Shell + ?Sized>(
 }
 
 impl Screen {
-    /// Reads `store` and holds what it said.
+    /// Reads `store` and holds what it said, beside `asked`, the frame limit
+    /// the game itself is running under — see [`Screen::over`].
     ///
     /// A store with nothing in it — a headless run, a player who has never
     /// pressed `SAVE` — is every bus at unity, which is what an absent
     /// `[engine.audio]` key means.
     #[must_use]
-    pub fn opened(store: Store) -> Self {
+    pub fn opened(store: Store, asked: FrameLimit) -> Self {
         let stack = store.source().open(APP_NAME).unwrap_or_default();
-        Self::over(stack, store)
+        Self::over(stack, store, asked)
     }
 
     /// The same screen over a stack the caller already has — what a test uses,
     /// and what a browser build will, since neither reads a config directory.
+    ///
+    /// `asked` is the game's own frame limit, the one `Loop::new` holds under
+    /// the file's ceiling; the row shows the rate that resolves to when it is
+    /// not the ceiling itself.
     #[must_use]
-    pub fn over(stack: SettingsStack, store: Store) -> Self {
+    pub fn over(stack: SettingsStack, store: Store, asked: FrameLimit) -> Self {
         let gains = crcbl::settings::audio_gains(&stack).map(|(_, gain)| gain);
         let cap = crcbl::settings::frame_limit(&stack);
         let anisotropy = crcbl::settings::anisotropic_filtering(&stack);
@@ -411,6 +425,7 @@ impl Screen {
             logged_edits: 0,
             cap,
             opened_cap: cap,
+            asked,
             anisotropy,
             opened_anisotropy: anisotropy,
             scale,
@@ -550,14 +565,26 @@ impl Screen {
         }
     }
 
-    /// What the row says: the ceiling, and whether this run is running under it.
+    /// What the row says: the ceiling; the rate the game's own limit holds it
+    /// to, where that is lower; and whether this run is running under it.
+    ///
+    /// The held-to rate is computed against the ceiling the row *shows*, so a
+    /// stepped ceiling says what the next start would resolve to — the game's
+    /// own limit is a fact about the binary, not about this run.
     fn cap_hint(&self) -> String {
-        let label = crate::menu::frame_cap_label(self.cap);
-        if self.cap == self.opened_cap {
-            label
-        } else {
-            format!("{label} {}", crate::menu::NEXT_START_MARK)
+        let mut hint = crate::menu::frame_cap_label(self.cap);
+        let resolved = self.asked.clamped_to(self.cap);
+        if resolved != self.cap {
+            hint = format!(
+                "{hint}, {} {}",
+                crate::menu::HELD_MARK,
+                crate::menu::frame_cap_label(resolved)
+            );
         }
+        if self.cap != self.opened_cap {
+            hint = format!("{hint} {}", crate::menu::NEXT_START_MARK);
+        }
+        hint
     }
 
     /// Moves the page anisotropy, writing the key and marking the file unsaved,
@@ -967,7 +994,11 @@ mod tests {
     fn screen(toml: &str) -> (Screen, Menus) {
         let storage = settings_file(toml);
         (
-            Screen::over(SettingsStack::from_storage(&storage), Store::None),
+            Screen::over(
+                SettingsStack::from_storage(&storage),
+                Store::None,
+                FrameLimit::unlimited(),
+            ),
             Screen::menus(),
         )
     }
@@ -1059,7 +1090,11 @@ mod tests {
     #[test]
     fn a_saved_gain_is_still_there_when_the_screen_opens_again() {
         let storage = crcbl::store::MemoryStorage::new();
-        let mut screen = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let mut screen = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         let mut menus = Screen::menus();
         reconcile(&mut screen, &mut menus);
 
@@ -1071,7 +1106,11 @@ mod tests {
         screen.save_to(SettingsSource::Source(&storage));
         assert_eq!(screen.saved(), &SaveState::Saved);
 
-        let reopened = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let reopened = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         assert!(
             (reopened.gain(Bus::Ambience) - 0.25).abs() < 1e-6,
             "the restart read back {} rather than the quarter that was saved",
@@ -1221,7 +1260,11 @@ mod tests {
     #[test]
     fn a_saved_switch_is_still_off_when_the_screen_opens_again() {
         let storage = crcbl::store::MemoryStorage::new();
-        let mut screen = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let mut screen = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         assert_eq!(
             screen.effects(),
             RenderEffects::all(),
@@ -1240,7 +1283,11 @@ mod tests {
         screen.save_to(SettingsSource::Source(&storage));
         assert_eq!(screen.saved(), &SaveState::Saved);
 
-        let reopened = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let reopened = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         assert_eq!(
             reopened.effects(),
             RenderEffects::all().difference(RenderEffects::SHADOWS),
@@ -1316,7 +1363,11 @@ mod tests {
     #[test]
     fn a_saved_frame_cap_is_still_there_when_the_screen_opens_again() {
         let storage = crcbl::store::MemoryStorage::new();
-        let mut screen = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let mut screen = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         assert_eq!(
             screen.cap(),
             FrameLimit::unlimited(),
@@ -1336,7 +1387,11 @@ mod tests {
         screen.save_to(SettingsSource::Source(&storage));
         assert_eq!(screen.saved(), &SaveState::Saved);
 
-        let reopened = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let reopened = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         assert_eq!(
             reopened.cap(),
             stepped,
@@ -1394,6 +1449,69 @@ mod tests {
         );
     }
 
+    /// **The row shows the rate the game's own limit holds the ceiling to,
+    /// and only where they differ.**
+    ///
+    /// A file saying 240 in a binary launched at 60 runs at 60, and a file
+    /// saying nothing runs at 60 too — both rows say so. A file saying 30 is
+    /// the ceiling that wins, and the row has nothing to add. Stepping the
+    /// ceiling recomputes the held-to rate against the new ceiling and marks
+    /// the row for the next start.
+    #[test]
+    fn the_row_shows_the_rate_the_games_own_limit_holds_the_ceiling_to() {
+        let asked = FrameLimit::fps(60);
+        let hint_of = |toml: &str| {
+            let storage = settings_file(toml);
+            let mut screen =
+                Screen::over(SettingsStack::from_storage(&storage), Store::None, asked);
+            let mut menus = Screen::menus();
+            reconcile(&mut screen, &mut menus);
+            (screen, menus)
+        };
+        let held = |cap: FrameLimit| {
+            format!(
+                "{}, {} {}",
+                crate::menu::frame_cap_label(cap),
+                crate::menu::HELD_MARK,
+                crate::menu::frame_cap_label(asked),
+            )
+        };
+
+        let (_, mut menus) = hint_of("[engine.video]\nframe_limit = 240\n");
+        assert_eq!(
+            hint(&mut menus, crate::menu::FRAME_CAP_ID),
+            held(FrameLimit::fps(240)),
+        );
+
+        let (_, mut menus) = hint_of("");
+        assert_eq!(
+            hint(&mut menus, crate::menu::FRAME_CAP_ID),
+            held(FrameLimit::unlimited()),
+            "no ceiling still runs at the game's own limit",
+        );
+
+        let (mut screen, mut menus) = hint_of("[engine.video]\nframe_limit = 30\n");
+        assert_eq!(
+            hint(&mut menus, crate::menu::FRAME_CAP_ID),
+            crate::menu::frame_cap_label(FrameLimit::fps(30)),
+            "a ceiling under the game's limit is the rate, and says nothing more",
+        );
+
+        // Two steps up from 30 is 72, above the game's 60: held, and next start.
+        screen.apply(Action::CycleFrameCap);
+        screen.apply(Action::CycleFrameCap);
+        assert_eq!(screen.cap(), FrameLimit::fps(72));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            hint(&mut menus, crate::menu::FRAME_CAP_ID),
+            format!(
+                "{} {}",
+                held(FrameLimit::fps(72)),
+                crate::menu::NEXT_START_MARK
+            ),
+        );
+    }
+
     /// `RESET` is the defaults of the whole screen, not only of the faders.
     #[test]
     fn reset_takes_the_frame_cap_back_to_no_ceiling_too() {
@@ -1420,7 +1538,11 @@ mod tests {
     #[test]
     fn a_saved_anisotropy_is_still_there_when_the_screen_opens_again() {
         let storage = crcbl::store::MemoryStorage::new();
-        let mut screen = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let mut screen = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         assert_eq!(
             screen.anisotropy(),
             DEFAULT_ANISOTROPY,
@@ -1441,7 +1563,11 @@ mod tests {
         screen.save_to(SettingsSource::Source(&storage));
         assert_eq!(screen.saved(), &SaveState::Saved);
 
-        let reopened = Screen::over(SettingsStack::from_storage(&storage), Store::None);
+        let reopened = Screen::over(
+            SettingsStack::from_storage(&storage),
+            Store::None,
+            FrameLimit::unlimited(),
+        );
         assert_eq!(
             reopened.anisotropy(),
             stepped,

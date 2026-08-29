@@ -305,6 +305,18 @@ pub const SILENT_MARK: &str = "(silent)";
 /// exactly why the video rows have to say that they do not.
 pub const NEXT_START_MARK: &str = "(next start)";
 
+/// What the frame-cap row writes between the file's ceiling and the rate this
+/// run actually runs at, when the two differ.
+///
+/// `docs/plan/39-capabilities.md`'s rule: `[engine.video]` may only clamp
+/// downward, so the game's own limit — its `--fps`, or the default it was
+/// built with — is held under the file's ceiling by `FrameLimit::clamped_to`
+/// in `Loop::new`. A player who wrote 240 into a sample launched at 60 gets 60,
+/// and a row that showed 240 with nothing beside it would be claiming a rate
+/// the run never reaches. Requested and resolved, shown apart where they
+/// differ, is the plan's exit criterion.
+pub const HELD_MARK: &str = "held to";
+
 /// The label a bus wears on its row.
 #[must_use]
 pub const fn label(bus: Bus) -> &'static str {

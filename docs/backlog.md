@@ -21799,18 +21799,6 @@ leaves:
   neither `set_render_scale` nor `set_anisotropy`, and that pairing is one
   decision — when the samples pick the scale up, they pick this up beside it.
 
-- **Requested versus resolved is only half shown.** `menu::NEXT_START_MARK` says
-  "this run is not under the ceiling you picked", which is the _time_ half. What
-  no row shows is the **clamp**: the game's own `--fps` and the file's ceiling
-  are held together by `FrameLimit::clamped_to` inside `Loop::new`, so a player
-  who sets 240 in a sample launched with `--fps 60` gets 60 and the screen says
-  240 with no explanation. `docs/plan/39-capabilities.md`'s downward-only rule
-  is what this display exists to make visible, and it is a plan exit criterion.
-  The cost is passing the game's requested limit into `Screen::opened` — one
-  argument through `app::assemble`, which already has the `Options` — and a
-  second line on the row. Deliberately not done in the slice that added the cap:
-  the row's own round trip was the reviewable unit.
-
 - **The ladder is a button, because the widget set has no cycler.** `crcbl-ui`'s
   `MenuItem` is a button or a slider and nothing else, so `FRAME CAP` steps
   forward on `ENTER` and cannot step back — `Menu::nudge_slider` is the only
