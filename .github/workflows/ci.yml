@@ -629,6 +629,11 @@ jobs:
         run:
           cargo run --locked -p crcbl-shaders --example cook-sky-prefilter --
           --check
+      # SMAA's area and search tables. Byte-exact rather than within a
+      # tolerance — the generator takes no transcendental — but in this job
+      # with the other two all the same, so one job owns every cooked table.
+      - name: Check the committed SMAA tables against their generator
+        run: cargo run --locked -p crcbl-shaders --example cook-smaa -- --check
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7

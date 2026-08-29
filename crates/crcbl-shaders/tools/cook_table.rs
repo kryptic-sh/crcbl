@@ -15,6 +15,12 @@
 //! only, and this compares decoded `f32`s within the tolerance each tool
 //! chooses, so a developer on another machine gets a useful answer instead of
 //! a false alarm.
+//!
+//! **A tolerance of zero compares bytes.** `cook-smaa`'s tables are bytes,
+//! not `f32`s, and its generator takes no transcendental at all — so the only
+//! honest comparison is exact, and decoding pairs of its bytes as floats would
+//! be nonsense. A tool that passes `0.0` gets the first differing byte named
+//! instead.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,7 +28,9 @@ use std::process::ExitCode;
 /// Regenerate or check `artifact` (relative to the crate) against `fresh`.
 ///
 /// `tool` names the caller in every message. Returns the process's exit code:
-/// success, failure, or 2 for arguments the tool does not take.
+/// success, failure, or 2 for arguments the tool does not take. A `tolerance`
+/// of zero compares bytes; a positive one decodes `f32`s — the header says why
+/// both exist.
 pub fn run(tool: &str, artifact: &str, fresh: &[u8], tolerance: f32) -> ExitCode {
     let check = match std::env::args().skip(1).collect::<Vec<String>>().as_slice() {
         [] => false,
@@ -55,18 +63,38 @@ pub fn run(tool: &str, artifact: &str, fresh: &[u8], tolerance: f32) -> ExitCode
             eprintln!("  Regenerate with: cargo run -p crcbl-shaders --example {tool}");
             return ExitCode::FAILURE;
         }
-        match worst_difference(&committed, fresh, tolerance) {
-            Some((at, committed_value, fresh_value)) => {
-                eprintln!(
-                    "{tool}: {artifact} holds {committed_value} where the integrator \
-                     produces {fresh_value} at value {at}, past a tolerance of {tolerance}"
-                );
-                eprintln!("  the committed table is not what its integrator produces.");
+        let difference = if tolerance > 0.0 {
+            worst_difference(&committed, fresh, tolerance).map(|(at, committed, fresh)| {
+                format!(
+                    "holds {committed} where the integrator produces {fresh} at value {at}, \
+                     past a tolerance of {tolerance}"
+                )
+            })
+        } else {
+            committed
+                .iter()
+                .zip(fresh)
+                .position(|(committed, fresh)| committed != fresh)
+                .map(|at| {
+                    format!(
+                        "holds {} where the generator produces {} at byte {at}",
+                        committed[at], fresh[at]
+                    )
+                })
+        };
+        match difference {
+            Some(difference) => {
+                eprintln!("{tool}: {artifact} {difference}");
+                eprintln!("  the committed table is not what its generator produces.");
                 eprintln!("  Regenerate with: cargo run -p crcbl-shaders --example {tool}");
                 ExitCode::FAILURE
             }
-            None => {
+            None if tolerance > 0.0 => {
                 println!("{tool}: {artifact} matches the integrator to {tolerance}");
+                ExitCode::SUCCESS
+            }
+            None => {
+                println!("{tool}: {artifact} matches the generator byte for byte");
                 ExitCode::SUCCESS
             }
         }

@@ -143,6 +143,16 @@ FXAA does not leave when SMAA arrives. **It stays as the cheap tier**, on the
 terms `RenderEffects` already gives the other pairs: a tier that is off is a
 frame with fewer passes, not a shader branch.
 
+**The tables are built (2026-08-30).** `crcbl_shaders::smaa` transcribes the
+reference `AreaTex.py` and `SearchTex.py` operation for operation, committed as
+`tables/smaa_area.bin` — the 160×80 offset-zero slab SMAA 1x reads; the S2x/T2x
+slabs have no rung here and stay uncommitted — and `tables/smaa_search.bin`
+(64×16), with `cook-smaa` regenerating them and its `--check` byte-exact in CI,
+since neither generator takes a transcendental. Verified against the reference
+scripts' own output at every subsample offset. The three passes, the
+`RenderEffects` tier and the upload are what the rung still owes;
+`docs/backlog.md` carries them.
+
 ### TAA is specified, still post-MVP, and the blocker is named exactly
 
 TAA needs four things this tree does not have:

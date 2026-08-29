@@ -77,3 +77,10 @@ path = "tools/cook-dfg.rs"
 [[example]]
 name = "cook-sky-prefilter"
 path = "tools/cook-sky-prefilter.rs"
+
+# SMAA's area and search tables' generator: a transcription of the reference
+# scripts, and byte-exact where the two integrators above are within a
+# tolerance — `cook_table.rs` says why both comparisons exist.
+[[example]]
+name = "cook-smaa"
+path = "tools/cook-smaa.rs"

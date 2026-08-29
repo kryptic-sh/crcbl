@@ -17,6 +17,32 @@ delivery table is the record of which. `apps/options` is sample 20; the other
 three samples are planned, not built. What follows is what the plans could not
 settle.
 
+### What the SMAA tables left owed (2026-08-30)
+
+`crcbl_shaders::smaa` holds SMAA's two lookup tables as committed bytes with
+`cook-smaa` behind them, verified byte-for-byte against the reference
+generators. Nothing reads them yet. Owed, in order:
+
+- **The three passes**, on `fxaa.slang`'s fullscreen shape: edge detection,
+  blend weights (the pass that reads both tables) and the neighbourhood blend.
+  The reference `SMAA.hlsl` is the transcription target; its area lookup is
+  addressed by `AREA_WIDTH`/`AREA_HEIGHT` rather than `SMAA_AREATEX_PIXEL_SIZE`,
+  and `SMAA_AREATEX_SUBTEX_SIZE` selects nothing because only the offset-zero
+  slab is committed.
+- **The upload**: `area_bytes()` as an `Rg8Unorm` image and `search_bytes()` as
+  an `R8Unorm` one, both sampled bilinear and clamped — the area lookup relies
+  on linear filtering between texels, so a nearest sampler would be a silent
+  quality bug rather than a crash.
+- **A `RenderEffects` tier** so FXAA stays the cheap one, and its settings key
+  on `antialiasing`'s terms. Whether SMAA takes FXAA's place in `DEFAULT_STACK`
+  is the user's call once goldens show both; the plan only says FXAA stays
+  available.
+- **The browser-gate cost measured before it lands**: three passes where FXAA is
+  one, and the shadow-filter entry below records what a pass costs there.
+- Committed is the offset-zero slab only. `bake_area_slab` still produces the
+  S2x/T2x slabs; if either ever gets a rung, the table grows by committing them,
+  not by re-deriving anything.
+
 ### What auto-exposure left owed (2026-08-29)
 
 `docs/plan/43-render-standards.md` §6's histogram-and-reduce rung is built —

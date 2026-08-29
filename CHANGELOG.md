@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **SMAA's lookup tables are cooked.** `crcbl_shaders::smaa` transcribes the
+  reference `AreaTex.py` and `SearchTex.py` operation for operation and commits
+  `tables/smaa_area.bin` — the 160×80 `Rg8` offset-zero slab SMAA 1x reads; the
+  S2x/T2x slabs stay uncommitted, `bake_area_slab` still bakes them — and
+  `tables/smaa_search.bin` (64×16 `R8`), both verified byte-for-byte against the
+  reference scripts' own output. `cook-smaa` regenerates them and its `--check`
+  is byte-exact in CI. Nothing draws with them yet: the three passes are the
+  rung's next slice.
 - **Point and spot lights glow in the froxel medium.**
   `docs/plan/51-volumetrics.md`'s rung 2: `volumetric.slang`'s scatter pass
   binds the frame's light rows and the froxel grid `light_cluster.slang` filled
