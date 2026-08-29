@@ -121,23 +121,29 @@ machinery. Verified against the tree on 2026-08-28:
 - **The frame cap is on the screen**, as of 2026-08-28, and is the first
   `[engine.video]` key to reach one. `menu::FRAME_CAPS` is the ladder it steps
   through and `menu::is_above` is the ordering, asked of
-  `FrameLimit::clamped_to` rather than of the rates. It is also the first
-  setting here that does **not** apply as it moves — the loop takes its ceiling
-  when it is built — so the row carries `menu::NEXT_START_MARK` until a run has
-  started under it. That is the _time_ half of requested-versus-resolved; the
-  _clamp_ half landed 2026-08-29: `Screen::opened` takes the game's own limit —
+  `FrameLimit::clamped_to` rather than of the rates. Since 2026-08-29 the row is
+  a `MenuItem::cycler` rather than a button: the arrows step it and stop at the
+  ends, `ENTER` and a click step it round, and `Screen::menu_kind` reads the
+  chosen rung back each frame the way it reads the grooves — `menu::rung_of`
+  says which rung a value sits on and `menu::stepped` where a step from it
+  lands, with a hand-written value between rungs going to the rung above on a
+  step forward and the rung below on a step back. It is also the first setting
+  here that does **not** apply as it moves — the loop takes its ceiling when it
+  is built — so the row carries `menu::NEXT_START_MARK` until a run has started
+  under it. That is the _time_ half of requested-versus-resolved; the _clamp_
+  half landed 2026-08-29: `Screen::opened` takes the game's own limit —
   `LoopConfig::limit`, the `--fps` `Loop::new` holds under the file's ceiling —
   and the row writes `menu::HELD_MARK` and the rate that resolves to wherever it
   is lower than the ceiling shown, so `frame_limit = 240` in a binary launched
   at 60 reads `240 fps, held to 60 fps`.
 - **The anisotropy is on the screen**, as of 2026-08-29, on the cap's pattern:
   `menu::ANISOTROPIES` is the ladder — `1`, `2`, `4`, `8`, `16`, the powers of
-  two hardware steps in — `menu::next_anisotropy` lifts a hand-written value
-  between rungs to the rung above, and `RESET` puts it back to
-  `DEFAULT_ANISOTROPY` rather than to the bottom, since that is what an absent
-  key means. It wears `menu::NEXT_START_MARK` too: this sample draws no page, so
-  the key reaches `ForwardRenderer::set_anisotropy` only where a renderer opens
-  over it, which today is `apps/viewer`.
+  two hardware steps in — a cycler like the cap's, so a hand-written `6` steps
+  up to `8` and back to `4`, and `RESET` puts it back to `DEFAULT_ANISOTROPY`
+  rather than to the bottom, since that is what an absent key means. It wears
+  `menu::NEXT_START_MARK` too: this sample draws no page, so the key reaches
+  `ForwardRenderer::set_anisotropy` only where a renderer opens over it, which
+  today is `apps/viewer`.
 - **The render scale is on the screen**, as of 2026-08-29, and it is a groove
   rather than a ladder because the key is a continuum: `menu::scale_at` and
   `menu::scale_handle_at` map the handle linearly over `MIN_RENDER_SCALE..=1.0`,

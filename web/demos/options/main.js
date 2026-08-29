@@ -20,7 +20,7 @@ import { bootDemo } from '../../engine/demo.js';
 
 bootDemo({
   init,
-  hint: 'up/down picks a row, left/right moves a fader or RENDER SCALE · ENTER steps FRAME CAP or ANISOTROPY, flips an effect, and presses SAVE or RESET · F3 shows the panel · F11 fullscreen',
+  hint: 'up/down picks a row, left/right moves a fader or RENDER SCALE and steps FRAME CAP, ANISOTROPY or an effect switch · ENTER steps a row round and presses SAVE or RESET · F3 shows the panel · F11 fullscreen',
   savedLabel: 'Settings',
   bind: (ex) => ({
     prepare: () => ex.__crcbl_options_prepare(),

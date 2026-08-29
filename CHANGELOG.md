@@ -42,12 +42,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `set_anisotropic_filtering` writes it, `VideoSettings::anisotropic_filtering`
   carries it, `GpuContext::anisotropic_filtering` hands it over, and
   `apps/viewer` applies it at open and on reload; `crcbl settings list` names
-  it; and `apps/options` steps it on an `ANISOTROPY` row — `menu::ANISOTROPIES`,
-  the powers of two from off to sixteen, with `RESET` returning it to the
-  engine's default and `(next start)` beside a value the run did not come up on,
-  since that screen draws no page. The lights fixture's sun (`dim_sun`) is
-  halved so its pools stay the brightest thing on their pyramids under a
-  bilinear page. The page costs a third again in device memory for the chain.
+  it; and `apps/options` steps it on an `ANISOTROPY` cycler row —
+  `menu::ANISOTROPIES`, the powers of two from off to sixteen, with `RESET`
+  returning it to the engine's default and `(next start)` beside a value the run
+  did not come up on, since that screen draws no page. The lights fixture's sun
+  (`dim_sun`) is halved so its pools stay the brightest thing on their pyramids
+  under a bilinear page. The page costs a third again in device memory for the
+  chain.
 
 - **Auto-exposure: the frame measures its own exposure, and no readback stalls
   on it.** `RenderEffects::AUTO_EXPOSURE` — the `auto_exposure` settings key —
@@ -200,10 +201,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   **`[engine.video] frame_limit` is the first video key on the screen.** A
   `FRAME CAP` row steps through a ladder of ceilings — `menu::FRAME_CAPS`, from
   30 fps up to no ceiling at all — writing the key as it goes, and `RESET` takes
-  the cap off along with the faders. It is the one row here that does not apply
-  as it moves: the loop takes its frame ceiling once, when `Loop::new` holds the
-  game's own `--fps` under the file's, so the row reads `(next start)` until a
-  run has actually started under the chosen cap. `menu::is_above` asks
+  the cap off along with the faders. The row is a cycler: the arrows step it and
+  stop at the ends, `ENTER` and a click step it round, and a hand-written rate
+  between rungs steps to the rung above or below in the direction pressed
+  (`menu::stepped`). It is the one row here that does not apply as it moves: the
+  loop takes its frame ceiling once, when `Loop::new` holds the game's own
+  `--fps` under the file's, so the row reads `(next start)` until a run has
+  actually started under the chosen cap. `menu::is_above` asks
   `FrameLimit::clamped_to` which of two ceilings is higher rather than comparing
   rates, because unlimited is spelled zero and is the largest ceiling there is.
   The row also shows the clamp: `Screen::opened` takes the game's own limit, and
@@ -311,13 +315,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   alike but a settings screen cannot: the key it would have to remove to turn an
   effect back on is the one it never wrote. A non-finite scale or gain is
   refused rather than written. `apps/options` carries the seven effect keys as
-  switches, one row per `VIDEO_KEYS` entry: a press flips the bit and writes
-  every key, `RESET` allows everything, and a switch the run did not come up
-  with reads `(next start)`, since that screen draws no scene.
-  `SettingsSource::stack` becomes the public `SettingsSource::open`, and
-  `SettingsSource::save` writes a stack back where that source read it —
-  `SettingsSource::None` saves nothing and reports so, because a golden run must
-  not persist into whichever home directory it ran in.
+  switches, one row per `VIDEO_KEYS` entry, each a two-rung cycler: an arrow or
+  a press flips the bit and writes every key, `RESET` allows everything, and a
+  switch the run did not come up with reads `(next start)`, since that screen
+  draws no scene. `SettingsSource::stack` becomes the public
+  `SettingsSource::open`, and `SettingsSource::save` writes a stack back where
+  that source read it — `SettingsSource::None` saves nothing and reports so,
+  because a golden run must not persist into whichever home directory it ran in.
 
 - **`[engine.video] render_scale`: the player can ask for a smaller internal
   frame.** `ForwardRenderer::set_render_scale` and the Catmull-Rom upscale pass

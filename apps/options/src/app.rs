@@ -763,13 +763,11 @@ impl HostedGame for Screen {
         match id {
             crate::menu::SAVE_ID => Some(Action::Save),
             crate::menu::RESET_ID => Some(Action::Reset),
-            crate::menu::FRAME_CAP_ID => Some(Action::CycleFrameCap),
-            crate::menu::ANISOTROPY_ID => Some(Action::CycleAnisotropy),
-            // A switch, or a groove. Sliders fire nothing, so the `None` here
-            // is unreachable through the loop — it is there because the ids
-            // exist and a catch-all that swallowed a real button would be
-            // silent.
-            _ => crate::menu::effect_of(id).map(Action::ToggleEffect),
+            // A groove, a cycler or a switch. None of them fires — a value row
+            // reports nothing from either device — so the `None` here is
+            // unreachable through the loop; it is there because the ids exist
+            // and a catch-all that swallowed a real button would be silent.
+            _ => None,
         }
     }
 
@@ -781,25 +779,21 @@ impl HostedGame for Screen {
         match action {
             Action::Save => self.save(),
             Action::Reset => self.reset(),
-            Action::CycleFrameCap => self.set_cap(crate::menu::next_frame_cap(self.cap)),
-            Action::CycleAnisotropy => {
-                self.set_anisotropy(crate::menu::next_anisotropy(self.anisotropy));
-            }
-            Action::ToggleEffect(effect) => {
-                let mut effects = self.effects;
-                effects.toggle(effect);
-                self.set_effects(effects);
-            }
         }
     }
 
-    /// **The whole of this sample's frame: the faders reconciled both ways.**
+    /// **The whole of this sample's frame: every value row reconciled both
+    /// ways.**
     ///
     /// A drag moves a handle and the gain has to follow; a `RESET` moves the
     /// gain and the handle has to follow. Both directions run here, in that
     /// order, and which one wins is decided by a comparison that cannot be
     /// fooled — `handles` is the number the widget itself last held, so a
-    /// difference is the pointer and nothing else.
+    /// difference is the pointer and nothing else. The cyclers are the same
+    /// shape with a rung for a handle: the widget's choice is compared with
+    /// the rung the screen's value sits on, a difference is a key or a click,
+    /// and the widget is put back on the value's rung afterwards — which is
+    /// where [`crate::menu::stepped`]'s off-ladder rule needs it to be.
     fn menu_kind(&mut self, menus: &mut Menus, _paused: bool) -> MenuKind {
         if let Some(menu) = menus.get_mut(MenuKind::Settings) {
             for bus in Bus::ALL {
@@ -856,10 +850,58 @@ impl HostedGame for Screen {
                 }
             }
             menu.set_item_hint(id, self.scale_hint());
-            menu.set_item_hint(crate::menu::FRAME_CAP_ID, self.cap_hint());
-            menu.set_item_hint(crate::menu::ANISOTROPY_ID, self.anisotropy_hint());
+
+            // The cap's cycler. `placed` guards the first frame here as it
+            // does the faders: the set is born on no ceiling and the file may
+            // say otherwise, which is a placement rather than a step.
+            let id = crate::menu::FRAME_CAP_ID;
+            let rung = crate::menu::frame_cap_rung(self.cap);
+            if let Some(chosen) = menu.cycler(id)
+                && self.placed
+                && chosen != rung
+            {
+                let forward = chosen == (rung + 1) % crate::menu::FRAME_CAPS.len();
+                self.set_cap(crate::menu::frame_cap_stepped(self.cap, forward, chosen));
+            }
+            menu.set_cycler(id, crate::menu::frame_cap_rung(self.cap));
+            menu.set_item_hint(id, self.cap_hint());
+
+            // The anisotropy's, on the same terms.
+            let id = crate::menu::ANISOTROPY_ID;
+            let rung = crate::menu::anisotropy_rung(self.anisotropy);
+            if let Some(chosen) = menu.cycler(id)
+                && self.placed
+                && chosen != rung
+            {
+                let forward = chosen == (rung + 1) % crate::menu::ANISOTROPIES.len();
+                self.set_anisotropy(crate::menu::anisotropy_stepped(
+                    self.anisotropy,
+                    forward,
+                    chosen,
+                ));
+            }
+            menu.set_cycler(id, crate::menu::anisotropy_rung(self.anisotropy));
+            menu.set_item_hint(id, self.anisotropy_hint());
+
+            // The switches: two rungs each, so any move is a flip. Every key
+            // is written once for however many flipped this frame.
+            let mut effects = self.effects;
             for (index, (_, effect)) in crcbl::settings::VIDEO_KEYS.iter().enumerate() {
-                menu.set_item_hint(crate::menu::effect_id(index), self.effect_hint(*effect));
+                let id = crate::menu::effect_id(index);
+                if let Some(chosen) = menu.cycler(id)
+                    && self.placed
+                    && chosen != crate::menu::switch_rung(effects.contains(*effect))
+                {
+                    effects.toggle(*effect);
+                }
+            }
+            if effects != self.effects {
+                self.set_effects(effects);
+            }
+            for (index, (_, effect)) in crcbl::settings::VIDEO_KEYS.iter().enumerate() {
+                let id = crate::menu::effect_id(index);
+                menu.set_cycler(id, crate::menu::switch_rung(self.effects.contains(*effect)));
+                menu.set_item_hint(id, self.effect_hint(*effect));
             }
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
@@ -1018,6 +1060,31 @@ mod tests {
             .expect("the one menu")
             .slider(crate::menu::fader_id(bus))
             .expect("every bus has a fader")
+    }
+
+    /// The choice a cycler row holds.
+    fn rung(menus: &mut Menus, id: crcbl::ui::WidgetId) -> usize {
+        menus
+            .get_mut(MenuKind::Settings)
+            .expect("the one menu")
+            .cycler(id)
+            .expect("the row is a cycler")
+    }
+
+    /// One arrow press on a cycler row, as the loop's menu pass delivers it:
+    /// the row highlighted, then nudged. The screen reads it on the next
+    /// [`reconcile`].
+    fn step(menus: &mut Menus, id: crcbl::ui::WidgetId, forward: bool) -> bool {
+        let menu = menus.get_mut(MenuKind::Settings).expect("the one menu");
+        assert!(menu.select_id(id), "no row {id}");
+        menu.nudge_cycler(forward)
+    }
+
+    /// `ENTER` on a cycler row: forward, and round the end.
+    fn press(menus: &mut Menus, id: crcbl::ui::WidgetId) {
+        let menu = menus.get_mut(MenuKind::Settings).expect("the one menu");
+        assert!(menu.select_id(id), "no row {id}");
+        assert_eq!(menu.activate(), None, "a cycler fired an id");
     }
 
     fn hint(menus: &mut Menus, id: crcbl::ui::WidgetId) -> String {
@@ -1231,18 +1298,12 @@ mod tests {
             Screen::menu_action(crate::menu::RESET_ID),
             Some(Action::Reset)
         );
-        assert_eq!(
-            Screen::menu_action(crate::menu::FRAME_CAP_ID),
-            Some(Action::CycleFrameCap)
-        );
-        assert_eq!(
-            Screen::menu_action(crate::menu::ANISOTROPY_ID),
-            Some(Action::CycleAnisotropy)
-        );
-        for (index, (key, effect)) in crcbl::settings::VIDEO_KEYS.iter().enumerate() {
+        assert_eq!(Screen::menu_action(crate::menu::FRAME_CAP_ID), None);
+        assert_eq!(Screen::menu_action(crate::menu::ANISOTROPY_ID), None);
+        for (index, (key, _)) in crcbl::settings::VIDEO_KEYS.iter().enumerate() {
             assert_eq!(
                 Screen::menu_action(crate::menu::effect_id(index)),
-                Some(Action::ToggleEffect(*effect)),
+                None,
                 "{key}'s switch",
             );
         }
@@ -1265,13 +1326,22 @@ mod tests {
             Store::None,
             FrameLimit::unlimited(),
         );
+        let mut menus = Screen::menus();
+        reconcile(&mut screen, &mut menus);
         assert_eq!(
             screen.effects(),
             RenderEffects::all(),
             "an absent section allows everything"
         );
 
-        screen.apply(Action::ToggleEffect(RenderEffects::SHADOWS));
+        let shadows = crcbl::settings::VIDEO_KEYS
+            .iter()
+            .position(|(_, effect)| *effect == RenderEffects::SHADOWS)
+            .expect("shadows has a key");
+        // Back, from `on` to `off`: the arrow a player reaches for on a switch
+        // that reads `< on`.
+        assert!(step(&mut menus, crate::menu::effect_id(shadows), false));
+        reconcile(&mut screen, &mut menus);
         assert_eq!(
             screen.effects(),
             RenderEffects::all().difference(RenderEffects::SHADOWS),
@@ -1317,7 +1387,13 @@ mod tests {
             "an untouched switch wears the mark",
         );
 
-        screen.apply(Action::ToggleEffect(RenderEffects::BLOOM));
+        assert_eq!(rung(&mut menus, id), crate::menu::switch_rung(false));
+        assert!(
+            !step(&mut menus, id, false),
+            "a switch already off stepped further off"
+        );
+        // `ENTER` goes round: off to on.
+        press(&mut menus, id);
         reconcile(&mut screen, &mut menus);
         let marked = hint(&mut menus, id);
         assert!(
@@ -1325,8 +1401,9 @@ mod tests {
                 && marked.contains(crate::menu::NEXT_START_MARK),
             "the row reads {marked:?} for an effect this run did not come up with",
         );
+        assert_eq!(rung(&mut menus, id), crate::menu::switch_rung(true));
 
-        screen.apply(Action::ToggleEffect(RenderEffects::BLOOM));
+        press(&mut menus, id);
         reconcile(&mut screen, &mut menus);
         assert_eq!(
             hint(&mut menus, id),
@@ -1373,8 +1450,13 @@ mod tests {
             FrameLimit::unlimited(),
             "an absent key is no cap"
         );
+        let mut menus = Screen::menus();
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.edits(), 0, "placing the row is not an edit");
 
-        screen.apply(Action::CycleFrameCap);
+        // Off the top rung, `ENTER` goes round to the bottom.
+        press(&mut menus, crate::menu::FRAME_CAP_ID);
+        reconcile(&mut screen, &mut menus);
         let stepped = screen.cap();
         assert_eq!(
             stepped,
@@ -1418,7 +1500,7 @@ mod tests {
             "a run opened on its own ceiling has nothing to add",
         );
 
-        screen.apply(Action::CycleFrameCap);
+        press(&mut menus, crate::menu::FRAME_CAP_ID);
         reconcile(&mut screen, &mut menus);
         let marked = hint(&mut menus);
         assert!(
@@ -1430,13 +1512,13 @@ mod tests {
             "the row reads {marked:?} rather than the ceiling that was chosen",
         );
 
-        // All the way round: the ladder is a cycle, so a rung's worth of steps
-        // from anywhere is back where it started — and one of them has already
+        // All the way round: `ENTER` wraps, so a rung's worth of presses from
+        // anywhere is back where it started — and one of them has already
         // been taken above.
         for _ in 1..crate::menu::FRAME_CAPS.len() {
-            screen.apply(Action::CycleFrameCap);
+            press(&mut menus, crate::menu::FRAME_CAP_ID);
+            reconcile(&mut screen, &mut menus);
         }
-        reconcile(&mut screen, &mut menus);
         assert_eq!(
             screen.cap(),
             FrameLimit::unlimited(),
@@ -1498,10 +1580,11 @@ mod tests {
         );
 
         // Two steps up from 30 is 72, above the game's 60: held, and next start.
-        screen.apply(Action::CycleFrameCap);
-        screen.apply(Action::CycleFrameCap);
+        for _ in 0..2 {
+            assert!(step(&mut menus, crate::menu::FRAME_CAP_ID, true));
+            reconcile(&mut screen, &mut menus);
+        }
         assert_eq!(screen.cap(), FrameLimit::fps(72));
-        reconcile(&mut screen, &mut menus);
         assert_eq!(
             hint(&mut menus, crate::menu::FRAME_CAP_ID),
             format!(
@@ -1548,12 +1631,16 @@ mod tests {
             DEFAULT_ANISOTROPY,
             "an absent key is the engine's default"
         );
+        let mut menus = Screen::menus();
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.edits(), 0, "placing the row is not an edit");
 
-        screen.apply(Action::CycleAnisotropy);
+        assert!(step(&mut menus, crate::menu::ANISOTROPY_ID, true));
+        reconcile(&mut screen, &mut menus);
         let stepped = screen.anisotropy();
         assert_eq!(
             stepped,
-            crate::menu::next_anisotropy(DEFAULT_ANISOTROPY),
+            crate::menu::ANISOTROPIES[crate::menu::anisotropy_rung(DEFAULT_ANISOTROPY) + 1],
             "the first step off the default is the rung above it",
         );
         assert_ne!(stepped, DEFAULT_ANISOTROPY);
@@ -1577,14 +1664,16 @@ mod tests {
     }
 
     /// **The row says when the anisotropy is not the one this run came up on,
-    /// and a file value between rungs steps to the rung above it.**
+    /// and a file value between rungs steps to the rung on either side.**
     ///
     /// The same mark the cap wears, for a related reason: nothing in this
     /// process samples a page, so a value chosen here reaches a sampler only
-    /// where the next renderer opens over the key. Round the ladder and back
-    /// brings the mark off again.
+    /// where the next renderer opens over the key. A hand-written `6` sits on
+    /// `4`'s rung and reads `6x`; one step up is `8`, and — from `6` again —
+    /// one step back is `4`, not the `2` the widget landed on, which is what
+    /// putting the widget back on the value's rung after every step is for.
     #[test]
-    fn an_anisotropy_this_run_is_not_on_says_so_and_a_value_between_rungs_steps_up() {
+    fn an_anisotropy_this_run_is_not_on_says_so_and_a_value_between_rungs_steps_either_way() {
         let (mut screen, mut menus) = screen("[engine.video]\nanisotropic_filtering = 6\n");
         assert_eq!(
             screen.anisotropy(),
@@ -1598,10 +1687,15 @@ mod tests {
             crate::menu::anisotropy_label(6.0),
             "a run opened on its own value has nothing to add",
         );
+        assert_eq!(
+            rung(&mut menus, crate::menu::ANISOTROPY_ID),
+            crate::menu::anisotropy_rung(6.0),
+            "the widget was not placed on the file's rung",
+        );
 
-        screen.apply(Action::CycleAnisotropy);
-        assert_eq!(screen.anisotropy(), 8.0, "six steps up to eight");
+        assert!(step(&mut menus, crate::menu::ANISOTROPY_ID, true));
         reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.anisotropy(), 8.0, "six steps up to eight");
         let marked = hint(&mut menus);
         assert!(
             marked.contains(crate::menu::NEXT_START_MARK),
@@ -1616,11 +1710,70 @@ mod tests {
         // came up on six, which is not a rung, so the mark stays until the
         // screen is reset back to the file's own value.
         for _ in 0..crate::menu::ANISOTROPIES.len() {
-            screen.apply(Action::CycleAnisotropy);
+            press(&mut menus, crate::menu::ANISOTROPY_ID);
+            reconcile(&mut screen, &mut menus);
         }
         assert_eq!(screen.anisotropy(), 8.0, "the ladder did not wrap");
-        reconcile(&mut screen, &mut menus);
         assert!(hint(&mut menus).contains(crate::menu::NEXT_START_MARK));
+
+        // And the other way from six: back is four.
+        let (mut screen, mut menus) = self::screen("[engine.video]\nanisotropic_filtering = 6\n");
+        reconcile(&mut screen, &mut menus);
+        assert!(step(&mut menus, crate::menu::ANISOTROPY_ID, false));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.anisotropy(), 4.0, "six steps back to four");
+        assert_eq!(
+            rung(&mut menus, crate::menu::ANISOTROPY_ID),
+            crate::menu::anisotropy_rung(4.0),
+            "the widget was left where it landed rather than on the value's rung",
+        );
+        assert_eq!(screen.edits(), 1);
+    }
+
+    /// **A hand-written rate steps to the rung on either side of it**, and the
+    /// arrows stop at the ladder's ends where `ENTER` goes round.
+    #[test]
+    fn a_rate_between_rungs_steps_either_way_and_the_arrows_stop_at_the_ends() {
+        let id = crate::menu::FRAME_CAP_ID;
+        let (mut screen, mut menus) = screen("[engine.video]\nframe_limit = 90\n");
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            hint(&mut menus, id),
+            crate::menu::frame_cap_label(FrameLimit::fps(90)),
+            "the row reads the file's rate, not a rung",
+        );
+        assert!(step(&mut menus, id, true));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.cap(), FrameLimit::fps(120), "90 steps up to 120");
+
+        let (mut screen, mut menus) = self::screen("[engine.video]\nframe_limit = 90\n");
+        reconcile(&mut screen, &mut menus);
+        assert!(step(&mut menus, id, false));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.cap(), FrameLimit::fps(72), "90 steps back to 72");
+        assert_eq!(
+            crcbl::settings::frame_limit(screen.stack()),
+            FrameLimit::fps(72),
+            "the step did not reach the key",
+        );
+
+        // No ceiling is the top rung: Right stays, ENTER goes round.
+        let (mut screen, mut menus) = self::screen("");
+        reconcile(&mut screen, &mut menus);
+        assert!(
+            !step(&mut menus, id, true),
+            "the top rung stepped further up"
+        );
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.cap(), FrameLimit::unlimited());
+        assert_eq!(screen.edits(), 0, "a refused step was written as an edit");
+        press(&mut menus, id);
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(screen.cap(), crate::menu::FRAME_CAPS[0]);
+        assert!(
+            !step(&mut menus, id, false),
+            "the bottom rung stepped further down"
+        );
     }
 
     /// Round the ladder from a value that is a rung brings the mark back off,
@@ -1629,16 +1782,16 @@ mod tests {
     fn stepping_round_the_anisotropy_ladder_brings_the_mark_off_again() {
         let (mut screen, mut menus) = screen("");
         reconcile(&mut screen, &mut menus);
-        screen.apply(Action::CycleAnisotropy);
+        press(&mut menus, crate::menu::ANISOTROPY_ID);
         reconcile(&mut screen, &mut menus);
         assert!(
             hint(&mut menus, crate::menu::ANISOTROPY_ID).contains(crate::menu::NEXT_START_MARK)
         );
 
         for _ in 1..crate::menu::ANISOTROPIES.len() {
-            screen.apply(Action::CycleAnisotropy);
+            press(&mut menus, crate::menu::ANISOTROPY_ID);
+            reconcile(&mut screen, &mut menus);
         }
-        reconcile(&mut screen, &mut menus);
         assert_eq!(screen.anisotropy(), DEFAULT_ANISOTROPY);
         assert_eq!(
             hint(&mut menus, crate::menu::ANISOTROPY_ID),

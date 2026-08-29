@@ -68,10 +68,10 @@ pub const FRAME_CAP_ID: crcbl::ui::WidgetId = RESET_ID + 1;
 /// 144 Hz panel, which is a worse setting than either neighbour and one nobody
 /// means to pick.
 ///
-/// The row is a button that steps forward — see [`next_frame_cap`] — from
-/// before `crcbl-ui` had a cycler. It has one now (`MenuItem::cycler`, built
-/// 2026-08-29), and moving this row and the anisotropy's onto it is the next
-/// slice; `docs/backlog.md` carries it.
+/// The row is a cycler over this table: the arrows step it and stop at its
+/// ends, `ENTER` and a click step it forward and round. The screen reads the
+/// chosen rung back every frame and writes the key — see [`stepped`] for
+/// where a step from a value that is not a rung lands.
 ///
 /// [`FrameLimit::unlimited`] sits at the end because that is where it sits in
 /// the ordering, not because it is a special case — see [`is_above`].
@@ -97,17 +97,68 @@ pub fn is_above(limit: FrameLimit, than: FrameLimit) -> bool {
     limit.clamped_to(than) == than && limit != than
 }
 
-/// The next ceiling up from `current`, wrapping round to the lowest.
+/// The rung of `ladder` a cycler row shows for `current`: the rung it is, or
+/// the highest rung below it for a value that is not on the ladder at all —
+/// and the bottom rung for a value under the whole ladder.
 ///
-/// **The first rung strictly above `current`**, so a file holding a rate that
-/// is not on the ladder at all — a player who typed `frame_limit = 90` — steps
-/// to the next rung up rather than to somewhere arbitrary.
+/// `above(a, b)` says whether `a` is the higher of the two; it is a parameter
+/// because [`FRAME_CAPS`] orders by [`is_above`] and [`ANISOTROPIES`] by `>`,
+/// and the rule is the same for both. The ladder must be ascending by it.
 #[must_use]
-pub fn next_frame_cap(current: FrameLimit) -> FrameLimit {
-    FRAME_CAPS
-        .into_iter()
-        .find(|rung| is_above(*rung, current))
-        .unwrap_or(FRAME_CAPS[0])
+pub fn rung_of<T: Copy>(ladder: &[T], current: T, above: impl Fn(T, T) -> bool) -> usize {
+    ladder
+        .iter()
+        .rposition(|rung| !above(*rung, current))
+        .unwrap_or(0)
+}
+
+/// Where a step of a cycler row lands, given that the widget moved from
+/// [`rung_of`]`(current)` to `chosen` and whether that was a step forward.
+///
+/// For a `current` that is a rung, the rung the widget chose — which is what
+/// a step forward, a step back and `ENTER`'s wrap round the end all mean. For
+/// a value that is **not** on the ladder — a player who typed
+/// `frame_limit = 90` — the rung above it on a step forward and the rung below
+/// it on a step back, so one press takes their setting to the nearest rung in
+/// the direction they pressed rather than somewhere arbitrary. A value under
+/// the whole ladder steps onto its bottom rung either way.
+#[must_use]
+pub fn stepped<T: Copy + PartialEq>(
+    ladder: &[T],
+    current: T,
+    forward: bool,
+    chosen: usize,
+    above: impl Fn(T, T) -> bool,
+) -> T {
+    let bottom = ladder[0];
+    if ladder.contains(&current) {
+        return ladder.get(chosen).copied().unwrap_or(bottom);
+    }
+    if forward {
+        ladder
+            .iter()
+            .copied()
+            .find(|rung| above(*rung, current))
+            .unwrap_or(bottom)
+    } else {
+        ladder
+            .iter()
+            .copied()
+            .rfind(|rung| above(current, *rung))
+            .unwrap_or(bottom)
+    }
+}
+
+/// [`rung_of`] over [`FRAME_CAPS`].
+#[must_use]
+pub fn frame_cap_rung(current: FrameLimit) -> usize {
+    rung_of(&FRAME_CAPS, current, is_above)
+}
+
+/// [`stepped`] over [`FRAME_CAPS`].
+#[must_use]
+pub fn frame_cap_stepped(current: FrameLimit, forward: bool, chosen: usize) -> FrameLimit {
+    stepped(&FRAME_CAPS, current, forward, chosen, is_above)
 }
 
 /// How a ceiling is written beside its row.
@@ -132,22 +183,23 @@ pub const ANISOTROPY_ID: crcbl::ui::WidgetId = FRAME_CAP_ID + 1;
 /// the desktop ceiling the key reads up to — and a device whose own ceiling is lower clamps below the screen's back,
 /// which the renderer does and this row cannot see.
 ///
-/// The row is a button that steps forward, like the cap's; the move onto
-/// `crcbl-ui`'s cycler is `docs/backlog.md`'s entry.
+/// The row is a cycler over this table, like the cap's.
 pub const ANISOTROPIES: [f32; 5] = [1.0, 2.0, 4.0, 8.0, 16.0];
 
-/// The next anisotropy up from `current`, wrapping round to the lowest.
+/// [`rung_of`] over [`ANISOTROPIES`].
 ///
-/// **The first rung strictly above `current`**, on [`next_frame_cap`]'s terms:
-/// the key's reader accepts any number in range, so a file holding a
-/// hand-written `6` steps to `8` rather than somewhere arbitrary. A `NaN` sits
-/// above nothing and wraps to the bottom.
+/// A `NaN` is above nothing and below nothing, so it sits on the top rung and
+/// steps from there; the key's reader never hands one over.
 #[must_use]
-pub fn next_anisotropy(current: f32) -> f32 {
-    ANISOTROPIES
-        .into_iter()
-        .find(|rung| *rung > current)
-        .unwrap_or(ANISOTROPIES[0])
+pub fn anisotropy_rung(current: f32) -> usize {
+    rung_of(&ANISOTROPIES, current, |a, b| a > b)
+}
+
+/// [`stepped`] over [`ANISOTROPIES`]: a hand-written `6` steps up to `8` and
+/// back to `4`.
+#[must_use]
+pub fn anisotropy_stepped(current: f32, forward: bool, chosen: usize) -> f32 {
+    stepped(&ANISOTROPIES, current, forward, chosen, |a, b| a > b)
 }
 
 /// How an anisotropy is written beside its row: `off` at one, since one tap is
@@ -223,6 +275,16 @@ pub const fn switch_label(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
+/// The choice a switch's cycler holds for `on`: `off` first, so the row reads
+/// `off >` and `< on` — the chevron points the way the switch would go.
+#[must_use]
+pub const fn switch_rung(on: bool) -> usize {
+    on as usize
+}
+
+/// How many choices a switch's cycler has: off and on.
+pub const SWITCH_RUNGS: usize = 2;
+
 /// What this sample's own rows do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -232,12 +294,6 @@ pub enum Action {
     /// means: every bus at unity, no frame ceiling and the engine's own
     /// anisotropy.
     Reset,
-    /// Step the frame ceiling to the next rung of [`FRAME_CAPS`].
-    CycleFrameCap,
-    /// Step the page's anisotropy to the next rung of [`ANISOTROPIES`].
-    CycleAnisotropy,
-    /// Flip one effect's `[engine.video]` key.
-    ToggleEffect(RenderEffects),
 }
 
 /// Which menu a frame shows. There is only one, and it is always on.
@@ -342,19 +398,25 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
         MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
         MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
         // Beside `FULLSCREEN`, because both are `[engine.video]` and a player
-        // looking for one is looking for the other. Its hint is written every
-        // frame by `Screen::menu_kind`, like a fader's.
-        MenuItem::new(
+        // looking for one is looking for the other. Born on no ceiling — what
+        // an absent key means — and placed on the file's rung by the first
+        // frame, like a fader; its caption is written every frame by
+        // `Screen::menu_kind`.
+        MenuItem::cycler(
             FRAME_CAP_ID,
             "FRAME CAP",
             frame_cap_label(FrameLimit::unlimited()),
+            FRAME_CAPS.len(),
+            frame_cap_rung(FrameLimit::unlimited()),
         ),
-        // The other `[engine.video]` key, beside the first, and written every
-        // frame the same way.
-        MenuItem::new(
+        // The other `[engine.video]` key, beside the first, and placed and
+        // written the same way.
+        MenuItem::cycler(
             ANISOTROPY_ID,
             "ANISOTROPY",
             anisotropy_label(DEFAULT_ANISOTROPY),
+            ANISOTROPIES.len(),
+            anisotropy_rung(DEFAULT_ANISOTROPY),
         ),
         // The third video key, a groove: the whole extent at the right end,
         // which is what an absent key means. Walked down to the file's value
@@ -364,7 +426,13 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
     // One switch per effect key, on: what an absent key means, and what the
     // first frame corrects to the file's answer.
     items.extend(VIDEO_KEYS.iter().enumerate().map(|(index, (key, _))| {
-        MenuItem::new(effect_id(index), effect_label(key), switch_label(true))
+        MenuItem::cycler(
+            effect_id(index),
+            effect_label(key),
+            switch_label(true),
+            SWITCH_RUNGS,
+            switch_rung(true),
+        )
     }));
     items.extend(gains.iter().map(|(bus, gain)| {
         MenuItem::slider(
@@ -389,11 +457,11 @@ mod tests {
 
     /// **The ladder is ascending, which everything else here assumes.**
     ///
-    /// [`next_frame_cap`] wraps to `FRAME_CAPS[0]` when nothing is above the
-    /// current rung, so a table written out of order would wrap to whatever
-    /// happened to be first and step downwards from there. The order is also
-    /// the order a player sees, and a settings list that jumps about is a
-    /// different bug with the same cause.
+    /// [`rung_of`] takes the highest rung not above the value, so a table
+    /// written out of order would put a value on whatever rung happened to be
+    /// last and step from there. The order is also the order a player sees,
+    /// and a settings list that jumps about is a different bug with the same
+    /// cause.
     #[test]
     fn the_frame_cap_ladder_climbs() {
         for pair in FRAME_CAPS.windows(2) {
@@ -428,44 +496,74 @@ mod tests {
         }
     }
 
-    /// Every rung steps to the next, and the last steps back to the first.
+    /// **A rung sits on itself, and a step from it lands on the rung the
+    /// widget chose** — forward, back, and `ENTER`'s wrap from the top back to
+    /// the bottom, which is what makes the cycler and the key agree.
     #[test]
-    fn the_ladder_steps_up_and_wraps_at_the_top() {
+    fn a_rung_sits_on_itself_and_steps_to_the_rung_the_widget_chose() {
         for (index, rung) in FRAME_CAPS.into_iter().enumerate() {
-            let expected = FRAME_CAPS[(index + 1) % FRAME_CAPS.len()];
-            assert_eq!(
-                next_frame_cap(rung),
-                expected,
-                "{rung:?} stepped somewhere other than {expected:?}",
-            );
+            assert_eq!(frame_cap_rung(rung), index, "{rung:?}");
+            let next = (index + 1) % FRAME_CAPS.len();
+            assert_eq!(frame_cap_stepped(rung, true, next), FRAME_CAPS[next]);
+            if index > 0 {
+                assert_eq!(
+                    frame_cap_stepped(rung, false, index - 1),
+                    FRAME_CAPS[index - 1]
+                );
+            }
+        }
+        for (index, rung) in ANISOTROPIES.into_iter().enumerate() {
+            assert_eq!(anisotropy_rung(rung), index, "{rung}");
+            let next = (index + 1) % ANISOTROPIES.len();
+            assert_eq!(anisotropy_stepped(rung, true, next), ANISOTROPIES[next]);
         }
     }
 
-    /// **A rate that is not on the ladder steps to the next rung above it**,
-    /// rather than to an arbitrary place.
+    /// **A value that is not on the ladder sits on the rung below it, steps
+    /// up to the rung above and back to the rung below**, rather than to an
+    /// arbitrary place.
     ///
     /// A player who typed `frame_limit = 90` into the file by hand is the case:
-    /// the screen has to do something with it, and stepping down or jumping to
-    /// the end would silently take their setting further from what they asked
-    /// for than one press should.
+    /// the screen has to do something with it, and a press that jumped past
+    /// the nearest rung would silently take their setting further from what
+    /// they asked for than one press should. The widget itself has moved to
+    /// the rung below the one it sat on, which is why a step back is not the
+    /// rung the widget chose.
     #[test]
-    fn a_rate_between_rungs_steps_up_to_the_next_one() {
-        for rung in FRAME_CAPS {
-            let Some(rate) = rung.rate().checked_sub(1).filter(|rate| *rate > 0) else {
-                // Unlimited has no rate below it to sit under, and 30 minus one
-                // is below the whole ladder, which the next case covers.
+    fn a_rate_between_rungs_steps_to_the_rung_on_either_side() {
+        for pair in FRAME_CAPS.windows(2) {
+            let (below, above) = (pair[0], pair[1]);
+            let Some(rate) = above.rate().checked_sub(1) else {
+                // Unlimited is spelled zero; the rate just under it is 240's.
                 continue;
             };
+            let between = FrameLimit::fps(rate);
+            let rung = frame_cap_rung(between);
+            assert_eq!(FRAME_CAPS[rung], below, "{rate} fps sits on {below:?}");
+            assert_eq!(frame_cap_stepped(between, true, rung + 1), above);
             assert_eq!(
-                next_frame_cap(FrameLimit::fps(rate)),
-                rung,
-                "{rate} fps did not step up to {rung:?}",
+                frame_cap_stepped(between, false, rung.saturating_sub(1)),
+                below
             );
         }
+        // Between the top two, where the rate under "unlimited" is 240's.
         assert_eq!(
-            next_frame_cap(FrameLimit::fps(1)),
-            FRAME_CAPS[0],
-            "a rate under the whole ladder steps onto its bottom rung",
+            frame_cap_stepped(FrameLimit::fps(500), true, 6),
+            FrameLimit::unlimited()
+        );
+        assert_eq!(
+            frame_cap_stepped(FrameLimit::fps(500), false, 4),
+            FrameLimit::fps(240)
+        );
+        // Under the whole ladder: the bottom rung, whichever way.
+        assert_eq!(frame_cap_rung(FrameLimit::fps(1)), 0);
+        assert_eq!(
+            frame_cap_stepped(FrameLimit::fps(1), true, 1),
+            FRAME_CAPS[0]
+        );
+        assert_eq!(
+            frame_cap_stepped(FrameLimit::fps(1), false, 0),
+            FRAME_CAPS[0]
         );
     }
 
@@ -507,25 +605,27 @@ mod tests {
         );
     }
 
-    /// Every rung steps to the next, the last wraps to the first, and a value
-    /// between rungs — a hand-written `6` — steps up to the rung above it.
+    /// A value between rungs — a hand-written `6` — sits on `4`, steps up to
+    /// `8` and back to `4`; a value under the ladder steps onto its bottom;
+    /// and a `NaN` sits on the top rung rather than off the ladder.
     #[test]
-    fn the_anisotropy_ladder_steps_up_wraps_and_lifts_a_value_between_rungs() {
-        for (index, rung) in ANISOTROPIES.into_iter().enumerate() {
-            let expected = ANISOTROPIES[(index + 1) % ANISOTROPIES.len()];
-            assert_eq!(
-                next_anisotropy(rung),
-                expected,
-                "{rung} stepped somewhere other than {expected}",
-            );
-        }
-        assert_eq!(next_anisotropy(6.0), 8.0);
-        assert_eq!(next_anisotropy(0.5), ANISOTROPIES[0]);
-        assert_eq!(
-            next_anisotropy(f32::NAN),
-            ANISOTROPIES[0],
-            "a number above nothing wraps to the bottom",
-        );
+    fn an_anisotropy_between_rungs_steps_to_the_rung_on_either_side() {
+        assert_eq!(anisotropy_rung(6.0), 2);
+        assert_eq!(anisotropy_stepped(6.0, true, 3), 8.0);
+        assert_eq!(anisotropy_stepped(6.0, false, 1), 4.0);
+        assert_eq!(anisotropy_rung(0.5), 0);
+        assert_eq!(anisotropy_stepped(0.5, true, 1), ANISOTROPIES[0]);
+        assert_eq!(anisotropy_stepped(0.5, false, 0), ANISOTROPIES[0]);
+        assert_eq!(anisotropy_rung(f32::NAN), ANISOTROPIES.len() - 1);
+    }
+
+    /// A switch is a two-rung cycler with `off` first, so the chevron points
+    /// the way the switch would go.
+    #[test]
+    fn a_switch_is_off_then_on() {
+        assert_eq!(switch_rung(false), 0);
+        assert_eq!(switch_rung(true), 1);
+        assert_eq!(SWITCH_RUNGS, 2);
     }
 
     /// One tap is written as `off`; a count is written with its `x`, and a
@@ -652,6 +752,11 @@ mod tests {
                 .find(|item| item.id == id)
                 .unwrap_or_else(|| panic!("{key} has no row"));
             assert_eq!(row.label, effect_label(key));
+            assert_eq!(
+                menu.cycler(id),
+                Some(switch_rung(true)),
+                "{key}'s switch is not a cycler born on"
+            );
         }
         assert_eq!(effect_of(RENDER_SCALE_ID), None);
         assert_eq!(effect_of(effect_id(VIDEO_KEYS.len())), None);
