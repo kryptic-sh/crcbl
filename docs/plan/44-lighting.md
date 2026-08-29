@@ -97,6 +97,23 @@ taste:
   storage buffers — so it is the same code on all four backends, which is the
   constraint every other path in this engine is held to.
 
+**The line, restated as a rule on 2026-08-30** because the user asked that no
+rung anywhere move this renderer towards deferred, on the grounds that forward+
+is where the industry is heading and cheaper at the frame: **shading happens in
+the forward pass and nowhere else.** A pass may _write a second attachment
+beside the lit colour_ — the reflectivity target `47-reflections.md` argued in,
+the motion target `43-render-standards.md` §9 built, an albedo or a normal that
+a screen-space GI rung may one day want — because each is a by-product of the
+shading the forward pass already did, read by one named consumer. What no rung
+may do is move the BRDF, the froxel walk or a light's evaluation _out_ of the
+forward pass into a pass that reads attachments: no G-buffer lighting, no
+deferred decals, no visibility-buffer shading (`03-gpu-driven-rendering.md`'s
+"visibility buffer slot" is an occlusion-cull input, not that). The test for a
+proposal is one question — after it lands, does `mesh.slang` still evaluate
+every light that reaches a fragment? — and `43-render-standards.md` §10 lists
+deferred and visibility buffers among what is refused on this section's
+authority.
+
 ### What it costs and what is budgeted
 
 - **A light is a row**: position, radius, colour premultiplied by intensity,
