@@ -919,13 +919,17 @@ impl HostedGame for Screen {
     ) {
     }
 
-    /// The audio section, which is this sample's only live system.
+    /// The audio section, which is this sample's only live system, and the
+    /// settings file as it stands.
     ///
     /// The engine's own sections carry the frame times and the GPU; what only
     /// this sample can report is whether its cues are reaching a mixer, which
-    /// is the thing a fader is claiming to control.
+    /// is the thing a fader is claiming to control — and what the file holds,
+    /// every key of it, which is the thing `SAVE` is claiming to write. See
+    /// [`crate::view`].
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.audio);
+        panel.add(&crate::view::FileView(&self.stack));
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -1888,6 +1892,62 @@ mod tests {
             edits,
             screen.edits(),
             "following a reset was read as a drag"
+        );
+    }
+
+    /// **The panel shows the file as it stands, keys no row owns included.**
+    ///
+    /// A hand-edited `[engine.window]` has no row on this screen and would
+    /// otherwise be invisible to a player wondering what their file says; and
+    /// the view is live — a fader moved after the panel was read shows the new
+    /// gain, since the section is gathered again every frame it is visible.
+    #[test]
+    fn the_panel_shows_every_key_in_the_file_as_it_stands() {
+        let (mut screen, mut menus) =
+            screen("[engine.audio]\nmusic_volume = 0.25\n\n[engine.window]\nwidth = 640\n");
+        reconcile(&mut screen, &mut menus);
+        let file_rows = |screen: &Screen| {
+            let mut panel = crcbl::ui::DebugPanel::new();
+            panel.set_visible(true);
+            panel.begin_frame();
+            screen.debug_sections(&mut panel);
+            let section = panel
+                .sections()
+                .iter()
+                .find(|section| section.title() == crate::view::TITLE)
+                .expect("the file has a section");
+            section
+                .rows()
+                .iter()
+                .map(|row| (row.label.clone(), row.value.clone()))
+                .collect::<Vec<_>>()
+        };
+        let rows = file_rows(&screen);
+        assert!(
+            rows.contains(&("[engine.window]".to_string(), String::new()))
+                && rows.contains(&("width".to_string(), "640".to_string())),
+            "a key no row owns is missing from {rows:?}",
+        );
+        assert!(
+            rows.contains(&("music_volume".to_string(), "0.25".to_string())),
+            "the file's gain is missing from {rows:?}",
+        );
+
+        screen.set(Bus::Music, 0.5);
+        let rows = file_rows(&screen);
+        assert!(
+            rows.contains(&("music_volume".to_string(), "0.5".to_string())),
+            "the view is not live: {rows:?}",
+        );
+
+        let (screen, _) = self::screen("");
+        assert_eq!(
+            file_rows(&screen),
+            [(
+                crate::view::EMPTY_ROW.0.to_string(),
+                crate::view::EMPTY_ROW.1.to_string()
+            )],
+            "an empty file says so",
         );
     }
 

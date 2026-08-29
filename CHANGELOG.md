@@ -318,7 +318,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   switches, one row per `VIDEO_KEYS` entry, each a two-rung cycler: an arrow or
   a press flips the bit and writes every key, `RESET` allows everything, and a
   switch the run did not come up with reads `(next start)`, since that screen
-  draws no scene. `SettingsSource::stack` becomes the public
+  draws no scene. Its `F3` debug panel carries a `settings file` section
+  (`options::view::FileView`, over `SettingsStack::dump`): one row per key in
+  the file's own tables, gathered again every frame the panel is visible, so a
+  key no row on the screen owns — a hand-edited `[engine.window]` — is still
+  there to read. `SettingsSource::stack` becomes the public
   `SettingsSource::open`, and `SettingsSource::save` writes a stack back where
   that source read it — `SettingsSource::None` saves nothing and reports so,
   because a golden run must not persist into whichever home directory it ran in.

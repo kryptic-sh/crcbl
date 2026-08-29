@@ -28,7 +28,9 @@
 //! on a `FRAME CAP` row that steps a ladder of ceilings; `anisotropic_filtering`,
 //! on an `ANISOTROPY` row that steps the powers of two; `render_scale`, on a
 //! `RENDER SCALE` groove over the range the renderer draws; and the effect
-//! switches of `crcbl::settings::VIDEO_KEYS`, one row each. What is **not**
+//! switches of `crcbl::settings::VIDEO_KEYS`, one row each. Under `F3`, the
+//! debug panel shows the settings file as it stands — every key in it, owned by
+//! a row here or not ([`view`]). What is **not**
 //! here is the rest of the video half and the graphics tiers — which
 //! `docs/backlog.md` carries, along with why each of the remaining video keys
 //! is harder than these.
@@ -54,6 +56,7 @@ mod args;
 pub mod audio;
 pub mod gpu;
 pub mod menu;
+pub mod view;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;

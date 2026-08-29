@@ -52,7 +52,9 @@ stores a player's choices had been exercised by everything except a player.
   click on the widgets themselves. Three buses with obviously different content
   is the minimum that makes a mixer legible.
 - A reset-to-defaults control, and a view of the settings file as it stands —
-  `SettingsStack::dump` already produces one.
+  `SettingsStack::dump` already produces one. The view is a section of the `F3`
+  debug panel since 2026-08-29 (`view::FileView`): one row per key, in the
+  file's own tables, so a key no row of the screen owns is still visible.
 - Pages web demo, which is the point of half this sample.
 
 ## Non-goals (hard cap)

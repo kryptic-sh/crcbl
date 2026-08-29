@@ -21799,10 +21799,6 @@ leaves:
   neither `set_render_scale` nor `set_anisotropy`, and that pairing is one
   decision — when the samples pick the scale up, they pick this up beside it.
 
-- **`SettingsStack::dump` has no viewer**, though the plan's scope asks for "a
-  view of the settings file as it stands". The screen shows six values and the
-  file may hold keys none of them own.
-
 - **Coverage gap: nothing restarts.** The round trip is covered by the tests in
   `apps/options/src/app.rs` over `MemoryStorage`, which is what
   `SettingsSource::Source` resolves. No test quits the binary and relaunches it
