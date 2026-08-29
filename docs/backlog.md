@@ -98,7 +98,9 @@ and lavapipe. What it did not do:
   `docs/plan/49-antialiasing.md` priced when FXAA landed, plus whatever has been
   blessed with the bit on since (`crates/crcbl/tests/golden/` has grown). The
   tiers share one resolve slot, so the flip is a one-line change to
-  `DEFAULT_STACK` and the bless.
+  `DEFAULT_STACK` and the bless. Since 2026-08-30 that plan's eighth decision
+  folds the two bits into one `antialiasing` cycler row whose default _is_ this
+  answer, with MSAA rungs above it; the row is the next AA slice.
 - **The reference's S2x/T2x and reprojection paths are not transcribed**, and
   deliberately: they are not branched around in the shaders, they are absent, so
   `SMAA_AREATEX_SUBTEX_SIZE` still selects nothing and only the offset-zero slab

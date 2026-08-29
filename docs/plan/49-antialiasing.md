@@ -241,7 +241,45 @@ as SSAO and SSR are in the stack. A view that drops both — which the per-camer
 effect layer above already allows — is a view where the arithmetic flips, and
 the reader holding that view is the one who should make the call.
 
+### An eighth, taken 2026-08-30: one AA row, and MSAA as its top rungs
+
+Counter-Strike 2's video panel is the comparand, and its AA row is one ladder:
+None, CMAA2, then 2×, 4× and 8× MSAA, with 4× the default and **no temporal
+option at all** — Valve's forward renderer refused TAA for clarity, on the same
+grounds this section's determinism arguments refuse it for goldens. Its
+filtering row is bilinear, trilinear and anisotropic 2× to 16×, which
+`apps/options`' `ANISOTROPIES` row already matches rung for rung.
+
+What this tree has instead is **two independent bits**,
+`RenderEffects::ANTIALIASING` and `RenderEffects::SMAA`, each a `VIDEO_KEYS`
+row, so the panel can switch both on and the resolve slot picks between them out
+of sight. The next two rungs of this ladder are the CS2 shape:
+
+1. **One `antialiasing` cycler row** — `None`, `FXAA`, `SMAA`, then the MSAA
+   rungs — so the two bits become one enum on the settings seam and one row in
+   `apps/options`. This is a settings and options change with no shader in it,
+   and it is the change that answers `docs/backlog.md`'s open question of which
+   tier `DEFAULT_STACK` carries: the row's default is that tier, and the user
+   steps off it themselves. It moves a `VIDEO_KEYS` entry, so
+   `web/tools/browser-e2e.mjs`'s `toFader` moves with it and the options browser
+   gate runs locally before it is pushed.
+2. **MSAA 2×, 4× and 8×** as the rungs above SMAA, on the price the seventh
+   decision above put on it: the depth prepass goes multisampled, and one
+   **depth resolve** pass writes the single-sample image `ssao.slang`,
+   `ssr.slang` and the Hi-Z pyramid read today, so neither screen-space pass is
+   rewritten. The froxel and light-cluster passes do not care. MSAA is
+   **opt-in**, never the default: the software and browser tiers pay for every
+   sample, and 4× on lavapipe is the wrong default for a suite that runs there.
+
+**CMAA2 is declined**, and the reason is below.
+
 ### What is refused
+
+- **CMAA2.** Intel's morphological filter occupies the slot SMAA 1x already
+  holds — one frame's pixels, no history, an edge classification and a blend —
+  and it is cheaper by a pass. That is a second implementation of the tier this
+  tree has, gated and measured, not a rung above it; a menu with both is a row
+  nobody can choose between.
 
 - **DLSS.** Single-vendor and closed: it runs on one hardware line behind an
   SDK, where every other path in this engine is held to being the same code on
