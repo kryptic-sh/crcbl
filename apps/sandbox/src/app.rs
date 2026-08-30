@@ -1259,7 +1259,7 @@ mod tests {
         );
         assert_eq!(
             engine.clock_source().limit(),
-            Some(FrameLimit::unlimited()),
+            FrameLimit::unlimited(),
             "the loop must apply the row's change to its clock",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");

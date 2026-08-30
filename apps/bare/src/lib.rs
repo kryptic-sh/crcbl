@@ -130,7 +130,8 @@ impl<S: Shell + ?Sized> Bare<S> {
         let mut clock_source = Clock::new(options.headless);
         // What `crcbl::engine::Loop::new` does for a hosted game, written out:
         // this sample owns its loop, so it owns the one line that applies
-        // `--fps` too. A manual clock ignores it — see `Clock::set_limit`.
+        // `--fps` too. A manual clock stores it and never waits on it — see
+        // `Clock::set_limit`.
         clock_source.set_limit(options.limit);
         let window = open_window(
             shell.as_mut(),

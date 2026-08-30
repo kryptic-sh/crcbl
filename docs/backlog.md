@@ -12638,37 +12638,41 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
-## The frame limiter: wrong rate, uncorrected jitter, and no browser pacing (2026-08-30)
+## The frame pacer: what was accepted rather than fixed (2026-08-30)
 
-Three findings from one user report, one fix in flight (the grid pacer slice);
-delete this entry when it lands.
+Left behind by the grid-pacer slice. None of these is a defect; each is here so
+it is not re-derived or filed as a bug.
 
-- **A 144 fps limit runs at 142.x on the desktop.** `Clock::advance` in
-  `crates/crcbl/src/engine.rs` anchors the next deadline to when the last frame
-  _actually_ started, after the sleep — so the OS sleep's overshoot (~50–100 µs
-  on Linux: the default timer slack plus wake latency) is added to every period.
-  6.944 ms + ~0.07 ms = 7.02 ms = 142.5 fps, which is the reading reported.
-  Measured by the user, derived from the code; not yet measured here.
-- **Jitter is the raw `thread::sleep` variance.** Nothing learns the overshoot
-  or spins the last stretch, so frame starts wander by the OS's wake latency.
-  The bar the user set: the least jitter possible, best in class.
-- **The browser never applies the limit.** `Clock::set_limit` is a documented
-  no-op on `Clock::Manual`, every wasm entry point builds a manual clock
-  (`Instant` panics on wasm32), and the shim draws one engine frame per
-  `requestAnimationFrame` — so `Loop::new`'s `set_limit` does nothing there and
-  `apps/options`'s `frame_limit` row changes nothing on the deployed demo.
-
-**The fix, decided:** a `FramePacer` that paces on a deadline _grid_ (next
-deadline = previous deadline + period, re-based only after a stall of a period
-or more) so a constant lateness never accumulates and the average rate is exact;
-`RealClock` sleeps short of the deadline by a learned overshoot and spins the
-remainder; the manual clock remembers its limit and the browser `App` skips the
-`requestAnimationFrame` ticks that fall inside a grid slot. What the browser
-cannot do better: choose which vsync ticks to draw on, so a cap that is not a
-divisor of the refresh rate judders there, and that is the browser's.
-
-**Not in the fix:** the options row's next-start rule, which is the entry below
-and outlives this one.
+- **Switching to `FrameLimit::unlimited` mid-run still costs the frame in
+  hand.** `FramePacer::wait` answers off the deadline alone and `set_limit`
+  leaves the deadline standing, so the frame after the change waits out the old
+  period and only `start` then clears it. Documented on `FramePacer::set_limit`.
+  At the rates `apps/options`'s row offers this is at most one old period; at
+  `FrameLimit::fps(1)` it is a second. Clearing the deadline inside `set_limit`
+  when the new limit is unlimited would remove it in one line; not done because
+  the slice's brief specified the "deadline in hand stands" rule and no caller
+  has felt it.
+- **A browser cap just under the display's rate drops a tick periodically, and
+  that is correct.** Simulated while writing
+  `a_browser_cap_at_the_display_rate_keeps_every_tick_and_a_lower_one_thins_them`:
+  rAF ticks every 16.6 ms against a 60 fps period (`FrameLimit::period`
+  truncates to whole nanoseconds) skip once each time the drift accumulates to a
+  whole tick — three skips in 600 ticks. The display is offering more ticks a
+  second than the cap asks for, so some have to go. Only the "ticks at the
+  display's own rate, jittered" case is asserted; the drift case is described
+  here instead.
+- **`SPIN_GUARD` was chosen, not swept.** 100 µs, on the argument in its doc
+  comment. The write agent's one measurement (not re-run by the reviewer):
+  against a build with `spin_until` removed, the spin costs 0.10 s of user CPU
+  over a 10.4 s run at `--fps 144` and takes the interval stdev from 13.5 µs to
+  0.6 µs. Nobody swept 50/100/200 µs to see whether a smaller guard holds the
+  same jitter for less CPU.
+- **Verified on Linux only.** `RealClock::wait_for_deadline` relies on
+  sub-millisecond sleeps being honoured. The Windows argument is the standard
+  library's `high_precision_sleep`, cited in `sleep`'s docs and not exercised
+  here; macOS and Windows verdicts come from CI. The `wasm32` arms of `sleep`
+  and `spin_until` are no-ops that no test executes — a real clock on that
+  target panics in `Instant::now` before reaching either.
 
 ## `apps/options`'s `frame_limit` row applies at the next start, not live (2026-08-30)
 
@@ -12732,12 +12736,18 @@ the logged limit and the measured frame time. What that leaves:
   anything on a real VRR panel — this pass proves only that the present mode is
   reachable.
 
-- **`--fps` is unobservable on every CI leg without a compositor.** The limiter
-  lives on `Clock::Real` by construction, so a headless run takes the flag and
-  correctly does nothing with it — which means the macOS, Windows and null-
-  backend legs say nothing about it, and neither does the browser, where every
-  entry point builds `Clock::manual` and `requestAnimationFrame` is the pacing.
-  The wayland pass is the only place it is real.
+- **`--fps` is observed on the wayland leg and in unit tests, and nowhere as a
+  rate in a browser.** The limiter _waits_ on `Clock::Real` alone, so a headless
+  run takes the flag, stores it and correctly does nothing with it — the macOS,
+  Windows and null-backend legs still say nothing about the wait. The browser is
+  no longer in that list the way it was: `Clock::Manual` now holds the limit,
+  `crcbl::web::App::frame` applies it by skipping `requestAnimationFrame` ticks,
+  and `a_capped_page_draws_on_the_ticks_its_grid_claims` in
+  `crates/crcbl/src/web.rs` covers the skip, the un-stepped clock and the
+  whole-gap step on the frame that follows. What no gate observes is a measured
+  _rate_ in a real browser: `web/run-browser-e2e.sh` drives the real page but
+  asserts nothing about how many rAF ticks were drawn on. `run_sandbox_paced` on
+  the wayland leg is still the only place a measured frame time is asserted.
 
 - **`apps/sandbox` now duplicates eight shared flags rather than six.** Its
   parser is deliberately its own (`crates/crcbl/src/args.rs`'s module docs make

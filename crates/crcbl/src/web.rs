@@ -46,6 +46,19 @@
 //! [`App::frame`] — so a queued line carries the seconds-since-start prefix the
 //! native sink writes, from the one clock this target has.
 //!
+//! # …and so is the frame limit
+//!
+//! A manual clock cannot wait, so a `[engine.video] frame_limit` or a `--fps`
+//! reaches the page as a number to obey rather than as a sleep: [`App::frame`]
+//! runs the same [`crate::engine::FramePacer`] the desktop limiter runs, and
+//! skips the `requestAnimationFrame` ticks that fall inside a slot the last
+//! frame already claimed. **The best a browser can do is choose which vsync
+//! ticks to draw on.** `setTimeout` is coarser than a frame and is not aligned
+//! to the display at all, so a cap that is not a divisor of the refresh rate
+//! lands its frames on an uneven pattern of ticks and judders. That is the
+//! platform's floor rather than this module's — and the only alternative on
+//! offer is what was here before, which was no limit applied at all.
+//!
 //! # A sample's wasm module imports nothing of its own
 //!
 //! Every one of the ABIs a page drives is exports-plus-polling: JS calls in,
@@ -318,6 +331,13 @@ pub trait WebLoop: crate::engine::GameLoop {
     /// How far the clock advances for this frame.
     fn set_frame_step(&mut self, dt: core::time::Duration);
 
+    /// The frame limit the run is holding, which on this target the page is
+    /// what obeys.
+    ///
+    /// Read every frame rather than once at boot, because a settings screen can
+    /// change it mid-run — see [`crate::engine::Loop::frame_limit`].
+    fn frame_limit(&self) -> crate::engine::FrameLimit;
+
     /// Logs the one line that is genuinely per-game.
     ///
     /// The **only** thing that differed between the four samples' copies of this
@@ -349,6 +369,10 @@ impl<S: crate::shell::Shell + ?Sized, G: crate::engine::HostedGame> WebLoop
 
     fn set_frame_step(&mut self, dt: core::time::Duration) {
         Self::set_frame_step(self, dt);
+    }
+
+    fn frame_limit(&self) -> crate::engine::FrameLimit {
+        Self::frame_limit(self)
     }
 
     fn log_summary(summary: &Self::Summary) {
@@ -504,6 +528,11 @@ pub struct App<P: WebPending> {
     /// `performance.now()` at the last frame, for the delta the clock is stepped
     /// by. `None` until the loop starts running.
     last_ms: Option<f64>,
+    /// The deadline grid the frame limit is applied on — see [`App::frame`].
+    ///
+    /// Starts unlimited and takes the loop's limit every frame, because there is
+    /// no loop to ask until one has booted.
+    pacer: crate::engine::FramePacer,
     error: String,
 }
 
@@ -514,6 +543,7 @@ impl<P: WebPending> core::fmt::Debug for App<P> {
         f.debug_struct("App")
             .field("status", &self.stage.status())
             .field("last_ms", &self.last_ms)
+            .field("pacer", &self.pacer)
             .field("error", &self.error)
             .finish()
     }
@@ -532,6 +562,7 @@ impl<P: WebPending> App<P> {
         Self {
             stage: Stage::Idle,
             last_ms: None,
+            pacer: crate::engine::FramePacer::new(crate::engine::FrameLimit::unlimited()),
             error: String::new(),
         }
     }
@@ -597,6 +628,24 @@ impl<P: WebPending> App<P> {
     /// One `requestAnimationFrame`, and the status afterwards.
     ///
     /// `now_ms` is `performance.now()`.
+    ///
+    /// # A tick inside a claimed slot is skipped, not shortened
+    ///
+    /// Once the loop is running this is where the [`crate::engine::FrameLimit`]
+    /// is applied, because the clock underneath cannot wait — see the module
+    /// docs. The tick's timestamp goes to the same [`crate::engine::FramePacer`]
+    /// the desktop limiter waits on; a tick the pacer is still holding a
+    /// deadline for returns the current status and does nothing else. Nothing
+    /// is stepped and nothing is drawn, and `last_ms` is deliberately left
+    /// alone, so the tick that *does* run steps the clock by the whole gap
+    /// rather than by the last slice of it — a game's motion is then the same
+    /// whichever ticks it landed on.
+    ///
+    /// A cap at or above the display's rate runs every tick, after at most one
+    /// skipped tick while the grid settles behind them. A cap below it drops
+    /// the ticks that fall inside a slot. What the browser cannot offer is a
+    /// slot boundary that is not a vsync tick, which is why an unfriendly ratio
+    /// judders — the module docs make that argument.
     pub fn frame(&mut self, now_ms: f64) -> u32 {
         // Before anything below can log, so a line written this frame is
         // stamped with this frame's time and not the previous one's.
@@ -617,6 +666,16 @@ impl<P: WebPending> App<P> {
                 Err(error) => self.fail(error),
             },
             Stage::Running(mut engine) => {
+                // Every frame, not once at boot: a settings screen can change
+                // the cap mid-run, and reading it back is a field access.
+                self.pacer.set_limit(engine.frame_limit());
+                let now = millis_from(now_ms);
+                if self.pacer.wait(now).is_some() {
+                    let status = running_status(engine.as_ref());
+                    self.stage = Stage::Running(engine);
+                    return status;
+                }
+                self.pacer.start(now);
                 engine.set_frame_step(step_from(self.last_ms.replace(now_ms), now_ms));
                 match engine.frame() {
                     Ok(crate::engine::Flow::Continue) => {
@@ -698,23 +757,35 @@ impl<P: WebPending> App<P> {
     }
 }
 
+/// Milliseconds from the page's clock as a [`core::time::Duration`], with the
+/// guard the conversion needs.
+///
+/// `Duration::from_secs_f64` **panics** on a negative or non-finite value and a
+/// panic here takes the whole wasm instance with it, so anything that is not a
+/// time is zero. `performance.now()` is monotonic and non-negative, so this is
+/// a guard against a shim bug rather than against physics — but it is the same
+/// guard for the timestamp [`App::frame`] paces on and for the delta
+/// [`step_from`] derives, and one of the two having it would be the one that
+/// drifts.
+fn millis_from(ms: f64) -> core::time::Duration {
+    if ms.is_finite() && ms > 0.0 {
+        core::time::Duration::from_secs_f64(ms / 1000.0)
+    } else {
+        core::time::Duration::ZERO
+    }
+}
+
 /// How far the clock should step for a frame that arrived at `now_ms`.
 ///
-/// `performance.now()` is monotonic, but a shim that passed the wrong number —
-/// or a first frame with no predecessor — must not produce a negative or
-/// non-finite `Duration`, which would panic in `from_secs_f64`. The upper bound
-/// is [`crate::engine::MAX_FRAME_STEP`]'s job, applied by `set_frame_step`,
+/// Zero for a first frame with no predecessor, and for a `previous` that is not
+/// behind `now_ms` — see [`millis_from`] for the guard. The upper bound is
+/// [`crate::engine::MAX_FRAME_STEP`]'s job, applied by `set_frame_step`,
 /// because a native manual clock needs it too.
 fn step_from(previous: Option<f64>, now_ms: f64) -> core::time::Duration {
     let Some(previous) = previous else {
         return core::time::Duration::ZERO;
     };
-    let delta = now_ms - previous;
-    if delta.is_finite() && delta > 0.0 {
-        core::time::Duration::from_secs_f64(delta / 1000.0)
-    } else {
-        core::time::Duration::ZERO
-    }
+    millis_from(now_ms - previous)
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +1040,8 @@ pub use crate::web_exports;
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use log::Log as _;
 
     use super::*;
@@ -1074,6 +1147,15 @@ mod tests {
         frames_left: u32,
         paused: bool,
         fail_frame: bool,
+        limit: crate::engine::FrameLimit,
+        /// Every `dt` [`App::frame`] handed over, in order.
+        ///
+        /// The observable the pacing tests turn on: a skipped tick never
+        /// reaches `set_frame_step`, so the length of this is how many frames
+        /// ran and the values are what the clock was moved by. Shared with the
+        /// fixture that built the loop, because [`App`] hands out no way to
+        /// reach the loop it owns.
+        steps: Rc<RefCell<Vec<core::time::Duration>>>,
     }
 
     #[derive(Debug)]
@@ -1118,7 +1200,13 @@ mod tests {
             self.paused
         }
 
-        fn set_frame_step(&mut self, _dt: core::time::Duration) {}
+        fn set_frame_step(&mut self, dt: core::time::Duration) {
+            self.steps.borrow_mut().push(dt);
+        }
+
+        fn frame_limit(&self) -> crate::engine::FrameLimit {
+            self.limit
+        }
 
         fn log_summary(summary: &Self::Summary) {
             log::info!("fake: {summary} frames left");
@@ -1130,6 +1218,25 @@ mod tests {
         frames: u32,
         paused: bool,
         fail_frame: bool,
+        limit: crate::engine::FrameLimit,
+        steps: Rc<RefCell<Vec<core::time::Duration>>>,
+    }
+
+    /// A loop that boots on the first frame, runs plenty, and is not capped.
+    ///
+    /// Every field a test does not name is one it is not about — which is what
+    /// keeps a pacing fixture from reading like a pause fixture.
+    impl Default for FakePending {
+        fn default() -> Self {
+            Self {
+                polls_left: 0,
+                frames: 10,
+                paused: false,
+                fail_frame: false,
+                limit: crate::engine::FrameLimit::unlimited(),
+                steps: Rc::default(),
+            }
+        }
     }
 
     impl WebPending for FakePending {
@@ -1151,6 +1258,8 @@ mod tests {
                 frames_left: self.frames,
                 paused: self.paused,
                 fail_frame: self.fail_frame,
+                limit: self.limit,
+                steps: Rc::clone(&self.steps),
             }))
         }
     }
@@ -1170,9 +1279,7 @@ mod tests {
     fn the_status_reports_booting_then_running_then_paused() {
         let mut app = booting(FakePending {
             polls_left: 2,
-            frames: 10,
-            paused: false,
-            fail_frame: false,
+            ..FakePending::default()
         });
         assert_eq!(app.status(), STATUS_BOOTING);
         assert_eq!(app.frame(0.0), STATUS_BOOTING);
@@ -1181,10 +1288,8 @@ mod tests {
         assert_eq!(app.status(), STATUS_RUNNING);
 
         let mut app = booting(FakePending {
-            polls_left: 0,
-            frames: 10,
             paused: true,
-            fail_frame: false,
+            ..FakePending::default()
         });
         assert_eq!(app.frame(0.0), STATUS_PAUSED);
         assert_eq!(app.status(), STATUS_PAUSED, "a paused demo is not RUNNING");
@@ -1198,10 +1303,8 @@ mod tests {
     #[test]
     fn a_loop_that_stops_reaches_stopped_and_stays_there() {
         let mut app = booting(FakePending {
-            polls_left: 0,
             frames: 1,
-            paused: false,
-            fail_frame: false,
+            ..FakePending::default()
         });
         assert_eq!(app.frame(0.0), STATUS_RUNNING);
         assert_eq!(app.frame(16.0), STATUS_RUNNING, "one frame of budget");
@@ -1218,10 +1321,8 @@ mod tests {
     #[test]
     fn a_failed_frame_is_terminal_and_reports_its_reason() {
         let mut app = booting(FakePending {
-            polls_left: 0,
-            frames: 10,
-            paused: false,
             fail_frame: true,
+            ..FakePending::default()
         });
         assert_eq!(app.frame(0.0), STATUS_RUNNING);
         assert_eq!(app.frame(16.0), STATUS_FAILED);
@@ -1237,16 +1338,69 @@ mod tests {
     /// already stopped.
     #[test]
     fn shutdown_tears_down_once() {
-        let mut app = booting(FakePending {
-            polls_left: 0,
-            frames: 10,
-            paused: false,
-            fail_frame: false,
-        });
+        let mut app = booting(FakePending::default());
         assert_eq!(app.frame(0.0), STATUS_RUNNING);
         assert_eq!(app.shutdown(), 1);
         assert_eq!(app.status(), STATUS_STOPPED);
         assert_eq!(app.shutdown(), 0, "there was nothing left to tear down");
+    }
+
+    /// **A cap under the display's rate skips ticks, and the frame that runs
+    /// is stepped by the whole gap.**
+    ///
+    /// The three claims are one behaviour and each fails silently on its own: a
+    /// page that ran every tick would ignore the limit, a page that stepped the
+    /// clock on a skipped tick would lose that tick's time out of the
+    /// simulation, and a page that stepped the running frame by one tick rather
+    /// than by the gap would run the game at the fraction of real time the cap
+    /// is of the refresh rate.
+    ///
+    /// A hundred ticks a second against a fifty a second cap, because both are
+    /// exact in binary floating point *and* in whole nanoseconds — so what is
+    /// asserted here is the pacer and not the rounding on the way in. The real
+    /// browser's numbers are neither, which is
+    /// `crate::engine::FramePacer`'s own tests' business.
+    #[test]
+    fn a_capped_page_draws_on_the_ticks_its_grid_claims() {
+        /// A 100 Hz display.
+        const TICK_MS: f64 = 10.0;
+        /// One frame of the cap, as `set_frame_step` should see it.
+        const SLOT: core::time::Duration = core::time::Duration::from_millis(20);
+
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let mut app = booting(FakePending {
+            frames: 100,
+            limit: crate::engine::FrameLimit::fps(50),
+            steps: Rc::clone(&steps),
+            ..FakePending::default()
+        });
+
+        // Tick zero is the boot poll: it starts the loop and draws nothing.
+        assert_eq!(app.frame(0.0), STATUS_RUNNING);
+        for tick in 1..=11 {
+            assert_eq!(
+                app.frame(f64::from(tick) * TICK_MS),
+                STATUS_RUNNING,
+                "a skipped tick reports the status it had, not a new one",
+            );
+        }
+
+        let steps = steps.borrow();
+        assert_eq!(
+            steps.len(),
+            6,
+            "eleven ticks at twice the cap must draw on six of them: {steps:?}",
+        );
+        assert_eq!(
+            steps[0],
+            core::time::Duration::from_millis(10),
+            "the first frame after boot is one tick after it",
+        );
+        assert!(
+            steps[1..].iter().all(|step| *step == SLOT),
+            "a frame after a skipped tick must be stepped by the whole gap, or \
+             the simulation runs slow: {steps:?}",
+        );
     }
 
     // ---- the frame step -----------------------------------------------------

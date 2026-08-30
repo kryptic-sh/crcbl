@@ -2319,11 +2319,13 @@ impl GpuContext {
 ///
 /// # This is a floor on the frame period, not a promise about it
 ///
-/// [`Clock::advance`] sleeps until the period has passed, and a sleep may
-/// overrun. At the default the period is a millisecond, which is the same order
-/// as a scheduler's granularity, so the *observed* rate can sit under the limit
-/// on a loaded machine. That is the honest behaviour for a limiter: it can slow
-/// a loop down and can never speed one up.
+/// [`FramePacer`] holds the *average* interval at the period even though every
+/// individual wait overruns, and [`Clock::advance`] spins out the last stretch
+/// so an individual one barely does. Neither can conjure time back: a frame
+/// that took longer than its period to draw is late, and the rate a loaded
+/// machine reaches can sit under the limit however the waiting is done. That is
+/// the honest behaviour for a limiter — it can slow a loop down and can never
+/// speed one up.
 ///
 /// # Under vsync it usually does nothing
 ///
@@ -2403,24 +2405,6 @@ impl FrameLimit {
     pub fn period(self) -> Option<Duration> {
         (self.fps != 0).then(|| Duration::from_secs(1) / self.fps)
     }
-
-    /// How long to wait before starting a frame, given when the last one
-    /// started and what the clock reads now.
-    ///
-    /// Separated from the sleep so the arithmetic is testable without spending
-    /// the time: a test can ask what a limiter *would* wait and get an answer
-    /// in nanoseconds rather than in seconds of test runtime.
-    ///
-    /// `None` when there is no limit, when no frame has started yet, or when
-    /// the deadline has already passed — a late frame is never "caught up" by
-    /// running the next one early, because that would turn one slow frame into
-    /// a burst.
-    #[must_use]
-    pub fn wait_from(self, last_start: Option<Duration>, now: Duration) -> Option<Duration> {
-        let period = self.period()?;
-        let deadline = last_start?.checked_add(period)?;
-        deadline.checked_sub(now).filter(|wait| !wait.is_zero())
-    }
 }
 
 impl Default for FrameLimit {
@@ -2439,14 +2423,129 @@ impl std::fmt::Display for FrameLimit {
     }
 }
 
+/// The grid of deadlines a limited loop starts its frames on.
+///
+/// Pure arithmetic over a [`FrameLimit`] and one timestamp — the part of a
+/// limiter that knows *when* the next frame may start, with nothing in it that
+/// waits. That split is what lets the two platforms share one answer:
+/// [`RealClock`] sleeps until [`wait`](Self::wait) is satisfied, and
+/// [`crate::web::App`] drops a `requestAnimationFrame` tick instead. It is also
+/// what lets a test ask what a limiter *would* do and get an answer in
+/// nanoseconds rather than in seconds of suite runtime.
+///
+/// # Why a grid, and not "a period since the last frame"
+///
+/// The obvious limiter holds each frame back until a period has passed since
+/// the previous one *started*, and it is wrong by the sleep's overshoot — an OS
+/// sleep returns late, by the timer's granularity plus however long the
+/// scheduler took to come back. Anchoring the next deadline to a start that was
+/// already late adds that overshoot to *every* period instead of to one, so the
+/// observed rate sits under the requested rate for as long as the run lasts.
+///
+/// A grid anchors the next deadline to the previous *deadline*. A constant
+/// lateness then shifts every start by the same amount and leaves the intervals
+/// at exactly one period, so the average rate is the rate that was asked for; a
+/// one-off lateness under a period is absorbed by the next frame, whose wait is
+/// that much shorter.
+///
+/// # A stall re-bases the grid, so it is never followed by a burst
+///
+/// Absorbing lateness without bound would be the failure a limiter exists to
+/// prevent: a loop that lost a second to a shader compile would repay it by
+/// running frames back to back until it caught up. So [`start`](Self::start)
+/// takes the later of "the previous deadline plus a period" and "now", and a
+/// loop that has fallen a whole period or more behind starts its grid again
+/// from where it actually is. The frame after a stall runs at once and the one
+/// after that waits a whole period — which is what a limiter anchored to the
+/// last frame did after a stall too. The two differ only in the case the old
+/// one got wrong.
+#[derive(Debug)]
+pub struct FramePacer {
+    limit: FrameLimit,
+    /// When the next frame may start, or `None` before the first frame and
+    /// whenever there is no limit.
+    deadline: Option<Duration>,
+}
+
+impl FramePacer {
+    /// A pacer at `limit`, with no frame started yet.
+    #[must_use]
+    pub const fn new(limit: FrameLimit) -> Self {
+        Self {
+            limit,
+            deadline: None,
+        }
+    }
+
+    /// The limit in force.
+    #[must_use]
+    pub const fn limit(&self) -> FrameLimit {
+        self.limit
+    }
+
+    /// Changes the limit, from the next [`start`](Self::start) on.
+    ///
+    /// The deadline already in hand stands rather than being recomputed: it is
+    /// at most one old period away, and `start` bounds the new grid against
+    /// `now` regardless, so a mid-run change costs at most one frame paced by
+    /// the rate that was in force when it was asked for.
+    pub const fn set_limit(&mut self, limit: FrameLimit) {
+        self.limit = limit;
+    }
+
+    /// How long a frame arriving at `now` has to wait, if it has to wait.
+    ///
+    /// `Some(deadline - now)` while the deadline is ahead; `None` when there is
+    /// no limit, when no frame has started yet, or when the deadline has
+    /// passed — the three a caller treats identically, by running the frame.
+    #[must_use]
+    pub fn wait(&self, now: Duration) -> Option<Duration> {
+        self.deadline?
+            .checked_sub(now)
+            .filter(|wait| !wait.is_zero())
+    }
+
+    /// Records that a frame starts at `now`, and moves the grid on.
+    ///
+    /// The next deadline is the previous one plus a period, held up to `now`
+    /// when the loop has fallen a whole period or more behind — the clamp the
+    /// type's docs argue for. The first frame of a run has no previous deadline
+    /// and takes `now` plus a period. No limit clears the deadline instead, so
+    /// [`wait`](Self::wait) answers `None` from here on.
+    pub fn start(&mut self, now: Duration) {
+        let Some(period) = self.limit.period() else {
+            self.deadline = None;
+            return;
+        };
+        self.deadline = Some(match self.deadline {
+            Some(deadline) => deadline.saturating_add(period).max(now),
+            None => now.saturating_add(period),
+        });
+    }
+}
+
 /// Blocks the calling thread for `wait`.
 ///
 /// Split out for the browser, where it does **nothing**. A wasm module runs on
 /// the page's only thread, so sleeping there does not pace a frame — it freezes
 /// the tab, input and all, until the sleep ends. The browser paces frames with
-/// `requestAnimationFrame` and the shim drives the loop from it, which is why
-/// every wasm entry point builds a [`Clock::Manual`] and never reaches this.
-/// The no-op is a backstop for a caller that constructs a real clock anyway.
+/// `requestAnimationFrame`, the shim drives the loop from it, and the limit is
+/// applied by choosing which of those ticks to draw on — see
+/// [`crate::web::App::frame`]. Every wasm entry point builds a
+/// [`Clock::Manual`] and never reaches this; the no-op is a backstop for a
+/// caller that constructs a real clock anyway.
+///
+/// # Sub-millisecond sleeps are honoured on all three desktops
+///
+/// [`RealClock::advance`](RealClock) asks for a sleep that is short of the
+/// deadline and spins out the rest, which is only worth doing if the short
+/// sleep is granted. Linux takes a nanosecond-resolution deadline through
+/// `clock_nanosleep` and macOS a nanosecond-resolution interval through
+/// `nanosleep` (the standard library's `sys/thread/unix.rs` picks between
+/// them); Windows used to round to the ~15.6 ms scheduler
+/// tick and no longer does — Rust's own implementation switched to a
+/// high-resolution waitable timer, which the standard library's
+/// `library/std/src/sys/thread/windows.rs` spells out in `high_precision_sleep`.
 #[cfg(not(target_arch = "wasm32"))]
 fn sleep(wait: Duration) {
     std::thread::sleep(wait);
@@ -2456,6 +2555,54 @@ fn sleep(wait: Duration) {
 #[allow(clippy::needless_pass_by_value)]
 fn sleep(_wait: Duration) {}
 
+/// Burns CPU until `time` reads `deadline`.
+///
+/// The other half of [`sleep`], and the reason a limited loop hits its rate: a
+/// sleep gives a core back but returns late, so the last stretch before a
+/// deadline is spun rather than slept. Bounded by [`RealClock`]'s learned
+/// slack, which is tens of microseconds on a desktop kernel.
+///
+/// **Nothing on the browser, for [`sleep`]'s reason and more sharply.** A spin
+/// on the page's only thread does not wait for a deadline, it hangs the tab
+/// until one arrives — and a `wasm32` build has no real clock to spin against
+/// in the first place, because [`std::time::Instant::now`] panics there.
+#[cfg(not(target_arch = "wasm32"))]
+fn spin_until(time: &MonotonicTime, deadline: Duration) {
+    while time.elapsed() < deadline {
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spin_until(_time: &MonotonicTime, _deadline: Duration) {}
+
+/// One new overshoot sample's share of [`RealClock`]'s running estimate.
+///
+/// Small, because what it is estimating — the granularity of this machine's
+/// timer and how promptly its scheduler comes back — changes slowly if at all,
+/// and one descheduled sleep should not move it far. A power of two so the
+/// update is a shift.
+const SLACK_EMA_WEIGHT: u32 = 8;
+
+/// Held back from every sleep on top of the measured overshoot, so the wake
+/// lands *before* the deadline rather than around it.
+///
+/// What it buys: [`spin_until`] can only ever wait out the remainder, so a
+/// deadline is met instead of being missed half the time — which is the whole
+/// point, since a missed deadline is lateness the grid has to absorb. What it
+/// costs: this much of every limited frame is spent spinning on a core rather
+/// than sleeping on it.
+const SPIN_GUARD: Duration = Duration::from_micros(100);
+
+/// The largest share of one period the spin may claim: one part in this.
+///
+/// Without it a machine with a coarse timer, or a limit high enough that the
+/// period approaches the timer's granularity, would spin away most of every
+/// frame — the limiter would stop saving the power it exists to save. The
+/// deadline is still met in that case; it is met by spinning less far ahead of
+/// it and sleeping the rest.
+const SLACK_PERIOD_SHARE: u32 = 2;
+
 /// The real clock, plus the frame limiter that paces it.
 ///
 /// A struct behind [`Clock::Real`] rather than more fields on the variant, so
@@ -2463,10 +2610,15 @@ fn sleep(_wait: Duration) {}
 #[derive(Debug)]
 pub struct RealClock {
     time: MonotonicTime,
-    limit: FrameLimit,
-    /// When the last frame started, so the next one can be held off until a
-    /// whole period has passed. `None` before the first frame.
-    last_start: Option<Duration>,
+    /// The deadline grid this clock waits on.
+    pacer: FramePacer,
+    /// How far short of a deadline the sleep is cut: this machine's measured
+    /// sleep overshoot, smoothed, plus [`SPIN_GUARD`].
+    ///
+    /// Learned rather than assumed, because it is a property of the kernel, the
+    /// timer hardware and the load — none of which the engine can read, and all
+    /// of which differ by an order of magnitude across the three desktops.
+    slack: Duration,
 }
 
 impl RealClock {
@@ -2475,15 +2627,61 @@ impl RealClock {
     pub fn new() -> Self {
         Self {
             time: MonotonicTime::new(),
-            limit: FrameLimit::default(),
-            last_start: None,
+            pacer: FramePacer::new(FrameLimit::default()),
+            slack: SPIN_GUARD,
         }
     }
 
     /// The limit in force.
     #[must_use]
     pub const fn limit(&self) -> FrameLimit {
-        self.limit
+        self.pacer.limit()
+    }
+
+    /// Holds the calling thread until this frame's deadline, and learns from
+    /// the sleep it took to get there.
+    ///
+    /// Sleeps for all but [`slack`](Self::slack) of the wait and spins out the
+    /// rest. Handing the whole wait to [`sleep`] is what put a limited loop
+    /// under its own rate: the sleep returns late, and a limiter that starts
+    /// the next period from the frame it woke for adds that lateness to every
+    /// period. [`FramePacer`] fixes the accumulation; this is what shrinks the
+    /// single-frame error that is left, and with it the jitter, to whatever the
+    /// spin's resolution is.
+    ///
+    /// The measurement is of the sleep that just happened — how far past the
+    /// moment it was asked to end the thread actually resumed — which is the
+    /// only sample this can take without spending a frame on it.
+    fn wait_for_deadline(&mut self) {
+        let now = self.time.elapsed();
+        let Some(wait) = self.pacer.wait(now) else {
+            return;
+        };
+        let deadline = now.saturating_add(wait);
+        let asked = wait.saturating_sub(self.slack);
+        if !asked.is_zero() {
+            let due = now.saturating_add(asked);
+            sleep(asked);
+            let sample = self
+                .time
+                .elapsed()
+                .saturating_sub(due)
+                .saturating_add(SPIN_GUARD);
+            // Whole nanoseconds throughout: that is what a `Duration` already
+            // is, and a float round trip would be precision spent for nothing.
+            let nanos = |d: Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+            let weight = u64::from(SLACK_EMA_WEIGHT);
+            self.slack = Duration::from_nanos(
+                nanos(self.slack)
+                    .saturating_mul(weight - 1)
+                    .saturating_add(nanos(sample))
+                    / weight,
+            );
+            if let Some(period) = self.pacer.limit().period() {
+                self.slack = self.slack.min(period / SLACK_PERIOD_SHARE);
+            }
+        }
+        spin_until(&self.time, deadline);
     }
 
     /// Changes the limit. Takes effect on the next frame.
@@ -2503,7 +2701,7 @@ impl RealClock {
     /// that never touches this reports the default through [`Loop::new`]
     /// anyway.
     pub fn set_limit(&mut self, limit: FrameLimit) {
-        self.limit = limit;
+        self.pacer.set_limit(limit);
         log::info!("engine: the frame limit is {limit}");
     }
 }
@@ -2522,10 +2720,19 @@ impl Default for RealClock {
 /// run therefore produces the same frame and tick counts on every machine,
 /// which is the whole reason CI can assert them.
 ///
-/// The frame limiter lives on [`Real`](Self::Real) alone, which is what makes a
+/// The limiter *waits* on [`Real`](Self::Real) alone, which is what makes a
 /// headless run unpaced **by construction** rather than by a check somebody has
 /// to remember: there is no wall clock to sleep against, and a manual clock's
 /// frames are supposed to be as fast as the machine can produce them.
+///
+/// Both variants nevertheless *hold* a [`FrameLimit`], because a manual clock is
+/// stepped from outside and whoever is stepping it may well be the thing that
+/// has to obey the limit. That is exactly the browser: a wasm build has no
+/// [`Instant`](std::time::Instant) and so no real clock, the page drives one
+/// engine frame per `requestAnimationFrame`, and [`crate::web::App::frame`]
+/// reads the limit back off the loop to decide which of those ticks to draw on.
+/// A limit set on a manual clock therefore changes nothing here — it is read,
+/// not obeyed — and a headless run stays deterministic.
 #[derive(Debug)]
 pub enum Clock {
     /// The real monotonic clock, paced by a [`FrameLimit`].
@@ -2536,6 +2743,9 @@ pub enum Clock {
         time: ManualTime,
         /// How far one frame advances it.
         step: Duration,
+        /// The limit this clock reports, for whoever is pacing it from
+        /// outside. Nothing here waits on it — see the type's docs.
+        limit: FrameLimit,
     },
 }
 
@@ -2550,28 +2760,32 @@ impl Clock {
         }
     }
 
-    /// The frame limit in force, if this is a real clock.
+    /// The frame limit in force.
     ///
-    /// `None` for a manual clock — not "unlimited", because the question does
-    /// not apply: a manual clock is stepped by its caller and never waits.
+    /// A manual clock answers too, and answers with the limit it was given
+    /// rather than with "unlimited" or with nothing: the question is what the
+    /// run was asked to cap at, and the browser needs that answer off a clock
+    /// that is always [`Manual`](Self::Manual). What differs between the
+    /// variants is who obeys it — see the type's docs.
     #[must_use]
-    pub const fn limit(&self) -> Option<FrameLimit> {
+    pub const fn limit(&self) -> FrameLimit {
         match self {
-            Self::Real(real) => Some(real.limit()),
-            Self::Manual { .. } => None,
+            Self::Real(real) => real.limit(),
+            Self::Manual { limit, .. } => *limit,
         }
     }
 
-    /// Sets the frame limit, if this is a real clock.
+    /// Sets the frame limit.
     ///
-    /// A no-op on a manual clock rather than an error: a game that sets a limit
-    /// during setup should not have to ask whether it is running headless, and
-    /// a headless run that silently obeyed one would stop being deterministic.
-    /// Nothing is logged in that case either, for the same reason: a headless
-    /// run has no frame limit to report.
+    /// Stored on either variant, so a game that sets a limit during setup does
+    /// not have to ask whether it is running headless or in a browser. Only a
+    /// real clock *waits* on it, and only a real clock logs the change: a
+    /// headless run has no frame limit to report and would stop being
+    /// deterministic if it obeyed one.
     pub fn set_limit(&mut self, limit: FrameLimit) {
-        if let Self::Real(real) = self {
-            real.set_limit(limit);
+        match self {
+            Self::Real(real) => real.set_limit(limit),
+            Self::Manual { limit: held, .. } => *held = limit,
         }
     }
 
@@ -2582,6 +2796,7 @@ impl Clock {
         Self::Manual {
             time: ManualTime::new(),
             step,
+            limit: FrameLimit::default(),
         }
     }
 
@@ -2596,24 +2811,23 @@ impl Clock {
 
     /// Moves to the next frame's timestamp and returns it.
     ///
-    /// **On a real clock this may sleep**, for as long as the [`FrameLimit`]
-    /// says the frame is early. It is the one call every loop already makes
-    /// once per frame, which is why the limiter lives here rather than in five
-    /// copies of a loop — and why a game gets it without asking.
+    /// **On a real clock this may sleep**, until the [`FramePacer`]'s next
+    /// deadline. It is the one call every loop already makes once per frame,
+    /// which is why the limiter lives here rather than in a copy per loop — and
+    /// why a game gets it without asking.
     ///
-    /// A manual clock never waits: there is no wall clock to wait against, and
-    /// a headless run's frames are meant to arrive as fast as they can.
+    /// A manual clock never waits, whatever limit it is holding: there is no
+    /// wall clock to wait against, and a headless run's frames are meant to
+    /// arrive as fast as they can.
     pub fn advance(&mut self) -> Duration {
         match self {
             Self::Real(real) => {
-                if let Some(wait) = real.limit.wait_from(real.last_start, real.time.elapsed()) {
-                    sleep(wait);
-                }
+                real.wait_for_deadline();
                 let now = real.time.elapsed();
-                real.last_start = Some(now);
+                real.pacer.start(now);
                 now
             }
-            Self::Manual { time, step } => {
+            Self::Manual { time, step, .. } => {
                 time.advance(*step);
                 time.elapsed()
             }
@@ -5965,10 +6179,25 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// `dt` is clamped to [`MAX_FRAME_STEP`]: a backgrounded tab resumes with a
     /// multi-second gap, and feeding that to the accumulator spends the next
     /// frame running thousands of ticks.
+    ///
+    /// The clock a browser run is steered through is also the one that cannot
+    /// wait, so the [`FrameLimit`] is applied a step further out: the page asks
+    /// [`frame_limit`](Self::frame_limit) which ticks to run and calls this only
+    /// on those — see [`crate::web::App::frame`].
     pub fn set_frame_step(&mut self, dt: Duration) {
         if let Clock::Manual { step, .. } = &mut self.clock_source {
             *step = dt.min(MAX_FRAME_STEP);
         }
+    }
+
+    /// The frame limit this loop's clock is holding.
+    ///
+    /// Which is not necessarily a limit this loop *obeys*: on the manual clock
+    /// a browser run is built on, it is the number the page has to pace against
+    /// instead. [`Clock::limit`] is where that split is argued.
+    #[must_use]
+    pub const fn frame_limit(&self) -> FrameLimit {
+        self.clock_source.limit()
     }
 
     /// Whether the simulation is stopped.
@@ -7872,83 +8101,275 @@ mod tests {
     fn a_limit_of_zero_is_no_limit() {
         assert_eq!(FrameLimit::fps(0), FrameLimit::unlimited());
         assert_eq!(FrameLimit::fps(0).period(), None);
-        assert_eq!(
-            FrameLimit::fps(0).wait_from(Some(Duration::ZERO), Duration::ZERO),
-            None,
-            "and it waits for nothing"
-        );
+
+        let mut pacer = FramePacer::new(FrameLimit::fps(0));
+        pacer.start(Duration::ZERO);
+        assert_eq!(pacer.wait(Duration::ZERO), None, "and it waits for nothing");
+    }
+
+    /// The first frame of a run does not wait.
+    #[test]
+    fn the_first_frame_never_waits() {
+        let pacer = FramePacer::new(FrameLimit::fps(100));
+        assert_eq!(pacer.wait(Duration::from_secs(9)), None);
     }
 
     /// An early frame waits exactly the remainder of its period.
     #[test]
     fn an_early_frame_waits_out_the_rest_of_its_period() {
         let limit = FrameLimit::fps(100); // 10ms
+        let period = limit.period().expect("100 is a limit");
         let started = Duration::from_millis(50);
 
+        let mut pacer = FramePacer::new(limit);
+        pacer.start(started);
         assert_eq!(
-            limit.wait_from(Some(started), started + Duration::from_millis(4)),
+            pacer.wait(started),
+            Some(period),
+            "no time spent yet leaves the whole period"
+        );
+        assert_eq!(
+            pacer.wait(started + Duration::from_millis(4)),
             Some(Duration::from_millis(6)),
             "4ms into a 10ms period leaves 6"
         );
         assert_eq!(
-            limit.wait_from(Some(started), started),
-            Some(Duration::from_millis(10)),
-            "no time spent yet leaves the whole period"
-        );
-    }
-
-    /// A late frame does not make the next one early.
-    ///
-    /// The failure this guards is a burst: if a limiter tried to average out to
-    /// the target rate, one slow frame would be repaid by running the following
-    /// frames back to back, which is the opposite of what a limiter is for.
-    #[test]
-    fn a_late_frame_is_never_caught_up() {
-        let limit = FrameLimit::fps(100);
-        let started = Duration::from_millis(50);
-
-        assert_eq!(
-            limit.wait_from(Some(started), started + Duration::from_millis(10)),
+            pacer.wait(started + period),
             None,
             "exactly on the deadline is not early"
         );
-        assert_eq!(
-            limit.wait_from(Some(started), started + Duration::from_millis(500)),
-            None,
-            "fifty periods late, and the answer is still 'do not wait', not a \
-             negative wait and not a credit against the next frame"
-        );
     }
 
-    /// The first frame of a run does not wait.
-    #[test]
-    fn the_first_frame_never_waits() {
-        assert_eq!(
-            FrameLimit::fps(100).wait_from(None, Duration::from_secs(9)),
-            None
-        );
-    }
-
-    /// A headless clock has no limit, and cannot be given one.
+    /// **A constant lateness shifts the grid once and never accumulates.**
     ///
-    /// Not a policy the loop has to remember — a manual clock has no wall clock
-    /// to wait against, so the limiter is absent by construction. A headless
-    /// run that quietly obeyed a limit would stop being deterministic, and CI
+    /// The bug this is the fix for, and the one assertion that tells the two
+    /// limiters apart: a sleep returns late by roughly the same amount every
+    /// time, and anchoring the next deadline to the frame that woke adds that
+    /// amount to *every* period. The whole run then finishes
+    /// `frames × overshoot` late instead of one overshoot late, which is a
+    /// request for one rate observably running at a lower one.
+    #[test]
+    fn a_constant_overshoot_shifts_the_grid_once_rather_than_every_frame() {
+        const FRAMES: u32 = 240;
+        /// A plausible `std::thread::sleep` overshoot, well inside a period.
+        const OVERSHOOT: Duration = Duration::from_micros(70);
+
+        let limit = FrameLimit::fps(144);
+        let period = limit.period().expect("144 is a limit");
+        let mut pacer = FramePacer::new(limit);
+
+        let first = Duration::from_secs(3);
+        pacer.start(first);
+        let mut starts = vec![first];
+        for _ in 1..FRAMES {
+            let now = *starts.last().expect("the run has a first frame");
+            // Wake `OVERSHOOT` past the deadline that was waited for, which is
+            // what a real sleep does.
+            let began = now + pacer.wait(now).expect("the frame is early") + OVERSHOOT;
+            pacer.start(began);
+            starts.push(began);
+        }
+
+        let gaps: Vec<Duration> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert_eq!(
+            gaps[0],
+            period + OVERSHOOT,
+            "the first frame is the one that carries the lateness",
+        );
+        assert!(
+            gaps[1..].iter().all(|gap| *gap == period),
+            "a later frame paid the overshoot again: {gaps:?}",
+        );
+        assert_eq!(
+            starts.last().copied().expect("the run has a last frame") - first,
+            period * (FRAMES - 1) + OVERSHOOT,
+            "a whole run is one overshoot late, not one per frame",
+        );
+    }
+
+    /// **A lateness under a period is absorbed by the next frame's wait.**
+    #[test]
+    fn a_frame_less_than_a_period_late_is_caught_up_by_the_next() {
+        let limit = FrameLimit::fps(100);
+        let period = limit.period().expect("100 is a limit");
+        let late = period / 4;
+
+        let mut pacer = FramePacer::new(limit);
+        let started = Duration::from_millis(50);
+        pacer.start(started);
+
+        let began = started + period + late;
+        assert_eq!(pacer.wait(began), None, "past its deadline, so it runs");
+        pacer.start(began);
+        assert_eq!(
+            pacer.wait(began),
+            Some(period - late),
+            "the next wait is short by exactly what the last frame was late by",
+        );
+    }
+
+    /// **A stall of a whole period or more re-bases the grid.**
+    ///
+    /// The failure this guards is a burst: a limiter that absorbed lateness
+    /// without bound would repay a second lost to a shader compile by running
+    /// frames back to back until it had caught up, which is the opposite of
+    /// what a limiter is for. So the frame after a stall runs at once — it is
+    /// already late — and the one after *that* waits a whole period.
+    #[test]
+    fn a_stall_of_a_whole_period_re_bases_the_grid() {
+        let limit = FrameLimit::fps(100);
+        let period = limit.period().expect("100 is a limit");
+
+        let mut pacer = FramePacer::new(limit);
+        let started = Duration::from_millis(50);
+        pacer.start(started);
+
+        let stalled = started + period * 5;
+        assert_eq!(pacer.wait(stalled), None, "five periods late, so it runs");
+        pacer.start(stalled);
+
+        assert_eq!(
+            pacer.wait(stalled),
+            None,
+            "the frame after the stall runs at once: the grid restarted from \
+             where the loop actually is, not from where it was",
+        );
+        pacer.start(stalled);
+        assert_eq!(
+            pacer.wait(stalled),
+            Some(period),
+            "and the one after it waits a whole period rather than being one \
+             of four frames repaying the stall",
+        );
+    }
+
+    /// **No limit never waits, and forgets the deadline it was holding.**
+    #[test]
+    fn an_unlimited_pacer_never_waits_and_drops_its_deadline() {
+        let mut pacer = FramePacer::new(FrameLimit::fps(100));
+        let started = Duration::from_millis(50);
+        pacer.start(started);
+        assert!(
+            pacer.wait(started).is_some(),
+            "the fixture needs a deadline for the next line to drop",
+        );
+
+        pacer.set_limit(FrameLimit::unlimited());
+        assert_eq!(pacer.limit(), FrameLimit::unlimited());
+        pacer.start(started);
+        assert_eq!(pacer.wait(started), None);
+        assert_eq!(
+            pacer.wait(Duration::ZERO),
+            None,
+            "and not at a time before the old deadline either, which is what a \
+             deadline left in place would still be holding",
+        );
+    }
+
+    /// **The browser's two cases, as arithmetic.**
+    ///
+    /// `crate::web::App::frame` runs this same pacer over `performance.now()`
+    /// and skips the `requestAnimationFrame` ticks it is still holding a
+    /// deadline for, so what the page does is decided here and can be asserted
+    /// without a browser.
+    ///
+    /// A cap at the display's rate must not thin the ticks, and that is not
+    /// free: a tick that arrives a little early is inside the slot the last
+    /// frame claimed and is dropped. It happens once — `start` takes the later
+    /// of the grid and now, so the grid settles behind the ticks and stays
+    /// there.
+    #[test]
+    fn a_browser_cap_at_the_display_rate_keeps_every_tick_and_a_lower_one_thins_them() {
+        /// Long enough that a grid drifting against the ticks would have shown
+        /// up as a second skip.
+        const TICKS: usize = 600;
+        /// A 60 Hz display's tick, which is not the truncated whole
+        /// nanoseconds `FrameLimit::period` reports for the same rate.
+        const DISPLAY_TICK: Duration = Duration::from_nanos(16_666_667);
+        /// Deterministic timestamp jitter, in nanoseconds, cycled over the
+        /// ticks. Signed: the negative entries are what puts a tick inside a
+        /// claimed slot.
+        const JITTER: [i64; 7] = [0, 300_000, -500_000, 120_000, -200_000, 450_000, -100_000];
+
+        let mut pacer = FramePacer::new(FrameLimit::fps(60));
+        let mut skipped = Vec::new();
+        for tick in 0..TICKS {
+            let nominal = DISPLAY_TICK * u32::try_from(tick).expect("the run is short");
+            let jitter = JITTER[tick % JITTER.len()];
+            let now = if jitter < 0 {
+                nominal - Duration::from_nanos(jitter.unsigned_abs())
+            } else {
+                nominal + Duration::from_nanos(jitter.unsigned_abs())
+            };
+            if pacer.wait(now).is_some() {
+                skipped.push(tick);
+                continue;
+            }
+            pacer.start(now);
+        }
+        assert_eq!(
+            skipped,
+            vec![2],
+            "a 60 fps cap on a 60 Hz display must cost one tick while the grid \
+             settles behind them, and none after that",
+        );
+
+        // And a cap under the display's rate keeps the rate it was asked for,
+        // rather than the nearest divisor of the refresh rate.
+        let ticks_144 = FrameLimit::fps(144).period().expect("144 is a limit");
+        let mut pacer = FramePacer::new(FrameLimit::fps(60));
+        let mut ran = 0_u32;
+        for tick in 0..144_u32 {
+            let now = ticks_144 * tick;
+            if pacer.wait(now).is_some() {
+                continue;
+            }
+            pacer.start(now);
+            ran += 1;
+        }
+        assert_eq!(
+            ran, 60,
+            "a 60 fps cap on a 144 Hz display must draw on 60 of one second's \
+             ticks",
+        );
+    }
+
+    /// A manual clock remembers a limit and is not paced by it.
+    ///
+    /// Both halves matter and they pull in opposite directions. It has to
+    /// *hold* one, because the browser builds on a manual clock and the page is
+    /// what obeys the cap — a clock that answered "no limit" would leave
+    /// `--fps` unapplied there, which is what it used to do. It must not *wait*
+    /// on one: a manual clock has no wall clock to wait against, and a headless
+    /// run that quietly obeyed a limit would stop being deterministic and CI
     /// would take a thousand times longer to say so.
     #[test]
-    fn a_headless_clock_cannot_be_paced() {
+    fn a_manual_clock_holds_a_limit_and_is_not_paced_by_it() {
         let mut clock = Clock::new(true);
-        assert_eq!(clock.limit(), None);
+        assert_eq!(clock.limit(), FrameLimit::default());
 
         clock.set_limit(FrameLimit::fps(1));
-        assert_eq!(clock.limit(), None, "still none: the call did nothing");
+        assert_eq!(
+            clock.limit(),
+            FrameLimit::fps(1),
+            "the browser reads this back to pace the page with",
+        );
 
+        // One frame a second is a period a paced clock could not possibly hide
+        // inside the suite's runtime.
+        let started = std::time::Instant::now();
         let first = clock.advance();
         let second = clock.advance();
         assert_eq!(
             second - first,
             HEADLESS_FRAME_STEP,
-            "and it still steps by exactly one frame, at once"
+            "it still steps by exactly one frame",
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "and it still steps at once: two frames at a one-a-second limit \
+             took {:?}",
+            started.elapsed(),
         );
     }
 
@@ -7956,13 +8377,13 @@ mod tests {
     #[test]
     fn a_real_clock_starts_limited_and_can_be_changed() {
         let mut clock = Clock::new(false);
-        assert_eq!(clock.limit(), Some(FrameLimit::default()));
+        assert_eq!(clock.limit(), FrameLimit::default());
 
         clock.set_limit(FrameLimit::unlimited());
-        assert_eq!(clock.limit(), Some(FrameLimit::unlimited()));
+        assert_eq!(clock.limit(), FrameLimit::unlimited());
 
         clock.set_limit(FrameLimit::fps(30));
-        assert_eq!(clock.limit(), Some(FrameLimit::fps(30)));
+        assert_eq!(clock.limit(), FrameLimit::fps(30));
     }
 
     /// A ceiling only ever holds a limit down, and unlimited is the top of the
@@ -8038,14 +8459,14 @@ mod tests {
                 ..hosted_config(None)
             },
         );
-        assert_eq!(engine.clock_source().limit(), Some(FrameLimit::fps(30)));
+        assert_eq!(engine.clock_source().limit(), FrameLimit::fps(30));
 
         // And the settings-screen half: a game that offers an fps cap changes it
         // while the loop is running, not only when it is built.
         engine.clock_source_mut().set_limit(FrameLimit::unlimited());
         assert_eq!(
             engine.clock_source().limit(),
-            Some(FrameLimit::unlimited()),
+            FrameLimit::unlimited(),
             "a mid-run change did not reach the clock",
         );
     }
@@ -8102,7 +8523,7 @@ mod tests {
             );
             assert_eq!(
                 engine.clock_source().limit(),
-                Some(wanted),
+                wanted,
                 "a game asking for {asked} under a ceiling of {ceiling}",
             );
         }
@@ -8133,7 +8554,7 @@ mod tests {
         engine.frame().expect("a frame");
         assert_eq!(
             engine.clock_source().limit(),
-            Some(FrameLimit::fps(30)),
+            FrameLimit::fps(30),
             "the taken request did not reach the clock",
         );
         assert_eq!(
@@ -8146,10 +8567,10 @@ mod tests {
 
     /// The limiter actually holds a real clock back.
     ///
-    /// The only test here that spends wall time, and the only one that observes
-    /// the *mechanism* rather than the arithmetic: every other limiter test
-    /// asks `wait_from` what it would do, which passes identically whether
-    /// [`Clock::advance`] consults it or ignores it.
+    /// One of the two tests here that spend wall time, and one of the two that
+    /// observe the *mechanism* rather than the arithmetic: every other limiter
+    /// test asks [`FramePacer`] what it would do, which passes identically
+    /// whether [`Clock::advance`] consults it or ignores it.
     ///
     /// Asserts a lower bound only. A limiter can slow a loop and can never
     /// speed one up, so "at least the period" is the whole promise — an upper
@@ -8181,6 +8602,46 @@ mod tests {
             "an unlimited clock waited {:?}, so something is pacing it that \
              should not be",
             second - first
+        );
+    }
+
+    /// **A run of frames is never faster than the cap.**
+    ///
+    /// The rate claim proper belongs to
+    /// [`a_constant_overshoot_shifts_the_grid_once_rather_than_every_frame`],
+    /// which can assert it exactly. What that one cannot see is whether
+    /// [`Clock::advance`] waits the way the grid says — and in particular
+    /// whether cutting the sleep short by the learned slack and spinning out
+    /// the rest ever lands a frame *early*, which is the failure the whole
+    /// sleep-short-and-spin arrangement could introduce and which no amount of
+    /// arithmetic would catch.
+    ///
+    /// A lower bound only, and deliberately: CI runners are loaded and macOS
+    /// sleeps late, so an upper bound here would be a test of the runner's
+    /// scheduler. Sized so the whole thing costs the suite well under a second.
+    #[test]
+    fn a_run_of_limited_frames_is_never_faster_than_the_cap() {
+        const FRAMES: u32 = 40;
+        const LIMIT: FrameLimit = FrameLimit::fps(200);
+
+        let mut clock = Clock::new(false);
+        clock.set_limit(LIMIT);
+        let period = LIMIT.period().expect("200 is a limit");
+
+        let first = clock.advance();
+        let mut last = first;
+        for _ in 1..FRAMES {
+            last = clock.advance();
+        }
+
+        // `FRAMES - 1` intervals between `FRAMES` starts. The first `advance`
+        // has no deadline to wait for and is not one of them.
+        let floor = period * (FRAMES - 1);
+        assert!(
+            last - first >= floor,
+            "{FRAMES} frames at {LIMIT} took {:?}, which is under the {floor:?} \
+             the cap asks for — the spin is landing frames early",
+            last - first,
         );
     }
 
@@ -8469,7 +8930,11 @@ mod tests {
         // nothing to obey and nothing to say.
         let mut headless = Clock::new(true);
         headless.set_limit(FrameLimit::fps(30));
-        assert_eq!(headless.limit(), None);
+        assert_eq!(
+            headless.limit(),
+            FrameLimit::fps(30),
+            "the limit is held even though nothing here waits on it",
+        );
         assert_eq!(
             logs.records()
                 .iter()
@@ -9245,7 +9710,7 @@ mod tests {
     }
 
     /// Which present a frame waits for, without a GPU and without spending the
-    /// time — the same split as [`FrameLimit::wait_from`].
+    /// time — the same split as [`FramePacer::wait`].
     #[test]
     fn a_frame_waits_for_the_present_frames_in_flight_behind_it() {
         let depth = FRAMES_IN_FLIGHT as u64;

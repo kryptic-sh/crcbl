@@ -14,6 +14,45 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **A frame limit now runs at the rate it was asked for, and the browser applies
+  one at all.** `crcbl::engine::FramePacer` paces on a deadline _grid_ — the
+  next deadline is the previous deadline plus a period, re-based to `now` only
+  after a stall of a whole period or more — so a sleep's overshoot shifts the
+  whole run once instead of being added to every period. `RealClock` sleeps
+  short of the deadline by an overshoot it learns (an EMA over the measured
+  sleep, plus `SPIN_GUARD`, clamped to half a period) and spins the remainder
+  with `core::hint::spin_loop`. A 144 fps cap that ran at 142.x fps on Linux now
+  measures a 6.944 ms mean with a 6.944–6.945 ms best–worst spread (144.0 fps)
+  on headless sway with `apps/sandbox --fps 144 --pacing off`.
+  `FrameLimit::wait_from` is gone; the rule it documented — "a late frame is
+  never caught up" — is now "a frame less than a period late is caught up by the
+  next; a stall is not".
+- **A `[engine.video] frame_limit` or `--fps` is applied in the browser.** It
+  never was: every wasm entry point builds a `Clock::manual` because `Instant`
+  panics on `wasm32`, and `Clock::set_limit` was a no-op there. `Clock::Manual`
+  now _holds_ a limit without waiting on it, `Loop::frame_limit` and
+  `WebLoop::frame_limit` read it back, and `crcbl::web::App::frame` runs the
+  same `FramePacer` over `performance.now()` and skips the
+  `requestAnimationFrame` ticks that fall inside a slot the last frame claimed —
+  leaving `last_ms` alone so the tick that does run steps the clock by the whole
+  gap. A browser can do no better than choose which vsync ticks to draw on, so a
+  cap that is not a divisor of the refresh rate judders there.
+
+### Breaking
+
+- **`Clock::limit` returns `FrameLimit`, not `Option<FrameLimit>`.** A manual
+  clock answers with the limit it was given rather than `None`, because the
+  browser reads the cap back off a clock that is always `Manual`; what still
+  differs between the variants is which of them waits. `Clock::set_limit` stores
+  on both and logs only on `Clock::Real`. `Clock::Manual` gained a `limit` field
+  (`Clock::manual` keeps its signature), and `WebLoop` gained a required
+  `frame_limit` method — hand-written implementors need it, though the blanket
+  impl for `Loop` covers every sample in this workspace.
+- **`FrameLimit::wait_from` is removed**, replaced by `FramePacer::wait` and
+  `FramePacer::start`.
+
 ### Added
 
 - **A motion-vector pass.** `docs/plan/43-render-standards.md` §9's remaining
