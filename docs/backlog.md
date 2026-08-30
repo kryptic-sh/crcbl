@@ -12597,11 +12597,21 @@ remainder; the manual clock remembers its limit and the browser `App` skips the
 cannot do better: choose which vsync ticks to draw on, so a cap that is not a
 divisor of the refresh rate judders there, and that is the browser's.
 
-**Not in the fix, and worth knowing:** `apps/options`'s row applies to the next
-start on every platform — the loop takes its limit when it is built — so on the
-web the cap takes effect on reload, out of OPFS. Applying it live is a separate
-slice (`Loop::set_limit` exists; the panel would call it through
-`take_pending_frame_limit`).
+**Not in the fix:** the options row's next-start rule, which is the entry below
+and outlives this one.
+
+## `apps/options`'s `frame_limit` row applies at the next start, not live (2026-08-30)
+
+`Screen::set_cap` in `apps/options/src/app.rs` writes the key and marks the file
+unsaved; the loop took its limit when `Loop::new` built it, and the row's hint
+says so (`opened_cap`, `HELD_MARK`). On the desktop that is a restart; in the
+browser it is a reload, with the value coming back out of OPFS. The user noticed
+it on the deployed options demo while the browser also had no limiter at all
+(the entry above), and once that lands the next-start rule is what remains.
+Applying it live is one slice: the panel hands the new cap through
+`HostedGame::take_pending_frame_limit`, which `Loop` already polls once a frame
+before advancing the clock, and the row's "held" hint loses its next-start
+clause. Not blocked on anything; not started.
 
 ## `--pacing` and `--fps` reach the engine; three quarters of what they can ask for is unexercised
 
