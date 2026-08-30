@@ -108,12 +108,13 @@ static const float FOG_RATIO_KERNEL[5] = {
 /// were never shadowed by.
 static const uint SHADOW_CASCADES = 2;
 
-/// Tiles across the shadow atlas, matching
-/// `crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS`.
-static const uint SHADOW_ATLAS_COLUMNS = 4;
-
-/// Tiles down it, matching `crcbl_shaders::mesh::SHADOW_ATLAS_ROWS`.
-static const uint SHADOW_ATLAS_ROWS = 4;
+/// Slots the shadow atlas has, matching
+/// `crcbl_shaders::mesh::SHADOW_ATLAS_TILES` and `mesh.slang`'s own copy.
+///
+/// The cascades and the light region together, which is what sizes
+/// `VolumetricParams::shadow_atlas_rect` — a layout number, so both files carry
+/// it whether they walk the atlas or not.
+static const uint SHADOW_ATLAS_TILES = 16;
 
 /// `light_cluster.slang`'s three kinds of row, and the shape of the grid it
 /// fills — the numbers `mesh.slang` declares, held to `crcbl_shaders::light`
@@ -251,6 +252,13 @@ struct VolumetricParams
     /// across the change that introduced it. The pad still ends the word run on
     /// the 16-byte boundary a matrix has to start on.
     float4x4 light_view_proj[SHADOW_LIGHT_TILES];
+    /// Where atlas slot `i`'s map is in the shadow atlas: a scale into the image
+    /// in `xy` and an offset in `zw`, the same rows
+    /// `FrameUniforms::shadow_atlas_rect` carries. `atlas_rect` reads it and
+    /// `mesh.slang` is where the layout is argued.
+    ///
+    /// **Last in the block**, so no member before it moved when it arrived.
+    float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
 };
 
 [[vk::binding(0, 0)]]
@@ -592,17 +600,16 @@ uint light_tile(uint tile)
     return SHADOW_CASCADES + tile;
 }
 
-/// Where tile `tile` puts `tile_uv` in the whole atlas.
+/// Where the map at `rect` puts `tile_uv` in the whole atlas.
 ///
-/// `mesh.slang`'s function of the same name, letter for letter — the grid is
-/// row-major and the cascades are its first tiles, which is the arithmetic
-/// `crcbl_render::shadow::tile_origin` performs on the host.
+/// `mesh.slang`'s function of the same name, letter for letter — a scale and an
+/// offset the host allocated, which is what lets a froxel read a lamp's map
+/// whatever size the atlas gave it.
 /// `crcbl_shaders::volumetric`'s `both_shaders_spell_the_same_atlas_walk` is
 /// what holds the two copies together, there being no `#include` here.
-float2 atlas_uv(uint tile, float2 tile_uv)
+float2 atlas_uv(float4 rect, float2 tile_uv)
 {
-    float2 cell = float2(float(tile % SHADOW_ATLAS_COLUMNS), float(tile / SHADOW_ATLAS_COLUMNS));
-    return (cell + tile_uv) / float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
+    return rect.zw + tile_uv * rect.xy;
 }
 
 /// The shadow filter's tap count, reach, disc and rotations, which are
@@ -671,23 +678,32 @@ float2 shadow_rotation(float2 pixel)
     return SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
 }
 
+/// Where atlas slot `tile`'s map is in the image, `mesh.slang`'s helper: a scale
+/// in `xy` and an offset in `zw`, out of the shared block.
+float4 atlas_rect(uint tile)
+{
+    return params.shadow_atlas_rect[tile];
+}
+
+/// One *atlas* texel as a step in a tile's own `0..1` space, `mesh.slang`'s
+/// helper. Why a divide rather than a grid's two extents lives there.
+float2 atlas_step(float4 rect)
+{
+    return params.shadow_params.xy / rect.xy;
+}
+
 /// One tap of the filter, `mesh.slang`'s letter for letter: the spoke turned,
 /// clamped half a texel inside the tile so the sampler's own 2×2 cannot reach
 /// the neighbouring map, and compared.
-float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, float reference)
+float tile_tap(float4 rect, float2 texel_step, float2 tile_uv, float2 spoke, float2 rotation,
+               float reference)
 {
-    float2 texel = params.shadow_params.xy;
-    // The grid's two extents, which is what turns an *atlas* texel into a step
-    // in tile space: a tile is `1 / SHADOW_ATLAS_COLUMNS` of the atlas wide and
-    // `1 / SHADOW_ATLAS_ROWS` of it tall, so scaling back up by them lands on
-    // exactly one shadow-map texel on either axis.
-    float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
-    float2 tile_min = float2(0.5, 0.5) * texel * grid;
+    float2 tile_min = float2(0.5, 0.5) * texel_step;
     // The rotation, written out: a complex multiply by `(cos, sin)`.
     float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
                            spoke.x * rotation.y + spoke.y * rotation.x);
-    float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
-    return shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
+    float2 tap = clamp(tile_uv + turned * texel_step, tile_min, 1.0 - tile_min);
+    return shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(rect, tap), reference);
 }
 
 /// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
@@ -708,12 +724,14 @@ float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, float r
 float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float radius)
 {
     float2 rotation = shadow_rotation(pixel);
+    float4 rect = atlas_rect(tile);
+    float2 texel_step = atlas_step(rect);
 
     float probe = 0.0;
     for (uint spot = 0u; spot < SHADOW_PROBE_TAPS; ++spot)
     {
-        probe += tile_tap(tile, tile_uv, SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius,
-                          rotation, reference);
+        probe += tile_tap(rect, texel_step, tile_uv,
+                          SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius, rotation, reference);
     }
     // Unanimity, tested at both ends rather than by a tolerance: a comparison
     // sampler returns exactly zero or exactly one wherever the four texels it
@@ -731,7 +749,8 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
     float visibility = 0.0;
     for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        visibility += tile_tap(tile, tile_uv, SHADOW_DISC[index] * radius, rotation, reference);
+        visibility += tile_tap(rect, texel_step, tile_uv, SHADOW_DISC[index] * radius, rotation,
+                               reference);
     }
     return visibility / float(SHADOW_TAPS);
 }

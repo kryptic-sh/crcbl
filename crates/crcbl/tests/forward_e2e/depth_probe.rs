@@ -1279,6 +1279,11 @@ fn render_probe(
         // Where this probe's own attribute region begins — see
         // `PROBE_ATTRIBUTE_BASE`, which is what stands in for the pool's.
         vertex_pool: [PROBE_ATTRIBUTE_BASE, 0, 0, 0],
+        // And no atlas rectangles, on the cascade matrices' terms exactly: the
+        // rows this frame carries name no tile, so nothing looks a rectangle
+        // up. A zero rectangle is what `crcbl::render::shadow` writes for a
+        // slot no map was rendered into, and this whole frame is that.
+        shadow_atlas_rect: [[0.0; 4]; crcbl::shaders::mesh::SHADOW_ATLAS_TILES],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

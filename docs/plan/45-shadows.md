@@ -247,15 +247,27 @@ within tolerance and was left alone.
   short.
 - **The atlas proper, pulled forward from post-MVP on 2026-08-30** because the
   user wants shadows that hold up on a scene with many lights sooner than the
-  ladder had it. What the fixed grid gives today is `SHADOW_ATLAS_COLUMNS` by
-  `SHADOW_ATLAS_ROWS` tiles of `SHADOW_TILE` texels, `LIGHT_SLOTS` cull slots,
-  and so two shadowed point lights and two spots beside the sun; a fifth light
-  lights and does not occlude. The rung makes the atlas an **allocator rather
-  than a grid**, in the shape Doom 2016 and Unity HDRP ship:
-  1. **Variable tile sizes** from a quadtree over the one atlas image —
-     `SHADOW_TILE` down through halvings to a floor — so a far or small light
-     takes a sixteenth of what a near one takes and the same image holds ten
-     times the lights.
+  ladder had it. What the atlas holds is `SHADOW_ATLAS_COLUMNS` by
+  `SHADOW_ATLAS_ROWS` cells of `SHADOW_TILE` texels and `LIGHT_SLOTS` cull
+  slots, and so two shadowed point lights and two spots beside the sun; a fifth
+  light lights and does not occlude. That capacity is unchanged by the items
+  below that have landed — they made the atlas divisible, not larger. The rung
+  makes the atlas an **allocator rather than a grid**, in the shape Doom 2016
+  and Unity HDRP ship. **Items 1 and 4 landed 2026-08-31**; 2, 3 and 5 are what
+  is left, and they are what actually spend the allocator.
+  1. **Variable tile sizes — the allocator landed 2026-08-31.**
+     `crcbl_render::shadow::AtlasAllocator` is a quadtree over each of the
+     atlas's root cells: `allocate(level)` hands out a whole cell or a halving
+     of it down to `MIN_TILE`, `release` merges four free children back into
+     their parent so the space comes back at the size it was, and the order is
+     deterministic — lowest free node of the level asked for, subdividing the
+     lowest free node of the finest coarser level. A forest of per-cell
+     quadtrees rather than one tree over the image, because the atlas is neither
+     square by construction nor a power of two in cells; ask every root for its
+     whole self and the layout is the old grid, texel for texel, which is what
+     shipped. **`MIN_TILE` is a floor nothing has measured** — no light asks for
+     a sub-cell map until item 2 exists — so the halvings are a starting point
+     for that rung to sweep, not a finding.
   2. **A priority per light per frame**: projected screen coverage of the
      light's reach, scaled down by distance, with hysteresis so a light on the
      cutoff does not flicker its shadow, which is the LOD rule this section
@@ -264,10 +276,23 @@ within tolerance and was left alone.
      rung above spending it: the highest-priority lights re-render every frame,
      the next tier every second, the rest hold their tile until they move. A
      light past the budget is unshadowed, as today.
-  4. **The shader reads a rect per light** — scale and offset into the atlas in
-     the light's own row — in place of a tile index into a fixed grid, which is
-     what lets tile size vary without a second sampling path; `LIGHT_SLOTS`
-     becomes the pool the allocator hands out from.
+  4. **The shader reads a rect per light — landed 2026-08-31.**
+     `FrameUniforms::shadow_atlas_rect` is one `float4` per atlas slot (a scale
+     into the image in `xy`, an offset in `zw`), and `mesh.slang`'s `atlas_uv`
+     is `rect.zw + tile_uv * rect.xy` where it used to derive a cell from a
+     grid; `atlas_step` divides the atlas's texel size by the rectangle's, which
+     is what a smaller tile stepping further per texel means and the whole of
+     why one sampling path covers every size. `volumetric.slang` carries the
+     same row and the same three functions, held to `mesh.slang`'s by
+     `both_shaders_spell_the_same_atlas_walk`, and `SHADOW_ATLAS_COLUMNS` and
+     `SHADOW_ATLAS_ROWS` are gone from both — the grid is a host fact only now.
+
+     **The rectangle rides beside the per-slot matrix, not in the light's row**,
+     and the reason is the point light: it owns `SHADOW_POINT_FACES` maps and
+     one row cannot carry six rectangles. `GpuLight::shadow_tile` is therefore
+     still the index — but into a _pool the allocator hands out from_ rather
+     than into a fixed grid, which is what this item was for.
+
   5. **Static caching** rides on it once tiles are stable across frames: a tile
      whose light and covered instances did not move is not re-rendered at all.
 

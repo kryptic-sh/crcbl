@@ -5266,6 +5266,15 @@ impl ForwardRenderer {
                 .map(|(index, extra)| extra.row(self.shadow_lights.base_of(index))),
         );
 
+        // And where each of those maps went in the atlas, out of the allocator
+        // the selection above just spent: a scale and an offset per slot, which
+        // is the whole of what the sampling side knows about the image's shape.
+        // Read once and handed to both blocks that carry it — the frame's and
+        // the froxel volume's — because a froxel reading one frame's rectangle
+        // against another's matrix would sample the right map's place for the
+        // wrong map.
+        let atlas_rects = self.shadow_lights.atlas_rects();
+
         // One matrix per held light tile, and the identity in a free one — a
         // spot fills the one tile it was given and a point light the six from
         // its base, in `shadow::face_axis`' order, which is the order
@@ -5335,6 +5344,7 @@ impl ForwardRenderer {
                 sun: light,
                 cascades: &cascades,
                 light_view_proj: &light_view_proj,
+                atlas_rects: &atlas_rects,
             },
         )?;
 
@@ -5417,6 +5427,11 @@ impl ForwardRenderer {
             // written every frame anyway, because this is the block that
             // carries it and there is no cheaper place. `yzw` are padding.
             vertex_pool: [self.pool.attribute_base(), 0, 0, 0],
+            // Where each atlas slot's map went, out of the allocator
+            // `shadow::Selection::update` just spent — the *whole* of what the
+            // sampling side knows about the atlas's shape, so a map is read
+            // from the rectangle it was rendered into whatever size that was.
+            shadow_atlas_rect: atlas_rects,
         };
         // Advanced here, between writing the block that reads it and anything
         // else that could look at it: this function runs exactly once per
@@ -7457,13 +7472,18 @@ impl ForwardRenderer {
             .collect();
 
         // What the pass body records, in order: which view's bind group, which
-        // atlas tile its viewport covers, and which of the culls above it draws
-        // from. Paired rather than positional, because the free slots are
-        // missing from every one of these lists and a bare index into one would
-        // hand a light's draws to the wrong viewport the moment one slot is free
-        // and a later one is not.
-        let mut views: Vec<(usize, usize, usize)> = (0..cascades)
-            .map(|cascade| (cascade, cascade, cascade))
+        // rectangle of the atlas its viewport covers, and which of the culls
+        // above it draws from. Paired rather than positional, because the free
+        // slots are missing from every one of these lists and a bare index into
+        // one would hand a light's draws to the wrong viewport the moment one
+        // slot is free and a later one is not.
+        //
+        // **The rectangle rather than the slot**, resolved here: the body runs
+        // in a closure that outlives this borrow, and asking the selection for
+        // it there would be a second reading of an allocation that has to be the
+        // one the frame block was written from.
+        let mut views: Vec<(usize, shadow::TileRect, usize)> = (0..cascades)
+            .map(|cascade| (cascade, self.shadow_lights.atlas_rect(cascade), cascade))
             .collect();
         for (index, (slot, held, light)) in occupied.iter().enumerate() {
             // A spot draws face 0 alone; a point light draws all six, each
@@ -7473,7 +7493,8 @@ impl ForwardRenderer {
             for face in 0..shadow::tile_span(light) {
                 views.push((
                     shadow_view(*slot, face),
-                    shadow::light_tile(held.base + face),
+                    self.shadow_lights
+                        .atlas_rect(shadow::light_tile(held.base + face)),
                     cascades + index,
                 ));
             }
@@ -7566,17 +7587,18 @@ impl ForwardRenderer {
             let encoder = ctx.encoder();
             bucket_draws.open(encoder);
             for (view, tile, cull) in &views {
-                // The tile this view draws into. The graph set a viewport over
-                // the whole atlas before this body ran, and this is what narrows
-                // it — the same clip-space matrix mapped into a different cell
-                // of the image, and for a point light six different matrices
-                // into six cells off one visible set.
-                let (origin_x, origin_y) = shadow::tile_origin(*tile);
+                // The rectangle this view draws into, as the allocator handed
+                // it out — the same rectangle the fragment stage samples
+                // through, out of `shadow::Selection`. The graph set a viewport
+                // over the whole atlas before this body ran, and this is what
+                // narrows it: the same clip-space matrix mapped into a different
+                // part of the image, and for a point light six different
+                // matrices into six of them off one visible set.
                 let rect = Rect2d {
-                    x: i32::try_from(origin_x).unwrap_or(i32::MAX),
-                    y: i32::try_from(origin_y).unwrap_or(i32::MAX),
-                    width: shadow::TILE,
-                    height: shadow::TILE,
+                    x: i32::try_from(tile.x).unwrap_or(i32::MAX),
+                    y: i32::try_from(tile.y).unwrap_or(i32::MAX),
+                    width: tile.side,
+                    height: tile.side,
                 };
                 encoder.set_viewport(&Viewport {
                     x: rect.x as f32,

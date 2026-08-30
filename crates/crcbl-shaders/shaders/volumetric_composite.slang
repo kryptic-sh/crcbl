@@ -96,6 +96,11 @@ static const uint SHADOW_CASCADES = 2;
 /// as the count above: it sizes the block's second matrix array.
 static const uint SHADOW_LIGHT_TILES = 14;
 
+/// Slots the atlas has, matching `crcbl_shaders::mesh::SHADOW_ATLAS_TILES`.
+/// Read here for the same reason as the two counts above: it sizes the block's
+/// row of atlas rectangles.
+static const uint SHADOW_ATLAS_TILES = 16;
+
 /// The block `volumetric.slang` declares, bound here unchanged so a pixel's
 /// froxel and the froxel the column was written into are one arithmetic.
 struct VolumetricParams
@@ -132,6 +137,13 @@ struct VolumetricParams
     /// World → light tile `i`'s shadow clip. Declared and not read, for
     /// `shadow_view_proj`'s reason; sized by `SHADOW_LIGHT_TILES` above.
     float4x4 light_view_proj[SHADOW_LIGHT_TILES];
+    /// Where atlas slot `i`'s map is in the shadow atlas: a scale into the image
+    /// in `xy` and an offset in `zw`, the same rows
+    /// `FrameUniforms::shadow_atlas_rect` carries. `atlas_rect` reads it and
+    /// `mesh.slang` is where the layout is argued.
+    ///
+    /// **Last in the block**, so no member before it moved when it arrived.
+    float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
 };
 
 [[vk::binding(0, 0)]]

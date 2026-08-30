@@ -153,10 +153,15 @@ pub fn integrate_slice(source: f32, extinction: f32, thickness: f32) -> SliceInt
 /// declaration in `shaders/volumetric_composite.slang`.
 ///
 /// One `float4x4` (64), [`crate::mesh::SHADOW_CASCADES`] more of them, eight
-/// `float4` (16 each), eight `uint`s (32) and
-/// [`crate::mesh::SHADOW_LIGHT_TILES`] `float4x4` more after the pad.
-pub const PARAMS_SIZE: usize =
-    64 + crate::mesh::SHADOW_CASCADES * 64 + 8 * 16 + 8 * 4 + crate::mesh::SHADOW_LIGHT_TILES * 64;
+/// `float4` (16 each), eight `uint`s (32), [`crate::mesh::SHADOW_LIGHT_TILES`]
+/// `float4x4` more after the pad and [`crate::mesh::SHADOW_ATLAS_TILES`]
+/// `float4` of atlas rectangles closing it.
+pub const PARAMS_SIZE: usize = 64
+    + crate::mesh::SHADOW_CASCADES * 64
+    + 8 * 16
+    + 8 * 4
+    + crate::mesh::SHADOW_LIGHT_TILES * 64
+    + crate::mesh::SHADOW_ATLAS_TILES * 16;
 
 /// Bytes one froxel occupies in the column buffer: one `float4`.
 ///
@@ -289,6 +294,16 @@ pub struct VolumetricParams {
     /// **After the pad word**, so no field before it moved when it arrived —
     /// the terms `mesh.slang` added its own copy on.
     pub light_view_proj: [[f32; 16]; crate::mesh::SHADOW_LIGHT_TILES],
+    /// Where atlas slot `i`'s map is in the shadow atlas: a scale into the image
+    /// in `xy` and an offset in `zw` — the same rows
+    /// [`crcbl_shaders::mesh::FrameUniforms::shadow_atlas_rect`] carries, so a
+    /// froxel reads a lamp's map out of the rectangle the surface behind it
+    /// reads it from.
+    ///
+    /// [`crcbl_shaders::mesh::FrameUniforms::shadow_atlas_rect`]: crate::mesh::FrameUniforms::shadow_atlas_rect
+    ///
+    /// **Last in the block**, so no field before it moved when it arrived.
+    pub shadow_atlas_rect: [[f32; 4]; crate::mesh::SHADOW_ATLAS_TILES],
 }
 
 impl VolumetricParams {
@@ -328,7 +343,12 @@ impl VolumetricParams {
         // `pad0` stays zero: it exists so the matrices after it start on the
         // 16-byte boundary a `float4x4` needs, and nothing reads it.
         at += 4;
-        for value in self.light_view_proj.into_iter().flatten() {
+        for value in self
+            .light_view_proj
+            .into_iter()
+            .flatten()
+            .chain(self.shadow_atlas_rect.into_iter().flatten())
+        {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
@@ -395,6 +415,7 @@ impl VolumetricParams {
                 *at += 4;
                 core::array::from_fn(|_| floats(bytes, at))
             },
+            shadow_atlas_rect: core::array::from_fn(|_| floats(bytes, at)),
         }
     }
 }
@@ -753,6 +774,7 @@ mod tests {
             viewport_y: 23,
             froxel_count: 29,
             light_view_proj: [[11.5; 16]; crate::mesh::SHADOW_LIGHT_TILES],
+            shadow_atlas_rect: [[12.5; 4]; crate::mesh::SHADOW_ATLAS_TILES],
         };
         let bytes = params.to_bytes();
         assert_eq!(bytes.len(), PARAMS_SIZE);
@@ -792,10 +814,18 @@ mod tests {
         assert_eq!(uint_at(348), 0, "the pad word is not written");
         // The first matrix after the pad and the last one the block holds.
         assert_eq!(float_at(352), 11.5, "the first light matrix");
+        let rects = 352 + 64 * crate::mesh::SHADOW_LIGHT_TILES;
         assert_eq!(
-            float_at(PARAMS_SIZE - 4),
+            float_at(rects - 4),
             11.5,
             "the last light matrix's last cell"
+        );
+        // And the rectangles past them, which is where the block now ends.
+        assert_eq!(float_at(rects), 12.5, "the first atlas rectangle");
+        assert_eq!(
+            float_at(PARAMS_SIZE - 4),
+            12.5,
+            "the last atlas rectangle's last lane"
         );
     }
 
@@ -835,6 +865,7 @@ mod tests {
             viewport_y: 23,
             froxel_count: 29,
             light_view_proj: core::array::from_fn(|_| row(next, 128.0)),
+            shadow_atlas_rect: core::array::from_fn(|_| row(next, 256.0)),
         };
         assert_eq!(
             VolumetricParams::from_bytes(&params.to_bytes()),
@@ -918,17 +949,6 @@ mod tests {
                  different size from the one the other shader binds"
             );
         }
-        for (value, name) in [
-            (crate::mesh::SHADOW_ATLAS_COLUMNS, "SHADOW_ATLAS_COLUMNS"),
-            (crate::mesh::SHADOW_ATLAS_ROWS, "SHADOW_ATLAS_ROWS"),
-        ] {
-            let spelling = format!("static const uint {name} = {value};");
-            assert!(
-                VOLUMETRIC.contains(&spelling),
-                "volumetric.slang does not declare `{spelling}`, so its shadow \
-                 atlas is not the one `crcbl_render::shadow` fills"
-            );
-        }
         // The light region is a layout number too — it sizes the block's
         // second matrix array — so both files carry it. The face count is the
         // walk's alone: only the scatter pass picks a point light's face.
@@ -939,6 +959,21 @@ mod tests {
                 source.contains(&spelling),
                 "{file} does not declare `{spelling}`, so the block it binds is a \
                  different size from the one the other shader binds"
+            );
+        }
+        // And the slot count, which sizes the row of atlas rectangles the walk
+        // now reads a tile's place out of. A layout number for the same reason
+        // the two above are, and `mesh.slang` sizes its own block with it — so
+        // it is checked against all three files rather than against the two that
+        // share the froxel block.
+        let slots = crate::mesh::SHADOW_ATLAS_TILES;
+        let spelling = format!("static const uint SHADOW_ATLAS_TILES = {slots};");
+        for (file, source) in SHADERS.into_iter().chain([("mesh.slang", MESH)]) {
+            assert!(
+                source.contains(&spelling),
+                "{file} does not declare `{spelling}`, so the rectangles it reads a \
+                 shadow map's place out of are not the ones `crcbl_render::shadow` \
+                 allocated"
             );
         }
         let faces = crate::mesh::SHADOW_POINT_FACES;
@@ -972,11 +1007,13 @@ mod tests {
 
         for signature in [
             "uint light_tile(uint tile)",
-            "float2 atlas_uv(uint tile, float2 tile_uv)",
+            "float2 atlas_uv(float4 rect, float2 tile_uv)",
+            "float4 atlas_rect(uint tile)",
+            "float2 atlas_step(float4 rect)",
             "uint point_face(float3 from_light)",
             "float2 shadow_rotation(float2 pixel)",
-            "float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, \
-             float reference)",
+            "float tile_tap(float4 rect, float2 texel_step, float2 tile_uv, float2 spoke, \
+             float2 rotation,",
             "float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, \
              float radius)",
         ] {

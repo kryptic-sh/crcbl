@@ -766,6 +766,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The shadow atlas is an allocator rather than a fixed grid, and the shader
+  reads a rectangle per map instead of deriving a cell from an index.**
+  `crcbl_render::shadow::AtlasAllocator` is a quadtree over each of the atlas's
+  root cells: `allocate(level)` hands out a whole cell or a halving of one down
+  to `MIN_TILE`, `release` gives it back and merges four free children into
+  their parent, and `TileRect::to_uv` is the scale and offset the shader reads.
+  `crcbl_shaders::mesh::FrameUniforms` gained `shadow_atlas_rect` — one `float4`
+  per atlas slot — and `crcbl_shaders::volumetric::VolumetricParams` the same
+  row, so a froxel and a fragment read one map out of one rectangle.
+  `mesh.slang` and `volumetric.slang` lost `SHADOW_ATLAS_COLUMNS` and
+  `SHADOW_ATLAS_ROWS` entirely: `atlas_uv` is a scale and an offset now,
+  `atlas_step` turns an atlas texel into a step in the tile's own space, and
+  `tile_tap` takes both rather than looking them up per tap. Every map still
+  takes a whole cell, so the arrangement and every golden are what they were;
+  choosing a size per light is the priority rung that follows. **Breaking** for
+  anything that builds these blocks itself: `mesh::FRAME_UNIFORMS_SIZE` is 1648
+  where it was 1392, `volumetric::PARAMS_SIZE` grew by one `float4` per atlas
+  slot, and both structs gained a field.
+
 - **`viewer`'s model argument is optional.** `viewer` with no path opens the
   shelf's Suzanne instead of exiting with a usage error; a build with no shelf
   on disk opens the generated document it always compiled in, and says so.

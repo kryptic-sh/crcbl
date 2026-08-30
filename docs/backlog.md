@@ -350,6 +350,47 @@ gate — left as limits rather than fixed:
   console command moves. Any demo could carry the _echo_ check; none of the
   others can carry the effect check without a new HUD field.
 
+## The shadow atlas allocator: what items 1 and 4 left (2026-08-31)
+
+`docs/plan/45-shadows.md`'s atlas rung is five items;
+`crcbl_render::shadow::AtlasAllocator` and `FrameUniforms::shadow_atlas_rect`
+are items 1 and 4, and items 2 (priority and hysteresis), 3 (budget and cadence)
+and 5 (static caching) are what actually spend them. What the two that landed
+left behind:
+
+- **`AtlasAllocator::release` has no caller in the renderer.**
+  `Selection::lay_out` resets the allocator and re-allocates every frame, so
+  nothing frees a tile. `release` and its merge exist because the static-caching
+  item is what will hold a tile across frames and hand back the one a light
+  stopped needing, and because an allocator that cannot free is not one. It is
+  exercised by `a_released_tile_s_space_is_reusable_at_its_own_size` and by
+  nothing else; the doc comment on `release` says so too.
+- **`MIN_TILE` and `TILE_LEVELS` are unswept.** Nothing in the renderer asks for
+  a level above 0 yet, so no scene has shown where a halved shadow map stops
+  being worth the texels. The two bounds the module docs give — the finest tile
+  is still far wider than the disc `mesh.slang` filters with, and one root
+  divided that far already holds more maps than the light region has slots — are
+  an argument, not a measurement. The priority rung is what will first request a
+  sub-cell map, and the sweep belongs with it.
+- **The priority rung has to carry each tile's own side into the shader, or its
+  maps are mis-biased.** `mesh.slang`'s `SHADOW_TILE` is still the _whole
+  cell's_ side and every bias in that file is denominated in it, so a light
+  demoted to a halving would be biased by the wrong texel footprint. Invisible
+  until a light is demoted, which is why it is written down now.
+- **Nothing yet asserts that a sub-cell map samples correctly on a device.** The
+  rectangle path is exercised at one size only, because one size is what this
+  slice ships: the goldens prove the rectangle is read — a wrong rectangle moves
+  every shadowed frame — but not that a quarter-sized map's clamp, bias and
+  penumbra hold up.
+- **The atlas layout is still the fixed grid, cell for cell.**
+  `Selection::lay_out` asks for level 0 for every occupied slot, in slot order,
+  so a slot's rectangle is exactly `tile_origin(slot)` with the whole cell's
+  side — which is what let every shadow golden and
+  `crates/crcbl/tests/forward_e2e/shadow.rs`'s `tile_origin`-addressed readbacks
+  stay untouched. Those readbacks will need the renderer's own rectangle the
+  moment a light takes a halved cell, and `ForwardRenderer` exposes no accessor
+  for `Selection` today, so that slice owes one.
+
 ## The render-quality programme (opened 2026-08-27)
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of

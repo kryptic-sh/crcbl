@@ -9,22 +9,33 @@
 //! the tile budget is a pure function of the light list — so every claim below
 //! is checked here without a device in the room.
 //!
-//! # One atlas, a fixed grid of [`TILES`] tiles
+//! # One atlas, [`TILES`] slots, and an allocator behind them
 //!
 //! The maps live side by side in a single `D32Float` image rather than as layers
 //! of an array. That is a consequence of the render graph, not a preference: a
 //! [`crate::graph`] render pass attaches an *image*, and there is no way to
 //! attach layer `i` of one. Tiles need nothing the graph does not already have —
-//! the shadow pass sets a viewport over tile `i` and draws — so the tile count is
+//! the shadow pass sets a viewport over a tile and draws — so the tile count is
 //! a constant either side of the seam and not a feature request.
 //! `mesh.slang`'s `shadow_atlas` says the same from the sampling side.
 //!
-//! The grid is [`ATLAS_COLUMNS`] by [`ATLAS_ROWS`] and the split of it is topic
-//! 18's 2026-08-13 decision: **the sun's cascades take the first [`CASCADES`]
-//! tiles and the rest are handed out one per shadowed spot and [`POINT_FACES`]
-//! per shadowed point**, with [`LIGHT_TILES`] of them. A light that gets no tiles
-//! still lights and simply does not occlude, which is what makes the budget a
-//! quality knob rather than a correctness cliff — see [`Selection`].
+//! A **slot** is one map: an index into the frame block's matrices, and the
+//! number a light's row carries. The split of them is topic 18's 2026-08-13
+//! decision: **the sun's cascades take the first [`CASCADES`] slots and the rest
+//! are handed out one per shadowed spot and [`POINT_FACES`] per shadowed
+//! point**, with [`LIGHT_TILES`] of them. A light that gets no slots still lights
+//! and simply does not occlude, which is what makes the budget a quality knob
+//! rather than a correctness cliff — see [`Selection`].
+//!
+//! **Where a slot's map lives in the image is a separate question, and
+//! [`AtlasAllocator`] answers it.** `docs/plan/45-shadows.md`'s atlas rung: the
+//! image is a quadtree over [`ATLAS_COLUMNS`] by [`ATLAS_ROWS`] root cells of
+//! [`TILE`] texels, a map takes a whole cell or a halving of one down to
+//! [`MIN_TILE`], and the shader reads the rectangle it landed in — see
+//! [`Selection::atlas_rect`] and `mesh.slang`'s `atlas_uv`. Nothing yet asks for
+//! anything but a whole cell, so the arrangement is the fixed grid this rung
+//! generalised, cell for cell; the priority and budget rungs of that plan are
+//! what will spend the halvings.
 //!
 //! # Two budgets, because they buy different things
 //!
@@ -86,7 +97,11 @@
 //! pass that is correct on one projection and wrong on the other is worse than
 //! one that is uniformly coarser.
 
+mod atlas;
+
 use glam::{Mat4, Vec3, Vec4Swizzles};
+
+pub use atlas::{AtlasAllocator, MIN_TILE, TILE_LEVELS, Tile, TileRect};
 
 use crate::camera::Camera;
 use crate::cull::Frustum;
@@ -494,13 +509,18 @@ pub const fn atlas_extent() -> (u32, u32) {
     (TILE * ATLAS_COLUMNS, TILE * ATLAS_ROWS)
 }
 
-/// Where tile `index` starts in the atlas, in texels.
+/// Where root cell `index` starts in the atlas, in texels.
 ///
-/// Row-major, so the sun's cascades are tiles `0..CASCADES` and land in the top
-/// row while [`ATLAS_COLUMNS`] is at least [`CASCADES`]. That is the arrangement
-/// the cascade goldens were blessed under; the texels themselves move whenever
-/// [`TILE`] or [`ATLAS_COLUMNS`] does, so a change to either is one those
-/// goldens have to be re-blessed through.
+/// Row-major, so the first cells are the top row while [`ATLAS_COLUMNS`] is at
+/// least [`CASCADES`]. That is the arrangement the cascade goldens were blessed
+/// under; the texels themselves move whenever [`TILE`] or [`ATLAS_COLUMNS`]
+/// does, so a change to either is one those goldens have to be re-blessed
+/// through.
+///
+/// **A cell, not a slot.** It is [`AtlasAllocator`]'s root order — where a
+/// level-0 tile lands — and a slot's map is wherever the allocator put it, which
+/// is [`Selection::atlas_rect`]. The two coincide while every map takes a whole
+/// cell, which is what this rung shipped with.
 #[must_use]
 pub const fn tile_origin(index: usize) -> (u32, u32) {
     let index = index as u32;
@@ -885,6 +905,20 @@ pub struct Assignment {
 pub struct Selection {
     /// What holds slot `i`, or `None` if the slot is free.
     slots: [Option<Assignment>; LIGHT_SLOTS],
+    /// The atlas's free space, reset and spent by [`Selection::lay_out`] once
+    /// per [`Selection::update`].
+    ///
+    /// Kept here rather than rebuilt because it holds a `Vec` per level: a
+    /// selection is updated every frame and an allocator built fresh each time
+    /// would be [`TILE_LEVELS`] heap allocations a frame for no gain.
+    allocator: AtlasAllocator,
+    /// Where atlas slot `i`'s map was rendered, or [`TileRect::EMPTY`] for a
+    /// slot no map was rendered into.
+    ///
+    /// Indexed the way the frame block's matrices are — the cascades first,
+    /// then [`light_tile`] of a light-region slot — so the row that names a
+    /// matrix names this rectangle too.
+    rects: [TileRect; TILES],
 }
 
 impl Selection {
@@ -982,12 +1016,79 @@ impl Selection {
             }
         }
         self.slots = slots;
+        self.lay_out(lights);
+    }
+
+    /// Hands each occupied atlas slot a rectangle of the image.
+    ///
+    /// **The cascades first and always**, whatever the light budget did: the
+    /// shadow pass draws them every frame, and a fragment samples them on a
+    /// frame with [`RenderEffects::SHADOWS`](crate::RenderEffects::SHADOWS) off
+    /// too — it finds the pass's clear and comes back lit, which it can only do
+    /// through a rectangle that names real texels. Then the light region's
+    /// occupied slots, in slot order.
+    ///
+    /// **Every request is for a whole cell.** Choosing a size per light is
+    /// `docs/plan/45-shadows.md`'s priority rung and not this one, and asking
+    /// for level 0 throughout is what makes this arrangement the fixed grid it
+    /// generalised — cell for cell, so no shadow golden moves.
+    fn lay_out(&mut self, lights: &[Light]) {
+        self.allocator.reset();
+        self.rects = [TileRect::EMPTY; TILES];
+        let mut occupied = [false; LIGHT_TILES];
+        for assignment in self.slots.iter().flatten() {
+            let Some(light) = lights.get(assignment.light) else {
+                continue;
+            };
+            let span = tile_span(light);
+            for tile in &mut occupied[assignment.base..assignment.base + span] {
+                *tile = true;
+            }
+        }
+        let slots = (0..CASCADES).chain(
+            occupied
+                .iter()
+                .enumerate()
+                .filter(|(_, held)| **held)
+                .map(|(tile, _)| light_tile(tile)),
+        );
+        for slot in slots {
+            // The atlas has exactly one cell per slot — `TILES` of them, which
+            // the assertion beside `LIGHT_TILES` is what holds — so a whole-cell
+            // request in slot order cannot run out. It is `unreachable!` rather
+            // than a fallback because a fallback here would be a map rendered
+            // into a rectangle another map is also using.
+            let tile = self
+                .allocator
+                .allocate(0)
+                .unwrap_or_else(|| unreachable!("one root cell per atlas slot"));
+            self.rects[slot] = tile.rect();
+        }
     }
 
     /// What holds each slot, in slot order.
     #[must_use]
     pub const fn slots(&self) -> &[Option<Assignment>; LIGHT_SLOTS] {
         &self.slots
+    }
+
+    /// Where atlas slot `slot`'s map was rendered, in texels — the viewport the
+    /// shadow pass sets over it.
+    ///
+    /// [`TileRect::EMPTY`] for a slot no map was rendered into, and for a `slot`
+    /// past [`TILES`], which is the same answer for the same reason: nothing
+    /// sampled a map there.
+    #[must_use]
+    pub fn atlas_rect(&self, slot: usize) -> TileRect {
+        self.rects.get(slot).copied().unwrap_or(TileRect::EMPTY)
+    }
+
+    /// The same rectangles as the shader reads them, ready for
+    /// [`FrameUniforms::shadow_atlas_rect`](crcbl_shaders::mesh::FrameUniforms::shadow_atlas_rect):
+    /// a scale into the atlas in `xy` and an offset in `zw`, one row per slot.
+    #[must_use]
+    pub fn atlas_rects(&self) -> [[f32; 4]; TILES] {
+        self.rects.map(TileRect::to_uv)
     }
 
     /// Where light `index`'s run of tiles starts, if it was given one.

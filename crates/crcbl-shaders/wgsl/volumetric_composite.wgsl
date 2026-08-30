@@ -36,6 +36,7 @@ struct VolumetricParams_std140_0
     @align(8) froxel_count_0 : u32,
     @align(4) pad0_0 : u32,
     @align(16) light_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E14_0,
+    @align(16) shadow_atlas_rect_0 : array<vec4<f32>, i32(16)>,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : VolumetricParams_std140_0;

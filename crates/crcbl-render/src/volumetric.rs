@@ -168,6 +168,12 @@ pub(crate) struct Medium<'a> {
     /// block with another frame's matrices would read the right tile of the
     /// wrong map.
     pub(crate) light_view_proj: &'a [[f32; 16]; shadow::LIGHT_TILES],
+    /// Where each of those maps is in the atlas, as the frame block carries
+    /// them — a scale and an offset per slot, out of the same
+    /// `shadow::Selection` the matrices came from. A froxel that read a
+    /// rectangle from one frame and a matrix from another would sample the
+    /// right map's place for the wrong map.
+    pub(crate) atlas_rects: &'a [[f32; 4]; shadow::TILES],
 }
 
 /// Everything the froxel volume owns.
@@ -517,6 +523,7 @@ impl Volumetric {
             sun,
             cascades,
             light_view_proj,
+            atlas_rects,
         } = medium;
         // Row 3 of the view-projection, so a shader can take a point's view
         // depth with one dot product — [`crate::light_grid`]'s block carries the
@@ -571,6 +578,7 @@ impl Volumetric {
                 viewport_y: view.extent.1.max(1),
                 froxel_count: grid.froxels(),
                 light_view_proj: *light_view_proj,
+                shadow_atlas_rect: *atlas_rects,
             }
             .to_bytes(),
         )

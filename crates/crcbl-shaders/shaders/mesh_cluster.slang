@@ -214,6 +214,11 @@ static const uint SHADOW_CASCADES = 2;
 /// with it.
 static const uint SHADOW_LIGHT_TILES = 14;
 
+/// Matching `static const uint SHADOW_ATLAS_TILES` in `mesh.slang`, for
+/// `SHADOW_CASCADES`' reason exactly: `FrameUniforms` below sizes its closing
+/// array with it.
+static const uint SHADOW_ATLAS_TILES = 16;
+
 /// Matching `struct FrameUniforms` in `mesh.slang`.
 ///
 /// The shadow members are declared and **not read**: nothing in this file
@@ -300,6 +305,11 @@ struct FrameUniforms
     /// stage and it subtracts them. That file's copy carries the account.
     float4x4 previous_view_proj;
     uint4 vertex_pool;
+    /// Where each atlas slot's map is in the shadow atlas, a scale and an
+    /// offset per slot. **Read by nothing here**, on the cascades' terms
+    /// exactly: this file does not shade, and `mesh.slang` — whose fragment
+    /// stage is this pipeline's — is where the rectangle is sampled through.
+    float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.

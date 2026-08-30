@@ -132,7 +132,7 @@ pub const SHADOW_POINT_FACES: usize = 6;
 /// `D32Float` memory and no allocation change, only per-tile resolution.
 pub const SHADOW_TILE: u32 = 768;
 
-/// Tiles across the shadow atlas.
+/// Root cells across the shadow atlas.
 ///
 /// At least [`SHADOW_CASCADES`], which is what keeps the cascades in the *top
 /// row* — see `crcbl_render::shadow::tile_origin`, and the cascade goldens,
@@ -141,16 +141,34 @@ pub const SHADOW_TILE: u32 = 768;
 /// Their origins move whenever this or [`SHADOW_TILE`] does, so a change to
 /// either is a change every golden of a shadowed scene has to be re-blessed
 /// through; what the bound protects is the *arrangement*, not the texels.
+///
+/// **No shader reads it.** It sizes the image and it is the root order
+/// `crcbl_render::shadow::AtlasAllocator` subdivides, both of which are host
+/// facts; the sampling side reads a rectangle out of
+/// [`FrameUniforms::shadow_atlas_rect`] and knows nothing about a grid. It lives
+/// here beside [`SHADOW_TILE`], which the shader does read, because the two
+/// multiply to the extent and picking one without the other is how the atlas
+/// changes size by accident.
 pub const SHADOW_ATLAS_COLUMNS: u32 = 4;
 
-/// Tiles down it.
+/// Root cells down it.
 ///
 /// A grid rather than one row: a point light is [`SHADOW_POINT_FACES`] tiles of
 /// exactly this kind, and a row long enough to hold them beside the cascades
-/// would be an image wider than some devices' limit. `mesh.slang` addresses a
-/// tile through both extents, so the shape is free to change without the
-/// sampling side changing with it.
+/// would be an image wider than some devices' limit. Read by no shader, on
+/// [`SHADOW_ATLAS_COLUMNS`]' terms.
 pub const SHADOW_ATLAS_ROWS: u32 = 4;
+
+/// Slots the shadow atlas has: [`SHADOW_CASCADES`] for the sun and
+/// [`SHADOW_LIGHT_TILES`] for the lights that fit.
+///
+/// A **slot** is one map — one matrix of [`FrameUniforms::light_view_proj`] or
+/// [`FrameUniforms::shadow_view_proj`], and one row of
+/// [`FrameUniforms::shadow_atlas_rect`], which is what this sizes. Where that
+/// map lives in the image is the rectangle rather than the index, which is what
+/// lets one map be a different size from the next;
+/// `crcbl_render::shadow::AtlasAllocator` is what decides it.
+pub const SHADOW_ATLAS_TILES: usize = SHADOW_CASCADES + SHADOW_LIGHT_TILES;
 
 /// How far in front of a cascade's near plane still writes depth, in world
 /// units.
@@ -171,8 +189,10 @@ pub const SHADOW_ATLAS_ROWS: u32 = 4;
 pub const SHADOW_CASTER_REACH: f32 = 40.0;
 
 const _: () = assert!(
-    (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_CASCADES + SHADOW_LIGHT_TILES,
-    "every tile of the grid is either a cascade's or a light's"
+    (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_ATLAS_TILES,
+    "every root cell of the atlas is one slot's, and every slot has a cell to \
+     take: an atlas short of a cell is a map the allocator cannot place, and one \
+     over is texels nothing can ever write"
 );
 
 const _: () = assert!(
@@ -194,9 +214,9 @@ const _: () = assert!(
 /// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
 /// `float4x4`, the irradiance grid's [`PROBE_VOLUME_SIZE`] header, the LOD and
 /// fog rows, the sky's three spherical-harmonic rows, the previous frame's
-/// `float4x4` and the vertex pool's `uint4`. Checked against the `Offset`
-/// decorations `slangc` emits by this module's
-/// `the_uniform_block_matches_the_offsets_slangc_emits`.
+/// `float4x4`, the vertex pool's `uint4` and [`SHADOW_ATLAS_TILES`] `float4` of
+/// atlas rectangles. Checked against the `Offset` decorations `slangc` emits by
+/// this module's `the_uniform_block_matches_the_offsets_slangc_emits`.
 pub const FRAME_UNIFORMS_SIZE: usize = 96
     + 64 * SHADOW_CASCADES
     + 48
@@ -206,7 +226,8 @@ pub const FRAME_UNIFORMS_SIZE: usize = 96
     + 32
     + 48
     + 64
-    + 16;
+    + 16
+    + 16 * SHADOW_ATLAS_TILES;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -720,6 +741,32 @@ pub struct FrameUniforms {
     /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms: no
     /// existing member's offset moves.
     pub vertex_pool: [u32; 4],
+    /// Where atlas slot `i`'s map is in the shadow atlas: a scale into the
+    /// image in `xy` and an offset in `zw`, so a point `t` of that map's own
+    /// `0..1` space is at `zw + t * xy`.
+    ///
+    /// **This is what replaced a tile index into a fixed grid**, which is
+    /// `docs/plan/45-shadows.md`'s atlas rung: a slot's map used to be a cell of
+    /// an [`SHADOW_ATLAS_COLUMNS`] by [`SHADOW_ATLAS_ROWS`] grid the shader
+    /// derived from the index, so every map was one size and could only be that
+    /// size. Reading the rectangle instead lets a far or small light take a
+    /// halving of a cell with no second sampling path anywhere —
+    /// `mesh.slang`'s `atlas_uv` and `atlas_step` are the whole of the reading
+    /// side.
+    ///
+    /// Indexed by **slot** rather than by light, on
+    /// [`light_view_proj`](Self::light_view_proj)'s terms exactly: the cascades
+    /// are the first [`SHADOW_CASCADES`] rows and a light's tile index plus
+    /// `SHADOW_CASCADES` is its own. `crcbl_render::shadow::Selection` fills
+    /// them out of `crcbl_render::shadow::AtlasAllocator`.
+    ///
+    /// A slot no map was rendered into carries a **zero** rectangle, which
+    /// nothing reads for `light_view_proj`'s reason — the rows that could name
+    /// one carry [`NO_SHADOW_TILE`](crate::light::NO_SHADOW_TILE) — and which
+    /// says "empty" plainly in a block dumped for debugging.
+    ///
+    /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms.
+    pub shadow_atlas_rect: [[f32; 4]; SHADOW_ATLAS_TILES],
 }
 
 impl FrameUniforms {
@@ -883,6 +930,9 @@ impl FrameUniforms {
         for value in self.vertex_pool {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
+        }
+        for rect in &self.shadow_atlas_rect {
+            put(&mut bytes, &mut at, rect);
         }
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
@@ -2299,6 +2349,7 @@ mod tests {
         for declaration in [
             format!("static const uint SHADOW_CASCADES = {SHADOW_CASCADES};"),
             format!("static const uint SHADOW_LIGHT_TILES = {SHADOW_LIGHT_TILES};"),
+            format!("static const uint SHADOW_ATLAS_TILES = {SHADOW_ATLAS_TILES};"),
         ] {
             for (name, source) in [("mesh.slang", mesh), ("mesh_cluster.slang", cluster)] {
                 assert!(
@@ -2308,13 +2359,13 @@ mod tests {
                 );
             }
         }
-        // The atlas's geometry, which only the sampling side reads. A grid the
-        // shader thought was a different shape would address every tile but the
-        // first at the wrong place in the atlas — a picture, and a plausible
-        // one, since tile 0 is cascade 0 either way.
+        // What is left of the atlas's geometry on the sampling side. The grid's
+        // two extents are gone from it — a slot's place is a rectangle the host
+        // allocated and hands over in the block, which is `shadow_atlas_rect`
+        // and the rung `docs/plan/45-shadows.md` calls the atlas proper — and
+        // the tile's own side stays, because every bias in that file is
+        // denominated in its texels.
         for declaration in [
-            format!("static const uint SHADOW_ATLAS_COLUMNS = {SHADOW_ATLAS_COLUMNS};"),
-            format!("static const uint SHADOW_ATLAS_ROWS = {SHADOW_ATLAS_ROWS};"),
             format!("static const float SHADOW_TILE = {SHADOW_TILE}.0;"),
             // The face count, which only the sampling side reads: it is how far
             // apart two of a point light's tiles are, so a shader that thought a
@@ -2770,20 +2821,22 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1392,
-            "at two cascades and fourteen light tiles"
+            FRAME_UNIFORMS_SIZE, 1648,
+            "at two cascades, fourteen light tiles and sixteen atlas rectangles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
         // 224, 240, 256, 272, 1168, 1184, 1200, 1216, 1232, 1248, 1264, 1280,
-        // 1296, 1312, 1376 — and
+        // 1296, 1312, 1376, 1392 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
-        // `%_arr_mat4v4float_int_14`, which is the light array's own length.
-        // Three of the middle rows are the grid header's, which this side
-        // writes as one group; then the fog's two and the sky's three. Read out
-        // of `spirv/mesh.spv` with `spirv-dis`, not derived from the arithmetic
-        // below — that is the point of them.
+        // `%_arr_mat4v4float_int_14`, which is the light array's own length, and
+        // `%_arr_v4float_int_16 ArrayStride 16`, which is the atlas
+        // rectangles'. Three of the middle rows are the grid header's, which
+        // this side writes as one group; then the fog's two and the sky's three.
+        // Read out of `spirv/mesh.spv` with `spirv-dis`, not derived from the
+        // arithmetic below — that is the point of them.
         let cascades = 64 * SHADOW_CASCADES;
         let lights = 64 * SHADOW_LIGHT_TILES;
+        let rects = 16 * SHADOW_ATLAS_TILES;
         let offsets = [
             0usize,
             64,
@@ -2802,6 +2855,7 @@ mod tests {
             224 + cascades + lights + PROBE_VOLUME_SIZE,
             240 + cascades + lights + PROBE_VOLUME_SIZE,
             304 + cascades + lights + PROBE_VOLUME_SIZE,
+            320 + cascades + lights + PROBE_VOLUME_SIZE,
         ];
         let sizes = [
             64usize,
@@ -2821,6 +2875,7 @@ mod tests {
             16,
             64,
             16,
+            rects,
         ];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
@@ -2874,6 +2929,14 @@ mod tests {
             // one mistake this member has, and equal values would hide it.
             previous_view_proj: core::array::from_fn(|lane| 130.0 + lane as f32),
             vertex_pool: [150, 151, 152, 153],
+            // A distinct value per slot *and* per lane, in a range nothing
+            // above uses: a rectangle is four numbers of one width, so a writer
+            // that transposed the scale and the offset, or wrote one slot's row
+            // into another's, would put a map somewhere plausible in the atlas
+            // and equal values would hide both.
+            shadow_atlas_rect: core::array::from_fn(|slot| {
+                core::array::from_fn(|lane| 200.0 + 4.0 * slot as f32 + lane as f32)
+            }),
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -3003,6 +3066,27 @@ mod tests {
                 "vertex_pool lane {lane}"
             );
         }
+        // And the atlas's rectangles past that, which is where the block now
+        // ends. Slot by slot and lane by lane, because a rectangle is four
+        // `float`s of one width: a scale swapped with an offset puts a map in
+        // the corner of the atlas at four times its size, and a slot's row
+        // written into another slot's samples another light's map — both
+        // pictures, and neither an error.
+        let atlas = pool + 16;
+        for slot in 0..SHADOW_ATLAS_TILES {
+            let row = atlas + slot * 16;
+            let base = 200.0 + 4.0 * slot as f32;
+            assert_eq!(
+                [at(row), at(row + 4), at(row + 8), at(row + 12)],
+                [base, base + 1.0, base + 2.0, base + 3.0],
+                "the atlas rectangle of slot {slot}"
+            );
+        }
+        assert_eq!(
+            atlas + 16 * SHADOW_ATLAS_TILES,
+            FRAME_UNIFORMS_SIZE,
+            "the rectangles are not what ends the block"
+        );
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the

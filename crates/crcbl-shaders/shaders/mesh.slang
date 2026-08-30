@@ -282,22 +282,25 @@ static const uint SHADOW_LIGHT_TILES = 14;
 /// story — and `point_face` below is the convention that says which is which.
 static const uint SHADOW_POINT_FACES = 6;
 
-/// Tiles across the shadow atlas, matching
-/// `crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS`.
-static const uint SHADOW_ATLAS_COLUMNS = 4;
+/// Slots the shadow atlas has, matching
+/// `crcbl_shaders::mesh::SHADOW_ATLAS_TILES`.
+///
+/// The cascades and the light region together, which is what sizes
+/// `FrameUniforms::shadow_atlas_rect` — so this is a layout number and the same
+/// drift test that pins `SHADOW_CASCADES` pins it.
+static const uint SHADOW_ATLAS_TILES = 16;
 
-/// Tiles down it, matching `crcbl_shaders::mesh::SHADOW_ATLAS_ROWS`.
-static const uint SHADOW_ATLAS_ROWS = 4;
-
-/// The side of one tile in texels, matching `crcbl_shaders::mesh::SHADOW_TILE`.
+/// The side of one whole atlas cell in texels, matching
+/// `crcbl_shaders::mesh::SHADOW_TILE`.
 ///
 /// Read here because every shadow bias in this file is denominated in *tile
 /// texels* — see `PUNCTUAL_DEPTH_BIAS_TEXELS` — and the world footprint of one
 /// texel is what that converts through, for a cascade as much as for a cone.
 ///
-/// Chosen with `SHADOW_ATLAS_COLUMNS`: the two multiply to the atlas's extent,
-/// and the 2026-08-26 re-tiling picked the pair that leaves that product where
-/// it was, so a wider grid costs resolution here rather than texels there.
+/// **The size of a whole cell, which is what every map the renderer allocates
+/// takes today.** `docs/plan/45-shadows.md`'s atlas rung made the image a
+/// quadtree, so a map may be a halving of a cell; the rung that hands one out
+/// is the rung that has to bias it by its own side rather than by this.
 static const float SHADOW_TILE = 768.0;
 
 /// Which atlas tile light tile `tile` of the light region was rendered into.
@@ -310,17 +313,17 @@ uint light_tile(uint tile)
     return SHADOW_CASCADES + tile;
 }
 
-/// Where `tile_uv` — a point in tile `tile`, `0..1` on both axes — lands in the
-/// atlas as a whole.
+/// Where `tile_uv` — a point in the map at `rect`, `0..1` on both axes — lands
+/// in the atlas as a whole.
 ///
-/// The grid is row-major, so tile `i` is at column `i % SHADOW_ATLAS_COLUMNS`
-/// and row `i / SHADOW_ATLAS_COLUMNS`. Both the cascades and the light maps
-/// address through this, which is what makes "the cascades are the first tiles"
-/// a fact about one function rather than an agreement between two.
-float2 atlas_uv(uint tile, float2 tile_uv)
+/// A scale and an offset, so this knows nothing about how the atlas is divided
+/// and a map of any size addresses through the same two instructions. That is
+/// `docs/plan/45-shadows.md`'s atlas rung: the cascades and the light maps share
+/// one sampling path whatever size their tiles are, where a grid derived from an
+/// index could only ever produce one size.
+float2 atlas_uv(float4 rect, float2 tile_uv)
 {
-    float2 cell = float2(float(tile % SHADOW_ATLAS_COLUMNS), float(tile / SHADOW_ATLAS_COLUMNS));
-    return (cell + tile_uv) / float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
+    return rect.zw + tile_uv * rect.xy;
 }
 
 /// Everything the frame needs that is not geometry, matching
@@ -529,6 +532,25 @@ struct FrameUniforms
     /// unread padding. See `crcbl_shaders::mesh::FrameUniforms::vertex_pool`,
     /// and `load_vertex` above, which is the only reader.
     uint4 vertex_pool;
+    /// Where atlas slot `i`'s map is in the shadow atlas: a scale into the image
+    /// in `xy` and an offset in `zw`, so a point `t` of that map's own `0..1`
+    /// space is at `zw + t * xy`. `atlas_rect` is what reads it.
+    ///
+    /// **What replaced a tile index into a fixed grid**,
+    /// `docs/plan/45-shadows.md`'s atlas rung: this file used to derive a cell
+    /// from the index, so every map was one size and could only be that size.
+    /// Reading the rectangle the host allocated lets a far or small light take a
+    /// halving of a cell with no second sampling path here.
+    ///
+    /// Indexed by **slot** rather than by light, on `light_view_proj`'s terms:
+    /// the cascades are the first `SHADOW_CASCADES` rows and `light_tile` of a
+    /// light's tile is its own. A slot no map was rendered into carries a zero
+    /// rectangle and is read by nothing, because the rows that could name it
+    /// carry `NO_SHADOW_TILE`.
+    ///
+    /// **Last in the block**, on `lod_params`' terms: no existing member's
+    /// offset moves.
+    float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
 };
 
 /// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
@@ -2784,8 +2806,32 @@ float2 shadow_rotation(float2 pixel)
     return SHADOW_ROTATIONS[SHADOW_DITHER[cell.y * 4u + cell.x]];
 }
 
-/// One tap of the shadow filter: `spoke` turned by `rotation`, clamped into
-/// tile `tile`, and compared against `reference`.
+/// Where atlas slot `tile`'s map is in the image, out of the frame block:
+/// `FrameUniforms::shadow_atlas_rect`, and that member is where the layout is
+/// argued.
+///
+/// A function rather than the subscript written out at each of the three places
+/// that want it, so the block member is named once and
+/// `crcbl_shaders::volumetric`'s drift test has one body to compare.
+float4 atlas_rect(uint tile)
+{
+    return frame.shadow_atlas_rect[tile];
+}
+
+/// One *atlas* texel as a step in a tile's own `0..1` space.
+///
+/// The map at `rect` is `rect.xy` of the atlas across, so dividing the atlas's
+/// texel size by it is what a fixed grid's multiply by its column and row counts
+/// used to be. It is also the whole of why a tile may now be smaller than its
+/// neighbour: a half-sized map steps twice as far per texel, and every clamp and
+/// every spoke below is written in these steps rather than in the atlas's.
+float2 atlas_step(float4 rect)
+{
+    return frame.shadow_params.xy / rect.xy;
+}
+
+/// One tap of the shadow filter: `spoke` turned by `rotation`, clamped into the
+/// map at `rect`, and compared against `reference`.
 ///
 /// One tap for the cascades and for the light maps, which is what keeps "a tap
 /// never leaves its own tile" a property of one function. The clamp is half a
@@ -2793,23 +2839,23 @@ float2 shadow_rotation(float2 pixel)
 /// around each tap, so a tap exactly on the edge would still reach across it and
 /// read the neighbouring map's depths as if they were this one's.
 ///
+/// `rect` and `texel_step` are parameters rather than a slot index this would
+/// look up: every tap [`tile_pcf`] takes — its probe's and its disc's alike —
+/// reads one map, so the pair is the same for all of them and the block read
+/// and the divide happen once per map rather than once per tap.
+///
 /// It is a function rather than four lines written twice because
 /// [`tile_pcf`]'s probe and its disc take exactly the same tap; two copies of
 /// this arithmetic would be two places a clamp could be fixed in one of.
-float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, float reference)
+float tile_tap(float4 rect, float2 texel_step, float2 tile_uv, float2 spoke, float2 rotation,
+               float reference)
 {
-    float2 texel = frame.shadow_params.xy;
-    // The grid's two extents, which is what turns an *atlas* texel into a step
-    // in tile space: a tile is `1 / SHADOW_ATLAS_COLUMNS` of the atlas wide and
-    // `1 / SHADOW_ATLAS_ROWS` of it tall, so scaling back up by them lands on
-    // exactly one shadow-map texel on either axis.
-    float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
-    float2 tile_min = float2(0.5, 0.5) * texel * grid;
+    float2 tile_min = float2(0.5, 0.5) * texel_step;
     // The rotation, written out: a complex multiply by `(cos, sin)`.
     float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
                            spoke.x * rotation.y + spoke.y * rotation.x);
-    float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
-    return shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(tile, tap), reference);
+    float2 tap = clamp(tile_uv + turned * texel_step, tile_min, 1.0 - tile_min);
+    return shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv(rect, tap), reference);
 }
 
 /// Rotated-disc PCF over tile `tile`, at `tile_uv` in that tile's own `0..1`
@@ -2834,12 +2880,14 @@ float tile_tap(uint tile, float2 tile_uv, float2 spoke, float2 rotation, float r
 float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float radius)
 {
     float2 rotation = shadow_rotation(pixel);
+    float4 rect = atlas_rect(tile);
+    float2 texel_step = atlas_step(rect);
 
     float probe = 0.0;
     for (uint spot = 0u; spot < SHADOW_PROBE_TAPS; ++spot)
     {
-        probe += tile_tap(tile, tile_uv, SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius,
-                          rotation, reference);
+        probe += tile_tap(rect, texel_step, tile_uv,
+                          SHADOW_DISC[SHADOW_PROBE_INDEX[spot]] * radius, rotation, reference);
     }
     // Unanimity, tested at both ends rather than by a tolerance: a comparison
     // sampler returns exactly zero or exactly one wherever the four texels it
@@ -2857,7 +2905,8 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
     float visibility = 0.0;
     for (uint index = 0u; index < SHADOW_TAPS; ++index)
     {
-        visibility += tile_tap(tile, tile_uv, SHADOW_DISC[index] * radius, rotation, reference);
+        visibility += tile_tap(rect, texel_step, tile_uv, SHADOW_DISC[index] * radius, rotation,
+                               reference);
     }
     return visibility / float(SHADOW_TAPS);
 }
@@ -2897,8 +2946,9 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
 float sun_penumbra_texels(uint cascade, float2 tile_uv, float reference, float2 rotation)
 {
     float2 texel = frame.shadow_params.xy;
-    float2 grid = float2(float(SHADOW_ATLAS_COLUMNS), float(SHADOW_ATLAS_ROWS));
-    float2 tile_min = float2(0.5, 0.5) * texel * grid;
+    float4 rect = atlas_rect(cascade);
+    float2 texel_step = atlas_step(rect);
+    float2 tile_min = float2(0.5, 0.5) * texel_step;
     // The atlas's extent in texels, which is what turns a normalised atlas
     // coordinate into the integer `Load` wants.
     float2 extent = float2(1.0, 1.0) / texel;
@@ -2910,13 +2960,12 @@ float sun_penumbra_texels(uint cascade, float2 tile_uv, float reference, float2 
         float2 spoke = SHADOW_SEARCH_DISC[index] * SHADOW_SEARCH_TEXELS;
         float2 turned = float2(spoke.x * rotation.x - spoke.y * rotation.y,
                                spoke.x * rotation.y + spoke.y * rotation.x);
-        float2 tap = clamp(tile_uv + turned * texel * grid, tile_min, 1.0 - tile_min);
+        float2 tap = clamp(tile_uv + turned * texel_step, tile_min, 1.0 - tile_min);
         // `min` against the last texel rather than trust to the clamp above: that
         // one is in tile space and half a texel inside, so the product below
         // lands inside the atlas by construction — but it is a float product,
         // and an out-of-range `Load` is undefined rather than clamped.
-        int2 coord =
-            int2(min(atlas_uv(cascade, tap) * extent, extent - float2(1.0, 1.0)));
+        int2 coord = int2(min(atlas_uv(rect, tap) * extent, extent - float2(1.0, 1.0)));
         float depth = shadow_atlas.Load(int3(coord, 0));
         if (depth > reference)
         {
