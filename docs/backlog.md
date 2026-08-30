@@ -956,9 +956,9 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
    costs no target); bent normals plus specular occlusion on medium and high.
    `46-ambient-occlusion.md` carries it; which scalar pass low runs is a
    measurement.
-9. **Burley diffuse.** `44-lighting.md` leaves it unranked. Recommended: decline
-   outright — a retroreflective rim on rough dielectrics is small next to any
-   item above.
+9. ~~**Burley diffuse.**~~ **DECLINED 2026-08-30**: Lambert stays, improved by
+   the terms around it (multi-scatter compensation, the AO tint and bent
+   normals, LTC area lights, the probe bounce). `44-lighting.md` records it.
 10. **Fill lights.** A no-GI, no-bake stack lights interiors with placed fill
     lights, and forward+ makes hundreds of them free. Engine feature (a
     no-shadow, no-specular flag on the existing light) or left to applications?

@@ -420,9 +420,14 @@ handedness the vertex route gets right.
 - **Parallax occlusion mapping.** A per-pixel march with a dependent texture
   read, for an effect normal mapping already approximates; it is a rung above
   normal maps rather than beside them, and there is no normal map yet.
-- **Burley diffuse is not refused, it is unranked.** Its fifth powers are
-  Schlick's and decompose into multiplies exactly as `ggx_lobe`'s do, so the
-  determinism argument that rules out AgX does not touch it. What it buys is a
-  retroreflective rim on rough dielectrics, which is small next to any rung
-  above; Unreal ships Lambert for the same trade. Revisit when the inputs are
-  textures and the difference has somewhere to show.
+- **Burley diffuse is refused — the user's call, 2026-08-30.** It was unranked
+  until then: its fifth powers are Schlick's and decompose into multiplies
+  exactly as `ggx_lobe`'s do, so the determinism argument that rules out AgX
+  never touched it. What it buys is a retroreflective rim on rough dielectrics,
+  which is small next to any rung above; Unreal ships Lambert for the same
+  trade. **Lambert stays**, and what improves it is everything that already does
+  or is scheduled to: the multi-scatter energy compensation on the lobe (built),
+  the multi-bounce occlusion tint and bent-normal ambient
+  ([46-ambient-occlusion.md](46-ambient-occlusion.md)'s decision of the same
+  day), the LTC area lights and the probe volume's bounce. The diffuse lobe
+  itself is not where the picture is lacking.
