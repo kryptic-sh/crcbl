@@ -94,12 +94,13 @@ one arrives.
 Planned in `docs/plan/52-debug-console.md` on the user's ask — a Source-style
 console on `` ` `` in every demo, the log in a panel, an input with Send, every
 settings key a variable, `help` and autocomplete, variables declared beside the
-code. Its eight delivery slices are the plan's; slices 1 to 6 have landed, so
-`` ` `` opens a working console in every game, `debug_view ambient occlusion`
-draws any renderer's channel, and slices 7 and 8 are what is left. The one
-decision the user's "go with your recs" settled: registration is a per-crate
-table gathered at one seam with a source-reading guard, not `linkme` (no wasm)
-or `inventory` (life-before-main) — see the plan's decision 2.
+code. Its eight delivery slices are the plan's; slices 1 to 7 have landed, so
+`` ` `` opens a working console in every game and in every browser demo,
+`debug_view ambient occlusion` draws any renderer's channel, and slice 8 is what
+is left. The one decision the user's "go with your recs" settled: registration
+is a per-crate table gathered at one seam with a source-reading guard, not
+`linkme` (no wasm) or `inventory` (life-before-main) — see the plan's
+decision 2.
 
 What slice 1 left as limits rather than fixed, each stated in the code:
 
@@ -157,10 +158,13 @@ limits rather than fixed:
   `filter()` act on `StderrLogger`, and on `wasm32` the installed sink is
   `crcbl::web`'s `WebLogger`, whose filter is the facade's global maximum and
   nothing else — so `is_installed()` is false there and both forms of the
-  command report "the engine's logger is not installed". Slice 5 owes the web
-  half: a `set_filter` the web sink honours, or `log` reaching
-  `log::set_max_level` directly when that sink is the one installed. Found in
-  review, not by a test; nothing runs the command in a browser yet.
+  command report "the engine's logger is not installed". The web half — a
+  `set_filter` the web sink honours, or `log` reaching `log::set_max_level`
+  directly when that sink is the one installed — is `crcbl-core`'s to take, and
+  neither slice 5 nor slice 7 did: slice 7 owned the web backend, the shim and
+  the browser gate. Found in review, not by a test; the browser gate now types
+  at the console, so a `log` line can join `EXPECTATIONS.quarry.console` the day
+  the command answers.
 
 What slice 4 — `crcbl_ui::console`, the panel's widgets — left as limits rather
 than fixed:
@@ -260,15 +264,6 @@ limits rather than fixed:
 What slice 6 — `crcbl::debug_view`, the shared view, the samples that gave up
 their own — left as limits rather than fixed:
 
-- **No browser gate presses a debug view, and none can until slice 7.** The
-  console's field is fed by `ShellEvent::TextCommit` alone and
-  `crates/crcbl-shell/src/web/mod.rs` emits none, so
-  `debug_view ambient occlusion` cannot be typed at a page. The browser runs for
-  this slice are therefore regressions — the demos still open, tick and draw —
-  and not a proof of the view. The other way in is `apps/lantern`'s `AO VIEW`
-  row, which a browser check could press through the pause menu and then sample
-  the canvas for grey; that is a group in `web/tools/browser-e2e.mjs` nobody has
-  written.
 - **`crcbl::debug_view::r_debug_view` is process-global, which is a test
   hazard.** A `ConVar` **is** the storage — plan decision 1 — so two loops in
   one process share the view, and `cargo test` runs a crate's tests as threads
@@ -318,6 +313,42 @@ their own — left as limits rather than fixed:
   the loop half asserts on `ForwardRenderer::debug_view` rather than on a
   picture. A single check that did both would need `--screenshot`, which quarry
   is one of the three samples not to have.
+
+What slice 7 — the web backend's `TextCommit`, the shim's swallow, the browser
+gate — left as limits rather than fixed:
+
+- **`AltGr` types nothing in a browser.** `__crcbl_web_key` commits text only
+  when neither `Ctrl` nor `Meta` is held, which is the plan's decision 5 — and
+  Windows and X11 both report `AltGr` as `Ctrl`+`Alt`, so a character reached
+  through it (`@`, `\`, `{` on a German or French layout) commits nothing.
+  Stated on the entry point. The fix is one clause — treat `Ctrl`+`Alt` as text,
+  the rule browsers' own editors use — and its cost is that every
+  `Ctrl+Alt+<key>` shortcut on a layout with no `AltGr` would then type a
+  character into whatever holds the caret. It wants the user's call, and a
+  keyboard with an `AltGr` to try it on; nothing in the tree has one.
+- **`is_text` is now spelled in three places.** `win32::keys::is_text`,
+  `appkit::keys::is_text` and the new `web::text_of` all say "a committed
+  character is text unless it is a control character", and `linux::xkb::text`
+  says it a fourth way over a whole string. Two copies were already there before
+  this slice; it added the third rather than lifting one helper into
+  `crcbl-shell`'s root, because slice 7's write set was the `web` module alone.
+  The lift is about ten lines and would put the rule, and the comment arguing
+  it, in one place.
+- **The browser gate types on a US layout and only on a US layout.** The
+  `physical` helper in `web/tools/browser-e2e.mjs` maps a character to a
+  `code`/virtual-key pair for lower-case letters, the space and the underscore,
+  and throws for anything else — so a console line added to `EXPECTATIONS` with
+  a digit or a punctuation mark in it fails loudly rather than dispatching a
+  wrong `code`. Widening it is a table, not a design.
+- **Nothing in a browser reads the panel back.** Every console check in the gate
+  reads the _log_ — the echoed line and quarry's own heartbeat — because the
+  panel is drawn into the frame and the gate has no way to find a glyph in it.
+  So "the console draws legibly in a browser" is still unproven, which is the
+  same gap the slice-4 bullet records for every other tier.
+- **Only one demo carries the block.** `EXPECTATIONS.quarry.console` is the only
+  row with one, because quarry's heartbeat is the only one that prints a value a
+  console command moves. Any demo could carry the _echo_ check; none of the
+  others can carry the effect check without a new HUD field.
 
 ## The render-quality programme (opened 2026-08-27)
 

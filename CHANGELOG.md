@@ -159,6 +159,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The debug console can be typed at in a browser.** `crcbl-shell`'s Web
+  backend emits `ShellEvent::TextCommit` for a press whose composed
+  `KeyboardEvent.key` is a single printable character and that carries no `Ctrl`
+  or `Meta` — the pair a text field needs, queued straight after the `Key` the
+  way the X11 and Wayland backends queue it. Until now it emitted none, so
+  `` ` `` opened the panel on a page and nothing could be entered at it:
+  `debug_view ambient occlusion`, `antialiasing smaa` and `help` all work in a
+  demo now. `ShellCaps::TEXT_IME` stays clear — there is no input method behind
+  the commit, so a dead key or a candidate window still composes nothing. The
+  shim swallows a bare `Backquote` so the page cannot act on the keystroke the
+  console has already eaten, and leaves `Ctrl`/`Meta`+`` ` `` to the browser's
+  devtools, which is the same condition `Pending::observe` applies on the
+  engine's side. Every demo page's controls list gains the `` ` `` row.
+
 - **A depth-only vertex stage, so the shadow atlas and the depth prepass fetch
   twelve bytes a vertex.** `shaders/mesh.slang` has a second vertex entry point,
   `depthVertexMain`: it reads stream 0 of the vertex pool, transforms it by the

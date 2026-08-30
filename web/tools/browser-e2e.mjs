@@ -806,6 +806,38 @@ const EXPECTATIONS = {
       line.includes('geometry: IndirectPerBatch'),
     moving: /eye z: (-?[\d.]+)/,
     movingLabel: 'the dolly keeps running down the face under its own steam',
+    // **The engine's debug console, typed at through a real keyboard**, which
+    // is the one place in this gate where characters a visitor pressed reach a
+    // text field rather than a binding. `docs/plan/52-debug-console.md` slice
+    // 7: until the web backend emitted `ShellEvent::TextCommit` the console
+    // opened in a browser and could not be typed at, so nothing here could
+    // press a debug view.
+    //
+    // **quarry carries it**, for the reason it carries the native console
+    // check in `apps/quarry/tests/device/console.rs`: `Quarry::log_heartbeat`
+    // prints `view:` straight off `crcbl::debug_view::current()`, so the
+    // command's *effect* is a reading rather than an inference — and this demo
+    // has no start key, so nothing typed here can start or restart a run.
+    console: {
+      // Typed one `keydown` at a time. A space and an underscore are in it on
+      // purpose: the space is what `Registry::run_statement` has to keep
+      // inside an enum value, and the underscore is a shifted key, so a
+      // backend that committed the *physical* key rather than the composed
+      // `KeyboardEvent.key` spells this line wrong.
+      typed: 'debug_view ambient occlusion',
+      // What quarry's own heartbeat then says. `DebugView::label`'s spelling,
+      // which is the same string the command took.
+      applied: (line) => line.includes('view: ambient occlusion'),
+      appliedLabel: 'view: ambient occlusion',
+      // And back, so the frame every group after this one reads is the frame
+      // they were written against. It is also the assertion that the console
+      // *closed*: the line below is typed after a toggle out and a toggle back
+      // in, so a console that never let go would be shut by the second press
+      // and this would never run.
+      restore: 'debug_view shaded',
+      restored: (line) => line.includes('view: shaded'),
+      restoredLabel: 'view: shaded',
+    },
   },
   // **The sample whose subject does not move.** viewer is a tool rather than a
   // game: it opens a document and shows it, and left alone it would draw the
@@ -6013,6 +6045,261 @@ try {
                   'frame means the draw resolved a base vertex the dispatch never wrote to ' +
                   '— GpuInstance::BASE_VERTEX_OVERRIDE is what points it at the region')
     );
+  }
+
+  // **THE ENGINE'S DEBUG CONSOLE, OPENED AND TYPED AT IN A BROWSER.** It
+  // belongs in this group for the group's own reason: a key arriving through
+  // the browser's input pipeline and changing what the engine says about
+  // itself. What makes it a different claim from every other key here is where
+  // the key goes — a binding reads the *edge*, and a text field reads the
+  // character, which is `ShellEvent::TextCommit` and reaches the engine
+  // through nothing else.
+  //
+  // **It runs last in this group, and that is deliberate.** The panel is drawn
+  // over the top of the frame and the view it sets changes every pixel below
+  // it, so the block leaves both back as it found them before group D reads
+  // the canvas.
+  //
+  // The events are dispatched with `Input.dispatchKeyEvent` rather than
+  // `Input.insertText`, because the shim listens for `keydown` and nothing
+  // else: text inserted by the protocol never reaches a listener and would
+  // prove nothing about the path a visitor's keyboard takes.
+  if (EXPECTED.console) {
+    const spec = EXPECTED.console;
+
+    // CDP's modifier bits, which are not the shim's.
+    const CDP_CTRL = 2;
+    const CDP_SHIFT = 8;
+
+    /**
+     * The physical key that produces `character` on a US layout, and its
+     * virtual key code.
+     *
+     * `code` is the physical key and is what the engine binds to; `key` is
+     * what the layout produced and is the only thing a commit can come from.
+     * A character this cannot place is a typo in the line above rather than
+     * something to dispatch a wrong `code` for, so it throws: a silently
+     * mis-coded key would still commit the right character and would hide
+     * exactly the confusion this pair exists to keep apart.
+     *
+     * @param {string} character
+     * @returns {[string, number, boolean]} the `code`, the virtual key, and
+     *   whether a US layout needs Shift held to produce it
+     */
+    const physical = (character) => {
+      if (character === ' ') return ['Space', 32, false];
+      if (character === '_') return ['Minus', 189, true];
+      if (character >= 'a' && character <= 'z')
+        return [
+          `Key${character.toUpperCase()}`,
+          character.toUpperCase().charCodeAt(0),
+          false,
+        ];
+      throw new Error(
+        `browser-e2e: no US-layout key for ${JSON.stringify(character)}; ` +
+          'the console lines in EXPECTATIONS are lower-case letters, spaces and underscores'
+      );
+    };
+
+    /**
+     * One key, pressed and released.
+     *
+     * @param {string} code
+     * @param {string} key
+     * @param {number} vk
+     * @param {{ text?: string, modifiers?: number }} [options]
+     */
+    const tap = async (code, key, vk, { text, modifiers = 0 } = {}) => {
+      for (const type of ['keyDown', 'keyUp']) {
+        await page.send('Input.dispatchKeyEvent', {
+          type,
+          code,
+          key,
+          windowsVirtualKeyCode: vk,
+          nativeVirtualKeyCode: vk,
+          modifiers,
+          ...(type === 'keyDown' && text !== undefined ? { text } : {}),
+        });
+      }
+    };
+
+    /** `crcbl::engine::CONSOLE_KEY`, as a keyboard sends it. */
+    const backquote = (modifiers = 0) =>
+      tap('Backquote', '`', 192, { text: '`', modifiers });
+
+    /**
+     * Toggles the console and waits for the loop to have taken the press.
+     *
+     * **The wait is not politeness.** `Pending::observe` folds every console
+     * key in a batch into one boolean, and the pump reads *last* frame's
+     * `is_open` to decide who the batch's other keys belong to — so two
+     * presses dispatched back to back toggle once, and a character dispatched
+     * in the same batch as the opening press goes to the game. Two of the
+     * demo's own frames is the engine having had, and taken, its chance; see
+     * `loopFrames`.
+     */
+    const toggleConsole = async () => {
+      await backquote();
+      await loopFrames(page);
+    };
+
+    /**
+     * Types a line at the console, one keystroke at a time, and submits it.
+     *
+     * @param {string} line
+     */
+    const typeLine = async (line) => {
+      for (const character of line) {
+        const [code, vk, shifted] = physical(character);
+        await tap(code, character, vk, {
+          text: character,
+          modifiers: shifted ? CDP_SHIFT : 0,
+        });
+      }
+      // No `text` on Enter: a browser sends none, and a backend that committed
+      // one would type a carriage return into the field it is submitting.
+      await tap('Enter', 'Enter', 13);
+    };
+
+    // **What the page did with the key, as well as what the engine did.** The
+    // shim calls `preventDefault` on the console key so a page does not act on
+    // a keystroke the console has already eaten, and a listener added now runs
+    // after the shim's own — same element, same phase — so `defaultPrevented`
+    // is exactly the shim's answer and nothing else's.
+    await evaluate(
+      page,
+      `(() => {
+         globalThis.__consoleKey = [];
+         document.getElementById('canvas').addEventListener('keydown', (event) => {
+           if (event.code === 'Backquote')
+             globalThis.__consoleKey.push(event.defaultPrevented);
+         });
+         return true;
+       })()`
+    );
+    /** @returns {Promise<boolean[]>} */
+    const swallowed = async () =>
+      (await evaluate(page, `globalThis.__consoleKey`)) ?? [];
+
+    // **The control, and it comes first.** With Ctrl held the backtick is a
+    // devtools shortcut: `Pending::observe` refuses to toggle on it and the
+    // shim refuses to swallow it. Without this the check below passes for a
+    // shim that swallows every backquote there is, which would take the
+    // shortcut away from every visitor.
+    await backquote(CDP_CTRL);
+    const shortcut = await swallowed();
+    check(
+      'C',
+      'the page keeps the console key when a devtools modifier is held',
+      shortcut.length === 1 && shortcut[0] === false,
+      shortcut.length === 1
+        ? `defaultPrevented was ${shortcut[0]}`
+        : `${shortcut.length} keydown(s) reached the probe, not 1`
+    );
+
+    await toggleConsole();
+    const opened = await swallowed();
+    check(
+      'C',
+      'the shim swallows the bare console key so the page cannot act on it too',
+      opened.length === 2 && opened[1] === true,
+      opened.length === 2
+        ? `defaultPrevented was ${opened[1]}`
+        : `${opened.length} keydown(s) reached the probe, not 2`
+    );
+
+    // Read before the line is typed, because every heartbeat before it says
+    // `view: shaded` and a search that started earlier would be searching the
+    // frames this command is supposed to change.
+    const beforeCommand = hud().length;
+    const beforeEcho = consoleLines.length;
+    await typeLine(spec.typed);
+
+    // **The console's own echo, which is the whole line back.** `Console::run`
+    // prints `PROMPT + line` to the log before it executes anything, so this
+    // is the field's contents character for character: a commit that dropped a
+    // keystroke, doubled one, or committed the physical key instead of the
+    // composed one spells the line differently here and nowhere else.
+    const echoed = await until(async () =>
+      consoleLines
+        .slice(beforeEcho)
+        .find((line) => line.includes(`] ${spec.typed}`))
+    );
+    check(
+      'C',
+      'every character typed at the console reaches its text field, in order',
+      Boolean(echoed),
+      echoed?.trim() ??
+        `nothing the page logged in ${pollCeiling()} ms echoed "] ${spec.typed}"; ` +
+          'the console took the keys and none of them carried a character'
+    );
+
+    // And what the command *did*, which the echo cannot say: quarry's
+    // heartbeat reads `crcbl::debug_view::current()` every sixty ticks, so
+    // this is the variable the console line moved, read back off the frame the
+    // simulation is drawing.
+    const applied = await until(async () =>
+      hud()
+        .slice(beforeCommand)
+        .find((line) => spec.applied(line))
+    );
+    check(
+      'C',
+      'a command typed at the console changes the frame the demo draws',
+      Boolean(applied),
+      applied?.trim() ??
+        `no heartbeat in ${pollCeiling()} ms said ${spec.appliedLabel}; the ` +
+          `last of ${hud().length - beforeCommand} since the line was typed was ` +
+          `"${(hud().at(-1) ?? 'none').trim()}"`
+    );
+
+    // **Out and back in**, which is what makes the line below a check of the
+    // toggle rather than of a console that never closes: if the first press
+    // did not shut the panel the second one does, and nothing after it can be
+    // typed at all.
+    await toggleConsole();
+    await toggleConsole();
+    const toggled = await swallowed();
+    check(
+      'C',
+      'the console key is swallowed on every bare press, not only the first',
+      toggled.length === 4 && toggled.slice(1).every((prevented) => prevented),
+      `defaultPrevented was ${toggled.join(', ')} over ${toggled.length} keydown(s)`
+    );
+
+    // **The state going in, and it is what stops this passing for nothing.**
+    // Every heartbeat before the first command says `view: shaded` and the
+    // view only moves when something moves it, so a check that looked only
+    // forward would find its own answer already on screen on a page where
+    // nothing was ever typed — which is exactly the page this whole block
+    // exists to fail on. Read after the toggles, so it is the reading the
+    // restore line is about to change.
+    const wentIn = hud().at(-1) ?? '';
+    const beforeRestore = hud().length;
+    await typeLine(spec.restore);
+    const restored = await until(async () =>
+      hud()
+        .slice(beforeRestore)
+        .find((line) => spec.restored(line))
+    );
+    check(
+      'C',
+      'the console closes on the same key and opens again on the next',
+      spec.applied(wentIn) && Boolean(restored),
+      spec.applied(wentIn)
+        ? (restored?.trim() ??
+            `no heartbeat in ${pollCeiling()} ms said ${spec.restoredLabel} after ` +
+              `the panel was toggled out and back in; the last of ` +
+              `${hud().length - beforeRestore} was "${(hud().at(-1) ?? 'none').trim()}"`)
+        : `the demo was not showing ${spec.appliedLabel} going in — ` +
+            `"${wentIn.trim() || 'no heartbeat at all'}" — so a later ` +
+            `${spec.restoredLabel} is the view it never left, not one this line set`
+    );
+
+    // Closed for the groups below, which read the canvas the panel would be
+    // drawn over. Group E's Escape is the backstop: a console left open eats
+    // it and the resume check goes red rather than this being silent.
+    await toggleConsole();
   }
 
   group('D — it renders');

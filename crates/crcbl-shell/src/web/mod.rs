@@ -37,7 +37,9 @@
 //!
 //! Everything else is clear, and each one is a *behaviour* that is missing
 //! rather than a platform that lacks it. [`TEXT_IME`](ShellCaps::TEXT_IME) is
-//! clear because nothing emits [`TextCommit`](ShellEvent::TextCommit);
+//! clear because there is no input method behind the commits this backend
+//! makes — see [`text_of`], which reads the composed `KeyboardEvent.key` and
+//! nothing else, so a dead key or a candidate window composes nothing;
 //! [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) because the Pointer Lock API
 //! is the only pointer constraint a browser has and it pins rather than
 //! confines; [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) and
@@ -390,6 +392,32 @@ fn keysym_of(key: &str) -> Keysym {
     }
 }
 
+/// What a `keydown` commits as text, or `None` for one that commits none.
+///
+/// The browser has already applied the layout: `KeyboardEvent.key` is the
+/// *composed* result, so it is the character a key produced — `"a"`, `"A"`,
+/// `"é"` — or a name like `"Shift"`, `"Enter"` or `"ArrowUp"` for a key that
+/// produced none. Only the first case is text, which is the same shape
+/// [`keysym_of`] reads it in.
+///
+/// A single **control** character is rejected as well, because
+/// [`ShellEvent::TextCommit`] means *text*: this is the filter every other
+/// backend applies to what its platform hands it — `is_text` in `win32::keys`
+/// and in `appkit::keys`, and the `all(char::is_control)` guard in
+/// `linux::xkb` that Wayland and X11 share — so they all agree that typing
+/// Enter commits nothing.
+///
+/// The caller decides the two things a string cannot say: that this was a
+/// press rather than a release, and that no `Ctrl` or `Meta` was held. See
+/// [`__crcbl_web_key`](shim::__crcbl_web_key), which is the only caller.
+fn text_of(key: &str) -> Option<String> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(character), None) if !character.is_control() => Some(character.to_string()),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // extern "C" entry points — called from JS
 // ---------------------------------------------------------------------------
@@ -403,7 +431,7 @@ fn keysym_of(key: &str) -> Keysym {
 pub(crate) mod shim {
     use super::{
         CANVAS, KEY_SCRATCH, KEY_SCRATCH_CAPACITY, PhysicalPoint, PhysicalSize, ShellEvent,
-        event_time, key_code_of, keysym_of, queue_for, scancode_of, with_bridge,
+        event_time, key_code_of, keysym_of, queue_for, scancode_of, text_of, with_bridge,
     };
     use crcbl_core::input::{
         ButtonState, ContactId, DeviceId, Modifiers, PointerButton, ScrollDelta, TouchPhase,
@@ -592,6 +620,36 @@ pub(crate) mod shim {
     /// `KeyboardEvent.key` (what it produced); both are UTF-8 in wasm memory.
     /// `time_ms` is the event's own `timeStamp`.
     ///
+    /// # And the text it commits
+    ///
+    /// A press that produced a printable character queues a
+    /// [`ShellEvent::TextCommit`] straight after the
+    /// [`Key`](ShellEvent::Key) — the order the X11 and Wayland backends push
+    /// the pair in, and the order a text field needs: the key edge is what a
+    /// binding reads, and the character is what an editable widget inserts.
+    /// [`text_of`] decides what counts as a character; the two conditions it
+    /// cannot see are decided here.
+    ///
+    /// * **A release commits nothing**, on every backend. Only `STATE_EDGE`
+    ///   does.
+    /// * **`Ctrl` or `Meta` held makes the press a shortcut**, not typing —
+    ///   `docs/plan/52-debug-console.md` decision 5. `Ctrl+A` would otherwise
+    ///   type an `a` into whatever has the caret, because a browser reports
+    ///   `key: "a"` for it all the same.
+    ///
+    /// A **repeat** does commit, and that is deliberate: holding a key down in
+    /// a text field types it over and over on every platform, and the engine's
+    /// debug console swallows the repeats of its own toggle key for exactly
+    /// that reason.
+    ///
+    /// `Alt` alone is left alone, so `Alt`-composed characters — the third
+    /// level of a European layout — still type. `AltGr` is the case this
+    /// misses: Windows and X11 both report it as `Ctrl`+`Alt`, so a character
+    /// reached through it commits nothing here. Recorded in
+    /// `docs/backlog.md` rather than guessed at, because the fix —
+    /// treating `Ctrl`+`Alt` as text — types a character for every
+    /// `Ctrl+Alt+<key>` shortcut on a layout that has no `AltGr`.
+    ///
     /// # Safety
     ///
     /// `code_ptr`/`key_ptr` must satisfy the contract on `borrow_str`.
@@ -620,6 +678,14 @@ pub(crate) mod shim {
             repeat: state & STATE_REPEAT != 0,
             modifiers: modifiers(state),
         });
+        let typing = state & STATE_EDGE != 0 && state & (STATE_CTRL | STATE_SUPER) == 0;
+        if let Some(text) = typing.then(|| text_of(key)).flatten() {
+            queue_for(canvas, |window, bridge| ShellEvent::TextCommit {
+                window,
+                time: event_time(bridge, time_ms),
+                text,
+            });
+        }
     }
 
     /// A `pointermove`.
@@ -1549,6 +1615,10 @@ mod tests {
         }
 
         let events = drain(&mut shell);
+        // The key edge *and* the character it committed, in that order — the
+        // pair the X11 and Wayland backends push and the pair a text field
+        // needs. This is the only test that gets both out of the buffer a
+        // browser actually writes into.
         let [
             ShellEvent::Key {
                 window: got_window,
@@ -1559,9 +1629,14 @@ mod tests {
                 modifiers,
                 ..
             },
+            ShellEvent::TextCommit {
+                window: text_window,
+                text,
+                ..
+            },
         ] = events.as_slice()
         else {
-            panic!("expected exactly one key event, got {events:?}");
+            panic!("expected a key event and the text it committed, got {events:?}");
         };
         assert_eq!(*got_window, window);
         assert_eq!(*key_code, KeyCode::from_name("KeyA"));
@@ -1569,6 +1644,88 @@ mod tests {
         assert_eq!(*state, ButtonState::Pressed);
         assert!(!*repeat);
         assert_eq!(*modifiers, Modifiers::SHIFT);
+        assert_eq!(*text_window, window);
+        assert_eq!(text, "a");
+    }
+
+    /// **The rules `__crcbl_web_key` applies to a commit**, each shown by the
+    /// event it does or does not produce.
+    ///
+    /// Driven through the entry point rather than through [`text_of`], because
+    /// the three conditions that matter — the edge, the modifiers, the repeat
+    /// — are the entry point's and not the helper's, and a test of the helper
+    /// alone would pass over a backend that emitted a commit on every `keyup`.
+    #[test]
+    fn a_press_commits_the_character_it_produced_and_a_shortcut_commits_none() {
+        let (mut shell, window) = shell_with_window(0);
+
+        /// Every commit `state` produces for `key`, as text.
+        fn typed(shell: &mut WebShell, key: &str, state: u32) -> Vec<String> {
+            let code = b"KeyA";
+            // SAFETY: both slices outlive the call and are valid UTF-8.
+            unsafe {
+                shim::__crcbl_web_key(
+                    0,
+                    code.as_ptr(),
+                    code.len() as u32,
+                    key.as_ptr(),
+                    key.len() as u32,
+                    1.0,
+                    state,
+                );
+            }
+            drain(shell)
+                .into_iter()
+                .filter_map(|event| match event {
+                    ShellEvent::TextCommit { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        assert_eq!(typed(&mut shell, "a", STATE_EDGE), vec!["a".to_string()]);
+        assert_eq!(
+            typed(&mut shell, "A", STATE_EDGE | STATE_SHIFT),
+            vec!["A".to_string()],
+            "the browser composed the layout already; Shift is not a shortcut"
+        );
+        assert_eq!(
+            typed(&mut shell, "é", STATE_EDGE | STATE_ALT),
+            vec!["é".to_string()],
+            "Alt alone is the third level of a European layout, not a shortcut"
+        );
+        assert_eq!(
+            typed(&mut shell, "a", STATE_EDGE | STATE_REPEAT),
+            vec!["a".to_string()],
+            "a held key types over and over, which is what the console's own \
+             toggle swallows repeats for"
+        );
+
+        assert!(
+            typed(&mut shell, "a", 0).is_empty(),
+            "a release commits nothing on any backend"
+        );
+        assert!(
+            typed(&mut shell, "a", STATE_EDGE | STATE_CTRL).is_empty(),
+            "Ctrl+A selects all; it does not type an a"
+        );
+        assert!(
+            typed(&mut shell, "a", STATE_EDGE | STATE_SUPER).is_empty(),
+            "and neither does Meta+A"
+        );
+        assert!(
+            typed(&mut shell, "Enter", STATE_EDGE).is_empty(),
+            "a key that produced a name rather than a character produced no text"
+        );
+        assert!(
+            typed(&mut shell, "\u{1b}", STATE_EDGE).is_empty(),
+            "and a lone control character is not text either"
+        );
+
+        // The events themselves were drained above; the window is still the one
+        // they were queued for, which is what makes the counts above about this
+        // canvas rather than about a shell that had stopped queueing anything.
+        assert!(shell.window_state(window).is_ok());
     }
 
     #[test]
@@ -2025,7 +2182,10 @@ mod tests {
             },
         ] = events.as_slice()
         else {
-            panic!("expected one Key event, got {events:?}");
+            // `Ctrl` is held, so this press is a shortcut and commits no text —
+            // which makes this the control for the commit rule as well as a
+            // check of the timestamp.
+            panic!("expected one Key event and no commit, got {events:?}");
         };
         assert_eq!(*got, window);
         assert_eq!(*key_code, Some(KeyCode::KeyW));

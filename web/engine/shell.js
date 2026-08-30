@@ -85,6 +85,21 @@ const SWALLOWED = new Set([
 ]);
 
 /**
+ * Keys the page must not act on, but only when no Ctrl or Meta is held.
+ *
+ * `Backquote` is `crcbl::engine::CONSOLE_KEY`: bare, it opens the engine's
+ * debug console in every demo, and everything typed at that console arrives as
+ * a `keydown` the page has no business acting on. Held with Ctrl or Meta it is
+ * a browser shortcut instead, and the engine deliberately leaves it alone —
+ * `docs/plan/52-debug-console.md` decision 5, which is the same test
+ * `Pending::observe` applies on the engine's own side. So the swallow has to
+ * carry the same condition: unconditional would take the visitor's devtools
+ * shortcut away, and none at all would let the page act on a keystroke the
+ * console has already eaten.
+ */
+const SWALLOWED_BARE = new Set(['Backquote']);
+
+/**
  * The key that asks for fullscreen. Must match `FULLSCREEN_KEY` in each
  * sample's `app.rs`.
  *
@@ -241,7 +256,9 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
         (down ? STATE_EDGE : 0) |
         (event.repeat ? STATE_REPEAT : 0)
     );
-    if (SWALLOWED.has(event.code)) event.preventDefault();
+    const bare = !event.ctrlKey && !event.metaKey;
+    if (SWALLOWED.has(event.code) || (bare && SWALLOWED_BARE.has(event.code)))
+      event.preventDefault();
     // After the forward, so the engine sees the press either way, and only on
     // a real press: `keyup` would toggle straight back, and a held key's
     // repeats would toggle once per repeat.

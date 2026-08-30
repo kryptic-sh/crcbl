@@ -514,8 +514,47 @@ entry; the browser gate runs on every slice that touches a demo.
    shaded frame, 559 of them darker than the placeholder on radv and 557 on
    lavapipe.
 
-7. **The web**: `TextCommit` emission in the web backend, `Backquote` swallowed
-   by the shim, the browser e2e typing a command in one demo.
+7. **The web — landed 2026-08-31.** `__crcbl_web_key` queues a
+   `ShellEvent::TextCommit` after the `Key` when the composed
+   `KeyboardEvent.key` is a single non-control character, the press is an edge
+   and no `Ctrl` or `Meta` is held — the shape decision 5 asked for, with `Alt`
+   alone left alone so a European layout's third level still types, and a repeat
+   committing because a held key types over and over everywhere else. `text_of`
+   is the filter, and it is the rule every other backend already applies.
+   `ShellCaps::TEXT_IME` stays clear: there is no input method behind the
+   commit, so a dead key and a candidate window still compose nothing. The shim
+   gained `SWALLOWED_BARE`, a second set checked only when neither `Ctrl` nor
+   `Meta` is held, so a bare `` ` `` is `preventDefault`ed and the devtools
+   shortcut is not — the same condition `Pending::observe` applies, spelled on
+   the page's side. Every demo page's controls list gains the row. `apps/quarry`
+   carries the browser gate, for the reason slice 6 gives:
+   `EXPECTATIONS.quarry.console` opens the panel, types
+   `debug_view ambient occlusion` one `keydown` at a time, reads the console's
+   own echo back out of the page log — the whole line, character for character —
+   and then reads `view: ambient occlusion` off quarry's heartbeat, which is the
+   variable's effect on the frame rather than the command's echo. It toggles out
+   and back in and types `debug_view shaded`, which is what proves the panel
+   closes as well as opens, and leaves the demo as group D found it.
+   `web/run-browser-e2e.sh` holds the claim and its control by name.
+
+   **Each of the six new checks was shown red first**, on the SwiftShader
+   adapter the gate picks: emptying `SWALLOWED_BARE` reds the two swallow
+   checks, dropping its bare condition reds the devtools-modifier control, and
+   severing the text path — both by making the backend commit nothing and by
+   having the shim send an empty `KeyboardEvent.key` — reds the echo, the
+   applied view and the toggle round trip.
+
+   **The restore check was rewritten during that sabotage.** As first written it
+   asked only "does a later heartbeat say `view: shaded`", which is true of
+   every heartbeat on a page where nothing was ever typed — it passed with the
+   whole feature removed. It reads the state _going in_ now and fails unless the
+   view was `ambient occlusion` when the line was typed.
+
+   **What it did not do:** the web half of `log` (decision 4's live filter still
+   faults in a browser — the fix is `crcbl-core`'s, and this slice owned the web
+   backend, the shim and the gate), and `AltGr`, which reports as `Ctrl`+`Alt`
+   and so commits nothing. Both in `docs/backlog.md`.
+
 8. **Follow-ups, each its own slice**: clipboard paste; `bind`/`unbind` over
    `ActionMap::action_names`; the `SIM` flag over the transport; a `config`
    command that runs a file of commands; a touch keyboard.
@@ -532,7 +571,8 @@ entry; the browser gate runs on every slice that touches a demo.
   set it, the frame changes, and `save` writes it.
 - `debug_view ambient occlusion` shows the AO channel in a demo that never
   exposed it — `apps/quarry`, for the reason slice 6 gives, and proven on radv
-  and lavapipe. **Not proven in a browser**: the web backend emits no
-  `TextCommit`, so nothing can be typed at the console there until slice 7.
+  and lavapipe, **and proven in a browser**: `web/tools/browser-e2e.mjs` types
+  the line at quarry's console on SwiftShader and reads
+  `view: ambient occlusion` back off the demo's own heartbeat.
 - No golden moves; the closed console adds no measurable frame cost on the
   browser tier.

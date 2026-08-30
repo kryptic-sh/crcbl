@@ -1,12 +1,12 @@
 <!--
-  The three keys the engine's loop keeps, whatever the game is. They belong to
-  `crcbl-shell` rather than to any sample, so they are listed once: a fourth
-  one appears on every demo's controls list from this file alone.
+  The keys the engine's loop keeps, whatever the game is. They belong to the
+  engine rather than to any sample, so they are listed once: another one
+  appears on every demo's controls list from this file alone.
 
   Goes inside a page's `<ul class="keys">`, after that game's own rows.
 
-  The rows are `pointer-only` and the last one is `touch-only`, because all
-  three of these are **keys** and a phone has none. Saying so is better than
+  The rows are `pointer-only` and the last one is `touch-only`, because every
+  one of these is a **key** and a phone has none. Saying so is better than
   printing <kbd>F11</kbd> at someone with no F11.
 
   The touch row no longer says "keyboard only" flatly, because that stopped
@@ -18,6 +18,11 @@
   demos this shared file has no business knowing about. Asteroids and hud do not
   have it: asteroids has no touch controls at all (three concurrent controls
   have no good phone layout) and hud takes no game input.
+
+  The console is not in that row, and that is not an omission: it opens from
+  the backtick and from nothing else, and it has no on-screen keyboard to type
+  at — `docs/plan/52-debug-console.md` decision 6 records the gap. A finger has
+  no route to it, so a phone is told about the three it can reach.
 -->
 <li class="key-row pointer-only">
   <span>Pause and resume</span>
@@ -30,6 +35,10 @@
 <li class="key-row pointer-only">
   <span>Debug overlay</span>
   <span><kbd>F3</kbd></span>
+</li>
+<li class="key-row pointer-only">
+  <span>Debug console</span>
+  <span><kbd>`</kbd></span>
 </li>
 <li class="key-row touch-only">
   <span>Pause, fullscreen and the debug overlay</span>

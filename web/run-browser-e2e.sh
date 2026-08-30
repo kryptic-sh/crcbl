@@ -519,6 +519,48 @@ case "$DEMO" in
         ;;
 esac
 
+# And the same argument for the engine's debug console, which is the only thing
+# on the browser path where a character a visitor pressed reaches a text field
+# rather than a binding. Every other check in the driver passes against a web
+# backend that emits no `ShellEvent::TextCommit` at all — that is what shipped
+# until `docs/plan/52-debug-console.md` slice 7 — because every one of them
+# reads a key *edge*, and the panel opened on the backtick even then. `quarry`
+# alone, because it is the only demo whose heartbeat prints the debug view the
+# console line sets.
+#
+# Two names are matched, and both are the halves worth deleting when a slow
+# machine makes them flake:
+#
+#  - 'a command typed at the console changes the frame' is the claim itself.
+#    Without it nothing anywhere asks whether a browser can drive the console,
+#    and the echo check beside it passes for a console that takes text and runs
+#    nothing.
+#  - 'the page keeps the console key when a devtools modifier is held' is the
+#    control for the swallow. Without it, 'the shim swallows the bare console
+#    key' passes for a shim that swallows every backquote there is — which
+#    takes the devtools shortcut away from every visitor and reads as green.
+#
+# Renaming either check in the driver is meant to fail here and be renamed here
+# too.
+case "$DEMO" in
+    quarry)
+        TYPED="$(grep -F 'a command typed at the console changes the frame the demo draws' "${OUTPUT}.plain" || true)"
+        if [ -z "$TYPED" ]; then
+            echo "crcbl web e2e: the driver never typed a command at $DEMO's console;" >&2
+            echo "               ShellEvent::TextCommit in crates/crcbl-shell/src/web/mod.rs is" >&2
+            echo "               ungated, and the console cannot be typed at in a browser" >&2
+            exit 1
+        fi
+        SHORTCUT="$(grep -F 'the page keeps the console key when a devtools modifier is held' "${OUTPUT}.plain" || true)"
+        if [ -z "$SHORTCUT" ]; then
+            echo "crcbl web e2e: the driver never checked that Ctrl and the console key stay" >&2
+            echo "               the browser's; 'the shim swallows the bare console key' has no" >&2
+            echo "               control, and it passes for a shim that swallows every backquote" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # And the same argument for the character controller, which is the one thing on
 # puppet's page that a visitor's own keys reach. Every other check in the driver
 # passes against a page whose input path is severed: that demo walks a circuit
