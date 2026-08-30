@@ -1491,10 +1491,10 @@ fn a_later_frame_skins_with_its_own_palette_into_the_half_its_parity_names() {
                 for slot in 0..count {
                     let slot = theirs as usize + slot;
                     assert!(
-                        pool_record(&bytes, slot) == pool_record(&uploaded, slot),
+                        pool_record(bytes, slot) == pool_record(&uploaded, slot),
                         "frame 0 wrote pool vertex {slot} of the half its parity does not \
                          name; it holds {:02x?} where the fill put {:02x?}",
-                        pool_record(&bytes, slot),
+                        pool_record(bytes, slot),
                         pool_record(&uploaded, slot),
                     );
                 }
@@ -1512,11 +1512,11 @@ fn a_later_frame_skins_with_its_own_palette_into_the_half_its_parity_names() {
                 continue;
             }
             assert!(
-                pool_record(&bytes, slot) == pool_record(&uploaded, slot),
+                pool_record(bytes, slot) == pool_record(&uploaded, slot),
                 "frame {index} wrote pool vertex {slot}, which belongs to neither half of \
                  the region ({halves:?}, {count} vertices each). It holds {:02x?} where the \
                  fill put {:02x?}",
-                pool_record(&bytes, slot),
+                pool_record(bytes, slot),
                 pool_record(&uploaded, slot),
             );
         }
