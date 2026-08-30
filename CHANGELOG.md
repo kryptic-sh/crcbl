@@ -132,6 +132,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The debug console's widgets, drawn from values and nothing else.**
+  `crcbl_ui::console` is the panel the `` ` `` key will drop down: `TextField`,
+  the crate's first editable widget — a line, a caret counted in characters,
+  `insert`/`backspace`/`delete`, `move_left`/`move_right`/`move_home`/`move_end`
+  and a `window` that scrolls a long line under a caret pinned to the last
+  column, because a `DrawList` has no clip rectangle; `LogView`, which takes
+  `crcbl_core::log::console::Record`s through `push_records`, keeps the `cursor`
+  the next `snapshot_since` wants, bounds itself at `CONSOLE_RING_LINES`, wraps
+  at the panel's column count, culls whole rows rather than clipping them,
+  colours each line by its level and carries a `LevelFilter` of its own that
+  hides lines without losing them; and `ConsolePanel`, which lays both out over
+  the top `CONSOLE_HEIGHT_FRACTION` of the frame at `ConsoleStyle::pixel_art`'s
+  whole-number scale — the log, then the `]` `PROMPT`, the field and a **Send**
+  button on one row, with up to `COMPLETION_ROWS` candidates hanging below the
+  panel and the matched head of each highlighted. `ConsolePanel::point` clicks
+  **Send** through the same `submit` `Enter` will call, and `caret_shown` is the
+  blink. It reads no ring, no registry, no clock and no keycode; wiring those to
+  it is the next slice.
 - **The log the debug console will draw, and a `log` command that moves the
   filter while the engine runs.** `crcbl_core::log::console` is a bounded ring —
   `Record { sequence, level, target, message, elapsed }`, `CONSOLE_RING_LINES`

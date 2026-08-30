@@ -11,6 +11,8 @@
 //!      │
 //! On-screen controls ([`touch`]) ←  the widgets a finger drives
 //!      │
+//! Debug console ([`console`])  ←  the panel the `` ` `` key drops down
+//!      │
 //! Widgets (Label, Button, …)   ←  this slice (P4-b)
 //!      │
 //!      ▼
@@ -32,6 +34,7 @@
 //! See `docs/plan/07-ui-debug.md` for the full design.
 
 pub mod budget;
+pub mod console;
 pub mod debug;
 pub mod draw_list;
 pub mod hud;
@@ -41,6 +44,11 @@ pub mod touch;
 pub mod widget;
 
 pub use budget::{Bound, BudgetStats, MIN_PERCENTILE_SAMPLES};
+pub use console::{
+    CARET_BLINK, COMPLETION_ROWS, CONSOLE_HEIGHT_FRACTION, ConsoleLayout, ConsolePanel,
+    ConsoleStyle, LogLine, LogView, MINIMUM_FIELD_COLUMNS, MINIMUM_LOG_ROWS, PROMPT, SEND_ID,
+    SEND_LABEL, TextField, TextFieldStyle, caret_shown,
+};
 pub use debug::{
     DEFAULT_FRAME_WINDOW, DebugModule, DebugOverlay, DebugPanel, DebugRow, DebugSection,
     DebugStyle, FrameStats,

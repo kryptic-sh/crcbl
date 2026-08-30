@@ -140,6 +140,51 @@ limits rather than fixed:
   `crcbl-console` appears in the engine's gather at all — that second guard is
   decision 2's other half and is slice 5's, along with the gather itself.
 
+What slice 4 — `crcbl_ui::console`, the panel's widgets — left as limits rather
+than fixed:
+
+- **The panel's line is not stderr's line glyph for glyph.** `LogView`'s
+  `line_text` draws a record's message with its target in front of it, unless
+  the console printed the line itself (`CONSOLE_TARGET`), and carries the level
+  as a colour; there is no elapsed-seconds column and no level name, because the
+  panel is about a hundred columns wide at scale 1 and the ring's order already
+  says what a timestamp would. So the plan's exit criterion "the panel shows the
+  same lines as stderr" is met as _the same records, in the same order, coloured
+  by level_ — read it that way when slice 5 is checked against it. `line_text`
+  is the single place a timestamp would be added if one is ever wanted.
+- **The panel's per-level view is a `LevelFilter` threshold, not five toggles.**
+  `LogView::set_filter` takes `Off` through `Trace` and hides lines without
+  dropping them; decision 4's wording was "a separate toggle per level". A
+  threshold is what a key can cycle, which is what that decision asked for in
+  the same sentence. **Nothing binds a key to it yet** — that is slice 5, and
+  until then the filter is only reachable from code.
+- **The caret is measured, not read off `layout_line`'s rectangles.** Decision 6
+  says the caret rectangle comes from the glyph rectangles;
+  `FontAtlas::layout_line` drops every zero-ink glyph, so its `n`-th rectangle
+  is not the `n`-th character of a line holding a space and a caret placed from
+  it slides left by a column per space. `TextField::caret_rect` measures the
+  text before the caret with `FontAtlas::text_width` instead — the same advances
+  `layout_line` walks — and
+  `the_caret_lands_on_the_column_it_names_across_a_space` is the check.
+- **`TextField` has a caret-following window and no other scrolling.** A line
+  longer than the box shows its last columns with the caret pinned to the last
+  one; there is no stored scroll offset, no selection, no clipboard and no IME
+  (all declined for v0 by the plan). A caller that passes `usize::MAX` columns
+  gets the whole line and no window at all.
+- **The pointer reaches the Send button and nothing else.**
+  `ConsolePanel::point` hit-tests that one rectangle: the completion rows are
+  not clickable, the log cannot be selected or dragged, and the wheel is not
+  read here — `LogView::scroll_by` is the seam slice 5 drives from a wheel or a
+  `PageUp`.
+- **The panel holds no history.** `crcbl_console::History` is the storage and
+  `TextField::set_text` is what a recall calls; joining the two is slice 5's.
+- **Not measured, and not seen.** Nothing in the workspace constructs a
+  `ConsolePanel` yet, so the widgets are exercised by their own tests alone —
+  the panel has never been drawn on a screen, and its per-frame cost (one draw
+  command per visible row, and a `String` per wrapped row because
+  `DrawList::text` takes an owned one) was never timed on any tier. Decision 10
+  priced the shape and nothing has priced the numbers.
+
 **Also owed with it:** the AO debug view is lantern's alone today
 (`ForwardRenderer::set_occlusion_view` behind lantern's pause panel). The user
 wants every debug view available in every build and demo; the debug console

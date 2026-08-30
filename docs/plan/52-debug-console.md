@@ -275,6 +275,16 @@ uses `MenuStyle::pixel_art`'s whole-number scale rule so it is crisp at every
 size, and it draws **after** the debug overlay, last in the frame, so nothing
 covers it.
 
+**What a line says**, settled while the widgets were built: the record's
+message, with its target in front of it unless the console printed the line
+itself (`CONSOLE_TARGET`), and the level carried by colour rather than by a
+name. The elapsed seconds stay the terminal's — the panel is a hundred columns
+wide at scale 1, and the ring's order already says what a timestamp would — so
+"the same lines as stderr" means the same records in the same order, not the
+same glyphs. The panel's own per-level view is a `LevelFilter` threshold, `Off`
+through `Trace`, rather than five independent toggles: a key that cycles it
+wants an order to cycle through, and the levels have one.
+
 Touch: the panel has no on-screen keyboard, so on a device with no keyboard the
 console opens (a Send button and history are usable) but typing is not. Recorded
 as a known gap, not designed around.
@@ -410,8 +420,27 @@ entry; the browser gate runs on every slice that touches a demo.
    `set_filter`/`filter` pair over an `RwLock` on the installed logger; `log` is
    a `concommand!` in `crcbl_core::log` listed by `crcbl_core::console_table()`
    and held there by `crates/crcbl-core/tests/console_table.rs`.
-4. **`crcbl_ui::console`**: `TextField`, `LogView`, the panel layout, the Send
-   button, the completion rows — draw-list snapshot tests like the menu's.
+4. **`crcbl_ui::console` — landed 2026-08-30.** `TextField` is the crate's first
+   editable widget: a line, a caret counted in characters rather than bytes,
+   `insert` (which drops control characters), `backspace`/`delete`, the four
+   cursor motions, and a `window` that scrolls a long line under a caret held in
+   the last column it can occupy — the draw list has no clip, so a field that
+   drew its whole line would draw it over the button beside it. `LogView` takes
+   `crcbl_core::log::console::Record`s through `push_records`, keeps the
+   `cursor` the next `snapshot_since` needs, is bounded at `CONSOLE_RING_LINES`,
+   wraps at the panel's column count, culls whole rows, colours by level,
+   scrolls in lines — holding still while the log fills up behind it — and
+   carries a `LevelFilter` of its own that hides lines rather than dropping
+   them. `ConsolePanel` lays the two out at `ConsoleStyle::pixel_art`'s scale
+   over the top `CONSOLE_HEIGHT_FRACTION` of the frame: the log, then the `]`
+   `PROMPT`, the field and the **Send** button on one row, with up to
+   `COMPLETION_ROWS` candidates hanging below the panel with their matched head
+   highlighted. `ConsolePanel::point` submits through the same
+   `ConsolePanel::submit` that `Enter` will call, and the scale chosen is the
+   largest whose panel still shows `MINIMUM_LOG_ROWS` rows and
+   `MINIMUM_FIELD_COLUMNS` columns. Nothing here reads the ring, the registry, a
+   clock or a keycode — the records, the candidates and the caret's blink
+   (`caret_shown`) all arrive as values, which is what slice 5 wires up.
 5. **The engine**: `CONSOLE_KEY`, the takeover and the held-key repair, the
    `TextCommit` pump, the draw after the overlay, the gather at `Loop::new` with
    both guards, `HostedGame::console_table`, the built-in commands, and the CLI
