@@ -12726,6 +12726,25 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
+## The browser gate covers one jobs backend, not both (2026-08-30)
+
+`docs/plan/21-jobs.md`'s second rung, rescoped by the user: the published site
+running the `Inline` fallback is a supported configuration, and the gate owes
+coverage of both backends. Today `web/tools/serve.mjs` always sends COOP/COEP,
+`web/tools/browser-e2e.mjs` asserts `crossOriginIsolated === true`, and the
+`web/jobs/` check never sees the non-isolated origin a visitor to
+crcbl.kryptic.sh gets. Two gaps, one slice:
+
+- **A switch on `serve.mjs` to withhold the headers**, and a second jobs run in
+  `web/run-browser-e2e.sh` against it asserting `crossOriginIsolated === false`
+  and the `Inline` backend chosen by name.
+- **The isolated run asserts the backend, not the flag.** `Workers` must report
+  in with its worker count; a pool that fell back to `Inline` under a true flag
+  passes today.
+
+Not a server problem and not a deploy problem: the fake server already exists,
+it just never runs the second configuration.
+
 ## The frame pacer: what was accepted rather than fixed (2026-08-30)
 
 Left behind by the grid-pacer slice. None of these is a defect; each is here so

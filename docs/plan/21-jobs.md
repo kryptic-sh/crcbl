@@ -364,11 +364,22 @@ is the constraint that already forbids a `crcbl::run(game)`.
 1. ~~The spawn seam in `crcbl-jobs`, with the native backend and a single-thread
    fallback.~~ Shipped as `crcbl_jobs::spawn` with `Threads`, `Inline` and
    `Workers`.
-2. Cross-origin isolation on the Pages deploy, proved by the browser gate
-   asserting `crossOriginIsolated === true` before anything relies on it.
-   **Still open, and still the gate.** `web/tools/serve.mjs` sends COOP/COEP
-   locally and `web/jobs/` asserts the flag against it; nothing sends those
-   headers on Pages, so no published demo is isolated.
+2. ~~Cross-origin isolation on the Pages deploy, proved by the browser gate
+   asserting `crossOriginIsolated === true` before anything relies on it.~~
+   **Rescoped 2026-08-30, the user's call:** the deploy's origin is not the
+   gate's business. GitHub Pages sends no COOP/COEP, so a published demo runs
+   the `Inline` fallback, and that is a **supported configuration** rather than
+   a gap — the seam exists so that a page without `SharedArrayBuffer` still
+   runs. What the gate owes is coverage of **both** backends, and today it has
+   half: `web/tools/serve.mjs` always sends the pair, the driver asserts
+   `crossOriginIsolated === true`, and nothing exercises the origin a real
+   visitor gets. The rung is therefore a two-run gate: the jobs demo served once
+   with the headers, asserting the `Workers` backend reported in with its worker
+   count, and once without them (`serve.mjs` grows a switch), asserting
+   `crossOriginIsolated === false` and the `Inline` backend chosen — the backend
+   by name in both, since the flag alone is satisfied by a pool that silently
+   fell back. Isolating the deploy (a service-worker shim, or a proxy that adds
+   the headers) stays available as a later choice and gates nothing.
 3. ~~The wasm worker backend behind the seam, and the pinned nightly for it.~~
    Shipped — `crcbl_jobs::workers::Workers` plus `web/engine/jobs.js` and
    `web/engine/jobs-worker.js`, gated locally by `web/run-jobs-e2e.sh`.
