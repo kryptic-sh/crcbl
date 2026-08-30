@@ -93,7 +93,9 @@ and lavapipe. What it did not do:
   current answer and will go red on the flip, which is intended: `apps/options`'
   `the_antialiasing_ladder_is_the_whole_enum` and `crcbl-render`'s
   `a_tier_spells_one_word_and_sets_one_pair_of_bits`. The CMAA2 slice retires
-  SMAA, so the flip is worth taking before it or not at all.
+  SMAA, so the flip is worth taking before it or not at all. **Not at all —
+  decided 2026-08-30**: CMAA2 becomes the default when it lands, one re-bless
+  for the filter that stays.
 - **The reference's S2x/T2x and reprojection paths are not transcribed**, and
   deliberately: they are not branched around in the shaders, they are absent, so
   `SMAA_AREATEX_SUBTEX_SIZE` still selects nothing and only the offset-zero slab
@@ -890,7 +892,11 @@ volume the RT tier fills by ray queries. The lantern and shard bakes leave with
 the slice that lands it. Order among the raster items: LTC area lights, the
 shadow atlas, the AO tint, **this**, then the atmosphere, then anything else.
 
-**Still open under it, and smaller than before:** (i) whether the GI term may
+**Answered 2026-08-30 on the user's "best-looking for the performance": (i) no
+temporal blend — fixed pattern, every probe every frame, on both tiers; (iii)
+yes, ray-traced shadows and reflections join the high tier as presets once the
+queries exist, priced then. (ii) is a design task for foundation (c), not a
+call.** The original wording follows for the record: (i) whether the GI term may
 carry a temporal blend now that it never runs on a golden's tier — C2 stands
 until this is answered, and the fixed-pattern every-probe-every-frame update is
 the default; (ii) what the seam adds — an acceleration-structure build and
@@ -1060,7 +1066,8 @@ candidate 3, the desktop-only contact term on top.
    committed bytes (six directions ≈ 2.3 MB for 8192 probes), not device memory.
    Anti-vacuity: a basis of one reproduces candidate 1 bit for bit. Strictly
    after candidate 1.
-3. **Non-temporal SSGI over the Hi-Z pyramid, delivered as an image.** The
+3. ~~**Non-temporal SSGI over the Hi-Z pyramid, delivered as an image.**~~
+   **Withdrawn 2026-08-30** — the probe volume is the bounce on every tier. The
    plan's SSGI row, with one correction: `43-render-standards.md` §9 and
    `49-antialiasing.md` file it behind motion vectors for temporal accumulation,
    and that is a choice — GTAO's fixed-pattern-plus-blur determinism argument
