@@ -279,10 +279,10 @@ within tolerance and was left alone.
   the rule rather than an option: the cadence tiers exist to bound the worst
   case when everything moves, and the cache is what makes the common case cheap.
   A cached tile is not a bake — it is re-rendered the frame its inputs change,
-  and nothing about it survives a load. Still open under it: the budget row —
-  how many shadowed local lights a frame renders and the atlas's size on each of
-  the three quality tiers — which is the pricing question `docs/backlog.md`'s
-  pending lighting calls carry.
+  and nothing about it survives a load. The budget row — how many shadowed local
+  lights a frame renders and the atlas's size on each of the three quality tiers
+  — is drafted in [39-capabilities.md](39-capabilities.md)'s tier table as
+  starting values to sweep on each tier's hardware.
 
   Checked by the goldens that stand — the sun's cascades and the four lights
   lantern shadows must not move — plus a scene with more lights than tiles that
