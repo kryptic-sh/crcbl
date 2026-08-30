@@ -79,6 +79,77 @@ opened over a `MemorySource`, the same call the built-in document takes. A file
 that will not parse keeps the frame that is on screen and puts the loader's own
 sentence on the status bar, because a page has no exit code to fail with.
 
+## Milestone 4 — the PBR showcase (decided 2026-08-30)
+
+**The user's ask, 2026-08-30:** the viewer is the demo that showcases the PBR
+material set — not a new sample. It gains three things:
+
+1. **Every way of opening a model.** The command line on run (`viewer <MODEL>`,
+   built) and a drop target in the browser (built) are joined by **native
+   drag-and-drop**: `crcbl-shell` already raises `ShellEvent::DroppedFile` and
+   the viewer never handles it, so a `.glb` or `.gltf` dropped on the window
+   opens through the same `load_bytes` the browser's drop takes. One open path,
+   three doors.
+2. **A bundled shelf, chosen from a list.** The Khronos CC0 models below ship
+   with the demo — natively beside the binary through the asset seam, in the
+   browser under `web/demos/viewer/assets/` — and a panel lists them; pick one
+   and it opens. The generated document `demo_model.rs` ships today becomes the
+   fallback only for a build without the shelf; **Suzanne is what opens when
+   nothing is asked for**, on both hosts.
+3. **The full metallic-roughness set rendered.** Base colour is drawn today;
+   normal, metallic-roughness-occlusion and emissive pages arrive with
+   foundation (a) and the normal-map rung with (d) in
+   `docs/plan/43-render-standards.md`'s lighting order, and the viewer on
+   Suzanne is that rung's golden. Sun and sky, LTC area lights, the atlas and
+   the probe volume all show on this shelf as they land.
+
+The first two need nothing the tree lacks and can go before the rung; the
+browser artifact's size budget decides how many of the shelf ship in the tab
+(the rest can load on demand from the same directory).
+
+### The licence rule for shipped assets (decided 2026-08-30)
+
+The repository is MIT and its demos are published, so every asset committed to
+it is redistributed under terms a downstream MIT user inherits. The rule:
+
+- **CC0 first.** An asset with no obligations is the default; nothing to track,
+  nothing a fork can get wrong.
+- **CC-BY 4.0 is allowed with attribution** in an `ATTRIBUTION.md` beside the
+  asset naming the author, the source URL and the licence, and the same line in
+  the demo's page. Not the default, because a fork that drops the file is in
+  breach and nothing in the tree would notice.
+- **No NC, no SA, no research-only.** A non-commercial clause is incompatible
+  with a permissive engine that ships a product; share-alike would relicense the
+  demo.
+- **Provenance is verified at the source, not remembered.** The licences below
+  were read on 2026-08-30 from the Khronos `glTF-Sample-Assets` model table and
+  each model's own `README.md`, from `polyhaven.com/license`, and from the
+  Stanford scanning repository's terms page. Re-read before committing a file;
+  an asset's licence is the one on its page that day.
+
+**Decided 2026-08-30, the user:** the model demos use **the CC0 models from
+Khronos' `glTF-Sample-Assets` and nothing else.** Not Poly Haven models, not
+CC-BY sets with an attribution file, not a modelled-here rabbit — one source,
+one licence, nothing to track. Poly Haven stays named below only as the CC0
+source for a PBR _texture_ or an HDRI if a rung ever needs one that the Khronos
+shelf lacks.
+
+### The models, checked
+
+| Model                                                                                                    | Source                          | Licence                                             | Verdict                                                                                                                                                               |
+| -------------------------------------------------------------------------------------------------------- | ------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Suzanne** (the monkey)                                                                                 | Khronos glTF-Sample-Assets      | CC0-1.0 (UX3D 2017)                                 | **In.** The one-mesh material fixture; ~8k triangles subdivided, a normal-mapped variant is ours                                                                      |
+| Stanford bunny (the rabbit)                                                                              | Stanford 3D Scanning Repository | research-only, no commercial use without permission | **Out.** "Not to be used for commercial purposes, nor appear in a product for sale" — a redistributed MIT demo is exactly that. Any rabbit here is a different rabbit |
+| Avocado, BoomBox, Corset, Lantern, WaterBottle, BarramundiFish, AntiqueCamera, FlightHelmet, SciFiHelmet | Khronos glTF-Sample-Assets      | CC0-1.0                                             | **In**, as the gallery's shelf: full metallic-roughness sets with normal, occlusion and emissive maps, sized for a browser tier                                       |
+| DamagedHelmet                                                                                            | Khronos glTF-Sample-Assets      | CC-BY 4.0 / CC-BY-NC 4.0 dual                       | **Out.** The dual licence is a trap for a fork; SciFiHelmet is the same kind of model under CC0                                                                       |
+| MetalRoughSpheres                                                                                        | Khronos glTF-Sample-Assets      | CC-BY 4.0                                           | Allowed with attribution; the BRDF ladder's calibration chart, worth the attribution line                                                                             |
+| Poly Haven models and textures                                                                           | polyhaven.com                   | CC0                                                 | **In.** The source for any prop or PBR texture set the gallery wants beyond the Khronos shelf, and for an HDRI once the sky can take one                              |
+| Duck, BrainStem, CesiumMan                                                                               | Khronos glTF-Sample-Assets      | SCEA / Poser EULA / CC-BY                           | Out, or not worth their terms                                                                                                                                         |
+
+There is no rabbit on the Khronos CC0 shelf, and the Stanford scan is the one
+the user meant and the one that cannot ship — so the demos have no rabbit. Named
+here so nobody re-derives it.
+
 ## Exit criteria
 
 - Loads ≥90% of the Khronos glTF-Sample-Models suite without crash; failures log

@@ -12726,17 +12726,18 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
-## Two PBR showcase demos are planned and not started (2026-08-30)
+## The viewer's PBR showcase milestone is planned and not started (2026-08-30)
 
-`docs/plan/sample/21-gallery.md`: `suzanne` (Khronos' CC0 Suzanne, the one-mesh
-material fixture) and `gallery` (a shelf of CC0 Khronos models). Both wait on
-foundation (a) and the normal-map rung with (d). The plan carries the asset
-licence rule (CC0 first, CC-BY with `ATTRIBUTION.md`, no NC/SA) and the verdicts
-read at the sources on 2026-08-30 — the Stanford bunny is research-only and
-cannot ship in an MIT repository. **Decided: the Khronos CC0 models only** — no
-Poly Haven models, no CC-BY sets, so there is no rabbit. Nothing is downloaded
-yet; when the slice starts, re-read each licence at its source before committing
-a file.
+`docs/plan/sample/05-viewer.md` milestone 4, the user's shape: the viewer is the
+PBR demo. Owed, in order: native drag-and-drop through `ShellEvent::DroppedFile`
+(the shell raises it, `apps/viewer` never handles it); a bundled shelf of
+Khronos CC0 models (`glTF-Sample-Assets`, the licence rule and the verdicts read
+at the sources on 2026-08-30 are in the plan; **Khronos CC0 only**, so no
+rabbit) picked from a panel, with Suzanne opening by default on both hosts; then
+the full material set once foundation (a) and the normal-map rung land. The
+first two parts can go now. Nothing is downloaded yet; re-read each licence at
+its source before committing a file, and mind the browser artifact's size budget
+when choosing how many of the shelf ship in the tab.
 
 ## The v2 vertex encodings: what the next slice owes (2026-08-30)
 
