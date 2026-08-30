@@ -19500,7 +19500,15 @@ four against a bound of 22), and the once-per-`PassTimers` warning is the
 backstop if one ever is. The alternative was every sample writing
 `MAX_TIMED_PASSES + 1`, which is the guessing this constant exists to end.
 
-## DECISION NEEDED — P6A cannot start until a wasm runtime is approved
+## DEFERRED — P6A, the native wasm module host (2026-08-30)
+
+**The user's call:** wasm game modules on the desktop/native client are deferred
+— "we can work on that later". No runtime is taken (`wasmtime`, `wasmi` or
+otherwise), topic 16's static binding (`crcbl_ecs::game_module::GameModule`)
+remains the game API every sample uses, and the browser build is unaffected (it
+never needed a runtime — the browser is one). The section below stays as the
+record of what the decision will be about when it is reopened; nothing in the
+render roadmap depends on it.
 
 `docs/plan/16-wasm-modules.md` settles the design question and not the
 procurement one: the host is **`wasmtime` behind a `WasmHost` seam**, openly a

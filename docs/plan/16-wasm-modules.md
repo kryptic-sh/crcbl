@@ -1,5 +1,14 @@
 # Topic 16 — Game Modules via Wasm FFI
 
+> **Deferred 2026-08-30, the user's call.** The native wasm module host — a
+> runtime (`wasmtime` or another) in the desktop binary, the FFI ABI, the SDKs
+> and `crcbl-abigen` — is not being built now; "we can work on that later". What
+> stands is the **static binding**: `crcbl_ecs::game_module::GameModule` is the
+> game API every sample implements, and the browser build needs no runtime
+> because the browser is one. Everything below is the design as it was settled,
+> kept for when this is reopened; `docs/plan/ROADMAP.md`'s P6A row and
+> `docs/backlog.md`'s "DEFERRED — P6A" entry point here.
+
 Game logic lives in **modules**: wasm binaries loaded by the engine host,
 talking through a flat FFI over linear memory. Any language that compiles to
 wasm (Rust, C/C++, Zig, TinyGo, AssemblyScript, C#/NativeAOT…) can write game
