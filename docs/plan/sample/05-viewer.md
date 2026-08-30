@@ -84,12 +84,13 @@ sentence on the status bar, because a page has no exit code to fail with.
 **The user's ask, 2026-08-30:** the viewer is the demo that showcases the PBR
 material set — not a new sample. It gains three things:
 
-1. **Every way of opening a model.** The command line on run (`viewer <MODEL>`,
-   built) and a drop target in the browser (built) are joined by **native
-   drag-and-drop**: `crcbl-shell` already raises `ShellEvent::DroppedFile` and
-   the viewer never handles it, so a `.glb` or `.gltf` dropped on the window
-   opens through the same `load_bytes` the browser's drop takes. One open path,
-   three doors.
+1. **Every way of opening a model.** The command line on run, a drop on the
+   window and a drop on the browser's canvas are the three doors, and all three
+   exist; a window drop opens through `model::load` — a `DirSource` rooted at
+   the file's own directory, so a `.gltf` with its buffers beside it works —
+   rather than the browser's one-file `load_bytes`. What this item still lacks
+   is X11, where `crcbl-shell` raises no drop event because XDND is
+   unimplemented; `docs/backlog.md` carries that.
 2. **A bundled shelf, chosen from a list.** The Khronos CC0 models below ship
    with the demo — natively beside the binary through the asset seam, in the
    browser under `web/demos/viewer/assets/` — and a panel lists them; pick one

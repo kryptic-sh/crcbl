@@ -9,6 +9,8 @@
 //!     ──────────────────────────────→ Viewer::wheel_event    (zoom)
 //!     ──────────────────────────────→ Viewer::pointer_event  (orbit press, drag)
 //!     ──────────────────────────────→ Viewer::key_event      (F, I, W, N, B, -, =)
+//!     ──────────────────────────────→ Viewer::dropped_file   (a document dropped
+//!                                                             on the window)
 //!   run_ticks  ─────────────────────→ Viewer::tick           (nothing at all)
 //!   draw_list.clear()
 //!     ──────────────────────────────→ Viewer::draw           (re-export poll,
@@ -44,6 +46,7 @@
 //! and there is no `GameModule` below, and their absence is the exception rather
 //! than an oversight.
 
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crcbl::core::input::{KeyCode, PointerButton, ScrollDelta};
@@ -379,6 +382,15 @@ pub struct Viewer {
     listing: Listing,
     /// Milestone 3's re-export loop — see [`crate::watch`] and [`Viewer::tick`].
     watch: Watch,
+    /// Documents dropped on the window since the last frame, in the order they
+    /// landed.
+    ///
+    /// Written by [`HostedGame::dropped_file`], which is handed no GPU, and
+    /// drained by [`Viewer::poll_for_dropped_files`] on the next
+    /// [`Viewer::draw`], which is. The same deferral `exposure_pending` is, and
+    /// the same shape the browser's drop takes through `crate::web`: the
+    /// event records, the frame acts.
+    dropped: Vec<PathBuf>,
     /// How many times the document has been read again since the window opened.
     ///
     /// The debug panel's observable for the reload path, and the only one there
@@ -493,6 +505,12 @@ pub fn with_shell<S: Shell + ?Sized>(
             // Asked for at creation rather than switched to afterwards, so
             // `--fullscreen` does not show a decorated window first.
             mode: options.common.display_mode(),
+            // The third door onto a document, beside the command line and the
+            // browser's canvas — see `Viewer::poll_for_dropped_files`. Asked
+            // for here because a window that has not advertised it is never
+            // sent a drop: `WindowDesc::accept_drops` is off by default,
+            // deliberately, so a game that ignores drops shows no drop cursor.
+            accept_drops: true,
             ..WindowDesc::default()
         },
     )?;
@@ -572,6 +590,7 @@ fn assemble<S: Shell + ?Sized>(
             exposure_pending: None,
             exposure_handle: crate::menu::handle_at(exposure),
             watch: Watch::new(&options.model),
+            dropped: Vec::new(),
             reloads: 0,
             turned: 0.0,
             handed_over: false,
@@ -755,12 +774,13 @@ impl Viewer {
     ///
     /// The tail of [`Viewer::poll_for_re_export`], and the whole of what a
     /// dropped document does with the frame — see
-    /// `Viewer::poll_for_dropped_document`. One function because it is one
-    /// event: a different document arriving at a viewer that is already
-    /// running. Two copies is where the browser would quietly stop rebuilding
-    /// the listing.
+    /// [`Viewer::poll_for_dropped_files`] for one dropped on the window and
+    /// `Viewer::poll_for_dropped_document` for one dropped on a page. One
+    /// function because it is one event: a different document arriving at a
+    /// viewer that is already running. A copy per door is where the browser
+    /// would quietly stop rebuilding the listing.
     ///
-    /// **The camera is not touched here**, and the two callers differ on
+    /// **The camera is not touched here**, and its callers differ on
     /// exactly that. A re-export is the same document again, so the pose an
     /// artist has aimed has to survive it; a document a visitor just chose is
     /// one nobody has aimed at, so the drop path asks for a re-frame itself.
@@ -798,6 +818,96 @@ impl Viewer {
         self.listing.set_visible(showing);
         self.reloads += 1;
         Ok(())
+    }
+
+    /// **The drop target on the window**: opens the documents dropped on it
+    /// since the last frame.
+    ///
+    /// `docs/plan/sample/05-viewer.md` milestone 4's first item, and the third
+    /// door onto a document: the command line names a path, a page hands over
+    /// bytes, and a window hands over a path. Called from [`Viewer::draw`]
+    /// beside the re-export poll, for that poll's reason — a paused frame still
+    /// draws, and someone who dropped a file with the panel up must not have to
+    /// close it first.
+    ///
+    /// **It opens the way the command line does**, through [`model::load`],
+    /// which is `load_from` over a `DirSource` rooted at the file's own
+    /// directory — so a `.gltf` with its buffers and images beside it works.
+    /// The browser's route cannot do that and is not a shortcoming of the
+    /// browser: a page hands over one file's bytes and has no directory to root
+    /// an asset source at.
+    ///
+    /// **A multi-file drop arrives as several events**, so this opens each in
+    /// turn and the last one that loads is the document left on screen. Nothing
+    /// here chooses between them: a viewer shows one document, and a rule about
+    /// which of the files the person meant would be an answer they never gave.
+    ///
+    /// **A path that will not load keeps the document already on screen.** The
+    /// native viewer *exits* on a bad file named on the command line, because
+    /// there is nothing on screen yet to keep; after a drop there is, so it
+    /// stays — which is the browser's rule, for the reason the browser has it.
+    /// There is no status bar on a window to put the sentence on, so it goes
+    /// to the log at the level `Viewer::open_dropped` logs the page's at —
+    /// `LoadError` names the file either way, which is what makes the sentence
+    /// worth reading.
+    ///
+    /// **Empty on every frame in a browser, and on X11.** The web backend
+    /// clears [`ShellCaps::DRAG_DROP`](crcbl::shell::ShellCaps::DRAG_DROP) and
+    /// so does X11 — XDND is unimplemented there, which `docs/backlog.md`
+    /// carries as a standing gap — so no path ever reaches
+    /// [`HostedGame::dropped_file`] on either. Wayland, Win32 and AppKit all
+    /// send one.
+    fn poll_for_dropped_files(&mut self, gpu: &mut Gpu) {
+        for path in std::mem::take(&mut self.dropped) {
+            let model = match model::load(&path) {
+                Ok(model) => model,
+                Err(error) => {
+                    // `LoadError` already names the file and what to do about
+                    // it, which is the sentence the command-line path prints
+                    // and exits on.
+                    crcbl::log::warn!(
+                        "viewer: a dropped document could not be read, so the document already \
+                         on screen was kept: {error}",
+                    );
+                    continue;
+                }
+            };
+            let key = model.key.display().to_string();
+            // Printed rather than logged, as the re-export loop's are and for
+            // the same reason: the person who just dropped the file is the one
+            // who needs to read what the conversion could not bring in.
+            for line in skip_report(&key, model.skipped(), model.render.instances.is_empty()) {
+                eprintln!("{line}");
+            }
+            if let Err(error) = self.adopt(gpu, &model) {
+                crcbl::log::warn!(
+                    "viewer: {key} was dropped but the renderer refused it, so the document \
+                     already on screen was kept: {error}",
+                );
+                continue;
+            }
+            // `adopt` leaves the camera alone, deliberately; the browser's drop
+            // sets both of these for the reasons it gives, and they are the
+            // same reasons here. Nobody has aimed at this document yet, so it
+            // is framed as start-up frames the one that was opened with, and
+            // the turntable starts again rather than leaving a new file still
+            // at an angle chosen for the old one.
+            self.reframe = true;
+            self.handed_over = false;
+            // **And the re-export loop follows the document**, which is the
+            // half a drop would otherwise quietly lose: without this the watch
+            // would still be on the file the command line named, so re-exporting
+            // the dropped file would do nothing and re-exporting the *old* one
+            // would replace the document on screen. `Watch::new` treats what is
+            // on disk now as already loaded, which is exactly true — it was just
+            // read.
+            self.watch = Watch::new(&path);
+            crcbl::log::info!(
+                "viewer: {key} opened — {} instance(s), {} skipped",
+                self.instances,
+                self.skipped,
+            );
+        }
     }
 
     /// **The drop target**: opens the document a visitor dropped on the canvas,
@@ -1064,6 +1174,13 @@ impl HostedGame for Viewer {
         self.handed_over = true;
     }
 
+    /// **A document dropped on the window**, recorded here and opened by the
+    /// next [`Viewer::draw`] — see `Viewer::poll_for_dropped_files` for why
+    /// the two are a frame apart and what happens to the file.
+    fn dropped_file(&mut self, path: &Path) {
+        self.dropped.push(path.to_path_buf());
+    }
+
     /// The viewer's panel carries no id of its own, so the loop never asks.
     fn menu_action(_id: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
         None
@@ -1141,6 +1258,12 @@ impl HostedGame for Viewer {
         // that lands is framed and listed by the rest of this call rather than
         // by the next one.
         self.poll_for_re_export(gpu, frame.render_dt.as_secs_f64());
+        // A document dropped on the window, in the same place and for the same
+        // reason — see [`Viewer::poll_for_dropped_files`]. Compiled everywhere
+        // rather than gated: the list it drains is filled by an event no
+        // browser and no X11 server sends, so on those hosts it is a drain of
+        // an empty list rather than an arm that does not exist.
+        self.poll_for_dropped_files(gpu);
         // The browser's half of the same idea, and in the same place for the
         // same reason — see `Viewer::poll_for_dropped_document`. Native builds
         // have no page to be dropped on, so there is nothing here for them
@@ -2994,6 +3117,220 @@ mod tests {
             engine.game().bounds.center(),
             moved,
             "the recovery never happened"
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A `.glb` in a directory of its own, for dropping on the window.
+    ///
+    /// **Its own directory, and that is the point.** A drop opens through
+    /// `model::load`, which roots a `DirSource` at the *dropped* file's parent;
+    /// a load rooted anywhere else — at the directory the run was started from,
+    /// say — cannot find this file at all, so every drop test below is also the
+    /// test that the source is rooted where the document is. Which is what a
+    /// `.gltf` with its buffers and images beside it needs.
+    fn document_beside(document: &[u8], name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join(name);
+        std::fs::write(&path, document).expect("the document");
+        (dir, path)
+    }
+
+    /// Drops `path` on the viewer's window, as a compositor would.
+    fn drop_on_window(engine: &mut Loop<HeadlessShell>, path: &Path) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .drop_file(window, path, None)
+            .expect("the viewer's window asks for drops");
+    }
+
+    /// **A document dropped on the window becomes the document on screen.**
+    ///
+    /// `docs/plan/sample/05-viewer.md` milestone 4's first item, end to end: the
+    /// compositor raises the drop, the loop hands the path to
+    /// [`HostedGame::dropped_file`], and the frame after it the scene, the
+    /// bounds, the listing panel and the camera are all the new document's.
+    ///
+    /// **The camera is asserted as well as the document**, because they fail
+    /// separately: `Viewer::adopt` deliberately leaves the camera where it is —
+    /// that is what a re-export needs — so a drop that forgot to ask for a
+    /// re-frame would swap every number below and leave the view pointing at
+    /// where the *old* document was.
+    ///
+    /// The panel is asserted open at the end for `a_re_export_is_picked_up`'s
+    /// reason: the listing is rebuilt from the new document, and its visibility
+    /// is the one thing on it that belongs to the person looking at it.
+    #[test]
+    fn a_document_dropped_on_the_window_replaces_the_one_on_screen() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let window = engine.window();
+        tap(&mut engine, window, LISTING_KEY);
+        assert_eq!(engine.game().instances, 1);
+        assert_eq!(engine.game().bounds.center(), Vec3::ZERO);
+        assert_eq!(row_value(&listing_text(&engine), "instances"), "1");
+
+        // Two quads three metres along, in a directory of their own: a
+        // different instance count, a different centre, and a different place
+        // on disk from the document the run opened with.
+        let (_elsewhere, dropped) = document_beside(&fixture::two_quads_glb(), "dropped.glb");
+        drop_on_window(&mut engine, &dropped);
+        // One frame: the pump at the top of it delivers the drop and the draw
+        // at the bottom opens it.
+        engine.frame().expect("a frame");
+
+        assert_eq!(
+            engine.game().instances,
+            2,
+            "the dropped document never reached the renderer",
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            Vec3::new(1.5, 0.0, 0.0),
+            "the scene was swapped but the bounds are still the old document's",
+        );
+        assert_eq!(
+            row_value(&listing_text(&engine), "instances"),
+            "2",
+            "the listing panel is still describing the document that was replaced",
+        );
+        assert_eq!(
+            engine.game().camera().target,
+            Vec3::new(1.5, 0.0, 0.0),
+            "the camera is still framed on where the previous document was",
+        );
+        assert!(
+            engine.game().listing.is_visible(),
+            "the drop closed a panel the user had opened",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A dropped path that will not load keeps the document on screen, and
+    /// says why.**
+    ///
+    /// The command-line path *exits* on a file it cannot read — there is
+    /// nothing on screen yet to keep — and after a drop there is, so this is
+    /// the opposite rule for the opposite situation, and the same one the
+    /// browser's drop follows.
+    ///
+    /// **The log is the assertion here because a window has no status bar.**
+    /// The page puts `LoadError`'s sentence under the canvas; natively the same
+    /// sentence goes to the terminal the viewer was started from, and it has to
+    /// name the file or it tells the person nothing they can act on.
+    #[test]
+    fn a_dropped_path_that_will_not_load_keeps_the_document_and_says_why() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+
+        // A path the shell is perfectly happy to deliver and the filesystem has
+        // nothing behind — which is what `ShellEvent::DroppedFile` warns of: the
+        // path comes from another process and checking it is this application's
+        // job.
+        let (elsewhere, _) = document_beside(&fixture::quad_glb(Vec3::ZERO), "real.glb");
+        let missing = elsewhere.path().join("missing.glb");
+
+        let logs = crcbl::log::capture();
+        drop_on_window(&mut engine, &missing);
+        engine.frame().expect("a frame");
+
+        let records = logs.records();
+        let said: Vec<_> = records
+            .iter()
+            .filter(|record| record.level == crcbl::log::Level::Warn)
+            .collect();
+        assert_eq!(
+            said.len(),
+            1,
+            "a drop that failed says so exactly once: {records:?}",
+        );
+        assert!(
+            said[0].message.contains("missing.glb"),
+            "the sentence does not name the file the person dropped: {}",
+            said[0].message,
+        );
+
+        assert_eq!(
+            engine.game().reloads,
+            0,
+            "a document that could not be read was adopted anyway",
+        );
+        assert_eq!(
+            engine.game().instances,
+            1,
+            "the frame lost the document it had",
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            Vec3::ZERO,
+            "the frame lost the document it had",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The re-export watch follows the document that was dropped.**
+    ///
+    /// Milestone 3 meeting milestone 4: after a drop, the file an artist
+    /// re-exports is the one they just dropped, so the watch has to move to it.
+    /// Both halves are asserted, and the second is the one with teeth — a watch
+    /// left on the command line's file would go on reloading *that* document
+    /// over the top of the dropped one, which is a viewer that will not stay
+    /// where it was put.
+    #[test]
+    fn the_re_export_watch_follows_a_dropped_document() {
+        let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        assert_eq!(engine.game().watch.path(), options.model);
+
+        let (_elsewhere, dropped) = document_beside(&fixture::quad_glb(Vec3::ZERO), "dropped.glb");
+        drop_on_window(&mut engine, &dropped);
+        engine.frame().expect("a frame");
+        assert_eq!(engine.game().reloads, 1, "the drop never landed");
+        assert_eq!(
+            engine.game().watch.path(),
+            dropped,
+            "the watch is still on the file the command line named",
+        );
+
+        // `Watch` looks four times a second and needs two agreeing looks, so
+        // two seconds of frames is the bound every re-export test here uses.
+        let frames = (f64::from(crate::args::DEFAULT_TICK_HZ) * 2.0).ceil() as usize;
+
+        // The control, first: the document the run was started with is written
+        // again, and nothing happens. A watch that had not moved would pick
+        // this up and replace the dropped document with it.
+        std::fs::write(&options.model, fixture::two_quads_glb()).expect("the re-export");
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(
+            engine.game().reloads,
+            1,
+            "the file the viewer was pointed at is still being watched after a drop",
+        );
+
+        // And the dropped file re-exported *is* picked up.
+        let moved = Vec3::new(12.5, 0.0, 0.0);
+        std::fs::write(&dropped, fixture::quad_glb(moved)).expect("the re-export");
+        for _ in 0..frames {
+            engine.frame().expect("a frame");
+            if engine.game().reloads > 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.game().reloads,
+            2,
+            "two seconds of frames did not pick up a re-export of the dropped file",
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            moved,
+            "the reload ran on something other than the dropped file",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

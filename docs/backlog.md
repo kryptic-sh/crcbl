@@ -12661,15 +12661,15 @@ every frame under it, which is the argument against it in one line.
 ## The viewer's PBR showcase milestone is planned and not started (2026-08-30)
 
 `docs/plan/sample/05-viewer.md` milestone 4, the user's shape: the viewer is the
-PBR demo. Owed, in order: native drag-and-drop through `ShellEvent::DroppedFile`
-(the shell raises it, `apps/viewer` never handles it); a bundled shelf of
-Khronos CC0 models (`glTF-Sample-Assets`, the licence rule and the verdicts read
-at the sources on 2026-08-30 are in the plan; **Khronos CC0 only**, so no
-rabbit) picked from a panel, with Suzanne opening by default on both hosts; then
-the full material set once foundation (a) and the normal-map rung land. The
-first two parts can go now. Nothing is downloaded yet; re-read each licence at
-its source before committing a file, and mind the browser artifact's size budget
-when choosing how many of the shelf ship in the tab.
+PBR demo. The native drop landed (`HostedGame::dropped_file`, `apps/viewer`'s
+`poll_for_dropped_files`). Owed, in order: a bundled shelf of Khronos CC0 models
+(`glTF-Sample-Assets`, the licence rule and the verdicts read at the sources on
+2026-08-30 are in the plan; **Khronos CC0 only**, so no rabbit) picked from a
+panel, with Suzanne opening by default on both hosts; then the full material set
+once foundation (a) and the normal-map rung land. The shelf can go now. Nothing
+is downloaded yet; re-read each licence at its source before committing a file,
+and mind the browser artifact's size budget when choosing how many of the shelf
+ship in the tab.
 
 ## The v2 vertex encodings: what the next slice owes (2026-08-30)
 

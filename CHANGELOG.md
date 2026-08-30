@@ -79,6 +79,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A `.glb` or `.gltf` dropped on the viewer's window opens.** The third door
+  onto a document, beside the command line and the browser's canvas: the path
+  goes through `crcbl_viewer::model::load` — `load_from` over a `DirSource`
+  rooted at the file's own directory, so a `.gltf` with its buffers and images
+  beside it works, which the browser's one-file `load_bytes` route cannot give —
+  the camera is framed on what arrives, and the re-export watch is re-pointed at
+  the dropped file, so saving _that_ one from Blender reloads it. A path that
+  will not load keeps the document on screen and logs `LoadError`'s own
+  sentence, where a bad path on the command line still exits. A multi-file drop
+  opens each in turn and the last one that loads is what stays. **Wayland, Win32
+  and AppKit**: X11 raises no drop event at all, XDND being unimplemented in
+  `crcbl-shell`.
+- **`HostedGame::dropped_file` hands a hosted game the files dropped on its
+  window**, once per file and in the order the shell reported them, dispatched
+  from the new `Pending::dropped` beside the button and wheel hooks. It takes no
+  GPU, for `key_event`'s reason, so a game records the path and acts on the next
+  `draw`. The default body is empty, so no existing game changes; a window opts
+  in with `WindowDesc::accept_drops`, which `apps/viewer` now sets.
+
 - **The v2 vertex's attribute encodings, host side.** `crcbl_shaders::vertex` is
   new: `QTangent` packs an orthonormal tangent frame into `snorm16x4` as a unit
   quaternion with the frame's handedness in the sign of `w` (Crytek's QTangents,

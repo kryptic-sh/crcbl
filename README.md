@@ -58,8 +58,9 @@ What is not:
   goes once the parity list closes; nothing new should be built on it.
 - **No editor.** `apps/editor` is deliberately absent until there is something
   to put in it.
-- The viewer opens a file from the command line natively; **the browser drop
-  target is not written**.
+- The viewer opens a file from the command line, from a drop on its window
+  (Wayland, Win32 and AppKit — X11 has no XDND), and from a drop on the canvas
+  in the browser.
 
 `docs/plan/ROADMAP.md` is the canonical build order and carries a fuller status;
 `docs/backlog.md` is what was raised and not finished, and why.
@@ -95,7 +96,8 @@ shell event.
 ### The viewer
 
 `docs/plan/sample/05-viewer.md`'s sample, and the asset pipeline's acceptance
-test. Orbit with the mouse, and:
+test. Open a model from the command line or drop a `.glb`/`.gltf` on the window
+(the browser demo takes a drop on the canvas). Orbit with the mouse, and:
 
 | Key     | What it does                                                      |
 | ------- | ----------------------------------------------------------------- |

@@ -101,6 +101,7 @@
 //!    the seam*, [`AcquiredFrame::view`].
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crcbl_core::time::{ManualTime, MonotonicTime, TimeSource};
@@ -2978,6 +2979,18 @@ pub struct Pending {
     /// reason [`touches`](Self::touches) is: the loop has nothing to say about
     /// what is in here.
     pub scrolls: Vec<crcbl_core::input::ScrollDelta>,
+    /// Every file dropped on the window during this batch, in the order the
+    /// shell reported them.
+    ///
+    /// **Appended, never collapsed**, for [`touches`](Self::touches)' reason: a
+    /// multi-file drop is one [`ShellEvent::DroppedFile`] per file, and a batch
+    /// that kept only the last would throw away the rest of what was dropped.
+    ///
+    /// Empty unless the window was created with
+    /// [`accept_drops`](crcbl_shell::WindowDesc::accept_drops), and empty on
+    /// X11 even then: that backend emits no drop event at all, because XDND is
+    /// unimplemented there — see `crates/crcbl-shell/src/x11/mod.rs`.
+    pub dropped: Vec<PathBuf>,
     /// [`DEBUG_OVERLAY_KEY`] was pressed, and it was a real press.
     pub toggle_debug_overlay: bool,
     /// [`PAUSE_KEY`] was pressed.
@@ -3121,6 +3134,11 @@ impl Pending {
                 phase: *phase,
                 at: glam::Vec2::new(position.x as f32, position.y as f32),
             }),
+            // Appended for `touches`' reason again: a multi-file drop is one
+            // event per file, and every one of them is a file the user meant.
+            // The path is cloned because the sink owns the event only for the
+            // length of this call.
+            ShellEvent::DroppedFile { path, .. } => self.dropped.push(path.clone()),
             ShellEvent::Key {
                 key_code: Some(code),
                 state,
@@ -5045,6 +5063,33 @@ pub trait HostedGame: Sized {
         let _ = touch;
     }
 
+    /// A file was dropped on the window, once per file.
+    ///
+    /// A multi-file drop is several [`ShellEvent::DroppedFile`]s and this is
+    /// called once for each, in the order the shell reported them. Only a
+    /// window created with
+    /// [`WindowDesc::accept_drops`](crcbl_shell::WindowDesc::accept_drops)
+    /// receives any, and only on Wayland, Win32 and AppKit: X11 emits no drop
+    /// event, because XDND is unimplemented there — see
+    /// `crates/crcbl-shell/src/x11/mod.rs`.
+    ///
+    /// **The path comes from another process**, so it is not guaranteed to
+    /// exist or to be readable; checking is the game's job, which is what
+    /// [`ShellEvent::DroppedFile`] says of it.
+    ///
+    /// **No GPU here**, for [`key_event`](Self::key_event)'s reason: this is
+    /// the input half of the frame, and the device is reachable only from
+    /// [`tick`](Self::tick) and [`draw`](Self::draw). A game that opens the
+    /// file records the path and reads it on the next `draw` — which is what
+    /// `apps/viewer` does with the document dropped on its window.
+    ///
+    /// The empty default carries [`touch_event`](Self::touch_event)'s
+    /// argument: nothing is verified by this method, and a game that never
+    /// overrides it is a game whose window accepts no drops.
+    fn dropped_file(&mut self, path: &Path) {
+        let _ = path;
+    }
+
     /// Where the pointer should be allowed to go, as of this frame.
     ///
     /// **Polled, and reconciled by the loop.** This is asked once a frame and
@@ -5639,6 +5684,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
         for delta in std::mem::take(&mut pending.scrolls) {
             self.game.wheel_event(delta);
+        }
+        // Beside the button and wheel dispatch because a drop is the same kind
+        // of thing: an event the loop has nothing of its own to say about. One
+        // call per file, in the order the shell reported them — see
+        // [`HostedGame::dropped_file`].
+        for path in std::mem::take(&mut pending.dropped) {
+            self.game.dropped_file(&path);
         }
 
         // What is left of the pointer once the menu and the game's own controls
@@ -11056,6 +11108,8 @@ mod tests {
         buttons: Vec<(crcbl_core::input::PointerButton, bool)>,
         /// Every scroll the loop forwarded, in order.
         scrolls: Vec<crcbl_core::input::ScrollDelta>,
+        /// Every dropped file the loop forwarded, in order.
+        dropped: Vec<PathBuf>,
         /// What each `draw` was told about its frame.
         draws: Vec<FrameInfo>,
         /// Whether the ball has been served.
@@ -11130,6 +11184,10 @@ mod tests {
 
         fn wheel_event(&mut self, delta: crcbl_core::input::ScrollDelta) {
             self.scrolls.push(delta);
+        }
+
+        fn dropped_file(&mut self, path: &Path) {
+            self.dropped.push(path.to_path_buf());
         }
 
         fn pointer_mode(&self) -> PointerMode {
@@ -11279,9 +11337,21 @@ mod tests {
     /// what these tests are about is the frame, not the handshake — the boot
     /// tests above own that.
     fn hosted(frames: Option<u64>) -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
+        hosted_on(&crcbl_shell::WindowDesc::default(), frames)
+    }
+
+    /// The same, on a window described by `desc`.
+    ///
+    /// Split out for the drop test and nothing else: a window that never asked
+    /// for drops is refused one by the shell, so the two halves of that test
+    /// differ by exactly this argument.
+    fn hosted_on(
+        desc: &crcbl_shell::WindowDesc<'_>,
+        frames: Option<u64>,
+    ) -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
         let mut shell = crcbl_shell::HeadlessShell::new();
         let window = shell
-            .create_window(&crcbl_shell::WindowDesc::default())
+            .create_window(desc)
             .expect("headless always creates a window");
         Loop::new(
             Booted {
@@ -11899,6 +11969,64 @@ mod tests {
                 (PointerButton::Middle, false)
             ],
             "a pan drag survived the alt-tab",
+        );
+    }
+
+    /// **Every dropped file reaches the hosted game, once each and in order —
+    /// and only on a window that asked for drops.**
+    ///
+    /// The dispatch half of [`HostedGame::dropped_file`], and the reason it is
+    /// asserted as a *list*: a multi-file drop is one
+    /// [`ShellEvent::DroppedFile`] per file, so a loop that kept only the batch's
+    /// last path would pass any assertion about "a drop arrived" while losing
+    /// every file but one.
+    ///
+    /// The second half is the control. `accept_drops` is off by default, and a
+    /// game that received a drop on a window that never advertised one would be
+    /// reading an event no window system would have sent.
+    #[test]
+    fn every_dropped_file_reaches_the_game_in_order_and_only_where_drops_were_asked_for() {
+        let mut engine = hosted_on(
+            &crcbl_shell::WindowDesc {
+                accept_drops: true,
+                ..crcbl_shell::WindowDesc::default()
+            },
+            None,
+        );
+        let window = engine.window();
+        engine.frame().expect("the fake never fails");
+
+        for name in ["first.glb", "second.glb"] {
+            engine
+                .shell_mut()
+                .drop_file(window, name, None)
+                .expect("the window asked for drops");
+        }
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.game().dropped,
+            vec![PathBuf::from("first.glb"), PathBuf::from("second.glb")],
+            "a two-file drop has to arrive as two calls in the order it landed",
+        );
+
+        // The control: a window that never asked. The shell refuses to raise
+        // the event at all, which is the layer the opt-in is enforced at, and
+        // the game is asserted empty afterwards so that a loop which invented a
+        // drop from somewhere else would still be caught.
+        let mut engine = hosted(None);
+        let window = engine.window();
+        engine.frame().expect("the fake never fails");
+        assert!(
+            engine
+                .shell_mut()
+                .drop_file(window, "third.glb", None)
+                .is_err(),
+            "a window created without accept_drops must refuse a drop",
+        );
+        engine.frame().expect("the fake never fails");
+        assert!(
+            engine.game().dropped.is_empty(),
+            "a window that never asked for drops was handed one anyway",
         );
     }
 
