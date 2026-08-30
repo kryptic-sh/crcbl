@@ -78,11 +78,12 @@ below; each names the file it came from.
 
 ### 1. The registry is a crate of its own, with no dependencies
 
-`crates/crcbl-console`: the variable and command types, the registry, the line
-parser, the value coercion, the completion and the history. It depends on
-nothing but `core`/`std`, so it is testable headless, compiles on every target
-and can be read by the UI, the engine and the CLI alike. It does not draw and it
-does not know about settings files; those are bindings (decision 3).
+`crcbl-console`, a new crate beside the others: the variable and command types,
+the registry, the line parser, the value coercion, the completion and the
+history. It depends on nothing but `core`/`std`, so it is testable headless,
+compiles on every target and can be read by the UI, the engine and the CLI
+alike. It does not draw and it does not know about settings files; those are
+bindings (decision 3).
 
 ```text
 ConVar      { name, help, kind: Kind, flags: Flags, default: Value, cell: Cell }
