@@ -43,6 +43,55 @@ day.** The grid below stays, and everything that _fills_ it changes:
   shader readers are the same on both tiers; only the pass that writes the rows
   differs. That is what "the diffuse GI twin" in this file's title now means.
 
+**Layered density, camera-centred (the user's addition, 2026-08-30).** One
+uniform grid over a whole scene is either too coarse near the camera or too
+large far from it. The volume is a **clipmap**: a small number of levels (three
+or four), each a fixed probe count centred on the camera, level `k` spaced `2^k`
+times level 0 — dense probes where the camera is, sparse ones in the distance,
+and a world that can be any size because the levels are camera-relative. A level
+scrolls with the camera in whole probe steps with **toroidal addressing**, so
+moving one cell exposes one slab of new probes and every other probe keeps its
+rows and its visibility map. A fragment reads the finest level that contains it,
+blended over a band at each level's edge so a level change never pops; within a
+level the read is the trilinear gather and the Chebyshev weighting above. Rows
+are per level, so [43-render-standards.md](43-render-standards.md) §5's C1 (one
+storage buffer) holds with an offset per level.
+
+**Captured on load, then on scroll — never baked.** The visibility maps for the
+whole initial window are rendered when a scene loads; after that only the slab a
+scroll exposes is rendered, in the frame it appears, and a probe whose static
+geometry changed is re-rendered on demand. The lighting rows are never stored
+across a load: they are recomputed every frame by the updater, which is what
+keeps the sun and every lamp dynamic. "Baked on load" in conversation means this
+capture, and the word the plan uses for it is _captured_, because what is stored
+is geometry.
+
+**One base, two sample producers — nothing else is bespoke.** The pipeline is
+the same on every tier, and the two tiers differ in exactly one stage:
+
+```text
+  placement (clipmap, scroll, relocation)   ── shared
+        │
+  sample producer: per probe, N directions → (radiance, distance, backface)
+        ├── raster tier: depth cube per probe (distance, backface) captured on
+        │                load/scroll + the RSM gather (radiance), gated by it
+        └── RT tier:     inline ray queries, every frame — one ray gives all
+                         three, dynamic objects included
+        │
+  integrate ── shared: samples → L1 irradiance rows + octahedral depth/depth²
+        │
+  shading read ── shared: level pick, trilinear, Chebyshev weight, SSR fallback
+```
+
+The producer's contract is a sample buffer of a fixed layout; the integrate
+pass, the storage, the relocation rule (a probe whose samples are mostly
+backfaces sits inside a wall and is moved or disabled — DDGI's rule, answered by
+both producers because both report backfaces) and the shader read never know
+which producer ran. What the RT producer buys over the raster one is dynamic
+occluders in the visibility and, if C2's temporal question is ever answered yes,
+a second and further bounce by reading the previous frame's rows; single bounce
+is the rule on both until then.
+
 **What this amends.** The GI decision of 2026-08-30 said the tier below ray
 tracing has no bounce term; it now has this one, because it is leak-free and its
 cost is one compute pass and two extra shadow-pass targets — the first thing on
