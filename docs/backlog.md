@@ -898,6 +898,13 @@ bakes the transport of a fixed light set); both stay below for the record of why
 they were the survey's answer, and question 4 below is answered "no" by the
 rule. It also settles what the tracer is for: **not a bake tool — a runtime.**
 
+**And shadows must work with it (the user, the same day):** every dynamic light
+shadows — the sun through the cascades that exist, the scene lights through the
+shadow atlas [45-shadows.md](plan/45-shadows.md) pulled forward — and the GI's
+hit shading reads those same maps, so a bounce is occluded by the same shadow
+the eye sees. A BVH shadow ray at the hit is the desktop-preset upgrade, not the
+baseline.
+
 **The candidate the rule points at — runtime-traced probes, no history.** The
 probe volume `GpuProbe` already is, filled every frame by a compute pass that
 traces a _fixed_ ray pattern per probe against a triangle BVH on the GPU —
