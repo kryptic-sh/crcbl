@@ -76,6 +76,7 @@ pub(crate) const SUITE: &str = "crcbl mesh e2e";
 // `tests/mesh_e2e/main.rs`, so Cargo compiles the directory as one test binary
 // named `mesh_e2e` and every `mod` here resolves beside the root.
 mod area_light;
+mod depth_only;
 mod exposure;
 mod froxels;
 mod goldens;

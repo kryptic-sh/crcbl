@@ -360,7 +360,7 @@ fn a_fill_light_keeps_its_diffuse_and_loses_its_highlight() {
 /// is a property of the machine, and a machine is not something a constant
 /// knows about. The count is of **recorded** frames; [`PRICE_WARMUP`] more are
 /// drawn first and thrown away.
-fn price_frame() -> ((u32, u32), usize) {
+pub(crate) fn price_frame() -> ((u32, u32), usize) {
     let extent = match std::env::var("CRCBL_PRICE_SIZE") {
         Ok(size) => {
             let (width, height) = size
@@ -399,7 +399,7 @@ fn price_frame() -> ((u32, u32), usize) {
 /// lights on lavapipe — a p50 of 6.44 ms against 3.10 ms — which is what the
 /// ordering assertions below then reported. Long enough to cover the ring's
 /// latency and the first draws with every pipeline the frame uses.
-const PRICE_WARMUP: usize = crcbl::render::forward::FRAMES_IN_FLIGHT + 2 + 16;
+pub(crate) const PRICE_WARMUP: usize = crcbl::render::forward::FRAMES_IN_FLIGHT + 2 + 16;
 
 /// How many lights of each kind the price is measured with.
 ///

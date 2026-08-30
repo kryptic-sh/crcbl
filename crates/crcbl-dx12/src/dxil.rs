@@ -609,8 +609,14 @@ mod tests {
     /// is the join between the two crates: a `dxil_containers` that mislabelled
     /// a container would put a pixel shader in the vertex slot, and the stage
     /// check is what refuses it.
+    ///
+    /// **Every entry point the module commits, not one per stage.**
+    /// `mesh.slang` has two vertex entry points — the colour pass's and the
+    /// depth-only one `crcbl_render::forward`'s shadow atlas and depth prepass
+    /// run — so a lookup by stage answers `None` for it, and a container the
+    /// list did not reach would be one nothing here ever parsed.
     #[test]
-    fn the_committed_graphics_shaders_resolve_both_stages() {
+    fn the_committed_graphics_shaders_resolve_every_entry_point() {
         for shader in [&crcbl_shaders::MESH, &crcbl_shaders::UI] {
             let entry = module(
                 &ShaderModuleDesc {
@@ -621,17 +627,30 @@ mod tests {
                 1,
             )
             .unwrap_or_else(|error| panic!("{}: {error}", shader.name()));
-            for (stage, stages) in [
-                (crcbl_shaders::Stage::Vertex, ShaderStages::VERTEX),
-                (crcbl_shaders::Stage::Fragment, ShaderStages::FRAGMENT),
-            ] {
-                let entry_point = shader
-                    .entry_point(stage)
-                    .unwrap_or_else(|| panic!("{}: no {stage:?} entry point", shader.name()));
+            assert!(
+                !shader.entry_points().is_empty(),
+                "{}: nothing to resolve",
+                shader.name()
+            );
+            for entry_point in shader.entry_points() {
+                let stages = match entry_point.stage() {
+                    crcbl_shaders::Stage::Vertex => ShaderStages::VERTEX,
+                    crcbl_shaders::Stage::Fragment => ShaderStages::FRAGMENT,
+                    // Neither of these two has one. A stage arriving here is a
+                    // module that grew a pipeline shape this test does not
+                    // describe, which is a finding rather than a container to
+                    // wave through.
+                    stage => panic!(
+                        "{}: {} is a {stage:?} stage, which is not one of the graphics pair \
+                         this test resolves",
+                        shader.name(),
+                        entry_point.name()
+                    ),
+                };
                 entry
-                    .container(entry_point)
+                    .container(entry_point.name())
                     .unwrap_or_else(|error| panic!("{}: {error}", shader.name()))
-                    .expect(stages, entry_point)
+                    .expect(stages, entry_point.name())
                     .unwrap_or_else(|error| panic!("{}: {error}", shader.name()));
             }
         }
@@ -915,7 +934,7 @@ mod tests {
             (
                 "mesh",
                 &crcbl_shaders::MESH,
-                &["vertexMain", "fragmentMain"],
+                &["vertexMain", "depthVertexMain", "fragmentMain"],
                 // The tail is §3.2's material table and the texture page it
                 // indexes, in declaration order: the table (binding 6), the
                 // `Texture2DArray` of base colours (7) and the sampler that

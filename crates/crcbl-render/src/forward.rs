@@ -1293,8 +1293,11 @@ pub struct ForwardRenderer {
     shadow_placeholder_view: ImageViewHandle,
     /// The **comparison** sampler the atlas is read through — hardware PCF.
     shadow_sampler: SamplerHandle,
-    /// The depth-only pipeline every tile is rendered with: the same geometry
-    /// stage as [`ForwardRenderer::mesh_pipeline`] and no fragment stage at all.
+    /// The depth-only pipeline every tile is rendered with — and, driven with
+    /// the camera's own draws, the depth prepass's: `mesh.slang`'s
+    /// `depthVertexMain` where the geometry comes from a vertex stage, the same
+    /// geometry stage as [`ForwardRenderer::mesh_pipeline`] where it comes from
+    /// a mesh one, and no fragment stage in either case.
     shadow_pipeline: GraphicsPipelineHandle,
     /// One cull and draw-argument pass **per cascade and per shadowed light**,
     /// which is topic 18's "one cull dispatch per cascade against the same
@@ -5638,11 +5641,11 @@ impl ForwardRenderer {
                 ],
                 // **This view's own matrix, so the interpolant is zero motion**
                 // rather than a reprojection through the camera. Nothing reads
-                // it: `MeshModules::depth_pipeline` names no fragment stage, so
-                // the previous clip position the geometry stages emit here dies
-                // with the stage that produced it. Carrying the camera's matrix
-                // would still be a block that says a cascade moved the way the
-                // viewer did.
+                // it: `depthVertexMain` never looks at it, and where the mesh
+                // stage draws these tiles instead, the previous clip position it
+                // emits dies with the fragment stage `depth_pipeline` does not
+                // name. Carrying the camera's matrix would still be a block that
+                // says a cascade moved the way the viewer did.
                 previous_view_proj: view_proj.to_cols_array(),
                 ..uniforms
             };
@@ -6795,7 +6798,9 @@ impl ForwardRenderer {
         // `shadow_pipeline` is already the depth-only twin of the colour pipeline,
         // built from the same modules and the same layout, so driven with the
         // camera's draws and a copy of the camera's bind group it *is* a scene
-        // depth prepass — no new pipeline, no new shader, no new entry point.
+        // depth prepass — no new pipeline and no new shader. It shares the
+        // cascades' `depthVertexMain` too, which is why the split-stream vertex
+        // pool pays for this pass as well as for the atlas.
         //
         // **Stored, unlike the depth the forward pass writes.** This is what the
         // occlusion pass samples, and it is the only reason
@@ -9109,7 +9114,7 @@ impl ForwardRenderer {
 /// callers: `build`, which makes the colour pipeline and its depth-only twin,
 /// and [`ForwardRenderer::set_wireframe`], which makes the colour pipeline again
 /// in [`PolygonMode::Line`] long after `build` released its modules. The
-/// alternative was a second copy of a descriptor that names two modules, three
+/// alternative was a second copy of a descriptor that names two modules, their
 /// entry points, the colour targets and a depth state — the pair that drifts.
 ///
 /// Short-lived: created, used to build pipelines, and [`MeshModules::destroy`]ed
@@ -9120,6 +9125,11 @@ struct MeshModules {
     mesh: ShaderModuleHandle,
     /// `vertexMain`, unused on the mesh-shader path.
     vertex: &'static str,
+    /// `depthVertexMain`, which [`MeshModules::depth_pipeline`] takes in
+    /// [`MeshModules::vertex`]'s place: the same transform off stream 0 of the
+    /// vertex pool and no attribute region at all. Unused on the mesh-shader
+    /// path, where the geometry stage is `mesh_cluster.slang`'s either way.
+    depth_vertex: &'static str,
     fragment: &'static str,
     /// `mesh_cluster.slang`'s, on the mesh-shader path alone.
     cluster: Option<ClusterStages>,
@@ -9189,7 +9199,14 @@ impl MeshModules {
         // Entry points resolved before the module exists: a manifest that
         // disagreed with the SPIR-V would otherwise fail inside the descriptor
         // literal, with the module already created and nothing holding it.
-        let vertex = entry(&MESH, Stage::Vertex)?;
+        //
+        // **The vertex stage is named rather than looked up by stage**, for
+        // `mesh_cluster.slang`'s reason below: since the depth-only stage landed
+        // this module has two vertex entry points, and a stage lookup answers
+        // `None` for two matches. Which of the two a pipeline names is the whole
+        // of what the split-stream vertex pool bought.
+        let vertex = named_entry(&MESH, "vertexMain", Stage::Vertex)?;
+        let depth_vertex = named_entry(&MESH, "depthVertexMain", Stage::Vertex)?;
         let fragment = entry(&MESH, Stage::Fragment)?;
         // **Named rather than looked up by stage**, because the module has two
         // mesh entry points and a stage lookup would refuse an ambiguous one —
@@ -9262,6 +9279,7 @@ impl MeshModules {
         Ok(Self {
             mesh,
             vertex,
+            depth_vertex,
             fragment,
             cluster,
         })
@@ -9346,17 +9364,26 @@ impl MeshModules {
     }
 
     /// The depth-only twin of [`MeshModules::color_pipeline`], built out of the
-    /// same modules and the same layout and differing in exactly two things: no
-    /// fragment stage and no colour target.
+    /// same modules and the same layout: no fragment stage, no colour target,
+    /// and a vertex stage that fetches stream 0 of the vertex pool alone.
     ///
-    /// **The geometry stage is identical, and that is the design.** Topic 18 asks
-    /// for a shadow pass "identical on every `GeometryPath` — depth pass plus
-    /// whatever emit tail the device selected", and the way to get that without a
-    /// second transform path is to leave `vertexMain` and `meshMain` alone and
-    /// hand them a frame block whose `view_proj` is the cascade's matrix. A
-    /// cascade that disagreed with the colour pass about where a vertex is would
-    /// produce shadows that do not line up with their casters, which is
-    /// indistinguishable from a bias problem.
+    /// **The transform is identical and the fetch is not, which is the point.**
+    /// Topic 18 asks for a shadow pass "identical on every `GeometryPath` —
+    /// depth pass plus whatever emit tail the device selected", and what makes
+    /// that work is a frame block whose `view_proj` is the cascade's matrix
+    /// rather than a second transform path: a cascade that disagreed with the
+    /// colour pass about where a vertex is would produce shadows that do not
+    /// line up with their casters, which is indistinguishable from a bias
+    /// problem. `depthVertexMain` is that same clip position written the same
+    /// way, with everything the discarded varyings needed — the attribute
+    /// region and the previous frame's position — left unread;
+    /// `docs/plan/43-render-standards.md` §2 split the pool for exactly this
+    /// pass, and this is where it is spent.
+    ///
+    /// **The mesh-shader path still runs the colour pipeline's geometry
+    /// stage.** `mesh_cluster.slang` emits one `VertexOutput`, so a depth-only
+    /// mesh stage is a second entry point in that module and its own rung; a
+    /// device with a mesh stage goes on reading whole vertices here.
     ///
     /// Always [`PolygonMode::Fill`]: it fills the shadow atlas and the depth
     /// prepass, and depth drawn as lines is depth with holes in it — which the
@@ -9392,7 +9419,7 @@ impl MeshModules {
                 layout,
                 vertex: ShaderEntry {
                     module: self.mesh,
-                    entry_point: self.vertex,
+                    entry_point: self.depth_vertex,
                 },
                 fragment: None,
                 primitive,
@@ -13652,6 +13679,81 @@ mod tests {
         pool.destroy(device);
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **The depth-only passes run the depth-only entry point, and the colour
+    /// pass does not.**
+    ///
+    /// `docs/plan/43-render-standards.md` §2 split the vertex pool so a pass
+    /// that wants a clip position and no more could fetch stream 0 alone, and
+    /// [`MeshModules::depth_pipeline`] naming `mesh.slang`'s `depthVertexMain`
+    /// is the whole of how that split is spent. **Nothing else in the tree sees
+    /// it.** `crcbl_shaders::mesh`'s
+    /// `the_depth_entry_point_fetches_the_position_stream_alone` reads the
+    /// compiled artifact and would pass with the entry point built and unused;
+    /// no golden moves, because the two stages compute the same clip position on
+    /// purpose; the render graph records a legal frame either way; and the
+    /// measured price says nothing — pointing this pipeline back at `vertexMain`
+    /// cost the depth prepass about a tenth more on lavapipe and nothing to
+    /// three figures on an RX 7900 XTX, measured 2026-08-31. So the wiring is
+    /// asserted here, against the reference backend, which records the entry
+    /// point a pipeline names precisely so this question has an answer.
+    ///
+    /// **Both halves, so the check is shown to discriminate.** A lookup that
+    /// answered `depthVertexMain` for every pipeline would satisfy the first
+    /// assertion alone, and the colour pipeline is the one that must *not* have
+    /// moved. The labels are the descriptors' own and are what the two are told
+    /// apart by, so a renamed pipeline fails at the `expect` rather than
+    /// silently matching nothing.
+    #[test]
+    fn the_depth_pipeline_names_the_depth_only_vertex_stage_and_the_colour_one_does_not() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        // A mesh stage has no vertex entry point to name, and this whole rung is
+        // about the raster arm — see [`MeshModules::depth_pipeline`]. The null
+        // preset reports no `Features::MESH_SHADER`, so this is what it built;
+        // asserted rather than assumed, because a preset that grew the feature
+        // would leave every assertion below looking for pipelines that do not
+        // exist.
+        assert_ne!(
+            renderer.geometry_path(),
+            crcbl_hal::GeometryPath::MeshShader,
+            "this device built a mesh-shader path, whose geometry stage names no vertex \
+             entry point at all"
+        );
+
+        let pipelines = recorder.graphics_pipeline_vertex_entries();
+        let entry_of = |label: &str| -> String {
+            let found: Vec<&str> = pipelines
+                .iter()
+                .filter(|(name, _)| name.as_deref() == Some(label))
+                .map(|(_, entry)| entry.as_str())
+                .collect();
+            assert_eq!(
+                found.len(),
+                1,
+                "the renderer built {} pipeline(s) labelled `{label}`, out of {pipelines:?}",
+                found.len()
+            );
+            found[0].to_owned()
+        };
+
+        assert_eq!(
+            entry_of("shadow cascade"),
+            "depthVertexMain",
+            "the shadow atlas and the depth prepass share this pipeline, and it is the one \
+             that reads the position stream alone"
+        );
+        assert_eq!(
+            entry_of("forward mesh"),
+            "vertexMain",
+            "the colour pass needs every attribute the depth pass skips, so it is the entry \
+             point that reads a whole vertex"
+        );
+
+        renderer.destroy(device);
         recorder.assert_valid();
     }
 

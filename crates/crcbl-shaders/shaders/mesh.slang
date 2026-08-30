@@ -1684,6 +1684,52 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     return output;
 }
 
+/// The depth-only vertex stage: stream 0's twelve bytes, the instance's
+/// transform, and nothing else.
+///
+/// `docs/plan/43-render-standards.md` §2 split the pool into a position region
+/// and an attribute region so the passes that need a clip position and nothing
+/// more could stop paying for a whole record. This is the pass that spends it.
+/// `crcbl_render::forward`'s depth pipeline — the shadow cascades and the depth
+/// prepass, which are one pipeline driven with two frame blocks — has **no
+/// fragment stage and no colour target**, so every varying `vertexMain` fills is
+/// written and then dropped. Filling them costs the attribute region's
+/// `ATTRIBUTE_WORDS` and a second position load for the motion vector, on top of
+/// the `POSITION_WORDS` this one reads; here the fetch is stream 0 alone.
+///
+/// **Only `SV_Position`, and nothing on this path wants more.** The atlas and
+/// the prepass image carry depth alone, and there is no alpha-mask cutout to
+/// serve: a cutout needs a fragment stage to `discard` in, this pipeline binds
+/// none, and §2's rung 4 will want its own entry point and its own pipeline
+/// rather than a UV bolted onto this one.
+///
+/// **The clip position is the same two multiplies in the same order as
+/// `vertexMain`'s**, deliberately. The prepass writes the depth the occlusion
+/// pair samples and the cascades write the depth the forward pass compares
+/// against, so a transform that rounded differently here would move shadows and
+/// occlusion with nothing in the frame to point at.
+///
+/// The mesh-shader path is untouched: where the device has a mesh stage the
+/// depth pipeline still runs `mesh_cluster.slang`'s `meshMain`, which reads a
+/// whole vertex through its own `load_vertex`. A depth-only mesh stage is its
+/// own rung — that module emits the varyings one `VertexOutput` declares, and
+/// splitting it splits the declaration too.
+[shader("vertex")]
+float4 depthVertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID) : SV_Position
+{
+    GpuInstance instance = instances[visible_instances[draw.base + instance_id]];
+    GpuMesh mesh = meshes[draw.mesh];
+    // `vertexMain`'s base-vertex rule, and it must stay the same rule: a skinned
+    // instance's vertices are the run this frame's dispatch deformed them into,
+    // which belongs to no mesh entry, so the instance carries the base and the
+    // bucket's mesh is authoritative without the bit.
+    uint base_vertex = (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) != 0u
+        ? instance.base_vertex
+        : mesh.base_vertex;
+    float4 world = mul(instance.transform, float4(load_position(index + base_vertex), 1.0));
+    return mul(frame.view_proj, world);
+}
+
 /// The smallest roughness the specular lobe is evaluated at.
 ///
 /// `alpha` is the roughness squared and the normal distribution divides by

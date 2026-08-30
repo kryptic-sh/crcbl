@@ -3502,6 +3502,94 @@ mod tests {
         assert_eq!(decode_block(MESH), decode_block(&recommented));
     }
 
+    /// One generated entry point's function body: from the line that opens it
+    /// to the `}` in the first column that closes it.
+    ///
+    /// Both text targets indent everything inside a function, so a brace at the
+    /// margin is the close and nothing else is — which is what lets one matcher
+    /// read WGSL and MSL alike. The name is matched with its opening
+    /// parenthesis so `vertexMain(` cannot be found inside `depthVertexMain(`,
+    /// and both artifacts spell an entry point's name verbatim (this crate's
+    /// `every_shipped_shader_has_wgsl_naming_the_same_entry_points` is what
+    /// holds them to it).
+    fn entry_point_body<'a>(artifact: &'a str, name: &str) -> &'a str {
+        let opening = format!("{name}(");
+        let at = artifact
+            .find(&opening)
+            .unwrap_or_else(|| panic!("the artifact declares `{name}`"));
+        let end = at
+            + artifact[at..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("`{name}` closes at the margin"));
+        &artifact[at..end]
+    }
+
+    /// **`depthVertexMain` fetches the position stream and nothing else**,
+    /// which is the whole of what `docs/plan/43-render-standards.md` §2's split
+    /// vertex pool was for.
+    ///
+    /// The claim is about the code a driver compiles, so it is asked of the
+    /// committed artifacts rather than of the Slang source: `load_vertex` is
+    /// the only reader of the attribute region — `every_shader_decodes_a_vertex_the_same_way`
+    /// above pins the arithmetic that makes it so — and `previous_transform` is
+    /// the motion vector's, which costs the second `load_position` a depth pass
+    /// has no use for. `vertexMain` is read beside it in the same artifact so
+    /// the matcher is shown to be able to find both, which a body that stopped
+    /// at the wrong brace could not.
+    ///
+    /// SPIR-V and DXIL are not read here because neither is text and both are
+    /// compiled from this same source by the same script; what a target-specific
+    /// codegen could get wrong is the *name*, and that is
+    /// [`crate`]'s cross-target entry-point tests.
+    #[test]
+    fn the_depth_entry_point_fetches_the_position_stream_alone() {
+        let shader = &crate::MESH;
+        assert!(
+            shader
+                .entry_points()
+                .iter()
+                .any(|entry| entry.name() == "depthVertexMain"
+                    && entry.stage() == crate::Stage::Vertex),
+            "the committed manifest exposes no `depthVertexMain` vertex stage, so \
+             `crcbl_render::forward`'s depth pipeline has nothing to name"
+        );
+        let artifacts = [
+            ("wgsl/mesh.wgsl", shader.wgsl().expect("mesh commits WGSL")),
+            ("msl/mesh.metal", shader.msl().expect("mesh commits MSL")),
+        ];
+        for (name, artifact) in artifacts {
+            let depth = entry_point_body(artifact, "depthVertexMain");
+            let color = entry_point_body(artifact, "vertexMain");
+            // **Both spellings, because inlining moves the evidence.** A body
+            // that decodes a whole vertex either calls `load_vertex` or carries
+            // that function's own address arithmetic, and `vertex_pool` — the
+            // word where the attribute region begins — is the whole of that
+            // arithmetic. Checking only the call would pass an inlined one.
+            assert!(
+                !depth.contains("load_vertex") && !depth.contains("vertex_pool"),
+                "{name}: `depthVertexMain` reaches into the attribute region, which is the \
+                 {ATTRIBUTE_STRIDE} bytes a vertex it exists to skip"
+            );
+            assert!(
+                !depth.contains("previous_transform"),
+                "{name}: `depthVertexMain` builds a motion vector, which costs a second \
+                 position fetch for a varying no fragment stage reads"
+            );
+            // And it does fetch a position, so an empty body — or one the
+            // matcher cut at the wrong brace — is not read as a pass.
+            assert!(
+                depth.contains("load_position") || depth.contains("vertices"),
+                "{name}: `depthVertexMain` reads no geometry at all, so this checked nothing"
+            );
+            assert!(
+                (color.contains("load_vertex") || color.contains("vertex_pool"))
+                    && color.contains("previous_transform"),
+                "{name}: `vertexMain` reads neither the attribute region nor the previous \
+                 transform, so the comparison above cannot tell the two entry points apart"
+            );
+        }
+    }
+
     /// The offsets `slangc` emitted for `DrawConstants`, read out of the
     /// disassembly, and the padding that makes the block's width the same
     /// number on both sides.

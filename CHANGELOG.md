@@ -159,6 +159,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A depth-only vertex stage, so the shadow atlas and the depth prepass fetch
+  twelve bytes a vertex.** `shaders/mesh.slang` has a second vertex entry point,
+  `depthVertexMain`: it reads stream 0 of the vertex pool, transforms it by the
+  instance's matrix and this view's `view_proj`, and writes `SV_Position` and
+  nothing else — no attribute region, no QTangent decode, and no second position
+  fetch for a motion vector no fragment stage reads. `crcbl_render::forward`'s
+  depth pipeline names it in `vertexMain`'s place, and that pipeline is the one
+  both the shadow cascades and the depth prepass are driven with, so
+  `docs/plan/43-render-standards.md` §2's split vertex pool is now spent by the
+  passes it was split for. Measured on lavapipe over a field of 144 dunes
+  patches at 640x480, the depth prepass costs 20.6/20.4 ms against 22.9/24.2 ms
+  through the full vertex stage (two runs each, the forward pass unmoved as the
+  control); on an RX 7900 XTX the same field prices at 0.073-0.074 ms either way
+  — that pass is not vertex-fetch bound there. No golden moved: the clip
+  position is the same two multiplies in the same order. A device with a mesh
+  stage still draws these tiles through `mesh_cluster.slang`'s `meshMain`, which
+  reads a whole vertex; that is a rung of its own.
+
+- **The null backend records the entry point a graphics pipeline names.**
+  `crcbl_hal::null`'s `create_graphics_pipeline` filed nothing about its
+  descriptor, so which code a pass runs was the one thing the reference backend
+  could not be asked — and two pipelines built from one module differ in exactly
+  that. It now files the vertex stage's entry point, and
+  `Recorder::graphics_pipeline_vertex_entries` reads back every live raster
+  pipeline as `(label, entry point)`. That is what holds
+  `crcbl_render::forward`'s depth pipeline to `depthVertexMain` and its colour
+  pipeline to `vertexMain` with no GPU in the room; a mesh pipeline is not
+  listed, having no vertex stage to name.
+
 - **Rectangular area lights, shaded by linearly transformed cosines.**
   `crcbl_render::RectLight` is a new `Light::Rect` variant — a centre, a normal,
   a tangent, two half-extents and a reach — and `shaders/mesh.slang` shades it

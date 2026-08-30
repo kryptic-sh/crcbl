@@ -1405,7 +1405,16 @@ impl Device for NullDevice {
             desc.primitive,
             desc.depth_stencil,
         )?;
-        Ok(self.insert(ObjectKind::GraphicsPipeline, desc.label, Detail::None))
+        // **The vertex stage is filed rather than dropped**, which is what makes
+        // "this pass runs that entry point" a question with a no-GPU answer —
+        // see [`Detail::GraphicsPipeline`], which carries the argument.
+        Ok(self.insert(
+            ObjectKind::GraphicsPipeline,
+            desc.label,
+            Detail::GraphicsPipeline {
+                vertex_entry: desc.vertex.entry_point.to_owned(),
+            },
+        ))
     }
 
     fn create_mesh_pipeline(
@@ -1437,7 +1446,9 @@ impl Device for NullDevice {
             desc.depth_stencil,
         )?;
         // The same pool as a raster pipeline, because the seam gives the two
-        // one handle type — see `MeshPipelineDesc`'s decision note.
+        // one handle type — see `MeshPipelineDesc`'s decision note. `Detail::None`
+        // beside the raster arm's `Detail::GraphicsPipeline` and it is not an
+        // omission: this pipeline has no vertex stage to record.
         Ok(self.insert(ObjectKind::GraphicsPipeline, desc.label, Detail::None))
     }
 

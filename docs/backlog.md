@@ -13154,14 +13154,39 @@ lighting order. What the shelf slice left behind:
 `docs/plan/43-render-standards.md` §2, and the pool, the three shader copies and
 every constructor use it. Left behind, each its own slice:
 
-- **No pass reads stream 0 alone yet.** The split exists so a depth prepass or a
-  shadow cascade fetches twelve contiguous bytes a vertex, but `mesh.slang` has
-  one vertex entry point, `vertexMain`, and every shadow draw goes through it —
-  `load_position` is called on its own only for the previous frame's position.
-  The rung is a depth-only vertex entry point (position, instance transform,
-  nothing else) and the pipelines for the shadow and prepass draws pointed at
-  it. Verified: `grep -n 'Main(' crates/crcbl-shaders/shaders/mesh.slang` shows
-  `vertexMain` and `fragmentMain` and nothing between.
+- **The mesh-shader path still reads a whole vertex for depth.**
+  `crcbl_render::forward`'s `MeshModules::depth_pipeline` names `mesh.slang`'s
+  `depthVertexMain` only on the raster arm; where the device has a mesh stage it
+  names `mesh_cluster.slang`'s geometry stage, the same one the colour pipeline
+  runs, which decodes the attribute region and builds a motion vector for a
+  fragment stage the depth pipeline does not bind. A depth-only mesh stage is a
+  second entry point in that module **and** a second `VertexOutput` for it to
+  emit, which is why it was not folded into the raster rung. Verified 2026-08-31
+  by reading `depth_pipeline`'s two arms.
+- **The depth passes still cast a solid silhouette for a masked material.**
+  Neither the shadow pipeline nor the depth prepass binds a fragment stage, so
+  there is nowhere to `discard` against `GpuMaterial::alpha_cutoff` — which is
+  itself still unread, see the normal-map entry below. §2's rung 4 (alpha modes)
+  is where a cutout depth pass belongs, and it wants its own entry point with a
+  UV and a fragment stage rather than a widened `depthVertexMain`; the entry
+  point's own doc comment says so.
+- **The depth-only rung is priced on two tiers, not three.** `mesh_e2e` does not
+  run in the browser, so the depth passes have no measurement there. And the win
+  is not measurable on the desktop tier at any scene size tried:
+  `crates/crcbl/tests/mesh_e2e/depth_only.rs`'s price test on an RX 7900 XTX
+  reads 0.073-0.074 ms for the depth prepass over a field of 144 dunes patches
+  whether the pipeline names `depthVertexMain` or `vertexMain` (two runs each,
+  200 recorded frames, 640x480), while the lavapipe delta is real and repeatable
+  at about 13%.
+- **The price test asserts an ordering the realistic regression does not break,
+  and that is deliberate.** `the_price_of_the_depth_only_passes` asserts the
+  depth prepass is cheaper than the forward pass and that all three passes were
+  measured; pointing the depth pipeline back at `vertexMain` keeps that true on
+  both tiers. A threshold test on the 13% lavapipe delta was considered and
+  declined: it is a duration, and a duration is a property of the machine. What
+  guards that regression instead is `crcbl_render::forward`'s
+  `the_depth_pipeline_names_the_depth_only_vertex_stage_and_the_colour_one_does_not`,
+  on the null device, which reads back the entry point each pipeline named.
 - **`uv1` is reserved and unwritten.** The lanes are in the layout, every
   constructor writes zero, the importer reads `TEXCOORD_0` alone and reports a
   material sampling `TEXCOORD_1` as skipped, and no shader declares a second

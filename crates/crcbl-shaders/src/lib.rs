@@ -1038,14 +1038,30 @@ mod tests {
         ] {
             let containers = shader.dxil_containers();
             for stage in [Stage::Vertex, Stage::Fragment] {
-                let entry_point = shader
-                    .entry_point(stage)
-                    .unwrap_or_else(|| panic!("{}: no {stage:?} entry point", shader.name()));
+                // **Scanned rather than resolved.** `mesh.slang` has two vertex
+                // entry points since its depth-only stage landed, so
+                // [`Shader::entry_point`] answers `None` for that stage — and
+                // what this test is about is the containers, which every entry
+                // point needs one of whether or not a lookup by stage can pick
+                // between them.
+                let of_stage: Vec<&str> = shader
+                    .entry_points()
+                    .iter()
+                    .filter(|entry| entry.stage() == stage)
+                    .map(EntryPoint::name)
+                    .collect();
                 assert!(
-                    containers.iter().any(|(name, _)| *name == entry_point),
-                    "{}: no DXIL container for `{entry_point}`",
+                    !of_stage.is_empty(),
+                    "{}: no {stage:?} entry point",
                     shader.name()
                 );
+                for entry_point in of_stage {
+                    assert!(
+                        containers.iter().any(|(name, _)| *name == entry_point),
+                        "{}: no DXIL container for `{entry_point}`",
+                        shader.name()
+                    );
+                }
             }
         }
     }

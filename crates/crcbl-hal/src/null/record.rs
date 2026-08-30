@@ -666,6 +666,23 @@ pub(super) enum Detail {
     /// rather than a requirement, and only a module that made one is held to
     /// it. See `check_stage`.
     ShaderModule { dxil_entry_points: Vec<String> },
+    /// A raster graphics pipeline: the entry point its **vertex** stage names.
+    ///
+    /// **What `create_graphics_pipeline` used to throw away.** It filed
+    /// [`Detail::None`], so the one thing a pipeline is — which code runs when
+    /// it is bound — was the one thing the reference backend did not record, and
+    /// a caller that pointed a pass at the wrong entry point of a module it had
+    /// legitimately created drew the wrong geometry with nothing anywhere saying
+    /// so. It is the vertex stage rather than both because that is the stage
+    /// that differs between two pipelines built from one module — see
+    /// `crcbl_render::forward`'s colour pipeline and its depth-only twin, whose
+    /// fragment stages are the same entry point and `None` respectively.
+    ///
+    /// A **mesh** pipeline files [`Detail::None`] still, and that is not an
+    /// omission: it has no vertex stage to name. The two share one pool because
+    /// the seam gives them one handle type, so a reader of
+    /// [`Recorder::graphics_pipeline_vertex_entries`] sees the raster ones alone.
+    GraphicsPipeline { vertex_entry: String },
     /// A query set: how many queries it holds, so a range can be checked.
     QuerySet { count: u32 },
     /// A semaphore: whether it is a timeline, and the value it holds.
@@ -1027,6 +1044,46 @@ impl Recorder {
     #[must_use]
     pub fn bind_group_layouts_created(&self) -> Vec<(Option<String>, Vec<BindGroupLayoutEntry>)> {
         self.lock().bind_group_layouts_created.clone()
+    }
+
+    /// Every **live** raster graphics pipeline, as `(label, the entry point its
+    /// vertex stage names)`.
+    ///
+    /// **The no-GPU answer to "which code does this pass run?"** Two pipelines
+    /// built from one module differ in exactly that name, and nothing else about
+    /// them is observable without a device: they take the same layout, they are
+    /// bound by the same call, and a pass driven with the wrong one of the two
+    /// still records a legal frame. `crcbl_render::forward`'s colour pipeline and
+    /// its depth-only twin are that pair — `vertexMain` against
+    /// `depthVertexMain`, the second reading `docs/plan/43-render-standards.md`
+    /// §2's position stream alone — and pointing the depth one back at the
+    /// colour one's stage is a change no golden, no validation rule and no
+    /// timing measurement on a desktop adapter reports.
+    ///
+    /// **Match on the label, not the position.** The order is the pipeline
+    /// pool's slot order, which is creation order only until a destroyed
+    /// pipeline's slot is reused — and a caller that rebuilds one pipeline of
+    /// several does exactly that (`crcbl_render::forward`'s wireframe twin is
+    /// one). The labels are the descriptors' own.
+    ///
+    /// A live lookup rather than a creation log, unlike
+    /// [`shader_modules_created`](Self::shader_modules_created): a caller
+    /// destroys its modules as soon as its pipelines exist, and keeps the
+    /// pipelines for as long as it draws.
+    ///
+    /// Mesh pipelines are not listed — they have no vertex stage to name.
+    #[must_use]
+    pub fn graphics_pipeline_vertex_entries(&self) -> Vec<(Option<String>, String)> {
+        let state = self.lock();
+        state.pools[ObjectKind::GraphicsPipeline as usize]
+            .iter()
+            .filter_map(|(_, object)| match &object.detail {
+                Detail::GraphicsPipeline { vertex_entry } => {
+                    Some((object.label.clone(), vertex_entry.clone()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Total live objects across every kind.
