@@ -583,18 +583,8 @@ it is a bound on a hang, not a measurement of shard, and there is still none.
 ### The audio buses ship without a reader or a wire slot (2026-08-28)
 
 `docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. Two halves of
-it are not, both deliberately out of that slice:
+it is not, deliberately out of that slice:
 
-- **Nothing writes a setting.** Every reader on this seam —
-  `crcbl::settings::video`, `render_scale`, `audio_gains` — takes a file a
-  player edits by hand. `crcbl-store` ships `SettingsStack::set` and `save`, and
-  `crates/crcbl-cli/src/settings_cmd.rs` is their only caller in the workspace,
-  so no game has ever persisted a choice. Two things are missing rather than
-  one: a writer beside each reader, so a screen does not have to know how a key
-  is spelled; and a way to reach the storage a stack was built over —
-  `SettingsStack::platform` resolves the config directory, uses it and drops it,
-  so a caller holding that stack has nothing to pass `save`. Sample 20 is what
-  needs both.
 - **`AudioEvent` carries no bus.** The plan already prices this: a 28-byte wire
   format gaining a route becomes 29 or 32, and `WIRE_SIZE` plus both round-trip
   tests move with it. It is worth doing rather than deriving the bus from the
@@ -720,7 +710,7 @@ the lit plateau and the settled shadow; the dunes count is pixels in the lit
 valley more than ten luma below the median of a 9×9 neighbourhood. The scripts
 were scratch and are not in the tree.
 
-### The froxel column casts its shaft and no demo turns it on (2026-08-28)
+### The froxel column casts its shaft (2026-08-28)
 
 Rungs 1 and 2 of `docs/plan/51-volumetrics.md` are closed:
 `crcbl_render::volumetric`'s three passes are switched by
@@ -2085,23 +2075,15 @@ plus whatever builds a stack at startup.
 **Deliberate, not a stub** — the doc argues this and the argument is intact; the
 pruning pass compressed the Delivery table down to this one open row.
 
-### Error-scope granularity for the WebGPU stream is still unmeasured (2026-08-27)
+### Error-scope granularity was measured and adopted; the plan still says otherwise (2026-08-27)
 
-**Not decided.** `docs/plan/41-webgpu-stream.md` leaves
-`pushErrorScope`/`popErrorScope` granularity open — per flush is cheap, per
-command is precise — and says the choice needs a measurement.
-`web/tools/error-scope-bench.mjs` is the instrument and it exists (three arms,
-`none`/`flush`/`command`, plus a sweep to 4096 pairs a frame), but no numbers
-from it are recorded anywhere in the tree and nothing in `ci.yml` or `pages.yml`
-runs it.
-
-**What it would take:** run the bench on a real device and on the CI adapter,
-record the figures, and either adopt one granularity or write down why neither
-is affordable.
-
-**What it blocks:** browser validation and OOM errors are still recorded as the
-device's and unattributed, which is what the whole error-attribution section
-exists to improve on.
+**Per flush, decided by measurement** — commit `7a0d6ee` (2026-08-22) carries
+the figures, and `Replayer#openErrorScopes` with `ERROR_SCOPE_FILTERS` in
+`web/engine/gpu-replay.js` attribute a browser error to the flush that caused
+it. What is left is the plan: `docs/plan/41-webgpu-stream.md` still calls the
+granularity "deliberately left open", still lists it as needing a measurement,
+and still describes errors as "recorded as the device's, unattributed" — three
+sentences to correct.
 
 **Evidence:** `grep -rn 'error-scope-bench' .github/ web/README.md` finds no
 caller.
@@ -2942,8 +2924,8 @@ build and across a reload.
 
 **The key became writable on 2026-08-28**: `crcbl::settings::set_render_scale`
 clamps to `MIN_RENDER_SCALE..=1.0` on the way in, and `SettingsSource::save`
-puts it back where `open` read it. What is still missing is a **caller** — no
-sample offers the control, so a player still edits the TOML by hand.
+puts it back where `open` read it. `apps/options`' `RENDER SCALE` slider is the
+caller.
 
 And **no `Shell` carries a render-scale request**, so a compositor that
 advertises `ShellCaps::HW_UPSCALE` cannot do the resample for free instead of
@@ -3010,14 +2992,13 @@ than merely unmet. Anyone reading them for "are we done" needs that stated.
 
 ## Audio (`docs/plan/13-audio.md`)
 
-### The mixer bus graph and limiter (2026-08-27)
+### The mixer limiter (2026-08-27)
 
-**Not built**, and this is the third audit in a row to say so. `crcbl-audio` has
-no `Bus` type and no limiter; `Mixer` is a list of voices with nothing above
-them. The delivery table puts buses in P4A, which the ROADMAP marks done.
+**The buses are built** — `crcbl_audio::mixer::Bus`, six of them with a gain
+each — **and the limiter is not.**
 
-**What it would take:** `master ← sfx/music/ui/voice` with per-bus gain and a
-soft-knee limiter on master, then mix snapshots on top.
+**What it would take:** a soft-knee limiter on master, then mix snapshots on
+top.
 
 **What it blocks:** three consumers now, not one — P10's ducking and mix
 snapshots, `32-voip.md`'s "mixer voice bus/ducking" slice, and any per-category
@@ -3181,15 +3162,12 @@ Today they are one mechanism with one trigger and one bypass.
 
 ### Two of four settings layers, and the settings UI screen (2026-08-27)
 
-**Partly built.** `crcbl-store`'s `settings.rs` has a `SettingsLayer` stack with
-`EngineDefaults` and `UserFile`, appended in order so a later layer wins, and
-writes always land in the user file. There is **no game-defaults layer and no
-CLI/env override layer**. The `crcbl settings` CLI is honest about this — its
+**Partly built.** `crcbl-store`'s `settings.rs` has a `SettingsLayer` stack,
+appended in order so a later layer wins, and writes always land in the user
+file. The enum declares `GameDefaults` and `CliOverrides` beside
+`EngineDefaults` and `UserFile`, and **nothing outside that file's own tests
+constructs the first two**. The `crcbl settings` CLI is honest about this — its
 stack has one layer, and `list` says so.
-
-**Not built:** the engine-provided settings UI screen (P10), and any defined
-`engine.audio.*` keys — the store is a generic dotted-key TOML stack with no
-audio namespace populated.
 
 **What it blocks:** a game shipping compiled-in defaults that a player's file
 overrides, which is the layering the doc's whole "small files, upgrade-friendly"
@@ -4074,13 +4052,6 @@ and `quarry_tile` asks for a human to look. Neither has been. The browser budget
 milestone 4 asks for is also unrecorded, though the page exists
 (`apps/quarry/src/web.rs`, `web/demos/quarry/`).
 
-**Contradiction found and not resolved by me:** `apps/quarry/src/lib.rs`'s
-module header says both "Milestones 1 to 4, less the two overlays milestone 2
-owes" and, further down, "Milestone 2's three debug overlays are all built". The
-overlays exist (`--lod-view`, `--heatmap`, the freeze key), so the later
-sentence is the right one and the earlier clause is stale. That is a Rust doc
-comment and outside this audit's write scope.
-
 ## shard (`docs/plan/sample/15-shard.md`)
 
 ### Two of milestone 1's six verbs, and its whole inventory claim, are unbuilt (2026-08-27)
@@ -4229,11 +4200,6 @@ whole audit.
 - **I did not check whether `apps/breach` and `apps/shard` are described
   correctly on the live demo site**, only that they are rows in `DEMOS` and have
   `web/demos/<name>/` directories.
-- **Two things outside my write scope that need a fix elsewhere**, both stated
-  above: `DEFAULT_MAX_ENEMIES`'s doc comment in `apps/horde/src/game.rs`
-  justifies its value with "neither P7 nor P8 exists", which the same sample's
-  own 2026-08-10 measurement contradicts; and `apps/quarry/src/lib.rs`'s header
-  contradicts itself about milestone 2's overlays.
 
 ## Coverage gaps in the tooling audit
 
@@ -5286,58 +5252,6 @@ Stated as gaps rather than reasoned away:
   hundred live at a time. `docs/plan/sample/10-sparks.md`'s exit criterion is 1k
   concurrent effect _instances_ at 60 fps, which is a different order and has
   not been attempted.
-
-### The Pages job renders every demo serially, and the total is now the cap
-
-Every browser gate runs inside `pages.yml`'s `build` job, one after another,
-because they all drive the site that job just built. So the job's budget has to
-hold the **sum** of them, and that sum grows with every demo the site ships.
-
-It ran out on 2026-08-25. Eleven demos rendered for 29 minutes against a
-30-minute cap; puppet was the one still running when the cap hit. The failure
-mode is the quiet one: the deploy step is gated on the build job, so it
-**skipped** rather than failed — CI green, workflow green-looking, and the site
-left a commit behind. The cap was raised to 60 minutes, which bought room and
-fixed nothing structural.
-
-**It ran out again on 2026-08-27, from the other end.** This time it was the
-per-_step_ caps, not the job's: the shadow ladder's rotated disc and blocker
-search took quarry from 480 s to 602 s and lantern from 471 s to 612 s, over
-their own ten-minute bounds, and two runs failed with every check inside them
-having passed. Those two steps are now 20 minutes, with breach and shard, and
-the job is 90 — see "The shadow filter costs 48 taps" for the per-commit table
-and for what nobody has measured. Both numbers are room, not a fix; the sum is
-still a sum and the demos are still serial.
-
-**The structural answer is a matrix job that downloads the `site` artifact.**
-`probe-macos` and `probe-windows` already do exactly that — they take the
-artifact `build` uploaded rather than rebuilding, precisely so all platforms
-drive identical bytes. A `render` job over the demo list would do the same and
-run them in parallel, turning a ~29-minute sum into roughly the slowest single
-demo. The comment in `pages.yml` arguing against a matrix is about matrixing
-`build` itself, which would rebuild the site per cell and collide on the
-artifact name; it is not an argument against matrixing a _consumer_ of the
-artifact.
-
-Not attempted, because a mistake here leaves the site undeployed and none of it
-can be run locally. Two things to get right when it is: the demo list must come
-from `web/build.sh`'s `DEMOS` array so `tools/check-browser-gate-demos.sh` keeps
-its grip, and the deploy step's `needs:` has to name the new job or the gate
-stops gating.
-
-**The two heavy 3D frames are why the total is what it is.** On the Pages runner
-quarry and lantern each take over ten minutes against well under one for a 2D
-demo — each behind by the factor its own heartbeat reports, on a software
-rasteriser. Puppet is a third heavy frame and it landed on the end of the queue.
-
-**And a per-step cap cannot say what it looks like it says.**
-`web/tools/browser-e2e.mjs` scales its own per-check budgets to the machine it
-is on — quarry's run reported "every later budget scaled 34.6x" — so a slower
-frame stretches the run instead of failing a check. The gate therefore has no
-way to report "this got slower"; it can only run out of wall clock. That is why
-a rendering change five times more expensive per fragment showed up as an
-infrastructure timeout two commits later rather than as a red check on the
-commit that made it.
 
 ### The character controller's slope sweep is platform-sensitive at its last step
 
@@ -9279,8 +9193,7 @@ it, forced by subtracting features from one adapter.
   `a_skinned_cube_draws_the_pose_its_palette_asks_for` and its mesh-stage twin
   in `crates/crcbl-vk/tests/vk_e2e/skinning.rs`. What remains is quarry's own
   half: carrying weights through a collapse in `crcbl-scene`'s simplifier, which
-  nothing does. `apps/quarry/src/lib.rs` still carries the old "the engine has
-  no skinning" sentence and is wrong about it.
+  nothing does.
 
   The browser demo is `/demos/quarry/`, and it satisfies the last exit
   criterion: it draws through `GeometryPath::IndirectPerBatch` — measured on the
@@ -11350,21 +11263,17 @@ where every backend can use it. Recorded in `web/engine/gpu-replay.js` above
 
 ### `ImageDesc` and `ImageViewDesc` state contracts nothing enforces
 
-Three of them, found while putting both descriptors on the wire. Each is prose
-in `crates/crcbl-hal/src/resource.rs` with no check anywhere and no named owner:
+One of them, found while putting both descriptors on the wire (the
+`mip_levels`/`samples` floor that stood beside it is enforced now —
+`ImageDesc::check` refuses a zero by name). It is prose in
+`crates/crcbl-hal/src/resource.rs` with no check anywhere and no named owner:
 
-- **`ImageDesc::mip_levels` and `samples` have no documented floor.**
-  `BufferDesc::size` says "must be non-zero" and these say nothing, so whether a
-  zero is a seam violation or a backend's problem has no answer. The stream
-  carries them through verbatim — the encoding refuses malformed streams, never
-  invalid descriptors, which `41-webgpu-stream.md` now states as a rule — so the
-  question lands on whatever creates the image.
 - **`ImageViewDesc::format` "must be compatible with" the image's format**, and
   nothing defines compatibility or says who checks it.
 
-All three land on the WebGPU replayer in the slice that executes these commands,
-and it has nothing to enforce them against: it sees the descriptor and not the
-seam's intent. What is needed is a decision about where each belongs — the
+It lands on the WebGPU replayer in the slice that executes these commands, and
+it has nothing to enforce them against: it sees the descriptor and not the
+seam's intent. What is needed is a decision about where it belongs — the
 descriptor's constructor, a debug assertion in the HAL, or explicitly the
 backend's — not more prose.
 
@@ -11377,7 +11286,7 @@ and encoding a `CreateBuffer`. So a documented seam rule with no named answer
 and no test had already diverged on a live backend, which is the concrete
 version of what this entry warns about.
 
-The shape that closed it, and the one the three above should copy: **the check
+The shape that closed it, and the one the rule above should copy: **the check
 lives in each backend**, the seam's doc **names the error** rather than only the
 rule, and **two tests** hold everyone to it — the agnostic seam suite for the
 four native backends, and `crcbl-webgpu`'s own `hal::tests` for the browser one,
@@ -12563,12 +12472,11 @@ re-exported, `glam` is `crcbl::math` and `log` is `crcbl::log`. What is left:
 
 `crcbl::engine::Pacing` chooses a present mode (`Auto`/`Vsync` → `Fifo`,
 `Adaptive` → `FifoRelaxed`/`Mailbox`, `Off` → `Mailbox`/`Immediate`; `Auto` may
-then rebuild onto `Adaptive`'s once the display has been read) and `FrameLimit`
-paces the loop by sleeping the difference between the last frame's length and a
-period, on `std::time` — `Clock::Real` in `crates/crcbl/src/engine.rs`, where
-the `wasm32` arm of `sleep` is deliberately a no-op because the browser paces
-frames itself. That is the whole mechanism, and it is open loop: it never learns
-when a frame was actually shown.
+then rebuild onto `Adaptive`'s once the display has been read) and `FramePacer`
+paces the loop on a deadline grid, on `std::time` — `Clock::Real` in
+`crates/crcbl/src/engine.rs`, with the browser skipping `requestAnimationFrame`
+ticks to the same grid. That is the whole mechanism, and it is open loop: it
+never learns when a frame was actually shown.
 
 **The seam, the engine wiring and the Vulkan backend now exist.**
 `Features::PRESENT_FEEDBACK`, `PresentInfo::present_id` and
@@ -16065,26 +15973,10 @@ golden images or a render pass: Windows can have a software rasteriser, the way
 Linux has lavapipe. What that does not cover is hardware: WARP is one
 implementation with one set of tolerances, and no D3D12 code in this workspace
 has run on a GPU. `renderer-tier=B` in the run's lines is the backend's own gap
-— `COMPUTE`, `TIMELINE_SEMAPHORE` and the two indirect features wait on calls no
-slice has written.
+— `TIMELINE_SEMAPHORE` waits on a call no slice has written.
 
 Deferred inside DX4, each with what it would take:
 
-- **Compute pipelines.** `create_compute_pipeline` still refuses. The compute
-  half is a `D3D12_COMPUTE_PIPELINE_STATE_DESC` over the same root signature
-  plus `SetComputeRootSignature`/`SetComputeRootDescriptorTable`, which are the
-  compute twins of calls `bind_group` already makes.
-- **Indexed and indirect draws.** `bind_index_buffer`, `draw_indexed` and the
-  four indirect entry points refuse. Indexed needs `IASetIndexBuffer` and a
-  `D3D12_INDEX_BUFFER_VIEW`; indirect needs an `ID3D12CommandSignature`, which
-  is a per-argument-layout object with no counterpart in the seam.
-- **Dynamic offsets.** `create_bind_group_layout` refuses a `dynamic` binding by
-  name. A descriptor table has no offset to apply — D3D12's answer is a _root_
-  CBV/SRV/UAV carrying a raw GPU address, which changes the root parameter type
-  for every binding in the set rather than adding to it.
-- **Push constants / root constants.** D3D12 _has_ the feature; what is missing
-  is knowing which root parameter slot the committed DXIL expects one at — the
-  same gap `crcbl-mtl` names for `setVertexBytes:`.
 - **Register-space mapping is verified for set 0 only.** Every committed shader
   declares `[[vk::binding(N, 0)]]`. **Settled by measurement, and the
   expectation was wrong**: `[[vk::binding]]` is Vulkan-only, and `dxc` numbers
@@ -16180,19 +16072,6 @@ discrete GPU and a real async-compute queue that CI has never had. Treat "green
 locally with the installed layer" as insufficient for anything touching
 barriers, and rely on `cargo nextest run -p crcbl-render` for that class — it
 compiles consecutive frames against one pool and needs no layer.
-
-### Two things DX1 decided that a later slice may have to undo
-
-- **`DESCRIPTOR_INDEXING` is reported ahead of a call**, which is the opposite
-  of what `crcbl-mtl` ended up doing. It is deliberate and the reversal
-  condition is written into `adapter.rs`: the binding slice must withdraw it if
-  D3D12 bind groups cannot deliver a runtime-sized array, exactly as Metal's
-  did. The reason for the asymmetry is that `adapters()` is _where the WARP
-  question is asked_, so the flag has to be derivable before any device exists.
-- **`driver` comes from `CheckInterfaceSupport(IID_IDXGIDevice)`**, which is
-  documented as a Direct3D 10 interface check, with a fallback string when it
-  refuses. WARP is the adapter most likely to refuse it. If the CI line shows
-  the fallback on real hardware too, the field needs a different source.
 
 ## What DX2 left open
 
@@ -16414,27 +16293,20 @@ the transport seam over a third transport shape.
   equivalent. Survivable because untrusted modules run server-side on native; a
   browser-hosted single-player game with mods has no containment. See
   `16-wasm-modules.md`.
-- **MSL is validated by nothing, anywhere.** `spirv-val` runs on the SPIR-V;
-  WGSL, MSL and DXIL are unchecked. MSL cannot be checked off macOS at all —
-  `xcrun metal` is macOS-only, `newLibraryWithSource:` needs a device, and no
-  open-source tool parses MSL. `xcrun metal` on the existing macOS CI leg is the
-  cheap fix and is not done.
-- **`crcbl-render` has no render-scale or upscale path**, though
-  `15-windowing.md` locks borderless as "internal render target upscaled to the
-  native surface" and `18-render-features.md` orders the post chain around it.
-  `ShellCaps::HW_UPSCALE` exists and nothing can ask for it. This is a locked
-  display mode with its renderer half missing.
+- **DXIL is validated by nothing.** `spirv-val` runs on the SPIR-V, the WGSL has
+  `crates/crcbl-shaders/tests/wgsl_validation.rs`, and the macOS leg compiles
+  every committed MSL artifact with `xcrun metal`; the DXIL alone is unchecked.
 - **L0's static trimesh/heightfield colliders do not exist.** `05-physics.md`
   puts them in L0 (MVP); the ROADMAP marks "P3 L0" done against a narrower list.
   towers demands them, and so does the character controller, which can only walk
   on boxes, spheres and capsules today.
-- **`crcbl-audio` has no bus graph and no limiter**, though `13-audio.md`
-  specifies `master ← sfx/music/ui/voice` with per-bus gain and a soft-knee
-  limiter, and its delivery table puts buses in P4A. Mix snapshots and ducking
-  at P10 depend on them.
-- **No golden audio buffers exist**, though the exit criterion asks for one per
-  sample that emits sound and asteroids and horde both synthesise
-  deterministically from fixed seeds.
+- **`crcbl-audio` has no limiter**, though `13-audio.md` specifies a soft-knee
+  limiter on master; the bus graph is built. Mix snapshots and ducking at P10
+  depend on it.
+- **One golden audio buffer exists**
+  (`crates/crcbl-audio/tests/burst-reference.wav`), not one per sample that
+  emits sound, which is what the exit criterion asks for; asteroids and horde
+  both synthesise deterministically from fixed seeds.
 - **The transcendental policy is two conflicting policies.** `05-physics.md`
   requires the `libm` crate; `13-audio.md` requires own polynomial
   approximations plus a CI deny. Neither exists. `libm` would be a new
@@ -16884,34 +16756,10 @@ green run over content that does not use the feature.
   it is a real bug and the driver version is the first thing to compare — **CI's
   lavapipe is as unpinned as its `spirv-val` was.**
 
-- **Nothing can bind a descriptor to the mesh stage yet.** `ShaderStages::MESH`
-  and `TASK` exist and map correctly, but no bind-group layout or push-constant
-  range names them, and no backend polices a layout naming a mesh stage on a
-  device without the capability. That is why the first mesh shader hardcodes its
-  three vertices instead of pulling them from a storage buffer the way
-  `triangle.slang` does — pulling needs mesh-stage visibility, which obliges
-  every backend to police the flag. **This is the next slice**, and it is the
-  prerequisite for a mesh shader that reads real geometry.
-
-  Note the flags are deliberately outside `ShaderStages::GRAPHICS` and `ALL`:
-  Vulkan refuses `MESH_BIT_EXT` in a layout on a device without `meshShader`, so
-  a composite carrying them would break every existing layout on most devices.
-
-- **Meshlets need a mesh asset system that does not exist.** §3.5 wants clusters
-  with bounds and normal cones baked from a mesh; `crcbl-scene` is a stub and
-  the only mesh in the tree is a hardcoded cube. The builder, the cluster
-  hierarchy and amplification-stage culling are all blocked behind topic 6's
-  asset work — building any of them now would be building ahead of a consumer.
-
 - **`crcbl-vk`'s absent-capability refusal is unexercised.** Both drivers here
   report `MESH_SHADER`, so only the null backend takes that arm. The e2e
   falsifies what any device can refuse instead — a mesh pipeline naming a
   fragment entry point as its mesh stage.
-
-- **Metal and D3D12 have the stages and the committed artifacts, and neither
-  loads them.** `msl/mesh_shader.metal` and the `ms_6_6`/`as_6_6` DXIL are built
-  and validated; what is missing is `MTLMeshRenderPipelineDescriptor` and the
-  D3D12 pipeline-state stream. Both refuse the entry points by name today.
 
 ### Owed by the capability work (P7)
 
@@ -17666,15 +17514,6 @@ copies by `forward`'s `an_app_page_and_table_reach_the_device_whole` — but it 
 still _one_ extent for every layer. Real content does not look like that. See
 "The base-colour page is still `ArrayPages`" below for what stands between here
 and the bindless form.
-
-**No mip chain, and the sampler is nearest because of it.**
-`upload_texture_layers` uploads `mip_levels: 1` and `forward`'s base-colour
-sampler filters nearest — a filtered read of a page with no mips buys a shimmer
-rather than a smoother picture. **The plan is written (2026-08-29)**:
-`docs/plan/43-render-standards.md`'s filtering subsection builds the chain at
-import with `gltf_render`'s own resampler and uploads it whole — not the compute
-pass §3.2 named, for reasons recorded there — then goes trilinear and
-anisotropic, and none of it waits on the stride decision.
 
 **glTF base-colour import landed; every other map is still unimported.**
 `crcbl-scene`'s `gltf_render` decodes the `baseColorTexture` of every material
@@ -20632,9 +20471,9 @@ to confirm and emits **zero** warnings.
 **Re-derived independently on 2026-08-18, and it is the same answer.** A later
 pass found the six links again and wrote them up as a live defect with three
 unattractive fixes — merge the features, blanket-allow the lint, or duplicate a
-sentence per link. That entry has been deleted rather than kept beside this one,
-because two entries disagreeing about whether something is a defect is worse
-than either.
+sentence per link. That entry stands below as "`cargo doc` without features is
+red, and nothing runs it"; the two disagree only on the word _defect_ — the fact
+is one, and the gate is `--all-features`.
 
 What the second pass did add is a measurement the first left open: **`bake` and
 `load` gate the identical dependency set** — both are `["dep:png"]` — so merging
@@ -22242,27 +22081,6 @@ same thing on every backend, which is the whole point of the exhaustive
 change to how every recording method on that backend works, it wants a
 measurement first, and it is not what either of the two slices that hit the wall
 was about. **Needs the user's call**, or an explicit decision to measure.
-
-## `crcbl-sprite`'s docs only build with `--all-features` (2026-08-24)
-
-`cargo doc -p crcbl-sprite` with default features fails
-`rustdoc::broken-intra-doc-links` on four `[`crate::bake`]` links in `crpix.rs`
-and `load.rs`. The crate declares no `default` feature and `bake` is
-`#[cfg(feature = "bake")]`, so under default features the module those links
-name does not exist.
-
-CI never sees it: every `cargo doc` invocation in `ci.yml` passes
-`--all-features`. Found by running the doc gate the wrong way, which is also how
-it was confirmed — with `--all-features` the workspace documents clean.
-
-It matters where the feature set is not ours to choose. The crate carries no
-`[package.metadata.docs.rs]`, so a docs.rs build would use default features and
-hit exactly this. Two ways to close it: add that metadata with
-`all-features = true`, or make the links degrade — the usual spelling is a
-`#[cfg_attr(not(feature = "bake"), doc = "...")]` pair, which is noisier than
-the problem. Not fixed because nothing publishes this crate yet, and it is a
-decision about what the crate's default documentation should say rather than a
-bug in the prose.
 
 ## Do `crcbl-mtl` and `crcbl-dx12` report an adapter's limits on a narrower device? (2026-08-24)
 
