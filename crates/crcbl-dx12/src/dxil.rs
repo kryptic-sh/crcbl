@@ -946,13 +946,18 @@ mod tests {
                 // light list, appended past the occlusion channel because this
                 // whole list only ever grows at its top.
                 //
-                // Last is the split-sum `DFG` table at binding 25, and therefore
+                // Then the split-sum `DFG` table at binding 25, and therefore
                 // `t11`: an `Rg8Unorm` `Texture2D<float2>` read by `Load`, so it
                 // takes no sampler beside it either. Binding 24 belongs to
                 // `mesh_cluster.slang` and is another gap D3D12 does not see.
+                //
+                // Last is §2's normal page at binding 26, and therefore `t12`: a
+                // second `Texture2DArray` beside the base-colour one, read
+                // through the **same** sampler — which is why it adds an `Srv`
+                // here and no `Sampler`.
                 &[
                     Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
-                    Srv, Srv,
+                    Srv, Srv, Srv,
                 ],
             ),
             (

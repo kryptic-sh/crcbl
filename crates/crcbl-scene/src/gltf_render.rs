@@ -114,7 +114,8 @@
 //! image, clamped to [`MAX_PAGE_EXTENT`] — by [`crcbl_render::mip::resample`],
 //! the alpha-weighted box filter that averages in *linear* light and re-encodes
 //! to sRGB, which is what the page's `Rgba8UnormSrgb` format means. The same
-//! filter builds each layer's mip chain when the page is uploaded.
+//! filter builds each layer's mip chain when the page is uploaded. The normal
+//! page has a filter of its own; see below.
 //!
 //! The page costs `layers × extent² × 4` bytes on the device, and a third again
 //! for the chain below level 0, so a document with many large textures is
@@ -122,11 +123,23 @@
 //! this module's choice; the fix is the bindless form the backlog entry
 //! describes.
 //!
-//! Only images an untextured-capable slot can actually use are decoded:
-//! `baseColorTexture` and nothing else, because [`mesh::GpuMaterial`] has one
-//! texture column. A material with no texture, or one this module could not
-//! decode, keeps [`PageDesc::UNTEXTURED_LAYER`] — the page's white layer, so the
-//! surface shades by its factors alone rather than black.
+//! Only images a slot the shading actually reads can use are decoded:
+//! `baseColorTexture` and `normalTexture`, which is what [`mesh::GpuMaterial`]'s
+//! two live page columns are. A material with no base-colour texture, or one
+//! this module could not decode, keeps [`PageDesc::UNTEXTURED_LAYER`] — the
+//! page's white layer, so the surface shades by its factors alone rather than
+//! black — and one with no normal map keeps
+//! [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE), which is both the
+//! normal page's neutral texel and the value the fragment stage reads as "no
+//! normal map".
+//!
+//! **A normal map goes through its own resampler**, [`crcbl_render::mip::normal_resample`]:
+//! no transfer curve, no alpha weighting, and a renormalise after the average.
+//! The colour filter's sRGB decode is wrong by a gamma for the linear
+//! tangent-space vectors a normal map holds — exact for an image the page does
+//! not resize, and skewed for every averaged texel of one it does. An image both
+//! slots name is therefore resampled twice, once through each filter, because
+//! the two pages hold different kinds of value.
 //!
 //! # Everything unsupported is skipped loudly
 //!
@@ -148,10 +161,10 @@ use crcbl_render::scene::{
 };
 use crcbl_shaders::mesh::{self, MeshVertex, VERTEX_STRIDE};
 use crcbl_shaders::skinning::SkinBinding;
-use crcbl_shaders::vertex::UvRange;
+use crcbl_shaders::vertex::{TangentFrame, UvRange};
 use glam::{Mat4, Vec3};
 
-use crate::gltf_import::{GltfPrimitive, GltfScene};
+use crate::gltf_import::{GltfPrimitive, GltfScene, GltfTexture};
 use crate::meshlet::build_meshlets;
 
 /// The largest square page this module will build, in texels a side.
@@ -255,8 +268,8 @@ pub fn build_render_scene(scene: &GltfScene, key: &Path) -> RenderScene {
         list: Vec::new(),
     };
 
-    let (page, layer_of_image) = pack_page(scene, &mut skips);
-    let materials = material_rows(scene, &layer_of_image, &mut skips);
+    let (page, base_layers, normal_layers) = pack_page(scene, &mut skips);
+    let materials = material_rows(scene, &base_layers, &normal_layers, &mut skips);
     let (meshes, origins, slots) = resident_meshes(scene, &mut skips);
     let instances = place_instances(scene, &slots, &mut skips);
 
@@ -326,36 +339,43 @@ fn image_label(scene: &GltfScene, image: usize) -> String {
 // The texture page
 // ---------------------------------------------------------------------------
 
-/// Decode every base-colour image the document actually uses, resample them onto
-/// one square extent, and return the page with a map from image index to layer.
+/// Decode every image the document actually uses, resample them onto one square
+/// extent, and return the page with a map from image index to layer for each of
+/// its two pages: base colour, then normal.
 ///
-/// The map is `None` for an image that is not in the page — never decoded, or
-/// decoded and refused — and a material naming one keeps
-/// [`PageDesc::UNTEXTURED_LAYER`].
-fn pack_page(scene: &GltfScene, skips: &mut Skips<'_>) -> (PageDesc<'static>, Vec<Option<u32>>) {
-    // Only images a material's `baseColorTexture` names: an image reached only
-    // through a normal or emissive slot has nowhere to go in a one-column
-    // material row, and a layer per unused image is device memory for nothing.
-    let mut wanted: Vec<usize> = Vec::new();
-    for (material, texture) in scene.base_color_textures().iter().enumerate() {
-        let Some(texture) = texture else { continue };
-        if texture.tex_coord() != 0 {
-            skips.push(
-                "texCoord",
-                material_label(material),
-                format!(
-                    "its baseColorTexture samples TEXCOORD_{}, and this importer reads \
-                     TEXCOORD_0 only; the surface shades with its base-colour factor alone",
-                    texture.tex_coord()
-                ),
-            );
-            continue;
-        }
-        if !wanted.contains(&texture.image()) {
-            wanted.push(texture.image());
+/// A map is `None` for an image that is not in that page — never wanted, never
+/// decoded, or decoded and refused — and a material naming one keeps
+/// [`PageDesc::UNTEXTURED_LAYER`] or
+/// [`GpuMaterial::NO_PAGE`](mesh::GpuMaterial::NO_PAGE) accordingly.
+///
+/// **One extent covers both pages**, because a [`PageDesc`] has one; an image
+/// larger than it is resampled down whichever slot named it.
+fn pack_page(
+    scene: &GltfScene,
+    skips: &mut Skips<'_>,
+) -> (PageDesc<'static>, Vec<Option<u32>>, Vec<Option<u32>>) {
+    let base_wanted = wanted_images(
+        scene.base_color_textures(),
+        "baseColorTexture",
+        "the surface shades with its base-colour factor alone",
+        skips,
+    );
+    let normal_wanted = wanted_images(
+        scene.normal_textures(),
+        "normalTexture",
+        "the surface shades with its interpolated normal and no normal map",
+        skips,
+    );
+
+    // Decoded once per image rather than once per slot: a document naming one
+    // image from both slots is legal, and decoding it twice would push the same
+    // failure into `skips` twice and report one loss as two.
+    let mut wanted = base_wanted.clone();
+    for image in &normal_wanted {
+        if !wanted.contains(image) {
+            wanted.push(*image);
         }
     }
-
     let mut decoded: Vec<(usize, crcbl_sprite::load::Rgba8)> = Vec::new();
     for image in wanted {
         match decode_image(scene, image, skips) {
@@ -376,16 +396,71 @@ fn pack_page(scene: &GltfScene, skips: &mut Skips<'_>) -> (PageDesc<'static>, Ve
         .clamp(PAGE_EXTENT, MAX_PAGE_EXTENT);
 
     let mut page = PageDesc::opaque_white(extent);
-    let mut layer_of_image = vec![None; scene.images().len()];
+    let mut base_layers = vec![None; scene.images().len()];
+    let mut normal_layers = vec![None; scene.images().len()];
     for (image, rgba) in decoded {
-        layer_of_image[image] = Some(page.push_layer(crcbl_render::mip::resample(
-            &rgba.pixels,
-            rgba.width,
-            rgba.height,
-            extent,
-        )));
+        // The two pages are two device images, so one texel run cannot be
+        // shared between them; an image both slots name is resampled per page.
+        if base_wanted.contains(&image) {
+            base_layers[image] = Some(page.push_layer(crcbl_render::mip::resample(
+                &rgba.pixels,
+                rgba.width,
+                rgba.height,
+                extent,
+            )));
+        }
+        if normal_wanted.contains(&image) {
+            // **`normal_resample`, not `resample`** — the filter that averages
+            // the decoded vectors plainly and renormalises, where the one above
+            // decodes an sRGB curve and weights by alpha. The same image in both
+            // slots is therefore resampled twice with two filters, which is the
+            // right answer rather than an inefficiency: the two pages hold
+            // different kinds of value and neither filter is correct for the
+            // other's.
+            normal_layers[image] = Some(page.push_normal_layer(
+                crcbl_render::mip::normal_resample(&rgba.pixels, rgba.width, rgba.height, extent),
+            ));
+        }
     }
-    (page, layer_of_image)
+    (page, base_layers, normal_layers)
+}
+
+/// Which of [`GltfScene::images`] one material slot's textures name, in the
+/// order they are first asked for, with a [`Skip`] for each that samples a UV
+/// set this importer does not read.
+///
+/// `feature` is the slot the way the specification spells it, and `instead` is
+/// what the surface does without it — the two halves of the message that differ
+/// between the base-colour and normal slots.
+///
+/// An image no live slot names is deliberately left out: a layer per unused
+/// image is device memory for nothing.
+fn wanted_images(
+    textures: &[Option<GltfTexture>],
+    feature: &'static str,
+    instead: &str,
+    skips: &mut Skips<'_>,
+) -> Vec<usize> {
+    let mut wanted: Vec<usize> = Vec::new();
+    for (material, texture) in textures.iter().enumerate() {
+        let Some(texture) = texture else { continue };
+        if texture.tex_coord() != 0 {
+            skips.push(
+                "texCoord",
+                material_label(material),
+                format!(
+                    "its {feature} samples TEXCOORD_{}, and this importer reads \
+                     TEXCOORD_0 only; {instead}",
+                    texture.tex_coord()
+                ),
+            );
+            continue;
+        }
+        if !wanted.contains(&texture.image()) {
+            wanted.push(texture.image());
+        }
+    }
+    wanted
 }
 
 /// The PNG magic number: eight bytes that no other format starts with.
@@ -477,35 +552,64 @@ const GLTF_DEFAULT_ROW: mesh::GpuMaterial = mesh::GpuMaterial {
     tiling: mesh::GpuMaterial::TILING_AUTHORED,
     tile_metres: 1.0,
     emissive: [0.0; 3],
+    // The default material names no texture of any kind, so every page column
+    // is the layer that means "none" — which for the normal page is also its
+    // neutral texel, `PageDesc::NEUTRAL_NORMAL`.
+    normal_texture: mesh::GpuMaterial::NO_PAGE,
+    // glTF's own default `normalTexture.scale`.
+    normal_scale: 1.0,
+    metallic_roughness_occlusion_texture: mesh::GpuMaterial::NO_PAGE,
+    emissive_texture: mesh::GpuMaterial::NO_PAGE,
+    // glTF's own default `alphaCutoff`, and `alphaMode` of `OPAQUE`, which is
+    // the absence of every flag.
+    alpha_cutoff: 0.5,
+    flags: 0,
 };
 
+/// Which layer of one page a material's texture reference resolves to, or
+/// `none` — that page's own "no layer" value — when it resolves to nothing.
+///
+/// **The UV set is re-checked here, not only in `pack_page`.** Two materials can
+/// name one image with different `texCoord`s, and then the image *is* on the
+/// page — put there for the one that asked for set 0. Reading the layer map
+/// alone would hand it to the other one too, which would sample it with
+/// coordinates from a set the file did not mean, silently, having already logged
+/// that it would not.
+///
+/// An image that never reached the page falls back the same way, and `pack_page`
+/// has already said why; this only makes the row honest about it.
+fn layer_at(texture: Option<GltfTexture>, layers: &[Option<u32>], none: u32) -> u32 {
+    match texture {
+        Some(texture) if texture.tex_coord() == 0 => layers
+            .get(texture.image())
+            .copied()
+            .flatten()
+            .unwrap_or(none),
+        Some(_) | None => none,
+    }
+}
+
 /// The material table: the glTF default first, then the document's own rows with
-/// their texture column pointed at the page.
+/// their texture columns pointed at the page.
 fn material_rows(
     scene: &GltfScene,
-    layer_of_image: &[Option<u32>],
+    base_layers: &[Option<u32>],
+    normal_layers: &[Option<u32>],
     skips: &mut Skips<'_>,
 ) -> Vec<mesh::GpuMaterial> {
     let mut rows = Vec::with_capacity(scene.materials().len() + 1);
     rows.push(GLTF_DEFAULT_ROW);
     for (index, row) in scene.materials().iter().enumerate() {
-        let layer = match scene.base_color_textures()[index] {
-            // **The UV set is re-checked here, not only in `pack_page`.** Two
-            // materials can name one image with different `texCoord`s, and then
-            // the image *is* on the page — put there for the one that asked for
-            // set 0. Reading `layer_of_image` alone would hand it to the other
-            // one too, which would sample it with coordinates from a set the
-            // file did not mean, silently, having already logged that it would
-            // not.
-            Some(texture) if texture.tex_coord() == 0 => layer_of_image
-                .get(texture.image())
-                .copied()
-                .flatten()
-                // A texture that never reached the page: `pack_page` has
-                // already said why, so this only makes the row honest about it.
-                .unwrap_or(PageDesc::UNTEXTURED_LAYER),
-            Some(_) | None => PageDesc::UNTEXTURED_LAYER,
-        };
+        let layer = layer_at(
+            scene.base_color_textures()[index],
+            base_layers,
+            PageDesc::UNTEXTURED_LAYER,
+        );
+        let normal_layer = layer_at(
+            scene.normal_textures()[index],
+            normal_layers,
+            mesh::GpuMaterial::NO_PAGE,
+        );
         if row.base_color[3] < 1.0 {
             skips.push(
                 "alphaMode",
@@ -519,6 +623,10 @@ fn material_rows(
         }
         rows.push(mesh::GpuMaterial {
             base_color_texture: layer,
+            // `normal_scale` is already the document's: it is a material factor
+            // and the importer put it on the row. Only the layer is this
+            // module's to fill.
+            normal_texture: normal_layer,
             ..*row
         });
     }
@@ -599,6 +707,11 @@ fn resident_meshes(
                     uv_range: expanded.uv_range,
                     indices: Cow::Owned(expanded.indices),
                     clusters,
+                    flags: if expanded.authored_tangents {
+                        mesh::GpuMesh::MESH_AUTHORED_TANGENTS
+                    } else {
+                        0
+                    },
                 },
             });
         }
@@ -628,6 +741,9 @@ struct Expanded {
     /// One binding per emitted vertex, in the same order, or empty for an
     /// unskinned primitive — see the [module docs](self).
     bindings: Vec<SkinBinding>,
+    /// Whether every emitted vertex's frame came from the file's own `TANGENT`
+    /// — what [`mesh::GpuMesh::MESH_AUTHORED_TANGENTS`] claims.
+    authored_tangents: bool,
 }
 
 /// A primitive's vertices in the renderer's own record, with the positions and
@@ -641,6 +757,14 @@ struct Expanded {
 /// `crcbl_shaders::mesh::cube_vertices` does by hand for the engine's own cube.
 /// Doing anything else here is what makes an exported mesh light as a
 /// featureless blob.
+///
+/// **The de-indexed path drops the file's `TANGENT` too**, and
+/// [`Expanded::authored_tangents`] is `false` there for that reason. It is
+/// taken only by a primitive with no `NORMAL`, whose normals are the face
+/// normals computed just above; a tangent authored against the normals the file
+/// carried is not the frame of one this module invented, and a mesh marked
+/// [`mesh::GpuMesh::MESH_AUTHORED_TANGENTS`] on that basis would have the
+/// fragment stage trust eight bytes that describe a different surface.
 ///
 /// That expansion is why the bindings are produced here: on the indexed path an
 /// emitted vertex is input vertex `n`, on the de-indexed one it is input vertex
@@ -665,7 +789,18 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
             .iter()
             .enumerate()
             .map(|(index, position)| {
-                vertex(*position, primitive.normals()[index], uvs[index], &uv_range)
+                vertex(
+                    *position,
+                    primitive.normals()[index],
+                    // `get` rather than an index: the importer refuses a
+                    // `TANGENT` that is neither absent nor as long as
+                    // `POSITION`, so this cannot be short — and a frame silently
+                    // invented from a panic is not what a belt-and-braces read
+                    // should cost.
+                    primitive.tangents().get(index).copied(),
+                    uvs[index],
+                    &uv_range,
+                )
             })
             .collect();
         let bindings = bindings_at(primitive, 0..positions.len());
@@ -675,6 +810,7 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
             uv_range,
             indices: primitive.indices().to_vec(),
             bindings,
+            authored_tangents: !primitive.tangents().is_empty(),
         };
     }
 
@@ -714,7 +850,11 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
     let vertices = positions
         .iter()
         .zip(&authored)
-        .map(|(position, (normal, uv))| vertex(*position, *normal, *uv, &uv_range))
+        // No tangent on this path even when the file wrote one. The normals
+        // here are face normals this module just computed, because the file had
+        // no `NORMAL` at all — and a tangent authored against the normals the
+        // file *did* have describes the frame of a surface that is not this one.
+        .map(|(position, (normal, uv))| vertex(*position, *normal, None, *uv, &uv_range))
         .collect();
     Expanded {
         positions,
@@ -722,6 +862,7 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
         uv_range,
         indices,
         bindings,
+        authored_tangents: false,
     }
 }
 
@@ -751,18 +892,50 @@ fn bindings_at(primitive: &GltfPrimitive, order: impl Iterator<Item = usize>) ->
 
 /// One vertex in `crcbl_shaders::mesh`'s record.
 ///
+/// `tangent` is the primitive's `TANGENT` entry for this vertex, or `None` for
+/// a primitive that carries none — which is what decides whether the frame is
+/// the file's own or [`orthonormal_basis`](crcbl_shaders::vertex::orthonormal_basis)'
+/// stand-in, and therefore whether the mesh may claim
+/// [`MESH_AUTHORED_TANGENTS`](mesh::GpuMesh::MESH_AUTHORED_TANGENTS).
+///
 /// The albedo is white because glTF puts a primitive's colour in its *material*,
 /// and the fragment stage multiplies the row's factor and the page texel into
 /// this — so anything but `1.0` here would tint every imported surface by a
 /// number the file never wrote. `COLOR_0` is not read by the importer, so there
 /// is nothing else this could be.
-fn vertex(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], range: &UvRange) -> MeshVertex {
-    // `from_normal`, because the importer reads no `TANGENT`: every frame here
-    // is `crcbl_shaders::vertex::orthonormal_basis`' stand-in, which agrees
-    // with no UV parameterisation and is what
-    // `docs/plan/43-render-standards.md` §2 says a mesh with no tangent gets
-    // until the MikkTSpace call `docs/backlog.md` carries lands.
-    MeshVertex::from_normal(position, normal, [1.0; 4], uv, range)
+fn vertex(
+    position: [f32; 3],
+    normal: [f32; 3],
+    tangent: Option<[f32; 4]>,
+    uv: [f32; 2],
+    range: &UvRange,
+) -> MeshVertex {
+    let Some(tangent) = tangent else {
+        // `from_normal` fills the frame with
+        // `crcbl_shaders::vertex::orthonormal_basis`' stand-in, which agrees
+        // with no UV parameterisation — so the mesh must not claim
+        // `MESH_AUTHORED_TANGENTS`, and `docs/plan/43-render-standards.md` §2
+        // says the fragment stage takes its screen-space derivative frame
+        // instead until the MikkTSpace call `docs/backlog.md` carries lands.
+        return MeshVertex::from_normal(position, normal, [1.0; 4], uv, range);
+    };
+    // glTF's `TANGENT` is `xyz` and a handedness in `w`, and the bitangent is
+    // `w × cross(normal, tangent)` — the same order `QTangent::decode` and
+    // `skinning.slang` reconstruct it in, so a frame that goes through the
+    // encoder comes back out of either of them unchanged.
+    let normal_vec = Vec3::from(normal);
+    let tangent_vec = Vec3::new(tangent[0], tangent[1], tangent[2]);
+    MeshVertex::from_frame(
+        position,
+        TangentFrame {
+            tangent: tangent_vec.to_array(),
+            bitangent: (normal_vec.cross(tangent_vec) * tangent[3]).to_array(),
+            normal,
+        },
+        [1.0; 4],
+        uv,
+        range,
+    )
 }
 
 /// How many vertices a description mesh holds, for the pool it has to fit in.
@@ -923,6 +1096,9 @@ mod tests {
         import_rigged_glb, import_skinned_pair_glb, png_bytes, replacing, rigged_json,
         skinned_pair_bin, skinned_pair_json, textured_glb, textured_parts, triangle_json,
     };
+    use crate::gltf_import::tests::{
+        NORMAL_SCALE, TANGENTS, normal_mapped_glb, tangent_bin, tangent_glb, tangent_json,
+    };
     use crcbl_shaders::vertex::QTangent;
 
     /// The key every conversion under test is named by, so a message that leaks
@@ -979,6 +1155,149 @@ mod tests {
             panic!("this module builds no DAGs");
         };
         indices.to_vec()
+    }
+
+    /// The per-mesh bits the description carries into
+    /// [`mesh::GpuMesh::flags`].
+    fn flags_of(mesh: &MeshDesc<'_>) -> u32 {
+        let Geometry::Flat { flags, .. } = &mesh.geometry else {
+            panic!("this module builds no DAGs");
+        };
+        *flags
+    }
+
+    /// The tangent and handedness a vertex's frame decodes to.
+    fn tangent_of(vertex: &MeshVertex) -> ([f32; 3], f32) {
+        (
+            vertex.qtangent.decode().tangent,
+            vertex.qtangent.handedness(),
+        )
+    }
+
+    #[test]
+    fn a_primitive_with_tangents_carries_the_authored_frame_and_says_so() {
+        let converted = convert(&tangent_glb(TANGENTS.len()));
+        assert_eq!(converted.skipped, []);
+
+        let mesh = &converted.scene.meshes[0];
+        assert_eq!(
+            flags_of(mesh),
+            mesh::GpuMesh::MESH_AUTHORED_TANGENTS,
+            "these vertices came from the file's own TANGENT, so the fragment stage \
+             may perturb in the interpolated frame rather than a derivative one",
+        );
+
+        for (vertex, authored) in vertices_of(mesh).iter().zip(TANGENTS) {
+            let (tangent, handedness) = tangent_of(vertex);
+            for (axis, want) in tangent.iter().zip(authored) {
+                assert!(
+                    (axis - want).abs() <= QTangent::MAX_COMPONENT_ERROR,
+                    "the frame decodes to {tangent:?}, not the authored {authored:?}",
+                );
+            }
+            assert_eq!(
+                handedness, authored[3],
+                "glTF's `w` is the handedness, and it is the half of the attribute \
+                 that no amount of geometry can re-derive",
+            );
+        }
+    }
+
+    #[test]
+    fn a_primitive_without_tangents_is_not_marked_as_carrying_them() {
+        let converted = convert_json(&triangle_json(BIN_CHUNK_BUFFER));
+
+        assert_eq!(
+            flags_of(&converted.scene.meshes[0]),
+            0,
+            "every frame here is `orthonormal_basis`' stand-in, which agrees with no \
+             UV parameterisation",
+        );
+    }
+
+    /// **A de-indexed primitive is unmarked even when the file carried
+    /// tangents**, and its frames are the stand-in.
+    ///
+    /// That path is taken only by a primitive with no `NORMAL`, whose normals
+    /// are the face normals `expand` just computed — so a tangent authored
+    /// against the normals the file *did* have is not a frame around these.
+    #[test]
+    fn a_de_indexed_primitive_is_unmarked_even_though_the_file_carried_tangents() {
+        let json = replacing(
+            &tangent_json(TANGENTS.len()),
+            r#""POSITION": 0, "NORMAL": 1, "TANGENT": 4"#,
+            r#""POSITION": 0, "TANGENT": 4"#,
+        );
+        let imported =
+            import_glb_bytes(&glb(&json, Some(&tangent_bin()))).expect("the fixture imports");
+        // Both halves of the fixture, asserted rather than assumed: no `NORMAL`
+        // is what sends it down the de-indexing path, and a `TANGENT` is what
+        // makes dropping one a thing that happened.
+        let primitive = &imported.meshes()[0].primitives()[0];
+        assert!(
+            primitive.normals().is_empty(),
+            "the fixture kept its NORMAL"
+        );
+        assert!(
+            !primitive.tangents().is_empty(),
+            "the fixture lost its TANGENT, so there is nothing here to drop"
+        );
+
+        let converted = build_render_scene(&imported, Path::new(KEY));
+        assert_eq!(converted.skipped, []);
+
+        let mesh = &converted.scene.meshes[0];
+        assert_eq!(flags_of(mesh), 0);
+        for vertex in &vertices_of(mesh) {
+            let (tangent, handedness) = tangent_of(vertex);
+            assert_eq!(
+                handedness, 1.0,
+                "`orthonormal_basis` is right-handed, where the fixture's own TANGENT \
+                 is left-handed on two of its three vertices: {tangent:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_normal_map_lands_on_its_own_page_layer_and_the_row_names_it() {
+        let converted = convert(&normal_mapped_glb());
+        assert_eq!(converted.skipped, []);
+
+        let page = &converted.scene.page;
+        assert_eq!(page.extent(), 2, "the page is sized by the one image in it");
+        assert_eq!(
+            page.layers().len(),
+            1,
+            "the base-colour page keeps its white layer alone: this material names no \
+             baseColorTexture, so nothing but the normal slot wanted the image",
+        );
+        assert_eq!(
+            page.normal_layers().len(),
+            2,
+            "the neutral layer the type owns, then the image"
+        );
+        assert!(
+            page.normal_layers()[mesh::GpuMaterial::NO_PAGE as usize]
+                .chunks_exact(4)
+                .all(|texel| texel == PageDesc::NEUTRAL_NORMAL),
+            "layer 0 is the neutral texel a row naming no normal map samples",
+        );
+        assert_eq!(
+            &page.normal_layers()[1][..],
+            &IMAGE_TEXELS[..],
+            "the image arrives texel for texel, in row-major order, unresampled"
+        );
+
+        assert_eq!(
+            converted.scene.materials[1],
+            mesh::GpuMaterial {
+                base_color: BASE_COLOR,
+                normal_texture: 1,
+                normal_scale: NORMAL_SCALE,
+                ..GLTF_DEFAULT_ROW
+            },
+            "the row keeps the importer's scale and gains the page layer",
+        );
     }
 
     #[test]

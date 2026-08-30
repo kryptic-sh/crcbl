@@ -12,10 +12,17 @@
 //! storage view, and a host chain is the same bytes on every backend — a
 //! determinism a device filter would have to be argued back to.
 //!
-//! [`resample`] is the one filter, and it is also what `crcbl-scene`'s glTF
-//! importer packs real textures onto the page with: a box average in linear
-//! light, weighted by alpha. One filter for both jobs, so a texture that was
-//! resampled onto the page and then mipped was averaged the same way twice.
+//! [`resample`] is the one filter for a *colour* page, and it is also what
+//! `crcbl-scene`'s glTF importer packs real textures onto the base-colour page
+//! with: a box average in linear light, weighted by alpha. One filter for both
+//! jobs, so a texture that was resampled onto the page and then mipped was
+//! averaged the same way twice.
+//!
+//! [`normal_resample`] and [`normal_chain`] are the same pair for the **normal**
+//! page, and they are a second filter rather than a flag on the first because a
+//! normal texel is not a colour: no transfer curve, no alpha weighting, and a
+//! renormalise after the average. `docs/plan/44-lighting.md`'s rung 2 is where
+//! that is argued.
 
 /// Resample `pixels`, a tightly packed `width × height` RGBA8 sRGB image, onto
 /// a square `extent`, alpha-weighted and in linear light.
@@ -119,6 +126,121 @@ pub fn chain(level0: &[u8], extent: u32) -> Vec<Vec<u8>> {
         let level = {
             let above = levels.last().map_or(level0, Vec::as_slice);
             resample(above, wide, wide, below)
+        };
+        levels.push(level);
+        wide = below;
+    }
+    levels
+}
+
+/// Resample `pixels`, a tightly packed `width × height` RGBA8 **normal** image,
+/// onto a square `extent` — in linear light, with no transfer curve and a
+/// renormalise after the average.
+///
+/// [`resample`]'s box filter over a different kind of value, and every one of
+/// the three differences is `docs/plan/44-lighting.md`'s rung 2:
+///
+/// * **No sRGB decode.** A normal texel is a direction stored as `n * 0.5 +
+///   0.5`, not a colour, and pushing it through the IEC transfer function is
+///   wrong by a gamma — which shows up as a downscaled map leaning further off
+///   vertical than the one it was built from.
+/// * **No alpha weighting.** A normal page has no meaningful alpha to weight by;
+///   the channel is averaged plainly and read by nothing.
+/// * **Renormalised.** The mean of unit vectors is shorter than one, so an
+///   averaged texel re-encoded as-is is a normal the shader then stretches back
+///   to unit length along whatever direction the shortening left. That plan's
+///   rung 4 is what turns the *length* the average lost into roughness; until it
+///   lands, the honest thing is to hand the device a unit vector rather than a
+///   short one, and `docs/backlog.md` carries the missing half.
+///
+/// A cell whose decoded vectors cancel — opposing normals, which a real map can
+/// hold at a crease — has no direction left to renormalise, and gets the neutral
+/// `(0, 0, 1)` rather than a `NaN`.
+///
+/// **A cell covering exactly one source texel is copied**, not decoded and
+/// re-encoded. Nothing was averaged, so there is no length to put back, and the
+/// round trip would move every texel an eight-bit encoding could not make a unit
+/// vector out of — which is most of them. So an image the page does not have to
+/// resize arrives byte for byte, and an upscale is nearest-neighbour on
+/// [`resample`]'s terms.
+///
+/// # Panics
+///
+/// [`resample`]'s conditions exactly.
+#[must_use]
+pub fn normal_resample(pixels: &[u8], width: u32, height: u32, extent: u32) -> Vec<u8> {
+    assert!(
+        width > 0 && height > 0 && extent > 0,
+        "a {width}×{height} image resampled onto {extent}² has no texels"
+    );
+    assert!(
+        pixels.len() >= width as usize * height as usize * 4,
+        "a {width}×{height} RGBA8 image is {} bytes, not {}",
+        width as usize * height as usize * 4,
+        pixels.len()
+    );
+    let mut out = vec![0u8; extent as usize * extent as usize * 4];
+    for y in 0..extent {
+        let (y0, y1) = source_span(y, extent, height);
+        for x in 0..extent {
+            let (x0, x1) = source_span(x, extent, width);
+            let at = (y as usize * extent as usize + x as usize) * 4;
+            if y1 - y0 == 1 && x1 - x0 == 1 {
+                // **One source texel is copied, not renormalised.** Nothing has
+                // been averaged, so there is no length to put back — and a
+                // decode, renormalise and re-encode of a single texel moves it:
+                // `(1, -1, -1)` is not a unit vector, and an authored map is
+                // full of texels that are not, because eight bits cannot hold
+                // one. An unresized layer therefore reaches the device byte for
+                // byte, which is what makes a page the caller built exactly the
+                // page the shader samples.
+                let from = (y0 as usize * width as usize + x0 as usize) * 4;
+                out[at..at + 4].copy_from_slice(&pixels[from..from + 4]);
+                continue;
+            }
+            let mut sum = [0.0f32; 3];
+            let mut alpha = 0.0f32;
+            let mut texels = 0.0f32;
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let from = (sy as usize * width as usize + sx as usize) * 4;
+                    for (channel, axis) in sum.iter_mut().enumerate() {
+                        *axis += f32::from(pixels[from + channel]) / 255.0 * 2.0 - 1.0;
+                    }
+                    alpha += f32::from(pixels[from + 3]) / 255.0;
+                    texels += 1.0;
+                }
+            }
+            let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
+            let unit = if length > 0.0 {
+                [sum[0] / length, sum[1] / length, sum[2] / length]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            for (channel, axis) in unit.iter().enumerate() {
+                out[at + channel] = quantise(axis * 0.5 + 0.5);
+            }
+            out[at + 3] = quantise(alpha / texels);
+        }
+    }
+    out
+}
+
+/// The levels below a square `extent`-wide RGBA8 **normal** layer, on
+/// [`chain`]'s terms and through [`normal_resample`].
+///
+/// # Panics
+///
+/// [`normal_resample`]'s conditions on `level0` and `extent`.
+#[must_use]
+pub fn normal_chain(level0: &[u8], extent: u32) -> Vec<Vec<u8>> {
+    let mut levels: Vec<Vec<u8>> = Vec::new();
+    let mut wide = extent;
+    while wide > 1 {
+        let below = level_extent(wide, 1);
+        let level = {
+            let above = levels.last().map_or(level0, Vec::as_slice);
+            normal_resample(above, wide, wide, below)
         };
         levels.push(level);
         wide = below;
@@ -280,6 +402,164 @@ mod tests {
         assert_eq!(&two[4..8], &[0x00, 0x00, 0x00, 0xFF], "the right is black");
         assert_eq!(&two[8..12], &[0xFF, 0xFF, 0xFF, 0xFF]);
         assert_eq!(&two[12..16], &[0x00, 0x00, 0x00, 0xFF]);
+    }
+
+    /// The neutral normal texel survives a downscale, which is the one property
+    /// of this filter that every material naming no map depends on.
+    ///
+    /// **The chain keeps a flat map flat, and every level of a map that is not
+    /// flat is still a unit vector.**
+    ///
+    /// The first half is the weaker claim and is here for the reason a constant
+    /// image is worth checking at all: it is the one input whose right answer
+    /// nobody can argue about. It does not discriminate between the two filters
+    /// — a constant image survives any linear filter, `resample` included — so
+    /// the second half is what holds `normal_chain` to *its* filter. A cell of
+    /// two normals leaning opposite ways averages to something far short of
+    /// unit length, and only the renormalise inside [`normal_resample`] puts the
+    /// length back; a chain built through the colour filter emits the short
+    /// vector, and a short shading normal is a surface that is quietly too dark.
+    #[test]
+    fn a_normal_chain_keeps_a_flat_map_flat_and_every_level_unit() {
+        let neutral = [0x80u8, 0x80, 0xFF, 0xFF];
+        let level0 = neutral.repeat(4 * 4);
+        for level in normal_chain(&level0, 4) {
+            for texel in level.chunks_exact(4) {
+                assert_eq!(texel, neutral, "a flat map stopped being flat");
+            }
+        }
+
+        // Columns leaning hard `+u` and hard `-u`, so every cell the chain
+        // averages holds a pair that very nearly cancels.
+        let leaning: Vec<u8> = (0..4 * 4)
+            .flat_map(|texel| {
+                if texel % 2 == 0 {
+                    [0xFFu8, 0x80, 0x80, 0xFF]
+                } else {
+                    [0x00, 0x80, 0x80, 0xFF]
+                }
+            })
+            .collect();
+        for (index, level) in normal_chain(&leaning, 4).into_iter().enumerate() {
+            for texel in level.chunks_exact(4) {
+                let decoded = [
+                    f32::from(texel[0]) / 255.0 * 2.0 - 1.0,
+                    f32::from(texel[1]) / 255.0 * 2.0 - 1.0,
+                    f32::from(texel[2]) / 255.0 * 2.0 - 1.0,
+                ];
+                let length =
+                    (decoded[0] * decoded[0] + decoded[1] * decoded[1] + decoded[2] * decoded[2])
+                        .sqrt();
+                // An eight-bit encoding of a unit vector is not exactly unit;
+                // half a level on each of three axes is what this allows.
+                assert!(
+                    (length - 1.0).abs() <= 3.0 / 255.0,
+                    "level {index} holds a normal of length {length}, and a short shading \
+                     normal is a surface that is quietly too dark"
+                );
+            }
+        }
+    }
+
+    /// **A layer the page does not resize arrives byte for byte.**
+    ///
+    /// The decode is `t * 2 - 1` and eight bits cannot encode most unit
+    /// vectors, so a decode-renormalise-re-encode round trip moves nearly every
+    /// texel of a real map — and an authored level 0 that reached the device
+    /// changed is a page the caller did not build. The single-texel copy in
+    /// [`normal_resample`] is what makes this hold.
+    #[test]
+    fn a_normal_layer_the_page_does_not_resize_is_copied() {
+        // `(1, -1, -1)` before normalising, which is the case that would move:
+        // its length is `sqrt(3)`, so a round trip would land it on `0xC9`.
+        let awkward = [0xFFu8, 0x00, 0x00, 0xFF];
+        let source = awkward.repeat(2 * 2);
+        assert_eq!(normal_resample(&source, 2, 2, 2), source);
+        // And an upscale is nearest-neighbour, on `resample`'s terms: every
+        // destination cell covers one source texel, so every one is a copy.
+        assert_eq!(normal_resample(&source, 2, 2, 4), awkward.repeat(4 * 4));
+    }
+
+    /// Averaging two opposite normals renormalises rather than emitting a
+    /// zero-length one, and a cell that cancels exactly gets the neutral.
+    #[test]
+    fn averaged_normals_come_out_unit_length() {
+        // Two texels leaning hard `+u` and two leaning hard `+v`: the mean
+        // leans between them, and the renormalise is what stops the encoded
+        // vector being the short one the average produced.
+        let leaning = [
+            0xFF, 0x80, 0x80, 0xFF, //
+            0xFF, 0x80, 0x80, 0xFF, //
+            0x80, 0xFF, 0x80, 0xFF, //
+            0x80, 0xFF, 0x80, 0xFF,
+        ];
+        let one = normal_resample(&leaning, 2, 2, 1);
+        let decoded: Vec<f32> = one[..3]
+            .iter()
+            .map(|lane| f32::from(*lane) / 255.0 * 2.0 - 1.0)
+            .collect();
+        let length = decoded.iter().map(|axis| axis * axis).sum::<f32>().sqrt();
+        assert!(
+            (length - 1.0).abs() < 4.0 / 255.0,
+            "the averaged normal decoded to a length of {length}, and the whole point of \
+             the renormalise is that it is one"
+        );
+        assert!(
+            decoded[0] > 0.5 && decoded[1] > 0.5,
+            "the mean of a `+u` pair and a `+v` pair leans towards both: {decoded:?}"
+        );
+
+        // And a cell whose vectors cancel exactly has no direction to recover,
+        // so it takes the neutral rather than a `NaN` that would poison every
+        // level below it.
+        let opposed = [
+            0xFF, 0x80, 0x80, 0xFF, //
+            0x00, 0x80, 0x80, 0xFF, //
+            0xFF, 0x80, 0x80, 0xFF, //
+            0x00, 0x80, 0x80, 0xFF,
+        ];
+        // `0xFF` and `0x00` decode to `+1` and `-1`, and `0x80` to `1 / 255`
+        // on both of the other axes — so the sum is not exactly zero and this
+        // is the near-cancellation a real crease produces rather than the
+        // contrived exact one. What it must not be is a `NaN`.
+        let one = normal_resample(&opposed, 2, 2, 1);
+        let decoded: Vec<f32> = one[..3]
+            .iter()
+            .map(|lane| f32::from(*lane) / 255.0 * 2.0 - 1.0)
+            .collect();
+        assert!(
+            decoded.iter().all(|axis| axis.is_finite()),
+            "a cancelling cell produced {decoded:?}"
+        );
+        let length = decoded.iter().map(|axis| axis * axis).sum::<f32>().sqrt();
+        assert!(
+            (length - 1.0).abs() < 4.0 / 255.0,
+            "and it is still a unit vector: {length}"
+        );
+    }
+
+    /// The two filters really are different filters, which is what a page whose
+    /// normal layers went through the colour one would silently lose.
+    #[test]
+    fn the_colour_filter_and_the_normal_filter_disagree() {
+        // A cell of two whites and two blacks. The colour filter averages in
+        // linear light and re-encodes through the sRGB curve, landing near mid
+        // grey's *encoding*; the normal filter averages `(1, 1, 1)` and
+        // `(-1, -1, -1)`, which nearly cancel, and renormalises whatever is
+        // left. Neither answer is wrong for its own kind of value, and that is
+        // the point.
+        let checker = [
+            0xFF, 0xFF, 0xFF, 0xFF, //
+            0x00, 0x00, 0x00, 0xFF, //
+            0x00, 0x00, 0x00, 0xFF, //
+            0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        assert_ne!(
+            resample(&checker, 2, 2, 1),
+            normal_resample(&checker, 2, 2, 1),
+            "a normal page mipped through the colour filter would be wrong by a gamma and \
+             nothing in a frame would report it"
+        );
     }
 
     /// The chain's length and each level's side agree with the seam's own

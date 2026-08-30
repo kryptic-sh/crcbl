@@ -43,7 +43,7 @@ use crcbl::render::{
     Camera, EffectOverride, EffectRequest, ForwardRenderer, InstanceDesc, Projection,
     RenderEffects, TransientPool,
 };
-use crcbl_shaders::mesh::{GpuMaterial, MeshVertex, vertex_bytes};
+use crcbl_shaders::mesh::{GpuMaterial, GpuMesh, MeshVertex, vertex_bytes};
 use crcbl_shaders::meshlet::{ClusterBounds, MeshClusters, Meshlet};
 use crcbl_shaders::vertex::{TangentFrame, UvRange};
 use std::borrow::Cow;
@@ -55,22 +55,22 @@ use std::borrow::Cow;
 /// [`pixel_at`] exact arithmetic instead of a perspective divide, so a test
 /// that wants the texel over a named point on a quad can name the point rather
 /// than hunt for it in the frame.
-const ORTHO_HALF_HEIGHT: f32 = 1.0;
+pub(crate) const ORTHO_HALF_HEIGHT: f32 = 1.0;
 
 /// Where the camera stands, looking down `-Z` at the quads in the `z = 0`
 /// plane. Between the near and far planes below with room either side.
-const CAMERA_Z: f32 = 3.0;
+pub(crate) const CAMERA_Z: f32 = 3.0;
 
 /// Half a quad's edge. Small enough that four of them at [`QUAD_CENTRE`] do not
 /// touch, and that every point this file samples is well inside one.
-const QUAD_HALF: f32 = 0.4;
+pub(crate) const QUAD_HALF: f32 = 0.4;
 
 /// How far from the origin each of the four normals-view quads sits, on both
 /// axes.
 const QUAD_CENTRE: f32 = 0.5;
 
 /// The camera every frame here is drawn with.
-fn quad_camera() -> Camera {
+pub(crate) fn quad_camera() -> Camera {
     Camera {
         eye: Vec3::new(0.0, 0.0, CAMERA_Z),
         target: Vec3::ZERO,
@@ -89,7 +89,7 @@ fn quad_camera() -> Camera {
 /// The orthographic projection maps `y` onto `±ORTHO_HALF_HEIGHT` and `x` onto
 /// that times the aspect ratio; NDC is Y-up and the readback is row-major from
 /// the top, which is the one flip in here.
-fn pixel_at(x: f32, y: f32) -> (u32, u32) {
+pub(crate) fn pixel_at(x: f32, y: f32) -> (u32, u32) {
     let (width, height) = MESH_EXTENT;
     let aspect = width as f32 / height as f32;
     let ndc_x = x / (ORTHO_HALF_HEIGHT * aspect);
@@ -106,7 +106,7 @@ fn pixel_at(x: f32, y: f32) -> (u32, u32) {
 
 /// A quad in the `z = 0` plane, wound the way `crcbl_shaders::mesh::FACES`
 /// winds its `+Z` face so this one faces the camera too.
-const QUAD_CORNERS: [[f32; 3]; 4] = [
+pub(crate) const QUAD_CORNERS: [[f32; 3]; 4] = [
     [-QUAD_HALF, -QUAD_HALF, 0.0],
     [QUAD_HALF, -QUAD_HALF, 0.0],
     [QUAD_HALF, QUAD_HALF, 0.0],
@@ -114,7 +114,7 @@ const QUAD_CORNERS: [[f32; 3]; 4] = [
 ];
 
 /// Its two triangles, `cube_indices`' pattern for one face.
-const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+pub(crate) const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
 /// One quad as a resident mesh: `frame` on all four corners, `uvs` corner by
 /// corner in [`QUAD_CORNERS`]' order.
@@ -122,7 +122,12 @@ const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
 /// The frame is on every corner so the interpolated normal is constant over the
 /// quad — a varying one would make the reading below a statement about the
 /// rasteriser's interpolation rather than about the decode.
-fn quad_mesh(label: &'static str, frame: TangentFrame, uvs: [[f32; 2]; 4]) -> MeshDesc<'static> {
+pub(crate) fn quad_mesh(
+    label: &'static str,
+    frame: TangentFrame,
+    uvs: [[f32; 2]; 4],
+    flags: u32,
+) -> MeshDesc<'static> {
     let range = UvRange::from_uvs(&uvs);
     let vertices: Vec<MeshVertex> = QUAD_CORNERS
         .iter()
@@ -136,6 +141,7 @@ fn quad_mesh(label: &'static str, frame: TangentFrame, uvs: [[f32; 2]; 4]) -> Me
             uv_range: range,
             indices: Cow::Owned(QUAD_INDICES.to_vec()),
             clusters: quad_clusters(),
+            flags,
         },
     }
 }
@@ -145,7 +151,7 @@ fn quad_mesh(label: &'static str, frame: TangentFrame, uvs: [[f32; 2]; 4]) -> Me
 /// Omnidirectional rather than a cone about `+Z`: a cone is a cull rule, and a
 /// test whose geometry can be rejected by one has a way to pass by drawing
 /// nothing.
-fn quad_clusters() -> MeshClusters {
+pub(crate) fn quad_clusters() -> MeshClusters {
     MeshClusters {
         clusters: vec![
             Meshlet::new(
@@ -174,7 +180,7 @@ fn quad_clusters() -> MeshClusters {
 /// row [`TEXTURED_ROW`] samples the checker. Both are `demo`'s, spelled out
 /// here because the mesh ids have to be this file's own — a description that
 /// appended to `demo` would put every quad past four meshes and one DAG.
-fn quad_scene(meshes: Vec<MeshDesc<'static>>) -> SceneDesc<'static> {
+pub(crate) fn quad_scene(meshes: Vec<MeshDesc<'static>>) -> SceneDesc<'static> {
     let mut page = PageDesc::opaque_white(PAGE_EXTENT);
     let checker = page.push_layer(&CHECKER_TEXELS[..]);
     assert_eq!(
@@ -211,7 +217,7 @@ const TEXTURED_ROW: usize = 1;
 ///
 /// Antialiasing and reflections are forced off. Both would put a neighbour's
 /// texel into the one being read, which is the whole measurement here.
-fn quad_frame(
+pub(crate) fn quad_frame(
     scene: &SceneDesc<'_>,
     normals_view: bool,
     place: impl FnOnce(&mut ForwardRenderer),
@@ -357,7 +363,19 @@ fn a_qtangent_decodes_to_its_own_normal_on_the_device() {
     let scene = quad_scene(
         NORMAL_QUADS
             .iter()
-            .map(|quad| quad_mesh(quad.name, quad.frame, [[0.0, 0.0]; 4]))
+            .map(|quad| {
+                quad_mesh(
+                    quad.name,
+                    quad.frame,
+                    [[0.0, 0.0]; 4],
+                    // Marked, because these frames are the caller's own and not
+                    // `orthonormal_basis`' stand-in — which is what the flag
+                    // claims. Nothing here samples a normal map, so the flag
+                    // decides nothing in this test; it is set because it is
+                    // true.
+                    GpuMesh::MESH_AUTHORED_TANGENTS,
+                )
+            })
             .collect(),
     );
     let frame = quad_frame(&scene, true, |renderer| {
@@ -481,7 +499,12 @@ fn a_uv_lane_outside_the_unit_square_tiles_through_its_range() {
         );
     }
 
-    let scene = quad_scene(vec![quad_mesh("tiled quad", flat_frame(), TILED_UVS)]);
+    let scene = quad_scene(vec![quad_mesh(
+        "tiled quad",
+        flat_frame(),
+        TILED_UVS,
+        GpuMesh::MESH_AUTHORED_TANGENTS,
+    )]);
     let frame = quad_frame(&scene, false, |renderer| {
         renderer
             .add_instance(&InstanceDesc {
@@ -523,7 +546,7 @@ fn a_uv_lane_outside_the_unit_square_tiles_through_its_range() {
 /// `crcbl_shaders::vertex::orthonormal_basis`' tangent rather than a written
 /// one, because which tangent it is does not matter here and inventing a second
 /// convention for it would.
-fn flat_frame() -> TangentFrame {
+pub(crate) fn flat_frame() -> TangentFrame {
     let normal = [0.0, 0.0, 1.0];
     let (tangent, bitangent) = crcbl_shaders::vertex::orthonormal_basis(normal);
     TangentFrame {

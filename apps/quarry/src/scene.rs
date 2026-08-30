@@ -72,6 +72,10 @@ pub fn quarry_scene(face: &Face) -> Result<SceneDesc<'static>, MeshletError> {
                 uv_range: UV_RANGE,
                 indices: Cow::Owned(face.indices.clone()),
                 clusters,
+                // No `MESH_AUTHORED_TANGENTS`: `vertex_bytes` below builds
+                // every vertex with `MeshVertex::from_normal`, whose frame is
+                // `orthonormal_basis`' stand-in rather than an authored one.
+                flags: 0,
             },
         }],
         // Row 0 is what an instance written without a material id names, so the

@@ -177,7 +177,7 @@ use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, Insta
 use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
-use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError};
+use crate::mesh_pool::{MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshUpload};
 use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
@@ -246,6 +246,24 @@ const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).forma
 /// the image was created with, and a barrier naming a format the image is not in
 /// picks the wrong aspects.
 const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
+
+/// The format `docs/plan/43-render-standards.md` §2's **normal** page is
+/// created with.
+///
+/// **`Rgba8Unorm`, and the missing `Srgb` is the whole decision.**
+/// [`docs/plan/44-lighting.md`]'s rung 2 argues it: a base-colour texel is a
+/// colour and glTF defines it as sRGB-encoded, so the format above is what makes
+/// the sampler decode it; a normal texel is a *number* — three components of a
+/// direction, stored as `n * 0.5 + 0.5` — and pushing it through the sRGB
+/// transfer curve is wrong by a gamma. What that looks like is not an error but
+/// a surface that leans further off vertical than the author drew, which is why
+/// the mistake survives review everywhere it is made.
+///
+/// `the_two_page_formats_differ` is the whole guard, and it is worth having
+/// because the two constants sit four lines apart and the wrong one compiles.
+///
+/// [`docs/plan/44-lighting.md`]: https://docs.rs/crcbl-render
+const NORMAL_PAGE_FORMAT: Format = Format::Rgba8Unorm;
 
 /// The format the motion-vector target is created with: two channels of half
 /// float, `docs/plan/43-render-standards.md` §9's third colour attachment.
@@ -434,6 +452,25 @@ const LEVEL_GROUP_TABLE_BINDING: u32 = 24;
 /// and nothing fills. See [`crcbl_hal::check_portable_storage_buffers`] and
 /// binding 7's `geometry` visibility.
 const SPECULAR_ALBEDO_BINDING: u32 = 25;
+
+/// The bind-group slot §2's normal page is sampled through.
+///
+/// **Appended past [`SPECULAR_ALBEDO_BINDING`], never inserted**, for
+/// [`PROBE_TABLE_BINDING`]'s reason exactly: `crcbl-mtl` gives a resource the
+/// next index in its Metal argument table by counting the same-table entries of
+/// this layout, and Slang numbers a stage's arguments by declaration order, so
+/// the two agree only while both ascend. 26 is past everything
+/// `mesh_cluster.slang` declares as well — that file reaches 24 — so it needs no
+/// mirror there and no index anything already owns moves.
+///
+/// **No sampler of its own.** The page is read through
+/// [`PAGE_SAMPLER_BINDING`]'s sampler, the same trilinear anisotropic one the
+/// base-colour page uses, because it is sampled at the same UV over an image of
+/// the same extent. A second sampler would be a second layout entry, a second
+/// index in Metal's sampler argument table, and a second thing
+/// [`ForwardRenderer::set_anisotropy`] has to rebuild — for a filter that would
+/// be identical.
+const NORMAL_PAGE_BINDING: u32 = 26;
 
 /// [`crcbl_shaders::dfg::DFG_SIZE`] as an image extent.
 ///
@@ -954,6 +991,15 @@ pub struct ForwardRenderer {
     /// why this is [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) and not
     /// a bindless descriptor array.
     base_color_page: UploadedTexture,
+    /// §2's second page: one `D2Array` image of tangent-space normals, whose
+    /// layers [`GpuMaterial::normal_texture`](mesh::GpuMaterial::normal_texture)
+    /// indexes.
+    ///
+    /// The base-colour page's own shape at [`NORMAL_PAGE_BINDING`], sampled
+    /// through the same UV and the same sampler, and **created linear** — see
+    /// [`NORMAL_PAGE_FORMAT`]. Its extent is the base-colour page's, because
+    /// [`PageDesc`](crate::scene::PageDesc) carries one for both.
+    normal_page: UploadedTexture,
     /// The page's size in texels, as a width and a height.
     ///
     /// Square, because [`PageDesc`](crate::scene::PageDesc) carries one extent
@@ -1709,6 +1755,10 @@ struct SharedBindings<'a> {
     mesh_table: BufferHandle,
     materials: BufferHandle,
     page: ImageViewHandle,
+    /// Binding [`NORMAL_PAGE_BINDING`], §2's normal page — shared for the
+    /// base-colour page's reason exactly, and read through the same sampler
+    /// beside it.
+    normal_page: ImageViewHandle,
     page_sampler: SamplerHandle,
     /// `Some` on [`GeometryPath::MeshShader`] and on no other path, which is
     /// what decides whether bindings 9 to 12 and 17 exist at all.
@@ -2013,8 +2063,32 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::ImageView(shared.specular_albedo),
         });
+        // And §2's normal page above that, on the same ascending terms — see
+        // [`NORMAL_PAGE_BINDING`]. Unconditional and `array_index: 0` for
+        // binding 7's reason: one image, and the layer is chosen in the shader.
+        entries.push(BindGroupEntry {
+            binding: NORMAL_PAGE_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(shared.normal_page),
+        });
         entries
     }
+}
+
+/// The two `ArrayPages` images every group of the mesh layout names, as the
+/// graph knows them.
+///
+/// One value rather than two arguments because the two travel together
+/// everywhere: every pass that declares one declares the other, and a pass
+/// handed them the wrong way round would order a caller's copy into the wrong
+/// image — which is a barrier bug, and therefore one that reproduces on one
+/// backend and not the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MaterialPages {
+    /// §3.2's base-colour page — [`ForwardRenderer::base_color_page_import`].
+    base_color: ImageId,
+    /// §2's normal page — [`ForwardRenderer::normal_page_import`].
+    normal: ImageId,
 }
 
 /// What the mesh pass's bind-group layout is called.
@@ -2422,11 +2496,23 @@ impl ForwardRenderer {
         // A row naming a layer the page does not have is an out-of-range sample,
         // which nothing below the seam reports.
         let layers = scene.page.layers().len();
+        let normal_layers = scene.page.normal_layers().len();
         for (row, material) in scene.materials.iter().enumerate() {
             if material.base_color_texture as usize >= layers {
                 return refuse(format!(
                     "material row {row} samples page layer {}, and the page has {layers}",
                     material.base_color_texture
+                ));
+            }
+            // The normal page on the same terms, and it is worth its own check
+            // rather than sharing the one above: the two pages have separate
+            // layer lists, so a row pointed at a base-colour layer number would
+            // pass that check and sample past the end of this image.
+            if material.normal_texture as usize >= normal_layers {
+                return refuse(format!(
+                    "material row {row} samples normal page layer {}, and the normal page \
+                     has {normal_layers}",
+                    material.normal_texture
                 ));
             }
         }
@@ -2658,6 +2744,49 @@ impl ForwardRenderer {
             &page_layers,
         )?;
         rollback.textures.push(base_color_page);
+
+        // §2's normal page, on exactly the terms above and with one difference
+        // that is the whole of the colour-space decision: it is created
+        // `Rgba8Unorm` where the page above is `Rgba8UnormSrgb`, so nothing
+        // decodes its texels through a transfer curve. See
+        // [`NORMAL_PAGE_FORMAT`], and `docs/plan/44-lighting.md`'s rung 2.
+        //
+        // **Its mips are a chain of its own**, and not the base-colour page's:
+        // `crate::mip::normal_chain` averages the decoded vectors plainly and
+        // renormalises, where `chain` decodes an sRGB curve and weights by
+        // alpha. A normal map mipped through the colour filter leans further off
+        // vertical at every level than the map it was built from, and nothing in
+        // a frame reports it. What the renormalise still does *not* recover is
+        // the length the average lost, which is `docs/plan/44-lighting.md`'s
+        // rung 4 and `docs/backlog.md`'s.
+        let normal_chains: Vec<Vec<Vec<u8>>> = scene
+            .page
+            .normal_layers()
+            .iter()
+            .map(|texels| crate::mip::normal_chain(texels, extent))
+            .collect();
+        let normal_levels: Vec<Vec<&[u8]>> = scene
+            .page
+            .normal_layers()
+            .iter()
+            .zip(&normal_chains)
+            .map(|(level0, below)| {
+                std::iter::once(level0.as_ref())
+                    .chain(below.iter().map(Vec::as_slice))
+                    .collect()
+            })
+            .collect();
+        let normal_page_layers: Vec<&[&[u8]]> = normal_levels.iter().map(Vec::as_slice).collect();
+        let normal_page = upload_texture_mip_layers(
+            device,
+            queue,
+            "material normals",
+            NORMAL_PAGE_FORMAT,
+            extent,
+            extent,
+            &normal_page_layers,
+        )?;
+        rollback.textures.push(normal_page);
 
         // The page's sampler at the device's default — see `create_page_sampler`
         // for what it filters, and `set_anisotropy` for how a caller moves it.
@@ -3428,6 +3557,29 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+
+        // §2's normal page, above everything — see [`NORMAL_PAGE_BINDING`].
+        //
+        // `geometry` beside `FRAGMENT` for binding 7's reason exactly: Slang's
+        // Metal backend materialises every global into every entry point, so
+        // `msl/mesh.metal`'s `vertexMain` takes the page whether it samples it
+        // or not. **A sampled image and not a storage buffer**, which costs this
+        // layout nothing at the WebGPU ceiling checked below — that limit counts
+        // storage buffers, and this row is a texture.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: NORMAL_PAGE_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2Array,
+                // `Float`: an `Rgba8Unorm` image, declared
+                // `texture_2d_array<f32>` by the WGSL artifact — the same
+                // sample type the sRGB base-colour page reports, since both
+                // decode to floats.
+                sample_type: SampleType::Float,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
         let mesh_desc = BindGroupLayoutDesc {
             label: Some(MESH_LAYOUT_LABEL),
             entries: &mesh_entries,
@@ -3751,6 +3903,7 @@ impl ForwardRenderer {
                 mesh_table,
                 materials: material_buffer,
                 page: base_color_page.view,
+                normal_page: normal_page.view,
                 page_sampler: base_color_sampler,
                 clusters: rollback.clusters.as_ref(),
                 shadow_sampler,
@@ -4233,6 +4386,7 @@ impl ForwardRenderer {
                 .unwrap_or_else(|| unreachable!("the table was placed in the rollback above")),
             probe_volume: scene.probes.volume,
             base_color_page,
+            normal_page,
             base_color_page_extent: (scene.page.extent(), scene.page.extent()),
             base_color_sampler,
             anisotropy,
@@ -4706,34 +4860,46 @@ impl ForwardRenderer {
                     vertices,
                     indices,
                     uv_range,
+                    flags,
                     ..
                 } => {
                     uploaded.push(vec![pool.upload(
                         device,
                         queue,
-                        &desc.label,
-                        vertices,
-                        indices,
-                        *uv_range,
+                        &MeshUpload {
+                            label: &desc.label,
+                            vertices,
+                            indices,
+                            uv_range: *uv_range,
+                            flags: *flags,
+                        },
                     )?]);
                 }
                 Geometry::Dag {
                     levels,
                     dag,
                     uv_range,
+                    flags,
                 } => {
                     let mut handles = Vec::with_capacity(levels.len());
                     for (depth, (vertices, level)) in levels.iter().zip(&dag.levels).enumerate() {
                         handles.push(pool.upload(
                             device,
                             queue,
-                            &format!("{} level {depth}", desc.label),
-                            vertices,
-                            &level.indices(),
-                            // Level 0's range for every level, which is the one
-                            // the mesh path reads whichever level it draws —
-                            // see `Geometry::Dag::uv_range`.
-                            *uv_range,
+                            &MeshUpload {
+                                label: &format!("{} level {depth}", desc.label),
+                                vertices,
+                                indices: &level.indices(),
+                                // Level 0's range for every level, which is the
+                                // one the mesh path reads whichever level it
+                                // draws — see `Geometry::Dag::uv_range`.
+                                uv_range: *uv_range,
+                                // And the description's flags for every level,
+                                // for the same reason: the levels are one
+                                // surface, so a tangent frame either describes
+                                // all of them or none.
+                                flags: *flags,
+                            },
                         )?);
                     }
                     uploaded.push(handles);
@@ -6291,6 +6457,10 @@ impl ForwardRenderer {
         // that sample it.
         let base_color_page =
             graph.import_image(Self::BASE_COLOR_PAGE_LABEL, self.base_color_page_import());
+        // §2's normal page beside it, declared for exactly the reason above: it
+        // is in every group of `mesh_layout` too, so a caller copying into one
+        // of its layers needs the same edge against these draws.
+        let normal_page = graph.import_image(Self::NORMAL_PAGE_LABEL, self.normal_page_import());
 
         // What this frame draws, resolved by the `begin_frame` that opened it —
         // see [`crate::effects`]. Read once here so every conditional below is
@@ -6301,12 +6471,16 @@ impl ForwardRenderer {
         // them would borrow the whole of it.
         let draws_sky = self.draws_sky();
 
+        let pages = MaterialPages {
+            base_color: base_color_page,
+            normal: normal_page,
+        };
         let (shadow_atlas, shadow_draws) = self.add_shadow_pass(
             graph,
             pool,
             &tile_selection,
             occlusion_placeholder,
-            base_color_page,
+            pages,
             skinned,
         );
 
@@ -6596,7 +6770,10 @@ impl ForwardRenderer {
             // group, this pass's included. Nothing samples it here either, and
             // declaring it is what lets the graph order a copy into a page layer
             // against this pass — see `base_color_page_import`.
-            .read_image(base_color_page);
+            .read_image(base_color_page)
+            // And §2's normal page, which is in the same groups for the same
+            // reason and is sampled here just as little.
+            .read_image(normal_page);
         // `read_draw_sources` declares the *camera's* statistics buffer, because
         // that is the one the arguments came out of; the prepass writes its own
         // instead, so both are declared and the graph barriers both.
@@ -6721,6 +6898,10 @@ impl ForwardRenderer {
             // graph can order a caller's copy into a page layer against these
             // draws — see `base_color_page_import`.
             .read_image(base_color_page)
+            // **And the normal page this pass's materials perturb through**,
+            // which is the other of the two pages that is literally sampled
+            // here — see `normal_page_import`.
+            .read_image(normal_page)
             // **The barrier out of the shadow pass's depth attachment.** The
             // atlas is in this pass's bind group at `SHADOW_ATLAS_BINDING`, and
             // without this declaration the graph leaves it in
@@ -7111,7 +7292,7 @@ impl ForwardRenderer {
         pool: &TransientPool,
         selection: &[BufferId],
         occlusion_placeholder: ImageId,
-        base_color_page: ImageId,
+        pages: MaterialPages,
         skinned: Option<BufferId>,
     ) -> (ImageId, u64) {
         let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
@@ -7235,7 +7416,10 @@ impl ForwardRenderer {
             // And §3.2's page, which `mesh_layout` names in every group — a
             // cascade's included. See `ForwardRenderer::base_color_page_import`
             // for what the declaration buys a caller that writes the page.
-            .read_image(base_color_page);
+            .read_image(pages.base_color)
+            // And §2's normal page beside it, in those same groups and sampled
+            // by no cascade — see `ForwardRenderer::normal_page_import`.
+            .read_image(pages.normal);
         // Each tile's mesh pass records the cut it descended to, into a buffer
         // of its own — see `ForwardRenderer::shadow_selection`. Empty where
         // there is no amplification stage to descend anything.
@@ -7404,6 +7588,44 @@ impl ForwardRenderer {
             image: self.base_color_page.image,
             view: self.base_color_page.view,
             format: BASE_COLOR_PAGE_FORMAT,
+            extent: self.base_color_page_extent,
+            initial: ResourceState::ShaderRead,
+            claim: InitialClaim::Tracked,
+            final_state: ResourceState::ShaderRead,
+        }
+    }
+
+    /// `docs/plan/43-render-standards.md` §2's **normal** page, the raw handles.
+    ///
+    /// [`base_color_page`](Self::base_color_page)'s counterpart, on every one of
+    /// its terms: one `D2Array` image, one layer per
+    /// [`PageDesc::normal_layers`](crate::scene::PageDesc::normal_layers) entry,
+    /// the same extent, and created with
+    /// [`ImageUsage::TRANSFER_DST`](crcbl_hal::ImageUsage::TRANSFER_DST) so a
+    /// per-frame copy into a layer needs no new usage flag. What it is *not* is
+    /// the same format: it is `Rgba8Unorm`, where the base-colour page is
+    /// `Rgba8UnormSrgb`, and `docs/plan/44-lighting.md`'s rung 2 is where that
+    /// is argued.
+    #[must_use]
+    pub const fn normal_page(&self) -> UploadedTexture {
+        self.normal_page
+    }
+
+    /// What [`add_passes`](Self::add_passes) names the normal page in the graph,
+    /// on [`BASE_COLOR_PAGE_LABEL`](Self::BASE_COLOR_PAGE_LABEL)'s terms.
+    pub const NORMAL_PAGE_LABEL: &'static str = "normal-page";
+
+    /// The normal page **as this renderer declares it to a graph**, on
+    /// [`base_color_page_import`](Self::base_color_page_import)'s terms exactly
+    /// — including that a caller writing a layer imports *this* value rather
+    /// than one of its own, so the write and the draws land on one state
+    /// tracker.
+    #[must_use]
+    pub const fn normal_page_import(&self) -> ImportedImage {
+        ImportedImage {
+            image: self.normal_page.image,
+            view: self.normal_page.view,
+            format: NORMAL_PAGE_FORMAT,
             extent: self.base_color_page_extent,
             initial: ResourceState::ShaderRead,
             claim: InitialClaim::Tracked,
@@ -8741,6 +8963,7 @@ impl ForwardRenderer {
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
         self.specular_albedo.destroy(device);
+        self.normal_page.destroy(device);
 
         device.destroy_graphics_pipeline(self.mesh_pipeline);
         // The one place the wireframe twin is released — `set_wireframe(.., false)`
@@ -10381,6 +10604,7 @@ mod tests {
                     uv_range: crcbl_shaders::mesh::demo_uv_range(),
                     indices: Cow::Owned(crcbl_shaders::mesh::cube_indices()),
                     clusters: crcbl_shaders::meshlet::cube_clusters(),
+                    flags: 0,
                 },
             }],
             materials: vec![mesh::GpuMaterial::UNTINTED],
@@ -11395,6 +11619,70 @@ mod tests {
     /// on any other backend can see that: Vulkan and D3D12 read the binding
     /// number, and WebGPU never takes this path.
     ///
+    /// **The two material pages are created with different formats, and the
+    /// base-colour one is the sRGB one.**
+    ///
+    /// `docs/plan/44-lighting.md`'s rung 2 calls this the classic PBR bug and
+    /// says why it survives review: a base-colour texel is an sRGB-encoded
+    /// *colour*, which is what glTF defines it as, and a normal texel is a
+    /// *number* — so decoding a normal through the sRGB curve is wrong by a
+    /// gamma and looks merely like a surface bumpier than the author drew.
+    /// Nothing in a frame reports it, no golden comparison can name it, and the
+    /// two constants sit a dozen lines apart with the wrong one compiling.
+    ///
+    /// So this is the whole guard, and it is three assertions rather than one:
+    /// that the pair differ, that each is the one it should be, and — the half
+    /// that would otherwise be a check that cannot fail — that the format each
+    /// page is *created* with is the format its `ImportedImage` declares. A
+    /// declaration naming a format the image is not in picks the wrong aspects
+    /// in a barrier.
+    #[test]
+    fn the_two_page_formats_differ() {
+        assert_eq!(BASE_COLOR_PAGE_FORMAT, Format::Rgba8UnormSrgb);
+        assert_eq!(NORMAL_PAGE_FORMAT, Format::Rgba8Unorm);
+        assert_ne!(
+            BASE_COLOR_PAGE_FORMAT, NORMAL_PAGE_FORMAT,
+            "a normal page created sRGB decodes every texel through a gamma it never had"
+        );
+
+        let (recorder, device, queue) = open();
+        let renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+            .expect("the forward renderer builds on the null backend");
+        assert_eq!(
+            renderer.base_color_page_import().format,
+            BASE_COLOR_PAGE_FORMAT
+        );
+        assert_eq!(renderer.normal_page_import().format, NORMAL_PAGE_FORMAT);
+        // And the two really are two images, not one bound twice — which is the
+        // other way a page could be "linear" and still be sampled through the
+        // sRGB one. The labels come off the recorder rather than off the
+        // handles, so this is evidence about what the device was asked to
+        // create.
+        assert_ne!(
+            renderer.normal_page().image,
+            renderer.base_color_page().image
+        );
+        assert_ne!(renderer.normal_page().view, renderer.base_color_page().view);
+        let images: Vec<String> = recorder
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Created {
+                    kind: ObjectKind::Image,
+                    label: Some(label),
+                } => Some(label),
+                _ => None,
+            })
+            .collect();
+        for page in ["material base colour", "material normals"] {
+            assert!(
+                images.iter().any(|label| label == page),
+                "no image was created for the {page} page, and it is {images:?} that were"
+            );
+        }
+        renderer.destroy(device.as_ref());
+    }
+
     /// **What turns it red.** Putting either `if emit.is_mesh()` in the layout
     /// back to `if culls_clusters`: the no-task arm then declares 17 fewer than
     /// two buffers below where the amplified arm does, and the sets stop

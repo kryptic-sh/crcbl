@@ -30,6 +30,7 @@ struct GpuMesh_std430_0
     @align(4) uv_scale_v_0 : f32,
     @align(4) uv_offset_u_0 : f32,
     @align(4) uv_offset_v_0 : f32,
+    @align(4) flags_0 : u32,
 };
 
 @binding(2) @group(0) var<storage, read> meshes_0 : array<GpuMesh_std430_0>;
@@ -54,7 +55,7 @@ struct GpuInstance_std430_0
     @align(16) mesh_0 : u32,
     @align(4) material_0 : u32,
     @align(8) sector_0 : u32,
-    @align(4) flags_0 : u32,
+    @align(4) flags_1 : u32,
     @align(16) base_vertex_1 : u32,
     @align(4) previous_base_vertex_0 : u32,
     @align(8) pad1_0 : u32,

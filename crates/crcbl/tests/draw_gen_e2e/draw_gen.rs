@@ -87,6 +87,9 @@ fn mesh_table() -> Vec<GpuMesh> {
             // The demo meshes' own, which is what `MeshPool::upload` would
             // have written; read by nothing this suite draws.
             uv_range: crcbl::shaders::mesh::demo_uv_range(),
+            // Read by nothing on this path, like the range beside it: the
+            // draw-argument pass resolves ranges and boxes.
+            flags: 0,
         }
     };
     vec![

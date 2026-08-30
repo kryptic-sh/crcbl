@@ -428,6 +428,15 @@ mod tests {
             // The last three words of the row, and the ones a writer that
             // stopped at the old padding leaves zero.
             emissive: [base + 0.8125, base + 0.875, base + 0.9375],
+            // And the six the material pages added past those, which are now
+            // the words a writer that stopped at the emissive triple leaves
+            // zero. Distinct from every other row's for the reason above.
+            normal_texture: n + 11,
+            normal_scale: base + 0.9375 + 1.0 / 32.0,
+            metallic_roughness_occlusion_texture: n + 13,
+            emissive_texture: n + 17,
+            alpha_cutoff: base + 0.9375 + 1.0 / 64.0,
+            flags: n + 19,
         }
     }
 

@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 380 "shaders/draw_gen.slang"
+#line 384 "shaders/draw_gen.slang"
 struct DrawGenParams_0
 {
     uint bucket_count_0;
@@ -35,17 +35,18 @@ struct GpuMesh_0
     float uv_scale_v_0;
     float uv_offset_u_0;
     float uv_offset_v_0;
+    uint flags_0;
 };
 
 
-#line 878
+#line 882
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<packed_float4, int(4)> data_0;
 };
 
 
-#line 878
+#line 882
 struct GpuInstance_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 transform_0;
@@ -53,7 +54,7 @@ struct GpuInstance_natural_0
     uint mesh_0;
     uint material_0;
     uint sector_0;
-    uint flags_0;
+    uint flags_1;
     uint base_vertex_1;
     uint previous_base_vertex_0;
     uint pad1_0;
@@ -61,7 +62,7 @@ struct GpuInstance_natural_0
 };
 
 
-#line 878
+#line 882
 struct KernelContext_0
 {
     DrawGenParams_0 constant* gen_0;
@@ -76,28 +77,28 @@ struct KernelContext_0
 };
 
 
-#line 594
+#line 598
 uint bucket_mesh_0(uint bucket_0, KernelContext_0 thread* kernelContext_0)
 {
     return kernelContext_0->tables_0[bucket_0];
 }
 
 
-#line 671
+#line 675
 uint mesh_arg_word_0(uint bucket_1, uint slot_0, KernelContext_0 thread* kernelContext_1)
 {
     return kernelContext_1->gen_0->bucket_count_0 + bucket_1 * 3U + slot_0;
 }
 
 
-#line 604
+#line 608
 uint bucket_clusters_0(uint bucket_2, KernelContext_0 thread* kernelContext_2)
 {
     return kernelContext_2->tables_0[kernelContext_2->gen_0->bucket_clusters_at_0 + bucket_2];
 }
 
 
-#line 345
+#line 349
 struct MeshLevels_0
 {
     uint first_group_0;
@@ -107,7 +108,7 @@ struct MeshLevels_0
 };
 
 
-#line 611
+#line 615
 MeshLevels_0 mesh_levels_of_0(uint mesh_1, KernelContext_0 thread* kernelContext_3)
 {
     uint at_0 = kernelContext_3->gen_0->mesh_levels_at_0 + mesh_1 * 4U;
@@ -120,42 +121,42 @@ MeshLevels_0 mesh_levels_of_0(uint mesh_1, KernelContext_0 thread* kernelContext
 }
 
 
-#line 742
+#line 746
 float max_stretch_0(matrix<float,int(3),int(3)>  basis_0)
 {
     matrix<float,int(3),int(3)>  _S1 = (((basis_0) * (transpose(basis_0))));
 
-#line 744
+#line 748
     float bound_0 = 0.0f;
 
-#line 744
+#line 748
     uint row_0 = 0U;
 
     for(;;)
     {
 
-#line 746
+#line 750
         if(row_0 < 3U)
         {
         }
         else
         {
 
-#line 746
+#line 750
             break;
         }
         float _S2 = max(bound_0, abs(_S1[row_0][int(0)]) + abs(_S1[row_0][int(1)]) + abs(_S1[row_0][int(2)]));
 
-#line 746
+#line 750
         uint row_1 = row_0 + 1U;
 
-#line 746
+#line 750
         bound_0 = _S2;
 
-#line 746
+#line 750
         row_0 = row_1;
 
-#line 746
+#line 750
     }
 
 
@@ -164,7 +165,7 @@ float max_stretch_0(matrix<float,int(3),int(3)>  basis_0)
 }
 
 
-#line 300
+#line 304
 struct LevelGroup_0
 {
     uint level_0;
@@ -176,7 +177,7 @@ struct LevelGroup_0
 };
 
 
-#line 629
+#line 633
 LevelGroup_0 level_group_at_0(uint group_0, KernelContext_0 thread* kernelContext_4)
 {
     uint at_1 = kernelContext_4->gen_0->level_groups_at_0 + group_0 * 6U;
@@ -191,16 +192,16 @@ LevelGroup_0 level_group_at_0(uint group_0, KernelContext_0 thread* kernelContex
 }
 
 
-#line 708
+#line 712
 float projected_error_0(float error_1, float3 center_0, float radius_1, float3 eye_0, float pixels_per_unit_0)
 {
     float3 delta_0 = eye_0 - center_0;
     float _S3 = delta_0.x;
 
-#line 711
+#line 715
     float _S4 = delta_0.y;
 
-#line 711
+#line 715
     float _S5 = delta_0.z;
     float distance_0 = sqrt(_S3 * _S3 + _S4 * _S4 + _S5 * _S5) - radius_1;
     if(distance_0 <= 0.0f)
@@ -211,78 +212,78 @@ float projected_error_0(float error_1, float3 center_0, float radius_1, float3 e
 }
 
 
-#line 762
+#line 766
 uint group_is_expanded_0(float error_2, float3 center_1, float radius_2, float3 eye_1, uint was_0, KernelContext_0 thread* kernelContext_5)
 {
     float projected_0 = projected_error_0(error_2, center_1, radius_2, eye_1, kernelContext_5->gen_0->lod_params_0.x);
 
-#line 764
+#line 768
     bool expanded_0;
 
     if(projected_0 > (kernelContext_5->gen_0->lod_params_0.y))
     {
 
-#line 766
+#line 770
         expanded_0 = true;
 
-#line 766
+#line 770
     }
     else
     {
 
-#line 766
+#line 770
         if(was_0 != 0U)
         {
 
-#line 766
+#line 770
             expanded_0 = projected_0 > (kernelContext_5->gen_0->lod_params_0.z);
 
-#line 766
+#line 770
         }
         else
         {
 
-#line 766
+#line 770
             expanded_0 = false;
 
-#line 766
+#line 770
         }
 
-#line 766
+#line 770
     }
 
-#line 766
+#line 770
     uint _S6;
     if(expanded_0)
     {
 
-#line 767
+#line 771
         _S6 = 1U;
 
-#line 767
+#line 771
     }
     else
     {
 
-#line 767
+#line 771
         _S6 = 0U;
 
-#line 767
+#line 771
     }
 
-#line 767
+#line 771
     return _S6;
 }
 
 
-#line 648
+#line 652
 uint level_mesh_at_0(uint level_1, KernelContext_0 thread* kernelContext_6)
 {
     return kernelContext_6->tables_0[kernelContext_6->gen_0->level_meshes_at_0 + level_1];
 }
 
 
-#line 658
+#line 662
 uint bucket_base_0(uint bucket_3, KernelContext_0 thread* kernelContext_7)
 {
     return kernelContext_7->gen_0->visible_capacity_0 + bucket_3 * kernelContext_7->gen_0->bucket_capacity_0;
@@ -295,136 +296,136 @@ uint count_word_0(uint bucket_4)
 }
 
 
-#line 837
+#line 841
 uint select_level_0(uint _S7, uint _S8, KernelContext_0 thread* kernelContext_8)
 {
 
-#line 837
+#line 841
     GpuInstance_natural_0 device* _S9 = kernelContext_8->instances_0+_S7;
 
-#line 837
+#line 841
     MeshLevels_0 _S10 = mesh_levels_of_0(_S9->mesh_0, kernelContext_8);
 
-#line 808
+#line 812
     float3 _S11 = kernelContext_8->gen_0->camera_position_0.xyz;
 
-#line 808
+#line 812
     matrix<float,int(4),int(4)>  _S12 = matrix<float,int(4),int(4)> (_S9->transform_0.data_0[int(0)][int(0)], _S9->transform_0.data_0[int(1)][int(0)], _S9->transform_0.data_0[int(2)][int(0)], _S9->transform_0.data_0[int(3)][int(0)], _S9->transform_0.data_0[int(0)][int(1)], _S9->transform_0.data_0[int(1)][int(1)], _S9->transform_0.data_0[int(2)][int(1)], _S9->transform_0.data_0[int(3)][int(1)], _S9->transform_0.data_0[int(0)][int(2)], _S9->transform_0.data_0[int(1)][int(2)], _S9->transform_0.data_0[int(2)][int(2)], _S9->transform_0.data_0[int(3)][int(2)], _S9->transform_0.data_0[int(0)][int(3)], _S9->transform_0.data_0[int(1)][int(3)], _S9->transform_0.data_0[int(2)][int(3)], _S9->transform_0.data_0[int(3)][int(3)]);
     float _S13 = max_stretch_0(matrix<float,int(3),int(3)> (_S12[int(0)].xyz, _S12[int(1)].xyz, _S12[int(2)].xyz));
     uint _S14 = _S8 * kernelContext_8->gen_0->group_stride_0;
 
-#line 810
+#line 814
     uint chosen_0 = _S10.top_level_0;
 
-#line 810
+#line 814
     uint i_0 = 0U;
 
     for(;;)
     {
 
-#line 812
+#line 816
         if(i_0 < (_S10.group_count_0))
         {
         }
         else
         {
 
-#line 812
+#line 816
             break;
         }
         uint at_2 = _S10.first_group_0 + i_0;
 
-#line 814
+#line 818
         LevelGroup_0 _S15 = level_group_at_0(at_2, kernelContext_8);
 
-#line 819
+#line 823
         uint _S16 = _S14 + at_2;
 
-#line 819
+#line 823
         uint _S17 = group_is_expanded_0(_S15.error_0 * _S13, (((float4(_S15.center_x_0, _S15.center_y_0, _S15.center_z_0, 1.0f)) * (_S12))).xyz, _S15.radius_0 * _S13, _S11, *(kernelContext_8->group_state_0+_S16), kernelContext_8);
         *(kernelContext_8->group_state_0+_S16) = _S17;
 
-#line 820
+#line 824
         bool _S18;
         if(_S17 == 1U)
         {
 
-#line 821
+#line 825
             _S18 = (_S15.level_0) < chosen_0;
 
-#line 821
+#line 825
         }
         else
         {
 
-#line 821
+#line 825
             _S18 = false;
 
-#line 821
+#line 825
         }
 
-#line 821
+#line 825
         if(_S18)
         {
 
-#line 821
+#line 825
             chosen_0 = _S15.level_0;
 
-#line 821
+#line 825
         }
 
-#line 812
+#line 816
         i_0 = i_0 + 1U;
 
-#line 812
+#line 816
     }
 
-#line 826
+#line 830
     return chosen_0;
 }
 
 
-#line 837
+#line 841
 [[kernel]] void computeMain(uint3 thread_0 [[thread_position_in_grid]], DrawGenParams_0 constant* gen_1 [[buffer(0)]], uint device* tables_1 [[buffer(4)]], GpuMesh_0 device* meshes_1 [[buffer(2)]], atomic<uint> device* args_1 [[buffer(6)]], atomic<uint> device* counts_and_mesh_args_1 [[buffer(7)]], uint device* visible_count_1 [[buffer(3)]], uint device* visible_instances_1 [[buffer(5)]], GpuInstance_natural_0 device* instances_1 [[buffer(1)]], uint device* group_state_1 [[buffer(8)]])
 {
 
-#line 837
+#line 841
     thread KernelContext_0 kernelContext_9;
 
-#line 837
+#line 841
     (&kernelContext_9)->gen_0 = gen_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->tables_0 = tables_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->meshes_0 = meshes_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->args_0 = args_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->counts_and_mesh_args_0 = counts_and_mesh_args_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->visible_count_0 = visible_count_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->visible_instances_0 = visible_instances_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->instances_0 = instances_1;
 
-#line 837
+#line 841
     (&kernelContext_9)->group_state_0 = group_state_1;
 
     uint index_0 = thread_0.x;
 
-#line 844
+#line 848
     if(index_0 < (gen_1->bucket_count_0))
     {
 
-#line 844
+#line 848
         uint _S19 = bucket_mesh_0(index_0, &kernelContext_9);
 
         GpuMesh_0 mesh_2 = (&kernelContext_9)->meshes_0[_S19];
@@ -432,30 +433,30 @@ uint select_level_0(uint _S7, uint _S8, KernelContext_0 thread* kernelContext_8)
         atomic_store_explicit((&kernelContext_9)->args_0+at_3, mesh_2.index_count_0, memory_order_relaxed);
         atomic_store_explicit((&kernelContext_9)->args_0+(at_3 + 2U), mesh_2.base_index_0, memory_order_relaxed);
 
-#line 855
+#line 859
         atomic_store_explicit((&kernelContext_9)->args_0+(at_3 + 3U), 0U, memory_order_relaxed);
         atomic_store_explicit((&kernelContext_9)->args_0+(at_3 + 4U), 0U, memory_order_relaxed);
 
-#line 856
+#line 860
         uint _S20 = mesh_arg_word_0(index_0, 0U, &kernelContext_9);
 
-#line 863
+#line 867
         atomic<uint> device* _S21 = (&kernelContext_9)->counts_and_mesh_args_0+_S20;
 
-#line 863
+#line 867
         uint _S22 = bucket_clusters_0(index_0, &kernelContext_9);
 
-#line 863
+#line 867
         atomic_store_explicit(_S21, _S22, memory_order_relaxed);
 
-#line 863
+#line 867
         uint _S23 = mesh_arg_word_0(index_0, 2U, &kernelContext_9);
         atomic_store_explicit((&kernelContext_9)->counts_and_mesh_args_0+_S23, 1U, memory_order_relaxed);
 
-#line 844
+#line 848
     }
 
-#line 871
+#line 875
     if(index_0 >= (min((&kernelContext_9)->visible_count_0[0U], min((&kernelContext_9)->gen_0->visible_capacity_0, (&kernelContext_9)->gen_0->bucket_capacity_0))))
     {
         return;
@@ -465,57 +466,57 @@ uint select_level_0(uint _S7, uint _S8, KernelContext_0 thread* kernelContext_8)
 
     uint device* _S24 = (&kernelContext_9)->visible_instances_0+index_0;
 
-#line 878
+#line 882
     uint instance_index_0 = *_S24;
 
-#line 878
+#line 882
     MeshLevels_0 _S25 = mesh_levels_of_0(((&kernelContext_9)->instances_0+*_S24)->mesh_0, &kernelContext_9);
 
-#line 878
+#line 882
     uint _S26 = select_level_0(*_S24, *_S24, &kernelContext_9);
 
-#line 878
+#line 882
     uint _S27 = level_mesh_at_0(_S25.first_level_0 + _S26, &kernelContext_9);
 
-#line 878
+#line 882
     uint bucket_5 = 0U;
 
-#line 891
+#line 895
     for(;;)
     {
 
-#line 891
+#line 895
         if(bucket_5 < (gen_1->bucket_count_0))
         {
         }
         else
         {
 
-#line 891
+#line 895
             break;
         }
 
-#line 891
+#line 895
         uint _S28 = bucket_mesh_0(bucket_5, &kernelContext_9);
 
         if(_S28 != _S27)
         {
             bucket_5 = bucket_5 + 1U;
 
-#line 891
+#line 895
             continue;
         }
 
-#line 897
+#line 901
         uint slot_1 = atomic_fetch_add_explicit((&kernelContext_9)->args_0+(bucket_5 * 5U + 1U), 1U, memory_order_relaxed);
 
-#line 897
+#line 901
         uint _S29 = mesh_arg_word_0(bucket_5, 1U, &kernelContext_9);
 
-#line 904
+#line 908
         uint _S30 = atomic_fetch_add_explicit((&kernelContext_9)->counts_and_mesh_args_0+_S29, 1U, memory_order_relaxed);
 
-#line 904
+#line 908
         uint _S31 = bucket_base_0(bucket_5, &kernelContext_9);
 
         *((&kernelContext_9)->visible_instances_0+(_S31 + slot_1)) = instance_index_0;
@@ -526,7 +527,7 @@ uint select_level_0(uint _S7, uint _S8, KernelContext_0 thread* kernelContext_8)
         {
             atomic_store_explicit((&kernelContext_9)->counts_and_mesh_args_0+count_word_0(bucket_5), 1U, memory_order_relaxed);
 
-#line 910
+#line 914
         }
 
 

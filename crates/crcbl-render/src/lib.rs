@@ -214,7 +214,7 @@ pub use material_table::{
 };
 pub use menu::{MenuArt, MenuRenderer, menu_camera, menu_view_projection};
 pub use mesh_pool::{
-    Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, UPLOAD_TIMEOUT,
+    Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, MeshUpload, UPLOAD_TIMEOUT,
 };
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
 pub use orbit::OrbitCamera;

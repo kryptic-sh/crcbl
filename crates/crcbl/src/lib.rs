@@ -500,6 +500,11 @@ mod tests {
                     uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(indices),
                     clusters,
+                    // `mesh::pyramid_vertices` is built with
+                    // `MeshVertex::from_normal`, so its frame is
+                    // `orthonormal_basis`' stand-in and this declines
+                    // `GpuMesh::MESH_AUTHORED_TANGENTS`.
+                    flags: 0,
                 },
             }],
             materials: vec![mesh::GpuMaterial::UNTINTED],

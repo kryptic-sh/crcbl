@@ -323,6 +323,7 @@ fn translated(geometry: Geometry<'static>, offset: Vec3) -> Geometry<'static> {
         uv_range,
         indices,
         mut clusters,
+        flags,
     } = geometry
     else {
         panic!("crcbl::greybox's primitives are flat meshes, and this one was not")
@@ -347,6 +348,10 @@ fn translated(geometry: Geometry<'static>, offset: Vec3) -> Geometry<'static> {
         uv_range,
         indices,
         clusters,
+        // Carried through rather than re-decided: a translation moves
+        // positions and leaves the tangent frame exactly as the primitive
+        // built it, so whatever it claimed it still claims.
+        flags,
     }
 }
 

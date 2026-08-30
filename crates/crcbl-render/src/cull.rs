@@ -521,6 +521,9 @@ mod tests {
             // Read by nothing here: this pass resolves boxes, and the range is
             // the vertex stage's.
             uv_range: crcbl_shaders::vertex::UvRange::default(),
+            // Read by nothing here either, and for the same reason: the tangent
+            // frame is the raster stages'.
+            flags: 0,
         }
     }
 

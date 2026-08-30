@@ -75,6 +75,10 @@ pub fn dag_scene(face: &Face) -> Result<SceneDesc<'static>, ClusterDagError> {
                 uv_range: crate::scene::uv_range(),
                 levels,
                 dag,
+                // No `MESH_AUTHORED_TANGENTS`: every level's bytes come from
+                // `crate::scene::vertex_bytes`, which builds its vertices with
+                // `MeshVertex::from_normal` and so carries no authored tangent.
+                flags: 0,
             },
         }],
         materials: vec![ROCK],

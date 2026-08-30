@@ -941,6 +941,11 @@ impl MeshBuilder {
                 uv_range,
                 indices: Cow::Owned(self.indices),
                 clusters,
+                // No `MESH_AUTHORED_TANGENTS`: `MeshVertex::from_normal` above
+                // fills the frame with `orthonormal_basis`' stand-in, which
+                // agrees with no UV parameterisation, so the room has no
+                // authored tangent to claim.
+                flags: 0,
             },
         }
     }

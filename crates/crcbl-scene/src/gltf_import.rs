@@ -52,13 +52,18 @@
 //! which of [`GltfScene::images`] each material's `baseColorTexture` names, and
 //! [`GltfScene::images`] carries that image's **encoded** bytes.
 //!
-//! `metallicRoughnessTexture`, `normalTexture`, `occlusionTexture` and
-//! `emissiveTexture` are not extracted. Not an oversight and not a decode
-//! question: [`GpuMaterial`] has one texture column, so there is nowhere for a
-//! second map to go — see `docs/backlog.md`'s "The material table has both
-//! halves". The one whose absence is *visible* is the metallic-roughness map: a
-//! document that varies gloss over a surface arrives with its factor applied
-//! flat across it.
+//! `normalTexture` rides that same seam: [`GltfScene::normal_textures`] says
+//! which image each material's normal map is, and the row's `normal_texture`
+//! column is left at [`GpuMaterial::NO_PAGE`] for the page builder to point.
+//! Its `scale` is not a page layer and does go on the row — see `build`.
+//!
+//! `metallicRoughnessTexture`, `occlusionTexture` and `emissiveTexture` are not
+//! extracted. Not an oversight and not a decode question: [`GpuMaterial`] has a
+//! column for each and no shader reads one, so an image pulled out for them
+//! would be a page layer nothing samples. `docs/plan/43-render-standards.md`
+//! §2's later rungs are what spend them. The one whose absence is *visible* is
+//! the metallic-roughness map: a document that varies gloss over a surface
+//! arrives with its factor applied flat across it.
 //!
 //! # An image that will not resolve is skipped, where a buffer that will not is
 //! refused
@@ -110,9 +115,11 @@
 //!
 //! # What is parsed and dropped
 //!
-//! Vertex colours, tangents and `TEXCOORD_1` are read by nothing here and so
-//! are not extracted, and neither is a second influence set — `JOINTS_1` and
+//! Vertex colours and `TEXCOORD_1` are read by nothing here and so are not
+//! extracted, and neither is a second influence set — `JOINTS_1` and
 //! `WEIGHTS_1` — so a vertex arrives bound to at most four joints.
+//! [`GltfPrimitive::tangents`] *is* read; [`crate::gltf_render`] is what turns
+//! it into a vertex frame.
 //!
 //! **Morph targets are dropped and warned about**, naming the file and the
 //! count, rather than being silently absent from the result: a viewer showing a
@@ -157,6 +164,7 @@ pub struct GltfScene {
     meshes: Vec<GltfMesh>,
     materials: Vec<GpuMaterial>,
     base_color_textures: Vec<Option<GltfTexture>>,
+    normal_textures: Vec<Option<GltfTexture>>,
     images: Vec<GltfImage>,
     nodes: Vec<GltfNode>,
     instances: Vec<GltfInstance>,
@@ -199,6 +207,22 @@ impl GltfScene {
     #[must_use]
     pub fn base_color_textures(&self) -> &[Option<GltfTexture>] {
         &self.base_color_textures
+    }
+
+    /// Which image each material's `normalTexture` names, on
+    /// [`base_color_textures`](Self::base_color_textures)' terms exactly:
+    /// parallel to [`materials`](Self::materials), `None` where the material
+    /// names no normal map, and every [`GltfTexture::image`] a valid index into
+    /// [`images`](Self::images).
+    ///
+    /// The map's `scale` is **not** here: that is a material factor and it
+    /// rides on the row, in [`GpuMaterial::normal_scale`]. What a row cannot
+    /// carry is the *index*, which is a page layer — see the [module
+    /// docs](self).
+    #[inline]
+    #[must_use]
+    pub fn normal_textures(&self) -> &[Option<GltfTexture>] {
+        &self.normal_textures
     }
 
     /// The document's `images` array, in file order, each still encoded.
@@ -709,6 +733,7 @@ impl GltfMesh {
 /// trivial `0..vertex_count` so that every primitive here is indexed and the
 /// GPU path has one case rather than two.
 /// [`normals`](GltfPrimitive::normals),
+/// [`tangents`](GltfPrimitive::tangents),
 /// [`tex_coords`](GltfPrimitive::tex_coords),
 /// [`joints`](GltfPrimitive::joints) and
 /// [`weights`](GltfPrimitive::weights) are empty when the file has none,
@@ -721,6 +746,7 @@ impl GltfMesh {
 pub struct GltfPrimitive {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    tangents: Vec<[f32; 4]>,
     tex_coords: Vec<[f32; 2]>,
     joints: Vec<[u16; 4]>,
     weights: Vec<[f32; 4]>,
@@ -741,6 +767,23 @@ impl GltfPrimitive {
     #[must_use]
     pub fn normals(&self) -> &[[f32; 3]] {
         &self.normals
+    }
+
+    /// `TANGENT`, or empty if the file has none.
+    ///
+    /// glTF stores the attribute as a `VEC3` **and a handedness**, in one
+    /// `float4`: `xyz` is the unit surface tangent and `w` is `+1` or `-1`,
+    /// the sign a client multiplies `cross(normal, tangent)` by to get the
+    /// bitangent. Both halves are reported as the file wrote them — the sign
+    /// is the half that cannot be re-derived, because a mirrored UV shell is
+    /// geometrically indistinguishable from an unmirrored one.
+    ///
+    /// [`crcbl_shaders::vertex::TangentFrame`] is what this becomes, through
+    /// [`crate::gltf_render`].
+    #[inline]
+    #[must_use]
+    pub fn tangents(&self) -> &[[f32; 4]] {
+        &self.tangents
     }
 
     /// `TEXCOORD_0`, or empty if the file has none.
@@ -1086,6 +1129,20 @@ fn build(
                 })
         })
         .collect();
+    let normal_textures = document
+        .materials()
+        .map(|material| {
+            material
+                .normal_texture()
+                // Load-bearing for `base_color_textures`' reason, and the same
+                // one: `Texture::source` panics on a texture naming no image.
+                .filter(|info| texture_has_an_image(document, info.texture().index()))
+                .map(|info| GltfTexture {
+                    image: info.texture().source().index(),
+                    tex_coord: info.tex_coord(),
+                })
+        })
+        .collect();
     let materials = document
         .materials()
         .map(|material| {
@@ -1111,6 +1168,27 @@ fn build(
                 // the engine's own greybox mode, not something glTF describes.
                 tiling: GpuMaterial::TILING_AUTHORED,
                 tile_metres: GpuMaterial::UNTINTED.tile_metres,
+                // Every page column on the same argument as `base_color_texture`
+                // above: a layer is known only to whoever builds the page, and
+                // the document's own answer is carried beside the row in
+                // `normal_textures`.
+                normal_texture: GpuMaterial::NO_PAGE,
+                metallic_roughness_occlusion_texture: GpuMaterial::NO_PAGE,
+                emissive_texture: GpuMaterial::NO_PAGE,
+                // **The `normalTexture`'s scale is not on that list.** It is a
+                // material factor, like the metallic and roughness ones above —
+                // a number the document wrote and the shader multiplies — where
+                // the *index* beside it is a page layer this module cannot know.
+                // So the two halves of one glTF object split here, and this is
+                // the half a row can hold.
+                normal_scale: material.normal_texture().map_or(1.0, |info| info.scale()),
+                // Read by nothing yet, on `GpuMaterial::alpha_cutoff`'s and
+                // `flags`' own terms. `UNTINTED`'s values rather than the
+                // document's `alphaCutoff` and `alphaMode`: a cutoff with no
+                // mode selecting it is a number, and reporting one the renderer
+                // would not honour is worse than reporting the default.
+                alpha_cutoff: GpuMaterial::UNTINTED.alpha_cutoff,
+                flags: GpuMaterial::UNTINTED.flags,
             }
         })
         .collect();
@@ -1144,6 +1222,7 @@ fn build(
         meshes,
         materials,
         base_color_textures,
+        normal_textures,
         images,
         skins: read_skins(document, buffers, key)?,
         clips: read_clips(document, buffers, key)?,
@@ -1445,6 +1524,10 @@ fn read_primitive(
         .read_normals()
         .map(|read| read.collect())
         .unwrap_or_default();
+    let tangents: Vec<[f32; 4]> = reader
+        .read_tangents()
+        .map(|read| read.collect())
+        .unwrap_or_default();
     let tex_coords: Vec<[f32; 2]> = reader
         .read_tex_coords(0)
         .map(|read| read.into_f32().collect())
@@ -1474,6 +1557,7 @@ fn read_primitive(
     }
     for (what, found) in [
         ("NORMAL", normals.len()),
+        ("TANGENT", tangents.len()),
         ("TEXCOORD_0", tex_coords.len()),
         ("JOINTS_0", joints.len()),
         ("WEIGHTS_0", weights.len()),
@@ -1502,6 +1586,7 @@ fn read_primitive(
     Ok(GltfPrimitive {
         positions,
         normals,
+        tangents,
         tex_coords,
         joints,
         weights,
@@ -1710,7 +1795,7 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::gltf_fixture::{
         Assets, BASE_COLOR, BIN_CHUNK_BUFFER, CLIP_ROTATIONS, CLIP_TIMES, EXTERNAL_BUFFER,
@@ -1738,6 +1823,16 @@ mod tests {
         tile_metres: 1.0,
         // glTF's own default `emissiveFactor`, which is no emission.
         emissive: [0.0; 3],
+        normal_texture: GpuMaterial::NO_PAGE,
+        // glTF's own default `normalTexture.scale`, which leaves a normal map
+        // as it was authored — and which a material with no normal map reports
+        // because the specification's default object is what it means.
+        normal_scale: 1.0,
+        metallic_roughness_occlusion_texture: GpuMaterial::NO_PAGE,
+        emissive_texture: GpuMaterial::NO_PAGE,
+        // glTF's own default `alphaCutoff`, and no alpha mode set.
+        alpha_cutoff: 0.5,
+        flags: 0,
     };
 
     /// The `animations` array a `KHR_animation_pointer` document carries: a
@@ -1982,6 +2077,184 @@ mod tests {
         assert!(
             error.to_string().contains("texture 0 names image 9"),
             "the refusal does not name the index: {error}",
+        );
+    }
+
+    /// The `TANGENT` [`tangent_glb`] authors, one per vertex of the fixture
+    /// triangle.
+    ///
+    /// Every one is a unit vector perpendicular to the fixture's normal —
+    /// `[0, 0, 1]` on all three vertices — so the frame each makes is
+    /// orthonormal and survives a `QTangent` round trip to that type's own
+    /// stated error. Their handedness is not all the same, deliberately: the
+    /// sign in `w` is the half of the attribute that no amount of geometry can
+    /// re-derive, so a fixture whose every vertex wrote `+1` would leave
+    /// exactly that half untested.
+    pub(crate) const TANGENTS: [[f32; 4]; 3] = [
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, -1.0],
+        [1.0, 0.0, 0.0, -1.0],
+    ];
+
+    /// The `normalTexture.scale` [`normal_mapped_glb`] authors.
+    ///
+    /// Deliberately not glTF's own default, so a row that reported the
+    /// specification's value instead of the document's could not pass for it.
+    pub(crate) const NORMAL_SCALE: f32 = 0.75;
+
+    /// [`triangle_bin`] with [`TANGENTS`] appended, which is what
+    /// [`tangent_json`]'s fifth buffer view slices.
+    pub(crate) fn tangent_bin() -> Vec<u8> {
+        let mut bytes = triangle_bin();
+        // A buffer view is four-byte aligned like any other, and an unaligned
+        // one would be this fixture's bug rather than the importer's.
+        while !bytes.len().is_multiple_of(4) {
+            bytes.push(0);
+        }
+        for tangent in TANGENTS {
+            for component in tangent {
+                bytes.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    /// [`triangle_json`] with a `TANGENT` attribute over [`tangent_bin`].
+    ///
+    /// `count` is the accessor's own count rather than [`TANGENTS`]' length, so
+    /// a caller can author a `TANGENT` **shorter** than `POSITION` — the case
+    /// the length check refuses.
+    pub(crate) fn tangent_json(count: usize) -> String {
+        let bin = tangent_bin();
+        let span = TANGENTS.len() * size_of::<[f32; 4]>();
+        let offset = bin.len() - span;
+        let base = triangle_json(&format!(r#"{{ "byteLength": {} }}"#, bin.len()));
+        let with_attribute = replacing(
+            &base,
+            r#""POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2"#,
+            r#""POSITION": 0, "NORMAL": 1, "TANGENT": 4, "TEXCOORD_0": 2"#,
+        );
+        let with_accessor = replacing(
+            &with_attribute,
+            r#"{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }"#,
+            &format!(
+                r#"{{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }},
+    {{ "bufferView": 4, "componentType": 5126, "count": {count}, "type": "VEC4" }}"#
+            ),
+        );
+        replacing(
+            &with_accessor,
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6 }"#,
+            &format!(
+                r#"{{ "buffer": 0, "byteOffset": 96, "byteLength": 6 }},
+    {{ "buffer": 0, "byteOffset": {offset}, "byteLength": {span} }}"#
+            ),
+        )
+    }
+
+    /// [`tangent_json`] closed into a `.glb`.
+    pub(crate) fn tangent_glb(count: usize) -> Vec<u8> {
+        glb(&tangent_json(count), Some(&tangent_bin()))
+    }
+
+    /// A one-triangle document whose material carries a `normalTexture` at
+    /// [`NORMAL_SCALE`] — and **no** `baseColorTexture`.
+    ///
+    /// The base-colour slot is left empty deliberately. The two pages are
+    /// indexed separately, so a document that filled both would let a row
+    /// pointed at the wrong page's layer map still read the right number.
+    pub(crate) fn normal_mapped_glb() -> Vec<u8> {
+        let (json, bin) = textured_parts(&png_bytes(2, 2, &IMAGE_TEXELS), "image/png", 0);
+        let json = replacing(
+            &json,
+            r#""baseColorFactor": [0.25, 0.5, 0.75, 1.0],
+      "baseColorTexture": { "index": 0, "texCoord": 0 }
+    }"#,
+            &format!(
+                r#""baseColorFactor": [0.25, 0.5, 0.75, 1.0]
+    }},
+    "normalTexture": {{ "index": 0, "texCoord": 0, "scale": {NORMAL_SCALE} }}"#
+            ),
+        );
+        glb(&json, Some(&bin))
+    }
+
+    #[test]
+    fn a_primitive_with_a_tangent_accessor_reads_it_back_with_its_handedness() {
+        let scene =
+            import_glb_bytes(&tangent_glb(TANGENTS.len())).expect("a TANGENT document imports");
+
+        let primitive = &scene.meshes()[0].primitives()[0];
+        assert_eq!(
+            primitive.tangents(),
+            TANGENTS,
+            "the float4 arrives as authored, the handedness in `w` included"
+        );
+        assert!(
+            primitive.tangents().iter().any(|tangent| tangent[3] < 0.0),
+            "the fixture must carry a left-handed vertex or the sign is untested",
+        );
+    }
+
+    #[test]
+    fn a_primitive_with_no_tangent_accessor_reads_back_no_tangents() {
+        let scene = import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        assert!(
+            scene.meshes()[0].primitives()[0].tangents().is_empty(),
+            "an absent attribute is empty, not invented",
+        );
+    }
+
+    /// A `TANGENT` shorter than `POSITION` is refused the way every other
+    /// short attribute is: there is no vertex for the missing entries to
+    /// belong to, and filling them would be this crate inventing a frame.
+    #[test]
+    fn a_tangent_shorter_than_position_is_refused() {
+        let error = import_glb_bytes(&tangent_glb(TANGENTS.len() - 1))
+            .expect_err("a short TANGENT makes the document malformed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("has 3 positions and 2 TANGENT values"),
+            "the refusal does not name the attribute and both counts: {error}",
+        );
+    }
+
+    #[test]
+    fn a_material_with_a_normal_texture_reports_its_image_and_keeps_the_scale_on_the_row() {
+        let scene = import_glb_bytes(&normal_mapped_glb()).expect("the fixture imports");
+
+        let texture = scene.normal_textures()[0].expect("the material names a normalTexture");
+        assert_eq!(texture.image(), 0, "the document's only image");
+        assert_eq!(texture.tex_coord(), 0);
+        assert!(
+            scene.base_color_textures()[0].is_none(),
+            "the fixture moved its one texture to the normal slot",
+        );
+
+        assert_eq!(
+            scene.materials()[0].normal_scale,
+            NORMAL_SCALE,
+            "the scale is a material factor, so it rides on the row",
+        );
+        assert_eq!(
+            scene.materials()[0].normal_texture,
+            GpuMaterial::NO_PAGE,
+            "the index is a page layer, which this module cannot know",
+        );
+    }
+
+    #[test]
+    fn a_material_with_no_normal_texture_reports_none_and_the_specification_default_scale() {
+        let scene = import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        assert!(scene.normal_textures()[0].is_none());
+        assert_eq!(
+            scene.materials()[0].normal_scale,
+            GLTF_DEFAULT_MATERIAL.normal_scale,
+            "glTF's own `normalTexture.scale` default, which is a map left as authored",
         );
     }
 

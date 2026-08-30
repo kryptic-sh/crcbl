@@ -387,14 +387,18 @@ struct GpuMesh
     float uv_scale_v;
     float uv_offset_u;
     float uv_offset_v;
+    uint flags;
 };
+
+/// Matching `static const uint MESH_AUTHORED_TANGENTS` in `mesh.slang`.
+static const uint MESH_AUTHORED_TANGENTS = 1;
 
 /// Matching `struct GpuMaterial` in `mesh.slang`. Declared and not read — see
 /// the binding below.
 struct GpuMaterial
 {
     float4 base_color;
-    uint base_color_texture;
+    uint color_normal_pages;
     float metallic;
     float roughness;
     uint tiling;
@@ -402,6 +406,10 @@ struct GpuMaterial
     float emissive_r;
     float emissive_g;
     float emissive_b;
+    uint mro_emissive_pages;
+    float normal_scale;
+    float alpha_cutoff;
+    uint flags;
 };
 
 /// One cluster, matching `crcbl_shaders::meshlet::Meshlet`.
@@ -1091,7 +1099,33 @@ struct VertexOutput
     /// perspective divide happens in the fragment stage rather than here.
     float4 clip_position : TEXCOORD2;
     float4 previous_clip_position : TEXCOORD3;
+    /// This vertex's surface tangent in world space, through the instance
+    /// transform's **bare 3x3** — `mesh.slang` declares it with the whole
+    /// account of why a tangent and a normal take different matrices.
+    float3 world_tangent : TEXCOORD4;
+    /// Which frame the fragment stage perturbs this primitive's normal map in,
+    /// and which way its bitangent points. `nointerpolation` for `material`'s
+    /// reason: neither bit is a quantity.
+    nointerpolation uint frame : TEXCOORD5;
 };
+
+/// Matching `static const uint FRAME_AUTHORED_TANGENTS` in `mesh.slang`.
+static const uint FRAME_AUTHORED_TANGENTS = 1;
+
+/// Matching `static const uint FRAME_LEFT_HANDED` in `mesh.slang`.
+static const uint FRAME_LEFT_HANDED = 2;
+
+/// The `VertexOutput::frame` word for one drawn vertex, mirroring `frame_word`
+/// in `mesh.slang` line for line — the fragment stage is that file's for both
+/// paths, so a word built differently here would light a mesh-shader frame
+/// differently from the raster frame beside it.
+uint frame_word(uint mesh_flags, TangentFrame basis)
+{
+    uint word = (mesh_flags & MESH_AUTHORED_TANGENTS) != 0u ? FRAME_AUTHORED_TANGENTS : 0u;
+    return dot(cross(basis.normal, basis.tangent), basis.bitangent) < 0.0
+        ? (word | FRAME_LEFT_HANDED)
+        : word;
+}
 
 /// Corner `corner` of the packed corner array.
 uint corner_at(uint corner)
@@ -1505,6 +1539,13 @@ void emit_cluster(
         // `mesh.slang`'s vertex stage uses on the same normal — a scaled
         // instance would otherwise light differently on the two paths.
         output.world_normal = mul(normals, vertex.basis.normal);
+        // **The tangent through the bare 3x3, not the cofactor** — the pair
+        // `mesh.slang`'s vertex stage emits and `skinning.slang` argues: a
+        // tangent lies in the surface and is carried by the transform, a normal
+        // is perpendicular to it and needs the cofactor. The handedness rides
+        // beside them as a bit, so the fragment stage needs no third vector.
+        output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);
+        output.frame = frame_word(mesh.flags, vertex.basis);
         // Under either overlay the cluster's colour replaces the vertex's,
         // which is what makes a per-cluster fact — the level a cut spans, or
         // how close to the budget each patch is — visible at all. `LOD_VIEW` is

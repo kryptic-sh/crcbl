@@ -1074,7 +1074,7 @@ mod tests {
     use crcbl_shaders::mesh::VERTEX_STRIDE;
 
     use super::*;
-    use crate::mesh_pool::MeshPoolDesc;
+    use crate::mesh_pool::{MeshPoolDesc, MeshUpload};
     use crate::transient::TransientPool;
 
     fn open() -> (Recorder, Box<dyn Device>, QueueHandle) {
@@ -1225,10 +1225,13 @@ mod tests {
             .upload(
                 device,
                 queue,
-                "source",
-                &vec![0u8; VERTICES as usize * VERTEX_STRIDE],
-                &[0, 1, 2],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "source",
+                    vertices: &vec![0u8; VERTICES as usize * VERTEX_STRIDE],
+                    indices: &[0, 1, 2],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("the pool has room");
         pool.flush(device).expect("the null backend completes it");
@@ -1295,10 +1298,13 @@ mod tests {
             .upload(
                 device,
                 queue,
-                "source",
-                &vec![0u8; 8 * VERTEX_STRIDE],
-                &[0, 1, 2],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "source",
+                    vertices: &vec![0u8; 8 * VERTEX_STRIDE],
+                    indices: &[0, 1, 2],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("the pool has room");
         pool.flush(device).expect("the null backend completes it");
@@ -1340,10 +1346,13 @@ mod tests {
             .upload(
                 device,
                 queue,
-                "source",
-                &vec![0u8; VERTICES as usize * VERTEX_STRIDE],
-                &[0, 1, 2],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "source",
+                    vertices: &vec![0u8; VERTICES as usize * VERTEX_STRIDE],
+                    indices: &[0, 1, 2],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("the pool has room");
         pool.flush(device).expect("the null backend completes it");
@@ -1663,10 +1672,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "bind pose",
-                &vec![0u8; count as usize * VERTEX_STRIDE],
-                &[0, 1, 2],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "bind pose",
+                    vertices: &vec![0u8; count as usize * VERTEX_STRIDE],
+                    indices: &[0, 1, 2],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("room in both pools");
         pool.flush(device.as_ref()).expect("the null backend lands");

@@ -155,6 +155,10 @@ struct GpuMesh
     float uv_scale_v;
     float uv_offset_u;
     float uv_offset_v;
+    /// The mesh's flags word, matching `mesh.slang`. Declared and not read, for
+    /// the UV range's reason exactly: a row short of it puts every entry after
+    /// this one at the wrong offset, and nothing anywhere reports that.
+    uint flags;
 };
 
 /// Planes in a frustum. Six, and the loop below is written against this rather

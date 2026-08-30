@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 777 "shaders/mesh_cluster.slang"
+#line 785 "shaders/mesh_cluster.slang"
 struct ClusterPayload_0
 {
     uint cluster_0;
@@ -11,7 +11,7 @@ struct ClusterPayload_0
 };
 
 
-#line 794
+#line 802
 struct ClusterDrawConstants_0
 {
     uint base_0;
@@ -23,7 +23,7 @@ struct ClusterDrawConstants_0
 };
 
 
-#line 716
+#line 724
 struct DrawIndexedArgs_0
 {
     uint index_count_0;
@@ -34,7 +34,7 @@ struct DrawIndexedArgs_0
 };
 
 
-#line 413
+#line 421
 struct Meshlet_0
 {
     uint vertex_offset_1;
@@ -52,14 +52,14 @@ struct Meshlet_0
 };
 
 
-#line 1432
+#line 1466
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<packed_float4, int(4)> data_0;
 };
 
 
-#line 1432
+#line 1466
 struct GpuInstance_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 transform_0;
@@ -91,17 +91,18 @@ struct GpuMesh_0
     float uv_scale_v_0;
     float uv_offset_u_0;
     float uv_offset_v_0;
+    uint flags_1;
 };
 
 
-#line 1433
+#line 1467
 struct _MatrixStorage_float4x4_ColMajornatural_1
 {
     array<float4, int(4)> data_1;
 };
 
 
-#line 1433
+#line 1467
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_1, int(2)> data_2;
@@ -140,17 +141,17 @@ struct FrameUniforms_natural_0
 };
 
 
-#line 692
+#line 700
 struct ClusterSelect_0
 {
-    uint flags_1;
+    uint flags_2;
     uint vertex_base_0;
     uint producer_group_0;
     uint container_group_0;
 };
 
 
-#line 736
+#line 744
 struct CullParams_0
 {
     array<float4, int(6)> planes_0;
@@ -159,7 +160,7 @@ struct CullParams_0
 };
 
 
-#line 1623
+#line 1664
 struct KernelContext_0
 {
     ClusterDrawConstants_0 constant* draw_0;
@@ -181,19 +182,19 @@ struct KernelContext_0
 };
 
 
-#line 1184
+#line 1218
 uint group_is_live_0(uint3 group_0, KernelContext_0 thread* kernelContext_0)
 {
 
     uint _S1 = group_0.y;
     uint _S2 = group_0.x;
 
-#line 1187
+#line 1221
     return min(1U, max(kernelContext_0->draw_args_0[kernelContext_0->draw_0->bucket_0].instance_count_0, _S1) - _S1) * min(1U, max(kernelContext_0->draw_0->cluster_count_0, _S2) - _S2);
 }
 
 
-#line 839
+#line 847
 struct LevelGroup_0
 {
     uint level_0;
@@ -205,7 +206,7 @@ struct LevelGroup_0
 };
 
 
-#line 1111
+#line 1145
 LevelGroup_0 level_group_at_0(uint group_1, KernelContext_0 thread* kernelContext_1)
 {
     uint at_0 = kernelContext_1->draw_0->level_groups_at_0 + group_1 * 6U;
@@ -220,42 +221,42 @@ LevelGroup_0 level_group_at_0(uint group_1, KernelContext_0 thread* kernelContex
 }
 
 
-#line 637
+#line 645
 float max_stretch_0(matrix<float,int(3),int(3)>  basis_0)
 {
     matrix<float,int(3),int(3)>  _S3 = (((basis_0) * (transpose(basis_0))));
 
-#line 639
+#line 647
     float bound_0 = 0.0f;
 
-#line 639
+#line 647
     uint row_0 = 0U;
 
     for(;;)
     {
 
-#line 641
+#line 649
         if(row_0 < 3U)
         {
         }
         else
         {
 
-#line 641
+#line 649
             break;
         }
         float _S4 = max(bound_0, abs(_S3[row_0][int(0)]) + abs(_S3[row_0][int(1)]) + abs(_S3[row_0][int(2)]));
 
-#line 641
+#line 649
         uint row_1 = row_0 + 1U;
 
-#line 641
+#line 649
         bound_0 = _S4;
 
-#line 641
+#line 649
         row_0 = row_1;
 
-#line 641
+#line 649
     }
 
 
@@ -264,16 +265,16 @@ float max_stretch_0(matrix<float,int(3),int(3)>  basis_0)
 }
 
 
-#line 596
+#line 604
 float projected_error_0(float error_1, float3 center_0, float radius_2, float3 eye_0, float pixels_per_unit_0)
 {
     float3 delta_0 = eye_0 - center_0;
     float _S5 = delta_0.x;
 
-#line 599
+#line 607
     float _S6 = delta_0.y;
 
-#line 599
+#line 607
     float _S7 = delta_0.z;
     float distance_0 = sqrt(_S5 * _S5 + _S6 * _S6 + _S7 * _S7) - radius_2;
     if(distance_0 <= 0.0f)
@@ -284,7 +285,7 @@ float projected_error_0(float error_1, float3 center_0, float radius_2, float3 e
 }
 
 
-#line 555
+#line 563
 float3 heat_tint_0(float projected_0, float expand_0, float hold_0)
 {
     float _S8 = max(expand_0, 9.99999997475242708e-07f);
@@ -306,43 +307,43 @@ float3 heat_tint_0(float projected_0, float expand_0, float hold_0)
 }
 
 
-#line 1152
+#line 1186
 float3 cluster_heat_0(uint cluster_index_0, matrix<float,int(4),int(4)>  transform_1, KernelContext_0 thread* kernelContext_2)
 {
     ClusterSelect_0 select_0 = kernelContext_2->cluster_select_0[cluster_index_0];
 
-#line 1154
+#line 1188
     float projected_1;
 
-    if(((select_0.flags_1) & 1U) != 0U)
+    if(((select_0.flags_2) & 1U) != 0U)
     {
 
-#line 1156
+#line 1190
         LevelGroup_0 _S9 = level_group_at_0(select_0.producer_group_0, kernelContext_2);
 
 
         float stretch_0 = max_stretch_0(matrix<float,int(3),int(3)> (transform_1[int(0)].xyz, transform_1[int(1)].xyz, transform_1[int(2)].xyz));
 
-#line 1159
+#line 1193
         projected_1 = projected_error_0(_S9.error_0 * stretch_0, (((float4(_S9.center_x_1, _S9.center_y_1, _S9.center_z_1, 1.0f)) * (transform_1))).xyz, _S9.radius_1 * stretch_0, kernelContext_2->frame_0->camera_position_0.xyz, kernelContext_2->frame_0->lod_params_0.x);
 
-#line 1156
+#line 1190
     }
     else
     {
 
-#line 1156
+#line 1190
         projected_1 = 0.0f;
 
-#line 1156
+#line 1190
     }
 
-#line 1165
+#line 1199
     return heat_tint_0(projected_1, kernelContext_2->frame_0->lod_params_0.y, kernelContext_2->frame_0->lod_params_0.z);
 }
 
 
-#line 661
+#line 669
 float3 lod_tint_0(uint level_1)
 {
     switch(level_1 % 8U)
@@ -350,65 +351,65 @@ float3 lod_tint_0(uint level_1)
     case 0U:
         {
 
-#line 665
+#line 673
             return float3(0.89999997615814209f, 0.25f, 0.25f);
         }
     case 1U:
         {
 
-#line 666
+#line 674
             return float3(0.94999998807907104f, 0.60000002384185791f, 0.20000000298023224f);
         }
     case 2U:
         {
 
-#line 667
+#line 675
             return float3(0.89999997615814209f, 0.89999997615814209f, 0.25f);
         }
     case 3U:
         {
 
-#line 668
+#line 676
             return float3(0.30000001192092896f, 0.85000002384185791f, 0.34999999403953552f);
         }
     case 4U:
         {
 
-#line 669
+#line 677
             return float3(0.25f, 0.80000001192092896f, 0.85000002384185791f);
         }
     case 5U:
         {
 
-#line 670
+#line 678
             return float3(0.30000001192092896f, 0.44999998807907104f, 0.94999998807907104f);
         }
     case 6U:
         {
 
-#line 671
+#line 679
             return float3(0.64999997615814209f, 0.34999999403953552f, 0.89999997615814209f);
         }
     default:
         {
 
-#line 672
+#line 680
             return float3(0.94999998807907104f, 0.44999998807907104f, 0.80000001192092896f);
         }
     }
 
-#line 672
+#line 680
 }
 
 
-#line 1384
+#line 1418
 matrix<float,int(3),int(3)>  normal_basis_0(matrix<float,int(3),int(3)>  basis_1)
 {
     return matrix<float,int(3),int(3)> (cross(basis_1[int(1)], basis_1[int(2)]), cross(basis_1[int(2)], basis_1[int(0)]), cross(basis_1[int(0)], basis_1[int(1)]));
 }
 
 
-#line 891
+#line 899
 float3 load_position_0(uint at_1, KernelContext_0 thread* kernelContext_3)
 {
     uint word_0 = at_1 * 3U;
@@ -514,13 +515,13 @@ struct MeshVertex_0
 };
 
 
-#line 902
+#line 910
 MeshVertex_0 load_vertex_0(uint at_2, float4 range_0, KernelContext_0 thread* kernelContext_4)
 {
     uint word_3 = kernelContext_4->frame_0->vertex_pool_0.x + at_2 * 5U;
     thread MeshVertex_0 vertex_0;
 
-#line 905
+#line 913
     float3 _S15 = load_position_0(at_2, kernelContext_4);
     (&vertex_0)->position_0 = _S15;
     (&vertex_0)->basis_3 = decode_qtangent_0(unpack_snorm16x4_0(kernelContext_4->vertices_0[word_3], kernelContext_4->vertices_0[word_3 + 1U]));
@@ -530,7 +531,46 @@ MeshVertex_0 load_vertex_0(uint at_2, float4 range_0, KernelContext_0 thread* ke
 }
 
 
-#line 1097
+#line 1122
+uint frame_word_0(uint mesh_flags_0, const TangentFrame_0 thread* basis_4)
+{
+
+#line 1122
+    uint word_4;
+
+    if((mesh_flags_0 & 1U) != 0U)
+    {
+
+#line 1124
+        word_4 = 1U;
+
+#line 1124
+    }
+    else
+    {
+
+#line 1124
+        word_4 = 0U;
+
+#line 1124
+    }
+
+    if((dot(cross(basis_4->normal_0, basis_4->tangent_0), basis_4->bitangent_0)) < 0.0f)
+    {
+
+#line 1126
+        word_4 = word_4 | 2U;
+
+#line 1126
+    }
+
+#line 1125
+    return word_4;
+}
+
+
+
+
 uint corner_at_0(uint corner_0, KernelContext_0 thread* kernelContext_5)
 {
 
@@ -538,7 +578,7 @@ uint corner_at_0(uint corner_0, KernelContext_0 thread* kernelContext_5)
 }
 
 
-#line 1078
+#line 1086
 struct VertexOutput_0
 {
     float4 position_1 [[position]];
@@ -549,634 +589,651 @@ struct VertexOutput_0
     float2 uv_0 [[user(TEXCOORD1)]];
     float4 clip_position_0 [[user(TEXCOORD2)]];
     float4 previous_clip_position_0 [[user(TEXCOORD3)]];
+    float3 world_tangent_0 [[user(TEXCOORD4)]];
+    [[flat]] uint frame_1 [[user(TEXCOORD5)]];
 };
 
 
-#line 1548
-[[mesh]] void meshMain(uint3 lane_1 [[thread_position_in_threadgroup]], uint3 group_2 [[threadgroup_position_in_grid]], metal::mesh<VertexOutput_0, void, 64U, 124U, metal::topology::triangle> _slang_mesh, ClusterDrawConstants_0 constant* draw_1 [[buffer(3)]], DrawIndexedArgs_0 device* draw_args_1 [[buffer(10)]], Meshlet_0 device* clusters_1 [[buffer(7)]], uint device* visible_instances_1 [[buffer(5)]], GpuInstance_natural_0 device* instances_1 [[buffer(2)]], GpuMesh_0 device* meshes_1 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_1 [[buffer(0)]], ClusterSelect_0 device* cluster_select_1 [[buffer(13)]], uint device* tables_1 [[buffer(19)]], uint device* cluster_vertices_1 [[buffer(8)]], uint device* vertices_1 [[buffer(1)]], uint device* cluster_corners_1 [[buffer(9)]], uint device* group_state_1 [[buffer(15)]], CullParams_0 constant* cull_1 [[buffer(11)]], atomic<uint> device* cull_stats_1 [[buffer(12)]], uint device* cluster_selection_1 [[buffer(14)]])
+#line 1589
+[[mesh]] void meshMain(uint3 lane_1 [[thread_position_in_threadgroup]], uint3 group_2 [[threadgroup_position_in_grid]], metal::mesh<VertexOutput_0, void, 64U, 124U, metal::topology::triangle> _slang_mesh, ClusterDrawConstants_0 constant* draw_1 [[buffer(3)]], DrawIndexedArgs_0 device* draw_args_1 [[buffer(10)]], Meshlet_0 device* clusters_1 [[buffer(7)]], uint device* visible_instances_1 [[buffer(5)]], GpuInstance_natural_0 device* instances_1 [[buffer(2)]], GpuMesh_0 device* meshes_1 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_2 [[buffer(0)]], ClusterSelect_0 device* cluster_select_1 [[buffer(13)]], uint device* tables_1 [[buffer(19)]], uint device* cluster_vertices_1 [[buffer(8)]], uint device* vertices_1 [[buffer(1)]], uint device* cluster_corners_1 [[buffer(9)]], uint device* group_state_1 [[buffer(15)]], CullParams_0 constant* cull_1 [[buffer(11)]], atomic<uint> device* cull_stats_1 [[buffer(12)]], uint device* cluster_selection_1 [[buffer(14)]])
 {
     thread KernelContext_0 kernelContext_6;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->draw_0 = draw_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->draw_args_0 = draw_args_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->clusters_0 = clusters_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->visible_instances_0 = visible_instances_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->instances_0 = instances_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->meshes_0 = meshes_1;
 
-#line 1550
-    (&kernelContext_6)->frame_0 = frame_1;
+#line 1591
+    (&kernelContext_6)->frame_0 = frame_2;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->cluster_select_0 = cluster_select_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->tables_0 = tables_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->cluster_vertices_0 = cluster_vertices_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->vertices_0 = vertices_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->cluster_corners_0 = cluster_corners_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->group_state_0 = group_state_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->cull_0 = cull_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->cull_stats_0 = cull_stats_1;
 
-#line 1550
+#line 1591
     (&kernelContext_6)->cluster_selection_0 = cluster_selection_1;
 
-#line 1550
+#line 1591
     uint lane_2 = lane_1.x;
 
-#line 1550
+#line 1591
     uint _S16 = group_is_live_0(group_2, &kernelContext_6);
 
-#line 1555
+#line 1596
     uint _S17 = (&kernelContext_6)->draw_0->cluster_base_0 + group_2.x * _S16;
 
-#line 1555
+#line 1596
     uint _S18 = group_2.y;
 
-#line 1555
+#line 1596
     for(;;)
     {
 
-#line 1555
+#line 1596
         Meshlet_0 cluster_1 = (&kernelContext_6)->clusters_0[_S17];
 
-#line 1555
+#line 1596
         _slang_mesh.set_primitive_count((cluster_1.triangle_count_0 * _S16));
 
-#line 1555
+#line 1596
         if(_S16 == 0U)
         {
 
-#line 1555
+#line 1596
             break;
         }
 
-#line 1555
+#line 1596
         GpuInstance_natural_0 device* _S19 = (&kernelContext_6)->instances_0+(&kernelContext_6)->visible_instances_0[(&kernelContext_6)->draw_0->base_0 + _S18];
 
-#line 1555
+#line 1596
         GpuMesh_0 mesh_1 = (&kernelContext_6)->meshes_0[_S19->mesh_0];
 
-#line 1555
+#line 1596
         float4 _S20 = float4(0.0f, 0.0f, 0.0f, 1.0f);
 
-#line 1555
+#line 1596
         float4 overlay_0;
 
-#line 1555
+#line 1596
         if(((&kernelContext_6)->frame_0->ambient_0.w) >= 2.5f)
         {
 
-#line 1555
+#line 1596
             float3 _S21 = cluster_heat_0(_S17, matrix<float,int(4),int(4)> (_S19->transform_0.data_0[int(0)][int(0)], _S19->transform_0.data_0[int(1)][int(0)], _S19->transform_0.data_0[int(2)][int(0)], _S19->transform_0.data_0[int(3)][int(0)], _S19->transform_0.data_0[int(0)][int(1)], _S19->transform_0.data_0[int(1)][int(1)], _S19->transform_0.data_0[int(2)][int(1)], _S19->transform_0.data_0[int(3)][int(1)], _S19->transform_0.data_0[int(0)][int(2)], _S19->transform_0.data_0[int(1)][int(2)], _S19->transform_0.data_0[int(2)][int(2)], _S19->transform_0.data_0[int(3)][int(2)], _S19->transform_0.data_0[int(0)][int(3)], _S19->transform_0.data_0[int(1)][int(3)], _S19->transform_0.data_0[int(2)][int(3)], _S19->transform_0.data_0[int(3)][int(3)]), &kernelContext_6);
 
-#line 1555
+#line 1596
             overlay_0 = float4(_S21, 1.0f);
 
-#line 1555
+#line 1596
         }
         else
         {
 
-#line 1555
+#line 1596
             if(((&kernelContext_6)->frame_0->ambient_0.w) >= 1.5f)
             {
 
-#line 1555
-                overlay_0 = float4(lod_tint_0(((&kernelContext_6)->cluster_select_0[_S17].flags_1) >> 2U), 1.0f);
+#line 1596
+                overlay_0 = float4(lod_tint_0(((&kernelContext_6)->cluster_select_0[_S17].flags_2) >> 2U), 1.0f);
 
-#line 1555
+#line 1596
             }
             else
             {
 
-#line 1555
+#line 1596
                 overlay_0 = _S20;
 
-#line 1555
+#line 1596
             }
 
-#line 1555
+#line 1596
         }
 
-#line 1555
+#line 1596
         ClusterSelect_0 _S22 = (&kernelContext_6)->cluster_select_0[_S17];
 
-#line 1555
+#line 1596
         bool _S23 = ((_S19->flags_0) & 2U) != 0U;
 
-#line 1555
+#line 1596
         uint base_vertex_2;
 
-#line 1555
+#line 1596
         if(_S23)
         {
 
-#line 1555
+#line 1596
             base_vertex_2 = _S19->base_vertex_0;
 
-#line 1555
+#line 1596
         }
         else
         {
 
-#line 1555
+#line 1596
             base_vertex_2 = mesh_1.base_vertex_1;
 
-#line 1555
+#line 1596
         }
 
-#line 1555
+#line 1596
         uint t_2;
 
-#line 1555
+#line 1596
         if(_S23)
         {
 
-#line 1555
+#line 1596
             t_2 = _S19->previous_base_vertex_0;
 
-#line 1555
+#line 1596
         }
         else
         {
 
-#line 1555
+#line 1596
             t_2 = base_vertex_2;
 
-#line 1555
+#line 1596
         }
 
-#line 1555
+#line 1596
         matrix<float,int(4),int(4)>  _S24 = matrix<float,int(4),int(4)> (_S19->transform_0.data_0[int(0)][int(0)], _S19->transform_0.data_0[int(1)][int(0)], _S19->transform_0.data_0[int(2)][int(0)], _S19->transform_0.data_0[int(3)][int(0)], _S19->transform_0.data_0[int(0)][int(1)], _S19->transform_0.data_0[int(1)][int(1)], _S19->transform_0.data_0[int(2)][int(1)], _S19->transform_0.data_0[int(3)][int(1)], _S19->transform_0.data_0[int(0)][int(2)], _S19->transform_0.data_0[int(1)][int(2)], _S19->transform_0.data_0[int(2)][int(2)], _S19->transform_0.data_0[int(3)][int(2)], _S19->transform_0.data_0[int(0)][int(3)], _S19->transform_0.data_0[int(1)][int(3)], _S19->transform_0.data_0[int(2)][int(3)], _S19->transform_0.data_0[int(3)][int(3)]);
 
-#line 1555
-        matrix<float,int(3),int(3)>  _S25 = normal_basis_0(matrix<float,int(3),int(3)> (_S24[int(0)].xyz, _S24[int(1)].xyz, _S24[int(2)].xyz));
+#line 1596
+        matrix<float,int(3),int(3)>  _S25 = matrix<float,int(3),int(3)> (_S24[int(0)].xyz, _S24[int(1)].xyz, _S24[int(2)].xyz);
 
-#line 1555
-        float4 _S26 = float4(mesh_1.uv_scale_u_0, mesh_1.uv_scale_v_0, mesh_1.uv_offset_u_0, mesh_1.uv_offset_v_0);
+#line 1596
+        matrix<float,int(3),int(3)>  _S26 = normal_basis_0(_S25);
 
-#line 1555
+#line 1596
+        float4 _S27 = float4(mesh_1.uv_scale_u_0, mesh_1.uv_scale_v_0, mesh_1.uv_offset_u_0, mesh_1.uv_offset_v_0);
+
+#line 1596
         uint v_1 = lane_2;
 
-#line 1555
+#line 1596
         for(;;)
         {
 
-#line 1555
+#line 1596
             if(v_1 < (cluster_1.vertex_count_0))
             {
             }
             else
             {
 
-#line 1555
+#line 1596
                 break;
             }
 
-#line 1555
+#line 1596
             uint index_0 = (&kernelContext_6)->cluster_vertices_0[cluster_1.vertex_offset_1 + v_1];
 
-#line 1555
-            MeshVertex_0 _S27 = load_vertex_0(index_0 + base_vertex_2 + _S22.vertex_base_0, _S26, &kernelContext_6);
+#line 1596
+            MeshVertex_0 _S28 = load_vertex_0(index_0 + base_vertex_2 + _S22.vertex_base_0, _S27, &kernelContext_6);
 
-#line 1555
-            float4 world_0 = (((float4(_S27.position_0, 1.0f)) * (_S24)));
+#line 1596
+            float4 world_0 = (((float4(_S28.position_0, 1.0f)) * (_S24)));
 
-#line 1555
+#line 1596
             thread VertexOutput_0 output_0;
 
-#line 1555
+#line 1596
             (&output_0)->position_1 = (((world_0) * (matrix<float,int(4),int(4)> ((&kernelContext_6)->frame_0->view_proj_0.data_1[int(0)][int(0)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(1)][int(0)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(2)][int(0)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(3)][int(0)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(0)][int(1)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(1)][int(1)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(2)][int(1)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(3)][int(1)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(0)][int(2)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(1)][int(2)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(2)][int(2)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(3)][int(2)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(0)][int(3)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(1)][int(3)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(2)][int(3)], (&kernelContext_6)->frame_0->view_proj_0.data_1[int(3)][int(3)]))));
 
-#line 1555
+#line 1596
             (&output_0)->world_position_0 = world_0.xyz;
 
-#line 1555
-            (&output_0)->world_normal_0 = (((_S27.basis_3.normal_0) * (_S25)));
+#line 1596
+            (&output_0)->world_normal_0 = (((_S28.basis_3.normal_0) * (_S26)));
 
-#line 1555
-            float4 _S28;
+#line 1596
+            (&output_0)->world_tangent_0 = (((_S28.basis_3.tangent_0) * (_S25)));
 
-#line 1555
+#line 1596
+            thread TangentFrame_0 _S29 = _S28.basis_3;
+
+#line 1596
+            uint _S30 = frame_word_0(mesh_1.flags_1, &_S29);
+
+#line 1596
+            (&output_0)->frame_1 = _S30;
+
+#line 1596
+            float4 _S31;
+
+#line 1596
             if(((&kernelContext_6)->frame_0->ambient_0.w) >= 1.5f)
             {
 
-#line 1555
-                _S28 = overlay_0;
+#line 1596
+                _S31 = overlay_0;
 
-#line 1555
+#line 1596
             }
             else
             {
 
-#line 1555
-                _S28 = _S27.color_0;
+#line 1596
+                _S31 = _S28.color_0;
 
-#line 1555
+#line 1596
             }
 
-#line 1555
-            (&output_0)->color_1 = _S28;
+#line 1596
+            (&output_0)->color_1 = _S31;
 
-#line 1555
+#line 1596
             (&output_0)->material_1 = _S19->material_0;
 
-#line 1555
-            (&output_0)->uv_0 = _S27.uv0_0;
+#line 1596
+            (&output_0)->uv_0 = _S28.uv0_0;
 
-#line 1555
-            float3 _S29 = load_position_0(index_0 + t_2 + _S22.vertex_base_0, &kernelContext_6);
+#line 1596
+            float3 _S32 = load_position_0(index_0 + t_2 + _S22.vertex_base_0, &kernelContext_6);
 
-#line 1555
+#line 1596
             (&output_0)->clip_position_0 = (&output_0)->position_1;
 
-#line 1555
-            (&output_0)->previous_clip_position_0 = ((((((float4(_S29, 1.0f)) * (matrix<float,int(4),int(4)> (_S19->previous_transform_0.data_0[int(0)][int(0)], _S19->previous_transform_0.data_0[int(1)][int(0)], _S19->previous_transform_0.data_0[int(2)][int(0)], _S19->previous_transform_0.data_0[int(3)][int(0)], _S19->previous_transform_0.data_0[int(0)][int(1)], _S19->previous_transform_0.data_0[int(1)][int(1)], _S19->previous_transform_0.data_0[int(2)][int(1)], _S19->previous_transform_0.data_0[int(3)][int(1)], _S19->previous_transform_0.data_0[int(0)][int(2)], _S19->previous_transform_0.data_0[int(1)][int(2)], _S19->previous_transform_0.data_0[int(2)][int(2)], _S19->previous_transform_0.data_0[int(3)][int(2)], _S19->previous_transform_0.data_0[int(0)][int(3)], _S19->previous_transform_0.data_0[int(1)][int(3)], _S19->previous_transform_0.data_0[int(2)][int(3)], _S19->previous_transform_0.data_0[int(3)][int(3)]))))) * (matrix<float,int(4),int(4)> ((&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(3)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(3)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(3)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(3)]))));
+#line 1596
+            (&output_0)->previous_clip_position_0 = ((((((float4(_S32, 1.0f)) * (matrix<float,int(4),int(4)> (_S19->previous_transform_0.data_0[int(0)][int(0)], _S19->previous_transform_0.data_0[int(1)][int(0)], _S19->previous_transform_0.data_0[int(2)][int(0)], _S19->previous_transform_0.data_0[int(3)][int(0)], _S19->previous_transform_0.data_0[int(0)][int(1)], _S19->previous_transform_0.data_0[int(1)][int(1)], _S19->previous_transform_0.data_0[int(2)][int(1)], _S19->previous_transform_0.data_0[int(3)][int(1)], _S19->previous_transform_0.data_0[int(0)][int(2)], _S19->previous_transform_0.data_0[int(1)][int(2)], _S19->previous_transform_0.data_0[int(2)][int(2)], _S19->previous_transform_0.data_0[int(3)][int(2)], _S19->previous_transform_0.data_0[int(0)][int(3)], _S19->previous_transform_0.data_0[int(1)][int(3)], _S19->previous_transform_0.data_0[int(2)][int(3)], _S19->previous_transform_0.data_0[int(3)][int(3)]))))) * (matrix<float,int(4),int(4)> ((&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(0)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(1)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(2)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(0)][int(3)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(1)][int(3)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(2)][int(3)], (&kernelContext_6)->frame_0->previous_view_proj_0.data_1[int(3)][int(3)]))));
 
-#line 1555
+#line 1596
             _slang_mesh.set_vertex(v_1,output_0);
 
-#line 1555
+#line 1596
             v_1 = v_1 + 64U;
 
-#line 1555
+#line 1596
         }
 
-#line 1555
+#line 1596
         t_2 = lane_2;
 
-#line 1555
+#line 1596
         for(;;)
         {
 
-#line 1555
+#line 1596
             if(t_2 < (cluster_1.triangle_count_0))
             {
             }
             else
             {
 
-#line 1555
+#line 1596
                 break;
             }
 
-#line 1555
+#line 1596
             uint corner_1 = cluster_1.triangle_offset_0 + t_2 * 3U;
 
-#line 1555
-            uint _S30 = corner_at_0(corner_1, &kernelContext_6);
+#line 1596
+            uint _S33 = corner_at_0(corner_1, &kernelContext_6);
 
-#line 1555
-            uint _S31 = corner_at_0(corner_1 + 1U, &kernelContext_6);
+#line 1596
+            uint _S34 = corner_at_0(corner_1 + 1U, &kernelContext_6);
 
-#line 1555
-            uint _S32 = corner_at_0(corner_1 + 2U, &kernelContext_6);
+#line 1596
+            uint _S35 = corner_at_0(corner_1 + 2U, &kernelContext_6);
 
-#line 1555
-            _slang_mesh.set_index(t_2*3+0,(uint3(_S30, _S31, _S32))[0]);
-            _slang_mesh.set_index(t_2*3+1,(uint3(_S30, _S31, _S32))[1]);
-            _slang_mesh.set_index(t_2*3+2,(uint3(_S30, _S31, _S32))[2]);
+#line 1596
+            _slang_mesh.set_index(t_2*3+0,(uint3(_S33, _S34, _S35))[0]);
+            _slang_mesh.set_index(t_2*3+1,(uint3(_S33, _S34, _S35))[1]);
+            _slang_mesh.set_index(t_2*3+2,(uint3(_S33, _S34, _S35))[2]);
             ;
 
-#line 1555
+#line 1596
             t_2 = t_2 + 64U;
 
-#line 1555
+#line 1596
         }
 
-#line 1555
+#line 1596
         break;
     }
 
-#line 1556
+#line 1597
     return;
 }
 
 
-#line 1358
+#line 1392
 uint cluster_is_selected_0(const ClusterSelect_0 thread* select_1, uint instance_index_0, KernelContext_0 thread* kernelContext_7)
 {
     uint base_1 = instance_index_0 * kernelContext_7->draw_0->group_stride_0;
 
-#line 1360
-    uint _S33 = select_1->flags_1;
+#line 1394
+    uint _S36 = select_1->flags_2;
 
-#line 1360
+#line 1394
     bool producer_expanded_0;
 
 
-    if(((select_1->flags_1) & 1U) != 0U)
+    if(((select_1->flags_2) & 1U) != 0U)
     {
 
-#line 1363
+#line 1397
         producer_expanded_0 = kernelContext_7->group_state_0[base_1 + select_1->producer_group_0] != 0U;
 
-#line 1363
+#line 1397
     }
     else
     {
 
-#line 1363
+#line 1397
         producer_expanded_0 = false;
 
-#line 1363
+#line 1397
     }
 
-#line 1363
+#line 1397
     bool container_expanded_0;
 
-    if((_S33 & 2U) == 0U)
+    if((_S36 & 2U) == 0U)
     {
 
-#line 1365
+#line 1399
         container_expanded_0 = true;
 
-#line 1365
+#line 1399
     }
     else
     {
 
-#line 1365
+#line 1399
         container_expanded_0 = kernelContext_7->group_state_0[base_1 + select_1->container_group_0] != 0U;
 
-#line 1365
+#line 1399
     }
 
     if(!producer_expanded_0)
     {
 
-#line 1367
+#line 1401
         producer_expanded_0 = container_expanded_0;
 
-#line 1367
+#line 1401
     }
     else
     {
 
-#line 1367
+#line 1401
         producer_expanded_0 = false;
 
-#line 1367
+#line 1401
     }
 
-#line 1367
-    uint _S34;
+#line 1401
+    uint _S37;
 
-#line 1367
+#line 1401
     if(producer_expanded_0)
     {
 
-#line 1367
-        _S34 = 1U;
+#line 1401
+        _S37 = 1U;
 
-#line 1367
+#line 1401
     }
     else
     {
 
-#line 1367
-        _S34 = 0U;
+#line 1401
+        _S37 = 0U;
 
-#line 1367
+#line 1401
     }
 
-#line 1367
-    return _S34;
+#line 1401
+    return _S37;
 }
 
 
-#line 1220
-bool preserves_angles_0(matrix<float,int(3),int(3)>  basis_4)
+#line 1254
+bool preserves_angles_0(matrix<float,int(3),int(3)>  basis_5)
 {
-    matrix<float,int(3),int(3)>  gram_0 = (((basis_4) * (transpose(basis_4))));
-    float _S35 = max(gram_0[int(0)][int(0)], max(gram_0[int(1)][int(1)], gram_0[int(2)][int(2)]));
-    if(_S35 <= 0.0f)
+    matrix<float,int(3),int(3)>  gram_0 = (((basis_5) * (transpose(basis_5))));
+    float _S38 = max(gram_0[int(0)][int(0)], max(gram_0[int(1)][int(1)], gram_0[int(2)][int(2)]));
+    if(_S38 <= 0.0f)
     {
         return false;
     }
-    float slack_0 = 0.00009999999747379f * _S35;
+    float slack_0 = 0.00009999999747379f * _S38;
 
-#line 1228
-    bool _S36;
+#line 1262
+    bool _S39;
     if((abs(gram_0[int(0)][int(1)])) <= slack_0)
     {
 
-#line 1229
-        _S36 = (abs(gram_0[int(0)][int(2)])) <= slack_0;
+#line 1263
+        _S39 = (abs(gram_0[int(0)][int(2)])) <= slack_0;
 
-#line 1229
+#line 1263
     }
     else
     {
 
-#line 1229
-        _S36 = false;
+#line 1263
+        _S39 = false;
 
-#line 1229
+#line 1263
     }
 
-#line 1229
-    if(_S36)
+#line 1263
+    if(_S39)
     {
 
-#line 1229
-        _S36 = (abs(gram_0[int(1)][int(2)])) <= slack_0;
+#line 1263
+        _S39 = (abs(gram_0[int(1)][int(2)])) <= slack_0;
 
-#line 1229
+#line 1263
     }
     else
     {
 
-#line 1229
-        _S36 = false;
+#line 1263
+        _S39 = false;
 
-#line 1229
+#line 1263
     }
-    if(_S36)
+    if(_S39)
     {
 
-#line 1230
-        _S36 = (_S35 - gram_0[int(0)][int(0)]) <= slack_0;
+#line 1264
+        _S39 = (_S38 - gram_0[int(0)][int(0)]) <= slack_0;
 
-#line 1230
+#line 1264
     }
     else
     {
 
-#line 1230
-        _S36 = false;
+#line 1264
+        _S39 = false;
 
-#line 1230
+#line 1264
     }
 
-#line 1230
-    if(_S36)
+#line 1264
+    if(_S39)
     {
 
-#line 1230
-        _S36 = (_S35 - gram_0[int(1)][int(1)]) <= slack_0;
+#line 1264
+        _S39 = (_S38 - gram_0[int(1)][int(1)]) <= slack_0;
 
-#line 1230
+#line 1264
     }
     else
     {
 
-#line 1230
-        _S36 = false;
+#line 1264
+        _S39 = false;
 
-#line 1230
+#line 1264
     }
-    if(_S36)
+    if(_S39)
     {
 
-#line 1231
-        _S36 = (_S35 - gram_0[int(2)][int(2)]) <= slack_0;
+#line 1265
+        _S39 = (_S38 - gram_0[int(2)][int(2)]) <= slack_0;
 
-#line 1231
+#line 1265
     }
     else
     {
 
-#line 1231
-        _S36 = false;
+#line 1265
+        _S39 = false;
 
-#line 1231
+#line 1265
     }
 
-#line 1229
-    return _S36;
+#line 1263
+    return _S39;
 }
 
 
-#line 1301
+#line 1335
 uint cluster_survives_0(const Meshlet_0 thread* cluster_2, matrix<float,int(4),int(4)>  transform_2, KernelContext_0 thread* kernelContext_8)
 {
-    matrix<float,int(3),int(3)>  _S37 = matrix<float,int(3),int(3)> (transform_2[int(0)].xyz, transform_2[int(1)].xyz, transform_2[int(2)].xyz);
+    matrix<float,int(3),int(3)>  _S40 = matrix<float,int(3),int(3)> (transform_2[int(0)].xyz, transform_2[int(1)].xyz, transform_2[int(2)].xyz);
     float3 center_1 = (((float4(cluster_2->center_x_0, cluster_2->center_y_0, cluster_2->center_z_0, 1.0f)) * (transform_2))).xyz;
-    float radius_3 = cluster_2->radius_0 * max_stretch_0(_S37);
+    float radius_3 = cluster_2->radius_0 * max_stretch_0(_S40);
 
-#line 1305
+#line 1339
     uint plane_0 = 0U;
 
     for(;;)
     {
 
-#line 1307
+#line 1341
         if(plane_0 < 6U)
         {
         }
         else
         {
 
-#line 1307
+#line 1341
             break;
         }
 
-        float3 _S38 = kernelContext_8->cull_0->planes_0[plane_0].xyz;
+        float3 _S41 = kernelContext_8->cull_0->planes_0[plane_0].xyz;
 
-#line 1310
-        if((dot(_S38, center_1) + kernelContext_8->cull_0->planes_0[plane_0].w) < (- radius_3 * length(_S38)))
+#line 1344
+        if((dot(_S41, center_1) + kernelContext_8->cull_0->planes_0[plane_0].w) < (- radius_3 * length(_S41)))
         {
             return 1U;
         }
 
-#line 1307
+#line 1341
         plane_0 = plane_0 + 1U;
 
-#line 1307
+#line 1341
     }
 
-#line 1324
-    float3 axis_0 = (((float3(cluster_2->cone_axis_x_0, cluster_2->cone_axis_y_0, cluster_2->cone_axis_z_0)) * (_S37)));
+#line 1358
+    float3 axis_0 = (((float3(cluster_2->cone_axis_x_0, cluster_2->cone_axis_y_0, cluster_2->cone_axis_z_0)) * (_S40)));
 
     float axis_length_0 = length(axis_0);
 
-#line 1326
+#line 1360
     float3 axis_1;
     if(axis_length_0 > 0.0f)
     {
 
-#line 1327
+#line 1361
         axis_1 = axis_0 / float3(axis_length_0) ;
 
-#line 1327
+#line 1361
     }
     else
     {
 
-#line 1327
+#line 1361
         axis_1 = float3(0.0f, 0.0f, 0.0f);
 
-#line 1327
+#line 1361
     }
     float3 to_center_0 = center_1 - kernelContext_8->frame_0->camera_position_0.xyz;
 
-#line 1328
-    float _S39 = cluster_2->cone_cutoff_0;
+#line 1362
+    float _S42 = cluster_2->cone_cutoff_0;
     float sine_0 = sqrt(max(0.0f, 1.0f - cluster_2->cone_cutoff_0 * cluster_2->cone_cutoff_0));
 
-#line 1329
-    bool _S40;
-    if(preserves_angles_0(_S37))
+#line 1363
+    bool _S43;
+    if(preserves_angles_0(_S40))
     {
 
-#line 1330
-        _S40 = _S39 > 0.0f;
+#line 1364
+        _S43 = _S42 > 0.0f;
 
-#line 1330
+#line 1364
     }
     else
     {
 
-#line 1330
-        _S40 = false;
+#line 1364
+        _S43 = false;
 
-#line 1330
+#line 1364
     }
-    if(_S40)
+    if(_S43)
     {
 
-#line 1331
-        _S40 = (dot(axis_1, to_center_0)) > (sine_0 * length(to_center_0) + radius_3);
+#line 1365
+        _S43 = (dot(axis_1, to_center_0)) > (sine_0 * length(to_center_0) + radius_3);
 
-#line 1331
+#line 1365
     }
     else
     {
 
-#line 1331
-        _S40 = false;
+#line 1365
+        _S43 = false;
 
-#line 1331
+#line 1365
     }
 
-#line 1330
-    if(_S40)
+#line 1364
+    if(_S43)
     {
 
         return 2U;
@@ -1186,518 +1243,533 @@ uint cluster_survives_0(const Meshlet_0 thread* cluster_2, matrix<float,int(4),i
 }
 
 
-#line 1580
-[[object]] void taskMain(uint3 group_3 [[threadgroup_position_in_grid]], ClusterPayload_0 object_data* _slang_mesh_payload [[payload]], mesh_grid_properties  _slang_mgp, ClusterDrawConstants_0 constant* draw_2 [[buffer(3)]], DrawIndexedArgs_0 device* draw_args_2 [[buffer(10)]], Meshlet_0 device* clusters_2 [[buffer(7)]], uint device* visible_instances_2 [[buffer(5)]], GpuInstance_natural_0 device* instances_2 [[buffer(2)]], GpuMesh_0 device* meshes_2 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_2 [[buffer(0)]], ClusterSelect_0 device* cluster_select_2 [[buffer(13)]], uint device* tables_2 [[buffer(19)]], uint device* cluster_vertices_2 [[buffer(8)]], uint device* vertices_2 [[buffer(1)]], uint device* cluster_corners_2 [[buffer(9)]], uint device* group_state_2 [[buffer(15)]], CullParams_0 constant* cull_2 [[buffer(11)]], atomic<uint> device* cull_stats_2 [[buffer(12)]], uint device* cluster_selection_2 [[buffer(14)]])
+#line 1621
+[[object]] void taskMain(uint3 group_3 [[threadgroup_position_in_grid]], ClusterPayload_0 object_data* _slang_mesh_payload [[payload]], mesh_grid_properties  _slang_mgp, ClusterDrawConstants_0 constant* draw_2 [[buffer(3)]], DrawIndexedArgs_0 device* draw_args_2 [[buffer(10)]], Meshlet_0 device* clusters_2 [[buffer(7)]], uint device* visible_instances_2 [[buffer(5)]], GpuInstance_natural_0 device* instances_2 [[buffer(2)]], GpuMesh_0 device* meshes_2 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_3 [[buffer(0)]], ClusterSelect_0 device* cluster_select_2 [[buffer(13)]], uint device* tables_2 [[buffer(19)]], uint device* cluster_vertices_2 [[buffer(8)]], uint device* vertices_2 [[buffer(1)]], uint device* cluster_corners_2 [[buffer(9)]], uint device* group_state_2 [[buffer(15)]], CullParams_0 constant* cull_2 [[buffer(11)]], atomic<uint> device* cull_stats_2 [[buffer(12)]], uint device* cluster_selection_2 [[buffer(14)]])
 {
 
-#line 1580
+#line 1621
     thread KernelContext_0 kernelContext_9;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->draw_0 = draw_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->draw_args_0 = draw_args_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->clusters_0 = clusters_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->visible_instances_0 = visible_instances_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->instances_0 = instances_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->meshes_0 = meshes_2;
 
-#line 1580
-    (&kernelContext_9)->frame_0 = frame_2;
+#line 1621
+    (&kernelContext_9)->frame_0 = frame_3;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->cluster_select_0 = cluster_select_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->tables_0 = tables_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->cluster_vertices_0 = cluster_vertices_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->vertices_0 = vertices_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->cluster_corners_0 = cluster_corners_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->group_state_0 = group_state_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->cull_0 = cull_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->cull_stats_0 = cull_stats_2;
 
-#line 1580
+#line 1621
     (&kernelContext_9)->cluster_selection_0 = cluster_selection_2;
 
-#line 1580
-    uint _S41 = group_is_live_0(group_3, &kernelContext_9);
+#line 1621
+    uint _S44 = group_is_live_0(group_3, &kernelContext_9);
 
 
-    uint _S42 = group_3.x;
+    uint _S45 = group_3.x;
 
-#line 1583
-    uint _S43 = _S42 * _S41;
+#line 1624
+    uint _S46 = _S45 * _S44;
 
-#line 1583
-    Meshlet_0 cluster_3 = (&kernelContext_9)->clusters_0[(&kernelContext_9)->draw_0->cluster_base_0 + _S43];
-    uint _S44 = group_3.y;
+#line 1624
+    Meshlet_0 cluster_3 = (&kernelContext_9)->clusters_0[(&kernelContext_9)->draw_0->cluster_base_0 + _S46];
+    uint _S47 = group_3.y;
 
-#line 1584
-    uint instance_index_1 = (&kernelContext_9)->visible_instances_0[(&kernelContext_9)->draw_0->base_0 + _S44 * _S41] * _S41;
+#line 1625
+    uint instance_index_1 = (&kernelContext_9)->visible_instances_0[(&kernelContext_9)->draw_0->base_0 + _S47 * _S44] * _S44;
 
-#line 1584
-    GpuInstance_natural_0 device* _S45 = (&kernelContext_9)->instances_0+instance_index_1;
-
-
-    uint index_1 = (&kernelContext_9)->draw_0->cluster_base_0 + _S43;
-
-#line 1587
-    thread ClusterSelect_0 _S46 = (&kernelContext_9)->cluster_select_0[index_1];
-
-#line 1587
-    uint _S47 = cluster_is_selected_0(&_S46, instance_index_1, &kernelContext_9);
-
-#line 1587
-    matrix<float,int(4),int(4)>  _S48 = matrix<float,int(4),int(4)> (_S45->transform_0.data_0[int(0)][int(0)], _S45->transform_0.data_0[int(1)][int(0)], _S45->transform_0.data_0[int(2)][int(0)], _S45->transform_0.data_0[int(3)][int(0)], _S45->transform_0.data_0[int(0)][int(1)], _S45->transform_0.data_0[int(1)][int(1)], _S45->transform_0.data_0[int(2)][int(1)], _S45->transform_0.data_0[int(3)][int(1)], _S45->transform_0.data_0[int(0)][int(2)], _S45->transform_0.data_0[int(1)][int(2)], _S45->transform_0.data_0[int(2)][int(2)], _S45->transform_0.data_0[int(3)][int(2)], _S45->transform_0.data_0[int(0)][int(3)], _S45->transform_0.data_0[int(1)][int(3)], _S45->transform_0.data_0[int(2)][int(3)], _S45->transform_0.data_0[int(3)][int(3)]);
-
-#line 1587
-    thread Meshlet_0 _S49 = cluster_3;
-
-#line 1587
-    uint _S50 = cluster_survives_0(&_S49, _S48, &kernelContext_9);
+#line 1625
+    GpuInstance_natural_0 device* _S48 = (&kernelContext_9)->instances_0+instance_index_1;
 
 
-    uint _S51 = _S41 * _S47;
+    uint index_1 = (&kernelContext_9)->draw_0->cluster_base_0 + _S46;
 
-#line 1590
-    bool _S52 = _S50 == 0U;
+#line 1628
+    thread ClusterSelect_0 _S49 = (&kernelContext_9)->cluster_select_0[index_1];
 
-#line 1590
-    uint word_4;
+#line 1628
+    uint _S50 = cluster_is_selected_0(&_S49, instance_index_1, &kernelContext_9);
 
-#line 1590
-    if(_S52)
+#line 1628
+    matrix<float,int(4),int(4)>  _S51 = matrix<float,int(4),int(4)> (_S48->transform_0.data_0[int(0)][int(0)], _S48->transform_0.data_0[int(1)][int(0)], _S48->transform_0.data_0[int(2)][int(0)], _S48->transform_0.data_0[int(3)][int(0)], _S48->transform_0.data_0[int(0)][int(1)], _S48->transform_0.data_0[int(1)][int(1)], _S48->transform_0.data_0[int(2)][int(1)], _S48->transform_0.data_0[int(3)][int(1)], _S48->transform_0.data_0[int(0)][int(2)], _S48->transform_0.data_0[int(1)][int(2)], _S48->transform_0.data_0[int(2)][int(2)], _S48->transform_0.data_0[int(3)][int(2)], _S48->transform_0.data_0[int(0)][int(3)], _S48->transform_0.data_0[int(1)][int(3)], _S48->transform_0.data_0[int(2)][int(3)], _S48->transform_0.data_0[int(3)][int(3)]);
+
+#line 1628
+    thread Meshlet_0 _S52 = cluster_3;
+
+#line 1628
+    uint _S53 = cluster_survives_0(&_S52, _S51, &kernelContext_9);
+
+
+    uint _S54 = _S44 * _S50;
+
+#line 1631
+    bool _S55 = _S53 == 0U;
+
+#line 1631
+    uint word_5;
+
+#line 1631
+    if(_S55)
     {
 
-#line 1590
-        word_4 = 1U;
+#line 1631
+        word_5 = 1U;
 
-#line 1590
+#line 1631
     }
     else
     {
 
-#line 1590
-        word_4 = 0U;
+#line 1631
+        word_5 = 0U;
 
-#line 1590
+#line 1631
     }
 
-#line 1590
-    uint keep_0 = _S51 * word_4;
+#line 1631
+    uint keep_0 = _S54 * word_5;
 
-#line 1603
-    if(_S52)
+#line 1644
+    if(_S55)
     {
 
-#line 1603
-        word_4 = 1U;
+#line 1644
+        word_5 = 1U;
 
-#line 1603
+#line 1644
     }
     else
     {
 
-#line 1604
-        if(_S50 == 1U)
+#line 1645
+        if(_S53 == 1U)
         {
 
-#line 1604
-            word_4 = 3U;
+#line 1645
+            word_5 = 3U;
 
-#line 1604
+#line 1645
         }
         else
         {
 
-#line 1604
-            word_4 = 4U;
+#line 1645
+            word_5 = 4U;
 
-#line 1604
+#line 1645
         }
 
-#line 1603
+#line 1644
     }
 
 
-    if(_S51 == 1U)
+    if(_S54 == 1U)
     {
-        uint _S53 = atomic_fetch_add_explicit((&kernelContext_9)->cull_stats_0+word_4, 1U, memory_order_relaxed);
+        uint _S56 = atomic_fetch_add_explicit((&kernelContext_9)->cull_stats_0+word_5, 1U, memory_order_relaxed);
 
-#line 1606
+#line 1647
     }
 
-#line 1606
-    bool _S54;
+#line 1647
+    bool _S57;
 
-#line 1621
-    if(_S44 == 0U)
+#line 1662
+    if(_S47 == 0U)
     {
 
-#line 1621
-        _S54 = _S41 == 1U;
+#line 1662
+        _S57 = _S44 == 1U;
 
-#line 1621
+#line 1662
     }
     else
     {
 
-#line 1621
-        _S54 = false;
+#line 1662
+        _S57 = false;
 
-#line 1621
+#line 1662
     }
 
-#line 1621
-    if(_S54)
+#line 1662
+    if(_S57)
     {
-        *((&kernelContext_9)->cluster_selection_0+index_1) = _S47;
+        *((&kernelContext_9)->cluster_selection_0+index_1) = _S50;
 
-#line 1621
+#line 1662
     }
 
-#line 1626
+#line 1667
     thread ClusterPayload_0 payload_0;
-    (&payload_0)->cluster_0 = _S42;
-    (&payload_0)->instance_0 = _S44;
+    (&payload_0)->cluster_0 = _S45;
+    (&payload_0)->instance_0 = _S47;
     *_slang_mesh_payload = *(&payload_0); _slang_mgp.set_threadgroups_per_grid(uint3((keep_0), (1U), (1U))); return;;
     return;
 }
 
 
-#line 1641
-[[mesh]] void amplifiedMeshMain(uint3 lane_3 [[thread_position_in_threadgroup]], const ClusterPayload_0 object_data* amplification_0 [[payload]], metal::mesh<VertexOutput_0, void, 64U, 124U, metal::topology::triangle> _slang_mesh, ClusterDrawConstants_0 constant* draw_3 [[buffer(3)]], DrawIndexedArgs_0 device* draw_args_3 [[buffer(10)]], Meshlet_0 device* clusters_3 [[buffer(7)]], uint device* visible_instances_3 [[buffer(5)]], GpuInstance_natural_0 device* instances_3 [[buffer(2)]], GpuMesh_0 device* meshes_3 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_3 [[buffer(0)]], ClusterSelect_0 device* cluster_select_3 [[buffer(13)]], uint device* tables_3 [[buffer(19)]], uint device* cluster_vertices_3 [[buffer(8)]], uint device* vertices_3 [[buffer(1)]], uint device* cluster_corners_3 [[buffer(9)]], uint device* group_state_3 [[buffer(15)]], CullParams_0 constant* cull_3 [[buffer(11)]], atomic<uint> device* cull_stats_3 [[buffer(12)]], uint device* cluster_selection_3 [[buffer(14)]])
+#line 1682
+[[mesh]] void amplifiedMeshMain(uint3 lane_3 [[thread_position_in_threadgroup]], const ClusterPayload_0 object_data* amplification_0 [[payload]], metal::mesh<VertexOutput_0, void, 64U, 124U, metal::topology::triangle> _slang_mesh, ClusterDrawConstants_0 constant* draw_3 [[buffer(3)]], DrawIndexedArgs_0 device* draw_args_3 [[buffer(10)]], Meshlet_0 device* clusters_3 [[buffer(7)]], uint device* visible_instances_3 [[buffer(5)]], GpuInstance_natural_0 device* instances_3 [[buffer(2)]], GpuMesh_0 device* meshes_3 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_4 [[buffer(0)]], ClusterSelect_0 device* cluster_select_3 [[buffer(13)]], uint device* tables_3 [[buffer(19)]], uint device* cluster_vertices_3 [[buffer(8)]], uint device* vertices_3 [[buffer(1)]], uint device* cluster_corners_3 [[buffer(9)]], uint device* group_state_3 [[buffer(15)]], CullParams_0 constant* cull_3 [[buffer(11)]], atomic<uint> device* cull_stats_3 [[buffer(12)]], uint device* cluster_selection_3 [[buffer(14)]])
 {
     thread KernelContext_0 kernelContext_10;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->draw_0 = draw_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->draw_args_0 = draw_args_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->clusters_0 = clusters_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->visible_instances_0 = visible_instances_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->instances_0 = instances_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->meshes_0 = meshes_3;
 
-#line 1643
-    (&kernelContext_10)->frame_0 = frame_3;
+#line 1684
+    (&kernelContext_10)->frame_0 = frame_4;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->cluster_select_0 = cluster_select_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->tables_0 = tables_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->cluster_vertices_0 = cluster_vertices_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->vertices_0 = vertices_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->cluster_corners_0 = cluster_corners_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->group_state_0 = group_state_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->cull_0 = cull_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->cull_stats_0 = cull_stats_3;
 
-#line 1643
+#line 1684
     (&kernelContext_10)->cluster_selection_0 = cluster_selection_3;
 
-#line 1643
+#line 1684
     uint lane_4 = lane_3.x;
 
-#line 1649
-    uint _S55 = draw_3->cluster_base_0 + amplification_0->cluster_0;
+#line 1690
+    uint _S58 = draw_3->cluster_base_0 + amplification_0->cluster_0;
 
-#line 1647
-    uint _S56 = amplification_0->instance_0;
+#line 1688
+    uint _S59 = amplification_0->instance_0;
 
-#line 1647
+#line 1688
     for(;;)
     {
 
-#line 1647
-        Meshlet_0 cluster_4 = (&kernelContext_10)->clusters_0[_S55];
+#line 1688
+        Meshlet_0 cluster_4 = (&kernelContext_10)->clusters_0[_S58];
 
-#line 1647
+#line 1688
         _slang_mesh.set_primitive_count((cluster_4.triangle_count_0));
 
-#line 1647
-        GpuInstance_natural_0 device* _S57 = (&kernelContext_10)->instances_0+(&kernelContext_10)->visible_instances_0[(&kernelContext_10)->draw_0->base_0 + _S56];
+#line 1688
+        GpuInstance_natural_0 device* _S60 = (&kernelContext_10)->instances_0+(&kernelContext_10)->visible_instances_0[(&kernelContext_10)->draw_0->base_0 + _S59];
 
-#line 1647
-        GpuMesh_0 mesh_2 = (&kernelContext_10)->meshes_0[_S57->mesh_0];
+#line 1688
+        GpuMesh_0 mesh_2 = (&kernelContext_10)->meshes_0[_S60->mesh_0];
 
-#line 1647
-        float4 _S58 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+#line 1688
+        float4 _S61 = float4(0.0f, 0.0f, 0.0f, 1.0f);
 
-#line 1647
+#line 1688
         float4 overlay_1;
 
-#line 1647
+#line 1688
         if(((&kernelContext_10)->frame_0->ambient_0.w) >= 2.5f)
         {
 
-#line 1647
-            float3 _S59 = cluster_heat_0(_S55, matrix<float,int(4),int(4)> (_S57->transform_0.data_0[int(0)][int(0)], _S57->transform_0.data_0[int(1)][int(0)], _S57->transform_0.data_0[int(2)][int(0)], _S57->transform_0.data_0[int(3)][int(0)], _S57->transform_0.data_0[int(0)][int(1)], _S57->transform_0.data_0[int(1)][int(1)], _S57->transform_0.data_0[int(2)][int(1)], _S57->transform_0.data_0[int(3)][int(1)], _S57->transform_0.data_0[int(0)][int(2)], _S57->transform_0.data_0[int(1)][int(2)], _S57->transform_0.data_0[int(2)][int(2)], _S57->transform_0.data_0[int(3)][int(2)], _S57->transform_0.data_0[int(0)][int(3)], _S57->transform_0.data_0[int(1)][int(3)], _S57->transform_0.data_0[int(2)][int(3)], _S57->transform_0.data_0[int(3)][int(3)]), &kernelContext_10);
+#line 1688
+            float3 _S62 = cluster_heat_0(_S58, matrix<float,int(4),int(4)> (_S60->transform_0.data_0[int(0)][int(0)], _S60->transform_0.data_0[int(1)][int(0)], _S60->transform_0.data_0[int(2)][int(0)], _S60->transform_0.data_0[int(3)][int(0)], _S60->transform_0.data_0[int(0)][int(1)], _S60->transform_0.data_0[int(1)][int(1)], _S60->transform_0.data_0[int(2)][int(1)], _S60->transform_0.data_0[int(3)][int(1)], _S60->transform_0.data_0[int(0)][int(2)], _S60->transform_0.data_0[int(1)][int(2)], _S60->transform_0.data_0[int(2)][int(2)], _S60->transform_0.data_0[int(3)][int(2)], _S60->transform_0.data_0[int(0)][int(3)], _S60->transform_0.data_0[int(1)][int(3)], _S60->transform_0.data_0[int(2)][int(3)], _S60->transform_0.data_0[int(3)][int(3)]), &kernelContext_10);
 
-#line 1647
-            overlay_1 = float4(_S59, 1.0f);
+#line 1688
+            overlay_1 = float4(_S62, 1.0f);
 
-#line 1647
+#line 1688
         }
         else
         {
 
-#line 1647
+#line 1688
             if(((&kernelContext_10)->frame_0->ambient_0.w) >= 1.5f)
             {
 
-#line 1647
-                overlay_1 = float4(lod_tint_0(((&kernelContext_10)->cluster_select_0[_S55].flags_1) >> 2U), 1.0f);
+#line 1688
+                overlay_1 = float4(lod_tint_0(((&kernelContext_10)->cluster_select_0[_S58].flags_2) >> 2U), 1.0f);
 
-#line 1647
+#line 1688
             }
             else
             {
 
-#line 1647
-                overlay_1 = _S58;
+#line 1688
+                overlay_1 = _S61;
 
-#line 1647
+#line 1688
             }
 
-#line 1647
+#line 1688
         }
 
-#line 1647
-        ClusterSelect_0 _S60 = (&kernelContext_10)->cluster_select_0[_S55];
+#line 1688
+        ClusterSelect_0 _S63 = (&kernelContext_10)->cluster_select_0[_S58];
 
-#line 1647
-        bool _S61 = ((_S57->flags_0) & 2U) != 0U;
+#line 1688
+        bool _S64 = ((_S60->flags_0) & 2U) != 0U;
 
-#line 1647
+#line 1688
         uint base_vertex_3;
 
-#line 1647
-        if(_S61)
+#line 1688
+        if(_S64)
         {
 
-#line 1647
-            base_vertex_3 = _S57->base_vertex_0;
+#line 1688
+            base_vertex_3 = _S60->base_vertex_0;
 
-#line 1647
+#line 1688
         }
         else
         {
 
-#line 1647
+#line 1688
             base_vertex_3 = mesh_2.base_vertex_1;
 
-#line 1647
+#line 1688
         }
 
-#line 1647
+#line 1688
         uint t_3;
 
-#line 1647
-        if(_S61)
+#line 1688
+        if(_S64)
         {
 
-#line 1647
-            t_3 = _S57->previous_base_vertex_0;
+#line 1688
+            t_3 = _S60->previous_base_vertex_0;
 
-#line 1647
+#line 1688
         }
         else
         {
 
-#line 1647
+#line 1688
             t_3 = base_vertex_3;
 
-#line 1647
+#line 1688
         }
 
-#line 1647
-        matrix<float,int(4),int(4)>  _S62 = matrix<float,int(4),int(4)> (_S57->transform_0.data_0[int(0)][int(0)], _S57->transform_0.data_0[int(1)][int(0)], _S57->transform_0.data_0[int(2)][int(0)], _S57->transform_0.data_0[int(3)][int(0)], _S57->transform_0.data_0[int(0)][int(1)], _S57->transform_0.data_0[int(1)][int(1)], _S57->transform_0.data_0[int(2)][int(1)], _S57->transform_0.data_0[int(3)][int(1)], _S57->transform_0.data_0[int(0)][int(2)], _S57->transform_0.data_0[int(1)][int(2)], _S57->transform_0.data_0[int(2)][int(2)], _S57->transform_0.data_0[int(3)][int(2)], _S57->transform_0.data_0[int(0)][int(3)], _S57->transform_0.data_0[int(1)][int(3)], _S57->transform_0.data_0[int(2)][int(3)], _S57->transform_0.data_0[int(3)][int(3)]);
+#line 1688
+        matrix<float,int(4),int(4)>  _S65 = matrix<float,int(4),int(4)> (_S60->transform_0.data_0[int(0)][int(0)], _S60->transform_0.data_0[int(1)][int(0)], _S60->transform_0.data_0[int(2)][int(0)], _S60->transform_0.data_0[int(3)][int(0)], _S60->transform_0.data_0[int(0)][int(1)], _S60->transform_0.data_0[int(1)][int(1)], _S60->transform_0.data_0[int(2)][int(1)], _S60->transform_0.data_0[int(3)][int(1)], _S60->transform_0.data_0[int(0)][int(2)], _S60->transform_0.data_0[int(1)][int(2)], _S60->transform_0.data_0[int(2)][int(2)], _S60->transform_0.data_0[int(3)][int(2)], _S60->transform_0.data_0[int(0)][int(3)], _S60->transform_0.data_0[int(1)][int(3)], _S60->transform_0.data_0[int(2)][int(3)], _S60->transform_0.data_0[int(3)][int(3)]);
 
-#line 1647
-        matrix<float,int(3),int(3)>  _S63 = normal_basis_0(matrix<float,int(3),int(3)> (_S62[int(0)].xyz, _S62[int(1)].xyz, _S62[int(2)].xyz));
+#line 1688
+        matrix<float,int(3),int(3)>  _S66 = matrix<float,int(3),int(3)> (_S65[int(0)].xyz, _S65[int(1)].xyz, _S65[int(2)].xyz);
 
-#line 1647
-        float4 _S64 = float4(mesh_2.uv_scale_u_0, mesh_2.uv_scale_v_0, mesh_2.uv_offset_u_0, mesh_2.uv_offset_v_0);
+#line 1688
+        matrix<float,int(3),int(3)>  _S67 = normal_basis_0(_S66);
 
-#line 1647
+#line 1688
+        float4 _S68 = float4(mesh_2.uv_scale_u_0, mesh_2.uv_scale_v_0, mesh_2.uv_offset_u_0, mesh_2.uv_offset_v_0);
+
+#line 1688
         uint v_2 = lane_4;
 
-#line 1647
+#line 1688
         for(;;)
         {
 
-#line 1647
+#line 1688
             if(v_2 < (cluster_4.vertex_count_0))
             {
             }
             else
             {
 
-#line 1647
+#line 1688
                 break;
             }
 
-#line 1647
+#line 1688
             uint index_2 = (&kernelContext_10)->cluster_vertices_0[cluster_4.vertex_offset_1 + v_2];
 
-#line 1647
-            MeshVertex_0 _S65 = load_vertex_0(index_2 + base_vertex_3 + _S60.vertex_base_0, _S64, &kernelContext_10);
+#line 1688
+            MeshVertex_0 _S69 = load_vertex_0(index_2 + base_vertex_3 + _S63.vertex_base_0, _S68, &kernelContext_10);
 
-#line 1647
-            float4 world_1 = (((float4(_S65.position_0, 1.0f)) * (_S62)));
+#line 1688
+            float4 world_1 = (((float4(_S69.position_0, 1.0f)) * (_S65)));
 
-#line 1647
+#line 1688
             thread VertexOutput_0 output_1;
 
-#line 1647
+#line 1688
             (&output_1)->position_1 = (((world_1) * (matrix<float,int(4),int(4)> ((&kernelContext_10)->frame_0->view_proj_0.data_1[int(0)][int(0)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(1)][int(0)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(2)][int(0)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(3)][int(0)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(0)][int(1)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(1)][int(1)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(2)][int(1)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(3)][int(1)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(0)][int(2)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(1)][int(2)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(2)][int(2)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(3)][int(2)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(0)][int(3)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(1)][int(3)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(2)][int(3)], (&kernelContext_10)->frame_0->view_proj_0.data_1[int(3)][int(3)]))));
 
-#line 1647
+#line 1688
             (&output_1)->world_position_0 = world_1.xyz;
 
-#line 1647
-            (&output_1)->world_normal_0 = (((_S65.basis_3.normal_0) * (_S63)));
+#line 1688
+            (&output_1)->world_normal_0 = (((_S69.basis_3.normal_0) * (_S67)));
 
-#line 1647
-            float4 _S66;
+#line 1688
+            (&output_1)->world_tangent_0 = (((_S69.basis_3.tangent_0) * (_S66)));
 
-#line 1647
+#line 1688
+            thread TangentFrame_0 _S70 = _S69.basis_3;
+
+#line 1688
+            uint _S71 = frame_word_0(mesh_2.flags_1, &_S70);
+
+#line 1688
+            (&output_1)->frame_1 = _S71;
+
+#line 1688
+            float4 _S72;
+
+#line 1688
             if(((&kernelContext_10)->frame_0->ambient_0.w) >= 1.5f)
             {
 
-#line 1647
-                _S66 = overlay_1;
+#line 1688
+                _S72 = overlay_1;
 
-#line 1647
+#line 1688
             }
             else
             {
 
-#line 1647
-                _S66 = _S65.color_0;
+#line 1688
+                _S72 = _S69.color_0;
 
-#line 1647
+#line 1688
             }
 
-#line 1647
-            (&output_1)->color_1 = _S66;
+#line 1688
+            (&output_1)->color_1 = _S72;
 
-#line 1647
-            (&output_1)->material_1 = _S57->material_0;
+#line 1688
+            (&output_1)->material_1 = _S60->material_0;
 
-#line 1647
-            (&output_1)->uv_0 = _S65.uv0_0;
+#line 1688
+            (&output_1)->uv_0 = _S69.uv0_0;
 
-#line 1647
-            float3 _S67 = load_position_0(index_2 + t_3 + _S60.vertex_base_0, &kernelContext_10);
+#line 1688
+            float3 _S73 = load_position_0(index_2 + t_3 + _S63.vertex_base_0, &kernelContext_10);
 
-#line 1647
+#line 1688
             (&output_1)->clip_position_0 = (&output_1)->position_1;
 
-#line 1647
-            (&output_1)->previous_clip_position_0 = ((((((float4(_S67, 1.0f)) * (matrix<float,int(4),int(4)> (_S57->previous_transform_0.data_0[int(0)][int(0)], _S57->previous_transform_0.data_0[int(1)][int(0)], _S57->previous_transform_0.data_0[int(2)][int(0)], _S57->previous_transform_0.data_0[int(3)][int(0)], _S57->previous_transform_0.data_0[int(0)][int(1)], _S57->previous_transform_0.data_0[int(1)][int(1)], _S57->previous_transform_0.data_0[int(2)][int(1)], _S57->previous_transform_0.data_0[int(3)][int(1)], _S57->previous_transform_0.data_0[int(0)][int(2)], _S57->previous_transform_0.data_0[int(1)][int(2)], _S57->previous_transform_0.data_0[int(2)][int(2)], _S57->previous_transform_0.data_0[int(3)][int(2)], _S57->previous_transform_0.data_0[int(0)][int(3)], _S57->previous_transform_0.data_0[int(1)][int(3)], _S57->previous_transform_0.data_0[int(2)][int(3)], _S57->previous_transform_0.data_0[int(3)][int(3)]))))) * (matrix<float,int(4),int(4)> ((&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(3)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(3)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(3)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(3)]))));
+#line 1688
+            (&output_1)->previous_clip_position_0 = ((((((float4(_S73, 1.0f)) * (matrix<float,int(4),int(4)> (_S60->previous_transform_0.data_0[int(0)][int(0)], _S60->previous_transform_0.data_0[int(1)][int(0)], _S60->previous_transform_0.data_0[int(2)][int(0)], _S60->previous_transform_0.data_0[int(3)][int(0)], _S60->previous_transform_0.data_0[int(0)][int(1)], _S60->previous_transform_0.data_0[int(1)][int(1)], _S60->previous_transform_0.data_0[int(2)][int(1)], _S60->previous_transform_0.data_0[int(3)][int(1)], _S60->previous_transform_0.data_0[int(0)][int(2)], _S60->previous_transform_0.data_0[int(1)][int(2)], _S60->previous_transform_0.data_0[int(2)][int(2)], _S60->previous_transform_0.data_0[int(3)][int(2)], _S60->previous_transform_0.data_0[int(0)][int(3)], _S60->previous_transform_0.data_0[int(1)][int(3)], _S60->previous_transform_0.data_0[int(2)][int(3)], _S60->previous_transform_0.data_0[int(3)][int(3)]))))) * (matrix<float,int(4),int(4)> ((&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(0)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(1)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(2)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(0)][int(3)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(1)][int(3)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(2)][int(3)], (&kernelContext_10)->frame_0->previous_view_proj_0.data_1[int(3)][int(3)]))));
 
-#line 1647
+#line 1688
             _slang_mesh.set_vertex(v_2,output_1);
 
-#line 1647
+#line 1688
             v_2 = v_2 + 64U;
 
-#line 1647
+#line 1688
         }
 
-#line 1647
+#line 1688
         t_3 = lane_4;
 
-#line 1647
+#line 1688
         for(;;)
         {
 
-#line 1647
+#line 1688
             if(t_3 < (cluster_4.triangle_count_0))
             {
             }
             else
             {
 
-#line 1647
+#line 1688
                 break;
             }
 
-#line 1647
+#line 1688
             uint corner_2 = cluster_4.triangle_offset_0 + t_3 * 3U;
 
-#line 1647
-            uint _S68 = corner_at_0(corner_2, &kernelContext_10);
+#line 1688
+            uint _S74 = corner_at_0(corner_2, &kernelContext_10);
 
-#line 1647
-            uint _S69 = corner_at_0(corner_2 + 1U, &kernelContext_10);
+#line 1688
+            uint _S75 = corner_at_0(corner_2 + 1U, &kernelContext_10);
 
-#line 1647
-            uint _S70 = corner_at_0(corner_2 + 2U, &kernelContext_10);
+#line 1688
+            uint _S76 = corner_at_0(corner_2 + 2U, &kernelContext_10);
 
-#line 1647
-            _slang_mesh.set_index(t_3*3+0,(uint3(_S68, _S69, _S70))[0]);
-            _slang_mesh.set_index(t_3*3+1,(uint3(_S68, _S69, _S70))[1]);
-            _slang_mesh.set_index(t_3*3+2,(uint3(_S68, _S69, _S70))[2]);
+#line 1688
+            _slang_mesh.set_index(t_3*3+0,(uint3(_S74, _S75, _S76))[0]);
+            _slang_mesh.set_index(t_3*3+1,(uint3(_S74, _S75, _S76))[1]);
+            _slang_mesh.set_index(t_3*3+2,(uint3(_S74, _S75, _S76))[2]);
             ;
 
-#line 1647
+#line 1688
             t_3 = t_3 + 64U;
 
-#line 1647
+#line 1688
         }
 
-#line 1647
+#line 1688
         break;
     }
 
-#line 1654
+#line 1695
     return;
 }
 

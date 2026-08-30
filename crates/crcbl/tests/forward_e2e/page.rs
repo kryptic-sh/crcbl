@@ -179,6 +179,7 @@ fn the_page_carries_the_hosts_mip_chain_on_every_layer() {
                 uv_range: crcbl::shaders::mesh::demo_uv_range(),
                 indices: Cow::Owned(crcbl::shaders::mesh::cube_indices()),
                 clusters: crcbl::shaders::meshlet::cube_clusters(),
+                flags: 0,
             },
         }],
         materials: vec![GpuMaterial::UNTINTED],

@@ -81,6 +81,9 @@ fn unit_cube() -> GpuMesh {
         bounds_max: [0.5, 0.5, 0.5],
         // Read by nothing on this path: the cull pass resolves boxes.
         uv_range: crcbl::shaders::vertex::UvRange::default(),
+        // And read by nothing here either: the tangent frame is the raster
+        // stages', and this pass records none.
+        flags: 0,
     }
 }
 
@@ -95,6 +98,9 @@ fn bar() -> GpuMesh {
         bounds_min: [-0.02, -1.0, -0.02],
         bounds_max: [0.02, 1.0, 0.02],
         uv_range: crcbl::shaders::vertex::UvRange::default(),
+        // And read by nothing here either: the tangent frame is the raster
+        // stages', and this pass records none.
+        flags: 0,
     }
 }
 

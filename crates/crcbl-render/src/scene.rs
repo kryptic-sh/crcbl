@@ -252,10 +252,21 @@ impl Default for Capacities {
 /// So there is no constructor that takes layer 0: [`opaque_white`](Self::opaque_white)
 /// writes it, [`push_layer`](Self::push_layer) can only append past it, and a
 /// caller has no way to spell the mistake.
+/// # It describes **two** images, and they share one extent
+///
+/// The base-colour page and `docs/plan/43-render-standards.md` §2's normal page:
+/// same square extent, same layer numbering rules, same sampler, one type. Two
+/// descriptions would be two extents a caller could set apart and two layer-0
+/// conventions to get right, for a pair of images the renderer creates in the
+/// same call and binds into the same group. What it costs is that a normal map
+/// has to be the base-colour page's size, which is already true of every layer
+/// of the base-colour page itself; §2's generalised page allocator is the rung
+/// that lifts it, and `docs/backlog.md` carries the gap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageDesc<'a> {
     extent: u32,
     layers: Vec<Cow<'a, [u8]>>,
+    normal_layers: Vec<Cow<'a, [u8]>>,
 }
 
 impl<'a> PageDesc<'a> {
@@ -270,6 +281,30 @@ impl<'a> PageDesc<'a> {
     /// material was shaded by before there was a page at all.
     pub const WHITE: u8 = 0xFF;
 
+    /// The texel the **normal** page's
+    /// [`UNTEXTURED_LAYER`](Self::UNTEXTURED_LAYER) is filled with:
+    /// `(0.5, 0.5, 1.0)` in RGBA8, which is `docs/plan/43-render-standards.md`
+    /// §2's neutral normal.
+    ///
+    /// # It is not exactly flat, and the shader is what makes "no map" exact
+    ///
+    /// An eight-bit unorm channel has no `0.5`: `0x80` decodes to `128 / 255`,
+    /// and `t * 2 - 1` turns that into `1 / 255` rather than zero — a tangent
+    /// space normal about a fifth of a degree off vertical. That is small and it
+    /// is not nothing, and this engine compares its goldens across four
+    /// backends with no tolerance, so a material sampling this texel and
+    /// perturbing by it would move every frame in the tree that draws a lit
+    /// surface. `mesh.slang`'s `shading_normal_of` therefore tests the layer
+    /// index and returns the surface normal untouched at layer 0;
+    /// `crcbl_shaders::mesh::a_neutral_normal_texel_is_not_exactly_flat`
+    /// measures the error this constant would otherwise introduce.
+    ///
+    /// So what this layer is *for* is the material that names it explicitly and
+    /// the read that runs off the end of an authored layer's edge — a neutral
+    /// texel is what those must find, rather than the `(0, 0, 0)` an unwritten
+    /// image holds, which decodes to a normal pointing straight backwards.
+    pub const NEUTRAL_NORMAL: [u8; 4] = [0x80, 0x80, 0xFF, 0xFF];
+
     /// A square page of `extent` texels a side, holding
     /// [`UNTEXTURED_LAYER`](Self::UNTEXTURED_LAYER) and nothing else.
     ///
@@ -279,11 +314,47 @@ impl<'a> PageDesc<'a> {
     #[must_use]
     pub fn opaque_white(extent: u32) -> Self {
         assert!(extent > 0, "a page must have at least one texel a side");
-        let bytes = extent as usize * extent as usize * 4;
+        let texels = extent as usize * extent as usize;
         Self {
             extent,
-            layers: vec![Cow::Owned(vec![Self::WHITE; bytes])],
+            layers: vec![Cow::Owned(vec![Self::WHITE; texels * 4])],
+            // **The normal page is born with its own layer 0**, so a caller
+            // that never mentions a normal map still describes a page the
+            // renderer can create and every material's `normal_texture` of zero
+            // still names a texel that exists. One texel repeated: this is a
+            // description, and the whole point of the type owning layer 0 is
+            // that no caller can spell it any other way.
+            normal_layers: vec![Cow::Owned(Self::NEUTRAL_NORMAL.repeat(texels))],
         }
+    }
+
+    /// Appends a **normal** page layer and returns its index — the number a
+    /// material row's
+    /// [`normal_texture`](mesh::GpuMaterial::normal_texture) carries.
+    ///
+    /// `texels` is RGBA8, row-major, and **linear**: a tangent-space normal
+    /// encoded as `n * 0.5 + 0.5` per channel, which is what glTF's
+    /// `normalTexture` holds and what every authoring tool writes. The renderer
+    /// creates the image as `Rgba8Unorm` — *not* the base-colour page's
+    /// `Rgba8UnormSrgb` — so nothing decodes it through a transfer curve; see
+    /// `docs/plan/44-lighting.md`'s rung 2, which is where that is argued, and
+    /// `crcbl_render::forward::NORMAL_PAGE_FORMAT`.
+    ///
+    /// Its length must be `extent² × 4`, on
+    /// [`push_layer`](Self::push_layer)'s terms exactly — the two pages share
+    /// one extent, which is this type's own constraint and not the device's.
+    pub fn push_normal_layer(&mut self, texels: impl Into<Cow<'a, [u8]>>) -> u32 {
+        let layer = u32::try_from(self.normal_layers.len())
+            .unwrap_or_else(|_| unreachable!("a page of more layers than a u32 can name"));
+        self.normal_layers.push(texels.into());
+        layer
+    }
+
+    /// Every **normal** page layer, in order: element `n` is layer `n`, and
+    /// element 0 is [`NEUTRAL_NORMAL`](Self::NEUTRAL_NORMAL) repeated.
+    #[must_use]
+    pub fn normal_layers(&self) -> &[Cow<'a, [u8]>] {
+        &self.normal_layers
     }
 
     /// Appends a layer and returns its index — the number a material row's
@@ -332,26 +403,60 @@ impl<'a> PageDesc<'a> {
     /// it.
     pub(crate) fn check(&self) -> Result<(), HalError> {
         let texels = self.extent as usize * self.extent as usize * 4;
-        for (layer, bytes) in self.layers.iter().enumerate() {
-            if bytes.len() != texels {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "page layer {layer} carries {} bytes, and a {}×{} RGBA8 layer is {texels}",
-                    bytes.len(),
-                    self.extent,
-                    self.extent
-                )));
+        for (what, layers) in [
+            ("page", self.layers.as_slice()),
+            ("normal page", self.normal_layers.as_slice()),
+        ] {
+            for (layer, bytes) in layers.iter().enumerate() {
+                if bytes.len() != texels {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "{what} layer {layer} carries {} bytes, and a {}×{} RGBA8 layer is \
+                         {texels}",
+                        bytes.len(),
+                        self.extent,
+                        self.extent
+                    )));
+                }
             }
         }
         match self.layers.first() {
-            Some(white) if white.iter().all(|&texel| texel == Self::WHITE) => Ok(()),
+            Some(white) if white.iter().all(|&texel| texel == Self::WHITE) => {}
+            Some(_) => {
+                return Err(HalError::InvalidDescriptor(
+                    "page layer 0 is not opaque white, so every material naming no texture \
+                     would be scaled by a texel that is not 1.0"
+                        .to_string(),
+                ));
+            }
+            None => {
+                return Err(HalError::InvalidDescriptor(
+                    "a page with no layers has nothing for a material naming no texture to \
+                     sample"
+                        .to_string(),
+                ));
+            }
+        }
+        // The normal page's own layer 0, on exactly the terms above: a material
+        // naming no normal map names it, and a read that runs past an authored
+        // layer's edge lands in it. What it must hold is the neutral texel and
+        // not the zero an unwritten image carries, which decodes to a normal
+        // pointing away from the surface.
+        match self.normal_layers.first() {
+            Some(neutral)
+                if neutral
+                    .chunks_exact(4)
+                    .all(|texel| texel == Self::NEUTRAL_NORMAL) =>
+            {
+                Ok(())
+            }
             Some(_) => Err(HalError::InvalidDescriptor(
-                "page layer 0 is not opaque white, so every material naming no texture \
-                 would be scaled by a texel that is not 1.0"
+                "normal page layer 0 is not the neutral texel, so a material naming no \
+                 normal map would be perturbed by one nobody authored"
                     .to_string(),
             )),
             None => Err(HalError::InvalidDescriptor(
-                "a page with no layers has nothing for a material naming no texture to \
-                 sample"
+                "a normal page with no layers has nothing for a material naming no normal \
+                 map to sample"
                     .to_string(),
             )),
         }
@@ -465,6 +570,20 @@ pub enum Geometry<'a> {
         /// [`GeometryPath::MeshShader`](crcbl_hal::GeometryPath::MeshShader) and
         /// on no other path.
         clusters: MeshClusters,
+        /// Per-mesh bits for [`mesh::GpuMesh::flags`] — today only
+        /// [`MESH_AUTHORED_TANGENTS`](mesh::GpuMesh::MESH_AUTHORED_TANGENTS).
+        ///
+        /// **Zero is the honest value for a caller that builds its vertices
+        /// with [`mesh::MeshVertex::from_normal`]**, which is every mesh this
+        /// engine authors for itself: that constructor fills the frame with
+        /// [`orthonormal_basis`](crcbl_shaders::vertex::orthonormal_basis)'
+        /// stand-in, which is orthonormal and agrees with no UV
+        /// parameterisation, so a normal map read through it would be rotated by
+        /// an angle nobody chose. Setting the bit is a claim that these
+        /// vertices came from a real `TANGENT`, and the fragment stage takes the
+        /// caller at its word — the screen-space derivative frame is what it
+        /// falls back to otherwise.
+        flags: u32,
     },
     /// `docs/plan/25-lod.md`'s cluster DAG: several levels of one surface, each
     /// its own vertex range, with the grouping that relates them.
@@ -500,6 +619,20 @@ pub enum Geometry<'a> {
         levels: Vec<Cow<'a, [u8]>>,
         /// The levels, their clusters, and the groups that relate them.
         dag: ClusterDag,
+        /// Per-mesh bits for [`mesh::GpuMesh::flags`] — today only
+        /// [`MESH_AUTHORED_TANGENTS`](mesh::GpuMesh::MESH_AUTHORED_TANGENTS).
+        ///
+        /// **Zero is the honest value for a caller that builds its vertices
+        /// with [`mesh::MeshVertex::from_normal`]**, which is every mesh this
+        /// engine authors for itself: that constructor fills the frame with
+        /// [`orthonormal_basis`](crcbl_shaders::vertex::orthonormal_basis)'
+        /// stand-in, which is orthonormal and agrees with no UV
+        /// parameterisation, so a normal map read through it would be rotated by
+        /// an angle nobody chose. Setting the bit is a claim that these
+        /// vertices came from a real `TANGENT`, and the fragment stage takes the
+        /// caller at its word — the screen-space derivative frame is what it
+        /// falls back to otherwise.
+        flags: u32,
     },
 }
 
@@ -690,6 +823,14 @@ pub fn demo() -> SceneDesc<'static> {
                     uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(mesh::cube_indices()),
                     clusters: crcbl_shaders::meshlet::cube_clusters(),
+                    // **Unmarked, and every mesh below it too.**
+                    // `crcbl_shaders::mesh` builds these three out of positions,
+                    // normals and UVs — `MeshVertex::from_normal`, whose frame
+                    // is a stand-in — so none of them has a tangent that agrees
+                    // with its own texture coordinates. Claiming otherwise would
+                    // point the fragment stage at eight bytes that mean nothing
+                    // for sampling.
+                    flags: 0,
                 },
             },
             MeshDesc {
@@ -699,6 +840,7 @@ pub fn demo() -> SceneDesc<'static> {
                     uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(mesh::pyramid_indices()),
                     clusters: crcbl_shaders::meshlet::pyramid_clusters(),
+                    flags: 0,
                 },
             },
             MeshDesc {
@@ -708,6 +850,7 @@ pub fn demo() -> SceneDesc<'static> {
                     uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(mesh::open_box_indices()),
                     clusters: crcbl_shaders::meshlet::open_box_clusters(),
+                    flags: 0,
                 },
             },
             MeshDesc {
@@ -773,6 +916,10 @@ fn dunes_geometry() -> Geometry<'static> {
         uv_range: crcbl_shaders::dunes::uv_range(),
         levels,
         dag,
+        // Unmarked, for the three meshes above's reason: `dunes::vertex_at`
+        // evaluates a height field and hands `MeshVertex::from_normal` a normal,
+        // so the frame it encodes is the arbitrary stand-in.
+        flags: 0,
     }
 }
 
@@ -851,54 +998,139 @@ mod tests {
         demo_page.check().expect("the demo page uploads as written");
     }
 
-    /// **[`PageDesc::check`] refuses each of the three pages that would draw a
-    /// wrong frame**, built here through the private fields no caller has.
+    /// **[`PageDesc::check`] refuses every page that would draw a wrong
+    /// frame**, built here through the private fields no caller has.
     ///
-    /// Without this the whiteness check is a check that cannot fail:
+    /// Without this the layer-0 checks are checks that cannot fail:
     /// [`PageDesc::opaque_white`] is the only way in from outside the crate and
-    /// it writes layer 0 itself, so nothing a caller can spell would ever reach
-    /// that arm. What it is there for is a *second* constructor — slice 4's
-    /// app-supplied page — and this is what says the arm still bites when one
-    /// arrives.
+    /// it writes both pages' layer 0 itself, so nothing a caller can spell would
+    /// ever reach those arms. What they are there for is a *second*
+    /// constructor — slice 4's app-supplied page — and this is what says they
+    /// still bite when one arrives.
     #[test]
     fn a_page_that_would_rescale_every_untextured_surface_is_refused() {
+        // The shape that is right, which every wrong one below is one field
+        // away from — and which is checked last, so a `check` that refused
+        // everything could not pass this test.
+        let good = |extent: u32| PageDesc {
+            extent,
+            layers: vec![Cow::Owned(vec![
+                PageDesc::WHITE;
+                extent as usize * extent as usize * 4
+            ])],
+            normal_layers: vec![Cow::Owned(
+                PageDesc::NEUTRAL_NORMAL.repeat(extent as usize * extent as usize),
+            )],
+        };
+
         let grey = PageDesc {
-            extent: 2,
             layers: vec![Cow::Owned(vec![0x80; 2 * 2 * 4])],
+            ..good(2)
         };
         grey.check()
             .expect_err("a grey layer 0 scales every untextured material");
 
         let short = PageDesc {
-            extent: 2,
             layers: vec![
                 Cow::Owned(vec![PageDesc::WHITE; 2 * 2 * 4]),
                 Cow::Owned(vec![0x00; 4]),
             ],
+            ..good(2)
         };
         short
             .check()
             .expect_err("a layer of the wrong length would upload another layer's texels");
 
         let empty = PageDesc {
-            extent: 2,
             layers: Vec::new(),
+            ..good(2)
         };
         empty
             .check()
             .expect_err("a material naming no texture has nothing to sample");
 
-        // And the shape that is right is accepted, or the three refusals above
-        // would pass on a check that refused everything.
-        PageDesc {
-            extent: 2,
-            layers: vec![
-                Cow::Owned(vec![PageDesc::WHITE; 2 * 2 * 4]),
-                Cow::Owned(vec![0x00; 2 * 2 * 4]),
+        // And the normal page's own three, which are the same three failures
+        // over a different neutral: a layer 0 that is not
+        // `NEUTRAL_NORMAL` perturbs every material that named no normal map by
+        // a direction nobody authored, and the other two are the base-colour
+        // page's word for word.
+        let tilted = PageDesc {
+            normal_layers: vec![Cow::Owned(vec![0x00; 2 * 2 * 4])],
+            ..good(2)
+        };
+        tilted
+            .check()
+            .expect_err("a zeroed normal layer 0 decodes to a normal pointing backwards");
+
+        let short_normal = PageDesc {
+            normal_layers: vec![
+                Cow::Owned(PageDesc::NEUTRAL_NORMAL.repeat(4)),
+                Cow::Owned(vec![0x00; 4]),
             ],
-        }
-        .check()
-        .expect("a white layer 0 and a full-length layer 1");
+            ..good(2)
+        };
+        short_normal
+            .check()
+            .expect_err("a normal layer of the wrong length would upload another's texels");
+
+        let no_normal = PageDesc {
+            normal_layers: Vec::new(),
+            ..good(2)
+        };
+        no_normal
+            .check()
+            .expect_err("a material naming no normal map has nothing to sample");
+
+        // Every layer past 0 is unconstrained on both pages — only its length
+        // is checked — so the accepted shape carries one of each.
+        let mut whole = good(2);
+        whole.layers.push(Cow::Owned(vec![0x00; 2 * 2 * 4]));
+        whole.normal_layers.push(Cow::Owned(vec![0x00; 2 * 2 * 4]));
+        whole
+            .check()
+            .expect("a white layer 0, a neutral normal layer 0 and a full-length layer 1 each");
+    }
+
+    /// [`PageDesc::opaque_white`] describes a normal page as well, and its
+    /// layer 0 is the neutral texel rather than the white one.
+    ///
+    /// The two pages' layer 0 hold *different* bytes and are written by the same
+    /// constructor, which is exactly the shape a copy-paste gets wrong — and a
+    /// white normal layer 0 is a tangent-space normal of `(1, 1, 1)`
+    /// normalised, tilted 55° off the surface, which every material naming no
+    /// normal map would then be shaded through.
+    #[test]
+    fn the_page_is_born_with_a_neutral_normal_layer() {
+        let page = PageDesc::opaque_white(4);
+        assert_eq!(page.normal_layers().len(), 1);
+        assert_eq!(page.layers().len(), 1);
+        assert_eq!(page.normal_layers()[0].len(), 4 * 4 * 4);
+        assert!(
+            page.normal_layers()[0]
+                .chunks_exact(4)
+                .all(|texel| texel == PageDesc::NEUTRAL_NORMAL),
+            "every texel of the normal page's layer 0 is the neutral one"
+        );
+        assert_ne!(
+            &page.normal_layers()[0][..4],
+            &page.layers()[0][..4],
+            "the two pages' layer 0 are different texels, and a constructor that \
+             wrote one twice would pass every length check"
+        );
+        page.check()
+            .expect("the page a caller gets uploads as written");
+
+        // And a layer pushed onto one page does not appear on the other: they
+        // are two images and two layer numberings, which is what
+        // `GpuMaterial`'s two index columns mean.
+        let mut page = PageDesc::opaque_white(2);
+        let colour = page.push_layer(vec![0x11; 2 * 2 * 4]);
+        let normal = page.push_normal_layer(vec![0x22; 2 * 2 * 4]);
+        assert_eq!((colour, normal), (1, 1));
+        assert_eq!(page.layers().len(), 2);
+        assert_eq!(page.normal_layers().len(), 2);
+        assert_eq!(page.layers()[1][0], 0x11);
+        assert_eq!(page.normal_layers()[1][0], 0x22);
     }
 
     /// The description the renderer consumes really is the resident set it used

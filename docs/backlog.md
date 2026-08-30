@@ -12853,12 +12853,6 @@ every constructor use it. Left behind, each its own slice:
   nothing else) and the pipelines for the shadow and prepass draws pointed at
   it. Verified: `grep -n 'Main(' crates/crcbl-shaders/shaders/mesh.slang` shows
   `vertexMain` and `fragmentMain` and nothing between.
-- **The importer reads no `TANGENT`.** `crcbl_scene::gltf_render::vertex` calls
-  `MeshVertex::from_normal`, so every imported frame is `orthonormal_basis`'
-  stand-in and agrees with no UV parameterisation — a normal map sampled through
-  it is wrong. The reader hands glTF's `float4` tangent to
-  `MeshVertex::from_frame` with `w` as the handedness; a mesh that ships none
-  gets the MikkTSpace call the normal-map rung owes. Lands with that rung.
 - **`uv1` is reserved and unwritten.** The lanes are in the layout, every
   constructor writes zero, the importer reads `TEXCOORD_0` alone and reports a
   material sampling `TEXCOORD_1` as skipped, and no shader declares a second
@@ -12872,6 +12866,98 @@ every constructor use it. Left behind, each its own slice:
   _extent_; a range whose offset dwarfs its extent (coordinates near 10000
   spanning a hundredth of a unit) is dominated by `f32` spacing at that
   magnitude and was not swept. Not believed to matter for real UVs.
+
+## Normal maps: what the tangent and page rungs left (2026-08-30)
+
+`docs/plan/43-render-standards.md` §2's rung 1 and the normal half of its rung 2
+landed: the importer reads `TANGENT` and `normalTexture`, `GpuMesh` carries
+`MESH_AUTHORED_TANGENTS`, `GpuMaterial` is 64 bytes, and the normal page
+perturbs the shading normal through a vertex frame or a screen-space one. What
+they left:
+
+- **No tangent generator.** A primitive with no `TANGENT` accessor takes the
+  fragment stage's screen-space frame (`derivative_frame` in `mesh.slang`), and
+  that frame is always right-handed about the normal by construction — it
+  applies the sign of the UV Jacobian's determinant rather than inheriting it,
+  because that sign also carries the target's screen-space `y` direction and the
+  backends disagree about that. So a **mirrored UV shell lights inside out**
+  through it, which is most of the left half of most characters. The fix is
+  MikkTSpace, and MikkTSpace is a new dependency, which is the user's call — ask
+  before adding one. Between here and there the answer is "author tangents in
+  the exporter", which every DCC tool does by default.
+- **Three of the four material columns are laid out and dead.**
+  `GpuMaterial::metallic_roughness_occlusion_texture`, `emissive_texture`,
+  `alpha_cutoff` and `flags` are in the row, written as `NO_PAGE`/`UNTINTED`'s
+  values by every constructor, and read by no shader. The importer deliberately
+  does not carry glTF's `alphaCutoff` and `alphaMode` into the row either: a
+  cutoff with no mode selecting it is a number the renderer would not honour.
+  Wiring each is its own rung (§2 rungs 3 and 4), and the space is already
+  there, so none of them moves a stride again.
+- **Layer 0 of the normal page is a constant that costs a full page layer.**
+  `PageDesc::opaque_white` writes the neutral texel across the whole extent, and
+  `crcbl_scene::gltf_render` sizes that extent from the largest image in the
+  document (up to `MAX_PAGE_EXTENT`). On a 2048² document that is 16 MiB of one
+  repeated texel, 21 MiB with its mip chain, for a value the shader could have
+  as a literal — and it is paid by every scene, including the ones with no
+  normal map at all. The shader already tests the layer index and returns early
+  (`shading_normal_of` in `mesh.slang`), so nothing _samples_ it; what allocates
+  it is the page's own rule that layer 0 exists. The fix is a page whose layer
+  count starts at zero with the "no page" index kept out of band, which is the
+  same generalisation the row below wants.
+- **The two pages share one extent.** `crcbl_render::scene::PageDesc` has a
+  single `extent` for the base-colour layers and the normal layers alike, so a
+  normal map authored at a different resolution than the albedo beside it is
+  resampled to the albedo's. Fine while both come out of the same asset
+  pipeline; a limit the moment a project ships 2K albedo and 512 normals to save
+  memory. The fix is a per-page extent, which is the same generalisation §2's
+  page-allocator row already wants for the decal and shadow atlases.
+- **The normal mip chain throws away the length it averaged.**
+  `crcbl_render::mip::normal_resample` averages the decoded vectors and
+  renormalises, so a mip level over a busy region is a unit vector with no
+  record of how much the normals disagreed. That disagreement is exactly the
+  signal Toksvig and LEAN mapping turn into roughness, and without it a
+  normal-mapped surface sparkles as it minifies. `docs/plan/44-lighting.md` rung
+  4's specular AA is where it would be spent: keep the pre-normalise length and
+  fold it into the roughness the MRO page will carry.
+- **Coverage gap: the frame's winding is proved on Vulkan only.** The claim that
+  applying the determinant's sign makes the derivative frame agree with the
+  vertex frame was measured on radv and on lavapipe — both quads read
+  `0.20495605`, identical to the bit. There is no D3D12 or Metal hardware here
+  (see the section below), so the other two backends' screen-space `y`
+  convention is asserted by
+  `an_unmarked_mesh_takes_the_derivative_frame_and_agrees_with_the_marked_one`
+  running in CI on WARP and the macOS paravirtual device, and by nothing else.
+  The test's bound is one eight-bit page level, which a wrong frame misses by
+  the whole tilt rather than by rounding, so a disagreement would be loud.
+- **Coverage gap: the normal page's mip chain is unobserved on a device.**
+  `ForwardRenderer::with_scene` builds the page's levels through
+  `crcbl_render::mip::normal_chain`, and swapping that call for the colour
+  `chain` passes every device test in the tree: `tests/mesh_e2e/normal_map.rs`
+  draws its quad at one texel per page texel, so only level 0 is ever sampled,
+  and level 0 is uploaded as authored whichever chain built the rest.
+  `the_colour_filter_and_the_normal_filter_disagree` guards the function, not
+  the call site. Closing it means a frame that minifies: the same quad drawn
+  small enough that the sampler reaches level 1 or below, over a page whose
+  texels lean two ways so the two filters' level 1 differ by more than the
+  target's step, and a read of the shaded value against the normal filter's
+  arithmetic. Verified by sabotage on 2026-08-30, not by argument. The companion
+  gap — the pool dropping `GpuMesh::flags` on the way to the table — was found
+  the same way and is closed:
+  `the_table_matches_the_pool_through_allocations_and_frees` uploads distinct
+  flags and decodes the row.
+- **Surprise, not a bug: only the browser gate sees a uniformity break.**
+  `shading_normal_of` was first written with its `layer == 0` early return above
+  the derivatives and an implicit-LOD `Sample` below them. SPIR-V, MSL and DXIL
+  all compiled that, every Vulkan suite passed on both ICDs, and the browser
+  refused the module outright —
+  `'textureSample' must only be called from uniform control flow`, with the
+  fragment input named as the possibly non-uniform value. WGSL's analysis is
+  static and cannot use the fact that the material row and the frame word are
+  `nointerpolation`. The shape that satisfies it is in the function's own doc;
+  the point for next time is that a native-only run says nothing at all about
+  whether a fragment stage will parse, and `web/build.sh` plus
+  `run-browser-e2e.sh` is the only thing that does. `fxaa.slang`'s `tap` learned
+  the same lesson earlier and its doc says so too.
 
 ## D3D12 and Metal: the hardware-proof rows stay parked (2026-08-30)
 

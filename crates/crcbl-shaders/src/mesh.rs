@@ -231,25 +231,54 @@ pub const INSTANCE_PAD_WORDS: usize = 2;
 
 /// Bytes per [`GpuMesh`], and the stride of the mesh-table storage buffer.
 ///
-/// Three `uint` then ten `float`, no padding — the box's two corners and then
-/// [`GpuMesh::uv_range`]'s scale and offset. Checked against the `ArrayStride`
-/// and the `Offset` decorations `slangc` emits by this module's
+/// Three `uint`, then ten `float` — the box's two corners and then
+/// [`GpuMesh::uv_range`]'s scale and offset — and then one closing `uint`,
+/// [`GpuMesh::flags`], with no padding anywhere. Checked against the
+/// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
 /// `the_mesh_entry_layout_matches_the_offsets_slangc_emits` — which is the test
 /// that says all three targets really did lay it out this way, since a `std430`
 /// struct of scalars is one of the few whose stride an implementation could
 /// round up without anything else noticing.
-pub const MESH_ENTRY_STRIDE: usize = 52;
+///
+/// **Fifty-six, and the four bytes are [`GpuMesh::flags`]' — appended, never
+/// inserted.** Every offset below it is where it was before the flags existed,
+/// which is what let the normal-map slice widen this row without moving a
+/// single field the cull and draw-argument passes read.
+pub const MESH_ENTRY_STRIDE: usize = 56;
 
 /// Bytes per [`GpuMaterial`], and the stride of the material-table storage
 /// buffer.
 ///
-/// One `float4`, one `uint`, two `float`, then the tiling pair — one `uint`
-/// selector and one `float` of tile size — and three `uint` of padding: 48
-/// rather than 36, because the row's alignment is the `float4`'s 16 and
-/// `std430` rounds the size up to a multiple of it. Checked against the
+/// One `float4` and then twelve scalar words, no padding at all: sixty-four is
+/// already a multiple of the `float4`'s sixteen. Checked against the
 /// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
 /// `the_material_layout_matches_the_offsets_slangc_emits`.
-pub const MATERIAL_STRIDE: usize = 48;
+///
+/// # Sixty-four, which is `docs/plan/43-render-standards.md` §2's own number
+///
+/// That section's table sizes the row at 64 bytes for "four page rows … plus
+/// the alpha cutoff and flags", and the four page rows are what make the
+/// arithmetic tight. Written as four separate `uint`s the row wants eighteen
+/// words — 72, which `std430` rounds to 80 — so the four layer indices ride
+/// **two per word**, sixteen bits each — `color_normal_pages` and
+/// `mro_emissive_pages` as `shaders/mesh.slang` names them, four plain fields on
+/// this side. A page layer index is bounded by the device's maximum array
+/// layers, which no target this engine runs on reports above a few thousand, so
+/// sixteen bits is not a limit anybody reaches — and it is the same trick the
+/// vertex stream is built out of, with the same kind of unpack beside it in the
+/// shader.
+pub const MATERIAL_STRIDE: usize = 64;
+
+/// The largest page layer index [`GpuMaterial`] can carry, since the four
+/// indices ride sixteen bits each — see [`MATERIAL_STRIDE`].
+///
+/// [`GpuMaterial::to_bytes`] saturates at this rather than truncating: a
+/// truncated index names some *other* layer and shades a surface with a texture
+/// nobody chose, where a saturated one names a layer the page almost certainly
+/// does not have and is refused by
+/// [`ForwardRenderer::with_scene`](https://docs.rs/crcbl-render), which checks
+/// every row against the page's length.
+pub const MAX_PAGE_LAYER: u32 = u16::MAX as u32;
 
 /// Bytes in one draw's constant block.
 ///
@@ -319,12 +348,15 @@ impl MeshVertex {
     /// A vertex whose frame is [`orthonormal_basis`]' stand-in for `normal` —
     /// what a mesh that ships no tangent gets.
     ///
-    /// Every constructor in this workspace takes this arm, because nothing here
-    /// produces a tangent: the glTF importer does not read `TANGENT`, and the
-    /// engine's own meshes are authored as positions, normals and UVs. A frame
-    /// arriving with a real tangent goes through [`from_frame`](Self::from_frame)
-    /// instead, which is what an importer that read `TANGENT` would call, with
-    /// glTF's `w` deciding the handedness.
+    /// The engine's own meshes take this arm — greybox faces, the demo scenes,
+    /// every procedural quad — because they are authored as positions, normals
+    /// and UVs and have no tangent to carry. A primitive whose glTF accessor
+    /// list holds `TANGENT` goes through [`from_frame`](Self::from_frame)
+    /// instead, with that accessor's `w` deciding the handedness; the importer
+    /// marks the difference on the mesh with
+    /// [`GpuMesh::MESH_AUTHORED_TANGENTS`], and a mesh without it takes the
+    /// fragment stage's screen-space frame rather than the stand-in encoded
+    /// here.
     ///
     /// `range` is the mesh's, not this vertex's: a UV lane means nothing
     /// without the scale and offset it was quantised against, and that pair
@@ -1206,9 +1238,43 @@ pub struct GpuMesh {
     /// reads level 0's row while drawing a coarser level's vertices. The caller
     /// that supplies a DAG's levels supplies one range for all of them.
     pub uv_range: UvRange,
+    /// Per-mesh bits the raster stages read. Today there is one:
+    /// [`MESH_AUTHORED_TANGENTS`](Self::MESH_AUTHORED_TANGENTS).
+    ///
+    /// **Zero is the honest default**, which is what makes a widened row safe:
+    /// a mesh nobody marked has no authored tangent frame, and the shading takes
+    /// the screen-space derivative frame for it rather than trusting eight bytes
+    /// that agree with no UV parameterisation. Every one of the engine's own
+    /// meshes is in that position — see
+    /// [`MeshVertex::from_normal`]'s stand-in — so an
+    /// unwritten flags word describes them correctly.
+    pub flags: u32,
 }
 
 impl GpuMesh {
+    /// [`flags`](Self::flags) bit 0: this mesh's vertices carry a **real**
+    /// tangent frame, one that agrees with its UV parameterisation.
+    ///
+    /// Set by whoever built the vertices out of a `TANGENT` accessor —
+    /// `crcbl_scene::gltf_render` is the only such producer today — and clear
+    /// for every mesh whose frame is
+    /// [`orthonormal_basis`](crate::vertex::orthonormal_basis)' stand-in, which
+    /// is arbitrary about the normal and therefore samples a normal map along
+    /// an axis the author never chose.
+    ///
+    /// **What the bit selects is which frame the fragment stage perturbs in**:
+    /// the interpolated vertex frame when it is set, and Schüler's cotangent
+    /// frame from `ddx`/`ddy` of world position and UV when it is not. Both are
+    /// in `shaders/mesh.slang`, and the selection is a branch on this bit —
+    /// which is uniform across a primitive, so it costs nothing a per-pixel
+    /// select would have saved.
+    ///
+    /// `docs/plan/43-render-standards.md` §2's rung 1: the vertex route is the
+    /// one to take because only a stored tangent's `w` recovers the handedness
+    /// a mirrored UV shell needs, and the derivative frame is what a mesh with
+    /// no tangent gets until MikkTSpace fills one.
+    pub const MESH_AUTHORED_TANGENTS: u32 = 1;
+
     /// The bytes one mesh-table element holds, in `std430` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; MESH_ENTRY_STRIDE] {
@@ -1228,6 +1294,8 @@ impl GpuMesh {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
+        bytes[at..at + 4].copy_from_slice(&self.flags.to_le_bytes());
+        at += 4;
         debug_assert_eq!(at, MESH_ENTRY_STRIDE);
         bytes
     }
@@ -1262,6 +1330,7 @@ impl GpuMesh {
                 scale: [float_at(36), float_at(40)],
                 offset: [float_at(44), float_at(48)],
             },
+            flags: uint_at(52),
         }
     }
 }
@@ -1402,6 +1471,72 @@ pub struct GpuMaterial {
     /// `shaders/mesh.slang` gives on `GpuMaterial::emissive_r`: `std430` aligns
     /// a `float3` to sixteen and would have taken the row to 64 bytes.
     pub emissive: [f32; 3],
+    /// Which layer of the pass's **normal** page this material samples, on
+    /// [`base_color_texture`](Self::base_color_texture)'s terms exactly.
+    ///
+    /// **Zero means "no normal map"**, and it means it twice over. Layer 0 of
+    /// the normal page is the neutral texel — see
+    /// [`PageDesc::NEUTRAL_NORMAL`](https://docs.rs/crcbl-render), which owns it
+    /// the way it owns the white one — *and* the fragment stage selects the
+    /// interpolated surface normal outright rather than the perturbed one when
+    /// this is zero. Both are needed: an 8-bit unorm cannot encode `0.5`
+    /// exactly, so the neutral texel decodes to a tangent-space normal about
+    /// `0.22°` off `(0, 0, 1)` and a page fetch alone would move every golden in
+    /// the tree by a last bit. `a_neutral_normal_texel_is_not_exactly_flat` is
+    /// that error measured.
+    ///
+    /// glTF's `normalTexture.index` reaches it through
+    /// `crcbl_scene::gltf_render`, which is what turns a document's image into a
+    /// page layer.
+    pub normal_texture: u32,
+    /// glTF's `normalTexture.scale`: how far the sampled normal is tilted off
+    /// the surface.
+    ///
+    /// The specification defines it as scaling the **`x` and `y`** of the
+    /// decoded tangent-space normal and leaving `z` alone —
+    /// `normalize((<sampled> * 2 - 1) * vec3(scale, scale, 1))`, glTF 2.0
+    /// §3.9.3 — so `1.0` is the texture as authored, `0.0` is a flat surface and
+    /// a value above one exaggerates. [`UNTINTED`](Self::UNTINTED) carries
+    /// `1.0`; a `default`-constructed row carries `0.0`, which is a flat surface
+    /// and is what a row nobody wrote should be.
+    ///
+    /// Read only where [`normal_texture`](Self::normal_texture) is non-zero.
+    pub normal_scale: f32,
+    /// Which layer of the metallic-roughness-occlusion page this material
+    /// samples.
+    ///
+    /// **Laid out and read by nothing.** `docs/plan/43-render-standards.md`
+    /// §2's table sizes the row for four page rows at once, and this slice wires
+    /// the normal row alone; the shaders declare this field, no shader reads it,
+    /// and every producer writes zero. The rung that spends it is the same
+    /// section's — the packed ORM texture that turns
+    /// [`metallic`](Self::metallic) and [`roughness`](Self::roughness) into
+    /// per-texel numbers.
+    pub metallic_roughness_occlusion_texture: u32,
+    /// Which layer of the emissive page this material samples, on
+    /// [`metallic_roughness_occlusion_texture`](Self::metallic_roughness_occlusion_texture)'s
+    /// terms: **laid out and read by nothing** until §2's emissive-page rung.
+    /// [`emissive`](Self::emissive) is the factor half, and it has shipped.
+    pub emissive_texture: u32,
+    /// The alpha below which a masked material discards, glTF's
+    /// `alphaCutoff`.
+    ///
+    /// **Laid out and read by nothing**, on
+    /// [`metallic_roughness_occlusion_texture`](Self::metallic_roughness_occlusion_texture)'s
+    /// terms. §2's fourth rung is the `discard` that spends it, and it needs an
+    /// alpha mode in [`flags`](Self::flags) beside it — a cutoff with no mode
+    /// selecting it is a number, not a behaviour, which is why nothing here
+    /// reads either yet.
+    pub alpha_cutoff: f32,
+    /// Per-material bits, **all of them unassigned**.
+    ///
+    /// The word §2's table names beside the alpha cutoff, and the home the
+    /// alpha modes of its fourth rung will take: `OPAQUE` is the absence of
+    /// every bit, `MASK` and `BLEND` are one each. Laid out now for
+    /// [`normal_texture`](Self::normal_texture)'s reason — the row's stride is
+    /// mirrored in five shader declarations and a pinned offsets test, and
+    /// widening it twice is that work twice.
+    pub flags: u32,
 }
 
 impl GpuMaterial {
@@ -1421,14 +1556,34 @@ impl GpuMaterial {
     /// Named for the same reason it always was: a table's rows are black until
     /// something writes them, and the numbers spelled at each such call site
     /// would be ones a reader has to recognise rather than read.
+    /// The row's neutral: no page, on any of the four rows.
+    ///
+    /// Layer 0 by the convention `PageDesc` keeps — the base-colour page's
+    /// white texel and the normal page's neutral one — and *also* the value the
+    /// fragment stage tests to decide whether a page was named at all. See
+    /// [`normal_texture`](Self::normal_texture), which is where the second half
+    /// of that is argued.
+    pub const NO_PAGE: u32 = 0;
+
     pub const UNTINTED: Self = Self {
         base_color: [1.0; 4],
-        base_color_texture: 0,
+        base_color_texture: Self::NO_PAGE,
         metallic: 0.0,
         roughness: 0.5,
         tiling: Self::TILING_AUTHORED,
         tile_metres: 1.0,
         emissive: [0.0; 3],
+        normal_texture: Self::NO_PAGE,
+        // The glTF default, and the factor that leaves an authored normal map
+        // as it was authored — see `normal_scale`.
+        normal_scale: 1.0,
+        metallic_roughness_occlusion_texture: Self::NO_PAGE,
+        emissive_texture: Self::NO_PAGE,
+        // glTF's own `alphaCutoff` default. Read by nothing today; spelled
+        // rather than left at zero so the rung that reads it inherits the
+        // specification's value from every row spread out of this one.
+        alpha_cutoff: 0.5,
+        flags: 0,
     };
 
     /// [`tiling`](Self::tiling): sample the base-colour texture at the vertex's
@@ -1445,20 +1600,43 @@ impl GpuMaterial {
     /// See `physical_tile_uv` in `shaders/mesh.slang` for the projection.
     pub const TILING_PHYSICAL: u32 = 1;
 
+    /// The four page layer indices as the two words the row carries them in:
+    /// base colour in the low half of the first and the normal page in its
+    /// high half, then metallic-roughness-occlusion and emissive the same way.
+    ///
+    /// Saturating rather than truncating at [`MAX_PAGE_LAYER`], for the reason
+    /// that constant gives: an index that wrapped would name a real layer and
+    /// shade a surface with somebody else's texture, where one that saturates
+    /// names a layer the page does not have and is refused before a frame is
+    /// drawn.
+    #[must_use]
+    fn page_words(&self) -> [u32; 2] {
+        let pair = |low: u32, high: u32| low.min(MAX_PAGE_LAYER) | (high.min(MAX_PAGE_LAYER) << 16);
+        [
+            pair(self.base_color_texture, self.normal_texture),
+            pair(
+                self.metallic_roughness_occlusion_texture,
+                self.emissive_texture,
+            ),
+        ]
+    }
+
     /// The bytes one material-table element holds, in `std430` order.
     ///
-    /// The row has no padding left: the three trailing words it used to spell
-    /// out are [`emissive`](Self::emissive), which is why adding emission cost
-    /// no stride and moved no offset.
+    /// The row has no padding: sixty-four is a multiple of the `float4`'s
+    /// alignment already, and every word after it is spent. Two of them are the
+    /// four page indices packed in pairs — see [`MATERIAL_STRIDE`], which is
+    /// where that arithmetic is argued, and `page_words`, which does it.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; MATERIAL_STRIDE] {
         let mut bytes = [0u8; MATERIAL_STRIDE];
         let mut at = 0usize;
+        let pages = self.page_words();
         for value in &self.base_color {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        bytes[at..at + 4].copy_from_slice(&self.base_color_texture.to_le_bytes());
+        bytes[at..at + 4].copy_from_slice(&pages[0].to_le_bytes());
         at += 4;
         for value in [self.metallic, self.roughness] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -1472,6 +1650,14 @@ impl GpuMaterial {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
+        bytes[at..at + 4].copy_from_slice(&pages[1].to_le_bytes());
+        at += 4;
+        for value in [self.normal_scale, self.alpha_cutoff] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        bytes[at..at + 4].copy_from_slice(&self.flags.to_le_bytes());
+        at += 4;
         debug_assert_eq!(at, MATERIAL_STRIDE);
         bytes
     }
@@ -1497,14 +1683,22 @@ impl GpuMaterial {
                     .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
             )
         };
+        let low = |word: u32| word & MAX_PAGE_LAYER;
+        let high = |word: u32| word >> 16;
         Self {
             base_color: [float_at(0), float_at(4), float_at(8), float_at(12)],
-            base_color_texture: uint_at(16),
+            base_color_texture: low(uint_at(16)),
             metallic: float_at(20),
             roughness: float_at(24),
             tiling: uint_at(28),
             tile_metres: float_at(32),
             emissive: [float_at(36), float_at(40), float_at(44)],
+            normal_texture: high(uint_at(16)),
+            normal_scale: float_at(52),
+            metallic_roughness_occlusion_texture: low(uint_at(48)),
+            emissive_texture: high(uint_at(48)),
+            alpha_cutoff: float_at(56),
+            flags: uint_at(60),
         }
     }
 }
@@ -3350,12 +3544,12 @@ mod tests {
     /// only a second resident can show.
     #[test]
     fn the_mesh_entry_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuMesh_std430 ArrayStride 52`, and
+        // `OpDecorate %_runtimearr_GpuMesh_std430 ArrayStride 56`, and
         // `OpMemberDecorate %GpuMesh_std430 n Offset …`: 0, 4, 8, 12, 16, 20,
-        // 24, 28, 32, 36, 40, 44, 48. The WGSL and the MSL declare the same
-        // thirteen scalars with no explicit alignment, which is the same
+        // 24, 28, 32, 36, 40, 44, 48, 52. The WGSL and the MSL declare the same
+        // fourteen scalars with no explicit alignment, which is the same
         // layout.
-        assert_eq!(MESH_ENTRY_STRIDE, 52);
+        assert_eq!(MESH_ENTRY_STRIDE, 56);
 
         let entry = GpuMesh {
             base_vertex: 24,
@@ -3367,6 +3561,7 @@ mod tests {
                 scale: [7.0, 8.0],
                 offset: [9.0, 10.0],
             },
+            flags: GpuMesh::MESH_AUTHORED_TANGENTS,
         };
         let bytes = entry.to_bytes();
         assert_eq!(bytes.len(), MESH_ENTRY_STRIDE);
@@ -3387,6 +3582,15 @@ mod tests {
         assert_eq!(float_at(40), 8.0, "uv_range.scale.y at offset 40");
         assert_eq!(float_at(44), 9.0, "uv_range.offset.x at offset 44");
         assert_eq!(float_at(48), 10.0, "uv_range.offset.y at offset 48");
+        // **Appended, so every offset above is where it always was.** The flags
+        // word is the row's fourteenth scalar and the only one the normal-map
+        // slice added; a reader that put it anywhere else would move the UV
+        // range the vertex stage decodes through.
+        assert_eq!(
+            uint_at(52),
+            GpuMesh::MESH_AUTHORED_TANGENTS,
+            "flags at offset 52"
+        );
 
         // And the decode agrees with the encode, field for field.
         assert_eq!(GpuMesh::from_bytes(&bytes), entry);
@@ -3397,6 +3601,13 @@ mod tests {
         // origin — a shape the cull pass must never decide anything on.
         assert_eq!(GpuMesh::default().to_bytes(), [0u8; MESH_ENTRY_STRIDE]);
         assert_eq!(GpuMesh::default().index_count, 0);
+        // **And a zeroed row says "no authored tangents"**, which is the whole
+        // reason the bit is spelled that way round: a mesh nobody marked takes
+        // the derivative frame, where the other polarity would have every
+        // unmarked mesh sample its normal map through
+        // `orthonormal_basis`' arbitrary axes.
+        assert_eq!(GpuMesh::default().flags, 0);
+        assert_eq!(GpuMesh::MESH_AUTHORED_TANGENTS, 1);
     }
 
     /// The offsets and the stride `slangc` actually emitted for `GpuMaterial`,
@@ -3410,17 +3621,18 @@ mod tests {
     /// the only reason the table exists at all.
     #[test]
     fn the_material_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 48`, and
+        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 64`, and
         // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0` / `1 Offset 16` /
         // `2 Offset 20` / `3 Offset 24` / `4 Offset 28` / `5 Offset 32` /
-        // `6 Offset 36` / `7 Offset 40` / `8 Offset 44`.
-        // Forty-eight rather than thirty-six: the row's alignment is the
-        // `float4`'s sixteen, so the members after `tile_metres` sit in bytes
-        // the row would have been padded to anyway. That is what made the
-        // emissive triple free — and it is also why it is three scalars rather
-        // than a `float3`, which `std430` would have aligned to 48 and taken the
-        // stride to 64.
-        assert_eq!(MATERIAL_STRIDE, 48);
+        // `6 Offset 36` / `7 Offset 40` / `8 Offset 44` / `9 Offset 48` /
+        // `10 Offset 52` / `11 Offset 56` / `12 Offset 60`.
+        // Sixty-four with **no** padding, where the row before the material
+        // pages was forty-eight with none either: the alignment is the
+        // `float4`'s sixteen and thirteen members of four bytes each land on
+        // exactly four of them. What the four page rows cost is two words, not
+        // four — see `MATERIAL_STRIDE`, and `the_page_words_pack_two_layers_each`
+        // for the pairing itself.
+        assert_eq!(MATERIAL_STRIDE, 64);
 
         let material = GpuMaterial {
             base_color: [0.25, 0.5, 0.75, 1.0],
@@ -3430,6 +3642,12 @@ mod tests {
             tiling: GpuMaterial::TILING_PHYSICAL,
             tile_metres: 2.0,
             emissive: [1.5, 2.5, 3.5],
+            normal_texture: 5,
+            normal_scale: 0.75,
+            metallic_roughness_occlusion_texture: 6,
+            emissive_texture: 7,
+            alpha_cutoff: 0.25,
+            flags: 0x8000_0001,
         };
         let bytes = material.to_bytes();
         assert_eq!(bytes.len(), MATERIAL_STRIDE);
@@ -3445,11 +3663,16 @@ mod tests {
                 channel * 4
             );
         }
-        // **The texture index is at offset 16, after the factor.** A row the CPU
-        // wrote at some other offset would still round-trip through
-        // `from_bytes`, so this is asserted against the bytes rather than
-        // against the decode.
-        assert_eq!(uint_at(16), 3, "base_color_texture at offset 16");
+        // **The base-colour and normal layers share offset 16, low half
+        // first.** A row the CPU wrote at some other offset would still
+        // round-trip through `from_bytes`, so this is asserted against the bytes
+        // rather than against the decode.
+        assert_eq!(uint_at(16) & 0xffff, 3, "base_color_texture at offset 16");
+        assert_eq!(
+            uint_at(16) >> 16,
+            5,
+            "normal_texture in offset 16's high half"
+        );
         assert_eq!(float_at(20), 0.125, "metallic at offset 20");
         assert_eq!(float_at(24), 0.375, "roughness at offset 24");
         // **The tiling pair went into the padding the row had plus the twelve
@@ -3469,6 +3692,25 @@ mod tests {
         assert_eq!(float_at(36), 1.5, "emissive[0] at offset 36");
         assert_eq!(float_at(40), 2.5, "emissive[1] at offset 40");
         assert_eq!(float_at(44), 3.5, "emissive[2] at offset 44");
+        // **The sixteen bytes §2's table sized the row for**: the other two page
+        // rows in one word, the normal map's scale, the alpha cutoff and the
+        // flags. Three of the five are read by nothing today and are pinned all
+        // the same — the offsets test is what the rung that reads them will
+        // trust, and a member sitting where nobody checked is exactly the drift
+        // this test exists for.
+        assert_eq!(
+            uint_at(48) & 0xffff,
+            6,
+            "metallic_roughness_occlusion_texture at offset 48"
+        );
+        assert_eq!(
+            uint_at(48) >> 16,
+            7,
+            "emissive_texture in offset 48's high half"
+        );
+        assert_eq!(float_at(52), 0.75, "normal_scale at offset 52");
+        assert_eq!(float_at(56), 0.25, "alpha_cutoff at offset 56");
+        assert_eq!(uint_at(60), 0x8000_0001, "flags at offset 60");
         assert_eq!(GpuMaterial::from_bytes(&bytes), material);
 
         // A row nothing has written is black, not untinted — the contract the
@@ -3500,6 +3742,25 @@ mod tests {
         // The zeroed row is authored-UV, so no unwritten material silently tiles
         // by world extent.
         assert_eq!(GpuMaterial::default().tiling, GpuMaterial::TILING_AUTHORED);
+        // **And it names no page on any of the four rows**, which is what makes
+        // a widened row safe: every material in the tree that was written before
+        // these columns existed carries zero in each, and zero is "no page" on
+        // all four.
+        assert_eq!(GpuMaterial::default().normal_texture, GpuMaterial::NO_PAGE);
+        assert_eq!(
+            GpuMaterial::default().metallic_roughness_occlusion_texture,
+            GpuMaterial::NO_PAGE
+        );
+        assert_eq!(
+            GpuMaterial::default().emissive_texture,
+            GpuMaterial::NO_PAGE
+        );
+        assert_eq!(GpuMaterial::UNTINTED.normal_texture, GpuMaterial::NO_PAGE);
+        // The untinted row's normal scale is glTF's own default, so a row spread
+        // from it and pointed at a normal page gets the map as authored.
+        assert_eq!(GpuMaterial::UNTINTED.normal_scale, 1.0);
+        assert_eq!(GpuMaterial::UNTINTED.alpha_cutoff, 0.5);
+        assert_eq!(GpuMaterial::UNTINTED.flags, 0);
 
         // Two materials differing in nothing but their texture are different
         // rows, which is the whole of what the second column buys.
@@ -3509,6 +3770,102 @@ mod tests {
         };
         assert_ne!(other, material);
         assert_ne!(other.to_bytes(), bytes);
+        // And the same for the row that shares its word: a normal page moved
+        // without a base colour moved has to reach the device as a different
+        // row, which is exactly what a pairing done wrong would lose.
+        let perturbed = GpuMaterial {
+            normal_texture: 9,
+            ..material
+        };
+        assert_ne!(perturbed.to_bytes(), bytes);
+        assert_eq!(
+            GpuMaterial::from_bytes(&perturbed.to_bytes()).base_color_texture,
+            material.base_color_texture,
+            "the normal layer must not spill into the base-colour layer's half"
+        );
+    }
+
+    /// The four page layers survive the two words they ride in, at the ends of
+    /// the range those halves can hold.
+    ///
+    /// The pairing is the one thing about the row a reader cannot see from the
+    /// field declarations, and getting it wrong is silent: a layer index that
+    /// wrapped into its neighbour's half still names *a* layer, and the surface
+    /// shades with a texture nobody chose rather than failing.
+    #[test]
+    fn the_page_words_pack_two_layers_each() {
+        let material = GpuMaterial {
+            base_color_texture: MAX_PAGE_LAYER,
+            normal_texture: 1,
+            metallic_roughness_occlusion_texture: 0,
+            emissive_texture: MAX_PAGE_LAYER,
+            ..GpuMaterial::UNTINTED
+        };
+        let decoded = GpuMaterial::from_bytes(&material.to_bytes());
+        assert_eq!(decoded.base_color_texture, MAX_PAGE_LAYER);
+        assert_eq!(decoded.normal_texture, 1);
+        assert_eq!(decoded.metallic_roughness_occlusion_texture, 0);
+        assert_eq!(decoded.emissive_texture, MAX_PAGE_LAYER);
+
+        // **Saturated, not wrapped.** An index past what sixteen bits hold is
+        // a caller mistake either way; what this pins is that the mistake stays
+        // a mistake. `MAX_PAGE_LAYER` is far past any page a device will let
+        // this engine create, so the renderer's own row check refuses it — see
+        // `MAX_PAGE_LAYER`, which is where that is argued.
+        let past = GpuMaterial {
+            base_color_texture: MAX_PAGE_LAYER + 1,
+            normal_texture: MAX_PAGE_LAYER + 9,
+            ..GpuMaterial::UNTINTED
+        };
+        let decoded = GpuMaterial::from_bytes(&past.to_bytes());
+        assert_eq!(
+            decoded.base_color_texture, MAX_PAGE_LAYER,
+            "an index past the half saturates rather than naming layer 0"
+        );
+        assert_eq!(decoded.normal_texture, MAX_PAGE_LAYER);
+    }
+
+    /// The neutral normal texel is **not** exactly flat, which is why
+    /// [`GpuMaterial::normal_texture`] is tested for zero in the shader rather
+    /// than left to the page's layer 0.
+    ///
+    /// `(0.5, 0.5, 1.0)` is the neutral a normal map is authored against, and an
+    /// eight-bit unorm channel has no `0.5`: `128 / 255` is the nearest, and it
+    /// decodes through `t * 2 - 1` to a tangent-space `x` and `y` of about
+    /// `0.0039` rather than zero. That is a real tilt — a fifth of a degree —
+    /// and this engine's goldens are compared across four backends with no
+    /// tolerance, so a fetch that always perturbed would move every frame in the
+    /// tree that draws a lit surface.
+    ///
+    /// The number is measured here rather than asserted to be small, so that a
+    /// later change to the neutral texel or to the decode reports what it did.
+    #[test]
+    fn a_neutral_normal_texel_is_not_exactly_flat() {
+        // The texel `crcbl_render::scene::PageDesc` writes into the normal
+        // page's layer 0, read back the way an `Rgba8Unorm` sampler reads it.
+        let neutral = [0x80u8, 0x80, 0xFF, 0xFF];
+        let decoded = crate::vertex::decode_rgba8(neutral);
+        let tangent_space = [
+            decoded[0] * 2.0 - 1.0,
+            decoded[1] * 2.0 - 1.0,
+            decoded[2] * 2.0 - 1.0,
+        ];
+        assert_eq!(
+            tangent_space[2], 1.0,
+            "the blue channel's 0xFF is exactly 1"
+        );
+        assert_ne!(
+            tangent_space[0], 0.0,
+            "if this ever became exact the shader's zero-layer test could go"
+        );
+        // Half an eight-bit step off a half, doubled by the decode: `0x80` is
+        // `128 / 255`, and `2 * (128 / 255) - 1` is `1 / 255` exactly.
+        let step = 1.0 / 255.0;
+        assert!(
+            (tangent_space[0] - step).abs() < 1.0e-7 && tangent_space[0] == tangent_space[1],
+            "the neutral texel tilts by {} on each axis, and the measured step is {step}",
+            tangent_space[0]
+        );
     }
 
     /// Every pyramid face is wound counter-clockwise as seen from outside, on
@@ -3794,6 +4151,188 @@ mod tests {
                 "{name} still takes a normal through the bare 3x3, which is the transform a \
                  tangent takes and not the one a normal takes"
             );
+        }
+    }
+
+    /// The `frame` word `VertexOutput` carries, as both raster paths must spell
+    /// it.
+    ///
+    /// Held byte for byte for [`NORMAL_BASIS`]' reason and one more of its own:
+    /// this word decides which tangent frame a normal map is sampled in *and*
+    /// which way its bitangent points, and a copy that built the handedness bit
+    /// the other way round would light a mesh-shader frame's normal maps as the
+    /// mirror of the raster frame's — two pictures of one scene, differing by
+    /// whether the device reported a mesh stage.
+    const FRAME_WORD: &str = concat!(
+        "uint frame_word(uint mesh_flags, TangentFrame basis)\n",
+        "{\n",
+        "    uint word = (mesh_flags & MESH_AUTHORED_TANGENTS) != 0u ? FRAME_AUTHORED_TANGENTS : 0u;\n",
+    );
+
+    /// **Both raster paths build the tangent-frame varying with one function,
+    /// and both feed it the mesh row's own flags.**
+    ///
+    /// `mesh.slang`'s vertex stage and `mesh_cluster.slang`'s mesh stage
+    /// complete the *same* fragment stage, so the word one of them writes is
+    /// read by code written against the other. Equal text cannot differ under
+    /// any input.
+    ///
+    /// The second assertion is what stops the function being decoration: a copy
+    /// declared and never called leaves `frame` at whatever the struct was
+    /// initialised with, and a zero word says "no authored tangents" — which is
+    /// a mesh-shader frame silently taking the derivative fallback on every mesh
+    /// that shipped a `TANGENT`, and is a difference no golden of an untangented
+    /// scene could ever show.
+    ///
+    /// The third is what stops the tangent going through the wrong matrix. A
+    /// tangent lies in the surface and takes the transform itself; the cofactor
+    /// matrix is the one a perpendicular needs, and sending both through it
+    /// shows up as a normal map lit from the wrong side on every non-uniformly
+    /// scaled instance — see `skinning.slang`, which argues the pair at length.
+    #[test]
+    fn every_shader_builds_the_frame_word_the_same_way() {
+        for (name, source, tangent) in [
+            (
+                "mesh.slang",
+                include_str!("../shaders/mesh.slang"),
+                "output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);",
+            ),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+                "output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);",
+            ),
+        ] {
+            assert!(
+                source.contains(FRAME_WORD),
+                "{name} does not carry this exact function, so the two raster paths can \
+                 disagree about which frame a normal map is sampled in:\n{FRAME_WORD}"
+            );
+            assert!(
+                source.contains("output.frame = frame_word(mesh.flags, vertex.basis);"),
+                "{name} declares `frame_word` and never fills `VertexOutput::frame` from the \
+                 mesh row with it, so the declaration is decoration and every primitive it \
+                 emits claims to have no authored tangents"
+            );
+            assert!(
+                source.contains(tangent),
+                "{name} does not carry the tangent through the bare 3x3, which is the \
+                 transform a tangent takes and not the one `normal_basis` builds"
+            );
+            assert!(
+                source.contains(&format!(
+                    "static const uint MESH_AUTHORED_TANGENTS = {};",
+                    GpuMesh::MESH_AUTHORED_TANGENTS
+                )),
+                "{name}'s MESH_AUTHORED_TANGENTS is not the host's {}",
+                GpuMesh::MESH_AUTHORED_TANGENTS
+            );
+        }
+    }
+
+    /// Every shader that declares `GpuMesh` declares **all fourteen** of its
+    /// scalars, and the flags word last.
+    ///
+    /// Four files read that table — the two raster paths, the cull pass and the
+    /// draw-argument pass — and only the raster ones read the new word. The
+    /// other two have to declare it all the same: a row short of a member puts
+    /// every *element after it* at the wrong offset, so a cull pass reading a
+    /// 52-byte row out of a 56-byte table culls the second mesh in the scene
+    /// against the first mesh's bounding box. Nothing anywhere reports that; the
+    /// frame simply loses geometry, and only for a scene with more than one
+    /// resident mesh.
+    #[test]
+    fn every_shader_that_reads_the_mesh_table_declares_the_flags_word() {
+        for (name, source) in [
+            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+            ),
+            ("cull.slang", include_str!("../shaders/cull.slang")),
+            ("draw_gen.slang", include_str!("../shaders/draw_gen.slang")),
+        ] {
+            let at = source
+                .find("struct GpuMesh\n{")
+                .unwrap_or_else(|| panic!("{name} declares no GpuMesh"));
+            let body = &source[at..];
+            let end = body
+                .find("\n};")
+                .unwrap_or_else(|| panic!("{name}'s GpuMesh never ends"));
+            let body = &body[..end];
+            // The scalars, in order, with the comments stripped: what the row
+            // has to be for the CPU's `MESH_ENTRY_STRIDE` bytes to land on the
+            // members this file names.
+            let scalars: Vec<&str> = body
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.ends_with(';'))
+                .collect();
+            assert_eq!(
+                scalars.len(),
+                MESH_ENTRY_STRIDE / 4,
+                "{name}'s GpuMesh declares {} scalars and the row is {MESH_ENTRY_STRIDE} bytes",
+                scalars.len()
+            );
+            assert_eq!(
+                scalars.last().copied(),
+                Some("uint flags;"),
+                "{name}'s GpuMesh must end with the flags word, or every member before it moves"
+            );
+        }
+    }
+
+    /// Both shaders that declare `GpuMaterial` declare **all thirteen** of its
+    /// members, and the two page words in the halves the host packs them into.
+    ///
+    /// `mesh_cluster.slang` reads no material at all — its copy exists because
+    /// the binding is in a layout its pipeline shares — which is exactly why it
+    /// is the one that would drift: nothing it draws would look different, and
+    /// the *fragment* stage reading the table is `mesh.slang`'s. What a short
+    /// row there costs is the layout check, and after that the table itself.
+    #[test]
+    fn every_shader_that_declares_a_material_row_declares_the_whole_row() {
+        for (name, source) in [
+            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+            ),
+        ] {
+            let at = source
+                .find("struct GpuMaterial\n{")
+                .unwrap_or_else(|| panic!("{name} declares no GpuMaterial"));
+            let body = &source[at..];
+            let end = body
+                .find("\n};")
+                .unwrap_or_else(|| panic!("{name}'s GpuMaterial never ends"));
+            let members: Vec<&str> = body[..end]
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.ends_with(';'))
+                .collect();
+            // A `float4` and twelve scalars: thirteen members over
+            // `MATERIAL_STRIDE` bytes, of which the vector is four words.
+            assert_eq!(
+                members.len(),
+                MATERIAL_STRIDE / 4 - 3,
+                "{name}'s GpuMaterial declares {} members: {members:?}",
+                members.len()
+            );
+            assert_eq!(members.first().copied(), Some("float4 base_color;"));
+            for expected in [
+                "uint color_normal_pages;",
+                "uint mro_emissive_pages;",
+                "float normal_scale;",
+                "float alpha_cutoff;",
+                "uint flags;",
+            ] {
+                assert!(
+                    members.contains(&expected),
+                    "{name}'s GpuMaterial is missing `{expected}`, so every member after where \
+                     it belongs is read out of the wrong bytes"
+                );
+            }
         }
     }
 

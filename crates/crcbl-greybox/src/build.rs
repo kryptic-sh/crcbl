@@ -256,6 +256,11 @@ impl MeshBuilder {
             uv_range,
             indices: Cow::Owned(self.indices),
             clusters,
+            // No `MESH_AUTHORED_TANGENTS`: the vertices above come from
+            // `MeshVertex::from_normal`, whose frame is `orthonormal_basis`'
+            // stand-in and agrees with no UV parameterisation. Setting the bit
+            // would be a claim this builder has no tangent to back.
+            flags: 0,
         }
     }
 }

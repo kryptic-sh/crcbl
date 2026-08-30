@@ -123,8 +123,9 @@
 //
 // §3.2 asks for "a bindless texture array (`BindingModel::Bindless`) or texture
 // array pages (`ArrayPages`)". This file has the second: `base_color_textures`
-// is a single `Texture2DArray` and `GpuMaterial::base_color_texture` names a
-// layer of it. Only one of the two models is here, and the reason is that only
+// is a single `Texture2DArray` and `base_color_layer(material)` names a layer
+// of it — as `normal_textures` and `normal_layer(material)` are the same pair
+// for §2's normal page. Only one of the two models is here, and the reason is that only
 // one of them every device can run — `crcbl-hal` derives `BindingModel` from
 // `Features::DESCRIPTOR_INDEXING`, `crcbl-mtl` withdraws that feature, and a
 // layer index needs nothing beyond a dynamically indexed sample. A device that
@@ -762,7 +763,27 @@ struct GpuMesh
     float uv_scale_v;
     float uv_offset_u;
     float uv_offset_v;
+    /// Per-mesh bits, matching `crcbl_shaders::mesh::GpuMesh::flags`. Today
+    /// there is one — `MESH_AUTHORED_TANGENTS` — and `vertexMain` is what
+    /// carries it to the fragment stage.
+    uint flags;
 };
+
+/// `GpuMesh::flags` bit 0: this mesh's vertices carry a real tangent frame,
+/// matching `crcbl_shaders::mesh::GpuMesh::MESH_AUTHORED_TANGENTS`.
+///
+/// **What it selects is which frame a normal map is sampled in.** Set, and the
+/// fragment stage perturbs in the interpolated vertex frame — the QTangent the
+/// importer built from the document's own `TANGENT`, whose `w` is the only
+/// thing that recovers the handedness of a mirrored UV shell. Clear, and it
+/// perturbs in the screen-space derivative frame instead, because a mesh with
+/// no authored tangent carries `crcbl_shaders::vertex::orthonormal_basis`'
+/// stand-in — a frame that is orthonormal and agrees with no UV
+/// parameterisation at all, so a normal map read through it is rotated by an
+/// arbitrary angle per vertex.
+///
+/// `docs/plan/43-render-standards.md` §2's rung 1 in one bit.
+static const uint MESH_AUTHORED_TANGENTS = 1;
 
 /// One material's shading factors **and its base-colour texture**, matching
 /// `crcbl_shaders::mesh::GpuMaterial`.
@@ -780,12 +801,24 @@ struct GpuMaterial
 {
     /// Linear RGBA factor multiplied into the vertex albedo and the texel.
     float4 base_color;
-    /// Which layer of `base_color_textures` this material samples.
+    /// The base-colour page layer in the **low** sixteen bits and the normal
+    /// page layer in the high sixteen, matching
+    /// `crcbl_shaders::mesh::GpuMaterial`'s `base_color_texture` and
+    /// `normal_texture`.
     ///
-    /// Layer 0 by convention holds a white texel, so a material that wants no
-    /// texture leaves this at zero and the multiply below changes nothing —
-    /// `crcbl_render`'s forward pass is what fills that layer and says so.
-    uint base_color_texture;
+    /// **Two layers to a word, and that is what makes the row 64 bytes.**
+    /// `docs/plan/43-render-standards.md` §2 sizes it for four page rows, the
+    /// alpha cutoff and flags; written as four separate `uint`s the row needs
+    /// eighteen words and `std430` rounds it to eighty. A page layer index is
+    /// bounded by the device's maximum array layers, so sixteen bits is a limit
+    /// nothing reaches — the host's `MATERIAL_STRIDE` carries the arithmetic and
+    /// `MAX_PAGE_LAYER` the bound. `base_color_layer` and `normal_layer` below
+    /// are the two readers, so no call site does the shift by hand.
+    ///
+    /// Layer 0 by convention is the page's neutral — a white texel on the
+    /// base-colour page and `(0.5, 0.5, 1.0)` on the normal one — so a material
+    /// that wants no texture leaves both halves at zero.
+    uint color_normal_pages;
     /// How metallic the surface is: 0 a dielectric, 1 a conductor. glTF's
     /// `metallicFactor`.
     ///
@@ -838,7 +871,58 @@ struct GpuMaterial
     float emissive_r;
     float emissive_g;
     float emissive_b;
+    /// The metallic-roughness-occlusion page layer in the low sixteen bits and
+    /// the emissive page layer in the high sixteen, on `color_normal_pages`'
+    /// terms.
+    ///
+    /// **Declared and read by nothing.** §2's table lays four page rows out at
+    /// once and this slice wires the normal row alone; every producer writes
+    /// zero here, and the rungs that spend the two halves are the packed ORM
+    /// texture and the emissive page. They are in the layout now because the
+    /// row's stride is mirrored in five declarations and one pinned offsets
+    /// test, and widening it twice is that work twice.
+    uint mro_emissive_pages;
+    /// glTF's `normalTexture.scale`: the factor the decoded tangent-space
+    /// normal's `x` and `y` are multiplied by before it is renormalised, with
+    /// `z` left alone — glTF 2.0 §3.9.3. One is the map as authored, zero is a
+    /// flat surface. Read only where `normal_layer` is non-zero.
+    float normal_scale;
+    /// The alpha below which a masked material discards, glTF's `alphaCutoff`.
+    /// **Declared and read by nothing** — §3's alpha-mask rung is what spends
+    /// it, and it needs a mode bit in `flags` beside it before a cutoff means
+    /// anything.
+    float alpha_cutoff;
+    /// Per-material bits, **all unassigned**. The word §2's table names beside
+    /// the cutoff, and where its alpha modes will land.
+    uint flags;
 };
+
+/// The base-colour page layer a material row names — the low half of
+/// `GpuMaterial::color_normal_pages`.
+///
+/// A function rather than a mask spelled at each reader, for `emissive_of`'s
+/// reason: the pairing is the one thing about the row that is invisible in the
+/// field declarations, and a shift written by hand in two places is two places
+/// to get the halves the wrong way round.
+uint base_color_layer(GpuMaterial material)
+{
+    return material.color_normal_pages & 0xffffu;
+}
+
+/// The normal page layer a material row names — the high half of
+/// `GpuMaterial::color_normal_pages`.
+///
+/// **Zero means the material has no normal map**, and `fragmentMain` tests it
+/// rather than trusting layer 0's neutral texel. An eight-bit unorm has no
+/// exact `0.5`, so that texel decodes to a tangent-space normal about a fifth
+/// of a degree off flat; perturbing by it would move every golden in the tree
+/// that draws a lit surface, for a picture nobody asked to change.
+/// `crcbl_shaders::mesh::a_neutral_normal_texel_is_not_exactly_flat` is that
+/// error measured on the host.
+uint normal_layer(GpuMaterial material)
+{
+    return material.color_normal_pages >> 16;
+}
 
 /// The emissive radiance of a material row, as a vector.
 ///
@@ -1058,7 +1142,7 @@ StructuredBuffer<uint> visible_instances;
 StructuredBuffer<GpuMaterial> materials;
 
 /// §3.2's texture side: **one `ArrayPages` page**, indexed by
-/// `GpuMaterial::base_color_texture`.
+/// `base_color_layer(material)`.
 ///
 /// A `Texture2DArray` — one image, one descriptor, a layer per material texture
 /// — rather than an array *of* descriptors, and that is the whole binding-model
@@ -1253,6 +1337,38 @@ StructuredBuffer<GpuProbe> probes;
 [[vk::binding(25, 0)]]
 Texture2D<float2> specular_albedo;
 
+/// §2's second texture page: the **normal** map, one `Texture2DArray` indexed
+/// by `normal_layer(material)`.
+///
+/// The base-colour page's own shape, one binding higher, read through the same
+/// UV and the *same sampler* — `base_color_sampler`, so a normal map gets the
+/// trilinear anisotropic filtering the colour page already has without a second
+/// sampler, a second layout entry, or a second index in Metal's sampler
+/// argument table.
+///
+/// # `Rgba8Unorm`, and the missing `Srgb` is the whole point
+///
+/// `crcbl_render::forward` creates this image as `Rgba8Unorm` where it creates
+/// the base-colour page as `Rgba8UnormSrgb`, and
+/// `docs/plan/44-lighting.md`'s rung 2 is where that is argued: a base-colour
+/// texel is a *colour* and glTF defines it as sRGB-encoded, where a normal texel
+/// is a *number* — three components of a direction — and pushing it through the
+/// sRGB decode is wrong by a gamma. The failure is quiet, which is why it
+/// survives review everywhere it happens: the decoded normal simply leans
+/// further from vertical than the author drew, and the surface reads as
+/// "bumpier than intended" rather than as broken.
+/// `crcbl_render::forward::the_two_page_formats_differ` is the guard.
+///
+/// **Appended past `specular_albedo`, never inserted**, for
+/// `SHADOW_ATLAS_BINDING`'s reason exactly: `crcbl-mtl` gives a resource the
+/// next index in its Metal argument table by counting the same-table entries of
+/// the layout list, and Slang numbers a stage's arguments by declaration order,
+/// so the two agree only while both ascend. 26 is past everything
+/// `mesh_cluster.slang` declares — that file reaches 24 — so it needs no mirror
+/// there and no index anything already owns moves.
+[[vk::binding(26, 0)]]
+Texture2DArray<float4> normal_textures;
+
 /// The matrix that carries a mesh-space normal into `GpuInstance::transform`'s
 /// space, built out of that transform's own upper-left 3×3.
 ///
@@ -1359,7 +1475,74 @@ struct VertexOutput
     /// Undivided, on `clip_position`'s terms. `motion_vector` below is what
     /// subtracts the two, and it is the only reader of either.
     float4 previous_clip_position : TEXCOORD3;
+    /// This vertex's surface tangent in world space — the QTangent's tangent
+    /// through the instance transform's **bare 3×3**.
+    ///
+    /// **The bare 3×3 and not `normal_basis`**, which is `skinning.slang`'s
+    /// account and holds here for the same reason: a tangent lies *in* the
+    /// surface, so the transform itself is what carries it, where the cofactor
+    /// matrix is what a perpendicular needs. Sending both through one matrix is
+    /// the mistake `normal_basis` exists to prevent, and what it looks like is a
+    /// normal map lit from the wrong side on every non-uniformly scaled
+    /// instance.
+    ///
+    /// Interpolated, and therefore neither unit length nor perpendicular to
+    /// `world_normal` by the time a fragment reads it — `fragmentMain`
+    /// re-orthogonalises with the Gram-Schmidt projection that `skinning.slang`
+    /// applies for the same reason. Read only where `FRAME_AUTHORED_TANGENTS`
+    /// is set; a mesh without it carries `orthonormal_basis`' stand-in here,
+    /// which is a direction the UV parameterisation never agreed to.
+    float3 world_tangent : TEXCOORD4;
+    /// Which frame this primitive's normal map is sampled in, and which way its
+    /// bitangent points: `FRAME_AUTHORED_TANGENTS` and `FRAME_LEFT_HANDED`.
+    ///
+    /// # `nointerpolation`, for `material`'s reason exactly
+    ///
+    /// Neither bit is a quantity. A handedness is `+1` or `-1` and a value
+    /// between them is a bitangent pointing nowhere, which is precisely what a
+    /// mirrored UV seam would produce if the sign were interpolated across the
+    /// triangle that straddles it. The provoking vertex's frame is the one the
+    /// whole primitive is shaded in, which is the same reading that makes the
+    /// mesh flag meaningful at all: a mesh either shipped tangents or did not.
+    nointerpolation uint frame : TEXCOORD5;
 };
+
+/// `VertexOutput::frame` bit 0: this primitive's mesh carries authored
+/// tangents, so the fragment stage perturbs in the interpolated vertex frame.
+///
+/// `GpuMesh::flags`' `MESH_AUTHORED_TANGENTS` carried across the stage
+/// boundary. It is copied into a varying rather than re-read from the table
+/// because the fragment stage has no mesh index — the instance's row is the
+/// vertex stage's lookup, and `mesh_cluster.slang`'s mesh stage's.
+static const uint FRAME_AUTHORED_TANGENTS = 1;
+
+/// `VertexOutput::frame` bit 1: the vertex frame is **left-handed**, so the
+/// bitangent is `-cross(normal, tangent)`.
+///
+/// The sign glTF stores in its tangent's `w` and `QTangent` stores in the sign
+/// of its own, carried rather than recomputed — `skinning.slang` gives the
+/// argument: handedness is a property of the UV parameterisation, which no
+/// transform changes, and re-deriving it from vectors a non-uniform scale has
+/// moved would let a nearly degenerate instance mirror a frame the asset never
+/// mirrored.
+static const uint FRAME_LEFT_HANDED = 2;
+
+/// The `VertexOutput::frame` word for one drawn vertex: the mesh's tangent bit
+/// and the vertex's own handedness.
+///
+/// One function so the two raster paths cannot spell it differently — the same
+/// obligation `normal_basis` and `decode_qtangent` are under, and
+/// `crcbl_shaders::mesh::every_shader_builds_the_frame_word_the_same_way` is
+/// what holds them equal.
+uint frame_word(uint mesh_flags, TangentFrame basis)
+{
+    uint word = (mesh_flags & MESH_AUTHORED_TANGENTS) != 0u ? FRAME_AUTHORED_TANGENTS : 0u;
+    // `decode_qtangent` put the sign in the bitangent it reconstructed, so this
+    // reads it back off the frame rather than out of the lanes a second time.
+    return dot(cross(basis.normal, basis.tangent), basis.bitangent) < 0.0
+        ? (word | FRAME_LEFT_HANDED)
+        : word;
+}
 
 [shader("vertex")]
 VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
@@ -1407,6 +1590,13 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // that keeps them together, and it is built here rather than uploaded, so
     // `GpuInstance` grows nothing.
     output.world_normal = mul(normal_basis((float3x3)instance.transform), vertex.basis.normal);
+    // **And the tangent through the bare 3×3, not the cofactor** — the pair
+    // `skinning.slang` argues at length: a tangent lies in the surface and is
+    // carried by the transform, a normal is perpendicular to it and is not.
+    // The handedness rides beside them as a bit rather than a third vector,
+    // because the bitangent is one cross product away from these two.
+    output.world_tangent = mul((float3x3)instance.transform, vertex.basis.tangent);
+    output.frame = frame_word(mesh.flags, vertex.basis);
     // **No cluster here, and that is the honest picture.** These two paths
     // select one level per *instance*, so there is neither a per-cluster level
     // to tint by nor a per-cluster projected error to shade by; a flat grey says
@@ -2993,6 +3183,226 @@ float2 physical_tile_uv(float3 world_position, float3 normal, float tile_metres)
     return planar / max(tile_metres, 1e-4);
 }
 
+/// Some unit vector perpendicular to `normal`, for a fragment whose real
+/// tangent could not be recovered.
+///
+/// Duff et al., "Building an Orthonormal Basis, Revisited" (JCGT 6:1, 2017) —
+/// `crcbl_shaders::vertex::orthonormal_basis`' first return value. The sign of
+/// `normal.z` is what makes it stable: the division is by `sign + normal.z`,
+/// which the naive form lets reach zero at the south pole and which this one
+/// holds at a magnitude of at least one everywhere. The host writes the sign
+/// with `f32::copysign`, which differs from the comparison here only at a
+/// negative zero — where both denominators are one all the same, so neither
+/// divides by zero and the frame either produces is equally arbitrary.
+///
+/// **Arbitrary about the normal, and that is the point.** It agrees with no UV
+/// parameterisation, so a normal map read through it is rotated by an angle
+/// nobody chose — which is exactly the right answer for the two cases that reach
+/// it, a surface whose UV does not vary at all and a tangent that interpolated
+/// to nothing. Both are frames that could not be measured, and a finite
+/// arbitrary one beats a `NaN` that turns the pixel black.
+float3 orthonormal_tangent(float3 normal)
+{
+    float sign_z = normal.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (sign_z + normal.z);
+    return float3(1.0 + sign_z * normal.x * normal.x * a,
+                  sign_z * normal.x * normal.y * a,
+                  -sign_z * normal.x);
+}
+
+/// The tangent frame a fragment gets when its mesh shipped no `TANGENT`:
+/// Schüler's cotangent frame, from the screen-space derivatives of world
+/// position and UV.
+///
+/// Christian Schüler, "Followup: Normal Mapping Without Precomputed Tangents"
+/// (ShaderX5, 2006). The two position derivatives span the facet's tangent plane
+/// and the two UV derivatives say how the parameterisation runs across it, so
+/// inverting that 2×2 Jacobian gives the direction in which `u` increases —
+/// which is what a tangent *is*:
+///
+/// ```text
+/// T ∝ ∂v/∂y · ∂p/∂x − ∂v/∂x · ∂p/∂y
+/// B ∝ ∂u/∂x · ∂p/∂y − ∂u/∂y · ∂p/∂x
+/// ```
+///
+/// The division by the Jacobian's determinant is left out, because both vectors
+/// are normalised below and a positive scale falls out of that — but its **sign**
+/// is not a scale and is applied. That is the one line the textbook form leaves
+/// out and the one this file cannot do without: a determinant is negative when
+/// the parameterisation is mirrored *or* when the target's screen-space `y` runs
+/// the other way, and the four targets here do not agree about the second.
+/// `geometric_normal_of` below measured that on radv — the bare
+/// `cross(ddx, ddy)` is anti-parallel to the authored normal there — and a frame
+/// that inherited the sign would light a normal map from the wrong side on that
+/// backend and the right one on another.
+///
+/// **The frame this returns is therefore always right-handed about `normal`,
+/// and that is the limitation rather than a defect.** It is the whole of
+/// `docs/plan/43-render-standards.md` §2's rung 1: a screen-space frame cannot
+/// tell a mirrored UV shell from a flipped screen basis, so it cannot recover
+/// the handedness glTF stores in a tangent's `w`, and the left half of a
+/// mirrored character lights inside out through it. What it is for is the mesh
+/// that has no vertex frame at all — every mesh this engine authors itself, and
+/// every imported primitive with no `TANGENT` accessor.
+///
+/// `normal` is the surface normal the frame is built around; the returned
+/// tangent and bitangent are unit length and perpendicular to it, and the
+/// normal is passed through unchanged. The bitangent completes the frame with a
+/// cross product rather than being taken from the measurement: with the sign
+/// applied the two agree in direction, and a skewed parameterisation — `u` and
+/// `v` not at right angles on the surface — loses its shear here, which is what
+/// every implementation that renormalises does.
+///
+/// **A fragment stage only**, on `geometric_normal_of`'s terms: `ddx`/`ddy` are
+/// a quad's finite differences and mean nothing in any other stage.
+TangentFrame derivative_frame(float3 dpdx, float3 dpdy, float2 duvdx, float2 duvdy, float3 normal)
+{
+    float determinant = duvdx.x * duvdy.y - duvdy.x * duvdx.y;
+    float winding = determinant < 0.0 ? -1.0 : 1.0;
+    float3 tangent = (duvdy.y * dpdx - duvdx.y * dpdy) * winding;
+
+    TangentFrame basis;
+    basis.normal = normal;
+    // Gram-Schmidt before the normalise, for the reason `skinning.slang` gives:
+    // the measured tangent lies in the facet's plane and `normal` is the
+    // interpolated shading normal, which on a curved surface is not that plane's
+    // perpendicular.
+    tangent = tangent - normal * dot(normal, tangent);
+    float length_squared = dot(tangent, tangent);
+    // A guarded normalise rather than a bare `rsqrt`, whose value is undefined
+    // for a primitive with no UV variation at all — a surface every one of whose
+    // corners carries the same coordinate, which is an ordinary thing for a
+    // greybox face to be, and one whose determinant is exactly zero. The stand-in
+    // is `orthonormal_basis`' own construction, which is arbitrary about the
+    // normal and therefore no worse than a frame that could not be measured;
+    // what matters is that no `NaN` reaches the shading, because a `NaN` normal
+    // is a black pixel that survives every later multiply.
+    basis.tangent = length_squared > 1e-16 ? tangent * rsqrt(length_squared)
+                                           : orthonormal_tangent(normal);
+    basis.bitangent = cross(normal, basis.tangent);
+    return basis;
+}
+
+/// The shading normal: the surface normal this material's normal map perturbs,
+/// or the surface normal itself where the material names no map.
+///
+/// `docs/plan/43-render-standards.md` §2's rung 2, and the whole of what the
+/// normal page buys.
+///
+/// # Two uniform branches, and both of them are free
+///
+/// A material row is a `nointerpolation` index and `VertexOutput::frame` is a
+/// `nointerpolation` word, so **both** tests below are constant across a quad —
+/// a quad belongs to one primitive, helper lanes included, which is the same
+/// fact `geometric_normal_of` rests on. So neither is a divergent branch on any
+/// target: every lane of the quad takes the same arm, the derivative operations
+/// above them are still evaluated in lockstep, and a select written branch-free
+/// would spend the page fetch and the frame on every untextured surface in the
+/// scene for a picture identical to the branch's.
+///
+/// The first branch is also what makes "no normal map" **exact**. Layer 0 of the
+/// page is the neutral texel, but an eight-bit unorm has no exact `0.5`, so that
+/// texel decodes to a tangent-space normal about a fifth of a degree off
+/// vertical — enough to move every golden in the tree that draws a lit surface.
+/// Returning `normal` untouched returns the same bits the shading used before
+/// this function existed. See `normal_layer`.
+///
+/// # The decode is glTF's, term for term
+///
+/// `normalize((<sampled> * 2 - 1) * float3(scale, scale, 1))` — glTF 2.0
+/// §3.9.3's own definition of `normalTexture.scale`, which multiplies the `x`
+/// and `y` of the decoded normal and leaves `z` alone. The texel arrives linear
+/// because the page is an `Rgba8Unorm` image and not an sRGB one; see
+/// `normal_textures`, where the colour-space decision is argued.
+///
+/// # WGSL cannot see that the branches are uniform, and says so
+///
+/// Every fact above is a fact about the hardware, and WGSL's uniformity
+/// analysis proves none of it: it reports the fragment input itself as possibly
+/// non-uniform, and `layer` reaches this function through the material row that
+/// input indexes, so both tests below are non-uniform as far as it can tell.
+/// Two rules then bite, and both of them fail
+/// `CreateShaderModule` in the browser while SPIR-V, MSL and DXIL compile the
+/// same source without a word — `fxaa.slang`'s `tap` carries the same scar.
+///
+/// * A derivative is legal only in uniform control flow, so `ddx` and `ddy` are
+///   taken at this function's top level, **above** the early return rather than
+///   after it.
+/// * An implicit-LOD sample is legal only in uniform control flow, so the page
+///   is read with `SampleGrad` and the derivatives already in hand. That is the
+///   same level `Sample` would have chosen — it is the same gradient — so the
+///   filtering is unchanged and the branch is kept.
+///
+/// The two scalars rather than the material row are the same accommodation one
+/// step earlier: Slang's WGSL backend passes a struct by pointer, and a pointer
+/// into the material array is one more thing the analysis has to reason about.
+/// This function reads two of the row's fields, so it takes two values.
+float3 shading_normal_of(uint layer,
+                         float normal_scale,
+                         VertexOutput input,
+                         float3 normal,
+                         float2 uv)
+{
+    // Above the early return, not below it, and above the frame's branch rather
+    // than inside the arm that uses them: a derivative is legal only in uniform
+    // control flow, and both tests below are on the material row. What that
+    // costs is four derivative operations on a surface with no normal map, which
+    // §2's pricing paragraph measured at less than the noise between two runs;
+    // what it buys is the module parsing at all in the browser.
+    float3 dpdx = ddx(input.world_position);
+    float3 dpdy = ddy(input.world_position);
+    float2 duvdx = ddx(uv);
+    float2 duvdy = ddy(uv);
+
+    if (layer == 0u)
+    {
+        return normal;
+    }
+
+    TangentFrame basis;
+    if ((input.frame & FRAME_AUTHORED_TANGENTS) != 0u)
+    {
+        // **Gram-Schmidt, because interpolation is not orthogonality.** The
+        // tangent crossed the stage boundary as an ordinary varying and the
+        // normal through the cofactor matrix, so the two arrive neither unit
+        // length nor perpendicular; removing the normal's component of the
+        // tangent is the projection `skinning.slang` applies for the same reason
+        // and the one MikkTSpace's own reconstruction makes.
+        basis.normal = normal;
+        float3 tangent = input.world_tangent - normal * dot(normal, input.world_tangent);
+        float length_squared = dot(tangent, tangent);
+        // A tangent that collapsed — parallel to the normal after a degenerate
+        // transform, or interpolated to nothing across a seam — has no direction
+        // left to recover, and the arbitrary frame is finite where a normalised
+        // zero is not.
+        basis.tangent = length_squared > 1e-16 ? tangent * rsqrt(length_squared)
+                                               : orthonormal_tangent(normal);
+        // **The handedness is the asset's, carried rather than recomputed** —
+        // `FRAME_LEFT_HANDED`, which is glTF's tangent `w` and the sign
+        // `QTangent` keeps in its own. It is a property of the UV
+        // parameterisation, which no transform changes.
+        basis.bitangent = cross(basis.normal, basis.tangent)
+            * ((input.frame & FRAME_LEFT_HANDED) != 0u ? -1.0 : 1.0);
+    }
+    else
+    {
+        basis = derivative_frame(dpdx, dpdy, duvdx, duvdy, normal);
+    }
+
+    float3 texel =
+        normal_textures.SampleGrad(base_color_sampler, float3(uv, float(layer)), duvdx, duvdy).xyz;
+    float3 tangent_space = texel * 2.0 - 1.0;
+    tangent_space.xy *= normal_scale;
+    // Normalised after the tilt and again after the change of basis: the first
+    // is glTF's own definition, the second is because the frame's three axes are
+    // orthonormal only to the precision the interpolation and the projection
+    // above left them with.
+    tangent_space = normalize(tangent_space);
+    return normalize(tangent_space.x * basis.tangent
+                     + tangent_space.y * basis.bitangent
+                     + tangent_space.z * basis.normal);
+}
+
 /// The occlusion channel under `position`, in `0..=1`, one meaning unoccluded.
 ///
 /// **The fetch is clamped to the image's extent**, which is what makes the
@@ -3052,7 +3462,13 @@ FragmentOutput fragmentMain(VertexOutput input)
     // fragment. Skipping it makes large triangles darken towards their centres —
     // and would make the normals view below read a shortened normal as a darker
     // colour, which is a picture of the interpolation rather than of the surface.
-    float3 normal = normalize(input.world_normal);
+    //
+    // **The surface's normal, not the shading normal.** A normal map perturbs
+    // this into `normal` below; what stays with this name is what the geometry
+    // said, which is what the shadow biases and the tiling projection want — see
+    // `geometric_normal_of` and `physical_tile_uv`, the two readers that must
+    // not follow a texture.
+    float3 vertex_normal = normalize(input.world_normal);
 
     // **Computed before the first branch, because every branch writes it.** The
     // debug views below return early and each one owes this target a value —
@@ -3139,6 +3555,35 @@ FragmentOutput fragmentMain(VertexOutput input)
         return tint;
     }
 
+    // **The material row and this fragment's shading normal, resolved before the
+    // normals view rather than after it.** That view exists to answer "which way
+    // is this surface facing", and once a normal map is in the frame the honest
+    // answer is the perturbed normal the lighting actually shades with — a view
+    // that drew the interpolated one would be a picture of the mesh rather than
+    // of the material, and would say nothing at all about whether a normal map
+    // reached the device the right way up.
+    //
+    // `material` is flat, so every fragment of a primitive reads the row its
+    // instance named.
+    GpuMaterial material = materials[input.material];
+    // The UV is the vertex's under `TILING_AUTHORED` and derived from the
+    // surface's world extent under `TILING_PHYSICAL` — the added branch that
+    // makes a tile measure `tile_metres` of surface. Resolved here because both
+    // pages are sampled through it: the base colour below, and the normal map
+    // inside `shading_normal_of`.
+    //
+    // **Projected on the surface normal and not on the shading one**, which
+    // would be circular — the projection chooses which world plane the UV comes
+    // from, and a texture that moved the plane it is sampled through would
+    // shimmer wherever the perturbation crossed an axis.
+    float2 uv = input.uv;
+    if (material.tiling == TILING_PHYSICAL)
+    {
+        uv = physical_tile_uv(input.world_position, vertex_normal, material.tile_metres);
+    }
+    float3 normal =
+        shading_normal_of(normal_layer(material), material.normal_scale, input, vertex_normal, uv);
+
     if (frame.ambient.w >= NORMALS_VIEW)
     {
         FragmentOutput normals;
@@ -3148,6 +3593,11 @@ FragmentOutput fragmentMain(VertexOutput input)
         // exactly. A caller who has moved the exposure has asked for the picture
         // to be scaled and gets that here too; the operator is monotonic per
         // channel either way, so which channel dominates never changes.
+        // **The shading normal, so a normal map shows up here.** `normal` is
+        // what `shading_normal_of` returned above, which is the vector the
+        // light loop below would have used — a view that drew the interpolated
+        // one instead would be a picture of the mesh and would say nothing
+        // about whether the page reached the device the right way up.
         normals.lit = float4(normal * 0.5 + 0.5, 1.0);
         // Not reflective, so `ssr.slang` marches nothing off these pixels and
         // `ssr_blur.slang` composites nothing onto them. A zero `F0` still leaves
@@ -3163,11 +3613,8 @@ FragmentOutput fragmentMain(VertexOutput input)
     // The facet under the shading normal, taken once for the fragment and read
     // by the shadow biases alone — never by the shading, which is the authored
     // normal's job. `geometric_normal_of` says why it cannot live inside them.
-    float3 geometric_normal = geometric_normal_of(input.world_position, normal);
+    float3 geometric_normal = geometric_normal_of(input.world_position, vertex_normal);
 
-    // The material row, resolved here rather than at the corners. `material` is
-    // flat, so every fragment of a primitive reads the row its instance named.
-    GpuMaterial material = materials[input.material];
     // Both halves of §3.2's "texture indices + factors", multiplied together.
     // The sample is why the lookup had to move to this stage at all: a texture
     // fetch is not constant across a primitive, so nothing it feeds could have
@@ -3177,17 +3624,11 @@ FragmentOutput fragmentMain(VertexOutput input)
     // sampler decoded it — which is the space `base_color` and `input.color`
     // are in. See the binding above.
     //
-    // The UV is the vertex's under `TILING_AUTHORED` and derived from the
-    // surface's world extent under `TILING_PHYSICAL` — the added branch that
-    // makes a tile measure `tile_metres` of surface. The wrapped sampler is what
-    // lets the physical UV, which runs past `0..1`, repeat rather than smear.
-    float2 uv = input.uv;
-    if (material.tiling == TILING_PHYSICAL)
-    {
-        uv = physical_tile_uv(input.world_position, normal, material.tile_metres);
-    }
+    // The UV was resolved above the normals view, because the normal page is
+    // sampled through it too. The wrapped sampler is what lets the physical UV,
+    // which runs past `0..1`, repeat rather than smear.
     float4 texel = base_color_textures.Sample(
-        base_color_sampler, float3(uv, float(material.base_color_texture)));
+        base_color_sampler, float3(uv, float(base_color_layer(material))));
     float4 albedo = input.color * material.base_color * texel;
 
     // The row's two shading factors, clamped once for the fragment rather than

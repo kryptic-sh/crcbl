@@ -79,18 +79,26 @@ Stated first, and with the same evidence discipline as the gaps.
 normal, occlusion-roughness-metallic packed, emissive — with alpha modes
 (opaque, mask, blend), and a tangent frame to sample the normal map in.
 
-**Where this one is**, read out of `crcbl_shaders::mesh::GpuMaterial`:
-`base_color`, `base_color_texture`, `metallic`, `roughness`, `emissive`,
-`tiling`, `tile_metres`. One texture, and it is the base colour.
-`crcbl_shaders::mesh::MeshVertex` is position, normal, colour and one UV — **no
-tangent**. `emissive` is a factor with no page behind it, and there is no alpha
-mode of any kind.
+**Where this one was**, read out of `crcbl_shaders::mesh::GpuMaterial` on
+2026-08-27: `base_color`, `base_color_texture`, `metallic`, `roughness`,
+`emissive`, `tiling`, `tile_metres`. One texture, and it was the base colour.
+`crcbl_shaders::mesh::MeshVertex` was position, normal, colour and one UV — **no
+tangent**. `emissive` was a factor with no page behind it, and there was no
+alpha mode of any kind.
 
-So: **no normal mapping.** That is the single largest visual gap in this
-renderer, and it is larger than every rung of the AO, shadow and AA ladders put
-together — a surface here can only be as detailed as its triangles, which is why
+So: **no normal mapping.** That was the single largest visual gap in this
+renderer, and it was larger than every rung of the AO, shadow and AA ladders put
+together — a surface could only be as detailed as its triangles, which is why
 the samples all read as flat-shaded greybox no matter how good the lighting on
-them gets.
+them got.
+
+**Rung 1 and the normal half of rung 2 landed 2026-08-30** and the gap is closed
+to that depth: the tangent frame is real, the normal page is bound, and a glTF
+material's `normalTexture` reaches the fragment stage. What is still missing
+from the list above is the rest of the texture set — the packed
+metallic-roughness-occlusion page, the emissive page and the alpha modes, whose
+columns in the row exist and are read by nothing — and the "Landed" paragraph
+below says exactly what shipped.
 
 **What it would take**, in the order the dependencies fall:
 
@@ -139,6 +147,18 @@ prepass are cheaper on it than on a wider copy of today's vertex.
 | 1              | `color`        | `rgba8`                                                                                      | 4     |
 | `GpuMaterial`  | four page rows | base colour, normal, metallic-roughness-occlusion, emissive, plus the alpha cutoff and flags | 64    |
 
+**Sixty-four holds four page rows only because two share a word.** Written as
+four separate `uint`s beside the factors, the alpha cutoff, the flags and glTF's
+`normalTexture.scale`, the row wants eighteen words — seventy-two, which
+`std430` rounds to eighty. So the four layer indices ride two per word, sixteen
+bits each: `color_normal_pages` and `mro_emissive_pages` on the wire,
+`base_color_texture`, `normal_texture`, `metallic_roughness_occlusion_texture`
+and `emissive_texture` as ordinary fields on the host, with
+`crcbl_shaders::mesh::MAX_PAGE_LAYER` the bound. A page layer index is limited
+by the device's maximum array layers, which no target here reports above a few
+thousand, so the sixteen bits are not a limit anything reaches — and bit-packing
+a small integer is what the vertex stream above is made of.
+
 Stream 0 is what the depth prepass and every shadow pass will fetch — twelve
 bytes a vertex where they decode the whole record today, and there are as many
 of those passes a frame as there are cascades and lit tiles. Stream 1 is the
@@ -167,9 +187,9 @@ call, `docs/backlog.md`'s).
 
 The three shader copies (`mesh`, `mesh_cluster`, `skinning`) decode it with one
 block of arithmetic that `every_shader_decodes_a_vertex_the_same_way` holds
-equal, and no golden moved. What the layout still owes — the depth-only entry
-point that reads stream 0 alone, a `TANGENT` reader in the importer, and a
-writer for `uv1` — is `docs/backlog.md`'s.
+equal, and no golden moved. The `TANGENT` reader that layout was waiting for
+landed with rungs 1 and 2 below. What it still owes — the depth-only entry point
+that reads stream 0 alone, and a writer for `uv1` — is `docs/backlog.md`'s.
 
 **The page allocator, generalised (the foundations block's fourth row).** One
 array-image allocator — `crcbl_render::scene::PageDesc` generalised, with a
@@ -178,6 +198,81 @@ everything that follows the same road: the normal, metallic-roughness-occlusion
 and emissive pages of this section, the decal atlases, and the shadow atlas's
 per-light rectangle in [45-shadows.md](45-shadows.md). Four page indices in the
 material row is what the 64-byte `GpuMaterial` above is sized for.
+
+**Normal maps landed 2026-08-30 — rung 1, and rung 2's normal page.**
+`crcbl_scene`'s importer reads the `TANGENT` accessor and glTF's `normalTexture`
+(index, `texCoord` 0 and `scale`); a primitive that shipped tangents is marked
+with `GpuMesh::MESH_AUTHORED_TANGENTS` and everything the engine authors itself
+is not. The fragment stage picks a frame from that one bit — the mesh's own
+frame carried through the vertex stage, or Schüler's screen-space frame out of
+`ddx`/`ddy` — and perturbs the shading normal through it, and the result is what
+lighting, SSR and the `Normals` view read. `GpuMaterial` is 64 bytes with all
+four page columns; only the normal one is wired. Four things were decided in the
+building:
+
+- **The screen-space frame applies the determinant's sign rather than inheriting
+  it.** The textbook cotangent frame comes out scaled by the UV Jacobian's
+  determinant, and that determinant is negative both for a mirrored
+  parameterisation _and_ for a target whose screen-space `y` runs the other way
+  — which radv's does, as `geometric_normal_of` already measured. A frame that
+  kept the sign would light a normal map from the wrong side on one backend and
+  the right side on another. Applying it makes the frame always right-handed
+  about the normal, which is the same statement as rung 1's: this route cannot
+  recover handedness, and a mirrored shell needs the authored tangent.
+- **A material with no normal texture gets the interpolated normal back
+  exactly**, by testing the layer index in the shader rather than by trusting
+  layer 0's neutral texel. Eight bits cannot encode the identity: `0x80` decodes
+  to `1 / 255` off flat, which is enough to move every golden in the tree drawn
+  without a normal map. None moved.
+- **The normal page gets its own mip filter.** `crcbl_render::mip::normal_chain`
+  averages the decoded vectors with no transfer curve and no alpha weight and
+  renormalises, and copies a cell that covers exactly one source texel byte for
+  byte rather than round-tripping it — a decode, renormalise and re-encode moves
+  nearly every texel of a real map, because most eight-bit normals are not unit
+  vectors.
+- **The four page indices are packed two per word.** Eighteen plain words is
+  seventy-two bytes, which `std430` rounds to eighty; sixteen bits each is
+  sixteen words exactly. See the paragraph above the layout table.
+- **The browser decides the shape of the fragment stage.** Both of
+  `shading_normal_of`'s branches are uniform across a quad in fact — the
+  material row and the frame word are both `nointerpolation` — and WGSL's
+  uniformity analysis can prove neither, because both trace back to the
+  instance's material index. So the derivatives are taken above the early return
+  rather than after it, and the page is read with `SampleGrad` and those
+  derivatives rather than with an implicit-LOD `Sample`. Same level, same
+  filtering, and the module parses; SPIR-V, MSL and DXIL accepted every
+  intermediate form of it without a word, and only the browser gate ever said
+  otherwise. `fxaa.slang`'s `tap` had already paid for this lesson once.
+
+**What it costs, on the three tiers.** Measured on the raster tier:
+`apps/viewer` headless on the shelf's SciFiHelmet (2048² pages, authored
+tangents) at 1920×1080 for 900 frames on an RX 7900 XTX under radv, the forward
+pass is **0.061 ms p50 / 0.064 ms p95** with the page sampled and **0.055 /
+0.057 ms** with `shading_normal_of` short-circuited to the interpolated normal —
+about **0.006 ms, a tenth of that pass** and two and a bit per cent of the
+frame's 0.254 ms of GPU work. That is one anisotropic fetch from an `Rgba8Unorm`
+array image plus a normalise and a 3×3 per fragment. The derivatives the browser
+made unconditional are in both of those figures; a third run that returns before
+taking them at all reads **0.056 / 0.058 ms**, which is _above_ the run that
+takes them, so the four derivative operations on every fragment in the frame
+cost less than this measurement can separate from run-to-run noise. An unmarked
+mesh pays those same derivatives plus the frame's arithmetic and no fetch, which
+no scene in this tree exercises at a size worth measuring and which is
+**estimated** to land under the sampled figure, since it trades the fetch's
+latency for ALU already counted. The page's memory is exactly the base-colour
+page's — one square extent shared by both, `layers × extent² × 4` bytes and a
+third again for the chain, so 21 MiB a layer at 2048² — and layer 0 is a full
+layer of one repeated texel, which `docs/backlog.md` has. **The browser tier
+pays the same arithmetic and more bytes**: WebGPU has `dpdx`/`dpdy` and a
+seventeenth sampled-texture binding is inside every portability floor this
+engine holds to, but the page is uncompressed `RGBA8` until the KTX2/BC5 rung
+lands, where a desktop would spend one byte a texel instead of four — which is
+why the compression rung is the one the material ladder waits on. Estimated; no
+browser measurement was taken. **The ray-tracing tier cannot use half of this**:
+a hit shader has no quad and therefore no derivatives, so a traced hit can only
+be shaded through an authored tangent frame, and an unmarked mesh reached by a
+ray has no normal mapping at all. That is an argument for MikkTSpace ahead of
+§5's rung, and it is in the backlog with the rest.
 
 ### Texture filtering — mips, anisotropy, compression
 
@@ -799,15 +894,15 @@ alone is not a price. The same rule holds the forward pass to
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **THE LIGHTING ORDER, decided 2026-08-30** — the raster items interleave with the foundations rather than waiting behind them                                                                 | (a) vertex v2 → normal maps → LTC area lights and the fill flag → the shadow atlas allocator with (f) and (e) beside it → contact shadows → the AO tint and bent normals → the probe volume rebuilt → the atmosphere → CMAA2. (b), (d) and (g) land where the first rung that needs them does; (c) when the RT tier's updater is next. The user's rule for the order: best-looking for the performance, cheapest real win first |
 | **FOUNDATIONS BLOCK (a)–(g), 2026-08-30** — a foundation is scheduled before any feature rung that would be cheaper with it                                                                   | The seven rows below, in order; each is priced like any rung. (a) is this section's stride decision and gates the material ladder; the rest are the early-leverage items written into their own plans the same day                                                                                                                                                                                                              |
-| **(a) Vertex v2 — the layout landed 2026-08-30; the position-only prepass and shadow entry point, and `GpuMaterial` at 64 bytes, remain**                                                     | §2 — the entry point is the rung that spends stream 0; the material row widens with the normal-map rung that needs the pages                                                                                                                                                                                                                                                                                                    |
+| **(a) Vertex v2 — the layout and the 64-byte `GpuMaterial` landed 2026-08-30; the position-only prepass and shadow entry point remain**                                                       | §2 — the entry point is the rung that spends stream 0; the material row widened with the normal-map rung below, and three of its four page columns are laid out and unread                                                                                                                                                                                                                                                      |
 | **(b) The render stack as RON, per camera**                                                                                                                                                   | [48-post-processing.md](48-post-processing.md) — the pass list a camera runs is data, so a demo, a test and a settings preset compose it without a build                                                                                                                                                                                                                                                                        |
 | **(c) Acceleration structures and inline ray queries on the seam** (vk, dx12, mtl)                                                                                                            | §5 — the GI's engine on the ray-tracing tier: a build and refit, a `Capability` the device reports, and the hit-shading reads. Decided 2026-08-30 in `docs/backlog.md`: GI is hardware ray tracing only; the other tiers run the raster stack                                                                                                                                                                                   |
 | **(d) The page allocator, generalised**                                                                                                                                                       | §2 — one array-image allocator behind base colour, the material pages, decals and the shadow atlas rectangle                                                                                                                                                                                                                                                                                                                    |
 | **(e) The debug draw layer**                                                                                                                                                                  | [07-ui-debug.md](07-ui-debug.md) — lines, boxes and text the culling, LOD and atlas rungs are debugged through                                                                                                                                                                                                                                                                                                                  |
 | **(f) The shared importance and hysteresis helper**                                                                                                                                           | [25-lod.md](25-lod.md) + [45-shadows.md](45-shadows.md) — one scorer for cluster selection and shadow-tile priority                                                                                                                                                                                                                                                                                                             |
 | **(g) Quality presets low / medium / high**                                                                                                                                                   | [39-capabilities.md](39-capabilities.md) — every rung's rows behind three names, which is what the three-tier pricing rule reports against                                                                                                                                                                                                                                                                                      |
-| **The viewer as the PBR showcase** — native drag-and-drop, a bundled shelf of Khronos CC0 models picked from a list, Suzanne on open ([sample/05-viewer.md](sample/05-viewer.md) milestone 4) | The first two parts need nothing the tree lacks; the material set draws when the normal-map rung lands, and the viewer on Suzanne is that rung's golden                                                                                                                                                                                                                                                                         |
-| **Normal maps: tangent, page, sampling**                                                                                                                                                      | §2 — the largest visual gap, and the rest of the material set follows the same road                                                                                                                                                                                                                                                                                                                                             |
+| **The viewer as the PBR showcase** — native drag-and-drop, a bundled shelf of Khronos CC0 models picked from a list, Suzanne on open ([sample/05-viewer.md](sample/05-viewer.md) milestone 4) | The first two parts need nothing the tree lacks; the material set draws now that the normal-map rung has landed, and the viewer on Suzanne is that rung's golden                                                                                                                                                                                                                                                                |
+| **Normal maps: tangent, page, sampling — landed 2026-08-30**                                                                                                                                  | §2 rungs 1 and 2 — the importer reads `TANGENT` and `normalTexture`, a linear normal page rides beside the base-colour one, and the fragment stage picks a vertex frame or a screen-space one per mesh. What it left is MikkTSpace, which is a new dependency: `docs/backlog.md`                                                                                                                                                |
 | **Emissive page** (the factor shipped 2026-08-27)                                                                                                                                             | §2 — rides the second texture page rung                                                                                                                                                                                                                                                                                                                                                                                         |
 | **Alpha-mask materials**                                                                                                                                                                      | §3 — a `discard`, no sorting, and it is what foliage wants                                                                                                                                                                                                                                                                                                                                                                      |
 | **Blended transparency with GPU-sorted keys**                                                                                                                                                 | §3 — the first rung here that touches the frame's structure                                                                                                                                                                                                                                                                                                                                                                     |

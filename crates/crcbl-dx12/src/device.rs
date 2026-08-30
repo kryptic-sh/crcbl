@@ -7595,6 +7595,9 @@ pub(crate) mod tests {
                 // Read by this probe's mesh stage and unobservable: its page is
                 // one white texel and it has no fragment stage.
                 uv_range: crcbl_shaders::vertex::UvRange::default(),
+                // Unobservable for the same reason, and the honest value
+                // regardless: this probe's vertices carry no authored tangent.
+                flags: 0,
             }
             .to_bytes(),
         );

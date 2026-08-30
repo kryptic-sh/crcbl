@@ -42,6 +42,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`GpuMesh` and `GpuMaterial` both grew, and the mesh upload takes a
+  descriptor.** `GpuMesh` gains `flags` (`MESH_ENTRY_STRIDE` 52 → 56) carrying
+  `MESH_AUTHORED_TANGENTS`, so `crcbl_render::MeshRange` gains `flags` and
+  `crcbl_render::scene::Geometry`'s `Flat` and `Dag` variants each gain one — a
+  mesh with no authored tangent writes zero. `MeshPool::upload` now takes a
+  single `crcbl_render::MeshUpload` rather than six loose arguments.
+  `GpuMaterial` grows 48 → 64 bytes: `normal_texture`, `normal_scale`,
+  `metallic_roughness_occlusion_texture`, `emissive_texture`, `alpha_cutoff` and
+  `flags`, with `GpuMaterial::NO_PAGE` the empty page index. Only the normal row
+  and its scale are wired in this release; the other two page rows, the cutoff
+  and the flags are laid out, written as "no page"/zero and read by nothing, so
+  the next rung of `docs/plan/43-render-standards.md` §2 finds the space already
+  there. On the wire the four page indices ride two per word (sixteen bits each,
+  saturating at `crcbl_shaders::mesh::MAX_PAGE_LAYER`) because eighteen plain
+  words would have rounded to eighty.
+- **`crcbl_render::scene::PageDesc` describes two pages, not one.** It gains
+  `normal_layers()` and `push_normal_layer()` beside the base-colour layers,
+  sharing the one `extent`, and `PageDesc::opaque_white` starts the normal page
+  with `PageDesc::NEUTRAL_NORMAL` in layer 0. `SceneDesc` is unchanged, so a
+  scene that names no normal texture needs no edit.
 - **`CatalogueKey::domain` is gone; the domain is a `crcbl_console::Kind` and
   the prose is `help`.** A prose domain could say "1 to 16" while the setter
   clamped to something else and nothing could tell, which is the failure
@@ -112,6 +132,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Normal maps.** `crcbl_scene`'s glTF importer reads the `TANGENT` accessor
+  and glTF's `normalTexture` (index, `texCoord` 0 and `scale`); the renderer
+  carries a second array image beside the base-colour page — linear
+  `Rgba8Unorm`, not sRGB, per `docs/plan/44-lighting.md` rung 2 — whose layer 0
+  is the neutral texel `(0.5, 0.5, 1.0)`, sampled through the same UV and the
+  same anisotropic sampler as the base colour. The decoded texel is
+  `normalize((t * 2 - 1) * (scale, scale, 1))` (glTF 2.0 §3.9.3), perturbed
+  through the fragment stage's tangent frame, and the result is what lighting,
+  SSR and the `Normals` debug view all read; `geometric_normal_of` keeps its own
+  job of biasing the shadow slope. A material that names no normal texture
+  samples layer 0 and gets the interpolated normal back _exactly_ — the shader
+  tests the layer, because the neutral texel is `1 / 255` off flat and an
+  eight-bit page cannot store the identity. No golden moved.
+- **Two tangent frames, chosen per mesh.** `GpuMesh::MESH_AUTHORED_TANGENTS`
+  says which: a marked mesh takes the frame its vertices carry — the QTangent's
+  tangent through the instance's bare 3×3, the normal through `normal_basis`,
+  the bitangent rebuilt from the carried sign — and an unmarked one rebuilds a
+  frame in the fragment stage from `ddx`/`ddy` of world position and UV
+  (Schüler's cotangent frame). The importer marks a primitive that shipped
+  `TANGENT`; every mesh this engine authors itself is unmarked. The branch is
+  uniform over a mesh, so neither path pays for the other. The screen-space
+  frame applies the _sign_ of the UV Jacobian's determinant rather than
+  inheriting it, because that sign also carries the target's screen-space `y`
+  direction and the four backends do not agree about it — which makes the frame
+  always right-handed about the normal, and is why a mirrored UV shell needs the
+  authored tangent that this release finally reads.
 - **Every `[engine.video]` and `[engine.audio]` key is now a typed console
   variable, and one function writes and applies it.**
   `crcbl::settings::apply(stack, key, value, stage)` is that function: it

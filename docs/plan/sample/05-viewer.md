@@ -92,12 +92,12 @@ material set — not a new sample. It gains three things:
    rather than the browser's one-file `load_bytes`. What this item still lacks
    is X11, where `crcbl-shell` raises no drop event because XDND is
    unimplemented; `docs/backlog.md` carries that.
-2. **The full metallic-roughness set rendered.** Base colour is drawn today;
-   normal, metallic-roughness-occlusion and emissive pages arrive with
-   foundation (a) and the normal-map rung with (d) in
-   `docs/plan/43-render-standards.md`'s lighting order, and the viewer on
-   Suzanne is that rung's golden. Sun and sky, LTC area lights, the atlas and
-   the probe volume all show on this shelf as they land.
+2. **The full metallic-roughness set rendered.** Base colour and the normal map
+   are drawn today; the metallic-roughness-occlusion and emissive pages are the
+   dead `GpuMaterial` columns `docs/backlog.md` carries, waiting on the rung
+   that samples them in `docs/plan/43-render-standards.md`'s lighting order, and
+   the viewer on Suzanne is that rung's golden. Sun and sky, LTC area lights,
+   the atlas and the probe volume all show on this shelf as they land.
 
 **The shelf, as built (2026-08-30):** the `ESC` panel's `SHELF` row lists the
 nine models below and Suzanne opens when nothing is asked for, on both hosts.

@@ -81,6 +81,7 @@ mod goldens;
 mod hdr;
 mod lod;
 mod motion;
+mod normal_map;
 mod render_scale;
 mod resize;
 mod skinned_motion;

@@ -223,6 +223,16 @@ const PROBE_MATERIALS: [crcbl::shaders::mesh::GpuMaterial; 2] = [
         // is the row above's value, so the two rows still differ only where the
         // assertion looks.
         emissive: [0.0; 3],
+        // **No page on any of the material rows either**, for the reason the
+        // tiling comment gives: this probe's scene carries the one white layer
+        // and the one neutral normal layer `PageDesc::opaque_white` describes,
+        // so a row naming any other layer would name one that does not exist.
+        normal_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
+        normal_scale: crcbl::shaders::mesh::GpuMaterial::UNTINTED.normal_scale,
+        metallic_roughness_occlusion_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
+        emissive_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
+        alpha_cutoff: crcbl::shaders::mesh::GpuMaterial::UNTINTED.alpha_cutoff,
+        flags: crcbl::shaders::mesh::GpuMaterial::UNTINTED.flags,
     },
 ];
 
@@ -472,6 +482,10 @@ impl DepthProbe {
                     bounds_min,
                     bounds_max,
                     uv_range: PROBE_UV_RANGE,
+                    // The quads are `MeshVertex::from_normal`'s, so their frame
+                    // is the arbitrary stand-in and this probe declines the
+                    // authored-tangent claim.
+                    flags: 0,
                 }
                 .to_bytes(),
             )
@@ -819,6 +833,23 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl::hal::BindingFlags::empty(),
             },
+            // The normal page, on binding 7's terms exactly: this probe's one
+            // material row names no normal map, so `shading_normal_of` returns
+            // before it samples — but the module *declares* the global, and a
+            // pipeline layout that does not cover a declared descriptor is
+            // refused. It shares the base-colour sampler at binding 8, so there
+            // is no second sampler entry to add.
+            crcbl::hal::BindGroupLayoutEntry {
+                binding: 26,
+                visibility: crcbl::hal::ShaderStages::VERTEX
+                    .union(crcbl::hal::ShaderStages::FRAGMENT),
+                kind: crcbl::hal::BindingKind::SampledImage {
+                    view_type: crcbl::hal::ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: crcbl::hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
@@ -906,6 +937,15 @@ impl DepthProbe {
                 binding: 25,
                 array_index: 0,
                 resource: crcbl::hal::BindingResource::ImageView(specular_albedo.view),
+            },
+            // The base-colour page's own view again. A descriptor has to point
+            // at something the backend can validate, and nothing here samples
+            // it — every material row this probe draws with is `NO_PAGE`, which
+            // the shader tests before it reads a texel.
+            crcbl::hal::BindGroupEntry {
+                binding: 26,
+                array_index: 0,
+                resource: crcbl::hal::BindingResource::ImageView(base_color_page.view),
             },
         ];
         let group = device

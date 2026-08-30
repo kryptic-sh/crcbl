@@ -284,7 +284,11 @@ rather than of the material asset:
   it looks plausible: roughness read through the decode is too smooth in the
   mid-range and the surface merely reads as "shinier than intended". A second
   page constant, `Rgba8Unorm`, and a test that asserts the two formats differ is
-  the whole guard.
+  the whole guard. **Built 2026-08-30** with the normal page:
+  `crcbl_render::forward`'s `NORMAL_PAGE_FORMAT` is that constant and
+  `the_two_page_formats_differ` is that test — it reads both constants, checks
+  they differ, and checks each graph import declares its own, so a page that
+  quietly took the other one fails rather than looking shinier.
 - **Two channels, not three, for a normal page.** The tangent-space `z` is
   `sqrt(1 - x² - y²)`, which is a square root and therefore allowed where a
   transcendental would not be, and reconstructing it means a BC5-class two-
@@ -294,7 +298,13 @@ rather than of the material asset:
   [43-render-standards.md](43-render-standards.md)'s filtering subsection**, and
   one line of it is the shading model's: a normal page's mips are renormalised
   after averaging, and the length a normal loses in that average is the
-  roughness rung 4 puts back.
+  roughness rung 4 puts back. **Half built 2026-08-30**:
+  `crcbl_render::mip::normal_resample` is that second filter — no transfer
+  curve, no alpha weight, a plain average of the decoded vectors and a
+  renormalise, with a cell covering exactly one source texel copied byte for
+  byte rather than round-tripped. What it does _not_ do is keep the length it
+  divided out, so rung 4 has nothing to read yet; that is `docs/backlog.md`'s
+  and it is the same change as the MRO page's roughness channel.
 
 ### Rung 3 — Specular IBL by the split-sum approximation
 

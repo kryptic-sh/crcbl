@@ -221,6 +221,47 @@ pub struct MeshRange {
     /// is what the caller builds it with, over every coordinate the mesh
     /// carries — and, for a DAG, over every coordinate every level carries.
     pub uv_range: UvRange,
+    /// The mesh's own bits, on their way to [`GpuMesh::flags`] — today only
+    /// [`GpuMesh::MESH_AUTHORED_TANGENTS`].
+    ///
+    /// Supplied by the caller for [`uv_range`](Self::uv_range)'s reason
+    /// exactly, and more strongly: the pool receives a `snorm16x4` quaternion
+    /// per vertex and every such quaternion is a valid frame, so whether the
+    /// frame *means* anything for sampling a texture is the one thing about a
+    /// mesh that cannot be read back out of its bytes. It is a claim, and only
+    /// whoever built the vertices can make it.
+    pub flags: u32,
+}
+
+/// One mesh as a caller hands it to [`MeshPool::upload`].
+///
+/// A description rather than six positional arguments, on
+/// [`MeshPoolDesc`]'s terms: three of the five are slices whose order a caller
+/// has no way to check at the call site, and `vertices` and `indices` swapped
+/// is a mesh that uploads and draws nothing.
+#[derive(Clone, Copy, Debug)]
+pub struct MeshUpload<'a> {
+    /// Debug name for the staging buffer and the command buffer this upload
+    /// records into, so a capture says which mesh a copy belongs to.
+    pub label: &'a str,
+    /// `VERTEX_STRIDE`-strided vertex data — one
+    /// [`MeshVertex::to_bytes`] record each, **interleaved**, which is not how
+    /// the pool stores them: [`MeshPool::upload`] is where the two streams are
+    /// separated, so a caller describes geometry once and the position region
+    /// stays contiguous for the passes that read nothing else.
+    ///
+    /// [`MeshVertex::to_bytes`]: crcbl_shaders::mesh::MeshVertex::to_bytes
+    pub vertices: &'a [u8],
+    /// Triangle indices, **mesh-relative**: the base vertex reaches the GPU
+    /// beside them rather than inside them, so a mesh's bytes never depend on
+    /// where in the pool it landed. The [module docs](self) say by which route.
+    pub indices: &'a [u32],
+    /// The pair every UV lane in `vertices` was quantised against, on its way
+    /// to [`MeshRange::uv_range`] and the mesh table.
+    pub uv_range: UvRange,
+    /// The mesh's own bits, on their way to [`MeshRange::flags`] — today only
+    /// [`GpuMesh::MESH_AUTHORED_TANGENTS`].
+    pub flags: u32,
 }
 
 /// What a [`MeshPool`] refuses to do.
@@ -603,6 +644,7 @@ impl MeshPool {
             bounds_min: range.bounds.min.to_array(),
             bounds_max: range.bounds.max.to_array(),
             uv_range: range.uv_range,
+            flags: range.flags,
         };
         let at = u64::from(index) * MESH_ENTRY_STRIDE as u64;
         device.write_buffer(self.table, at, &entry.to_bytes())?;
@@ -622,19 +664,8 @@ impl MeshPool {
 
     /// Suballocates room for a mesh and records a staging copy into it.
     ///
-    /// `vertices` is `VERTEX_STRIDE`-strided vertex data — one
-    /// [`MeshVertex::to_bytes`] record each, **interleaved**, which is not how
-    /// the pool stores them: this is where the two streams are separated, so a
-    /// caller describes geometry once and the position region stays contiguous
-    /// for the passes that read nothing else. `indices` are **mesh-relative** —
-    /// the base vertex reaches the GPU beside them rather than inside them, so
-    /// a mesh's bytes never depend on where it landed. The [module docs](self)
-    /// say by which route. `uv_range` is the pair every UV lane was quantised
-    /// against, which reaches the shaders through the mesh table. The returned
-    /// mesh is not resident until [`MeshPool::flush`] has run, and
+    /// The returned mesh is not resident until [`MeshPool::flush`] has run, and
     /// [`MeshPool::mesh`] says so.
-    ///
-    /// [`MeshVertex::to_bytes`]: crcbl_shaders::mesh::MeshVertex::to_bytes
     ///
     /// # Errors
     ///
@@ -648,11 +679,15 @@ impl MeshPool {
         &mut self,
         device: &dyn Device,
         queue: QueueHandle,
-        label: &str,
-        vertices: &[u8],
-        indices: &[u32],
-        uv_range: UvRange,
+        mesh: &MeshUpload<'_>,
     ) -> Result<MeshHandle, MeshPoolError> {
+        let MeshUpload {
+            label,
+            vertices,
+            indices,
+            uv_range,
+            flags,
+        } = *mesh;
         if !vertices.len().is_multiple_of(VERTEX_STRIDE) {
             return Err(MeshPoolError::VertexStrideMismatch {
                 bytes: vertices.len(),
@@ -703,6 +738,7 @@ impl MeshPool {
             // and nothing reads it back.
             bounds: local_bounds(vertices),
             uv_range,
+            flags,
         };
         let ready_at = match self.record_upload(device, queue, label, vertices, indices, range) {
             Ok(ready_at) => ready_at,
@@ -1328,6 +1364,7 @@ mod tests {
             bounds_min: range.bounds.min.to_array(),
             bounds_max: range.bounds.max.to_array(),
             uv_range: range.uv_range,
+            flags: range.flags,
         }
     }
 
@@ -1536,10 +1573,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "cube",
-                &vertex_bytes(4),
-                &[0, 1, 2],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "cube",
+                    vertices: &vertex_bytes(4),
+                    indices: &[0, 1, 2],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("it fits");
         let signals: Vec<_> = recorder
@@ -1588,10 +1628,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "too many indices",
-                &vertex_bytes(4),
-                &[0; 16],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "too many indices",
+                    vertices: &vertex_bytes(4),
+                    indices: &[0; 16],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect_err("16 indices do not fit in 8");
         assert!(
@@ -1640,10 +1683,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "cube",
-                &vertex_bytes(4),
-                &[0, 1, 2, 0, 2, 3],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "cube",
+                    vertices: &vertex_bytes(4),
+                    indices: &[0, 1, 2, 0, 2, 3],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("it fits");
 
@@ -1669,6 +1715,7 @@ mod tests {
                 base_index: 0,
                 index_count: 6,
                 bounds: local_bounds(&vertex_bytes(4)),
+                flags: 0,
             }),
             "and once the timeline has passed, it must"
         );
@@ -1687,10 +1734,13 @@ mod tests {
         pool.upload(
             device.as_ref(),
             queue,
-            "cube",
-            &vertex_bytes(4),
-            &[0, 1, 2],
-            UvRange::default(),
+            &MeshUpload {
+                label: "cube",
+                vertices: &vertex_bytes(4),
+                indices: &[0, 1, 2],
+                uv_range: UvRange::default(),
+                flags: 0,
+            },
         )
         .expect("it fits");
 
@@ -1741,10 +1791,13 @@ mod tests {
             pool.upload(
                 device.as_ref(),
                 queue,
-                label,
-                &vertex_bytes(vertices),
-                &indices,
-                UvRange::default(),
+                &MeshUpload {
+                    label,
+                    vertices: &vertex_bytes(vertices),
+                    indices: &indices,
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("both fit");
         }
@@ -1798,10 +1851,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "cube",
-                &vertex_bytes(8),
-                &[0; 12],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "cube",
+                    vertices: &vertex_bytes(8),
+                    indices: &[0; 12],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("it fits");
         pool.flush(device.as_ref()).expect("drains");
@@ -1847,21 +1903,33 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut pool = pool(device.as_ref(), 64, 64);
 
-        // Distinct sizes, so no two meshes have interchangeable entries.
-        let handles: Vec<MeshHandle> = [(4u32, 6usize), (3, 3), (5, 9)]
-            .into_iter()
-            .map(|(vertices, indices)| {
-                pool.upload(
-                    device.as_ref(),
-                    queue,
-                    "mesh",
-                    &vertex_bytes(vertices),
-                    &vec![0u32; indices],
-                    UvRange::default(),
-                )
-                .expect("they fit")
-            })
-            .collect();
+        // Distinct sizes, so no two meshes have interchangeable entries — and
+        // distinct flags, because the flag word is the one column a row could
+        // drop and still light every mesh in this tree correctly: a flat quad's
+        // derivative frame is its authored frame, so no frame read off a device
+        // can tell a pool that wrote the bit from one that wrote zero. Only the
+        // bytes can.
+        let handles: Vec<MeshHandle> = [
+            (4u32, 6usize, GpuMesh::MESH_AUTHORED_TANGENTS),
+            (3, 3, 0),
+            (5, 9, GpuMesh::MESH_AUTHORED_TANGENTS),
+        ]
+        .into_iter()
+        .map(|(vertices, indices, flags)| {
+            pool.upload(
+                device.as_ref(),
+                queue,
+                &MeshUpload {
+                    label: "mesh",
+                    vertices: &vertex_bytes(vertices),
+                    indices: &vec![0u32; indices],
+                    uv_range: UvRange::default(),
+                    flags,
+                },
+            )
+            .expect("they fit")
+        })
+        .collect();
         pool.flush(device.as_ref()).expect("drains");
 
         let live = |pool: &MeshPool, recorder: &Recorder, handles: &[MeshHandle]| {
@@ -1888,6 +1956,17 @@ mod tests {
             "the second starts after the first"
         );
         assert_eq!(ranges[2].base_vertex, 7, "and the third after the second");
+        // And the flags reached the CPU side as uploaded, or the comparison
+        // above is two zeroes agreeing.
+        assert_eq!(
+            ranges.iter().map(|range| range.flags).collect::<Vec<u32>>(),
+            [
+                GpuMesh::MESH_AUTHORED_TANGENTS,
+                0,
+                GpuMesh::MESH_AUTHORED_TANGENTS
+            ],
+            "the pool must keep each mesh's flags, not the first's or none"
+        );
 
         // Free the middle one. Its entry is cleared and its neighbours' are not.
         let freed = pool.table_index(handles[1]).expect("resident");
@@ -1909,10 +1988,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "fourth",
-                &vertex_bytes(2),
-                &[0; 3],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "fourth",
+                    vertices: &vertex_bytes(2),
+                    indices: &[0; 3],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("the freed space fits it");
         pool.flush(device.as_ref()).expect("drains");
@@ -1948,10 +2030,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "first",
-                &vertex_bytes(4),
-                &[0; 6],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "first",
+                    vertices: &vertex_bytes(4),
+                    indices: &[0; 6],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("it fits");
         pool.flush(device.as_ref()).expect("drains");
@@ -1969,10 +2054,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "second",
-                &vertex_bytes(4),
-                &[0; 6],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "second",
+                    vertices: &vertex_bytes(4),
+                    indices: &[0; 6],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("the freed space fits it");
         pool.flush(device.as_ref()).expect("drains");
@@ -2064,10 +2152,13 @@ mod tests {
             pool.upload(
                 device.as_ref(),
                 queue,
-                "mesh",
-                &vertex_bytes(2),
-                &[0; 3],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "mesh",
+                    vertices: &vertex_bytes(2),
+                    indices: &[0; 3],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
         };
         let first = upload(&mut pool).expect("room");
@@ -2111,10 +2202,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "cube",
-                &mesh::cube_vertex_bytes(),
-                &mesh::cube_indices(),
-                UvRange::default(),
+                &MeshUpload {
+                    label: "cube",
+                    vertices: &mesh::cube_vertex_bytes(),
+                    indices: &mesh::cube_indices(),
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("a cube is small");
         pool.flush(device.as_ref()).expect("drains");
@@ -2147,20 +2241,26 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "cube",
-                &mesh::cube_vertex_bytes(),
-                &mesh::cube_indices(),
-                UvRange::default(),
+                &MeshUpload {
+                    label: "cube",
+                    vertices: &mesh::cube_vertex_bytes(),
+                    indices: &mesh::cube_indices(),
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("a cube is small");
         let pyramid = pool
             .upload(
                 device.as_ref(),
                 queue,
-                "pyramid",
-                &mesh::pyramid_vertex_bytes(),
-                &mesh::pyramid_indices(),
-                UvRange::default(),
+                &MeshUpload {
+                    label: "pyramid",
+                    vertices: &mesh::pyramid_vertex_bytes(),
+                    indices: &mesh::pyramid_indices(),
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect("a pyramid is small");
         pool.flush(device.as_ref()).expect("drains");
@@ -2217,10 +2317,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "ragged",
-                &[0u8; VERTEX_STRIDE + 1],
-                &[0, 1, 2],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "ragged",
+                    vertices: &[0u8; VERTEX_STRIDE + 1],
+                    indices: &[0, 1, 2],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect_err("49 bytes is not a whole number of vertices");
         assert!(
@@ -2233,10 +2336,13 @@ mod tests {
             .upload(
                 device.as_ref(),
                 queue,
-                "empty",
-                &[],
-                &[],
-                UvRange::default(),
+                &MeshUpload {
+                    label: "empty",
+                    vertices: &[],
+                    indices: &[],
+                    uv_range: UvRange::default(),
+                    flags: 0,
+                },
             )
             .expect_err("a mesh needs both halves");
         assert!(
@@ -2258,20 +2364,26 @@ mod tests {
         pool.upload(
             device.as_ref(),
             queue,
-            "flushed",
-            &vertex_bytes(4),
-            &[0, 1, 2],
-            UvRange::default(),
+            &MeshUpload {
+                label: "flushed",
+                vertices: &vertex_bytes(4),
+                indices: &[0, 1, 2],
+                uv_range: UvRange::default(),
+                flags: 0,
+            },
         )
         .expect("fits");
         pool.flush(device.as_ref()).expect("drains");
         pool.upload(
             device.as_ref(),
             queue,
-            "still staged",
-            &vertex_bytes(4),
-            &[0, 1, 2],
-            UvRange::default(),
+            &MeshUpload {
+                label: "still staged",
+                vertices: &vertex_bytes(4),
+                indices: &[0, 1, 2],
+                uv_range: UvRange::default(),
+                flags: 0,
+            },
         )
         .expect("fits");
         assert!(recorder.total_live_objects() > before);
