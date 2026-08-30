@@ -5751,26 +5751,28 @@ impl ForwardRenderer {
             ..
         } = self;
         skinned_instances.retain_mut(|entry| {
-            // The record as the pool holds it, so the transform, the material
-            // and the mesh the caller last set survive: only the two bases are
-            // this call's.
-            let Some(mut instance) = instances.get(entry.handle) else {
-                return false;
-            };
             // `SkinnedRegion::base`'s indexing and `SkinnedRegion::previous_base`'s,
             // applied to the entry's own copy of the pair — see
             // [`SkinnedInstance::bases`].
-            instance.base_vertex = entry.bases[(parity & 1) as usize];
-            instance.previous_base_vertex = if entry.pointed {
+            let base_vertex = entry.bases[(parity & 1) as usize];
+            let previous_base_vertex = if entry.pointed {
                 entry.bases[((parity ^ 1) & 1) as usize]
             } else {
                 // Nothing has been written into the other half for this object,
                 // so it is put at rest — see [`SkinnedInstance::pointed`].
-                instance.base_vertex
+                base_vertex
             };
             entry.pointed = true;
-            instances.set(entry.handle, &instance);
-            true
+            // The two bases and nothing else: the transform, the material and
+            // the mesh the caller last set survive, and so does the transform
+            // the record moved *from* — which
+            // [`InstancePool::set`](crate::instance_pool::InstancePool::set)
+            // would overwrite with this frame's, leaving a skinned object's own
+            // travel out of the motion target. See
+            // [`InstancePool::set_bases`](crate::instance_pool::InstancePool::set_bases).
+            // Its answer is also what says the instance is still there, so an
+            // object a caller removed drops out of the list here.
+            instances.set_bases(entry.handle, base_vertex, previous_base_vertex)
         });
     }
 
@@ -14114,6 +14116,87 @@ mod tests {
         }
 
         fixture.renderer.release_skinned(second);
+        fixture.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **A skinned object that moves carries the transform it moved from**, and
+    /// the frame after it is back at rest.
+    ///
+    /// The transform half of a skinned motion vector, and the half the
+    /// per-frame re-point used to erase: it rewrote the record through
+    /// [`InstancePool::set`], which fills the previous transform out of the
+    /// record it overwrites — and that record already held this frame's
+    /// transform, because
+    /// [`set_skinned_instance`](ForwardRenderer::set_skinned_instance) had put
+    /// it there. Every skinned instance then read `previous_transform ==
+    /// transform` on every frame, so a character that walked contributed
+    /// nothing to the motion target from the walk, only from its deformation.
+    /// [`InstancePool::set_bases`] is what the re-point goes through instead.
+    ///
+    /// Both frames are the claim. Without the second, a re-point that wrote
+    /// some *other* stale transform into the field would pass; and the second
+    /// is the pool's own rest rule reaching a skinned object at all, which a
+    /// re-point that kept enrolling the element every frame would suppress
+    /// for ever.
+    ///
+    /// Read out of the ring buffer the frame draws from, on
+    /// [`instance_record`]'s terms.
+    #[test]
+    fn a_skinned_instance_that_moves_carries_the_transform_it_moved_from() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut fixture = SkinnedFixture::build(device, queue);
+        let handle = fixture
+            .renderer
+            .add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+            })
+            .expect("a pool of thousands has room for one object");
+
+        // Two frames standing still, so the history the move is measured
+        // against is a settled record rather than a fresh one.
+        fixture.begin(device);
+        fixture.begin(device);
+
+        let moved = Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0));
+        fixture.renderer.set_skinned_instance(
+            handle,
+            &SkinnedInstanceDesc {
+                mesh: &fixture.skinned,
+                material: DEMO_UNTINTED,
+                transform: moved,
+            },
+        );
+        fixture.begin(device);
+        let instance = instance_record(&recorder, &fixture.renderer, handle);
+        assert_eq!(
+            instance.transform,
+            moved.to_cols_array(),
+            "the frame that moved the object must draw it where it arrived"
+        );
+        assert_eq!(
+            instance.previous_transform,
+            Mat4::IDENTITY.to_cols_array(),
+            "and it must say where from — a previous transform equal to the current one is \
+             the re-point having overwritten the move"
+        );
+
+        fixture.begin(device);
+        let settled = instance_record(&recorder, &fixture.renderer, handle);
+        assert_eq!(
+            settled.transform,
+            moved.to_cols_array(),
+            "nothing moved it again"
+        );
+        assert_eq!(
+            settled.previous_transform, settled.transform,
+            "so the frame after the move owes rest; a re-point that enrolled the element \
+             every frame would keep it reporting the move for ever"
+        );
+
         fixture.destroy(device);
         recorder.assert_valid();
     }

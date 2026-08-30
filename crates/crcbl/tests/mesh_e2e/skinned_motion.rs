@@ -13,14 +13,27 @@
 //! # The claim, and what a transform-only reading does with it
 //!
 //! The cube here sits at [`crate::motion::MOVING_AT`] under
-//! [`Mat4::IDENTITY`] and **never moves**: its instance record carries the same
-//! transform for every frame, so the previous-transform half of the subtraction
-//! is zero throughout. What moves is the palette — one joint, every vertex bound
-//! to it — and the frame that translates it by [`crate::motion::MOVE_BY`] owes
-//! exactly the displacement `crate::motion`'s transform move measures for the
-//! same cube under the same camera. A stage reading `vertex.position` on the
-//! override arm reads rest there instead, which is
+//! [`Mat4::IDENTITY`], and in every test but the last one it **never moves**:
+//! its instance record carries the same transform for every frame, so the
+//! previous-transform half of the subtraction is zero throughout. What moves is
+//! the palette — one joint, every vertex bound to it — and the frame that
+//! translates it by [`crate::motion::MOVE_BY`] owes exactly the displacement
+//! `crate::motion`'s transform move measures for the same cube under the same
+//! camera. A stage reading `vertex.position` on the override arm reads rest
+//! there instead, which is
 //! [`a_deformed_cube_reads_the_motion_its_palette_moved_it_by`]'s failure.
+//!
+//! # The other half: a deformed object that also travels
+//!
+//! [`a_skinned_cube_whose_transform_moved_reads_that_motion`] is the mirror of
+//! that test — the palette stays at rest and the *instance transform* moves by
+//! the same [`crate::motion::MOVE_BY`], so the displacement owed is the same
+//! one again. It is a claim about the re-point rather than about the shader:
+//! `ForwardRenderer::point_skinned_instances` rewrites every skinned record
+//! between the instance ring's rotation and its upload, and while that went
+//! through `InstancePool::set` — which fills the previous transform out of the
+//! record it overwrites — it overwrote the move with the frame it was already
+//! carrying, and a skinned character that walked read rest.
 //!
 //! # The numbers here were measured
 //!
@@ -39,10 +52,10 @@ use crcbl::hal::{
     BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, ImageAspect,
     ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState, SubmitInfo,
 };
-use crcbl::math::Mat4;
+use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, ImportedImage, InitialClaim, RenderGraph,
-    SkinnedInstanceDesc, SkinnedMesh, Skinning, SkinningDesc, TransientPool,
+    Camera, DirectionalLight, ForwardRenderer, ImportedImage, InitialClaim, InstanceHandle,
+    RenderGraph, SkinnedInstanceDesc, SkinnedMesh, Skinning, SkinningDesc, TransientPool,
     forward::FRAMES_IN_FLIGHT,
 };
 use crcbl_shaders::skinning::{JOINTS_PER_VERTEX, SkinBinding};
@@ -65,6 +78,11 @@ struct SkinnedMotionScene {
     /// region is the renderer's pool space, not this type's.
     skinned: SkinnedMesh,
     bindings: Vec<SkinBinding>,
+    /// The one skinned object, so
+    /// [`a_skinned_cube_whose_transform_moved_reads_that_motion`] can move it.
+    /// Every other test here leaves it where [`open`](SkinnedMotionScene::open)
+    /// put it.
+    cube: InstanceHandle,
 }
 
 impl SkinnedMotionScene {
@@ -80,14 +98,14 @@ impl SkinnedMotionScene {
         let skinned = renderer
             .reserve_skinned(crcbl::render::scene::DEMO_CUBE)
             .expect("the demo pool has room for two halves of a cube");
-        renderer
+        let cube = renderer
             .add_skinned_instance(&SkinnedInstanceDesc {
                 mesh: &skinned,
                 material: crcbl::render::scene::DEMO_UNTINTED,
-                // **The transform never changes in this file**, which is what
-                // makes every motion below the palette's. `MOVING_AT` is the
-                // origin, so this is where `crate::motion`'s moving instance
-                // stands before it moves.
+                // Where `crate::motion`'s moving instance stands before it
+                // moves — `MOVING_AT` is the origin. Only
+                // [`SkinnedMotionScene::move_to`] ever changes it, so in every
+                // other test here the motion read back is the palette's.
                 transform: Mat4::from_translation(MOVING_AT),
             })
             .expect("an instance pool of thousands has room for one object");
@@ -123,7 +141,27 @@ impl SkinnedMotionScene {
             skinning,
             skinned,
             bindings,
+            cube,
         }
+    }
+
+    /// Puts the skinned cube at `at`, which the next [`frame`](Self::frame)
+    /// re-points and uploads.
+    ///
+    /// A transform and nothing else, which is the whole of what a caller ever
+    /// passes: the pool fills the previous transform out of the record it
+    /// already holds, and the re-point between the rotation and the upload has
+    /// to leave that alone — see
+    /// `crcbl_render::instance_pool::InstancePool::set_bases`.
+    fn move_to(&mut self, at: Vec3) {
+        self.renderer.set_skinned_instance(
+            self.cube,
+            &SkinnedInstanceDesc {
+                mesh: &self.skinned,
+                material: crcbl::render::scene::DEMO_UNTINTED,
+                transform: Mat4::from_translation(at),
+            },
+        );
     }
 
     /// Draws one skinned frame at `palette` and answers with the scene target
@@ -414,4 +452,76 @@ fn a_deformed_cube_reads_the_motion_its_palette_moved_it_by() {
     );
 
     assert_at_rest(&settled, "the frame after the palette settled");
+}
+
+/// **A skinned cube whose _transform_ moved reads that motion**, with a palette
+/// that never changed — and the frame after it is back at rest.
+///
+/// The mirror of [`a_deformed_cube_reads_the_motion_its_palette_moved_it_by`]:
+/// there the palette carried the surface and the transform stood still, here
+/// the transform carries it and the palette stands still. The displacement owed
+/// is the same one, because the cube ends up at the same place — [`project`]
+/// over the same two world points, and [`MOTION_BAND`] for the same reason a
+/// perspective camera makes the population a band.
+///
+/// **The re-point is what this is about.**
+/// `ForwardRenderer::point_skinned_instances` rewrites every skinned record
+/// once a frame, between the instance ring's rotation and its upload. While it
+/// did that through `InstancePool::set`, the previous transform came from the
+/// record it was overwriting — which by then held this frame's transform, put
+/// there by `set_skinned_instance` — so `previous_transform` equalled
+/// `transform` for every skinned instance on every frame and this test reads
+/// rest on the moved frame. `InstancePool::set_bases` is the entry point the
+/// re-point uses instead.
+///
+/// The fourth frame is the control, and it is the pool's rest rule reaching a
+/// skinned object: nothing wrote the instance again, so the carry-forward puts
+/// it back at rest. A re-point that kept enrolling the record as written would
+/// report the move for ever and fail here.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_skinned_cube_whose_transform_moved_reads_that_motion() {
+    let camera = motion_camera();
+    let mut scene = SkinnedMotionScene::open();
+    // Two frames standing still, so the history the third subtracts against is
+    // a settled record rather than the frame the object was placed in.
+    let _ = scene.frame(&camera, &rest_palette());
+    let _ = scene.frame(&camera, &rest_palette());
+    scene.move_to(MOVING_AT + MOVE_BY);
+    let moved = scene.frame(&camera, &rest_palette());
+    let settled = scene.frame(&camera, &rest_palette());
+    scene.finish();
+
+    let before = project(&camera, MOVING_AT);
+    let after = project(&camera, MOVING_AT + MOVE_BY);
+    let predicted = (after[0] - before[0]) / MESH_EXTENT.0 as f32;
+    assert!(
+        predicted > CAMERA_MOTION_FLOOR,
+        "this camera moves the cube's centre by {predicted} in u, so the positive sign and \
+         the band below are not what its motion works out to"
+    );
+
+    let field = covered(&moved);
+    let mut drawn = 0usize;
+    for (index, texel) in field.iter().enumerate() {
+        let Some(encoded) = texel else {
+            continue;
+        };
+        drawn += 1;
+        let motion = decode(*encoded);
+        assert!(
+            motion[0] > predicted * MOTION_BAND.0 && motion[0] < predicted * MOTION_BAND.1,
+            "texel {:?} belongs to a skinned cube whose transform carried it {predicted} \
+             across the frame and reads {motion:?} in u — a value at rest is the re-point \
+             having overwritten the transform the record moved from",
+            texel_at(index)
+        );
+    }
+    assert!(
+        drawn > COVERED_FLOOR,
+        "the moved cube covered only {drawn} texel(s), so the loop above checked almost \
+         nothing"
+    );
+
+    assert_at_rest(&settled, "the frame after the cube stopped");
 }

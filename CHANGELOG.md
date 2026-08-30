@@ -31,9 +31,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   writes zero. Nothing samples the target yet — `DebugView::Motion` is the
   observer, encoding the vector as `motion * MOTION_VIEW_SCALE + 0.5` into the
   scene target, and `crates/crcbl/tests/mesh_e2e/motion.rs` is what holds the
-  subtraction to it. The sky reads zero rather than the camera's motion, and a
-  skinned instance's own transform contributes nothing to the target because the
-  re-point overwrites its previous transform; both are `docs/backlog.md`'s.
+  subtraction to it. The sky reads zero rather than the camera's motion, which
+  is `docs/backlog.md`'s.
+- **A skinned instance's own transform reaches the motion target.**
+  `crcbl_render::InstancePool` gains `set_bases`, which rewrites a live record's
+  `base_vertex` and `previous_base_vertex` and touches nothing else — the
+  transform it moved from included — and returns `false` for a stale handle on
+  `InstancePool::set`'s terms. `ForwardRenderer::point_skinned_instances` goes
+  through it instead of `get` plus `set`: `set` fills the previous transform out
+  of the record it overwrites, and the per-frame re-point runs after
+  `set_skinned_instance` has already put this frame's transform there, so every
+  skinned instance read `previous_transform == transform` on every frame and a
+  character that walked contributed nothing to the target from the walk, only
+  from its deformation. A re-point also no longer enrols the element as written,
+  so `InstancePool::rotate`'s carry-forward reaches a skinned object and the
+  frame after a move is back at rest. Observed at three levels:
+  `setting_the_bases_keeps_the_transform_the_record_moved_from` in the pool,
+  `a_skinned_instance_that_moves_carries_the_transform_it_moved_from` on the
+  instance ring the renderer draws from, and
+  `a_skinned_cube_whose_transform_moved_reads_that_motion` in
+  `crates/crcbl/tests/mesh_e2e/skinned_motion.rs`, which reads the displacement
+  back out of the frame.
 - **A skinned instance's motion vector follows its deformation.**
   `crcbl_shaders::mesh::GpuInstance` gains `previous_base_vertex` in place of
   one of its padding words, so `INSTANCE_STRIDE` is unchanged at 160 and

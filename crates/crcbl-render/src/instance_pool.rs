@@ -58,7 +58,11 @@
 //! record already holds, [`InstancePool::insert`] fills it from the new
 //! transform — a spawn did not travel from anywhere — and
 //! [`InstancePool::rotate`] puts back at rest whatever moved a frame ago and
-//! has not moved again.
+//! has not moved again. [`InstancePool::set_bases`] is the one write that is
+//! **not** a move: it rewrites a record's two base vertices and leaves this
+//! field and the carry-forward enrolment exactly as they stand, because the
+//! per-frame re-point a skinned object goes through is not a caller saying the
+//! object travelled.
 //!
 //! That last step is what makes the field mean *last frame* rather than *the
 //! last time anyone wrote this*. An instance that moves for a while and then
@@ -415,6 +419,47 @@ impl InstancePool {
         // caller does not pass it — see [`GpuInstance::previous_transform`].
         let previous = self.read(handle.index()).transform;
         self.write_live(handle.index(), instance, previous);
+        true
+    }
+
+    /// Rewrites `handle`'s two base vertices and **nothing else** — the
+    /// previous transform the record already holds included.
+    ///
+    /// Returns whether the handle named a live instance; a stale one writes
+    /// nothing, on [`InstancePool::set`]'s terms. The record keeps
+    /// [`GpuInstance::LIVE`], because every path that puts one in the mirror is
+    /// a path that set the bit.
+    ///
+    /// **It exists because a re-point is not a move.**
+    /// [`ForwardRenderer::point_skinned_instances`](crate::forward::ForwardRenderer)
+    /// rewrites every skinned object's pair of bases once a frame, between the
+    /// [`rotate`](Self::rotate) and the upload, and doing that through
+    /// [`set`](Self::set) made it a *transform* write: `set` takes the previous
+    /// transform from the record it overwrites, and by then that record already
+    /// carries this frame's transform, so `previous_transform` came out equal to
+    /// `transform` for every skinned instance on every frame. A character that
+    /// walked contributed nothing to the motion target from the walk.
+    ///
+    /// It also leaves the element out of the next [`rotate`](Self::rotate)'s
+    /// carry-forward, which is the same reason from the other side: a call that
+    /// runs for every skinned object every frame would keep each of them
+    /// permanently written-this-frame, nothing would ever be put back at rest,
+    /// and one move would be reported for ever. What enrols an element is a
+    /// caller's own write — [`insert`](Self::insert) and [`set`](Self::set).
+    pub fn set_bases(
+        &mut self,
+        handle: InstanceHandle,
+        base_vertex: u32,
+        previous_base_vertex: u32,
+    ) -> bool {
+        if !self.slots.contains(handle.cast()) {
+            return false;
+        }
+        let index = handle.index();
+        let mut record = self.read(index);
+        record.base_vertex = base_vertex;
+        record.previous_base_vertex = previous_base_vertex;
+        self.write(index, &record);
         true
     }
 
@@ -1243,6 +1288,92 @@ mod tests {
                 (moving.previous_transform, moving.transform),
                 (instance(step - 1).transform, instance(step).transform),
                 "the frame that moved it to {step} lost one end of the move"
+            );
+        }
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A re-point rewrites the two bases and leaves the move alone**, which
+    /// is the whole of why [`InstancePool::set_bases`] exists.
+    ///
+    /// The record is moved first, so it is carrying a previous transform that
+    /// differs from its current one when the bases are rewritten — a call that
+    /// went through [`InstancePool::set`] would take the previous transform
+    /// from the record it overwrites, which by then holds the move's *end*, and
+    /// the move would be gone. That is what
+    /// [`crate::forward::ForwardRenderer`]'s per-frame re-point did to every
+    /// skinned instance.
+    ///
+    /// The frame checked on the device is the one the move is drawn in. The
+    /// frame after it puts the record back at rest, which is
+    /// [`carry_forward`](InstancePool::carry_forward)'s job rather than this
+    /// call's — [`an_instance_carries_where_it_was_last_frame`] is where that
+    /// half is asserted, and the renderer-level
+    /// `a_skinned_instance_that_moves_carries_the_transform_it_moved_from` is
+    /// where the two meet.
+    ///
+    /// The stale half is [`InstancePool::set`]'s contract: `false`, and nothing
+    /// written — asserted on the bytes that reached the device and on the
+    /// uploads a later frame performs, because a mirror written without being
+    /// marked dirty would satisfy only one of the two.
+    #[test]
+    fn setting_the_bases_keeps_the_transform_the_record_moved_from() {
+        let (recorder, device) = open();
+        let mut pool = pool(device.as_ref(), 16);
+        let handle = pool.insert(&instance(7)).expect("room");
+        assert!(pool.set(handle, &instance(11)), "the handle is live");
+
+        assert!(pool.set_bases(handle, 40, 41), "the handle is still live");
+        let repointed = GpuInstance {
+            base_vertex: 40,
+            previous_base_vertex: 41,
+            ..stored_after(11, 7)
+        };
+        assert_eq!(
+            pool.get(handle),
+            Some(repointed),
+            "a re-point owes the two bases it was given and every other field the record \
+             already held — the previous transform above all"
+        );
+
+        let index = pool.index(handle).expect("live");
+        let slot = pool
+            .begin_frame(device.as_ref())
+            .expect("the null device writes");
+        assert_eq!(
+            on_device(&recorder, &pool, slot, index),
+            repointed,
+            "the buffer this frame draws from did not take the re-point, so a shader reads \
+             the bases of the frame before"
+        );
+
+        assert!(pool.remove(handle));
+        for _ in 0..FRAMES * 2 {
+            pool.begin_frame(device.as_ref())
+                .expect("the null device writes");
+        }
+        recorder.clear();
+        assert!(
+            !pool.set_bases(handle, 60, 61),
+            "a retired handle names no instance"
+        );
+        for _ in 0..FRAMES * 2 {
+            pool.begin_frame(device.as_ref())
+                .expect("the null device writes");
+        }
+        assert_eq!(
+            writes(&recorder),
+            [],
+            "a stale re-point marked a slot dirty, so it wrote into whatever took it"
+        );
+        for slot in 0..FRAMES {
+            let dead = on_device(&recorder, &pool, slot, index);
+            assert_eq!(
+                (dead.base_vertex, dead.previous_base_vertex),
+                (40, 41),
+                "buffer {slot} took a stale handle's bases"
             );
         }
 

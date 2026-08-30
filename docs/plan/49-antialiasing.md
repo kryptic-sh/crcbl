@@ -201,11 +201,11 @@ TAA needs four things this tree does not have:
   `crates/crcbl/tests/mesh_e2e/motion.rs` and — for a deformed surface, through
   `GpuInstance::previous_base_vertex` —
   `crates/crcbl/tests/mesh_e2e/skinned_motion.rs`. What the target does not yet
-  carry is the camera's motion where the sky shows through, and a skinned
-  instance's own transform motion, which the per-frame re-point erases; both are
-  `docs/backlog.md`'s and this rung's to finish. The AA row in
-  [48-post-processing.md](48-post-processing.md) carries the history of the
-  earlier correction and nothing here repeats it.
+  carry is the camera's motion where the sky shows through, which is
+  `docs/backlog.md`'s and this rung's to finish; a skinned instance's own
+  transform motion was the other gap until `InstancePool::set_bases` landed on
+  2026-08-30. The AA row in [48-post-processing.md](48-post-processing.md)
+  carries the history of the earlier correction and nothing here repeats it.
 
 `crcbl_render::skinning`'s `SkinnedRegion::previous_base` was the half of the
 reservation taken first: topic 17's 2026-07-27 correction double-buffers the

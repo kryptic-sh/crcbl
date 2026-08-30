@@ -720,10 +720,13 @@ instance transform never changed, which is
 frame before deformed it into — being read on the override arm.
 
 So the five features below are blocked **on their own work only** — a rigid
-body's and a deformed surface's motion are both in the target, and the two
-things it does not yet carry are `docs/backlog.md`'s: the camera's motion where
-the sky shows through, and a skinned instance's own transform motion, which the
-per-frame re-point in `ForwardRenderer::point_skinned_instances` erases.
+body's motion, a deformed surface's and a skinned object's own travel are all
+three in the target, and the one thing it does not yet carry is
+`docs/backlog.md`'s: the camera's motion where the sky shows through. A skinned
+instance's transform motion was the third gap until 2026-08-30, when
+`crcbl_render::InstancePool::set_bases` gave
+`ForwardRenderer::point_skinned_instances` a way to rewrite a record's two base
+vertices without the write being taken for a move.
 
 Those five, in the order they would be wanted:
 
