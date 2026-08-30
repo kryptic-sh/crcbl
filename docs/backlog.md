@@ -12568,6 +12568,41 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
+## The frame limiter: wrong rate, uncorrected jitter, and no browser pacing (2026-08-30)
+
+Three findings from one user report, one fix in flight (the grid pacer slice);
+delete this entry when it lands.
+
+- **A 144 fps limit runs at 142.x on the desktop.** `Clock::advance` in
+  `crates/crcbl/src/engine.rs` anchors the next deadline to when the last frame
+  _actually_ started, after the sleep — so the OS sleep's overshoot (~50–100 µs
+  on Linux: the default timer slack plus wake latency) is added to every period.
+  6.944 ms + ~0.07 ms = 7.02 ms = 142.5 fps, which is the reading reported.
+  Measured by the user, derived from the code; not yet measured here.
+- **Jitter is the raw `thread::sleep` variance.** Nothing learns the overshoot
+  or spins the last stretch, so frame starts wander by the OS's wake latency.
+  The bar the user set: the least jitter possible, best in class.
+- **The browser never applies the limit.** `Clock::set_limit` is a documented
+  no-op on `Clock::Manual`, every wasm entry point builds a manual clock
+  (`Instant` panics on wasm32), and the shim draws one engine frame per
+  `requestAnimationFrame` — so `Loop::new`'s `set_limit` does nothing there and
+  `apps/options`'s `frame_limit` row changes nothing on the deployed demo.
+
+**The fix, decided:** a `FramePacer` that paces on a deadline _grid_ (next
+deadline = previous deadline + period, re-based only after a stall of a period
+or more) so a constant lateness never accumulates and the average rate is exact;
+`RealClock` sleeps short of the deadline by a learned overshoot and spins the
+remainder; the manual clock remembers its limit and the browser `App` skips the
+`requestAnimationFrame` ticks that fall inside a grid slot. What the browser
+cannot do better: choose which vsync ticks to draw on, so a cap that is not a
+divisor of the refresh rate judders there, and that is the browser's.
+
+**Not in the fix, and worth knowing:** `apps/options`'s row applies to the next
+start on every platform — the loop takes its limit when it is built — so on the
+web the cap takes effect on reload, out of OPFS. Applying it live is a separate
+slice (`Loop::set_limit` exists; the panel would call it through
+`take_pending_frame_limit`).
+
 ## `--pacing` and `--fps` reach the engine; three quarters of what they can ask for is unexercised
 
 `crcbl::args::Common::pacing` and `::limit` carry the two values,
