@@ -59,8 +59,8 @@ What is not:
 - **No editor.** `apps/editor` is deliberately absent until there is something
   to put in it.
 - The viewer opens a file from the command line, from a drop on its window
-  (Wayland, Win32 and AppKit — X11 has no XDND), and from a drop on the canvas
-  in the browser.
+  (Wayland, Win32 and AppKit — X11 has no XDND), from a drop on the canvas in
+  the browser, and from the shelf of Khronos CC0 models on its `ESC` panel.
 
 `docs/plan/ROADMAP.md` is the canonical build order and carries a fuller status;
 `docs/backlog.md` is what was raised and not finished, and why.
@@ -81,9 +81,10 @@ cargo run -p sandbox -- --headless        # needs neither; what CI runs
 cargo run -p breakout
 cargo run -p lantern                        # one room, every lighting effect
 
-# The glTF viewer. Bring your own model:
-curl -sSLO https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb
-cargo run -p viewer -- Avocado.glb
+# The glTF viewer: Suzanne, or bring your own model.
+cargo run -p viewer
+cargo run -p viewer -- your.glb
+./tools/fetch-shelf.sh                      # the rest of the Khronos CC0 shelf
 ```
 
 Every sample takes the same flags: `--backend vk|mtl|dx12|null`, `--headless`,
@@ -96,8 +97,9 @@ shell event.
 ### The viewer
 
 `docs/plan/sample/05-viewer.md`'s sample, and the asset pipeline's acceptance
-test. Open a model from the command line or drop a `.glb`/`.gltf` on the window
-(the browser demo takes a drop on the canvas). Orbit with the mouse, and:
+test. Open a model from the command line, drop a `.glb`/`.gltf` on the window
+(the browser demo takes a drop on the canvas), or pick one off the shelf. Orbit
+with the mouse, and:
 
 | Key     | What it does                                                      |
 | ------- | ----------------------------------------------------------------- |
@@ -106,7 +108,7 @@ test. Open a model from the command line or drop a `.glb`/`.gltf` on the window
 | `W`     | wireframe                                                         |
 | `N`     | world-space normals, as `n * 0.5 + 0.5`                           |
 | `-` `=` | exposure, a third of a stop a press                               |
-| `ESC`   | the menu, which also carries an exposure slider                   |
+| `ESC`   | the menu: an exposure slider and the `SHELF` row                  |
 
 **Re-export the file while it is open and the frame becomes the new document.**
 The debug panel's `reloads` row is how you tell a reload that ran from one that

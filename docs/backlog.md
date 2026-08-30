@@ -12730,18 +12730,28 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
-## The viewer's PBR showcase milestone is planned and not started (2026-08-30)
+## The viewer's material set waits on the normal-map rung (2026-08-30)
 
-`docs/plan/sample/05-viewer.md` milestone 4, the user's shape: the viewer is the
-PBR demo. The native drop landed (`HostedGame::dropped_file`, `apps/viewer`'s
-`poll_for_dropped_files`). Owed, in order: a bundled shelf of Khronos CC0 models
-(`glTF-Sample-Assets`, the licence rule and the verdicts read at the sources on
-2026-08-30 are in the plan; **Khronos CC0 only**, so no rabbit) picked from a
-panel, with Suzanne opening by default on both hosts; then the full material set
-once foundation (a) and the normal-map rung land. The shelf can go now. Nothing
-is downloaded yet; re-read each licence at its source before committing a file,
-and mind the browser artifact's size budget when choosing how many of the shelf
-ship in the tab.
+`docs/plan/sample/05-viewer.md` milestone 4: the native drop and the shelf are
+built; what is owed is the full metallic-roughness set drawn, which lands with
+foundation (a) and the normal-map rung in `docs/plan/43-render-standards.md`'s
+lighting order. What the shelf slice left behind:
+
+- **The browser gate's `playing` and `deforming` checks read the _dropped_
+  document.** The page opens on Suzanne, which has no skin, so
+  `web/tools/browser-e2e.mjs`'s `riggedPairGlb()` is the only rigged document a
+  browser run sees; `web/run-browser-e2e.sh` guards the check _names_, not the
+  document. If that fixture ever loses its rig, the only browser-side proof that
+  GPU skinning reaches a picture goes with it.
+- **`tools/run-samples-windowed.sh`'s `generate_viewer_model`** writes a `.glb`
+  at run time because the repository had no model to point the viewer at. It has
+  Suzanne now; the helper can go in favour of the shelf. Left as is — the gate
+  is green.
+- **CI fetches 138 MB uncached** in `test (linux)`. `actions/cache` keyed on
+  `apps/viewer/assets/shelf.sha256` is the fix if it shows in run times.
+- **Not verified:** nothing in the shelf slice ran on macOS, Windows or real
+  WebGPU hardware, and `tools/fetch-shelf.sh`'s `shasum -a 256` branch has never
+  executed (no macOS here).
 
 ## The v2 vertex encodings: what the next slice owes (2026-08-30)
 

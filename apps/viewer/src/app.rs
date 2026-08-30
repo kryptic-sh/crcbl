@@ -67,6 +67,7 @@ use crate::gpu::Gpu;
 use crate::listing::Listing;
 use crate::menu::{MenuKind, Menus};
 use crate::model::{self, LoadError, Model};
+use crate::shelf;
 use crate::watch::Watch;
 
 /// Frames the model again, fitting it in the view from wherever the camera is.
@@ -382,6 +383,25 @@ pub struct Viewer {
     listing: Listing,
     /// Milestone 3's re-export loop — see [`crate::watch`] and [`Viewer::tick`].
     watch: Watch,
+    /// Which row of [`crate::shelf`] the panel's `SHELF` cycler is showing.
+    ///
+    /// **What the arrows will open, not a claim about what is on screen.** The
+    /// other three doors — a path, a drop on the window, a drop on the canvas —
+    /// put documents on screen that are not on the shelf at all, and there is
+    /// no row for them; leaving this where the visitor last left it is honest,
+    /// where moving it to some nearest entry would name a model nobody opened.
+    /// Compared against the widget's own value for [`Viewer::exposure_handle`]'s
+    /// reason: a difference is a press and nothing else.
+    shelf_choice: usize,
+    /// The shelf row a press asked for, opened by the next [`Viewer::draw`].
+    ///
+    /// Deferred on `exposure_pending`'s terms — the renderer is reachable only
+    /// from `tick` and `draw`. **Held rather than taken** while
+    /// [`crate::shelf::load`] answers `Pending`, which is how the browser's
+    /// on-demand fetch converges: the frame asks again until the last file of
+    /// the model has landed. Natively nothing is ever pending and it is cleared
+    /// on the first try.
+    shelf_pending: Option<usize>,
     /// Documents dropped on the window since the last frame, in the order they
     /// landed.
     ///
@@ -589,13 +609,15 @@ fn assemble<S: Shell + ?Sized>(
             exposure,
             exposure_pending: None,
             exposure_handle: crate::menu::handle_at(exposure),
-            watch: Watch::new(&options.model),
+            watch: Watch::new(&document_path(options)),
             dropped: Vec::new(),
             reloads: 0,
             turned: 0.0,
             handed_over: false,
             ticks: 0,
             listing,
+            shelf_choice: shelf::DEFAULT,
+            shelf_pending: None,
             instances: model.render.instances.len(),
             skipped: model.render.skipped.len(),
             joints: model.rig.joints,
@@ -747,13 +769,11 @@ impl Viewer {
         // `drew_nothing` is false by construction: `model::load` computes the
         // bounds from the primitives the conversion would draw, so a document
         // with nothing to draw has no bounds and was refused above as a
-        // `LoadError::NoGeometry`. Passed anyway rather than hard-coded, so
-        // that a `world_bounds` which one day counts something the conversion
-        // skips reports it here instead of printing a skip list with no verdict
-        // under it.
-        for line in skip_report(&key, model.skipped(), model.render.instances.is_empty()) {
-            eprintln!("{line}");
-        }
+        // `LoadError::NoGeometry`. Reported anyway rather than skipped, so that
+        // a `world_bounds` which one day counts something the conversion skips
+        // reports it here instead of printing a skip list with no verdict under
+        // it.
+        report_skips(&key, &model);
         if let Err(error) = self.adopt(gpu, &model) {
             crcbl::log::warn!(
                 "viewer: {key} was re-read but the renderer refused it, so the document already \
@@ -876,9 +896,7 @@ impl Viewer {
             // Printed rather than logged, as the re-export loop's are and for
             // the same reason: the person who just dropped the file is the one
             // who needs to read what the conversion could not bring in.
-            for line in skip_report(&key, model.skipped(), model.render.instances.is_empty()) {
-                eprintln!("{line}");
-            }
+            report_skips(&key, &model);
             if let Err(error) = self.adopt(gpu, &model) {
                 crcbl::log::warn!(
                     "viewer: {key} was dropped but the renderer refused it, so the document \
@@ -908,6 +926,88 @@ impl Viewer {
                 self.skipped,
             );
         }
+    }
+
+    /// **The shelf**: opens the model the panel's `SHELF` row was stepped onto.
+    ///
+    /// `docs/plan/sample/05-viewer.md` milestone 4's second item, and the
+    /// fourth door onto a document — the command line names a path, a window
+    /// hands over a path, a page hands over bytes, and this one is a row on a
+    /// panel. Everything past the loading is [`Viewer::adopt`], as it is for
+    /// the other three: one open path, four doors.
+    ///
+    /// **It retries while the load is pending, and only then.** Natively the
+    /// shelf is a directory and [`crate::shelf::load`] either finds the files
+    /// or does not. In a browser it is a `fetch()` per file, so the first
+    /// several frames after a press answer
+    /// [`Pending`](crcbl::store::StorageError::Pending) while the bytes are on
+    /// the wire; the request is left standing and asked again next frame. Every
+    /// other failure clears it, because retrying a document that will not parse
+    /// would log the same sentence sixty times a second.
+    ///
+    /// **A failure keeps the document already on screen**, for the reason the
+    /// drop paths keep theirs: there is something to keep, and a shelf that has
+    /// not been fetched is a thing the message says how to fix rather than a
+    /// reason to blank the window.
+    fn poll_for_shelf(&mut self, gpu: &mut Gpu) {
+        let Some(index) = self.shelf_pending else {
+            return;
+        };
+        let Some(entry) = shelf::model(index) else {
+            self.shelf_pending = None;
+            return;
+        };
+        let (model, path) = match shelf::load(index) {
+            Ok(opened) => opened,
+            // Not cleared: the browser's fetch is still in flight, and the next
+            // frame asks again. See this method's docs.
+            Err(error) if shelf::is_pending(&error) => return,
+            Err(error) => {
+                self.shelf_pending = None;
+                let verdict = format!(
+                    "{} could not be opened from the shelf, so the document already on screen \
+                     was kept: {error}",
+                    entry.name,
+                );
+                crcbl::log::warn!("viewer: {verdict}");
+                #[cfg(target_arch = "wasm32")]
+                crate::web::report_dropped_document(verdict);
+                return;
+            }
+        };
+        self.shelf_pending = None;
+        let key = model.key.display().to_string();
+        report_skips(&key, &model);
+        if let Err(error) = self.adopt(gpu, &model) {
+            let verdict = format!(
+                "{key}: the renderer refused it, so the document already on screen was kept: \
+                 {error}"
+            );
+            crcbl::log::warn!("viewer: {verdict}");
+            #[cfg(target_arch = "wasm32")]
+            crate::web::report_dropped_document(verdict);
+            return;
+        }
+        // The drop paths' two lines, for the drop paths' reason: nobody has
+        // aimed at this document, so it is framed as start-up frames the one
+        // the application opened with and the turntable starts again.
+        self.reframe = true;
+        self.handed_over = false;
+        // **And the re-export watch follows it**, as it follows a dropped file:
+        // the shelf is a directory of real files, so re-exporting one of them
+        // over the top reloads exactly as re-exporting the file on the command
+        // line does. In a browser the path is a key and `crate::watch` polls a
+        // filesystem the target has not got, so the watch is built and never
+        // fires — which is what it already did for the document the page opens
+        // with.
+        self.watch = Watch::new(&path);
+        let verdict = format!(
+            "{key} opened from the shelf — {} instance(s), {} skipped",
+            self.instances, self.skipped,
+        );
+        crcbl::log::info!("viewer: {verdict}");
+        #[cfg(target_arch = "wasm32")]
+        crate::web::report_dropped_document(verdict);
     }
 
     /// **The drop target**: opens the document a visitor dropped on the canvas,
@@ -960,13 +1060,11 @@ impl Viewer {
             }
         };
         let key = model.key.display().to_string();
-        // Logged rather than printed: `skip_report` writes to stderr at
-        // start-up and in the re-export loop, and this target has none. The
-        // same lines reach the browser console through the shim's log drain,
-        // and the panel behind `I` holds them for whoever wants to look.
-        for line in skip_report(&key, model.skipped(), model.render.instances.is_empty()) {
-            crcbl::log::info!("{line}");
-        }
+        // Logged rather than printed, which is `report_skips`'s own decision on
+        // this target: it has no stderr. The same lines reach the browser
+        // console through the shim's log drain, and the panel behind `I` holds
+        // them for whoever wants to look.
+        report_skips(&key, &model);
         if let Err(error) = self.adopt(gpu, &model) {
             let verdict = format!(
                 "{key}: the renderer refused it, so the document already on screen was kept: \
@@ -1235,6 +1333,30 @@ impl HostedGame for Viewer {
                 crate::menu::EXPOSURE_ID,
                 crate::listing::exposure_value(self.exposure),
             );
+            // **The shelf row, on the slider's terms.** A cycler is never
+            // dragged, so there is no "refused while held" case to work around
+            // — but the two directions are the same two: a press moves the
+            // widget and the document has to follow, and everything else
+            // mirrors this game's value back into the row. A press is a
+            // difference from the number the widget itself last held, which is
+            // what makes it a press and not a redraw.
+            match menu.cycler(crate::menu::SHELF_ID) {
+                Some(chosen) if chosen != self.shelf_choice => {
+                    self.shelf_choice = chosen;
+                    self.shelf_pending = Some(chosen);
+                }
+                _ => {
+                    menu.set_cycler(crate::menu::SHELF_ID, self.shelf_choice);
+                }
+            }
+            // The caption, every frame for the exposure row's reason: it is
+            // written from this game's value rather than left where the widget
+            // put it, so a row mirrored back after a document arrived by
+            // another door still reads as the model its arrows would open.
+            menu.set_item_hint(
+                crate::menu::SHELF_ID,
+                shelf::model(self.shelf_choice).map_or("—", |entry| entry.name),
+            );
         }
         MenuKind::of(paused)
     }
@@ -1248,10 +1370,13 @@ impl HostedGame for Viewer {
     /// pinned to opposite corners, so today they do not.
     ///
     /// **This is also where the re-export loop runs** — see
-    /// `Viewer::poll_for_re_export` for why it is not in the tick — and, on
-    /// `wasm32`, where a document dropped on the canvas is opened. Both put a
-    /// new document on screen through `Viewer::adopt`, and both are here rather
-    /// than in the tick because a paused frame still draws.
+    /// `Viewer::poll_for_re_export` for why it is not in the tick — where a
+    /// document dropped on the window is opened, where a shelf row that has
+    /// been stepped onto is opened, and, on `wasm32`, where a document dropped
+    /// on the canvas is opened. Every one of them puts a new document on screen
+    /// through `Viewer::adopt`, and every one is here rather than in the tick
+    /// because a paused frame still draws — which for the shelf is the whole
+    /// point, since its row is on the panel that pauses the loop.
     fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, frame: FrameInfo) {
         // Before anything else in the frame, which is the position the tick
         // used to give it: the tick ran immediately before this, so a document
@@ -1264,6 +1389,11 @@ impl HostedGame for Viewer {
         // browser and no X11 server sends, so on those hosts it is a drain of
         // an empty list rather than an arm that does not exist.
         self.poll_for_dropped_files(gpu);
+        // The fourth door, in the same place and for the same reason — see
+        // [`Viewer::poll_for_shelf`]. Compiled everywhere: the shelf is a panel
+        // row on both hosts, and the only difference is where the bytes come
+        // from.
+        self.poll_for_shelf(gpu);
         // The browser's half of the same idea, and in the same place for the
         // same reason — see `Viewer::poll_for_dropped_document`. Native builds
         // have no page to be dropped on, so there is nothing here for them
@@ -1525,19 +1655,74 @@ impl DebugModule for Viewer {
 /// because the conversion is infallible by design and reports a full list of
 /// reasons instead.
 fn load_and_report(options: &Options) -> Result<Model, ViewerError> {
-    let model = model::load(&options.model)?;
+    let model = match &options.model {
+        Some(path) => model::load(path)?,
+        None => open_the_default()?,
+    };
     let drew_nothing = model.render.instances.is_empty();
-    for line in skip_report(
-        &model.key.display().to_string(),
-        model.skipped(),
-        drew_nothing,
-    ) {
-        eprintln!("{line}");
-    }
+    report_skips(&model.key.display().to_string(), &model);
     if drew_nothing {
-        return Err(LoadError::NoGeometry(options.model.clone()).into());
+        return Err(LoadError::NoGeometry(document_path(options)).into());
     }
     Ok(model)
+}
+
+/// The document a run that named no path opens: [`crate::shelf`]'s default.
+///
+/// **And the document this build generates, when the shelf is not there.**
+/// `docs/plan/sample/05-viewer.md` milestone 4 gives [`crate::demo_model`]
+/// exactly that job — "the fallback only for a build without the shelf" — and
+/// the case is real rather than theoretical: only Suzanne is committed, the
+/// rest is fetched, and a copied binary has no source tree under it. A viewer
+/// that refused to start would be a worse answer than one that opens with
+/// something and says on the log why it is not the monkey.
+///
+/// # Errors
+///
+/// [`ViewerError::Load`] only if the generated document will not load either,
+/// which `crate::demo_model`'s own tests assert it does on every build.
+fn open_the_default() -> Result<Model, ViewerError> {
+    let entry = &shelf::SHELF[shelf::DEFAULT];
+    match shelf::load(shelf::DEFAULT) {
+        Ok((model, _)) => Ok(model),
+        Err(error) => {
+            crcbl::log::warn!(
+                "viewer: the shelf's {} could not be opened, so the document this build \
+                 generates was opened instead — run tools/fetch-shelf.sh, or point {} at a \
+                 shelf: {error}",
+                entry.name,
+                shelf::ROOT_ENV,
+            );
+            Ok(crate::demo_model::demo_document()?)
+        }
+    }
+}
+
+/// The document this invocation opens, as a path: the one on the command line,
+/// or [`crate::shelf`]'s default.
+///
+/// One function rather than two spellings, because two of them disagreeing is
+/// a re-export watch pointed at a file nobody opened. [`assemble`] builds the
+/// watch from this and [`load_and_report`] names it in the one error that has
+/// no file of its own to name.
+fn document_path(options: &Options) -> std::path::PathBuf {
+    options.model.clone().unwrap_or_else(shelf::default_path)
+}
+
+/// Puts a document's [`skip_report`] where the person who opened it is looking.
+///
+/// Stderr natively, because that is where someone who just typed a path or
+/// dropped a file is reading; the log in a browser, which has no stderr and
+/// whose console the shim's drain already reaches. Written once because it is
+/// one decision: every door onto a document makes it, and a copy per door is
+/// where one of them would quietly stop reporting.
+fn report_skips(key: &str, model: &Model) {
+    for line in skip_report(key, model.skipped(), model.render.instances.is_empty()) {
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("{line}");
+        #[cfg(target_arch = "wasm32")]
+        crcbl::log::info!("{line}");
+    }
 }
 
 /// The lines [`load_and_report`] prints, built rather than printed.
@@ -1661,8 +1846,8 @@ mod tests {
     }
 
     use crcbl::engine::{
-        DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, Flow, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_UP_KEY,
-        PAUSE_KEY,
+        DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, Flow, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_LEFT_KEY,
+        MENU_RIGHT_KEY, MENU_UP_KEY, PAUSE_KEY,
     };
     use crcbl::math::Vec2;
     use crcbl::math::Vec3;
@@ -1714,13 +1899,34 @@ mod tests {
             dir,
             Options {
                 common,
-                model: path,
+                model: Some(path),
             },
         )
     }
 
+    /// The path an [`Options`] built by [`model_at`] names.
+    ///
+    /// `Options::model` is an `Option` because `viewer` with no argument opens
+    /// the shelf — see [`crate::shelf`] — and every fixture below names a file,
+    /// so the unwrap is the honest spelling rather than a default that would
+    /// quietly open the monkey in a test about a quad.
+    fn model_path(options: &Options) -> &Path {
+        options
+            .model
+            .as_deref()
+            .expect("these fixtures always name a path")
+    }
+
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
-        let model = model::load(&options.model).expect("the fixture loads");
+        let model = model::load(model_path(options)).expect("the fixture loads");
+        scripted_with(options, model)
+    }
+
+    /// [`scripted`] over a document the caller has already opened.
+    ///
+    /// For the run that names no path: its document comes off the shelf rather
+    /// than off `options`, and `load_and_report` is the thing under test.
+    fn scripted_with(options: &Options, model: Model) -> Loop<HeadlessShell> {
         with_shell(Box::new(HeadlessShell::new()), options, model).expect("headless always starts")
     }
 
@@ -2932,7 +3138,7 @@ mod tests {
         // different centre, and a different length on disk — so every number
         // below can move, and the watch can tell the two files apart on a
         // filesystem with a coarse modification time.
-        std::fs::write(&options.model, fixture::two_quads_glb()).expect("the re-export");
+        std::fs::write(model_path(&options), fixture::two_quads_glb()).expect("the re-export");
 
         // `Watch` looks at the file four times a second and needs two agreeing
         // looks, so half a second of ticks. Bounded rather than open, so a
@@ -3013,7 +3219,7 @@ mod tests {
         // The same pair of documents the unpaused test uses, and for the same
         // reason: a different instance count, a different centre and a
         // different length on disk.
-        std::fs::write(&options.model, fixture::two_quads_glb()).expect("the re-export");
+        std::fs::write(model_path(&options), fixture::two_quads_glb()).expect("the re-export");
 
         // `Watch` looks at the file four times a second and needs two agreeing
         // looks, so half a second of frames. A headless frame is
@@ -3068,7 +3274,7 @@ mod tests {
         engine.frame().expect("a frame");
 
         std::fs::write(
-            &options.model,
+            model_path(&options),
             b"not a glb at all, and not the right length either",
         )
         .expect("the bad write");
@@ -3093,7 +3299,7 @@ mod tests {
         // conversion skips it and `model::load` reports `NoGeometry` — a
         // different refusal from the parse failure above, and the one an
         // artist actually produces by exporting the wrong collection.
-        std::fs::write(&options.model, fixture::points_glb()).expect("the points write");
+        std::fs::write(model_path(&options), fixture::points_glb()).expect("the points write");
         for _ in 0..frames {
             engine.frame().expect("a frame");
         }
@@ -3106,7 +3312,7 @@ mod tests {
 
         // And the next good write still lands, so the refusal is not a latch.
         let moved = Vec3::new(12.5, 0.0, 0.0);
-        std::fs::write(&options.model, fixture::quad_glb(moved)).expect("the re-export");
+        std::fs::write(model_path(&options), fixture::quad_glb(moved)).expect("the re-export");
         for _ in 0..frames {
             engine.frame().expect("a frame");
             if engine.game().reloads > 0 {
@@ -3208,6 +3414,154 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **`viewer` with no path opens the shelf's Suzanne**, end to end:
+    /// `docs/plan/sample/05-viewer.md` milestone 4's second item, and the one
+    /// half of it that is a claim about *this repository* rather than about a
+    /// fetch — Suzanne is committed, so this runs on every machine with no
+    /// network and no `tools/fetch-shelf.sh`.
+    ///
+    /// **The instance count is read off the real file** rather than asserted
+    /// against a number this test made up: `crate::shelf`'s own
+    /// `the_default_model_loads_from_the_committed_shelf` says what Suzanne
+    /// holds, and what this one adds is that a whole headless run reaches it —
+    /// the loader, the renderer, the camera framed on its bounds, and the
+    /// watch pointed at the file it came from rather than at a path nobody
+    /// opened.
+    #[test]
+    fn a_run_with_no_model_opens_the_shelfs_suzanne() {
+        let mut common = Common::new(crate::args::DEFAULT_TICK_HZ);
+        common.headless = true;
+        common.frames = Some(4);
+        common.backend = Some(test_backend());
+        let options = Options {
+            common,
+            model: None,
+        };
+
+        let (suzanne, path) = shelf::load(shelf::DEFAULT).expect("Suzanne is committed");
+        let instances = suzanne.render.instances.len();
+        let center = suzanne.bounds.center();
+        drop(suzanne);
+
+        let model = load_and_report(&options).expect("the shelf's default opens");
+        assert_eq!(
+            model.key,
+            shelf::SHELF[shelf::DEFAULT].key(),
+            "a run that named no path opened something other than the shelf's default",
+        );
+
+        let mut engine = scripted_with(&options, model);
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.game().instances,
+            instances,
+            "the document on screen is not the one on disk",
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            center,
+            "the frame was built around some other document's bounds",
+        );
+        assert_eq!(
+            engine.game().camera().target,
+            center,
+            "the camera was not framed on the document that opened",
+        );
+        assert_eq!(
+            engine.game().watch.path(),
+            path,
+            "the re-export watch is on a path nobody opened",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The panel's `SHELF` row opens the model it names**, through the same
+    /// `adopt` + re-frame + watch-repoint the drop paths take — milestone 4's
+    /// second item, and the fourth door onto a document.
+    ///
+    /// **Driven with the real keys through the real pump.** `ESC` opens the
+    /// panel, four `Down`s put the highlight on the shelf row, and the arrows
+    /// step it: `crcbl::engine::MenuPump` claims the arrows only over a slider
+    /// or a cycler, so a test that reached into `MenuSet` directly would prove
+    /// nothing about whether a player can press this row at all.
+    ///
+    /// **It steps away and back**, which is not a detour. The row opens on the
+    /// shelf's default and only a *change* is a pick, so `Right` then `Left` is
+    /// the shortest press sequence that picks Suzanne — and the model it steps
+    /// through on the way is the second shelf row, which is fetched rather than
+    /// committed. That makes the hop a check either way: with a fetched shelf
+    /// it opens and is replaced, and without one it fails and the frame keeps
+    /// the document it had, which is exactly the rule this door is meant to
+    /// follow.
+    ///
+    /// **The panel is up the whole time**, so this is also the assertion that a
+    /// paused frame still opens documents — the same thing the re-export tests
+    /// make of `ESC`, and here it is load-bearing rather than incidental: the
+    /// row lives on the panel that pauses the loop, so a pick that only landed
+    /// on an unpaused frame could never land at all.
+    #[test]
+    fn the_shelf_row_opens_the_model_it_names() {
+        let (_dir, options) = model_at(&fixture::two_quads_glb(), 4096);
+        let mut engine = scripted(&options);
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        tap(&mut engine, window, LISTING_KEY);
+        assert_eq!(engine.game().instances, 2, "the fixture is two quads");
+        assert_eq!(engine.game().bounds.center(), Vec3::new(1.5, 0.0, 0.0));
+
+        tap(&mut engine, window, PAUSE_KEY);
+        engine.frame().expect("a frame");
+        assert_eq!(engine.menu_kind(), MenuKind::Menu, "the panel never opened");
+        for _ in 0..4 {
+            tap(&mut engine, window, MENU_DOWN_KEY);
+        }
+        engine.frame().expect("a frame");
+
+        // Away, then back. Each press needs a frame of its own: the pick is
+        // read out of the widget in `menu_kind` and applied in the `draw` that
+        // follows it, so two presses inside one frame would be one pick.
+        tap(&mut engine, window, MENU_RIGHT_KEY);
+        engine.frame().expect("a frame");
+        tap(&mut engine, window, MENU_LEFT_KEY);
+        engine.frame().expect("a frame");
+
+        let (suzanne, path) = shelf::load(shelf::DEFAULT).expect("Suzanne is committed");
+        assert_eq!(
+            engine.game().instances,
+            suzanne.render.instances.len(),
+            "the shelf row never replaced the document",
+        );
+        assert_eq!(
+            engine.game().bounds.center(),
+            suzanne.bounds.center(),
+            "the document was swapped but the bounds are still the old one's",
+        );
+        assert_eq!(
+            row_value(&listing_text(&engine), "instances"),
+            suzanne.render.instances.len().to_string(),
+            "the listing panel is still describing the document that was replaced",
+        );
+        assert_eq!(
+            engine.game().camera().target,
+            suzanne.bounds.center(),
+            "the camera is still framed on where the previous document was",
+        );
+        assert_eq!(
+            engine.game().watch.path(),
+            path,
+            "the re-export watch did not follow the model that was picked",
+        );
+        assert!(
+            engine.is_paused(),
+            "the pick closed the panel it was made on",
+        );
+        assert!(
+            engine.game().listing.is_visible(),
+            "the pick closed a panel the user had opened",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **A dropped path that will not load keeps the document on screen, and
     /// says why.**
     ///
@@ -3284,7 +3638,7 @@ mod tests {
         let (_dir, options) = model_at(&fixture::quad_glb(Vec3::ZERO), 4096);
         let mut engine = scripted(&options);
         engine.frame().expect("a frame");
-        assert_eq!(engine.game().watch.path(), options.model);
+        assert_eq!(engine.game().watch.path(), model_path(&options));
 
         let (_elsewhere, dropped) = document_beside(&fixture::quad_glb(Vec3::ZERO), "dropped.glb");
         drop_on_window(&mut engine, &dropped);
@@ -3303,7 +3657,7 @@ mod tests {
         // The control, first: the document the run was started with is written
         // again, and nothing happens. A watch that had not moved would pick
         // this up and replace the dropped document with it.
-        std::fs::write(&options.model, fixture::two_quads_glb()).expect("the re-export");
+        std::fs::write(model_path(&options), fixture::two_quads_glb()).expect("the re-export");
         for _ in 0..frames {
             engine.frame().expect("a frame");
         }
@@ -3353,8 +3707,11 @@ mod tests {
             "the key did not move it: {raised}"
         );
 
-        std::fs::write(&options.model, fixture::quad_glb(Vec3::new(12.5, 0.0, 0.0)))
-            .expect("the re-export");
+        std::fs::write(
+            model_path(&options),
+            fixture::quad_glb(Vec3::new(12.5, 0.0, 0.0)),
+        )
+        .expect("the re-export");
         let frames = (f64::from(crate::args::DEFAULT_TICK_HZ) * 2.0).ceil() as usize;
         for _ in 0..frames {
             engine.frame().expect("a frame");

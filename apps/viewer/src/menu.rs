@@ -20,12 +20,23 @@
 //! the `PAUSED`/`RESUME` every game uses: the keys are the same in every sample
 //! and the words are not lies about this one.
 //!
-//! # One item of the viewer's own, and it is not a button
+//! # Two items of the viewer's own, and neither is a button
 //!
 //! Milestone 2's listing panel has landed — [`crate::listing`] — and it is
 //! bound to a key rather than to a button here, because it is a read-only view
 //! of the document and a menu that has to be dismissed to see what it toggled
 //! is the wrong shape for one.
+//!
+//! **The shelf is a cycler** — [`SHELF_ID`], milestone 4's second item. A list
+//! of models is a fixed, ordered set of choices and that is exactly what
+//! [`crcbl::ui::MenuItemKind::Cycler`] is: the arrows walk it and stop at its
+//! ends, the commit key and a click walk it forward and round, so every model
+//! is reachable with one key on a machine that has no pointer. It is not a
+//! button per model, which is the shape it would otherwise take: nine rows on a
+//! four-row panel, growing with the shelf, and every one of them numbered in
+//! the game's range for [`crcbl::engine::MenuAction::from_id`] to answer for.
+//! `apps/options` is where this row's pattern comes from — the frame cap and
+//! the anisotropy ladders are the same widget read back the same way.
 //!
 //! The exposure is the exception, and it is a **slider**: `-` and `=` already
 //! step it, so what a panel adds is the thing keys cannot do — reaching a value
@@ -53,9 +64,11 @@ use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
 /// The exposure slider's id.
 ///
-/// The first id the engine leaves to the game — the viewer has exactly one row
-/// of its own, and this is it.
+/// The first id the engine leaves to the game.
 pub const EXPOSURE_ID: crcbl::ui::WidgetId = FIRST_GAME_ID;
+
+/// The model shelf's id — see the [module docs](self).
+pub const SHELF_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 1;
 
 /// Which menu a frame shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -107,6 +120,19 @@ pub fn menus() -> Menus {
                         "EXPOSURE",
                         crate::listing::exposure_value(crcbl::shaders::tonemap::DEFAULT_EXPOSURE),
                         handle_at(crcbl::shaders::tonemap::DEFAULT_EXPOSURE),
+                    ),
+                    // Opened on the shelf's own default, which is the document
+                    // a run that named no path is showing — so the row agrees
+                    // with the frame behind it on its first frame. A row placed
+                    // at nought regardless would claim Suzanne over a file the
+                    // command line named, which is the same lie the exposure
+                    // slider's comment above refuses.
+                    MenuItem::cycler(
+                        SHELF_ID,
+                        "SHELF",
+                        crate::shelf::SHELF[crate::shelf::DEFAULT].name,
+                        crate::shelf::SHELF.len(),
+                        crate::shelf::DEFAULT,
                     ),
                 ],
             ),
@@ -160,8 +186,14 @@ mod tests {
         assert_eq!(menu.title, "MENU");
         assert_eq!(
             menu.items().iter().map(|item| item.id).collect::<Vec<_>>(),
-            vec![RESUME_ID, FULLSCREEN_ID, DEBUG_OVERLAY_ID, EXPOSURE_ID],
-            "the panel is the loop's three buttons and the viewer's slider",
+            vec![
+                RESUME_ID,
+                FULLSCREEN_ID,
+                DEBUG_OVERLAY_ID,
+                EXPOSURE_ID,
+                SHELF_ID
+            ],
+            "the panel is the loop's three buttons, the slider and the shelf",
         );
     }
 
@@ -178,7 +210,7 @@ mod tests {
         let mut menus = menus();
         menus.show(MenuKind::Menu);
         for item in menus.current().expect("the menu").items() {
-            if matches!(item.kind, MenuItemKind::Slider(_)) {
+            if matches!(item.kind, MenuItemKind::Slider(_) | MenuItemKind::Cycler(_)) {
                 continue;
             }
             assert!(
@@ -196,6 +228,35 @@ mod tests {
                 }),
             );
         }
+    }
+
+    /// **The shelf row fires nothing either**, and stepping it is how a model
+    /// is chosen: the commit key walks it forward and round, so every one of
+    /// the shelf's models is reachable without a pointer, and no id ever
+    /// reaches `MenuAction::from_id`.
+    #[test]
+    fn the_shelf_row_steps_without_firing_an_id() {
+        let mut menus = menus();
+        menus.show(MenuKind::Menu);
+        let menu = menus.current_mut().expect("the menu");
+        menu.select_id(SHELF_ID);
+        assert_eq!(menu.cycler(SHELF_ID), Some(crate::shelf::DEFAULT));
+
+        assert!(menu.nudge_cycler(true), "the arrow did not step the shelf");
+        assert_eq!(menu.cycler(SHELF_ID), Some(crate::shelf::DEFAULT + 1));
+
+        // Round the end from the last row, which is what makes one key enough.
+        menu.set_cycler(SHELF_ID, crate::shelf::SHELF.len() - 1);
+        assert!(
+            !menu.nudge_cycler(true),
+            "an arrow walked off the end of the shelf",
+        );
+        assert_eq!(menu.activate(), None, "the shelf row fired an id");
+        assert_eq!(
+            menu.cycler(SHELF_ID),
+            Some(0),
+            "the commit key did not come round to the first model",
+        );
     }
 
     /// **The slider fires nothing**, from the commit key or from a release over

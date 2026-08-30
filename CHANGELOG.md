@@ -79,6 +79,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/viewer` ships a shelf of Khronos CC0 models, and opens Suzanne when no
+  path is given, on both hosts.** The `ESC` panel's new `SHELF` row steps
+  through them and opens the one it names, through the same reload path a
+  dropped file takes — the camera re-frames and the re-export watch follows.
+  Only Suzanne is in the repository; `tools/fetch-shelf.sh` fetches the rest
+  (`Avocado`, `WaterBottle`, `BoomBox`, `Corset`, `Lantern`, `BarramundiFish`,
+  `SciFiHelmet`, `FlightHelmet`) at a pinned upstream commit with a sha256 per
+  file into a gitignored directory, `--check` verifies what is on disk, and
+  `CRCBL_SHELF` moves the directory the viewer reads them from. The browser demo
+  carries Suzanne, Avocado and WaterBottle; Suzanne is pre-loaded and the other
+  two are fetched when picked.
+
 - **A `.glb` or `.gltf` dropped on the viewer's window opens.** The third door
   onto a document, beside the command line and the browser's canvas: the path
   goes through `crcbl_viewer::model::load` — `load_from` over a `DirSource`
@@ -449,6 +461,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   cycler row as it does over a slider (`MenuSet::cycler_highlighted`).
 
 ### Changed
+
+- **`viewer`'s model argument is optional.** `viewer` with no path opens the
+  shelf's Suzanne instead of exiting with a usage error; a build with no shelf
+  on disk opens the generated document it always compiled in, and says so.
 
 - **A reflection's environment is scaled by the split-sum's `DFG` pair.**
   `ssr.slang` binds `crcbl_shaders::dfg::pair_texels` — the table's `scale` and

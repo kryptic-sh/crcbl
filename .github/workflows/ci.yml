@@ -594,6 +594,24 @@ jobs:
         uses: ./.github/actions/apt-packages
         with:
           packages: libasound2-dev
+      # THE VIEWER'S MODEL SHELF, and this is the only job that fetches it.
+      #
+      # `apps/viewer` ships a shelf of Khronos CC0 models — about 138 MB, of
+      # which only Suzanne is committed, because a repository with no LFS is not
+      # where a demo's texture set belongs. `apps/viewer/src/shelf.rs`'s
+      # `every_shelf_file_is_on_disk_once_the_shelf_is_fetched` checks the
+      # committed half everywhere and *announces a skip* for the rest, so
+      # without this step the shelf's own gate would pass on every runner
+      # without ever asking its question. This is where it asks it.
+      #
+      # Only here. The macOS and Windows legs below run the same test and take
+      # the skip: the fetch is 138 MB and the thing it would prove — that a
+      # pinned upstream commit still serves the files this repository hashed —
+      # is not a per-platform claim. `web/build.sh` fetches the browser subset
+      # for itself, so the Pages build and the browser gates need nothing here.
+      - name: Fetch the viewer's model shelf
+        timeout-minutes: 10
+        run: ./tools/fetch-shelf.sh
       - run: cargo nextest run --workspace --all-features --locked --profile ci
       # nextest does not run doctests — without this step every `//!`/`///`
       # example in the engine is unexecuted documentation.

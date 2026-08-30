@@ -155,14 +155,17 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  *
  * `drop` is the third optional key, and only viewer has one: it is the
  * document this harness drags onto the canvas, and the numbers the `[HUD]` line
- * has to reach once the page has opened it. See {@link quadPairGlb} for why the
+ * has to reach once the page has opened it. See {@link riggedPairGlb} for why the
  * document is built here rather than checked in.
  *
  * `playing` is the fourth, and only viewer has one of those either: a second
  * pattern read the way `moving` is, for the demo whose subject is a *document*
  * rather than a simulation. `moving` says the page is running; `playing` says
- * the animation inside the file it opened is being sampled. A row without one
- * is a demo that ships no rig, which is every other demo here.
+ * the animation inside the document on screen is being sampled. A row without
+ * one is a demo that shows no rig, which is every other demo here — and the
+ * document viewer's own `playing` reads is the *dropped* one, because the page
+ * now opens on the shelf's Suzanne and Suzanne has no skin. That is why the
+ * block reading it runs after the `drop` block rather than before it.
  *
  * `walk` is the fifth, and only puppet has one: the demo whose subject is a
  * character *controller*, where "it moved" is not enough on its own. It names
@@ -191,70 +194,189 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * quietly skipped it would be the check passing for the wrong reason.
  */
 /**
- * A `.glb` of two quads, one at the origin and one three metres along `x`.
+ * A `.glb` of two one-metre boxes a metre up, one of them skinned to a
+ * two-joint rig that a clip swings.
  *
  * **Built here rather than vendored**, which is the argument
  * `apps/viewer/src/fixture.rs` and `crcbl-scene`'s `gltf_fixture` both make and
  * make for the same reason: a `.glb` is a binary container, so a checked-in one
  * is a fixture nobody reviewing a change can read, and every number this file
- * asserts on ought to be written out in this file. It is the same document
- * those two build, in the same layout, with a second node added — because the
- * point of the drop check is that the page is showing a document it did not
- * ship with, and the instance count is what says so.
+ * asserts on ought to be written out in this file.
  *
- * Two nodes and no skin, so the `[HUD]` line reads `instances: 2  …  joints: 0`
- * where the demo document reads `instances: 3  …  joints: 2`. Neither number
- * can be reached by a page that took the bytes and did nothing with them.
+ * **It wears the rig because the page no longer opens on one.** The tab opens
+ * the shelf's Suzanne — `docs/plan/sample/05-viewer.md` milestone 4 — and
+ * Suzanne is one static mesh, so this is the only rigged document a browser run
+ * ever sees and the `playing` and `deforming` checks read it after the drop.
+ * The rig is `apps/viewer/src/demo_model.rs`'s, reduced to what those two
+ * checks need: two joints, a rigid split of the vertices by the sign of their
+ * `y`, and one channel swinging the upper joint.
  *
- * **THE TWO NODES ARE PLACED THE WAY THEY ARE BECAUSE GROUP D READS THIS
- * CANVAS AFTERWARDS**, and a document the viewer frames badly makes that group
- * fail on a page that is working. Both of them:
+ * Two nodes and a skin, so the `[HUD]` line reads `instances: 2  …  joints: 2`
+ * where Suzanne reads `instances: 1  …  joints: 0`. Neither number can be
+ * reached by a page that took the bytes and did nothing with them, and the pair
+ * cannot be reached by the document the module generates for a site with no
+ * shelf either, which reports `instances: 3`.
+ *
+ * **ONLY THE FIRST NODE IS SKINNED, AND THAT IS DELIBERATE.** glTF says a
+ * skinned mesh node's own transform is ignored, so two skinned nodes would draw
+ * on top of each other wherever the joints put them — the second node is the
+ * one that gives the box depth on every axis, and it has to be placed by its
+ * own transform to have a place at all. It shares the mesh, `JOINTS_0` and all,
+ * which is also the check that "is this instance skinned" is read off the
+ * *node's* `skin` rather than off the mesh's attributes;
+ * `apps/viewer/src/demo_model.rs` holds the same property from the other side.
+ *
+ * **THE NODES ARE PLACED THE WAY THEY ARE BECAUSE GROUP D READS THIS CANVAS
+ * AFTERWARDS**, and a document the viewer frames badly makes that group fail on
+ * a page that is working. Both of them:
  *
  * - **They stand above the grid**, which is where a model out of any DCC tool
  *   stands. `OrbitCamera::frame` aims at the bounding box's centre and keeps
  *   its pitch, so a document centred *on* the ground plane puts the eye exactly
- *   in that plane: the grid goes edge-on and disappears, and the quads are
- *   back-face culled for half of the turntable's sweep — the whole canvas comes
- *   back as one flat clear colour. Measured, not guessed: that is precisely how
- *   group D failed when these nodes sat at `y = 0`.
- * - **The box has depth on every axis**, the second one turned a quarter turn
- *   about `y` so the pair is not one flat sheet. `apps/viewer/src/demo_model.rs`
- *   holds the same property of the demo document in
+ *   in that plane: the grid goes edge-on and disappears. Measured, not guessed:
+ *   that is precisely how group D failed when these nodes sat at `y = 0`.
+ * - **THEY ARE BOXES AND NOT QUADS, AND THAT IS THE `deforming` CHECK'S.** They
+ *   were a pair of flat quads while this document was only ever dropped in
+ *   front of a *turning* camera — the picture changed because the camera moved,
+ *   whatever the geometry did. `deforming` stops the camera on purpose, and a
+ *   quad in the XY plane seen from wherever the drag left the turntable is
+ *   edge-on or back-facing: measured, not guessed, the whole 45° swing came
+ *   back as one distinct frame in 444 samples with the clip demonstrably
+ *   playing. A closed box has a face towards every camera, which is why
+ *   `apps/viewer/src/demo_model.rs` builds its rigged part as a crate.
+ * - **The pair has depth on every axis**, the second one turned a quarter turn
+ *   about `y`. `apps/viewer/src/demo_model.rs` holds the same property of the
+ *   demo document in
  *   `the_demo_documents_world_box_is_finite_and_has_depth_on_every_axis`, and
  *   this is the same trap seen from the other side.
  *
  * @returns {Buffer} the container, ready to be handed to a `File`
  */
-function quadPairGlb() {
-  // One metre across in the XY plane, facing +Z; two triangles wound
-  // counter-clockwise seen from there, which is the front face.
-  const positions = [
-    [-0.5, -0.5, 0],
-    [0.5, -0.5, 0],
-    [0.5, 0.5, 0],
-    [-0.5, 0.5, 0],
+function riggedPairGlb() {
+  // A one-metre box centred on its own origin, four vertices a face rather than
+  // eight for the whole cube: the normals differ per face and a shared corner
+  // can only carry one of them. `u × v` is each face's own normal, which is
+  // what makes the two triangles wind counter-clockwise seen from outside.
+  const HALF = 0.5;
+  const FACES = [
+    { normal: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0] },
+    { normal: [0, 0, -1], u: [-1, 0, 0], v: [0, 1, 0] },
+    { normal: [1, 0, 0], u: [0, 0, -1], v: [0, 1, 0] },
+    { normal: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0] },
+    { normal: [0, 1, 0], u: [1, 0, 0], v: [0, 0, -1] },
+    { normal: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] },
   ];
-  const normals = [
-    [0, 0, 1],
-    [0, 0, 1],
-    [0, 0, 1],
-    [0, 0, 1],
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  for (const face of FACES) {
+    const base = positions.length;
+    for (const [du, dv] of [
+      [-1, -1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ]) {
+      positions.push(
+        [0, 1, 2].map(
+          (axis) =>
+            (face.normal[axis] + du * face.u[axis] + dv * face.v[axis]) * HALF
+        )
+      );
+      normals.push(face.normal);
+    }
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+
+  // Where the skinned box stands, and where each joint binds relative to it.
+  // A joint a quarter of a metre below the box's centre and one a quarter above
+  // it each sit in the middle of the half of the box they own, which is what
+  // makes the weights below a straight split by the sign of a vertex's `y`.
+  // Neither height is zero, so neither inverse bind matrix is an identity — a
+  // rig whose matrices were all identities would read the same whether the
+  // importer applied them or ignored them.
+  const PANEL_Y = 1;
+  const JOINT_BIND_Y = [-0.25, 0.25];
+  // The clip's keyframe times, in seconds. **Not a whole number**, and that is
+  // this harness's own concern: `apps/viewer` logs its heartbeat once a second
+  // and the `playing` check reads `pose` off that line, so a duration that
+  // divided the period would be sampled at very nearly the same phase every
+  // time and print one number over and over on a page animating perfectly.
+  const CLIP_TIMES = [0, 1.7];
+  // How far the clip swings the upper joint about `z`, in degrees, as an
+  // `xyzw` quaternion pair. Built from `sin`/`cos` of *half* the angle rather
+  // than from decimals typed out, because a quaternion carries `θ/2` and that
+  // is the step a hand-written one gets wrong silently.
+  const SWING_DEGREES = 45;
+  const half = ((SWING_DEGREES * Math.PI) / 180) * 0.5;
+  const rotations = [
+    [0, 0, 0, 1],
+    [0, 0, Math.sin(half), Math.cos(half)],
   ];
-  const indices = [0, 1, 2, 0, 2, 3];
+
+  // Rigid weights: the leading slot takes the whole vertex and the three past
+  // it carry none, which is what a rig a person would author for a hinge looks
+  // like and keeps the numbers checkable by eye. The lower half of the box
+  // belongs to the lower joint and the upper half to the upper one.
+  const joints = positions.map(([, y]) => [y >= 0 ? 1 : 0, 0, 0, 0]);
+  const weights = positions.map(() => [1, 0, 0, 0]);
+  // World to joint-local at bind time, column-major, which is the order glTF
+  // stores a `MAT4` in. Both joints bind at a pure translation up `y`, and the
+  // inverse of a translation is the opposite translation; the last column is
+  // where a column-major matrix keeps one.
+  const inverseBinds = JOINT_BIND_Y.map((y) => [
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    -y,
+    0,
+    1,
+  ]);
 
   const POSITIONS_AT = 0;
-  const NORMALS_AT = positions.length * 3 * 4;
-  const INDICES_AT = NORMALS_AT + normals.length * 3 * 4;
-  const bin = Buffer.alloc(INDICES_AT + indices.length * 2);
+  const NORMALS_AT = POSITIONS_AT + positions.length * 3 * 4;
+  const JOINTS_AT = NORMALS_AT + normals.length * 3 * 4;
+  const WEIGHTS_AT = JOINTS_AT + joints.length * 4 * 2;
+  const INDICES_AT = WEIGHTS_AT + weights.length * 4 * 4;
+  const BINDS_AT = INDICES_AT + indices.length * 2;
+  const TIMES_AT = BINDS_AT + inverseBinds.length * 16 * 4;
+  const CLIP_AT = TIMES_AT + CLIP_TIMES.length * 4;
+  const bin = Buffer.alloc(CLIP_AT + rotations.length * 4 * 4);
   let at = POSITIONS_AT;
-  for (const value of [...positions, ...normals].flat()) {
-    bin.writeFloatLE(value, at);
-    at += 4;
+  const floats = (values) => {
+    for (const value of values.flat()) {
+      bin.writeFloatLE(value, at);
+      at += 4;
+    }
+  };
+  floats(positions);
+  floats(normals);
+  // `UNSIGNED_SHORT`, because the specification's `JOINTS_0` is an unsigned
+  // byte or short and never a float.
+  for (const index of joints.flat()) {
+    bin.writeUInt16LE(index, at);
+    at += 2;
   }
+  floats(weights);
   for (const index of indices) {
     bin.writeUInt16LE(index, at);
     at += 2;
   }
+  floats(inverseBinds);
+  floats(CLIP_TIMES.map((second) => [second]));
+  floats(rotations);
+
+  const bounds = (axis) => positions.map((position) => position[axis]);
 
   // `metallicFactor` is written out as zero for the reason
   // `crates/crcbl/tests/gltf_e2e.rs` gives: glTF defaults a material to a fully
@@ -264,16 +386,37 @@ function quadPairGlb() {
   const json = JSON.stringify({
     asset: { version: '2.0' },
     scene: 0,
-    scenes: [{ nodes: [0, 1] }],
+    scenes: [{ nodes: [0, 1, 2] }],
     nodes: [
-      { name: 'panel', mesh: 0, translation: [0, 1, 0] },
+      // The skin draws this one; the translation is written anyway, because
+      // `crate::model::world_bounds` reads the document's own placement to
+      // frame the camera and it has to agree with where the joints put it.
       {
         name: 'panel',
         mesh: 0,
-        translation: [1.5, 1, 1.5],
+        skin: 0,
+        translation: [0, PANEL_Y, 0],
+      },
+      {
+        name: 'panel.far',
+        mesh: 0,
+        translation: [1.5, PANEL_Y, 1.5],
         // A quarter turn about +y as an `xyzw` quaternion, so this quad faces
         // +x where the other faces +z.
         rotation: [0, Math.SQRT1_2, 0, Math.SQRT1_2],
+      },
+      // The upper joint is the lower one's child, so its own translation is the
+      // step between them rather than its height. Together with the inverse
+      // binds above, the bind pose reproduces the mesh exactly where the first
+      // node says it is.
+      {
+        name: 'joint.base',
+        children: [3],
+        translation: [0, PANEL_Y + JOINT_BIND_Y[0], 0],
+      },
+      {
+        name: 'joint.lid',
+        translation: [0, JOINT_BIND_Y[1] - JOINT_BIND_Y[0], 0],
       },
     ],
     meshes: [
@@ -281,11 +424,26 @@ function quadPairGlb() {
         name: 'panel',
         primitives: [
           {
-            attributes: { POSITION: 0, NORMAL: 1 },
-            indices: 2,
+            attributes: { POSITION: 0, NORMAL: 1, JOINTS_0: 2, WEIGHTS_0: 3 },
+            indices: 4,
             material: 0,
           },
         ],
+      },
+    ],
+    skins: [
+      {
+        name: 'panel-rig',
+        skeleton: 2,
+        joints: [2, 3],
+        inverseBindMatrices: 5,
+      },
+    ],
+    animations: [
+      {
+        name: 'panel-swing',
+        channels: [{ sampler: 0, target: { node: 3, path: 'rotation' } }],
+        samplers: [{ input: 6, output: 7, interpolation: 'LINEAR' }],
       },
     ],
     materials: [
@@ -298,22 +456,92 @@ function quadPairGlb() {
         },
       },
     ],
+    // `min` and `max` on `POSITION` and on the animation sampler's input
+    // because the specification requires them there: this workspace's importer
+    // recomputes the box for itself, but the file is a glTF document before it
+    // is this harness's input and anything else that opens it may lean on them.
     accessors: [
-      { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3' },
-      { bufferView: 1, componentType: 5126, count: 4, type: 'VEC3' },
-      { bufferView: 2, componentType: 5123, count: 6, type: 'SCALAR' },
+      {
+        bufferView: 0,
+        componentType: 5126,
+        count: positions.length,
+        type: 'VEC3',
+        min: [0, 1, 2].map((axis) => Math.min(...bounds(axis))),
+        max: [0, 1, 2].map((axis) => Math.max(...bounds(axis))),
+      },
+      {
+        bufferView: 1,
+        componentType: 5126,
+        count: normals.length,
+        type: 'VEC3',
+      },
+      {
+        bufferView: 2,
+        componentType: 5123,
+        count: joints.length,
+        type: 'VEC4',
+      },
+      {
+        bufferView: 3,
+        componentType: 5126,
+        count: weights.length,
+        type: 'VEC4',
+      },
+      {
+        bufferView: 4,
+        componentType: 5123,
+        count: indices.length,
+        type: 'SCALAR',
+      },
+      {
+        bufferView: 5,
+        componentType: 5126,
+        count: inverseBinds.length,
+        type: 'MAT4',
+      },
+      {
+        bufferView: 6,
+        componentType: 5126,
+        count: CLIP_TIMES.length,
+        type: 'SCALAR',
+        min: [CLIP_TIMES[0]],
+        max: [CLIP_TIMES[CLIP_TIMES.length - 1]],
+      },
+      {
+        bufferView: 7,
+        componentType: 5126,
+        count: rotations.length,
+        type: 'VEC4',
+      },
     ],
     bufferViews: [
       { buffer: 0, byteOffset: POSITIONS_AT, byteLength: NORMALS_AT },
       {
         buffer: 0,
         byteOffset: NORMALS_AT,
-        byteLength: INDICES_AT - NORMALS_AT,
+        byteLength: JOINTS_AT - NORMALS_AT,
+      },
+      {
+        buffer: 0,
+        byteOffset: JOINTS_AT,
+        byteLength: WEIGHTS_AT - JOINTS_AT,
+      },
+      {
+        buffer: 0,
+        byteOffset: WEIGHTS_AT,
+        byteLength: INDICES_AT - WEIGHTS_AT,
       },
       {
         buffer: 0,
         byteOffset: INDICES_AT,
-        byteLength: bin.length - INDICES_AT,
+        byteLength: BINDS_AT - INDICES_AT,
+      },
+      { buffer: 0, byteOffset: BINDS_AT, byteLength: TIMES_AT - BINDS_AT },
+      { buffer: 0, byteOffset: TIMES_AT, byteLength: CLIP_AT - TIMES_AT },
+      {
+        buffer: 0,
+        byteOffset: CLIP_AT,
+        byteLength: bin.length - CLIP_AT,
       },
     ],
     buffers: [{ byteLength: bin.length }],
@@ -592,35 +820,47 @@ const EXPECTATIONS = {
     // turntable, so it shows the open hand every model viewer shows, and the
     // closed one while the hand is holding it — which group C asserts mid-drag.
     cursor: 'grab',
-    // `instances` is the document's own three, so this also says the generated
-    // `.glb` reached the renderer rather than an empty scene arriving as a
-    // successful boot.
+    // **THE DOCUMENT IS THE SHELF'S SUZANNE NOW, NOT THE ONE THE MODULE
+    // GENERATES.** `docs/plan/sample/05-viewer.md` milestone 4 makes Suzanne
+    // what opens when nothing is asked for on both hosts, and
+    // `web/demos/viewer/assets/manifest.json` names its four files so the shim
+    // has them resident before `boot()`. So these numbers are that file's.
     //
-    // `joints` is the demo document's rig — a skin over two joint nodes, built
-    // by `apps/viewer/src/demo_model.rs`. Nothing in this engine poses a
-    // skeleton, so the count on the heartbeat is the *only* place a browser can
-    // see that the import read one: `crcbl::scene::GltfScene::skins` reaching
-    // `crate::model::Rig` reaching the `[HUD]` line. Asked for by its value
-    // rather than by "is a number", because zero is what both a document with
-    // no rig and an import that dropped the skin report. Counts only on this
-    // line — the clip names are on the viewer's own listing panel, since a name
-    // out of someone else's file could hold the space or the colon this parse
-    // is made of.
+    // `instances: 1` is Suzanne's one mesh in its one node, and it is what
+    // distinguishes the shelf from the fallback: a site that shipped no shelf
+    // opens `apps/viewer/src/demo_model.rs`'s generated document instead, which
+    // reports three. So this asserts the *fetched* document reached the
+    // renderer, not merely that something did.
+    //
+    // `skipped: 0` is the other half and the reason `joints` is not here. A
+    // count of nought is what both a whole document and a dropped feature
+    // report, so a `joints: 0` would be a check wired to nothing — but
+    // `skipped` is nought only when every feature of the document was brought
+    // in, and Suzanne carries a base-colour and a metallic-roughness texture
+    // that a page which fetched the `.gltf` and not its siblings would have had
+    // to skip. It is the assertion that the sibling keys resolved.
     waiting: (line) =>
       line.includes('[HUD] tick:') &&
-      line.includes('instances: 3') &&
-      line.includes('joints: 2'),
+      line.includes('instances: 1') &&
+      line.includes('skipped: 0'),
     moving: /turn: ([\d.]+)/,
     movingLabel: 'the turntable carries the camera under its own steam',
     // **The document advancing, which is a different claim from the frame
     // advancing.** `turn` above is this page's own turntable — it would go on
     // moving over a document the engine never looked at twice. `pose` is how
-    // far the demo document's own clip has carried its skeleton from its rest
-    // pose, in metres, and it is read off the joint palette and off nothing
-    // else: a playhead ticking over a pose nobody ever composed leaves it at
-    // `0.00` for ever, and so does a conversion that handed the sampler joint
-    // indices that name no joint. See `apps/viewer/src/anim.rs`, which is the
-    // one consumer `crcbl-anim` has.
+    // far the clip in the document on screen has carried its skeleton from its
+    // rest pose, in metres, and it is read off the joint palette and off
+    // nothing else: a playhead ticking over a pose nobody ever composed leaves
+    // it at `0.00` for ever, and so does a conversion that handed the sampler
+    // joint indices that name no joint. See `apps/viewer/src/anim.rs`, which is
+    // the one consumer `crcbl-anim` has.
+    //
+    // **THE DOCUMENT THIS READS IS THE DROPPED ONE, WHICH IS WHY THE TWO
+    // BLOCKS BELOW RUN AFTER THE DROP.** The page opens on the shelf's Suzanne
+    // and Suzanne has no skin, so `pose` sits at `0.00` until `drop.document`
+    // — `riggedPairGlb()` — is on screen. Moving them was the alternative to
+    // deleting them, and `web/run-browser-e2e.sh` refuses a viewer run that
+    // reports neither, by name, for exactly that reason.
     //
     // Two different values is the whole assertion, exactly as it is for
     // `moving`: the clip loops, so the number sweeps rather than climbing.
@@ -653,10 +893,10 @@ const EXPECTATIONS = {
     // leave the page drawing what it already had.
     drop: {
       name: 'dropped.glb',
-      document: quadPairGlb(),
+      document: riggedPairGlb(),
       opened: (line) =>
-        line.includes('instances: 2') && line.includes('joints: 0'),
-      openedLabel: 'instances: 2 and joints: 0',
+        line.includes('instances: 2') && line.includes('joints: 2'),
+      openedLabel: 'instances: 2 and joints: 2',
       brokenName: 'broken.glb',
       broken: Buffer.from('not a glTF document', 'utf8'),
     },
@@ -5394,6 +5634,184 @@ try {
     );
   }
 
+  // **A FILE THE VISITOR CHOSE, WHICH IS THE OTHER WAY INPUT REACHES THIS
+  // ENGINE.** Only viewer has one — `apps/viewer/src/web.rs`'s drop target,
+  // `docs/plan/sample/05-viewer.md`'s V-F5 — and it belongs in this group for
+  // the group's own reason: everything above is a pointer or a key arriving
+  // through the browser's input pipeline and changing what the engine says
+  // about itself, and a dropped document is the same claim about a different
+  // pipeline.
+  //
+  // **IT RUNS AFTER EVERY CHECK THAT READS `waiting`, AND THAT IS
+  // LOAD-BEARING.** `EXPECTED.waiting` asks for the shelf's Suzanne — its
+  // `instances: 1  skipped: 0` — and the whole point of this block is that the
+  // page stops showing that document. Nothing after it reads `waiting`:
+  // `EXPECTED.backdrop` is absent for this demo, and the `touch` rows that read
+  // it belong to demos that have no `drop`.
+  //
+  // **The two blocks that follow it need what it leaves on screen.** `playing`
+  // and `deforming` read `pose`, and the page opens on a Suzanne that has no
+  // skin — so the rigged document this block drops is the only rigged document
+  // a browser run ever sees. They used to run before this one, on the rigged
+  // document the module itself generated; that document is the fallback for a
+  // site with no shelf now, so the order is the other way round and
+  // `EXPECTED.drop.document` is the thing that wears the rig.
+  //
+  // The events are dispatched from page script rather than through
+  // `Input.dispatchDragEvent`, because CDP's drag interception needs a real
+  // file on the browser's own filesystem and the document under test is built
+  // in this process. What is dispatched is the event the handler listens for,
+  // carrying a `DataTransfer` with a real `File` in it, which is what a browser
+  // delivers.
+  if (EXPECTED.drop) {
+    // **A drag the page does not claim is a tab that navigates to the file**,
+    // taking the canvas, the device and the log with it. `dragover` is the
+    // event that decides it, so it is the one asked about; the frame lighting
+    // up is the visitor's half of the same answer.
+    const dragged = await evaluate(
+      page,
+      `(() => {
+         const canvas = document.getElementById('canvas');
+         const stage = canvas.closest('.stage');
+         const event = new DragEvent('dragover', {
+           dataTransfer: new DataTransfer(), bubbles: true, cancelable: true });
+         canvas.dispatchEvent(event);
+         const during = stage ? getComputedStyle(stage).borderColor : '';
+         canvas.dispatchEvent(new DragEvent('dragleave', {
+           dataTransfer: new DataTransfer(), bubbles: true, cancelable: true }));
+         const after = stage ? getComputedStyle(stage).borderColor : '';
+         return { prevented: event.defaultPrevented, during, after };
+       })()`
+    );
+    check(
+      'C',
+      'a file dragged over the canvas is claimed rather than navigated to',
+      dragged?.prevented === true,
+      dragged?.prevented === true
+        ? 'dragover was cancelled'
+        : 'dragover was not cancelled, so dropping a file here would replace the page with it'
+    );
+    check(
+      'C',
+      'the frame says it will take the file, and stops saying it',
+      Boolean(dragged) && dragged.during !== dragged.after,
+      Boolean(dragged) && dragged.during !== dragged.after
+        ? `${dragged.during} while over the canvas, ${dragged.after} after`
+        : `the border was ${dragged?.after ?? 'unreadable'} throughout — a ` +
+            'visitor holding a file over the canvas is told nothing'
+    );
+
+    // The document goes across as base64 because that is what survives being
+    // spliced into an expression string; the page turns it back into the bytes
+    // this process built.
+    /**
+     * @param {string} name
+     * @param {Buffer} bytes
+     * @returns {Promise<boolean>} whether the handler claimed the drop
+     */
+    const dropFile = async (name, bytes) =>
+      evaluate(
+        page,
+        `(() => {
+           const bytes = Uint8Array.from(atob(${JSON.stringify(bytes.toString('base64'))}),
+                                         (ch) => ch.charCodeAt(0));
+           const carried = new DataTransfer();
+           carried.items.add(new File([bytes], ${JSON.stringify(name)}));
+           const event = new DragEvent('drop', {
+             dataTransfer: carried, bubbles: true, cancelable: true });
+           document.getElementById('canvas').dispatchEvent(event);
+           return event.defaultPrevented;
+         })()`
+      );
+    const detailLine = () =>
+      evaluate(page, `document.getElementById('detail')?.textContent ?? ''`);
+
+    const beforeDrop = hud().length;
+    await dropFile(EXPECTED.drop.name, EXPECTED.drop.document);
+    const dropped = await until(async () =>
+      hud()
+        .slice(beforeDrop)
+        .find((line) => EXPECTED.drop.opened(line))
+    );
+    check(
+      'C',
+      'a dropped document replaces the one the page opened with',
+      Boolean(dropped),
+      dropped
+        ? dropped.trim()
+        : `no heartbeat in ${pollCeiling()} ms said ${EXPECTED.drop.openedLabel} — ` +
+            `the last of ${hud().length - beforeDrop} since the drop was ` +
+            `"${(hud().at(-1) ?? 'none').trim()}", and the status bar says ` +
+            `"${await detailLine()}"`
+    );
+    const said = await until(async () => {
+      const text = await detailLine();
+      return text.includes(EXPECTED.drop.name) && text.includes('instance(s)')
+        ? text
+        : null;
+    });
+    check(
+      'C',
+      'the page tells the visitor what became of the file they dropped',
+      Boolean(said),
+      said ??
+        `the status bar says "${await detailLine()}", which does not name ` +
+          `${EXPECTED.drop.name} and what it came to`
+    );
+
+    // **AND BYTES THAT ARE NOT A DOCUMENT MUST NOT TAKE THE PAGE DOWN.** The
+    // native viewer's whole claim is that a file either loads or says why not,
+    // and a browser owes a visitor the same — except that a page has no exit
+    // code, so "says why not" means the frame already on screen keeps drawing
+    // and the status bar carries the loader's own sentence. Asked here rather
+    // than left to group D's "no uncaught exception": that check passes just as
+    // happily against a page that stopped drawing.
+    const beforeBroken = hud().length;
+    await dropFile(EXPECTED.drop.brokenName, EXPECTED.drop.broken);
+    // **THE ENGINE'S ANSWER, NOT THE PAGE'S ACKNOWLEDGEMENT.** Every line
+    // `web/demos/viewer/main.js` writes about a drop names the file too — it is
+    // saying it has handed the bytes over, or that nothing came back — so a
+    // check that only looked for the name passes against a page whose engine
+    // never answered at all. It did: under a `take_dropped_document` sabotaged
+    // to return nothing, this check stayed green on "broken.glb was handed over
+    // and no frame has opened it."
+    //
+    // What is asked for instead is `LoadError`'s own shape, which is the file
+    // and then what was wrong with it — `apps/viewer/src/model.rs` writes every
+    // one of its variants that way, and no line the page composes for itself
+    // begins with the name.
+    const refused = await until(async () => {
+      const text = await detailLine();
+      return text.startsWith(`${EXPECTED.drop.brokenName}:`) ? text : null;
+    });
+    check(
+      'C',
+      'a file that is not a document is refused in a sentence, not a crash',
+      Boolean(refused),
+      refused ??
+        `the status bar says "${await detailLine()}", which is not the ` +
+          `loader's own account of ${EXPECTED.drop.brokenName}`
+    );
+    const survived = await until(async () =>
+      hud()
+        .slice(beforeBroken)
+        .filter((line) => EXPECTED.drop.opened(line)).length > 1
+        ? hud().at(-1)
+        : null
+    );
+    check(
+      'C',
+      'the document already on screen is still there and still drawing',
+      Boolean(survived),
+      survived
+        ? survived.trim()
+        : `fewer than two heartbeats since the refusal still said ` +
+            `${EXPECTED.drop.openedLabel} — the page either stopped drawing or ` +
+            `lost the document it had, and the last line was ` +
+            `"${(hud().at(-1) ?? 'none').trim()}"`
+    );
+  }
+
   // **AND THE DOCUMENT'S OWN CLIP PLAYING, WHICH THE CHECK ABOVE CANNOT SEE.**
   // Only viewer has one. Every other demo in this file advances because its
   // *simulation* does; this one opens a file and shows it, and what has to
@@ -5403,9 +5821,11 @@ try {
   // reads: `pose` comes off the palette and would sit at `0.00` through a
   // whole run of a page whose skeleton was never posed.
   //
-  // **IT RUNS BEFORE THE DROP BLOCK BELOW, AND THAT IS LOAD-BEARING.** The
-  // document dropped there has no skin and no clip, so from that moment on
-  // `pose` is `0.00` and can never take a second value again.
+  // **IT RUNS AFTER THE DROP BLOCK ABOVE, AND THAT IS LOAD-BEARING.** The
+  // page opens on the shelf's Suzanne, which has no skin and no clip, so until
+  // that block puts `riggedPairGlb()` on screen `pose` is `0.00` and could
+  // never take a second value. It ran *before* the drop until the shelf landed,
+  // when the document the module generates was what a tab opened with.
   if (EXPECTED.playing) {
     const posed = await until(async () => {
       const seen = valuesOf(EXPECTED.playing);
@@ -5430,9 +5850,9 @@ try {
   // are three further steps, and a page that lost any of them prints the same
   // sweep while drawing the document's bind pose for ever.
   //
-  // **IT RUNS BEFORE THE DROP BLOCK, FOR THE REASON THE CHECK ABOVE DOES**: the
-  // document dropped there has no skin, so nothing below this point in the run
-  // has any skinned geometry to look at.
+  // **IT RUNS AFTER THE DROP BLOCK, FOR THE REASON THE CHECK ABOVE DOES**: the
+  // document the page opens with has no skin, so the dropped one is the only
+  // skinned geometry a browser run ever has to look at.
   if (EXPECTED.deforming) {
     // **The viewer's own control, not a switch this harness reaches past it.**
     // `apps/viewer/src/app.rs` latches the turntable off the first time
@@ -5592,176 +6012,6 @@ try {
                   'changing: the geometry on screen is not following the palette. A single ' +
                   'frame means the draw resolved a base vertex the dispatch never wrote to ' +
                   '— GpuInstance::BASE_VERTEX_OVERRIDE is what points it at the region')
-    );
-  }
-
-  // **A FILE THE VISITOR CHOSE, WHICH IS THE OTHER WAY INPUT REACHES THIS
-  // ENGINE.** Only viewer has one — `apps/viewer/src/web.rs`'s drop target,
-  // `docs/plan/sample/05-viewer.md`'s V-F5 — and it belongs in this group for
-  // the group's own reason: everything above is a pointer or a key arriving
-  // through the browser's input pipeline and changing what the engine says
-  // about itself, and a dropped document is the same claim about a different
-  // pipeline.
-  //
-  // **IT RUNS LAST IN THE GROUP, AND THAT IS LOAD-BEARING.** `EXPECTED.waiting`
-  // asks for the demo document's own `instances: 3`, and the whole point of
-  // this block is that the page stops showing that document — so every check
-  // that reads `waiting` has to have read it already. Nothing after group C
-  // does: `EXPECTED.backdrop` is absent for this demo, and the `touch` rows
-  // that read it belong to demos that have no `drop`.
-  //
-  // The events are dispatched from page script rather than through
-  // `Input.dispatchDragEvent`, because CDP's drag interception needs a real
-  // file on the browser's own filesystem and the document under test is built
-  // in this process. What is dispatched is the event the handler listens for,
-  // carrying a `DataTransfer` with a real `File` in it, which is what a browser
-  // delivers.
-  if (EXPECTED.drop) {
-    // **A drag the page does not claim is a tab that navigates to the file**,
-    // taking the canvas, the device and the log with it. `dragover` is the
-    // event that decides it, so it is the one asked about; the frame lighting
-    // up is the visitor's half of the same answer.
-    const dragged = await evaluate(
-      page,
-      `(() => {
-         const canvas = document.getElementById('canvas');
-         const stage = canvas.closest('.stage');
-         const event = new DragEvent('dragover', {
-           dataTransfer: new DataTransfer(), bubbles: true, cancelable: true });
-         canvas.dispatchEvent(event);
-         const during = stage ? getComputedStyle(stage).borderColor : '';
-         canvas.dispatchEvent(new DragEvent('dragleave', {
-           dataTransfer: new DataTransfer(), bubbles: true, cancelable: true }));
-         const after = stage ? getComputedStyle(stage).borderColor : '';
-         return { prevented: event.defaultPrevented, during, after };
-       })()`
-    );
-    check(
-      'C',
-      'a file dragged over the canvas is claimed rather than navigated to',
-      dragged?.prevented === true,
-      dragged?.prevented === true
-        ? 'dragover was cancelled'
-        : 'dragover was not cancelled, so dropping a file here would replace the page with it'
-    );
-    check(
-      'C',
-      'the frame says it will take the file, and stops saying it',
-      Boolean(dragged) && dragged.during !== dragged.after,
-      Boolean(dragged) && dragged.during !== dragged.after
-        ? `${dragged.during} while over the canvas, ${dragged.after} after`
-        : `the border was ${dragged?.after ?? 'unreadable'} throughout — a ` +
-            'visitor holding a file over the canvas is told nothing'
-    );
-
-    // The document goes across as base64 because that is what survives being
-    // spliced into an expression string; the page turns it back into the bytes
-    // this process built.
-    /**
-     * @param {string} name
-     * @param {Buffer} bytes
-     * @returns {Promise<boolean>} whether the handler claimed the drop
-     */
-    const dropFile = async (name, bytes) =>
-      evaluate(
-        page,
-        `(() => {
-           const bytes = Uint8Array.from(atob(${JSON.stringify(bytes.toString('base64'))}),
-                                         (ch) => ch.charCodeAt(0));
-           const carried = new DataTransfer();
-           carried.items.add(new File([bytes], ${JSON.stringify(name)}));
-           const event = new DragEvent('drop', {
-             dataTransfer: carried, bubbles: true, cancelable: true });
-           document.getElementById('canvas').dispatchEvent(event);
-           return event.defaultPrevented;
-         })()`
-      );
-    const detailLine = () =>
-      evaluate(page, `document.getElementById('detail')?.textContent ?? ''`);
-
-    const beforeDrop = hud().length;
-    await dropFile(EXPECTED.drop.name, EXPECTED.drop.document);
-    const dropped = await until(async () =>
-      hud()
-        .slice(beforeDrop)
-        .find((line) => EXPECTED.drop.opened(line))
-    );
-    check(
-      'C',
-      'a dropped document replaces the one the page opened with',
-      Boolean(dropped),
-      dropped
-        ? dropped.trim()
-        : `no heartbeat in ${pollCeiling()} ms said ${EXPECTED.drop.openedLabel} — ` +
-            `the last of ${hud().length - beforeDrop} since the drop was ` +
-            `"${(hud().at(-1) ?? 'none').trim()}", and the status bar says ` +
-            `"${await detailLine()}"`
-    );
-    const said = await until(async () => {
-      const text = await detailLine();
-      return text.includes(EXPECTED.drop.name) && text.includes('instance(s)')
-        ? text
-        : null;
-    });
-    check(
-      'C',
-      'the page tells the visitor what became of the file they dropped',
-      Boolean(said),
-      said ??
-        `the status bar says "${await detailLine()}", which does not name ` +
-          `${EXPECTED.drop.name} and what it came to`
-    );
-
-    // **AND BYTES THAT ARE NOT A DOCUMENT MUST NOT TAKE THE PAGE DOWN.** The
-    // native viewer's whole claim is that a file either loads or says why not,
-    // and a browser owes a visitor the same — except that a page has no exit
-    // code, so "says why not" means the frame already on screen keeps drawing
-    // and the status bar carries the loader's own sentence. Asked here rather
-    // than left to group D's "no uncaught exception": that check passes just as
-    // happily against a page that stopped drawing.
-    const beforeBroken = hud().length;
-    await dropFile(EXPECTED.drop.brokenName, EXPECTED.drop.broken);
-    // **THE ENGINE'S ANSWER, NOT THE PAGE'S ACKNOWLEDGEMENT.** Every line
-    // `web/demos/viewer/main.js` writes about a drop names the file too — it is
-    // saying it has handed the bytes over, or that nothing came back — so a
-    // check that only looked for the name passes against a page whose engine
-    // never answered at all. It did: under a `take_dropped_document` sabotaged
-    // to return nothing, this check stayed green on "broken.glb was handed over
-    // and no frame has opened it."
-    //
-    // What is asked for instead is `LoadError`'s own shape, which is the file
-    // and then what was wrong with it — `apps/viewer/src/model.rs` writes every
-    // one of its variants that way, and no line the page composes for itself
-    // begins with the name.
-    const refused = await until(async () => {
-      const text = await detailLine();
-      return text.startsWith(`${EXPECTED.drop.brokenName}:`) ? text : null;
-    });
-    check(
-      'C',
-      'a file that is not a document is refused in a sentence, not a crash',
-      Boolean(refused),
-      refused ??
-        `the status bar says "${await detailLine()}", which is not the ` +
-          `loader's own account of ${EXPECTED.drop.brokenName}`
-    );
-    const survived = await until(async () =>
-      hud()
-        .slice(beforeBroken)
-        .filter((line) => EXPECTED.drop.opened(line)).length > 1
-        ? hud().at(-1)
-        : null
-    );
-    check(
-      'C',
-      'the document already on screen is still there and still drawing',
-      Boolean(survived),
-      survived
-        ? survived.trim()
-        : `fewer than two heartbeats since the refusal still said ` +
-            `${EXPECTED.drop.openedLabel} — the page either stopped drawing or ` +
-            `lost the document it had, and the last line was ` +
-            `"${(hud().at(-1) ?? 'none').trim()}"`
     );
   }
 

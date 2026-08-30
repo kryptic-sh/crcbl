@@ -9,3 +9,11 @@
 # explicitly — a global `core.excludesFile` with `*.lock` would otherwise hide
 # it.
 !Cargo.lock
+
+# The viewer's model shelf. `tools/fetch-shelf.sh` writes it, at a pinned
+# upstream commit with a sha256 per file in `apps/viewer/assets/shelf.sha256`;
+# the whole Khronos CC0 shelf is ~138 MB, which is not history this repository
+# is going to carry. Suzanne is the exception and is committed, because it is
+# what the viewer opens when nothing is asked for and its tests read it offline.
+/apps/viewer/assets/shelf/*
+!/apps/viewer/assets/shelf/Suzanne/

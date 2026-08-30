@@ -116,6 +116,23 @@ assemble_static() {
     mkdir -p "$site/$(dirname "$file")"
     cp "$REPO/web/$file" "$site/$file"
   done
+
+  # THE VIEWER'S MODEL SHELF, and the one part of a demo's assets that is not
+  # in this repository. `apps/viewer` opens the Khronos CC0 Suzanne and lists
+  # the rest of the shelf on its panel; the whole set is ~138 MB, so only
+  # Suzanne is committed and `tools/fetch-shelf.sh` fetches the others at a
+  # pinned commit with a sha256 a file. `--web` fetches the browser subset
+  # alone — three models, 18.9 MB, against a stated 25 MB budget for the demo's
+  # assets — and copies them in.
+  #
+  # INTO THE SITE, NOT INTO `web/`. The copy above publishes everything under
+  # `web/`, so writing the shelf there would leave 19 MB of untracked files
+  # beside a demo's page and put them in front of every `git status` this
+  # repository ever prints. `web/demos/viewer/assets/manifest.json` names the
+  # keys under it that the page pre-loads, and that file *is* tracked: the list
+  # is the seam, the bytes are not.
+  echo "==> fetching the viewer's model shelf"
+  "$REPO/tools/fetch-shelf.sh" --web "$site/demos/viewer/assets"
 }
 
 # `--gate-only` narrows the threaded build to the one artifact

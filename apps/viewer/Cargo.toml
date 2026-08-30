@@ -10,13 +10,11 @@ publish = false
 # **A library with two front ends**, like every other sample that reaches a
 # browser: `src/main.rs` natively and `src/web.rs` on `wasm32`.
 #
-# The browser half shows the document `src/demo_model.rs` generates, not one a
-# visitor chose. `docs/plan/sample/05-viewer.md`'s V-F5 is "path argument
-# natively, drop target in the browser", and the drop target is still owed —
-# it needs an asset source over a file the browser handed across, which is now
-# a small thing (`crcbl_assets::MemorySource` is the half that was missing)
-# rather than the stage-10 item this comment used to call it. See
-# `docs/backlog.md`.
+# The browser half opens `src/shelf.rs`'s Suzanne over the page's own fetch
+# source and lists the rest of the shelf on its panel; the document
+# `src/demo_model.rs` generates is the fallback for a build whose site carries
+# no shelf. `docs/plan/sample/05-viewer.md`'s V-F5 — "path argument natively,
+# drop target in the browser" — is done on both hosts.
 #
 # The lib is not called `viewer`: a lib and a bin of the same name in one
 # package write the same file, which cargo calls an output filename collision.
@@ -42,7 +40,9 @@ crcbl = { workspace = true, features = ["scene"] }
 # The tests write a `.glb` to a real directory and open it through the real
 # `DirSource`, for the reason `crates/crcbl/tests/gltf_e2e.rs` gives: the key
 # rule a document has to satisfy is the production one, and a mock source would
-# not apply it.
+# not apply it. `src/shelf.rs`'s tests use one as an empty shelf root, which is
+# how they check what an unfetched shelf reports without writing to the
+# environment every other test in the process reads.
 [dev-dependencies]
 tempfile = "3"
 

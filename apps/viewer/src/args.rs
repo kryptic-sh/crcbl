@@ -12,6 +12,15 @@
 //! The first argument that is not a flag is the model; a second one is an error
 //! rather than a silently ignored file, because a user who typed two paths
 //! meant something this application cannot do.
+//!
+//! # And it is optional, because there is a shelf
+//!
+//! `viewer` with no path opens [`crate::shelf`]'s Suzanne — milestone 4's
+//! second item, which says in as many words that Suzanne is what opens when
+//! nothing is asked for, on both hosts. So [`Options::model`] is an `Option`
+//! and `None` is not a placeholder: it is "the shelf's default", resolved
+//! where the document is read rather than by inventing a path here that names
+//! a file on the machine the binary was built on.
 
 use std::path::PathBuf;
 
@@ -29,8 +38,9 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 pub struct Options {
     /// The flags every sample has.
     pub common: Common,
-    /// The `.gltf` or `.glb` to open.
-    pub model: PathBuf,
+    /// The `.gltf` or `.glb` to open, or `None` for [`crate::shelf`]'s
+    /// default — see the [module docs](self).
+    pub model: Option<PathBuf>,
 }
 
 /// The `--help` text.
@@ -44,14 +54,20 @@ pub const USAGE: &str = "\
 viewer — open a glTF model, look at it
 
 USAGE:
-    viewer <MODEL> [OPTIONS]
+    viewer [MODEL] [OPTIONS]
 
 ARGUMENTS:
-    <MODEL>              The .gltf or .glb file to open. Its own directory
+    [MODEL]              The .gltf or .glb file to open. Its own directory
                          becomes the asset root, so a .gltf finds the .bin and
                          the textures beside it. Asset keys hold only letters,
                          digits, '.', '_' and '-', so a file name with a space
                          in it has to be renamed.
+
+                         Left out, the shelf's Suzanne opens. The shelf is the
+                         Khronos CC0 models the ESC panel's SHELF row steps
+                         through; only Suzanne is in this repository, and
+                         tools/fetch-shelf.sh fetches the rest. CRCBL_SHELF
+                         moves the directory they are read from.
 
 CONTROLS:
     left drag            Orbit — the model follows the pointer
@@ -76,8 +92,8 @@ CONTROLS:
                          1.00x; the listing panel's 'exposure' row is what the
                          frame is actually drawn with, so it says when an end of
                          that range has been reached.
-    ESC                  Open the menu — the only way to reach the two below
-                         without a keyboard
+    ESC                  Open the menu — the only way to reach the two below,
+                         or the model shelf, without a keyboard
     F11                  Fullscreen
     F3                   Debug panel
 
@@ -121,7 +137,8 @@ pub type Invocation = crcbl::args::Invocation<Options>;
 /// # Errors
 ///
 /// Reported as [`Invocation::BadUsage`], never as a panic: an unknown flag, a
-/// flag with a missing value, a second model path, and no model path at all.
+/// flag with a missing value, and a second model path. **No path at all is not
+/// one of them** — that is the shelf's default, see the [module docs](self).
 #[must_use]
 pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut common = Common::new(DEFAULT_TICK_HZ);
@@ -149,10 +166,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         model = Some(PathBuf::from(arg));
     }
 
-    match model {
-        Some(model) => Invocation::Run(Options { common, model }),
-        None => Invocation::BadUsage("no model given — try `viewer model.glb`".into()),
-    }
+    Invocation::Run(Options { common, model })
 }
 
 #[cfg(test)]
@@ -171,20 +185,28 @@ mod tests {
         else {
             panic!("that invocation is a run");
         };
-        assert_eq!(options.model, PathBuf::from("meshes/helmet.glb"));
+        assert_eq!(options.model, Some(PathBuf::from("meshes/helmet.glb")));
         assert!(options.common.headless);
         assert_eq!(options.common.frames, Some(4));
     }
 
-    /// **A path is required**, because a viewer with nothing to view has
-    /// nothing to do — and the message says what to type instead.
+    /// **A path is optional, and its absence is not a placeholder**: no
+    /// argument at all is a run with nothing named, which is what
+    /// `crate::shelf`'s default answers. It used to be a usage error, and the
+    /// shelf is what changed.
     #[test]
-    fn an_invocation_with_no_model_says_so() {
-        let Invocation::BadUsage(message) = run(&[]) else {
-            panic!("no model is not a run");
+    fn an_invocation_with_no_model_opens_the_shelf() {
+        let Invocation::Run(options) = run(&[]) else {
+            panic!("no model is a run now");
         };
-        assert!(message.contains("no model given"), "{message}");
-        assert!(matches!(run(&["--headless"]), Invocation::BadUsage(_)));
+        assert_eq!(options.model, None);
+
+        let Invocation::Run(options) = run(&["--headless", "--frames", "2"]) else {
+            panic!("flags with no model are a run");
+        };
+        assert_eq!(options.model, None);
+        assert!(options.common.headless);
+        assert_eq!(options.common.frames, Some(2));
     }
 
     /// A misspelled flag is refused by name rather than opened as a file, and a
@@ -214,7 +236,7 @@ mod tests {
         let Invocation::Run(options) = run(&["./-weird.glb"]) else {
             panic!("a relative path is a run");
         };
-        assert_eq!(options.model, PathBuf::from("./-weird.glb"));
+        assert_eq!(options.model, Some(PathBuf::from("./-weird.glb")));
     }
 
     /// The shared half of the usage text is the engine's, byte for byte.

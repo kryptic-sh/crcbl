@@ -13,7 +13,7 @@
 //! # What is here, and what is not
 //!
 //! This is that document's **milestone 1**, "Load + orbit + grid", the whole
-//! of milestone 2, and milestone 4's first item. What it does: takes a path,
+//! of milestone 2, and milestone 4's first two items. What it does: takes a path,
 //! reads it through the asset seam, converts it, frames the camera on it,
 //! turns it under the mouse, draws it under a single directional light over a
 //! grid floor, and puts what the document holds — and what the conversion
@@ -22,6 +22,13 @@
 //! and so does the slider on the `ESC` panel — see [`menu`]. Re-export the
 //! file and the frame becomes the new document, which is milestone 3's artist
 //! loop — see [`watch`].
+//!
+//! **And it ships a shelf of models.** `viewer` with no path opens Suzanne;
+//! the `ESC` panel's `SHELF` row steps through the Khronos CC0 models
+//! `docs/plan/sample/05-viewer.md` milestone 4 names, and stepping onto one
+//! opens it. Only Suzanne is in this repository — `tools/fetch-shelf.sh`
+//! fetches the rest at a pinned commit, and `CRCBL_SHELF` moves the directory
+//! they are read from. See [`shelf`].
 //!
 //! **And a `.glb` or `.gltf` dropped on the window opens**, which is milestone
 //! 4's first item and the third door onto a document: the path goes through
@@ -46,10 +53,12 @@
 //!
 //! `crate::web` is the `wasm32` front end — not linked, because it does not
 //! exist in a native documentation build — and `web/demos/viewer/` is its
-//! page. A tab
-//! has no path to type and no directory to root an asset source at, so it opens
-//! the document [`demo_model`] generates and compiles into the module —
-//! everything past the loading is the code below, unchanged.
+//! page. A tab has no path to type and no directory to root an asset source at,
+//! so it opens the shelf's Suzanne over the page's own `fetch()` source, and
+//! its `SHELF` row fetches whichever of the shelf the site carries. The
+//! document [`demo_model`] generates and compiles into the module is what a
+//! build with no shelf at all opens instead — everything past the loading is
+//! the code below, unchanged.
 //!
 //! **And it takes a document the visitor chooses.** V-F5 was "path argument
 //! natively, drop target in the browser"; the native window has a drop target
@@ -91,6 +100,7 @@ pub mod gpu;
 pub mod listing;
 pub mod menu;
 pub mod model;
+pub mod shelf;
 pub mod watch;
 
 #[cfg(target_arch = "wasm32")]
@@ -113,3 +123,4 @@ pub use controls::Controls;
 pub use listing::Listing;
 pub use menu::{MenuKind, Menus};
 pub use model::{LoadError, Model, Rig, load, load_bytes, load_from, world_bounds};
+pub use shelf::{SHELF, ShelfModel};
