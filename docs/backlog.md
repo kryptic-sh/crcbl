@@ -951,10 +951,11 @@ was surveyed against the tree the same day; what is already built (GGX + Smith
    non-temporal, desktop-only, a contact-scale bounce. The decision above says
    no GI below the RT tier; rule SSGI in as a screen-space term or delete it
    from the candidates.
-8. **Bent normals, AO tint and specular occlusion — which tiers.**
-   `46-ambient-occlusion.md` owes bent normals; they widen the AO target from
-   `R8Unorm`, which is bandwidth on the low tier. Scalar GTAO on low and bent
-   normals on mid and high, or bent everywhere.
+8. ~~**Bent normals, AO tint and specular occlusion — which tiers.**~~ **DECIDED
+   2026-08-30**: scalar occlusion plus the multi-bounce tint on low (the tint
+   costs no target); bent normals plus specular occlusion on medium and high.
+   `46-ambient-occlusion.md` carries it; which scalar pass low runs is a
+   measurement.
 9. **Burley diffuse.** `44-lighting.md` leaves it unranked. Recommended: decline
    outright — a retroreflective rim on rough dielectrics is small next to any
    item above.

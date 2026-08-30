@@ -315,6 +315,25 @@ carries it.
 a quality bump. They need the `R8Unorm` target widened, so they are their own
 slice.
 
+**DECIDED 2026-08-30 — which tiers get which.** The user's call, on the question
+of where the widened target is worth its bandwidth:
+
+- **Low: scalar occlusion plus the multi-bounce tint.** The tint is Jimenez et
+  al. 2016's polynomial of the scalar term and the surface albedo — no second
+  target, no second pass, so the low tier gets coloured rather than grey
+  occlusion for nothing. Which scalar pass low runs, SSAO or GTAO, is a
+  measurement on that tier's hardware rather than a design choice, and it is why
+  SSAO stays as the cheap rung above.
+- **Medium and high: bent normals plus specular occlusion.** The `R8Unorm`
+  target widens to carry the bent direction beside the scalar, the ambient term
+  is sampled along it, and the reflection term takes the cone's occlusion — the
+  pair the SSR section's refusal has been waiting for. The widening is the
+  bandwidth low does not pay.
+
+The presets of foundation (g) select between the two; until they exist the bent
+pair is on where it is built and the scalar path is what a device without it
+runs. Both are priced on the three tiers before the rung counts.
+
 **What the pass costs, measured 2026-08-28.** `crcbl_render::PassTimers` times
 every pass in the graph and `apps/lantern` builds one, so the report comes out
 of `lantern --headless --frames 400 --size 1920x1080` under `RUST_LOG=info`. On
