@@ -477,10 +477,9 @@ entry; the browser gate runs on every slice that touches a demo.
    it declares nothing.
 
    **What it did not do**, each in `docs/backlog.md`: `toggle` and `reset` (they
-   belong in `crcbl-console`'s `builtin.rs`, which this slice did not own),
-   `debug_view` and `r_debug_view` (slice 6's), the web half of `log` (slice
-   7's), and a console audio-gain write reaching the running mixer, which needs
-   a `HostedGame` seam the loop does not have.
+   belong in `crcbl-console`'s `builtin.rs`, which this slice did not own), the
+   web half of `log` (slice 7's), and a console audio-gain write reaching the
+   running mixer, which needs a `HostedGame` seam the loop does not have.
 
 6. **Every debug view everywhere — landed 2026-08-31.** `crcbl::debug_view` is
    the module: the `r_debug_view` enum variable over `DebugView::label`'s six

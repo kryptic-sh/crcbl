@@ -5,7 +5,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## HIGH PRIORITY — the user's calls of 2026-08-30
 
-Two items the user ranked above the lighting order. They stay at the top of this
+The items the user ranked above the lighting order. They stay at the top of this
 file until they ship.
 
 ### The ambient occlusion pass still bands along the tangential axis
