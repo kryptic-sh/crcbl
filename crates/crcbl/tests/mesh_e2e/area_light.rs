@@ -428,24 +428,38 @@ const PRICE_LIGHTS: usize = crcbl_shaders::light::CLUSTER_LIGHT_CAPACITY as usiz
 /// the same numbers the debug overlay shows and the same accumulator
 /// `apps/lantern`'s headless report uses — so this measures what a frame costs
 /// rather than what a benchmark harness costs.
-fn forward_pass_prices(sets: &[&[Light]], extent: (u32, u32), frames: usize) -> Vec<(u64, u64)> {
+fn forward_pass_prices(
+    sets: &[&[Light]],
+    extent: (u32, u32),
+    frames: usize,
+) -> Option<Vec<(u64, u64)>> {
     let headless = Headless::open_at(
         extent,
         Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
     );
     let device = headless.device.as_ref();
+    // **The features above are asked for, not required** — `Headless::open_at`
+    // opens the best device it can — and a backend that cannot time a pass
+    // cannot price one. CI's Apple Paravirtual device is the case: it reports
+    // no `TIMESTAMP_QUERY`, so this answers `None` and the caller says the
+    // price went unmeasured rather than asserting an ordering between three
+    // zeroes. The frames are still drawn either way, which is the half of this
+    // helper every backend can run.
+    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
     let camera = mesh_camera(Projection::default());
     let sun = dim_sun();
     let mut priced: Vec<_> = sets
         .iter()
         .map(|lights| {
             let (renderer, pool) = slab_scene(&headless, lights);
-            let timers = crcbl::render::PassTimers::new(
-                device,
-                crcbl::render::forward::FRAMES_IN_FLIGHT,
-                crcbl::render::MAX_TIMED_PASSES,
-            )
-            .expect("this fixture asks for TIMESTAMP_QUERY");
+            let timers = timed.then(|| {
+                crcbl::render::PassTimers::new(
+                    device,
+                    crcbl::render::forward::FRAMES_IN_FLIGHT,
+                    crcbl::render::MAX_TIMED_PASSES,
+                )
+                .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
+            });
             (
                 renderer,
                 pool,
@@ -486,7 +500,7 @@ fn forward_pass_prices(sets: &[&[Light]], extent: (u32, u32), frames: usize) -> 
                 queue: headless.queue,
             });
             compiled
-                .execute(device, pool, encoder.as_mut(), Some(timers))
+                .execute(device, pool, encoder.as_mut(), timers.as_mut())
                 .expect("the graph executed");
             let commands = encoder.finish().expect("recording succeeded");
             device
@@ -502,7 +516,7 @@ fn forward_pass_prices(sets: &[&[Light]], extent: (u32, u32), frames: usize) -> 
                     },
                 )
                 .expect("present");
-            if index >= PRICE_WARMUP {
+            if let (true, Some(timers)) = (index >= PRICE_WARMUP, timers.as_ref()) {
                 stats.record(timers.latest());
             }
             recorded.push(commands);
@@ -510,17 +524,21 @@ fn forward_pass_prices(sets: &[&[Light]], extent: (u32, u32), frames: usize) -> 
     }
 
     device.wait_idle().expect("idle");
-    let prices = priced
-        .iter()
-        .map(|(_, _, _, stats, _)| {
-            eprintln!("{}: {}", crate::SUITE, stats.report());
-            stats
-                .percentiles("forward")
-                .expect("the forward pass is timed and the window is past its floor")
-        })
-        .collect();
-    for (renderer, mut pool, mut timers, _, recorded) in priced {
-        timers.destroy(device);
+    let prices = timed.then(|| {
+        priced
+            .iter()
+            .map(|(_, _, _, stats, _)| {
+                eprintln!("{}: {}", crate::SUITE, stats.report());
+                stats
+                    .percentiles("forward")
+                    .expect("the forward pass is timed and the window is past its floor")
+            })
+            .collect()
+    });
+    for (renderer, mut pool, timers, _, recorded) in priced {
+        if let Some(mut timers) = timers {
+            timers.destroy(device);
+        }
         for commands in recorded {
             device.destroy_command_buffer(commands);
         }
@@ -541,6 +559,18 @@ fn forward_pass_prices(sets: &[&[Light]], extent: (u32, u32), frames: usize) -> 
 /// about — that a rectangle costs more than a point light and by a bounded
 /// factor — so a polygon integral that grew an order of magnitude fails here
 /// rather than being noticed in a frame.
+///
+/// # A backend that cannot time a pass cannot price one
+///
+/// The ordering below needs GPU timestamps, and CI's Apple Paravirtual device
+/// reports none. So this draws its three light sets on every backend — which
+/// is a real claim, and the one that caught the missing `Rgba16Float` blend on
+/// a backend that had it and the polygon integral on one that did not — and
+/// prices them only where the device says it can measure. **It says which**,
+/// rather than passing quietly: a price that went unmeasured is reported as
+/// unmeasured, which is the difference `mesh_e2e/main.rs`'s header draws
+/// between splitting a test and gating one. `docs/backlog.md` carries which
+/// backends have actually priced this rung.
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh price"]
 fn the_price_of_a_froxel_full_of_area_lights() {
@@ -573,7 +603,18 @@ fn the_price_of_a_froxel_full_of_area_lights() {
         })
         .collect();
 
-    let prices = forward_pass_prices(&[&[], &points, &rects], extent, frames);
+    let Some(prices) = forward_pass_prices(&[&[], &points, &rects], extent, frames) else {
+        // Drawn, not priced. The frames above went through the whole forward
+        // pass with sixteen rectangles in a froxel — a shading path that
+        // trapped or refused a pipeline would have failed inside the helper —
+        // and this backend reports no way to time them.
+        eprintln!(
+            "{}: the forward pass drew {PRICE_LIGHTS} area lights and this backend reports no \
+             TIMESTAMP_QUERY, so the rung's price went unmeasured here",
+            crate::SUITE,
+        );
+        return;
+    };
     let [none, punctual, area] = prices[..].try_into().expect("one price per set");
     let ms = |nanos: u64| nanos as f64 / 1.0e6;
     eprintln!(

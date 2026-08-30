@@ -286,6 +286,14 @@ highlight, the fill flag measured on the linear target, and the price — plus
 `crcbl_shaders::ltc`'s own tests against a brute-force hemisphere sweep and
 against the GGX lobe. What it did not do:
 
+- **Only radv and lavapipe have priced the rung.**
+  `the_price_of_a_froxel_full_of_area_lights` needs GPU timestamps, and CI's
+  Apple Paravirtual device reports none — it drew the three light sets and
+  printed that the price went unmeasured (2026-08-31, after the `expect` on
+  `TIMESTAMP_QUERY` reddened the Metal job on `b61ed52`). WARP and the wgpu
+  backend are untried. So the 3.7x and 2.3x ratios in `docs/plan/44-lighting.md`
+  are two drivers' numbers, and the browser tier's is still an ALU count rather
+  than a measurement.
 - **The fill flag's shadow half is a guard that cannot fail.**
   `crcbl_render::shadow::can_be_shadowed` opens with
   `if light.is_fill() { return false; }`, and nothing reaches it: `fill` is a
