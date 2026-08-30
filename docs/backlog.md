@@ -854,7 +854,35 @@ mirrored UVs (§2's 2026-08-27 correction).
   tool or a pinned external `basisu` — which is the same shape of choice and is
   the bandwidth rung's gate; see §2's filtering subsection.
 
-### DECISION NEEDED — the global-illumination direction (2026-08-30)
+### DECIDED — GI is hardware ray tracing only; the raster stack carries every other tier (2026-08-30)
+
+**The user's decision:** no GI on hardware without ray tracing. The browser
+(WebGPU has no ray tracing), lavapipe and every device that lacks the feature
+run the traditional raster stack — direct lighting under forward+, cascades and
+the shadow atlas, sky IBL, GTAO, SSR — and nothing there approximates a bounce.
+On `crcbl-vk` (`VK_KHR_ray_query`), `crcbl-dx12` (DXR 1.1 inline) and
+`crcbl-mtl` (Metal ray tracing, `intersection_query`) GI is the runtime-traced
+probe volume below, tracing on the hardware through **inline ray queries in
+compute** — the one shape all three expose and Slang targets with one source —
+behind a `Capability` the device reports and the quality presets read. The
+standing rules hold: no bake step, every light dynamic, shadows from the same
+maps, and the tracer is priced on the desktop adapter before it counts. What
+this buys: the ray budget stops being the question (hardware traversal is two
+orders cheaper than a compute BVH), the browser tier pays nothing, and the
+raster stack is one stack on four backends rather than two.
+
+**Still open under it, and smaller than before:** (i) whether the GI term may
+carry a temporal blend now that it never runs on a golden's tier — C2 stands
+until this is answered, and the fixed-pattern every-probe-every-frame update is
+the default; (ii) what the seam adds — an acceleration-structure build and
+refit, a ray-query capability, and the storage the hit shading reads — which is
+foundation (c) in `docs/plan/43-render-standards.md`'s delivery table; (iii)
+whether ray-traced shadows and reflections join the RT tier as a preset above
+the atlas and SSR, which is a pricing question once the queries exist.
+
+The survey that led here stays below for the record.
+
+#### The survey (2026-08-30, superseded by the decision above)
 
 A survey of what Frostbite, Unreal, Godot and Unity ship for GI, scored against
 this tree's five standing constraints rather than in the abstract (the full
