@@ -890,6 +890,39 @@ probe formats converged on 4×4×4 bricks of low-order SH: the format `GpuProbe`
 already is. What they have that this tree lacks is the thing that fills it — an
 offline path tracer.
 
+**Rule from the user (2026-08-30): lighting is not baked.** The sun and every
+scene light are dynamic — direction, position, colour, on and off — and no bake
+step writes a lighting result into the tree. That excludes candidate 1 (a cooked
+irradiance volume _is_ baked lighting) and, for scene lights, candidate 2 (it
+bakes the transport of a fixed light set); both stay below for the record of why
+they were the survey's answer, and question 4 below is answered "no" by the
+rule. It also settles what the tracer is for: **not a bake tool — a runtime.**
+
+**The candidate the rule points at — runtime-traced probes, no history.** The
+probe volume `GpuProbe` already is, filled every frame by a compute pass that
+traces a _fixed_ ray pattern per probe against a triangle BVH on the GPU —
+DDGI's tracer (Majercik et al. 2019) with its temporal blend removed. Every
+probe, every frame, from this frame's lights and this frame's geometry, so it
+clears C2 the way GTAO does: a fixed pattern and a smooth target (L1 SH is
+low-frequency, and needs far fewer rays than DDGI's octahedral maps do). It
+needs no RT hardware — traversal is a compute shader over a flattened BVH in a
+storage buffer, its own pipeline and bind group, so C1's ceiling on the
+_forward_ pass does not bind it. Hits shade with this frame's direct light (the
+cascades and the light list the forward pass already reads), which gives one
+bounce; a second is a second explicit trace, not a feedback read of the previous
+volume. Dynamic geometry bounces too, through a refit of the BVH
+(`crcbl_phys::Bvh` refits; the triangle-leaf variant is the same first slice
+candidate 1 wanted, and its CPU form becomes the _reference_ the GPU pass is
+held to). What it costs is the open number: probes × rays × traversal — the same
+8192 × 64–128 rays is of the order of a million rays a frame, which on the
+desktop adapter is plausibly inside a millisecond and on lavapipe and the
+browser is not; it is priced on all three tiers before it counts, per plan 43,
+and the web tier runs it reduced or off behind the quality preset. The
+alternatives that also satisfy the rule — SDFGI/Brixelizer (SDF generator, 3D
+images, cascade state), voxel cone tracing (leaks), LPV (single low-frequency
+bounce, one RSM per light) — each carry more machinery for less; SSGI stays
+candidate 3, the desktop-only contact term on top.
+
 **The candidates, in order.**
 
 1. **A cooked irradiance-probe volume** (the APV / Flux shape). An offline CPU
@@ -951,20 +984,22 @@ SH L2 (priced in `50-irradiance-probes.md`; a contained escalation later).
 **The questions, and the one that decides the rest:**
 
 1. **Must indirect light respond to geometry that moves** — doors, destruction,
-   player-built structures? Yes means candidates 1 and 2 are insufficient and
-   the answer is a cascaded SDF, at the cost of an SDF generator, a 3D-image
-   path across four backends and per-frame determinism for the GI term. Static
-   geometry with dynamic lights means 1 + 2 beat anything in the plan for zero
-   milliseconds. Every engine surveyed recommends the baked answer for this
-   hardware tier.
+   player-built structures? _Lights_ are answered: dynamic, by the rule above.
+   Geometry is still the user's call, though the runtime-traced candidate makes
+   it a refit rather than a different design. Yes means candidates 1 and 2 are
+   insufficient and the answer is a cascaded SDF, at the cost of an SDF
+   generator, a 3D-image path across four backends and per-frame determinism for
+   the GI term. Static geometry with dynamic lights means 1 + 2 beat anything in
+   the plan for zero milliseconds. Every engine surveyed recommends the baked
+   answer for this hardware tier.
 2. May a golden ever carry a temporal component? If the answer is a permanent
    no, it belongs in `43-render-standards.md` §5 as one constraint rather than
    three scattered refusals.
 3. What is the GI budget in milliseconds, on which tier — is candidate 3's
    doubling acceptable on desktop if off by default on the web tier?
-4. Is a bake step acceptable in the content pipeline? A scene acquires a
-   committed, `--check`ed artifact and a scene edit means a rebake. Everything
-   above depends on this being yes.
+4. ~~Is a bake step acceptable in the content pipeline?~~ **No** (the rule
+   above). A scene acquires a committed, `--check`ed artifact and a scene edit
+   means a rebake. Everything above depends on this being yes.
 5. Do `ray_vs_triangle` and the triangle BVH live in `crcbl-phys` (available to
    gameplay queries too) or bake-only beside the `cook-*` tools? No new
    dependency either way.
