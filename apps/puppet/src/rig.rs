@@ -320,6 +320,7 @@ fn box_part(
 fn translated(geometry: Geometry<'static>, offset: Vec3) -> Geometry<'static> {
     let Geometry::Flat {
         vertices,
+        uv_range,
         indices,
         mut clusters,
     } = geometry
@@ -341,6 +342,9 @@ fn translated(geometry: Geometry<'static>, offset: Vec3) -> Geometry<'static> {
     }
     Geometry::Flat {
         vertices: Cow::Owned(bytes),
+        // Untouched: a translation moves positions, and the UV lanes and the
+        // range they decode through are the same either side of it.
+        uv_range,
         indices,
         clusters,
     }

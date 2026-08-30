@@ -86,6 +86,7 @@ mod resize;
 mod skinned_motion;
 mod smaa;
 mod two_dags;
+mod vertex_v2;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because
 // three other suites open the same device against the same offscreen ring and a

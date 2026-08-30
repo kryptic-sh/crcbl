@@ -120,6 +120,8 @@ impl SkinnedMotionScene {
                 // The renderer's own pool, which is what makes the dispatch's
                 // output reachable by its draws at all.
                 vertices: renderer.vertex_buffer(),
+                // And the boundary between that pool's two streams.
+                attribute_base: renderer.attribute_base(),
             },
         )
         .expect("a skinning pass");

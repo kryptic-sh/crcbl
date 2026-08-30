@@ -79,6 +79,8 @@ fn unit_cube() -> GpuMesh {
         index_count: 36,
         bounds_min: [-0.5, -0.5, -0.5],
         bounds_max: [0.5, 0.5, 0.5],
+        // Read by nothing on this path: the cull pass resolves boxes.
+        uv_range: crcbl::shaders::vertex::UvRange::default(),
     }
 }
 
@@ -92,6 +94,7 @@ fn bar() -> GpuMesh {
         index_count: 6,
         bounds_min: [-0.02, -1.0, -0.02],
         bounds_max: [0.02, 1.0, 0.02],
+        uv_range: crcbl::shaders::vertex::UvRange::default(),
     }
 }
 

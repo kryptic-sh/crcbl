@@ -84,6 +84,9 @@ fn mesh_table() -> Vec<GpuMesh> {
             index_count: index_count as u32,
             bounds_min: bounds.min.to_array(),
             bounds_max: bounds.max.to_array(),
+            // The demo meshes' own, which is what `MeshPool::upload` would
+            // have written; read by nothing this suite draws.
+            uv_range: crcbl::shaders::mesh::demo_uv_range(),
         }
     };
     vec![

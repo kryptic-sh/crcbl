@@ -76,6 +76,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   impl for `Loop` covers every sample in this workspace.
 - **`FrameLimit::wait_from` is removed**, replaced by `FramePacer::wait` and
   `FramePacer::start`.
+- **`crcbl_shaders::mesh::MeshVertex` is the v2 two-stream layout.** A
+  `[f32; 3]` position (`POSITION_STRIDE`) and, in a second stream
+  (`ATTRIBUTE_STRIDE`), a `QTangent` replacing the normal and tangent,
+  `uv0`/`uv1` as `unorm16x2` over the mesh's `UvRange`, and an `rgba8` colour —
+  `VERTEX_STRIDE` halves from 64 to 32 bytes. Build one with
+  `MeshVertex::from_normal` or `from_frame` rather than by writing floats. The
+  pool stores the two streams as two regions of one storage buffer;
+  `FrameUniforms::vertex_pool.x` and `skinning::Params::attribute_base` carry
+  the boundary. `Geometry::Flat` and `Geometry::Dag` gain a `uv_range` the
+  vertices were quantised against, `MeshPool::upload` takes it, `GpuMesh`
+  carries it to the shaders (`MESH_ENTRY_STRIDE` 36 → 52), and `SkinningDesc`
+  gains `attribute_base`. No golden moved.
 
 ### Added
 

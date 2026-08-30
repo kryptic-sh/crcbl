@@ -23,10 +23,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crcbl_render::scene::Geometry;
-use crcbl_shaders::mesh::{MeshVertex, VERTEX_STRIDE};
+use crcbl_shaders::mesh::MeshVertex;
 use crcbl_shaders::meshlet::{
     ClusterBounds, MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES, MeshClusters, Meshlet,
 };
+use crcbl_shaders::vertex::UvRange;
 use glam::Vec3;
 
 /// The neutral greybox albedo every primitive carries, linear RGBA.
@@ -60,8 +61,21 @@ const TRI_UV: [[f32; 3]; 1] = [[0.0, 0.0, 1.0]];
 ///   which is what the surfaces of revolution — cylinder, sphere, capsule —
 ///   want so a curve does not read as a stack of facets.
 pub(crate) struct MeshBuilder {
-    vertices: Vec<MeshVertex>,
+    /// The vertices as they were authored, before quantisation.
+    ///
+    /// Floats until [`finish`](Self::finish), because a `unorm16` UV lane needs
+    /// the range of *every* coordinate the mesh carries, and a builder is not
+    /// finished being handed coordinates until it is closed.
+    vertices: Vec<RawVertex>,
     indices: Vec<u32>,
+}
+
+/// One vertex on the way to a [`MeshVertex`]: what a primitive authored.
+#[derive(Clone, Copy, Debug)]
+struct RawVertex {
+    position: Vec3,
+    normal: Vec3,
+    uv: [f32; 2],
 }
 
 impl MeshBuilder {
@@ -77,11 +91,10 @@ impl MeshBuilder {
     pub(crate) fn vertex(&mut self, position: Vec3, normal: Vec3, uv: [f32; 2]) -> u32 {
         let index = u32::try_from(self.vertices.len())
             .expect("a greybox primitive has fewer vertices than u32::MAX");
-        self.vertices.push(MeshVertex {
-            position: [position.x, position.y, position.z, 1.0],
-            normal: [normal.x, normal.y, normal.z, 0.0],
-            color: GREYBOX_ALBEDO,
-            uv: [uv[0], uv[1], 0.0, 0.0],
+        self.vertices.push(RawVertex {
+            position,
+            normal,
+            uv,
         });
         index
     }
@@ -217,10 +230,30 @@ impl MeshBuilder {
     }
 
     /// Closes the builder into a flat geometry with its meshlet clusters.
+    ///
+    /// The UV range is computed here and nowhere earlier: it is the bounds of
+    /// every coordinate the primitive turned out to carry, and a range taken
+    /// before the last vertex arrived would clamp whatever came after it.
     pub(crate) fn finish(self) -> Geometry<'static> {
-        let clusters = build_clusters(&self.vertices, &self.indices);
+        let uvs: Vec<[f32; 2]> = self.vertices.iter().map(|vertex| vertex.uv).collect();
+        let uv_range = UvRange::from_uvs(&uvs);
+        let vertices: Vec<MeshVertex> = self
+            .vertices
+            .iter()
+            .map(|vertex| {
+                MeshVertex::from_normal(
+                    vertex.position.to_array(),
+                    vertex.normal.to_array(),
+                    GREYBOX_ALBEDO,
+                    vertex.uv,
+                    &uv_range,
+                )
+            })
+            .collect();
+        let clusters = build_clusters(&vertices, &self.indices);
         Geometry::Flat {
-            vertices: Cow::Owned(vertex_bytes(&self.vertices)),
+            vertices: Cow::Owned(crcbl_shaders::mesh::vertex_bytes(&vertices)),
+            uv_range,
             indices: Cow::Owned(self.indices),
             clusters,
         }
@@ -232,25 +265,6 @@ fn quad_normal(corners: &[Vec3; 4]) -> Vec3 {
     (corners[1] - corners[0])
         .cross(corners[3] - corners[0])
         .normalize()
-}
-
-/// The vertices as the little-endian `f32` bytes a geometry pool holds —
-/// position, normal, colour, uv per vertex, [`VERTEX_STRIDE`] bytes each, which
-/// is exactly what `crcbl_shaders::mesh::cube_vertex_bytes` produces.
-fn vertex_bytes(vertices: &[MeshVertex]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vertices.len() * VERTEX_STRIDE);
-    for vertex in vertices {
-        for value in vertex
-            .position
-            .iter()
-            .chain(&vertex.normal)
-            .chain(&vertex.color)
-            .chain(&vertex.uv)
-        {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
 }
 
 /// Partitions a triangle list into meshlet clusters, the greedy walk

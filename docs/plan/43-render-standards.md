@@ -134,40 +134,42 @@ prepass are cheaper on it than on a wider copy of today's vertex.
 | -------------- | -------------- | -------------------------------------------------------------------------------------------- | ----- |
 | 0 (position)   | `position`     | `float3`                                                                                     | 12    |
 | 1 (attributes) | `qtangent`     | `snorm16x4` — the tangent frame as a quaternion, sign in `w`                                 | 8     |
-| 1              | `uv0`          | `unorm16x2`, a per-mesh scale and offset in the draw constants                               | 4     |
+| 1              | `uv0`          | `unorm16x2`, a per-mesh scale and offset in the mesh table row                               | 4     |
 | 1              | `uv1`          | `unorm16x2`, the same way                                                                    | 4     |
 | 1              | `color`        | `rgba8`                                                                                      | 4     |
 | `GpuMaterial`  | four page rows | base colour, normal, metallic-roughness-occlusion, emissive, plus the alpha cutoff and flags | 64    |
 
-Stream 0 is what the depth prepass and every shadow pass fetch — twelve bytes a
-vertex where they read sixty-four today, and there are as many of those passes a
-frame as there are cascades and lit tiles. Stream 1 is the forward pass's, 32
-bytes against 64. The QTangent replaces the normal _and_ the tangent: a
-normalised quaternion recovers both, its sign carries glTF's handedness, and a
-mesh that ships no tangent takes the derivative frame as its fallback until the
-importer fills one (which is the MikkTSpace call, `docs/backlog.md`'s).
+Stream 0 is what the depth prepass and every shadow pass will fetch — twelve
+bytes a vertex where they decode the whole record today, and there are as many
+of those passes a frame as there are cascades and lit tiles. Stream 1 is the
+forward pass's, twenty bytes against sixty-four. The QTangent replaces the
+normal _and_ the tangent: a normalised quaternion recovers both, its sign
+carries glTF's handedness, and a mesh that ships no tangent takes the derivative
+frame as its fallback until the importer fills one (which is the MikkTSpace
+call, `docs/backlog.md`'s).
 
-**The host-side encodings are built (2026-08-30).** `crcbl_shaders::vertex`
-carries the arithmetic the layout above is made of, tested on its own before any
-constructor moves: `QTangent` (the frame as a snorm16 quaternion, handedness in
-`w`'s sign, with the paper's bias for the half-turn case where `w` is zero
-exactly), `UvRange` (a mesh's bounds, the unorm16 quantisation over them, and
-the degenerate axis that must still round-trip exactly), `orthonormal_basis`
-(Duff et al.'s branchless stand-in, so the encoding never sees a missing frame),
-and the `rgba8` pair. The next slice is what spends it: `MeshVertex` becomes the
-two streams, every constructor in the list below calls into this module,
-`VERTEX_STRIDE` splits into a position stride and an attribute stride for
-`crcbl-dx12`'s input layout, the four shader copies gain a Slang decode
-mirroring `QTangent::decode` and held to the same known frames, and the goldens
-re-bless once.
+**Landed 2026-08-30.** `crcbl_shaders::vertex` carries the arithmetic —
+`QTangent`, `UvRange`, `orthonormal_basis`, the `rgba8` pair — and
+`crcbl_shaders::mesh::MeshVertex` is the two streams, built only through
+`from_normal` and `from_frame`. Three things were decided in the building:
 
-**Who constructs a vertex today, and so changes with it:** `crcbl_shaders::mesh`
-(the type and its cooked constants), `crcbl_shaders::dunes`,
-`crcbl_render::skinning`, `crcbl_scene::gltf_render`, `crcbl_greybox::build`,
-`apps/quarry`'s `scene.rs`, `apps/lantern`'s `room.rs` and `crcbl-vk`'s `vk_e2e`
-skinning test; the four shader copies of the vertex (`mesh`, `mesh_cluster`,
-`mesh_shader`, `skinning`); and `crcbl-dx12`'s device, which reads
-`VERTEX_STRIDE` for its input layout.
+- The attribute stream is twenty bytes, not the thirty-two an earlier draft
+  quoted beside the table — the rows sum to twenty, and the arithmetic won.
+- The two streams are two regions of one storage buffer rather than two
+  bindings: the raster path's vertex stage already binds
+  `PORTABLE_STORAGE_BUFFERS_PER_STAGE` storage buffers, so a ninth would be a
+  renderer no browser can build. The boundary is the pool's vertex capacity in
+  words and travels in `FrameUniforms::vertex_pool.x`, and in
+  `skinning::Params::attribute_base` for the pass that binds no frame block.
+- The `UvRange` rides in the mesh table row (`GpuMesh::uv_range`), not in the
+  draw constants: both geometry paths already fetch that row, and a cluster DAG
+  needs one range for every level because the mesh path resolves level 0's.
+
+The three shader copies (`mesh`, `mesh_cluster`, `skinning`) decode it with one
+block of arithmetic that `every_shader_decodes_a_vertex_the_same_way` holds
+equal, and no golden moved. What the layout still owes — the depth-only entry
+point that reads stream 0 alone, a `TANGENT` reader in the importer, and a
+writer for `uv1` — is `docs/backlog.md`'s.
 
 **The page allocator, generalised (the foundations block's fourth row).** One
 array-image allocator — `crcbl_render::scene::PageDesc` generalised, with a
@@ -797,7 +799,7 @@ alone is not a price. The same rule holds the forward pass to
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **THE LIGHTING ORDER, decided 2026-08-30** — the raster items interleave with the foundations rather than waiting behind them                                                                 | (a) vertex v2 → normal maps → LTC area lights and the fill flag → the shadow atlas allocator with (f) and (e) beside it → contact shadows → the AO tint and bent normals → the probe volume rebuilt → the atmosphere → CMAA2. (b), (d) and (g) land where the first rung that needs them does; (c) when the RT tier's updater is next. The user's rule for the order: best-looking for the performance, cheapest real win first |
 | **FOUNDATIONS BLOCK (a)–(g), 2026-08-30** — a foundation is scheduled before any feature rung that would be cheaper with it                                                                   | The seven rows below, in order; each is priced like any rung. (a) is this section's stride decision and gates the material ladder; the rest are the early-leverage items written into their own plans the same day                                                                                                                                                                                                              |
-| **(a) Vertex v2: split streams, QTangent, quantised UVs, `GpuMaterial` at 64 bytes**                                                                                                          | §2 — one re-bless, born v0; the position-only prepass and shadow passes come with it                                                                                                                                                                                                                                                                                                                                            |
+| **(a) Vertex v2 — the layout landed 2026-08-30; the position-only prepass and shadow entry point, and `GpuMaterial` at 64 bytes, remain**                                                     | §2 — the entry point is the rung that spends stream 0; the material row widens with the normal-map rung that needs the pages                                                                                                                                                                                                                                                                                                    |
 | **(b) The render stack as RON, per camera**                                                                                                                                                   | [48-post-processing.md](48-post-processing.md) — the pass list a camera runs is data, so a demo, a test and a settings preset compose it without a build                                                                                                                                                                                                                                                                        |
 | **(c) Acceleration structures and inline ray queries on the seam** (vk, dx12, mtl)                                                                                                            | §5 — the GI's engine on the ray-tracing tier: a build and refit, a `Capability` the device reports, and the hit-shading reads. Decided 2026-08-30 in `docs/backlog.md`: GI is hardware ray tracing only; the other tiers run the raster stack                                                                                                                                                                                   |
 | **(d) The page allocator, generalised**                                                                                                                                                       | §2 — one array-image allocator behind base colour, the material pages, decals and the shadow atlas rectangle                                                                                                                                                                                                                                                                                                                    |

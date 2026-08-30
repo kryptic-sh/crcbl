@@ -30,9 +30,43 @@
 //! [`bind_index_buffer`]: https://docs.rs/crcbl-hal
 
 use crate::probe::{PROBE_VOLUME_SIZE, ProbeVolume};
+use crate::vertex::{QTangent, UvRange};
 
-/// Bytes per vertex: four `float4`s, no padding.
-pub const VERTEX_STRIDE: usize = 64;
+/// Bytes one vertex spends in the **position** stream: a `float3`, no padding.
+///
+/// `docs/plan/43-render-standards.md` §2's 2026-08-30 layout, stream 0. This is
+/// the whole of what a depth prepass or a shadow cascade has to fetch, and it
+/// is why the pool keeps the two streams in regions of their own rather than
+/// interleaved — see [`MeshVertex`], whose docs carry the arithmetic.
+///
+/// A struct of three scalar `float`s rather than a `float3`: `std430` gives a
+/// `float3` an alignment of sixteen and would round the record up to it, where
+/// three scalars pack to twelve on all four targets. [`MESH_ENTRY_STRIDE`] is
+/// the same trick and `the_mesh_entry_layout_matches_the_offsets_slangc_emits`
+/// is what says the targets really do lay it out that way.
+pub const POSITION_STRIDE: usize = 12;
+
+/// Bytes one vertex spends in the **attribute** stream: five `uint`s, no
+/// padding.
+///
+/// §2's stream 1, in the order [`MeshVertex::attribute_bytes`] writes them: two
+/// words of `snorm16x4` tangent frame, one of `unorm16x2` for each UV set, and
+/// one of `rgba8`.
+///
+/// **Twenty, where the plan's table says thirty-two.** The table's own rows add
+/// to twenty — 8 + 4 + 4 + 4 — and the prose beside it carried the wider figure
+/// from an earlier draft. The arithmetic is what this constant follows; padding
+/// up to a round number would be four bytes a vertex that nothing reads.
+pub const ATTRIBUTE_STRIDE: usize = 20;
+
+/// Bytes one vertex costs a caller's description, both streams together.
+///
+/// A description hands the renderer one array of [`MeshVertex`] records — see
+/// [`MeshVertex::to_bytes`] — and [`MeshPool`](https://docs.rs/crcbl-render) is
+/// what splits them into the two regions the shaders read. So this is the
+/// stride of the *description*, and [`POSITION_STRIDE`] and
+/// [`ATTRIBUTE_STRIDE`] are the strides of the two pool regions.
+pub const VERTEX_STRIDE: usize = POSITION_STRIDE + ATTRIBUTE_STRIDE;
 
 /// How many cascades the sun's shadow map is split into.
 ///
@@ -159,9 +193,10 @@ const _: () = assert!(
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
 /// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
 /// `float4x4`, the irradiance grid's [`PROBE_VOLUME_SIZE`] header, the LOD and
-/// fog rows, the sky's three spherical-harmonic rows, and the previous frame's
-/// `float4x4`. Checked against the `Offset` decorations `slangc` emits by this
-/// module's `the_uniform_block_matches_the_offsets_slangc_emits`.
+/// fog rows, the sky's three spherical-harmonic rows, the previous frame's
+/// `float4x4` and the vertex pool's `uint4`. Checked against the `Offset`
+/// decorations `slangc` emits by this module's
+/// `the_uniform_block_matches_the_offsets_slangc_emits`.
 pub const FRAME_UNIFORMS_SIZE: usize = 96
     + 64 * SHADOW_CASCADES
     + 48
@@ -170,7 +205,8 @@ pub const FRAME_UNIFORMS_SIZE: usize = 96
     + 16
     + 32
     + 48
-    + 64;
+    + 64
+    + 16;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -195,13 +231,14 @@ pub const INSTANCE_PAD_WORDS: usize = 2;
 
 /// Bytes per [`GpuMesh`], and the stride of the mesh-table storage buffer.
 ///
-/// Three `uint` then six `float`, no padding. Checked against the
-/// `ArrayStride 36` and the `Offset` decorations `slangc` emits by this module's
+/// Three `uint` then ten `float`, no padding — the box's two corners and then
+/// [`GpuMesh::uv_range`]'s scale and offset. Checked against the `ArrayStride`
+/// and the `Offset` decorations `slangc` emits by this module's
 /// `the_mesh_entry_layout_matches_the_offsets_slangc_emits` — which is the test
 /// that says all three targets really did lay it out this way, since a `std430`
 /// struct of scalars is one of the few whose stride an implementation could
 /// round up without anything else noticing.
-pub const MESH_ENTRY_STRIDE: usize = 36;
+pub const MESH_ENTRY_STRIDE: usize = 52;
 
 /// Bytes per [`GpuMaterial`], and the stride of the material-table storage
 /// buffer.
@@ -222,24 +259,207 @@ pub const MATERIAL_STRIDE: usize = 48;
 /// `DrawConstants` in `shaders/mesh.slang`.
 pub const DRAW_CONSTANTS_SIZE: usize = 16;
 
-/// One vertex, matching `struct MeshVertex` in `shaders/mesh.slang`.
+/// One vertex in the two-stream layout `docs/plan/43-render-standards.md` §2
+/// decided on 2026-08-30.
+///
+/// # Two streams, one record
+///
+/// A caller describes geometry as an array of these, [`VERTEX_STRIDE`] bytes
+/// each — [`to_bytes`](Self::to_bytes), which is the position first and the
+/// attributes after it. What reaches the device is *not* that array:
+/// [`MeshPool`](https://docs.rs/crcbl-render) splits it, so the pool's buffer
+/// is [`POSITION_STRIDE`] bytes per vertex of positions followed by
+/// [`ATTRIBUTE_STRIDE`] bytes per vertex of attributes, and a pass that wants
+/// geometry alone reads a contiguous run of [`POSITION_STRIDE`] instead of
+/// striding over [`VERTEX_STRIDE`] and discarding most of every fetch. That is
+/// the whole point of the split; the depth-only entry point that spends it is a
+/// later rung.
+///
+/// **One buffer, two regions, and that is forced.** The obvious spelling is two
+/// storage buffers, one bound per stream. The raster path's bind group layout
+/// already binds [`PORTABLE_STORAGE_BUFFERS_PER_STAGE`] storage buffers in its
+/// vertex stage — every one a WebGPU device guarantees — so a ninth is a
+/// renderer that cannot be built in a browser. Two regions of one binding costs
+/// nothing a separate buffer would have saved: the memory system sees the same
+/// two contiguous runs either way.
+///
+/// [`PORTABLE_STORAGE_BUFFERS_PER_STAGE`]: https://docs.rs/crcbl-hal
+///
+/// # Every attribute is quantised, and [`crate::vertex`] is the arithmetic
+///
+/// The normal and the tangent are one [`QTangent`], each UV pair is `unorm16x2`
+/// over the mesh's own [`UvRange`], and the colour is `rgba8`. Nothing here
+/// re-derives any of that: [`from_normal`](Self::from_normal) is what every
+/// constructor in the tree calls, and it calls that module.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshVertex {
-    /// Object-space position in `xyz`; `w` unused and written as `1.0`.
-    pub position: [f32; 4],
-    /// Object-space normal in `xyz`, unit length; `w` unused and written as
-    /// `0.0`.
-    pub normal: [f32; 4],
-    /// Linear RGBA albedo.
-    pub color: [f32; 4],
-    /// Base-colour texture coordinates in `xy`; `zw` unused and written as
-    /// `0.0`.
+    /// Object-space position — the whole of stream 0.
+    pub position: [f32; 3],
+    /// The tangent frame as a `snorm16x4` quaternion, handedness in the sign of
+    /// `w`. Replaces the normal *and* the tangent.
+    pub qtangent: QTangent,
+    /// Base-colour texture coordinates, quantised onto the mesh's
+    /// [`GpuMesh::uv_range`].
+    pub uv0: [u16; 2],
+    /// The second UV set's lanes, on the same range.
     ///
-    /// A whole `float4` for two numbers because the shader's struct is four
-    /// `float4`s with no padding anywhere — see `struct MeshVertex` in
-    /// `shaders/mesh.slang`, where a `float2` would cost the same eight bytes
-    /// of tail padding and put a hole in a layout that has none.
-    pub uv: [f32; 4],
+    /// **Nothing fills them and nothing reads them yet.** `crcbl_scene`'s
+    /// importer reads `TEXCOORD_0` alone and reports a material sampling
+    /// `TEXCOORD_1` as skipped, so every constructor in this workspace writes
+    /// zero here and no shader declares a second coordinate. The lanes are in
+    /// the layout because §2 decided the layout once and every golden in the
+    /// tree re-blesses when it changes; they are not a working second UV set,
+    /// and the importer that fills them is `docs/backlog.md`'s.
+    pub uv1: [u16; 2],
+    /// Linear RGBA albedo as `rgba8`.
+    pub color: [u8; 4],
+}
+
+impl MeshVertex {
+    /// A vertex whose frame is [`orthonormal_basis`]' stand-in for `normal` —
+    /// what a mesh that ships no tangent gets.
+    ///
+    /// Every constructor in this workspace takes this arm, because nothing here
+    /// produces a tangent: the glTF importer does not read `TANGENT`, and the
+    /// engine's own meshes are authored as positions, normals and UVs. A frame
+    /// arriving with a real tangent goes through [`from_frame`](Self::from_frame)
+    /// instead, which is what an importer that read `TANGENT` would call, with
+    /// glTF's `w` deciding the handedness.
+    ///
+    /// `range` is the mesh's, not this vertex's: a UV lane means nothing
+    /// without the scale and offset it was quantised against, and that pair
+    /// rides in [`GpuMesh::uv_range`] for the whole mesh. Compute it with
+    /// [`UvRange::from_uvs`] over every coordinate the mesh carries, before
+    /// building any vertex.
+    ///
+    /// [`orthonormal_basis`]: crate::vertex::orthonormal_basis
+    #[must_use]
+    pub fn from_normal(
+        position: [f32; 3],
+        normal: [f32; 3],
+        color: [f32; 4],
+        uv: [f32; 2],
+        range: &UvRange,
+    ) -> Self {
+        let (tangent, bitangent) = crate::vertex::orthonormal_basis(normal);
+        Self::from_frame(
+            position,
+            crate::vertex::TangentFrame {
+                tangent,
+                bitangent,
+                normal,
+            },
+            color,
+            uv,
+            range,
+        )
+    }
+
+    /// The same vertex from a frame the caller already has.
+    #[must_use]
+    pub fn from_frame(
+        position: [f32; 3],
+        frame: crate::vertex::TangentFrame,
+        color: [f32; 4],
+        uv: [f32; 2],
+        range: &UvRange,
+    ) -> Self {
+        Self {
+            position,
+            qtangent: QTangent::encode(frame),
+            uv0: range.encode(uv),
+            uv1: [0; 2],
+            color: crate::vertex::encode_rgba8(color),
+        }
+    }
+
+    /// The record a description holds: [`position_bytes`](Self::position_bytes)
+    /// then [`attribute_bytes`](Self::attribute_bytes).
+    ///
+    /// Little-endian throughout, which is what `std430` means on every target
+    /// this engine has.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; VERTEX_STRIDE] {
+        let mut bytes = [0u8; VERTEX_STRIDE];
+        bytes[..POSITION_STRIDE].copy_from_slice(&self.position_bytes());
+        bytes[POSITION_STRIDE..].copy_from_slice(&self.attribute_bytes());
+        bytes
+    }
+
+    /// The inverse of [`to_bytes`](Self::to_bytes).
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; VERTEX_STRIDE]) -> Self {
+        let word = |at: usize| {
+            u32::from_le_bytes(
+                bytes[at..at + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            )
+        };
+        let halves = |at: usize| [word(at) as u16, (word(at) >> 16) as u16];
+        let qtangent = [halves(POSITION_STRIDE), halves(POSITION_STRIDE + 4)];
+        Self {
+            position: [
+                f32::from_bits(word(0)),
+                f32::from_bits(word(4)),
+                f32::from_bits(word(8)),
+            ],
+            qtangent: QTangent([
+                qtangent[0][0] as i16,
+                qtangent[0][1] as i16,
+                qtangent[1][0] as i16,
+                qtangent[1][1] as i16,
+            ]),
+            uv0: halves(POSITION_STRIDE + 8),
+            uv1: halves(POSITION_STRIDE + 12),
+            color: word(POSITION_STRIDE + 16).to_le_bytes(),
+        }
+    }
+
+    /// This vertex's [`POSITION_STRIDE`] bytes of stream 0.
+    #[must_use]
+    pub fn position_bytes(&self) -> [u8; POSITION_STRIDE] {
+        let mut bytes = [0u8; POSITION_STRIDE];
+        for (lane, value) in self.position.iter().enumerate() {
+            bytes[lane * 4..lane * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// This vertex's [`ATTRIBUTE_STRIDE`] bytes of stream 1, as the `uint`s the
+    /// shaders unpack.
+    ///
+    /// Each pair of sixteen-bit lanes rides in one word, low lane first — which
+    /// is what a little-endian `uint` load and a `snorm16x2`/`unorm16x2` vertex
+    /// fetch both mean by "first".
+    #[must_use]
+    pub fn attribute_bytes(&self) -> [u8; ATTRIBUTE_STRIDE] {
+        let pair = |low: u16, high: u16| u32::from(low) | (u32::from(high) << 16);
+        let lanes = self.qtangent.0;
+        let words = [
+            pair(lanes[0] as u16, lanes[1] as u16),
+            pair(lanes[2] as u16, lanes[3] as u16),
+            pair(self.uv0[0], self.uv0[1]),
+            pair(self.uv1[0], self.uv1[1]),
+            u32::from_le_bytes(self.color),
+        ];
+        let mut bytes = [0u8; ATTRIBUTE_STRIDE];
+        for (index, word) in words.iter().enumerate() {
+            bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        bytes
+    }
+}
+
+/// A run of vertices as the bytes a description carries — [`VERTEX_STRIDE`]
+/// each, in order.
+#[must_use]
+pub fn vertex_bytes(vertices: &[MeshVertex]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vertices.len() * VERTEX_STRIDE);
+    for vertex in vertices {
+        bytes.extend_from_slice(&vertex.to_bytes());
+    }
+    bytes
 }
 
 /// The frame's non-geometry inputs, matching `struct FrameUniforms` in
@@ -444,6 +664,30 @@ pub struct FrameUniforms {
     ///
     /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms.
     pub previous_view_proj: [f32; 16],
+    /// Where the vertex pool's **attribute** region begins, as a `uint` index
+    /// into the pool read as words; `yzw` unread padding `std140` aligns a
+    /// vector to sixteen bytes with.
+    ///
+    /// `docs/plan/43-render-standards.md` §2's two streams live in one buffer:
+    /// the first [`POSITION_STRIDE`] bytes per vertex of positions, then
+    /// [`ATTRIBUTE_STRIDE`] bytes per vertex of attributes. A vertex `v`'s
+    /// position is at word `3 v` and its attributes at word `x + 5 v`, which
+    /// is the only thing a shader cannot derive for itself — the boundary is
+    /// the pool's capacity, and a shader has never been told that.
+    ///
+    /// **One number for the whole pool, not one per mesh**, and that is what
+    /// makes it right for a skinned instance too: `GpuInstance::base_vertex`
+    /// overrides which vertices a draw reads, and both regions are addressed
+    /// off the same override with no second field to keep in step.
+    ///
+    /// [`MeshPool::attribute_base`](https://docs.rs/crcbl-render) is what
+    /// computes it, and the skinning dispatch is handed the same number through
+    /// [`skinning::Params::attribute_base`](crate::skinning::Params::attribute_base)
+    /// because that pass binds no frame block.
+    ///
+    /// **Last in the block**, on [`lod_params`](Self::lod_params)' terms: no
+    /// existing member's offset moves.
+    pub vertex_pool: [u32; 4],
 }
 
 impl FrameUniforms {
@@ -604,6 +848,10 @@ impl FrameUniforms {
         put(&mut bytes, &mut at, &self.sky_sh_g);
         put(&mut bytes, &mut at, &self.sky_sh_b);
         put(&mut bytes, &mut at, &self.previous_view_proj);
+        for value in self.vertex_pool {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -937,6 +1185,27 @@ pub struct GpuMesh {
     pub bounds_min: [f32; 3],
     /// Highest corner of the same box.
     pub bounds_max: [f32; 3],
+    /// The scale and offset every [`MeshVertex::uv0`] lane of this mesh was
+    /// quantised against, and the pair the shaders read a coordinate back
+    /// through.
+    ///
+    /// **Per mesh, which is what buys the sixteen bits.** A mesh that tiles its
+    /// texture forty times and one that does not would otherwise share a range
+    /// forty times wider than either needs — see [`UvRange`], where that is
+    /// argued in full.
+    ///
+    /// **A table field rather than a draw constant**, though
+    /// `docs/plan/43-render-standards.md` §2 says "the draw constants": the row
+    /// is what both geometry paths already fetch to resolve a mesh's vertices,
+    /// and the mesh path fetches it through `instance.mesh` where the raster
+    /// path fetches it through the bucket's — so a pair carried in either
+    /// pass's own constant block would be a second thing to keep in step for
+    /// no gain. The row *is* this mesh's constants.
+    ///
+    /// **Every level of a DAG carries the same range**, because the mesh path
+    /// reads level 0's row while drawing a coarser level's vertices. The caller
+    /// that supplies a DAG's levels supplies one range for all of them.
+    pub uv_range: UvRange,
 }
 
 impl GpuMesh {
@@ -949,7 +1218,13 @@ impl GpuMesh {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        for value in self.bounds_min.iter().chain(&self.bounds_max) {
+        for value in self
+            .bounds_min
+            .iter()
+            .chain(&self.bounds_max)
+            .chain(&self.uv_range.scale)
+            .chain(&self.uv_range.offset)
+        {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
@@ -983,6 +1258,10 @@ impl GpuMesh {
             index_count: uint_at(8),
             bounds_min: [float_at(12), float_at(16), float_at(20)],
             bounds_max: [float_at(24), float_at(28), float_at(32)],
+            uv_range: UvRange {
+                scale: [float_at(36), float_at(40)],
+                offset: [float_at(44), float_at(48)],
+            },
         }
     }
 }
@@ -1365,18 +1644,42 @@ const QUAD_UV: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 /// than in one corner.
 #[must_use]
 pub fn cube_vertices() -> Vec<MeshVertex> {
+    let range = demo_uv_range();
     let mut vertices = Vec::with_capacity(CUBE_VERTEX_COUNT);
     for face in &FACES {
         for (corner, uv) in face.corners.iter().zip(&QUAD_UV) {
-            vertices.push(MeshVertex {
-                position: [corner[0], corner[1], corner[2], 1.0],
-                normal: [face.normal[0], face.normal[1], face.normal[2], 0.0],
-                color: [face.color[0], face.color[1], face.color[2], 1.0],
-                uv: [uv[0], uv[1], 0.0, 0.0],
-            });
+            vertices.push(MeshVertex::from_normal(
+                *corner,
+                face.normal,
+                [face.color[0], face.color[1], face.color[2], 1.0],
+                *uv,
+                &range,
+            ));
         }
     }
     vertices
+}
+
+/// The [`UvRange`] every mesh in this module quantises its coordinates against.
+///
+/// All three are authored on the unit square: the cube's and the pyramid's
+/// coordinates are `QUAD_UV` and `TRIANGLE_UV` exactly, and the open box's
+/// are `(column + corner) / OPEN_BOX_SUBDIVISIONS`, which reaches zero and one
+/// and nothing outside either. Derived from those two tables rather than
+/// written down, and `the_demo_meshes_are_authored_on_the_range_they_declare`
+/// is what would fail if a mesh here grew a coordinate this range does not
+/// cover.
+///
+/// A description carries it beside the vertex bytes — see `Geometry::Flat`'s
+/// `uv_range` in `crcbl-render` — because a lane means nothing without the
+/// scale and offset it was quantised against, and the pool writes the pair into
+/// [`GpuMesh::uv_range`] for the shaders to read back through.
+#[must_use]
+pub fn demo_uv_range() -> UvRange {
+    let mut uvs = Vec::with_capacity(QUAD_UV.len() + TRIANGLE_UV.len());
+    uvs.extend_from_slice(&QUAD_UV);
+    uvs.extend_from_slice(&TRIANGLE_UV);
+    UvRange::from_uvs(&uvs)
 }
 
 /// The cube's indices: `0 1 2, 0 2 3` per face, preserving each face's
@@ -1397,18 +1700,7 @@ pub fn cube_indices() -> Vec<u32> {
 /// a struct of `float4`s and what every target this engine has is.
 #[must_use]
 pub fn cube_vertex_bytes() -> Vec<u8> {
-    let vertices = cube_vertices();
-    crate::pack_f32_le(
-        vertices.iter().flat_map(|vertex| {
-            vertex
-                .position
-                .iter()
-                .chain(&vertex.normal)
-                .chain(&vertex.color)
-                .chain(&vertex.uv)
-        }),
-        vertices.len() * VERTEX_STRIDE,
-    )
+    vertex_bytes(&cube_vertices())
 }
 
 /// [`cube_indices`] as the bytes an index buffer holds.
@@ -1493,22 +1785,24 @@ pub fn pyramid_vertices() -> Vec<MeshVertex> {
     ];
     let apex = [0.0, PYRAMID_APEX_Y, 0.0];
 
+    let range = demo_uv_range();
     let mut vertices = Vec::with_capacity(PYRAMID_VERTEX_COUNT);
     // The base, in the same corner order as the cube's `-Y` face, so the
     // `0 1 2, 0 2 3` triangulation below is the one `cube_indices` uses — and
     // so is `QUAD_UV`, for the same reason.
     for (corner, uv) in base.iter().zip(&QUAD_UV) {
-        vertices.push(MeshVertex {
-            position: [corner[0], corner[1], corner[2], 1.0],
-            normal: [0.0, -1.0, 0.0, 0.0],
-            color: [
+        vertices.push(MeshVertex::from_normal(
+            *corner,
+            [0.0, -1.0, 0.0],
+            [
                 PYRAMID_BASE_COLOR[0],
                 PYRAMID_BASE_COLOR[1],
                 PYRAMID_BASE_COLOR[2],
                 1.0,
             ],
-            uv: [uv[0], uv[1], 0.0, 0.0],
-        });
+            *uv,
+            &range,
+        ));
     }
     // One triangle per side. Corner `i + 1` before corner `i` is what makes the
     // winding counter-clockwise from outside; taking them in the other order
@@ -1517,12 +1811,13 @@ pub fn pyramid_vertices() -> Vec<MeshVertex> {
         let corners = [base[(side + 1) % base.len()], base[side], apex];
         let normal = triangle_normal(corners[0], corners[1], corners[2]);
         for (corner, uv) in corners.iter().zip(&TRIANGLE_UV) {
-            vertices.push(MeshVertex {
-                position: [corner[0], corner[1], corner[2], 1.0],
-                normal: [normal[0], normal[1], normal[2], 0.0],
-                color: [color[0], color[1], color[2], 1.0],
-                uv: [uv[0], uv[1], 0.0, 0.0],
-            });
+            vertices.push(MeshVertex::from_normal(
+                *corner,
+                normal,
+                [color[0], color[1], color[2], 1.0],
+                *uv,
+                &range,
+            ));
         }
     }
     vertices
@@ -1567,18 +1862,7 @@ pub fn pyramid_indices() -> Vec<u32> {
 /// as [`cube_vertex_bytes`].
 #[must_use]
 pub fn pyramid_vertex_bytes() -> Vec<u8> {
-    let vertices = pyramid_vertices();
-    crate::pack_f32_le(
-        vertices.iter().flat_map(|vertex| {
-            vertex
-                .position
-                .iter()
-                .chain(&vertex.normal)
-                .chain(&vertex.color)
-                .chain(&vertex.uv)
-        }),
-        vertices.len() * VERTEX_STRIDE,
-    )
+    vertex_bytes(&pyramid_vertices())
 }
 
 // ---------------------------------------------------------------------------
@@ -1706,6 +1990,7 @@ fn bilinear(corners: &[[f32; 3]; 4], s: f32, t: f32) -> [f32; 3] {
 /// rather than over each quad.
 #[must_use]
 pub fn open_box_vertices() -> Vec<MeshVertex> {
+    let range = demo_uv_range();
     let step = 1.0 / OPEN_BOX_SUBDIVISIONS as f32;
     let mut vertices = Vec::with_capacity(OPEN_BOX_VERTEX_COUNT);
     for face in &OPEN_BOX_FACES {
@@ -1718,12 +2003,13 @@ pub fn open_box_vertices() -> Vec<MeshVertex> {
                     let s = (column as f32 + uv[0]) * step;
                     let t = (row as f32 + uv[1]) * step;
                     let position = bilinear(&face.corners, s, t);
-                    vertices.push(MeshVertex {
-                        position: [position[0], position[1], position[2], 1.0],
-                        normal: [face.normal[0], face.normal[1], face.normal[2], 0.0],
-                        color: [face.color[0], face.color[1], face.color[2], 1.0],
-                        uv: [s, t, 0.0, 0.0],
-                    });
+                    vertices.push(MeshVertex::from_normal(
+                        position,
+                        face.normal,
+                        [face.color[0], face.color[1], face.color[2], 1.0],
+                        [s, t],
+                        &range,
+                    ));
                 }
             }
         }
@@ -1747,18 +2033,7 @@ pub fn open_box_indices() -> Vec<u32> {
 /// as [`cube_vertex_bytes`].
 #[must_use]
 pub fn open_box_vertex_bytes() -> Vec<u8> {
-    let vertices = open_box_vertices();
-    crate::pack_f32_le(
-        vertices.iter().flat_map(|vertex| {
-            vertex
-                .position
-                .iter()
-                .chain(&vertex.normal)
-                .chain(&vertex.color)
-                .chain(&vertex.uv)
-        }),
-        vertices.len() * VERTEX_STRIDE,
-    )
+    vertex_bytes(&open_box_vertices())
 }
 
 #[cfg(test)]
@@ -2055,8 +2330,7 @@ mod tests {
                 "{name} declares `previous_view_proj` and never carries a vertex through it"
             );
             assert!(
-                !source
-                    .contains("mul(instance.previous_transform, float4(vertex.position.xyz, 1.0))"),
+                !source.contains("mul(instance.previous_transform, float4(vertex.position, 1.0))"),
                 "{name} puts this frame's vertex through the previous transform, which is the \
                  reading a skinned instance's deformation is invisible to"
             );
@@ -2066,7 +2340,7 @@ mod tests {
                  its previous position cannot be a deformed one"
             );
             assert!(
-                source.contains("vertices[index + previous_base"),
+                source.contains("load_position(index + previous_base"),
                 "{name} does not fetch its previous position out of that base"
             );
             assert!(
@@ -2302,12 +2576,12 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 1376,
+            FRAME_UNIFORMS_SIZE, 1392,
             "at two cascades and fourteen light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
         // 224, 240, 256, 272, 1168, 1184, 1200, 1216, 1232, 1248, 1264, 1280,
-        // 1296, 1312 — and
+        // 1296, 1312, 1376 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64` beside
         // `%_arr_mat4v4float_int_14`, which is the light array's own length.
         // Three of the middle rows are the grid header's, which this side
@@ -2333,6 +2607,7 @@ mod tests {
             208 + cascades + lights + PROBE_VOLUME_SIZE,
             224 + cascades + lights + PROBE_VOLUME_SIZE,
             240 + cascades + lights + PROBE_VOLUME_SIZE,
+            304 + cascades + lights + PROBE_VOLUME_SIZE,
         ];
         let sizes = [
             64usize,
@@ -2351,6 +2626,7 @@ mod tests {
             16,
             16,
             64,
+            16,
         ];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
@@ -2403,6 +2679,7 @@ mod tests {
             // that forgot to advance the camera's history would upload — is the
             // one mistake this member has, and equal values would hide it.
             previous_view_proj: core::array::from_fn(|lane| 130.0 + lane as f32),
+            vertex_pool: [150, 151, 152, 153],
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -2518,6 +2795,18 @@ mod tests {
                 at(previous + lane * 4),
                 130.0 + lane as f32,
                 "lane {lane} of the previous frame's view-projection"
+            );
+        }
+        // And the pool's boundary past that, which is where the block now ends.
+        // Every lane, though only `x` is read: three `uint`s of padding written
+        // as something else would be a block whose *size* the two sides agree
+        // about and whose tail the shader is free to read.
+        let pool = previous + 64;
+        for (lane, expected) in [150u32, 151, 152, 153].into_iter().enumerate() {
+            assert_eq!(
+                word_at(pool + lane * 4),
+                expected,
+                "vertex_pool lane {lane}"
             );
         }
     }
@@ -2675,58 +2964,130 @@ mod tests {
         }
     }
 
+    /// The record is a `float3` and five `uint`s, with no padding on either
+    /// side of the boundary the pool splits at.
     #[test]
-    fn the_vertex_layout_is_four_float4s_with_no_padding() {
+    fn the_vertex_layout_is_two_streams_with_no_padding() {
         let bytes = cube_vertex_bytes();
-        assert_eq!(VERTEX_STRIDE, 16 * size_of::<f32>());
+        assert_eq!(POSITION_STRIDE, 3 * size_of::<f32>());
+        assert_eq!(ATTRIBUTE_STRIDE, 5 * size_of::<u32>());
+        assert_eq!(VERTEX_STRIDE, POSITION_STRIDE + ATTRIBUTE_STRIDE);
         assert_eq!(bytes.len(), CUBE_VERTEX_COUNT * VERTEX_STRIDE);
         assert_eq!(cube_vertices().len(), CUBE_VERTEX_COUNT);
         assert_eq!(cube_indices().len(), CUBE_INDEX_COUNT);
         assert_eq!(cube_index_bytes().len(), CUBE_INDEX_COUNT * 4);
     }
 
-    /// **The UV is the fourth `float4`, at byte 48 of each vertex**, and every
-    /// mesh really carries one.
+    /// **The UV lanes are the third attribute word**, and every mesh really
+    /// carries a coordinate that spans its layer.
     ///
-    /// Read out of the packed bytes rather than off the struct: the packer
-    /// chains four fields and a chain that forgot the last one would produce a
+    /// Read out of the packed bytes rather than off the struct: the record is
+    /// built by two functions and one that dropped a field would produce a
     /// buffer of the right *length* only by accident — and would silently give
     /// every fragment the UV of the vertex after it. Both meshes are checked
     /// because they are packed by two call sites.
+    ///
+    /// Decoded through [`demo_uv_range`] the way the shader does, so what is
+    /// asserted is the coordinate a fragment actually receives rather than the
+    /// lanes on the way to it.
     #[test]
-    fn every_vertex_carries_its_uv_in_the_fourth_float4() {
+    fn every_vertex_carries_its_uv_in_the_third_attribute_word() {
+        let range = demo_uv_range();
         for (name, vertices, bytes) in [
             ("cube", cube_vertices(), cube_vertex_bytes()),
             ("pyramid", pyramid_vertices(), pyramid_vertex_bytes()),
         ] {
             for (index, vertex) in vertices.iter().enumerate() {
-                let at = index * VERTEX_STRIDE + 48;
-                let read = |lane: usize| {
-                    f32::from_le_bytes(
-                        bytes[at + lane * 4..at + lane * 4 + 4]
-                            .try_into()
-                            .expect("four bytes"),
-                    )
-                };
+                let at = index * VERTEX_STRIDE + POSITION_STRIDE + 8;
+                let word = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
                 assert_eq!(
-                    [read(0), read(1), read(2), read(3)],
-                    vertex.uv,
+                    [word as u16, (word >> 16) as u16],
+                    vertex.uv0,
                     "{name} vertex {index}'s uv is not at byte {at}"
                 );
             }
             // And the coordinates actually span the layer rather than sitting
             // at one corner, which is what makes a page layer visible over a
             // whole face instead of as a single flat colour.
-            let us: Vec<f32> = vertices.iter().map(|vertex| vertex.uv[0]).collect();
-            let vs: Vec<f32> = vertices.iter().map(|vertex| vertex.uv[1]).collect();
-            assert!(
-                us.contains(&0.0) && us.contains(&1.0),
-                "{name} never reaches both edges of the layer in u"
+            let decoded: Vec<[f32; 2]> = vertices
+                .iter()
+                .map(|vertex| range.decode(vertex.uv0))
+                .collect();
+            for (axis, name_of) in [(0usize, "u"), (1, "v")] {
+                let lane: Vec<f32> = decoded.iter().map(|uv| uv[axis]).collect();
+                assert!(
+                    lane.contains(&0.0) && lane.contains(&1.0),
+                    "{name} never reaches both edges of the layer in {name_of}"
+                );
+            }
+        }
+    }
+
+    /// Every coordinate this module's meshes carry survives the trip through
+    /// [`demo_uv_range`], which is what says that one range really does cover
+    /// all three.
+    ///
+    /// The open box is the one that could drift: its coordinates are generated
+    /// from [`OPEN_BOX_SUBDIVISIONS`] rather than read out of a table, so a
+    /// subdivision count that stopped reaching the edges — or a face laid out
+    /// past them — would be a mesh quantised against a range that does not
+    /// contain it, and every lane would clamp to an edge instead.
+    #[test]
+    fn the_demo_meshes_are_authored_on_the_range_they_declare() {
+        let range = demo_uv_range();
+        assert_eq!(range, UvRange::from_uvs(&[[0.0, 0.0], [1.0, 1.0]]));
+        let step = 1.0 / OPEN_BOX_SUBDIVISIONS as f32;
+        let intended: Vec<(&str, Vec<[f32; 2]>)> = vec![
+            (
+                "cube",
+                FACES.iter().flat_map(|_| QUAD_UV).collect::<Vec<_>>(),
+            ),
+            (
+                "pyramid",
+                QUAD_UV
+                    .into_iter()
+                    .chain(
+                        PYRAMID_SIDE_COLORS
+                            .iter()
+                            .flat_map(|_| TRIANGLE_UV.into_iter()),
+                    )
+                    .collect(),
+            ),
+            (
+                "open box",
+                OPEN_BOX_FACES
+                    .iter()
+                    .flat_map(|_| {
+                        (0..OPEN_BOX_SUBDIVISIONS).flat_map(move |row| {
+                            (0..OPEN_BOX_SUBDIVISIONS).flat_map(move |column| {
+                                QUAD_UV.into_iter().map(move |uv| {
+                                    [(column as f32 + uv[0]) * step, (row as f32 + uv[1]) * step]
+                                })
+                            })
+                        })
+                    })
+                    .collect(),
+            ),
+        ];
+        for ((name, coordinates), vertices) in
+            intended
+                .into_iter()
+                .zip([cube_vertices(), pyramid_vertices(), open_box_vertices()])
+        {
+            assert_eq!(
+                coordinates.len(),
+                vertices.len(),
+                "{name} carries a different number of coordinates than vertices"
             );
-            assert!(
-                vs.contains(&0.0) && vs.contains(&1.0),
-                "{name} never reaches both edges of the layer in v"
-            );
+            for (index, (uv, vertex)) in coordinates.iter().zip(&vertices).enumerate() {
+                let decoded = range.decode(vertex.uv0);
+                for axis in 0..2 {
+                    assert!(
+                        (decoded[axis] - uv[axis]).abs() <= UvRange::MAX_RELATIVE_ERROR,
+                        "{name} vertex {index} decodes {decoded:?} where it was authored {uv:?}"
+                    );
+                }
+            }
         }
     }
 
@@ -2828,6 +3189,125 @@ mod tests {
         }
     }
 
+    /// The stretch of a shader source that decodes a vertex: from the first
+    /// stream constant to the close of `struct MeshVertex`, with `//` comments
+    /// dropped and runs of whitespace collapsed.
+    ///
+    /// Comments are dropped deliberately, on
+    /// `crcbl_shaders::volumetric::one_function`'s terms: what has to agree
+    /// between three copies is the arithmetic, and a copy that says in its own
+    /// words why it exists is a copy doing its job.
+    fn decode_block(source: &str) -> String {
+        let start = source
+            .find("static const uint POSITION_WORDS")
+            .expect("the shader declares the position stream's width");
+        let tail = &source[start..];
+        let struct_at = tail
+            .find("struct MeshVertex")
+            .expect("the shader declares the decoded vertex");
+        let end = struct_at
+            + tail[struct_at..]
+                .find("\n};")
+                .expect("the decoded vertex closes")
+            + 3;
+        tail[..end]
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Every shader that touches the vertex pool spells the decode the same
+    /// way.
+    ///
+    /// `mesh.slang` pulls the pool, `mesh_cluster.slang` pulls the same pool
+    /// from a mesh stage, and `skinning.slang` writes it — and there is no
+    /// shared header, because the compile script hashes one source per artifact
+    /// and an `#include` would be a file whose edits nothing downstream
+    /// notices. A drift is not a compile error in any of the three: every file
+    /// builds, and one pass reads the bytes another wrote as different numbers.
+    ///
+    /// The two stream widths are checked against this module's strides as well,
+    /// because a shader stepping by four words where the pool strides five is
+    /// the same defect arriving from the other side — and no amount of
+    /// agreement *between* the shaders would see it.
+    #[test]
+    fn every_shader_decodes_a_vertex_the_same_way() {
+        const MESH: &str = include_str!("../shaders/mesh.slang");
+        const CLUSTER: &str = include_str!("../shaders/mesh_cluster.slang");
+        const SKINNING: &str = include_str!("../shaders/skinning.slang");
+
+        let declared = decode_block(MESH);
+        assert!(
+            declared.contains("decode_qtangent") && declared.contains("unpack_unorm16x2"),
+            "the block matched in mesh.slang carries no decode, so this comparison \
+             checked nothing: {declared}"
+        );
+        for (name, source) in [
+            ("mesh_cluster.slang", CLUSTER),
+            ("skinning.slang", SKINNING),
+        ] {
+            assert_eq!(
+                declared,
+                decode_block(source),
+                "the vertex decode differs between mesh.slang and {name}; one pass would \
+                 read the vertex pool with arithmetic another wrote it with"
+            );
+        }
+
+        // The loaders are `mesh.slang`'s and `mesh_cluster.slang`'s alone —
+        // `skinning.slang` addresses the pool through its own block rather than
+        // a frame one — so they are compared over the two files that have them.
+        for line in [
+            "uint word = at * POSITION_WORDS;",
+            "uint word = frame.vertex_pool.x + at * ATTRIBUTE_WORDS;",
+            "vertex.uv0 = range.zw + range.xy * unpack_unorm16x2(vertices[word + 2]);",
+        ] {
+            for (name, source) in [("mesh.slang", MESH), ("mesh_cluster.slang", CLUSTER)] {
+                assert!(
+                    source.contains(line),
+                    "{name} does not address the pool with `{line}`"
+                );
+            }
+        }
+
+        for (words, stride) in [
+            ("POSITION_WORDS", POSITION_STRIDE),
+            ("ATTRIBUTE_WORDS", ATTRIBUTE_STRIDE),
+        ] {
+            let spelling = format!("static const uint {words} = {};", stride / 4);
+            for (name, source) in [
+                ("mesh.slang", MESH),
+                ("mesh_cluster.slang", CLUSTER),
+                ("skinning.slang", SKINNING),
+            ] {
+                assert!(
+                    source.contains(&spelling),
+                    "{name} does not declare `{spelling}`, so it walks the pool at a stride \
+                     this module does not write it at"
+                );
+            }
+        }
+    }
+
+    /// The comparison above must be able to see a difference, which a matcher
+    /// that returned the same thing for every input could not.
+    #[test]
+    fn the_decode_comparison_notices_a_changed_line() {
+        const MESH: &str = include_str!("../shaders/mesh.slang");
+        let drifted = MESH.replace("/ 65535.0", "/ 65536.0");
+        assert_ne!(
+            decode_block(MESH),
+            decode_block(&drifted),
+            "a changed divisor is invisible to the comparison"
+        );
+        // And a reworded comment is not a difference, or the guard is one
+        // authors route around.
+        let recommented = MESH.replace("// low lane first.", "// the low lane first.");
+        assert_eq!(decode_block(MESH), decode_block(&recommented));
+    }
+
     /// The offsets `slangc` emitted for `DrawConstants`, read out of the
     /// disassembly, and the padding that makes the block's width the same
     /// number on both sides.
@@ -2870,11 +3350,12 @@ mod tests {
     /// only a second resident can show.
     #[test]
     fn the_mesh_entry_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuMesh_std430 ArrayStride 36`, and
+        // `OpDecorate %_runtimearr_GpuMesh_std430 ArrayStride 52`, and
         // `OpMemberDecorate %GpuMesh_std430 n Offset …`: 0, 4, 8, 12, 16, 20,
-        // 24, 28, 32. The WGSL and the MSL declare the same nine scalars with
-        // no explicit alignment, which is the same layout.
-        assert_eq!(MESH_ENTRY_STRIDE, 36);
+        // 24, 28, 32, 36, 40, 44, 48. The WGSL and the MSL declare the same
+        // thirteen scalars with no explicit alignment, which is the same
+        // layout.
+        assert_eq!(MESH_ENTRY_STRIDE, 52);
 
         let entry = GpuMesh {
             base_vertex: 24,
@@ -2882,6 +3363,10 @@ mod tests {
             index_count: 18,
             bounds_min: [-1.0, -2.0, -3.0],
             bounds_max: [4.0, 5.0, 6.0],
+            uv_range: UvRange {
+                scale: [7.0, 8.0],
+                offset: [9.0, 10.0],
+            },
         };
         let bytes = entry.to_bytes();
         assert_eq!(bytes.len(), MESH_ENTRY_STRIDE);
@@ -2898,6 +3383,10 @@ mod tests {
         assert_eq!(float_at(24), 4.0, "bounds_max.x at offset 24");
         assert_eq!(float_at(28), 5.0, "bounds_max.y at offset 28");
         assert_eq!(float_at(32), 6.0, "bounds_max.z at offset 32");
+        assert_eq!(float_at(36), 7.0, "uv_range.scale.x at offset 36");
+        assert_eq!(float_at(40), 8.0, "uv_range.scale.y at offset 40");
+        assert_eq!(float_at(44), 9.0, "uv_range.offset.x at offset 44");
+        assert_eq!(float_at(48), 10.0, "uv_range.offset.y at offset 48");
 
         // And the decode agrees with the encode, field for field.
         assert_eq!(GpuMesh::from_bytes(&bytes), entry);
@@ -3055,10 +3544,10 @@ mod tests {
             // And the declared normals agree with the winding, or the lighting
             // is inside out on a face that still draws.
             for slot in 0..3 {
-                let declared = vertices[triangle[slot] as usize].normal;
+                let declared = vertices[triangle[slot] as usize].qtangent.decode().normal;
                 for axis in 0..3 {
                     assert!(
-                        (declared[axis] - normal[axis]).abs() < 1e-5,
+                        (declared[axis] - normal[axis]).abs() < 1e-4,
                         "vertex {} of {triangle:?} declares {declared:?}, not {normal:?}",
                         triangle[slot]
                     );
@@ -3167,9 +3656,9 @@ mod tests {
                 // And the vertex normals agree with the winding, or the face
                 // still draws and is lit inside out.
                 for slot in 0..3 {
-                    let declared = vertices[corners[slot] as usize].normal;
+                    let declared = vertices[corners[slot] as usize].qtangent.decode().normal;
                     assert!(
-                        (declared[axis] - face.normal[axis]).abs() < 1e-6,
+                        (declared[axis] - face.normal[axis]).abs() <= QTangent::MAX_COMPONENT_ERROR,
                         "vertex {} of triangle {triangle} declares {declared:?}",
                         corners[slot]
                     );
@@ -3200,11 +3689,20 @@ mod tests {
                 );
             }
             // The texture coordinates run the same grid over `0..=1`, so a face
-            // samples the whole of its layer exactly as the cube's does.
+            // samples the whole of its layer exactly as the cube's does. On the
+            // grid rather than exact in `f32`: an `unorm16` lane is a
+            // sixty-five-thousandth of the range and a quarter is not a
+            // multiple of it, so what survives quantisation is the coordinate
+            // to within one step and not its last bit.
+            let uv = demo_uv_range().decode(vertex.uv0);
             for axis in 0..2 {
-                let quarters = vertex.uv[axis] * OPEN_BOX_SUBDIVISIONS as f32;
-                assert_eq!(quarters, quarters.trunc(), "uv {:?}", vertex.uv);
-                assert!((0.0..=1.0).contains(&vertex.uv[axis]), "uv {:?}", vertex.uv);
+                let quarters = uv[axis] * OPEN_BOX_SUBDIVISIONS as f32;
+                assert!(
+                    (quarters - quarters.round()).abs()
+                        <= UvRange::MAX_RELATIVE_ERROR * OPEN_BOX_SUBDIVISIONS as f32,
+                    "uv {uv:?} is not on the subdivision grid"
+                );
+                assert!((0.0..=1.0).contains(&uv[axis]), "uv {uv:?}");
             }
         }
     }

@@ -68,7 +68,14 @@ pub fn dag_scene(face: &Face) -> Result<SceneDesc<'static>, ClusterDagError> {
         capacities: dag_capacities(&dag),
         meshes: vec![MeshDesc {
             label: Cow::Borrowed("quarry face"),
-            geometry: Geometry::Dag { levels, dag },
+            geometry: Geometry::Dag {
+                // Every level's, because nothing here samples the page — see
+                // `crate::scene::vertex_bytes`, which gives every vertex of
+                // every level the same coordinate.
+                uv_range: crate::scene::uv_range(),
+                levels,
+                dag,
+            },
         }],
         materials: vec![ROCK],
         page: PageDesc::opaque_white(PAGE_EXTENT),
@@ -167,7 +174,7 @@ mod tests {
     fn every_level_is_packed_to_its_own_vertex_count() {
         let face = crate::face::quarry_face(CELLS);
         let scene = dag_scene(&face).expect("the face clusters");
-        let Geometry::Dag { levels, dag } = &scene.meshes[0].geometry else {
+        let Geometry::Dag { levels, dag, .. } = &scene.meshes[0].geometry else {
             panic!("dag_scene describes a DAG");
         };
         assert_eq!(levels.len(), dag.levels.len());

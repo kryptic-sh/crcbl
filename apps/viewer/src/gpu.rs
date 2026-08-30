@@ -520,6 +520,9 @@ impl Gpu {
                 // **This pool and no other.** A pass built against a different
                 // buffer writes vertices no draw of this renderer can reach.
                 vertices: renderer.vertex_buffer(),
+                // And the boundary between that pool's two streams, which the
+                // dispatch writes both of.
+                attribute_base: renderer.attribute_base(),
             },
         );
         match built {

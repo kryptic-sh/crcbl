@@ -12,32 +12,38 @@ use crcbl_greybox::{
     scene3d, sphere, stairs, unit_cube, wall,
 };
 use crcbl_render::scene::{Geometry, PageDesc};
-use crcbl_shaders::mesh::{GpuMaterial, VERTEX_STRIDE};
+use crcbl_shaders::mesh::{GpuMaterial, MeshVertex, VERTEX_STRIDE};
 use crcbl_shaders::meshlet::{MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES};
 use glam::Vec3;
 
-/// The position channel of every vertex, read out of a flat geometry's bytes.
+/// The position of every vertex, read out of a flat geometry's bytes.
 fn positions(geometry: &Geometry<'_>) -> Vec<Vec3> {
-    read_channel(geometry, 0)
+    records(geometry)
+        .into_iter()
+        .map(|vertex| Vec3::from_array(vertex.position))
+        .collect()
 }
 
-/// The normal channel of every vertex.
+/// The normal every vertex's tangent frame decodes to.
+///
+/// Decoded rather than read: the frame is a quantised quaternion now, so what
+/// a shader receives is the rotation of `(0, 0, 1)` by it and not a stored
+/// vector — and this is the number the checks below are about.
 fn normals(geometry: &Geometry<'_>) -> Vec<Vec3> {
-    read_channel(geometry, 16)
+    records(geometry)
+        .into_iter()
+        .map(|vertex| Vec3::from_array(vertex.qtangent.decode().normal))
+        .collect()
 }
 
-/// The `xyz` of the channel at `offset` bytes into each [`VERTEX_STRIDE`]-byte
-/// vertex.
-fn read_channel(geometry: &Geometry<'_>, offset: usize) -> Vec<Vec3> {
+/// Every vertex of a flat geometry, decoded out of the bytes the pool takes.
+fn records(geometry: &Geometry<'_>) -> Vec<MeshVertex> {
     let Geometry::Flat { vertices, .. } = geometry else {
         panic!("a greybox primitive is always Geometry::Flat");
     };
     vertices
         .chunks_exact(VERTEX_STRIDE)
-        .map(|vertex| {
-            let f = |o: usize| f32::from_le_bytes(vertex[o..o + 4].try_into().expect("four bytes"));
-            Vec3::new(f(offset), f(offset + 4), f(offset + 8))
-        })
+        .map(|vertex| MeshVertex::from_bytes(vertex.try_into().expect("one whole record")))
         .collect()
 }
 

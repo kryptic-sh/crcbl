@@ -207,7 +207,7 @@ impl QTangent {
 /// tiles its texture forty times and one that does not would otherwise share
 /// a range forty times wider than either needs, and the narrow one would spend
 /// most of its sixteen bits on coordinates it never reaches.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UvRange {
     /// The extent of the mesh's coordinates on each axis: `max - min`, and
     /// zero on an axis where every coordinate is the same.

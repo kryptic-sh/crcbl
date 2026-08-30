@@ -52,10 +52,11 @@ use crcbl_hal::{
 };
 use crcbl_render::skinning::{SkinRange, SkinnedRegion, Skinning, SkinningDesc};
 use crcbl_render::{MeshPool, MeshPoolDesc, RenderGraph, TransientPool};
-use crcbl_shaders::mesh::{MeshVertex, VERTEX_STRIDE};
+use crcbl_shaders::mesh::{ATTRIBUTE_STRIDE, MeshVertex, POSITION_STRIDE, VERTEX_STRIDE};
 use crcbl_shaders::skinning::{
     JOINT_STRIDE, PARAMS_SIZE, Params, SKIN_BINDING_STRIDE, SkinBinding, WORKGROUP_SIZE,
 };
+use crcbl_shaders::vertex::UvRange;
 use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::harness::{Headless, poisoned};
@@ -138,9 +139,42 @@ const GUARD_WORD: u32 = 0xC0DE_FACE;
 /// that margin rather than assuming it.
 const TOLERANCE: f32 = 1e-5;
 
+/// How far a read-back **basis vector** may sit from the oracle's.
+///
+/// Wider than [`TOLERANCE`], and the extra is quantisation rather than
+/// rounding: the frame goes into `snorm16` on both sides, and rotating a basis
+/// vector by a quaternion whose lanes moved by half a step moves the vector by
+/// about twice that angle. It is `crcbl_shaders::vertex::QTangent`'s own
+/// `MAX_COMPONENT_ERROR`, doubled once because the two sides quantise
+/// *independently* — the shader re-encodes what it computed and the oracle
+/// re-encodes what it computed, so the two answers are up to two steps apart
+/// even where the arithmetic agreed exactly.
+///
+/// Still three orders of magnitude tighter than every mistake this file exists
+/// to catch: the bare 3×3 instead of the cofactor, a dropped base offset, the
+/// wrong weight or the wrong joint each move a component by a quantity of
+/// order one.
+const FRAME_TOLERANCE: f32 = 2.0 * crcbl_shaders::vertex::QTangent::MAX_COMPONENT_ERROR;
+
 /// Bytes of the vertex pool.
+///
+/// Both streams: `POSITION_STRIDE` for every vertex the pool holds and then
+/// `ATTRIBUTE_STRIDE` for every one of them, which is `MeshPool::new`'s own
+/// arrangement.
 const fn pool_bytes() -> u64 {
     POOL_VERTICES as u64 * VERTEX_STRIDE as u64
+}
+
+/// Where the pool's attribute region begins, in **bytes**.
+const fn attribute_region() -> usize {
+    POOL_VERTICES as usize * POSITION_STRIDE
+}
+
+/// The same boundary in **words**, which is what the block carries — the
+/// stand-in for `MeshPool::attribute_base`, since this suite builds its pool by
+/// hand.
+const fn attribute_base() -> u32 {
+    POOL_VERTICES * (POSITION_STRIDE / size_of::<u32>()) as u32
 }
 
 /// Bytes of the binding buffer.
@@ -153,37 +187,38 @@ const fn joint_bytes() -> u64 {
     (JOINT_BASE + MAX_JOINTS) as u64 * JOINT_STRIDE as u64
 }
 
-/// A [`MeshVertex`] as the sixteen little-endian floats the pool holds.
+/// Writes one vertex into `pool` at `slot`, in the pool's two-region layout.
 ///
-/// The pool has no decoder of its own — `crcbl_render::mesh_pool` uploads
-/// `VERTEX_STRIDE`-strided bytes and never decodes them — so this file owns both
-/// halves of the conversion and [`vertex_from_bytes`] is its inverse.
-fn vertex_bytes(vertex: &MeshVertex) -> [u8; VERTEX_STRIDE] {
-    let mut bytes = [0u8; VERTEX_STRIDE];
-    let mut at = 0usize;
-    for field in [vertex.position, vertex.normal, vertex.color, vertex.uv] {
-        for value in field {
-            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-            at += 4;
-        }
-    }
-    assert_eq!(at, VERTEX_STRIDE, "four float4s and no padding");
-    bytes
+/// The pool has no decoder of its own — `crcbl_render::mesh_pool` splits
+/// `VERTEX_STRIDE`-strided records and never decodes them — so this file owns
+/// both halves of the conversion and [`vertex_from_pool`] is its inverse.
+fn write_vertex(pool: &mut [u8], slot: usize, vertex: &MeshVertex) {
+    let at = slot * POSITION_STRIDE;
+    pool[at..at + POSITION_STRIDE].copy_from_slice(&vertex.position_bytes());
+    let at = attribute_region() + slot * ATTRIBUTE_STRIDE;
+    pool[at..at + ATTRIBUTE_STRIDE].copy_from_slice(&vertex.attribute_bytes());
 }
 
-/// The inverse of [`vertex_bytes`].
-fn vertex_from_bytes(bytes: &[u8]) -> MeshVertex {
-    assert_eq!(bytes.len(), VERTEX_STRIDE, "one whole vertex");
-    let float = |at: usize| {
-        f32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes of a float"))
-    };
-    let field = |at: usize| [float(at), float(at + 4), float(at + 8), float(at + 12)];
-    MeshVertex {
-        position: field(0),
-        normal: field(16),
-        color: field(32),
-        uv: field(48),
-    }
+/// One slot's two regions gathered back into the interleaved record
+/// [`write_vertex`] took apart.
+///
+/// **The unit every "was this slot written?" comparison is made in.** A slot's
+/// bytes are no longer contiguous in the pool, so a range of `VERTEX_STRIDE`
+/// bytes taken at `slot * VERTEX_STRIDE` spans some other vertices' positions
+/// entirely — it would report a slot as overwritten because a slot two and a
+/// half times further along was skinned.
+fn pool_record(pool: &[u8], slot: usize) -> [u8; VERTEX_STRIDE] {
+    let mut record = [0u8; VERTEX_STRIDE];
+    let at = slot * POSITION_STRIDE;
+    record[..POSITION_STRIDE].copy_from_slice(&pool[at..at + POSITION_STRIDE]);
+    let at = attribute_region() + slot * ATTRIBUTE_STRIDE;
+    record[POSITION_STRIDE..].copy_from_slice(&pool[at..at + ATTRIBUTE_STRIDE]);
+    record
+}
+
+/// The inverse of [`write_vertex`].
+fn vertex_from_pool(pool: &[u8], slot: usize) -> MeshVertex {
+    MeshVertex::from_bytes(&pool_record(pool, slot))
 }
 
 /// The pool's fill: [`GUARD_WORD`] with the word's own index folded in, so a
@@ -205,8 +240,7 @@ fn guard_pool() -> Vec<u8> {
 fn uploaded_pool(case: &Case) -> Vec<u8> {
     let mut pool = guard_pool();
     for (slot, vertex) in case.input.iter().enumerate() {
-        let at = (INPUT_BASE as usize + slot) * VERTEX_STRIDE;
-        pool[at..at + VERTEX_STRIDE].copy_from_slice(&vertex_bytes(vertex));
+        write_vertex(&mut pool, INPUT_BASE as usize + slot, vertex);
     }
     pool
 }
@@ -232,6 +266,7 @@ impl Case {
             binding_base: BINDING_BASE,
             joint_base: JOINT_BASE,
             joint_count: u32::try_from(self.palette.len()).expect("a small palette"),
+            attribute_base: attribute_base(),
         }
     }
 
@@ -684,10 +719,7 @@ fn close(got: f32, want: f32) -> bool {
 /// The `count` vertices a pool readback holds starting at `base`, decoded.
 fn half(pool: &[u8], base: u32, count: usize) -> Vec<MeshVertex> {
     (0..count)
-        .map(|slot| {
-            let at = (base as usize + slot) * VERTEX_STRIDE;
-            vertex_from_bytes(&pool[at..at + VERTEX_STRIDE])
-        })
+        .map(|slot| vertex_from_pool(pool, base as usize + slot))
         .collect()
 }
 
@@ -698,10 +730,14 @@ fn skinned(pool: &[u8], count: usize) -> Vec<MeshVertex> {
 
 /// Compares one skinned vertex against the oracle's.
 ///
-/// `position` and `normal` go through [`close`]; `color` and `uv` are compared
-/// **exactly**, because the kernel copies them through and a copy that rounds is
-/// not a copy. So are the two unused lanes, which the kernel writes as `1.0` and
-/// `0.0` rather than leaving alone.
+/// The position goes through [`close`] and the frame through
+/// [`FRAME_TOLERANCE`], which is wider because both sides quantise it;
+/// `color`, `uv0` and `uv1` are compared **exactly**, because the kernel copies
+/// their words through and a copy that rounds is not a copy.
+///
+/// **The handedness lane is compared as a sign**, and it is the one part of the
+/// frame the raster path cannot show: nothing shades through a bitangent yet,
+/// so this readback is where a device is held to having carried it.
 fn assert_vertex(got: &MeshVertex, want: &MeshVertex, slot: usize, what: &str) {
     for (lane, (lane_got, lane_want)) in got.position.iter().zip(want.position).enumerate() {
         assert!(
@@ -712,30 +748,37 @@ fn assert_vertex(got: &MeshVertex, want: &MeshVertex, slot: usize, what: &str) {
             want.position,
         );
     }
-    for (lane, (lane_got, lane_want)) in got.normal.iter().zip(want.normal).enumerate() {
-        assert!(
-            close(*lane_got, lane_want),
-            "{what}: vertex {slot} normal lane {lane} is {lane_got}, expected \
-             {lane_want} (tolerance {TOLERANCE}); the whole normal is {:?} against {:?}",
-            got.normal,
-            want.normal,
-        );
+    let (frame_got, frame_want) = (got.qtangent.decode(), want.qtangent.decode());
+    for (name, lanes_got, lanes_want) in [
+        ("normal", frame_got.normal, frame_want.normal),
+        ("tangent", frame_got.tangent, frame_want.tangent),
+        ("bitangent", frame_got.bitangent, frame_want.bitangent),
+    ] {
+        for (lane, (lane_got, lane_want)) in lanes_got.iter().zip(lanes_want).enumerate() {
+            assert!(
+                (lane_got - lane_want).abs() <= FRAME_TOLERANCE,
+                "{what}: vertex {slot} {name} lane {lane} is {lane_got}, expected \
+                 {lane_want} (tolerance {FRAME_TOLERANCE}); the whole {name} is {lanes_got:?} \
+                 against {lanes_want:?}"
+            );
+        }
     }
     assert_eq!(
-        got.position[3], 1.0,
-        "{what}: vertex {slot}'s position `w` is written as 1.0"
-    );
-    assert_eq!(
-        got.normal[3], 0.0,
-        "{what}: vertex {slot}'s normal `w` is written as 0.0"
+        got.qtangent.handedness(),
+        want.qtangent.handedness(),
+        "{what}: vertex {slot}'s handedness is carried through the dispatch"
     );
     assert_eq!(
         got.color, want.color,
         "{what}: vertex {slot}'s colour is copied through unchanged"
     );
     assert_eq!(
-        got.uv, want.uv,
+        got.uv0, want.uv0,
         "{what}: vertex {slot}'s uv is copied through unchanged"
+    );
+    assert_eq!(
+        got.uv1, want.uv1,
+        "{what}: vertex {slot}'s second uv set with it"
     );
 }
 
@@ -753,9 +796,8 @@ fn assert_untouched(pool: &[u8], case: &Case, what: &str) {
         if skinned.contains(&slot) {
             continue;
         }
-        let at = slot * VERTEX_STRIDE;
-        let got = &pool[at..at + VERTEX_STRIDE];
-        let want = &uploaded[at..at + VERTEX_STRIDE];
+        let got = pool_record(pool, slot);
+        let want = pool_record(&uploaded, slot);
         assert!(
             got == want,
             "{what}: pool vertex {slot} was written, and the dispatch owned only \
@@ -771,12 +813,16 @@ fn assert_untouched(pool: &[u8], case: &Case, what: &str) {
 /// A vertex distinct in every field, so a copy landing in the wrong lane could
 /// not compare equal by accident.
 fn vertex(position: Vec3, normal: Vec3) -> MeshVertex {
-    MeshVertex {
-        position: [position.x, position.y, position.z, 1.0],
-        normal: [normal.x, normal.y, normal.z, 0.0],
-        color: [0.25, 0.5, 0.75, 1.0],
-        uv: [0.125, 0.375, 0.0, 0.0],
-    }
+    MeshVertex::from_normal(
+        position.to_array(),
+        normal.to_array(),
+        [0.25, 0.5, 0.75, 1.0],
+        [0.125, 0.375],
+        &UvRange {
+            scale: [1.0, 1.0],
+            offset: [0.0, 0.0],
+        },
+    )
 }
 
 /// **A vertex whose weight is entirely on one joint is transformed by that joint
@@ -940,7 +986,7 @@ fn a_normal_under_a_non_uniform_scale_goes_through_the_cofactor_basis() {
     // What the bare 3×3 would have written, which is the mistake this case is
     // shaped to catch.
     let bare = (Mat3::from_mat4(joint) * bind_pose_normal).normalize();
-    let cofactor = Vec3::new(want[0].normal[0], want[0].normal[1], want[0].normal[2]);
+    let cofactor = Vec3::from_array(want[0].qtangent.decode().normal);
     let separation = (bare - cofactor).length();
     assert!(
         separation > 1e-2,
@@ -949,7 +995,7 @@ fn a_normal_under_a_non_uniform_scale_goes_through_the_cofactor_basis() {
          joint's scale is what separates them, so a case that lost it would pass \
          with either matrix."
     );
-    let read = Vec3::new(got[0].normal[0], got[0].normal[1], got[0].normal[2]);
+    let read = Vec3::from_array(got[0].qtangent.decode().normal);
     assert!(
         (read - cofactor).length() < (read - bare).length(),
         "the read-back normal {read:?} is nearer the bare 3x3's {bare:?} than the \
@@ -1275,8 +1321,7 @@ fn a_later_frame_skins_with_its_own_palette_into_the_half_its_parity_names() {
     let bindings = frame_bindings();
     let mut uploaded = guard_pool();
     for (slot, vertex) in bind_pose.iter().enumerate() {
-        let at = (input_base as usize + slot) * VERTEX_STRIDE;
-        uploaded[at..at + VERTEX_STRIDE].copy_from_slice(&vertex_bytes(vertex));
+        write_vertex(&mut uploaded, input_base as usize + slot, vertex);
     }
     device
         .write_buffer(upload, 0, &uploaded)
@@ -1340,6 +1385,7 @@ fn a_later_frame_skins_with_its_own_palette_into_the_half_its_parity_names() {
             joints: 2,
             bindings: FRAME_VERTICES,
             vertices,
+            attribute_base: attribute_base(),
         },
     )
     .expect("a skinning pass");
@@ -1443,14 +1489,13 @@ fn a_later_frame_skins_with_its_own_palette_into_the_half_its_parity_names() {
             }
             None => {
                 for slot in 0..count {
-                    let at = (theirs as usize + slot) * VERTEX_STRIDE;
+                    let slot = theirs as usize + slot;
                     assert!(
-                        bytes[at..at + VERTEX_STRIDE] == uploaded[at..at + VERTEX_STRIDE],
-                        "frame 0 wrote pool vertex {} of the half its parity does not \
+                        pool_record(&bytes, slot) == pool_record(&uploaded, slot),
+                        "frame 0 wrote pool vertex {slot} of the half its parity does not \
                          name; it holds {:02x?} where the fill put {:02x?}",
-                        theirs as usize + slot,
-                        &bytes[at..at + VERTEX_STRIDE],
-                        &uploaded[at..at + VERTEX_STRIDE],
+                        pool_record(&bytes, slot),
+                        pool_record(&uploaded, slot),
                     );
                 }
             }
@@ -1466,14 +1511,13 @@ fn a_later_frame_skins_with_its_own_palette_into_the_half_its_parity_names() {
             {
                 continue;
             }
-            let at = slot * VERTEX_STRIDE;
             assert!(
-                bytes[at..at + VERTEX_STRIDE] == uploaded[at..at + VERTEX_STRIDE],
+                pool_record(&bytes, slot) == pool_record(&uploaded, slot),
                 "frame {index} wrote pool vertex {slot}, which belongs to neither half of \
                  the region ({halves:?}, {count} vertices each). It holds {:02x?} where the \
                  fill put {:02x?}",
-                &bytes[at..at + VERTEX_STRIDE],
-                &uploaded[at..at + VERTEX_STRIDE],
+                pool_record(&bytes, slot),
+                pool_record(&uploaded, slot),
             );
         }
     }
@@ -1931,6 +1975,7 @@ fn skinned_palette_case(headless: Headless) {
             // The renderer's own pool, which is what makes the dispatch's
             // output reachable by its draws at all.
             vertices: skinned_renderer.vertex_buffer(),
+            attribute_base: skinned_renderer.attribute_base(),
         },
     )
     .expect("a skinning pass");

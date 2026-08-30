@@ -487,6 +487,7 @@ mod tests {
                 label: Cow::Borrowed("an application's own mesh"),
                 geometry: Geometry::Flat {
                     vertices: Cow::Owned(mesh::pyramid_vertex_bytes()),
+                    uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(indices),
                     clusters,
                 },

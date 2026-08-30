@@ -22,7 +22,8 @@ use std::borrow::Cow;
 
 use crcbl::render::scene::{Capacities, Geometry, MeshDesc, PageDesc, ProbeGrid, SceneDesc};
 use crcbl::scene::meshlet::{MeshletError, build_meshlets};
-use crcbl::shaders::mesh::{GpuMaterial, MeshVertex, VERTEX_STRIDE};
+use crcbl::shaders::mesh::{GpuMaterial, MeshVertex};
+use crcbl::shaders::vertex::UvRange;
 
 use crate::face::Face;
 
@@ -68,6 +69,7 @@ pub fn quarry_scene(face: &Face) -> Result<SceneDesc<'static>, MeshletError> {
             label: Cow::Borrowed("quarry face"),
             geometry: Geometry::Flat {
                 vertices: Cow::Owned(vertices),
+                uv_range: UV_RANGE,
                 indices: Cow::Owned(face.indices.clone()),
                 clusters,
             },
@@ -133,33 +135,43 @@ pub(crate) fn vertex_bytes(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<
         normals.len(),
         "a vertex needs both a position and a normal"
     );
-    let mut bytes = Vec::with_capacity(positions.len() * VERTEX_STRIDE);
-    for (position, normal) in positions.iter().zip(normals) {
-        let vertex = MeshVertex {
-            position: [position[0], position[1], position[2], 1.0],
-            normal: [normal[0], normal[1], normal[2], 0.0],
-            color: ROCK.base_color,
-            // Nothing samples the page, so the coordinate is the one every
-            // vertex can share: a single-texel page has one texel to name.
-            uv: [0.0; 4],
-        };
-        for value in vertex
-            .position
-            .iter()
-            .chain(&vertex.normal)
-            .chain(&vertex.color)
-            .chain(&vertex.uv)
-        {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
+    let vertices: Vec<MeshVertex> = positions
+        .iter()
+        .zip(normals)
+        .map(|(position, normal)| {
+            MeshVertex::from_normal(*position, *normal, ROCK.base_color, [0.0; 2], &UV_RANGE)
+        })
+        .collect();
+    crcbl::shaders::mesh::vertex_bytes(&vertices)
+}
+
+/// The range every coordinate of this sample is quantised against: the
+/// degenerate one at the origin.
+///
+/// Nothing here samples the page — it is one white texel — so every vertex
+/// carries the same coordinate, and the range that reconstructs a single shared
+/// coordinate *exactly* is the one whose extent is zero. See
+/// `crcbl::shaders::vertex::UvRange::encode`, where the zero-extent axis is
+/// what round-trips rather than what divides by zero.
+const UV_RANGE: UvRange = UvRange {
+    scale: [0.0; 2],
+    offset: [0.0; 2],
+};
+
+/// [`UV_RANGE`], for the description a caller assembles — `crate::dag`'s levels
+/// carry it too, and a level quantised against another range would sample a
+/// different texel of a page that has only one.
+#[must_use]
+pub(crate) const fn uv_range() -> UvRange {
+    UV_RANGE
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::face::quarry_face;
+    use crcbl::shaders::mesh::VERTEX_STRIDE;
+    use crcbl::shaders::vertex::QTangent;
 
     /// Big enough to exceed [`Capacities::default`]'s vertex reservation, which
     /// is the point of `the_default_capacities_would_not_fit_the_face` below.
@@ -179,6 +191,7 @@ mod tests {
             vertices,
             indices,
             clusters,
+            ..
         } = &scene.meshes[0].geometry
         else {
             panic!("milestone 1 is the flat path; the DAG arrives with milestone 2");
@@ -238,16 +251,28 @@ mod tests {
 
     /// The packed bytes really are the positions and normals the face carries,
     /// read back at the stride the shader uses.
+    ///
+    /// The position exactly, because stream 0 is `f32` and nothing quantises
+    /// it; the normal to within the frame encoding's stated error, because the
+    /// record carries a `snorm16` quaternion and the normal is what it decodes
+    /// to.
     #[test]
     fn the_first_vertex_round_trips_through_the_packing() {
         let face = quarry_face(SMALL);
         let bytes = vertex_bytes(&face.positions, &face.normals);
-        let word = |at: usize| {
-            f32::from_le_bytes(bytes[at * 4..at * 4 + 4].try_into().expect("four bytes"))
-        };
-        assert_eq!([word(0), word(1), word(2)], face.positions[0]);
-        assert_eq!(word(3), 1.0, "position w is written as 1.0");
-        assert_eq!([word(4), word(5), word(6)], face.normals[0]);
-        assert_eq!(word(7), 0.0, "normal w is written as 0.0");
+        let vertex =
+            MeshVertex::from_bytes(bytes[..VERTEX_STRIDE].try_into().expect("one whole record"));
+        assert_eq!(vertex.position, face.positions[0]);
+        let decoded = vertex.qtangent.decode().normal;
+        for (axis, want) in decoded.iter().zip(face.normals[0]) {
+            assert!(
+                (axis - want).abs() <= QTangent::MAX_COMPONENT_ERROR,
+                "the frame decodes to {decoded:?}, not {:?}",
+                face.normals[0]
+            );
+        }
+        // And the coordinate every vertex shares comes back exactly, which is
+        // what a zero-extent range is for.
+        assert_eq!(UV_RANGE.decode(vertex.uv0), [0.0; 2]);
     }
 }

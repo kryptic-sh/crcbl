@@ -142,6 +142,9 @@ impl Gpu {
                 // buffer writes vertices no draw of this renderer can reach,
                 // and the picture is the bind pose for ever.
                 vertices: renderer.vertex_buffer(),
+                // And the boundary between that pool's two streams, which the
+                // dispatch writes both of.
+                attribute_base: renderer.attribute_base(),
             },
         ) {
             Ok(skinning) => skinning,

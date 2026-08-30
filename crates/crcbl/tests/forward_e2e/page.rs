@@ -176,6 +176,7 @@ fn the_page_carries_the_hosts_mip_chain_on_every_layer() {
             label: Cow::Borrowed("a cube nobody draws"),
             geometry: Geometry::Flat {
                 vertices: Cow::Owned(crcbl::shaders::mesh::cube_vertex_bytes()),
+                uv_range: crcbl::shaders::mesh::demo_uv_range(),
                 indices: Cow::Owned(crcbl::shaders::mesh::cube_indices()),
                 clusters: crcbl::shaders::meshlet::cube_clusters(),
             },

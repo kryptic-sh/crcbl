@@ -75,6 +75,7 @@ use crcbl_shaders::cluster_dag::ClusterDag;
 use crcbl_shaders::mesh;
 use crcbl_shaders::meshlet::MeshClusters;
 use crcbl_shaders::probe;
+use crcbl_shaders::vertex::UvRange;
 use glam::Mat4;
 
 /// The second material's base colour, and the whole of what makes it visible.
@@ -442,7 +443,21 @@ pub enum Geometry<'a> {
         /// Vertices as [`mesh::MeshVertex`] bytes — [`mesh::VERTEX_STRIDE`] per
         /// vertex, little-endian, exactly what
         /// [`cube_vertex_bytes`](mesh::cube_vertex_bytes) produces.
+        ///
+        /// **Interleaved, which is not how the pool stores them.** A record is
+        /// a position and then its attributes; [`crate::MeshPool::upload`]
+        /// separates the two streams, so a caller describes geometry once and
+        /// the position region reaches the device contiguous.
         vertices: Cow<'a, [u8]>,
+        /// The scale and offset every UV lane in `vertices` was quantised
+        /// against — [`UvRange::from_uvs`] over the mesh's float coordinates,
+        /// before any vertex was built.
+        ///
+        /// It has to travel with the bytes: a `unorm16` lane means nothing
+        /// without it, and the pool cannot recover it from lanes that are
+        /// already quantised. It reaches the shaders through
+        /// [`mesh::GpuMesh::uv_range`].
+        uv_range: UvRange,
         /// Triangle indices into `vertices`, **mesh-relative**: the pool's base
         /// vertex is added by the shader through the mesh table.
         indices: Cow<'a, [u32]>,
@@ -471,6 +486,14 @@ pub enum Geometry<'a> {
     /// this variant is usable today only by a caller that can answer that
     /// question for its own surface.
     Dag {
+        /// The range every level's UV lanes were quantised against — **one for
+        /// all of them**.
+        ///
+        /// The mesh path resolves a row through the instance's mesh, which for
+        /// a DAG is level 0, so a coarser level's vertices are decoded through
+        /// level 0's range. A caller that quantised each level against its own
+        /// bounds would see the coarse levels' texture slide.
+        uv_range: UvRange,
         /// Vertex bytes per level, finest first and **parallel to
         /// [`dag.levels`](ClusterDag::levels)** — same length, and one vertex
         /// per position of the level beside it.
@@ -664,6 +687,7 @@ pub fn demo() -> SceneDesc<'static> {
                 label: Cow::Borrowed("cube"),
                 geometry: Geometry::Flat {
                     vertices: Cow::Owned(mesh::cube_vertex_bytes()),
+                    uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(mesh::cube_indices()),
                     clusters: crcbl_shaders::meshlet::cube_clusters(),
                 },
@@ -672,6 +696,7 @@ pub fn demo() -> SceneDesc<'static> {
                 label: Cow::Borrowed("pyramid"),
                 geometry: Geometry::Flat {
                     vertices: Cow::Owned(mesh::pyramid_vertex_bytes()),
+                    uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(mesh::pyramid_indices()),
                     clusters: crcbl_shaders::meshlet::pyramid_clusters(),
                 },
@@ -680,6 +705,7 @@ pub fn demo() -> SceneDesc<'static> {
                 label: Cow::Borrowed("open box"),
                 geometry: Geometry::Flat {
                     vertices: Cow::Owned(mesh::open_box_vertex_bytes()),
+                    uv_range: mesh::demo_uv_range(),
                     indices: Cow::Owned(mesh::open_box_indices()),
                     clusters: crcbl_shaders::meshlet::open_box_clusters(),
                 },
@@ -732,23 +758,22 @@ fn dunes_geometry() -> Geometry<'static> {
         .levels
         .iter()
         .map(|level| {
-            let mut bytes = Vec::with_capacity(level.positions.len() * mesh::VERTEX_STRIDE);
-            for &position in &level.positions {
-                let vertex = crcbl_shaders::dunes::vertex_at(position);
-                for value in vertex
-                    .position
-                    .iter()
-                    .chain(&vertex.normal)
-                    .chain(&vertex.color)
-                    .chain(&vertex.uv)
-                {
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-            Cow::Owned(bytes)
+            let vertices: Vec<mesh::MeshVertex> = level
+                .positions
+                .iter()
+                .map(|&position| crcbl_shaders::dunes::vertex_at(position))
+                .collect();
+            Cow::Owned(mesh::vertex_bytes(&vertices))
         })
         .collect();
-    Geometry::Dag { levels, dag }
+    Geometry::Dag {
+        // Every level's, because `dunes::vertex_at` maps the patch's extent
+        // onto the unit square whatever the decimator did to a position — see
+        // `crcbl_shaders::dunes::uv_range`.
+        uv_range: crcbl_shaders::dunes::uv_range(),
+        levels,
+        dag,
+    }
 }
 
 #[cfg(test)]
@@ -904,7 +929,7 @@ mod tests {
             "the flat residents are one mesh table entry each"
         );
 
-        let Geometry::Dag { levels, dag } = &scene.meshes[3].geometry else {
+        let Geometry::Dag { levels, dag, .. } = &scene.meshes[3].geometry else {
             panic!("the dunes patch is the description's only DAG");
         };
         assert_eq!(

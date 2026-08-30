@@ -44,6 +44,7 @@ use crcbl::hal::{
     SampleType, SubmitInfo,
 };
 use crcbl::shaders::dfg;
+use crcbl::shaders::mesh;
 
 /// Two overlapping quads, the **near one drawn first**, so the depth test is the
 /// only thing deciding what is visible.
@@ -253,6 +254,21 @@ const REFLECTIVITY_TOLERANCE: f32 = 2.0 / 255.0;
 /// channel at zero.
 const OCCLUSION_TOLERANCE: f32 = 3.0 / 255.0;
 
+/// The range this probe's coordinates are quantised against: the unit square,
+/// which is what `x * 0.5 + 0.5` covers for corners at `±1`.
+const PROBE_UV_RANGE: crcbl::shaders::vertex::UvRange = crcbl::shaders::vertex::UvRange {
+    scale: [1.0, 1.0],
+    offset: [0.0, 0.0],
+};
+
+/// Vertices in this probe's geometry: two quads of four corners.
+const PROBE_VERTEX_COUNT: usize = 8;
+
+/// Where its attribute region begins, as a word index — the stand-in for
+/// `MeshPool::attribute_base`, since this probe binds no pool.
+const PROBE_ATTRIBUTE_BASE: u32 =
+    (PROBE_VERTEX_COUNT * mesh::POSITION_STRIDE / size_of::<u32>()) as u32;
+
 impl DepthProbe {
     /// The two quads, near-first, in `crcbl::shaders::mesh::MeshVertex` layout,
     /// with the box they fit in.
@@ -269,7 +285,7 @@ impl DepthProbe {
             (0.3f32, 0.25f32, NEAR_QUAD_COLOR),
             (-0.3, 0.6, FAR_QUAD_COLOR),
         ];
-        let mut vertices = Vec::new();
+        let mut records = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
         let mut bounds_min = [f32::INFINITY; 3];
         let mut bounds_max = [f32::NEG_INFINITY; 3];
@@ -281,28 +297,30 @@ impl DepthProbe {
                     bounds_min[axis] = bounds_min[axis].min(position[axis]);
                     bounds_max[axis] = bounds_max[axis].max(position[axis]);
                 }
-                for value in [position[0], position[1], position[2], 1.0] {
-                    vertices.extend_from_slice(&value.to_le_bytes());
-                }
-                // Facing the camera, so both quads are lit identically and the
-                // only difference between them is their albedo.
-                for value in [0.0f32, 0.0, 1.0, 0.0] {
-                    vertices.extend_from_slice(&value.to_le_bytes());
-                }
-                for value in [color[0], color[1], color[2], 1.0] {
-                    vertices.extend_from_slice(&value.to_le_bytes());
-                }
-                // The fourth `float4` of `crcbl::shaders::mesh::MeshVertex`:
-                // the base-colour UV, the corner's own position mapped to
-                // `0..=1`. It selects nothing here — the probe's page has one
-                // white layer — but it has to be *written*, because the stride
-                // is 64 bytes and a vertex short of it would slide every later
-                // vertex's position into the wrong lane.
-                for value in [x * 0.5 + 0.5, y * 0.5 + 0.5, 0.0, 0.0] {
-                    vertices.extend_from_slice(&value.to_le_bytes());
-                }
+                records.push(crcbl::shaders::mesh::MeshVertex::from_normal(
+                    position,
+                    // Facing the camera, so both quads are lit identically and
+                    // the only difference between them is their albedo.
+                    [0.0, 0.0, 1.0],
+                    [color[0], color[1], color[2], 1.0],
+                    // The corner's own position mapped to `0..=1`. It selects
+                    // nothing here — the probe's page has one white layer.
+                    [x * 0.5 + 0.5, y * 0.5 + 0.5],
+                    &PROBE_UV_RANGE,
+                ));
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        // **The pool's own arrangement, by hand**: every position, then every
+        // attribute. This probe binds no `MeshPool`, so it is what stands in
+        // for one — and `PROBE_ATTRIBUTE_BASE` is the boundary the frame block
+        // has to carry, exactly as `MeshPool::attribute_base` would.
+        let mut vertices = Vec::with_capacity(records.len() * mesh::VERTEX_STRIDE);
+        for record in &records {
+            vertices.extend_from_slice(&record.position_bytes());
+        }
+        for record in &records {
+            vertices.extend_from_slice(&record.attribute_bytes());
         }
         let index_bytes = indices
             .iter()
@@ -453,6 +471,7 @@ impl DepthProbe {
                     // neither.
                     bounds_min,
                     bounds_max,
+                    uv_range: PROBE_UV_RANGE,
                 }
                 .to_bytes(),
             )
@@ -1176,6 +1195,9 @@ fn render_probe(
         // target held a reprojection through some other matrix would be a
         // difference between two frames that are one frame.
         previous_view_proj: view_proj.to_cols_array(),
+        // Where this probe's own attribute region begins — see
+        // `PROBE_ATTRIBUTE_BASE`, which is what stands in for the pool's.
+        vertex_pool: [PROBE_ATTRIBUTE_BASE, 0, 0, 0],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

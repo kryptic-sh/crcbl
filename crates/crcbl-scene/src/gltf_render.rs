@@ -148,6 +148,7 @@ use crcbl_render::scene::{
 };
 use crcbl_shaders::mesh::{self, MeshVertex, VERTEX_STRIDE};
 use crcbl_shaders::skinning::SkinBinding;
+use crcbl_shaders::vertex::UvRange;
 use glam::{Mat4, Vec3};
 
 use crate::gltf_import::{GltfPrimitive, GltfScene};
@@ -594,7 +595,8 @@ fn resident_meshes(
             meshes.push(MeshDesc {
                 label: Cow::Owned(at()),
                 geometry: Geometry::Flat {
-                    vertices: Cow::Owned(vertex_bytes(&expanded.vertices)),
+                    vertices: Cow::Owned(mesh::vertex_bytes(&expanded.vertices)),
+                    uv_range: expanded.uv_range,
                     indices: Cow::Owned(expanded.indices),
                     clusters,
                 },
@@ -612,6 +614,15 @@ struct Expanded {
     /// The emitted vertices in the renderer's own record, one per entry of
     /// [`Expanded::positions`].
     vertices: Vec<MeshVertex>,
+    /// The range every one of their UV lanes was quantised against: the bounds
+    /// of the coordinates this primitive actually emitted.
+    ///
+    /// The *emitted* ones rather than `TEXCOORD_0` whole, because a primitive
+    /// with no normals is de-indexed and a primitive with fewer coordinates
+    /// than positions gets `[0, 0]` for the rest — so the accessor's own bounds
+    /// are neither an upper nor a lower bound on what the vertices carry, and a
+    /// range that did not contain a coordinate would clamp it to an edge.
+    uv_range: UvRange,
     /// The triangle list over them.
     indices: Vec<u32>,
     /// One binding per emitted vertex, in the same order, or empty for an
@@ -648,22 +659,30 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
 
     if !primitive.normals().is_empty() {
         let positions = primitive.positions().to_vec();
+        let uvs: Vec<[f32; 2]> = (0..positions.len()).map(uv_at).collect();
+        let uv_range = UvRange::from_uvs(&uvs);
         let vertices = positions
             .iter()
             .enumerate()
-            .map(|(index, position)| vertex(*position, primitive.normals()[index], uv_at(index)))
+            .map(|(index, position)| {
+                vertex(*position, primitive.normals()[index], uvs[index], &uv_range)
+            })
             .collect();
         let bindings = bindings_at(primitive, 0..positions.len());
         return Expanded {
             positions,
             vertices,
+            uv_range,
             indices: primitive.indices().to_vec(),
             bindings,
         };
     }
 
     let mut positions = Vec::with_capacity(primitive.indices().len());
-    let mut vertices = Vec::with_capacity(primitive.indices().len());
+    // The flat-normal path emits its coordinates before it can quantise them,
+    // for `Expanded::uv_range`'s reason: de-indexing changes which coordinates
+    // are emitted and how often, and the range is the bounds of exactly those.
+    let mut authored: Vec<([f32; 3], [f32; 2])> = Vec::with_capacity(primitive.indices().len());
     let mut sources = Vec::with_capacity(primitive.indices().len());
     for corners in primitive.indices().chunks_exact(3) {
         let corner = |at: usize| primitive.positions()[corners[at] as usize];
@@ -679,7 +698,7 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
         let face = (b - a).cross(c - a).normalize_or(Vec3::Y);
         for (at, &index) in corners.iter().enumerate() {
             positions.push(corner(at));
-            vertices.push(vertex(corner(at), face.to_array(), uv_at(index as usize)));
+            authored.push((face.to_array(), uv_at(index as usize)));
             // Pushed here rather than re-read off `indices` afterwards so that
             // the two cannot disagree: whatever this loop chooses to emit — a
             // trailing partial triangle is dropped by `chunks_exact`, for one —
@@ -690,9 +709,17 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
     }
     let bindings = bindings_at(primitive, sources.into_iter());
     let indices = (0..u32::try_from(positions.len()).unwrap_or(u32::MAX)).collect();
+    let uvs: Vec<[f32; 2]> = authored.iter().map(|(_, uv)| *uv).collect();
+    let uv_range = UvRange::from_uvs(&uvs);
+    let vertices = positions
+        .iter()
+        .zip(&authored)
+        .map(|(position, (normal, uv))| vertex(*position, *normal, *uv, &uv_range))
+        .collect();
     Expanded {
         positions,
         vertices,
+        uv_range,
         indices,
         bindings,
     }
@@ -729,32 +756,13 @@ fn bindings_at(primitive: &GltfPrimitive, order: impl Iterator<Item = usize>) ->
 /// this — so anything but `1.0` here would tint every imported surface by a
 /// number the file never wrote. `COLOR_0` is not read by the importer, so there
 /// is nothing else this could be.
-fn vertex(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> MeshVertex {
-    MeshVertex {
-        position: [position[0], position[1], position[2], 1.0],
-        normal: [normal[0], normal[1], normal[2], 0.0],
-        color: [1.0; 4],
-        uv: [uv[0], uv[1], 0.0, 0.0],
-    }
-}
-
-/// The vertices as the little-endian `f32` bytes a geometry pool holds —
-/// position, normal, colour, uv per vertex, [`VERTEX_STRIDE`] bytes each, which
-/// is exactly what `crcbl_shaders::mesh::cube_vertex_bytes` produces.
-fn vertex_bytes(vertices: &[MeshVertex]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vertices.len() * VERTEX_STRIDE);
-    for vertex in vertices {
-        for value in vertex
-            .position
-            .iter()
-            .chain(&vertex.normal)
-            .chain(&vertex.color)
-            .chain(&vertex.uv)
-        {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
+fn vertex(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], range: &UvRange) -> MeshVertex {
+    // `from_normal`, because the importer reads no `TANGENT`: every frame here
+    // is `crcbl_shaders::vertex::orthonormal_basis`' stand-in, which agrees
+    // with no UV parameterisation and is what
+    // `docs/plan/43-render-standards.md` §2 says a mesh with no tangent gets
+    // until the MikkTSpace call `docs/backlog.md` carries lands.
+    MeshVertex::from_normal(position, normal, [1.0; 4], uv, range)
 }
 
 /// How many vertices a description mesh holds, for the pool it has to fit in.
@@ -915,6 +923,7 @@ mod tests {
         import_rigged_glb, import_skinned_pair_glb, png_bytes, replacing, rigged_json,
         skinned_pair_bin, skinned_pair_json, textured_glb, textured_parts, triangle_json,
     };
+    use crcbl_shaders::vertex::QTangent;
 
     /// The key every conversion under test is named by, so a message that leaks
     /// into an assertion is recognisable.
@@ -947,18 +956,22 @@ mod tests {
         };
         vertices
             .chunks_exact(VERTEX_STRIDE)
-            .map(|bytes| {
-                let at = |offset: usize| {
-                    f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
-                };
-                MeshVertex {
-                    position: [at(0), at(4), at(8), at(12)],
-                    normal: [at(16), at(20), at(24), at(28)],
-                    color: [at(32), at(36), at(40), at(44)],
-                    uv: [at(48), at(52), at(56), at(60)],
-                }
-            })
+            .map(|bytes| MeshVertex::from_bytes(bytes.try_into().expect("one record")))
             .collect()
+    }
+
+    /// The range that mesh's UV lanes decode through, which the description
+    /// carries beside them.
+    fn uv_range_of(mesh: &MeshDesc<'_>) -> UvRange {
+        let Geometry::Flat { uv_range, .. } = &mesh.geometry else {
+            panic!("this module builds no DAGs");
+        };
+        *uv_range
+    }
+
+    /// The normal a vertex's frame decodes to.
+    fn normal_of(vertex: &MeshVertex) -> [f32; 3] {
+        vertex.qtangent.decode().normal
     }
 
     fn indices_of(mesh: &MeshDesc<'_>) -> Vec<u32> {
@@ -1172,7 +1185,13 @@ mod tests {
         // The fixture's triangle is (0,0,0), (1,0,0), (0,1,0) — counter-clockwise
         // seen from +Z, so its face normal is +Z and nothing else.
         for vertex in &vertices {
-            assert_eq!(vertex.normal, [0.0, 0.0, 1.0, 0.0], "{vertex:?}");
+            let normal = normal_of(vertex);
+            for (axis, want) in normal.iter().zip([0.0, 0.0, 1.0]) {
+                assert!(
+                    (axis - want).abs() <= QTangent::MAX_COMPONENT_ERROR,
+                    "{vertex:?} decodes to {normal:?}"
+                );
+            }
         }
     }
 
@@ -1182,15 +1201,25 @@ mod tests {
         let vertices = vertices_of(&converted.scene.meshes[0]);
 
         assert_eq!(vertices.len(), 3, "an indexed mesh is not expanded");
-        assert_eq!(vertices[1].position, [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(vertices[1].normal, [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(vertices[1].position, [1.0, 0.0, 0.0]);
+        let normal = normal_of(&vertices[1]);
+        for (axis, want) in normal.iter().zip([0.0, 0.0, 1.0]) {
+            assert!(
+                (axis - want).abs() <= QTangent::MAX_COMPONENT_ERROR,
+                "the frame decodes to {normal:?}"
+            );
+        }
+        // Decoded through the description's own range, which is what a shader
+        // does: a lane on its own is not a coordinate.
+        let uv = uv_range_of(&converted.scene.meshes[0]).decode(vertices[1].uv0);
+        for (axis, want) in uv.iter().zip([1.0, 0.0]) {
+            assert!(
+                (axis - want).abs() <= UvRange::MAX_RELATIVE_ERROR,
+                "TEXCOORD_0 reaches the vertex: {uv:?}"
+            );
+        }
         assert_eq!(
-            vertices[1].uv,
-            [1.0, 0.0, 0.0, 0.0],
-            "TEXCOORD_0 reaches the vertex"
-        );
-        assert_eq!(
-            vertices[1].color, [1.0; 4],
+            vertices[1].color, [255; 4],
             "the albedo is white, or every imported surface would be tinted by a number \
              the file never wrote"
         );
@@ -1329,8 +1358,9 @@ mod tests {
         // page, so the surface draws — flatly.
         assert_eq!(converted.scene.meshes.len(), 1);
         assert_eq!(converted.scene.materials[1].base_color_texture, 1);
+        let range = uv_range_of(&converted.scene.meshes[0]);
         for vertex in vertices_of(&converted.scene.meshes[0]) {
-            assert_eq!(vertex.uv, [0.0; 4]);
+            assert_eq!(range.decode(vertex.uv0), [0.0; 2]);
         }
     }
 
@@ -1432,8 +1462,7 @@ mod tests {
             let source = source as usize;
             let position = QUAD_POSITIONS[source];
             assert_eq!(
-                vertices[emitted].position,
-                [position[0], position[1], position[2], 1.0],
+                vertices[emitted].position, position,
                 "emitted vertex {emitted} is corner {source}"
             );
             assert_eq!(

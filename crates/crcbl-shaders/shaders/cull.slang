@@ -148,6 +148,13 @@ struct GpuMesh
     float max_x;
     float max_y;
     float max_z;
+    /// The mesh's UV range, matching `mesh.slang`. Declared and not read: this
+    /// pass resolves ranges and boxes, and a row short of four floats here puts
+    /// every entry after it at the wrong offset.
+    float uv_scale_u;
+    float uv_scale_v;
+    float uv_offset_u;
+    float uv_offset_v;
 };
 
 /// Planes in a frustum. Six, and the loop below is written against this rather

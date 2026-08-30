@@ -2432,7 +2432,7 @@ impl ForwardRenderer {
         }
 
         for (index, desc) in scene.meshes.iter().enumerate() {
-            let Geometry::Dag { levels, dag } = &desc.geometry else {
+            let Geometry::Dag { levels, dag, .. } = &desc.geometry else {
                 continue;
             };
             // Zipped together at upload and again at
@@ -2510,7 +2510,7 @@ impl ForwardRenderer {
                     vertices += (bytes.len() / mesh::VERTEX_STRIDE) as u64;
                     indices += list.len() as u64;
                 }
-                Geometry::Dag { levels, dag } => {
+                Geometry::Dag { levels, dag, .. } => {
                     for bytes in levels {
                         vertices += (bytes.len() / mesh::VERTEX_STRIDE) as u64;
                     }
@@ -4703,7 +4703,10 @@ impl ForwardRenderer {
         for desc in &scene.meshes {
             match &desc.geometry {
                 Geometry::Flat {
-                    vertices, indices, ..
+                    vertices,
+                    indices,
+                    uv_range,
+                    ..
                 } => {
                     uploaded.push(vec![pool.upload(
                         device,
@@ -4711,9 +4714,14 @@ impl ForwardRenderer {
                         &desc.label,
                         vertices,
                         indices,
+                        *uv_range,
                     )?]);
                 }
-                Geometry::Dag { levels, dag } => {
+                Geometry::Dag {
+                    levels,
+                    dag,
+                    uv_range,
+                } => {
                     let mut handles = Vec::with_capacity(levels.len());
                     for (depth, (vertices, level)) in levels.iter().zip(&dag.levels).enumerate() {
                         handles.push(pool.upload(
@@ -4722,6 +4730,10 @@ impl ForwardRenderer {
                             &format!("{} level {depth}", desc.label),
                             vertices,
                             &level.indices(),
+                            // Level 0's range for every level, which is the one
+                            // the mesh path reads whichever level it draws —
+                            // see `Geometry::Dag::uv_range`.
+                            *uv_range,
                         )?);
                     }
                     uploaded.push(handles);
@@ -5148,6 +5160,13 @@ impl ForwardRenderer {
                 .previous_view_projection
                 .unwrap_or(view_projection)
                 .to_cols_array(),
+            // Where the pool's attribute region begins, which is the one thing
+            // about `docs/plan/43-render-standards.md` §2's two streams that a
+            // shader cannot derive: it is the pool's *capacity*, and a shader
+            // has never been told that. Fixed for the life of the pool and
+            // written every frame anyway, because this is the block that
+            // carries it and there is no cheaper place. `yzw` are padding.
+            vertex_pool: [self.pool.attribute_base(), 0, 0, 0],
         };
         // Advanced here, between writing the block that reads it and anything
         // else that could look at it: this function runs exactly once per
@@ -5558,6 +5577,19 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn vertex_buffer(&self) -> BufferHandle {
         self.pool.vertex_buffer()
+    }
+
+    /// Where that pool's **attribute** region begins, in words — what
+    /// [`SkinningDesc::attribute_base`](crate::skinning::SkinningDesc::attribute_base)
+    /// takes.
+    ///
+    /// The buffer holds two streams, so a pass that writes it needs the
+    /// boundary as well as the handle; a [`Skinning`] built with the wrong one
+    /// writes a mesh's attributes over another mesh's positions. See
+    /// [`MeshPool::attribute_base`](crate::MeshPool::attribute_base).
+    #[must_use]
+    pub const fn attribute_base(&self) -> u32 {
+        self.pool.attribute_base()
     }
 
     /// Reserves a skinned region for description mesh `mesh`.
@@ -10346,6 +10378,7 @@ mod tests {
                 label: Cow::Borrowed("the only mesh"),
                 geometry: Geometry::Flat {
                     vertices: Cow::Owned(crcbl_shaders::mesh::cube_vertex_bytes()),
+                    uv_range: crcbl_shaders::mesh::demo_uv_range(),
                     indices: Cow::Owned(crcbl_shaders::mesh::cube_indices()),
                     clusters: crcbl_shaders::meshlet::cube_clusters(),
                 },
@@ -13765,6 +13798,7 @@ mod tests {
                     // The renderer's own pool, which is the whole of what makes
                     // the dispatch's output reachable by its draws.
                     vertices: renderer.vertex_buffer(),
+                    attribute_base: renderer.attribute_base(),
                 },
             )
             .expect("the null backend accepts every descriptor");

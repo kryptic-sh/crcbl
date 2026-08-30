@@ -12753,22 +12753,35 @@ lighting order. What the shelf slice left behind:
   WebGPU hardware, and `tools/fetch-shelf.sh`'s `shasum -a 256` branch has never
   executed (no macOS here).
 
-## The v2 vertex encodings: what the next slice owes (2026-08-30)
+## The v2 vertex layout: what is left to spend it (2026-08-30)
 
-`crcbl_shaders::vertex` landed host side only, by design. Left behind:
+`crcbl_shaders::mesh::MeshVertex` is the two-stream layout of
+`docs/plan/43-render-standards.md` §2, and the pool, the three shader copies and
+every constructor use it. Left behind, each its own slice:
 
-- **The device half is not written.** No Slang mirror of `QTangent::decode` or
-  `UvRange::decode`, so nothing holds a host decode and a device decode to the
-  same numbers. The two hand-written frame/quaternion pairs in
-  `a_frame_extracts_the_quaternion_the_paper_writes_for_it` are what the
-  shader-side test should reuse. That, `MeshVertex` as two streams, the eight
-  constructors, `VERTEX_STRIDE` split for `crcbl-dx12`'s input layout and the
-  `UvRange` draw-constant wiring are the next slice, with its one re-bless.
-- **`QTangent` accepts any four lanes.** The field is public so the slice that
-  writes vertex bytes can read it, so `QTangent([0; 4])` decodes to `NaN`. Left
-  as is: a checked constructor for a value that today only comes out of `encode`
-  is an accessor nobody calls. Revisit when a `QTangent` is first read off disk
-  rather than computed.
+- **No pass reads stream 0 alone yet.** The split exists so a depth prepass or a
+  shadow cascade fetches twelve contiguous bytes a vertex, but `mesh.slang` has
+  one vertex entry point, `vertexMain`, and every shadow draw goes through it —
+  `load_position` is called on its own only for the previous frame's position.
+  The rung is a depth-only vertex entry point (position, instance transform,
+  nothing else) and the pipelines for the shadow and prepass draws pointed at
+  it. Verified: `grep -n 'Main(' crates/crcbl-shaders/shaders/mesh.slang` shows
+  `vertexMain` and `fragmentMain` and nothing between.
+- **The importer reads no `TANGENT`.** `crcbl_scene::gltf_render::vertex` calls
+  `MeshVertex::from_normal`, so every imported frame is `orthonormal_basis`'
+  stand-in and agrees with no UV parameterisation — a normal map sampled through
+  it is wrong. The reader hands glTF's `float4` tangent to
+  `MeshVertex::from_frame` with `w` as the handedness; a mesh that ships none
+  gets the MikkTSpace call the normal-map rung owes. Lands with that rung.
+- **`uv1` is reserved and unwritten.** The lanes are in the layout, every
+  constructor writes zero, the importer reads `TEXCOORD_0` alone and reports a
+  material sampling `TEXCOORD_1` as skipped, and no shader declares a second
+  coordinate. The importer that fills them and the material row that says which
+  set a page samples are one change.
+- **`QTangent` accepts any four lanes** — the field is public so the byte
+  writers can read it, so `QTangent([0; 4])` decodes to `NaN`. Declined: a
+  checked constructor for a value that today only comes out of `encode` is an
+  accessor nobody calls. Revisit when a `QTangent` is first read off disk.
 - **Coverage gap:** `UvRange::MAX_RELATIVE_ERROR` is relative to a range's
   _extent_; a range whose offset dwarfs its extent (coordinates near 10000
   spanning a hundredth of a unit) is dominated by `f32` spacing at that

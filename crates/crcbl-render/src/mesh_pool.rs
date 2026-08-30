@@ -148,7 +148,10 @@ use crcbl_hal::{
     QueueHandle, ResourceState, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal,
     SemaphoreWait, SubmitInfo,
 };
-use crcbl_shaders::mesh::{GpuMesh, MESH_ENTRY_STRIDE, VERTEX_STRIDE};
+use crcbl_shaders::mesh::{
+    ATTRIBUTE_STRIDE, GpuMesh, MESH_ENTRY_STRIDE, POSITION_STRIDE, VERTEX_STRIDE,
+};
+use crcbl_shaders::vertex::UvRange;
 use glam::Vec3;
 
 use crate::cull::Aabb;
@@ -208,6 +211,16 @@ pub struct MeshRange {
     /// nothing to fail. It travels with the range for the reason the
     /// [module docs](self) give: same lifetime, same table entry, same write.
     pub bounds: Aabb,
+    /// The scale and offset this mesh's `unorm16` UV lanes were quantised
+    /// against, on its way to [`GpuMesh::uv_range`].
+    ///
+    /// Supplied by the caller rather than computed here, unlike
+    /// [`bounds`](Self::bounds): the pool receives coordinates that are
+    /// *already* lanes, so the float range they came from is the one thing
+    /// about a mesh it cannot recover. `crcbl_shaders::vertex::UvRange::from_uvs`
+    /// is what the caller builds it with, over every coordinate the mesh
+    /// carries — and, for a DAG, over every coordinate every level carries.
+    pub uv_range: UvRange,
 }
 
 /// What a [`MeshPool`] refuses to do.
@@ -367,6 +380,9 @@ struct InFlight {
 pub struct MeshPool {
     vertices: BufferHandle,
     indices: BufferHandle,
+    /// Vertices the pool can hold, which is also where its attribute region
+    /// begins — see [`MeshPool::attribute_base`].
+    vertex_capacity: u32,
     vertex_alloc: FreeList,
     index_alloc: FreeList,
 
@@ -407,6 +423,13 @@ impl MeshPool {
         let vertices = device.create_buffer(&BufferDesc {
             label: Some(&format!("{stem} vertices")),
             size: u64::from(desc.vertex_capacity) * VERTEX_STRIDE as u64,
+            // **Two regions, not one interleaved array.** The first
+            // `vertex_capacity * POSITION_STRIDE` bytes are every vertex's
+            // position and the rest is every vertex's attributes, which is
+            // `docs/plan/43-render-standards.md` §2's split — see
+            // `MeshPool::attribute_base`, the one number a shader cannot derive
+            // for itself. The buffer is the same size either way.
+            //
             // STORAGE, not a vertex buffer: §3.1's vertex pulling means the
             // vertex stage indexes this with `SV_VertexID` and there is no
             // vertex-input state anywhere in the engine.
@@ -465,6 +488,7 @@ impl MeshPool {
         Ok(Self {
             vertices,
             indices,
+            vertex_capacity: desc.vertex_capacity,
             vertex_alloc: FreeList::new(desc.vertex_capacity),
             index_alloc: FreeList::new(desc.index_capacity),
             table,
@@ -475,6 +499,33 @@ impl MeshPool {
             completed: 0,
             in_flight: Vec::new(),
         })
+    }
+
+    /// Where the attribute region begins in the vertex pool, in **bytes**.
+    ///
+    /// Every position the pool can hold comes first, so the boundary is the
+    /// capacity rather than anything about the meshes actually resident — which
+    /// is what lets a mesh be freed and another uploaded at a different base
+    /// with nothing else moving.
+    const fn attribute_region(&self) -> u64 {
+        self.vertex_capacity as u64 * POSITION_STRIDE as u64
+    }
+
+    /// The same boundary as a **word** index, which is what the shaders take.
+    ///
+    /// `FrameUniforms::vertex_pool`'s `x` lane and
+    /// `crcbl_shaders::skinning::Params::attribute_base` are both this number:
+    /// a vertex `v`'s position is at word `3 v` and its attributes at word
+    /// `attribute_base() + 5 v`. It is the one thing about the split a shader
+    /// cannot derive, because the pool's capacity has never been something a
+    /// shader was told.
+    ///
+    /// [`MeshPool::new`] refuses a capacity above `i32::MAX`, so the product
+    /// with `POSITION_STRIDE / 4` cannot overflow a `u32`: three times two
+    /// billion is short of four.
+    #[must_use]
+    pub const fn attribute_base(&self) -> u32 {
+        self.vertex_capacity * (POSITION_STRIDE / size_of::<u32>()) as u32
     }
 
     /// The vertex pool. Bound as a storage buffer; the vertex stage indexes it.
@@ -551,6 +602,7 @@ impl MeshPool {
             index_count: range.index_count,
             bounds_min: range.bounds.min.to_array(),
             bounds_max: range.bounds.max.to_array(),
+            uv_range: range.uv_range,
         };
         let at = u64::from(index) * MESH_ENTRY_STRIDE as u64;
         device.write_buffer(self.table, at, &entry.to_bytes())?;
@@ -570,11 +622,19 @@ impl MeshPool {
 
     /// Suballocates room for a mesh and records a staging copy into it.
     ///
-    /// `vertices` is `VERTEX_STRIDE`-strided vertex data; `indices` are
-    /// **mesh-relative** — the base vertex reaches the GPU beside them rather
-    /// than inside them, so a mesh's bytes never depend on where it landed. The
-    /// [module docs](self) say by which route. The returned mesh is not resident
-    /// until [`MeshPool::flush`] has run, and [`MeshPool::mesh`] says so.
+    /// `vertices` is `VERTEX_STRIDE`-strided vertex data — one
+    /// [`MeshVertex::to_bytes`] record each, **interleaved**, which is not how
+    /// the pool stores them: this is where the two streams are separated, so a
+    /// caller describes geometry once and the position region stays contiguous
+    /// for the passes that read nothing else. `indices` are **mesh-relative** —
+    /// the base vertex reaches the GPU beside them rather than inside them, so
+    /// a mesh's bytes never depend on where it landed. The [module docs](self)
+    /// say by which route. `uv_range` is the pair every UV lane was quantised
+    /// against, which reaches the shaders through the mesh table. The returned
+    /// mesh is not resident until [`MeshPool::flush`] has run, and
+    /// [`MeshPool::mesh`] says so.
+    ///
+    /// [`MeshVertex::to_bytes`]: crcbl_shaders::mesh::MeshVertex::to_bytes
     ///
     /// # Errors
     ///
@@ -591,6 +651,7 @@ impl MeshPool {
         label: &str,
         vertices: &[u8],
         indices: &[u32],
+        uv_range: UvRange,
     ) -> Result<MeshHandle, MeshPoolError> {
         if !vertices.len().is_multiple_of(VERTEX_STRIDE) {
             return Err(MeshPoolError::VertexStrideMismatch {
@@ -641,6 +702,7 @@ impl MeshPool {
             // moment the pool ever sees them: the vertex pool is device-local
             // and nothing reads it back.
             bounds: local_bounds(vertices),
+            uv_range,
         };
         let ready_at = match self.record_upload(device, queue, label, vertices, indices, range) {
             Ok(ready_at) => ready_at,
@@ -694,10 +756,20 @@ impl MeshPool {
         indices: &[u32],
         range: MeshRange,
     ) -> Result<u64, MeshPoolError> {
-        // One staging buffer for both halves, vertices first: two copies out of
-        // one allocation rather than two allocations, since they are submitted
-        // together anyway.
+        // One staging buffer for every half, positions first: three copies out
+        // of one allocation rather than three allocations, since they are
+        // submitted together anyway.
+        //
+        // **The de-interleave happens here**, on the host and once per upload.
+        // This is a start-up path — the [module docs](self) say so, and
+        // `MeshPool::flush` blocks — so the copy costs a load, not a frame.
         let index_bytes: &[u8] = bytemuck::cast_slice(indices);
+        let mut positions = Vec::with_capacity(vertices.len() / VERTEX_STRIDE * POSITION_STRIDE);
+        let mut attributes = Vec::with_capacity(vertices.len() / VERTEX_STRIDE * ATTRIBUTE_STRIDE);
+        for vertex in vertices.chunks_exact(VERTEX_STRIDE) {
+            positions.extend_from_slice(&vertex[..POSITION_STRIDE]);
+            attributes.extend_from_slice(&vertex[POSITION_STRIDE..]);
+        }
         let staging = device.create_buffer(&BufferDesc {
             label: Some(&format!("{label} staging")),
             size: (vertices.len() + index_bytes.len()) as u64,
@@ -710,7 +782,8 @@ impl MeshPool {
             label,
             Staged {
                 staging,
-                vertex_bytes: vertices,
+                position_bytes: &positions,
+                attribute_bytes: &attributes,
                 index_bytes,
                 range,
             },
@@ -733,9 +806,15 @@ impl MeshPool {
         label: &str,
         staged: Staged<'_>,
     ) -> Result<u64, MeshPoolError> {
-        let vertex_bytes = staged.vertex_bytes.len() as u64;
-        device.write_buffer(staged.staging, 0, staged.vertex_bytes)?;
-        device.write_buffer(staged.staging, vertex_bytes, staged.index_bytes)?;
+        let position_bytes = staged.position_bytes.len() as u64;
+        let attribute_bytes = staged.attribute_bytes.len() as u64;
+        device.write_buffer(staged.staging, 0, staged.position_bytes)?;
+        device.write_buffer(staged.staging, position_bytes, staged.attribute_bytes)?;
+        device.write_buffer(
+            staged.staging,
+            position_bytes + attribute_bytes,
+            staged.index_bytes,
+        )?;
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
             label: Some(&format!("{label} upload")),
@@ -760,16 +839,28 @@ impl MeshPool {
             ],
             ..Barriers::default()
         });
+        // Two copies into the vertex pool rather than one, which is the whole
+        // of what the split costs at upload: the position region at the top of
+        // the buffer and the attribute region past every position the pool can
+        // hold.
         encoder.copy_buffer_to_buffer(&BufferCopy {
             src: staged.staging,
             src_offset: 0,
             dst: self.vertices,
-            dst_offset: u64::from(staged.range.base_vertex) * VERTEX_STRIDE as u64,
-            size: vertex_bytes,
+            dst_offset: u64::from(staged.range.base_vertex) * POSITION_STRIDE as u64,
+            size: position_bytes,
         });
         encoder.copy_buffer_to_buffer(&BufferCopy {
             src: staged.staging,
-            src_offset: vertex_bytes,
+            src_offset: position_bytes,
+            dst: self.vertices,
+            dst_offset: self.attribute_region()
+                + u64::from(staged.range.base_vertex) * ATTRIBUTE_STRIDE as u64,
+            size: attribute_bytes,
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: staged.staging,
+            src_offset: position_bytes + attribute_bytes,
             dst: self.indices,
             dst_offset: u64::from(staged.range.base_index) * INDEX_STRIDE,
             size: staged.index_bytes.len() as u64,
@@ -1044,7 +1135,8 @@ fn local_bounds(vertices: &[u8]) -> Aabb {
 /// byte slices that would otherwise be swappable at the call site.
 struct Staged<'a> {
     staging: BufferHandle,
-    vertex_bytes: &'a [u8],
+    position_bytes: &'a [u8],
+    attribute_bytes: &'a [u8],
     index_bytes: &'a [u8],
     range: MeshRange,
 }
@@ -1235,6 +1327,7 @@ mod tests {
             index_count: range.index_count,
             bounds_min: range.bounds.min.to_array(),
             bounds_max: range.bounds.max.to_array(),
+            uv_range: range.uv_range,
         }
     }
 
@@ -1440,7 +1533,14 @@ mod tests {
 
         let mut pool = pool(device.as_ref(), 64, 64);
         let handle = pool
-            .upload(device.as_ref(), queue, "cube", &vertex_bytes(4), &[0, 1, 2])
+            .upload(
+                device.as_ref(),
+                queue,
+                "cube",
+                &vertex_bytes(4),
+                &[0, 1, 2],
+                UvRange::default(),
+            )
             .expect("it fits");
         let signals: Vec<_> = recorder
             .events()
@@ -1491,6 +1591,7 @@ mod tests {
                 "too many indices",
                 &vertex_bytes(4),
                 &[0; 16],
+                UvRange::default(),
             )
             .expect_err("16 indices do not fit in 8");
         assert!(
@@ -1542,6 +1643,7 @@ mod tests {
                 "cube",
                 &vertex_bytes(4),
                 &[0, 1, 2, 0, 2, 3],
+                UvRange::default(),
             )
             .expect("it fits");
 
@@ -1562,6 +1664,7 @@ mod tests {
         assert_eq!(
             pool.mesh(handle),
             Some(MeshRange {
+                uv_range: UvRange::default(),
                 base_vertex: 0,
                 base_index: 0,
                 index_count: 6,
@@ -1581,8 +1684,15 @@ mod tests {
     fn an_upload_signals_the_pools_timeline() {
         let (recorder, device, queue) = open();
         let mut pool = pool(device.as_ref(), 64, 64);
-        pool.upload(device.as_ref(), queue, "cube", &vertex_bytes(4), &[0, 1, 2])
-            .expect("it fits");
+        pool.upload(
+            device.as_ref(),
+            queue,
+            "cube",
+            &vertex_bytes(4),
+            &[0, 1, 2],
+            UvRange::default(),
+        )
+        .expect("it fits");
 
         let signals: Vec<_> = recorder
             .events()
@@ -1609,8 +1719,19 @@ mod tests {
     /// Two meshes land at different bases, and the second's copies are offset
     /// by the first's size in **bytes** — the one place the element/byte
     /// conversion could go wrong without any test noticing.
+    ///
+    /// And by the *right* stride in each of the two vertex regions, which is
+    /// what says the pool really de-interleaved rather than writing one array
+    /// twice.
     #[test]
     fn a_second_mesh_lands_after_the_first_in_both_pools() {
+        /// Where the attribute region of a 64-vertex pool begins, in bytes.
+        ///
+        /// Written out rather than taken from `MeshPool::attribute_base`: this
+        /// is the assertion that the boundary is the capacity, and a test that
+        /// asked the pool where it put things would agree with any answer.
+        const ATTRIBUTES_AT: u64 = 64 * POSITION_STRIDE as u64;
+
         let (recorder, device, queue) = open();
         let mut pool = pool(device.as_ref(), 64, 64);
         for (label, vertices, indices) in [
@@ -1623,6 +1744,7 @@ mod tests {
                 label,
                 &vertex_bytes(vertices),
                 &indices,
+                UvRange::default(),
             )
             .expect("both fit");
         }
@@ -1636,13 +1758,32 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(copies.len(), 4, "two meshes, vertices and indices each");
-        // First mesh: both halves at the start of their pool.
-        assert_eq!(copies[0].dst_offset, 0);
-        assert_eq!(copies[1].dst_offset, 0);
-        // Second mesh: four vertices and six indices further in.
-        assert_eq!(copies[2].dst_offset, 4 * VERTEX_STRIDE as u64);
-        assert_eq!(copies[3].dst_offset, 6 * INDEX_STRIDE);
+        assert_eq!(
+            copies.len(),
+            6,
+            "two meshes, and three copies each: the two vertex streams and the indices"
+        );
+        // First mesh: every region at the start of its own.
+        assert_eq!(copies[0].dst_offset, 0, "the first mesh's positions");
+        assert_eq!(
+            copies[1].dst_offset, ATTRIBUTES_AT,
+            "and its attributes, past every position the pool can hold"
+        );
+        assert_eq!(copies[2].dst_offset, 0, "and its indices");
+        // Second mesh: four vertices and six indices further in — and the two
+        // vertex regions step by *different* strides, which is the whole of
+        // what the split is and the one thing an interleaved pool could not do.
+        assert_eq!(
+            copies[3].dst_offset,
+            4 * POSITION_STRIDE as u64,
+            "the second mesh's positions"
+        );
+        assert_eq!(
+            copies[4].dst_offset,
+            ATTRIBUTES_AT + 4 * ATTRIBUTE_STRIDE as u64,
+            "and its attributes, at its own base inside the attribute region"
+        );
+        assert_eq!(copies[5].dst_offset, 6 * INDEX_STRIDE);
         pool.destroy(device.as_ref());
         recorder.assert_valid();
     }
@@ -1654,7 +1795,14 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut pool = pool(device.as_ref(), 64, 64);
         let handle = pool
-            .upload(device.as_ref(), queue, "cube", &vertex_bytes(8), &[0; 12])
+            .upload(
+                device.as_ref(),
+                queue,
+                "cube",
+                &vertex_bytes(8),
+                &[0; 12],
+                UvRange::default(),
+            )
             .expect("it fits");
         pool.flush(device.as_ref()).expect("drains");
         assert_eq!(pool.vertex_space(), (64 - 8, 64 - 8));
@@ -1709,6 +1857,7 @@ mod tests {
                     "mesh",
                     &vertex_bytes(vertices),
                     &vec![0u32; indices],
+                    UvRange::default(),
                 )
                 .expect("they fit")
             })
@@ -1757,7 +1906,14 @@ mod tests {
         // And a fourth mesh takes the freed slot, replacing that entry rather
         // than landing past the ones already there.
         let reused = pool
-            .upload(device.as_ref(), queue, "fourth", &vertex_bytes(2), &[0; 3])
+            .upload(
+                device.as_ref(),
+                queue,
+                "fourth",
+                &vertex_bytes(2),
+                &[0; 3],
+                UvRange::default(),
+            )
             .expect("the freed space fits it");
         pool.flush(device.as_ref()).expect("drains");
         assert_eq!(
@@ -1789,7 +1945,14 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut pool = pool(device.as_ref(), 64, 64);
         let first = pool
-            .upload(device.as_ref(), queue, "first", &vertex_bytes(4), &[0; 6])
+            .upload(
+                device.as_ref(),
+                queue,
+                "first",
+                &vertex_bytes(4),
+                &[0; 6],
+                UvRange::default(),
+            )
             .expect("it fits");
         pool.flush(device.as_ref()).expect("drains");
         let mesh_id = pool.table_index(first).expect("resident");
@@ -1803,7 +1966,14 @@ mod tests {
         // The successor lands in the space the freed mesh had, which is what
         // makes a stale entry actively wrong rather than merely out of date.
         let second = pool
-            .upload(device.as_ref(), queue, "second", &vertex_bytes(4), &[0; 6])
+            .upload(
+                device.as_ref(),
+                queue,
+                "second",
+                &vertex_bytes(4),
+                &[0; 6],
+                UvRange::default(),
+            )
             .expect("the freed space fits it");
         pool.flush(device.as_ref()).expect("drains");
         assert_eq!(
@@ -1891,7 +2061,14 @@ mod tests {
         )
         .expect("the null backend accepts every descriptor");
         let upload = |pool: &mut MeshPool| {
-            pool.upload(device.as_ref(), queue, "mesh", &vertex_bytes(2), &[0; 3])
+            pool.upload(
+                device.as_ref(),
+                queue,
+                "mesh",
+                &vertex_bytes(2),
+                &[0; 3],
+                UvRange::default(),
+            )
         };
         let first = upload(&mut pool).expect("room");
         upload(&mut pool).expect("room");
@@ -1937,6 +2114,7 @@ mod tests {
                 "cube",
                 &mesh::cube_vertex_bytes(),
                 &mesh::cube_indices(),
+                UvRange::default(),
             )
             .expect("a cube is small");
         pool.flush(device.as_ref()).expect("drains");
@@ -1972,6 +2150,7 @@ mod tests {
                 "cube",
                 &mesh::cube_vertex_bytes(),
                 &mesh::cube_indices(),
+                UvRange::default(),
             )
             .expect("a cube is small");
         let pyramid = pool
@@ -1981,6 +2160,7 @@ mod tests {
                 "pyramid",
                 &mesh::pyramid_vertex_bytes(),
                 &mesh::pyramid_indices(),
+                UvRange::default(),
             )
             .expect("a pyramid is small");
         pool.flush(device.as_ref()).expect("drains");
@@ -2040,6 +2220,7 @@ mod tests {
                 "ragged",
                 &[0u8; VERTEX_STRIDE + 1],
                 &[0, 1, 2],
+                UvRange::default(),
             )
             .expect_err("49 bytes is not a whole number of vertices");
         assert!(
@@ -2049,7 +2230,14 @@ mod tests {
         assert_eq!(pool.vertex_space(), (64, 64), "and nothing was reserved");
 
         let error = pool
-            .upload(device.as_ref(), queue, "empty", &[], &[])
+            .upload(
+                device.as_ref(),
+                queue,
+                "empty",
+                &[],
+                &[],
+                UvRange::default(),
+            )
             .expect_err("a mesh needs both halves");
         assert!(
             matches!(error, MeshPoolError::EmptyMesh { .. }),
@@ -2073,6 +2261,7 @@ mod tests {
             "flushed",
             &vertex_bytes(4),
             &[0, 1, 2],
+            UvRange::default(),
         )
         .expect("fits");
         pool.flush(device.as_ref()).expect("drains");
@@ -2082,6 +2271,7 @@ mod tests {
             "still staged",
             &vertex_bytes(4),
             &[0, 1, 2],
+            UvRange::default(),
         )
         .expect("fits");
         assert!(recorder.total_live_objects() > before);

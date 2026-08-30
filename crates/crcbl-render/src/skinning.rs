@@ -108,6 +108,7 @@ use crcbl_shaders::skinning::{
     JOINT_STRIDE, JOINTS_PER_VERTEX, PARAMS_SIZE, Params, SKIN_BINDING_STRIDE, SkinBinding,
     WORKGROUP_SIZE,
 };
+use crcbl_shaders::vertex::{QTangent, TangentFrame};
 use glam::{Mat3, Mat4, Vec3, Vec4};
 
 use crate::draw_gen::{bound, compute_pipeline, storage, uniform};
@@ -443,6 +444,16 @@ pub struct SkinningDesc<'a> {
     /// else in one usage scope, so the two-view spelling is a
     /// `createBindGroup` failure in the browser rather than a matter of taste.
     pub vertices: BufferHandle,
+    /// Where that pool's **attribute** region begins, in words:
+    /// [`MeshPool::attribute_base`].
+    ///
+    /// The dispatch reads and writes both streams, and the boundary is the
+    /// pool's capacity — which is why it arrives here rather than being derived:
+    /// see `crcbl_shaders::skinning::Params::attribute_base`, the block lane it
+    /// ends up in.
+    ///
+    /// [`MeshPool::attribute_base`]: crate::MeshPool::attribute_base
+    pub attribute_base: u32,
 }
 
 /// One range the caller asks to be skinned this frame: one animated
@@ -485,6 +496,9 @@ pub struct Skinning {
     pipeline_layout: PipelineLayoutHandle,
     pipeline: ComputePipelineHandle,
     vertices: BufferHandle,
+    /// [`SkinningDesc::attribute_base`], carried into every block this pass
+    /// writes.
+    attribute_base: u32,
     range_capacity: u32,
     joint_capacity: u32,
     binding_capacity: u32,
@@ -633,6 +647,7 @@ impl Skinning {
             pipeline_layout,
             pipeline,
             vertices: desc.vertices,
+            attribute_base: desc.attribute_base,
             range_capacity: desc.ranges,
             joint_capacity: desc.joints,
             binding_capacity: desc.bindings,
@@ -722,6 +737,7 @@ impl Skinning {
                 binding_base: (binding_bytes.len() / SKIN_BINDING_STRIDE) as u32,
                 joint_base: (palette_bytes.len() / JOINT_STRIDE) as u32,
                 joint_count: range.palette.len() as u32,
+                attribute_base: self.attribute_base,
             };
             // `to_bytes` panics on an overlap and on an empty palette. Neither
             // can happen here: `check` refused the empty palette by name, and
@@ -994,7 +1010,13 @@ pub fn normal_basis(basis: Mat3) -> Mat3 {
 ///   normalised **only if it is non-zero** — the shader's guard, whose fallback
 ///   is the bind-pose normal, because a `NaN` written into the pool is read
 ///   again by the shadow passes;
-/// * `color` and `uv` are copied through, because the destination is a
+/// * the tangent goes through the **bare** linear part, because a tangent lies
+///   in the surface where a normal is perpendicular to it, and is then
+///   Gram-Schmidted against the posed normal — a quaternion is three axes at
+///   right angles, and a shearing blend leaves the pair at some other one;
+/// * the handedness is the bind pose's, carried rather than re-derived: it is
+///   a property of the UV parameterisation, which no pose changes;
+/// * `uv0`, `uv1` and `color` are copied through, because the destination is a
 ///   different range of the pool and a field left alone is a field holding
 ///   whatever the allocator last put there.
 ///
@@ -1004,31 +1026,49 @@ pub fn normal_basis(basis: Mat3) -> Mat3 {
 #[must_use]
 pub fn skin_vertex(palette: &[Mat4], binding: &SkinBinding, vertex: &MeshVertex) -> MeshVertex {
     let blended = blend(palette, binding);
-    let position = blended
-        * Vec4::new(
-            vertex.position[0],
-            vertex.position[1],
-            vertex.position[2],
-            1.0,
-        );
-    let bind_pose = Vec3::new(vertex.normal[0], vertex.normal[1], vertex.normal[2]);
-    let carried = normal_basis(Mat3::from_mat4(blended)) * bind_pose;
+    let position = blended * Vec4::from((Vec3::from_array(vertex.position), 1.0));
+    let bind_pose = vertex.qtangent.decode();
+    let bind_normal = Vec3::from_array(bind_pose.normal);
+    let bind_tangent = Vec3::from_array(bind_pose.tangent);
+
+    let carried = normal_basis(Mat3::from_mat4(blended)) * bind_normal;
     let square_length = carried.dot(carried);
     let normal = if square_length > 0.0 {
         carried / square_length.sqrt()
     } else {
-        bind_pose
+        bind_normal
     };
+    let projected = {
+        let moved = Mat3::from_mat4(blended) * bind_tangent;
+        moved - normal * normal.dot(moved)
+    };
+    let square_length = projected.dot(projected);
+    let tangent = if square_length > 0.0 {
+        projected / square_length.sqrt()
+    } else {
+        bind_tangent
+    };
+    let handedness = Vec3::from_array(bind_pose.normal)
+        .cross(bind_tangent)
+        .dot(Vec3::from_array(bind_pose.bitangent));
     MeshVertex {
-        position: [position.x, position.y, position.z, 1.0],
-        normal: [normal.x, normal.y, normal.z, 0.0],
+        position: [position.x, position.y, position.z],
+        qtangent: QTangent::encode(TangentFrame {
+            tangent: tangent.to_array(),
+            bitangent: (normal.cross(tangent) * if handedness < 0.0 { -1.0 } else { 1.0 })
+                .to_array(),
+            normal: normal.to_array(),
+        }),
+        uv0: vertex.uv0,
+        uv1: vertex.uv1,
         color: vertex.color,
-        uv: vertex.uv,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crcbl_shaders::vertex::UvRange;
+
     use crcbl_hal::null::{Command, NullInstance, Recorder};
     use crcbl_hal::{CommandEncoderDesc, DeviceDesc, Instance, QueueHandle, QueueKind};
     use crcbl_shaders::mesh::VERTEX_STRIDE;
@@ -1081,6 +1121,7 @@ mod tests {
                 joints,
                 bindings,
                 vertices: pool.vertex_buffer(),
+                attribute_base: pool.attribute_base(),
             },
         )
         .expect("the null backend accepts every descriptor")
@@ -1162,6 +1203,7 @@ mod tests {
             binding_base: word(12),
             joint_base: word(16),
             joint_count: word(20),
+            attribute_base: word(24),
         }
     }
 
@@ -1186,6 +1228,7 @@ mod tests {
                 "source",
                 &vec![0u8; VERTICES as usize * VERTEX_STRIDE],
                 &[0, 1, 2],
+                UvRange::default(),
             )
             .expect("the pool has room");
         pool.flush(device).expect("the null backend completes it");
@@ -1255,6 +1298,7 @@ mod tests {
                 "source",
                 &vec![0u8; 8 * VERTEX_STRIDE],
                 &[0, 1, 2],
+                UvRange::default(),
             )
             .expect("the pool has room");
         pool.flush(device).expect("the null backend completes it");
@@ -1299,6 +1343,7 @@ mod tests {
                 "source",
                 &vec![0u8; VERTICES as usize * VERTEX_STRIDE],
                 &[0, 1, 2],
+                UvRange::default(),
             )
             .expect("the pool has room");
         pool.flush(device).expect("the null backend completes it");
@@ -1324,12 +1369,22 @@ mod tests {
     /// A vertex, distinct in every field so a copy landing in the wrong lane
     /// could not compare equal by accident.
     fn vertex(position: Vec3, normal: Vec3) -> MeshVertex {
-        MeshVertex {
-            position: [position.x, position.y, position.z, 1.0],
-            normal: [normal.x, normal.y, normal.z, 0.0],
-            color: [0.25, 0.5, 0.75, 1.0],
-            uv: [0.125, 0.375, 0.0, 0.0],
-        }
+        MeshVertex::from_normal(
+            position.to_array(),
+            normal.to_array(),
+            [0.25, 0.5, 0.75, 1.0],
+            [0.125, 0.375],
+            &UvRange {
+                scale: [1.0, 1.0],
+                offset: [0.0, 0.0],
+            },
+        )
+    }
+
+    /// The normal a vertex's frame decodes to — what the tests below compare,
+    /// since the record carries a quaternion rather than a normal.
+    fn normal_of(vertex: &MeshVertex) -> Vec3 {
+        Vec3::from_array(vertex.qtangent.decode().normal)
     }
 
     /// **A vertex whose weight is entirely on one joint is transformed
@@ -1357,22 +1412,22 @@ mod tests {
         let expected = joint * Vec4::new(1.0, 2.0, 3.0, 1.0);
         assert_eq!(
             skinned.position,
-            [expected.x, expected.y, expected.z, 1.0],
+            [expected.x, expected.y, expected.z],
             "a rigidly bound vertex is the joint's transform of it and nothing else"
         );
         // A rotation is its own cofactor to within rounding, so the normal is
         // the rotated one; the tolerance is the normalise, not the blend.
         let want = Mat3::from_mat4(joint) * Vec3::Y;
-        for (got, want) in skinned.normal[..3].iter().zip(want.to_array()) {
+        let got = normal_of(&skinned);
+        for (got, want) in got.to_array().iter().zip(want.to_array()) {
             assert!(
-                (got - want).abs() < 1e-6,
-                "a rigidly bound normal is the joint's rotation of it: {:?} against {want}",
-                skinned.normal
+                (got - want).abs() <= QTangent::MAX_COMPONENT_ERROR,
+                "a rigidly bound normal is the joint's rotation of it: {got:?} against {want}"
             );
         }
-        assert_eq!(skinned.normal[3], 0.0, "the normal's w is written as zero");
         assert_eq!(skinned.color, bind_pose.color, "colour is copied through");
-        assert_eq!(skinned.uv, bind_pose.uv, "uv is copied through");
+        assert_eq!(skinned.uv0, bind_pose.uv0, "uv is copied through");
+        assert_eq!(skinned.uv1, bind_pose.uv1, "and the second set with it");
     }
 
     /// A vertex blended across two joints, against the value worked out by
@@ -1398,13 +1453,13 @@ mod tests {
 
         assert_eq!(
             skinned.position,
-            [1.0 + 0.25 * 4.0, 1.0 + 0.75 * 8.0, 1.0, 1.0],
+            [1.0 + 0.25 * 4.0, 1.0 + 0.75 * 8.0, 1.0],
             "a quarter of the first joint's translation and three quarters of the second's"
         );
         assert_eq!(
-            skinned.normal,
-            [0.0, 0.0, 1.0, 0.0],
-            "a blend of translations has an identity linear part, so the normal is unmoved"
+            skinned.qtangent, bind_pose.qtangent,
+            "a blend of translations has an identity linear part, so the frame is unmoved — \
+             and lane for lane, because the re-encode is the same arithmetic on the same frame"
         );
     }
 
@@ -1431,9 +1486,9 @@ mod tests {
         // from x; the bare basis is diag(4,1,1) and tilts toward it.
         let through_cofactor = (Vec3::new(1.0, 4.0, 0.0)).normalize();
         let through_basis = (Vec3::new(4.0, 1.0, 0.0)).normalize();
-        let got = Vec3::new(skinned.normal[0], skinned.normal[1], skinned.normal[2]);
+        let got = normal_of(&skinned);
         assert!(
-            (got - through_cofactor).length() < 1e-6,
+            (got - through_cofactor).length() <= QTangent::MAX_COMPONENT_ERROR,
             "{got:?} is not the cofactor's answer {through_cofactor:?}"
         );
         assert!(
@@ -1442,7 +1497,7 @@ mod tests {
              this test would pass with the wrong matrix"
         );
         assert!(
-            (got.length() - 1.0).abs() < 1e-6,
+            (got.length() - 1.0).abs() <= QTangent::MAX_COMPONENT_ERROR,
             "the shader normalises, so the written normal is unit length"
         );
     }
@@ -1496,15 +1551,18 @@ mod tests {
 
         assert_eq!(
             skinned.position,
-            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
             "no weight at all puts the vertex at the palette's origin"
         );
         assert_eq!(
-            skinned.normal, bind_pose.normal,
-            "and the normal is the bind pose's, finite and already unit length"
+            skinned.qtangent, bind_pose.qtangent,
+            "and the frame is the bind pose's, finite and already orthonormal"
         );
         assert!(
-            skinned.normal.iter().all(|value| value.is_finite()),
+            normal_of(&skinned)
+                .to_array()
+                .iter()
+                .all(|value| value.is_finite()),
             "nothing written into the vertex pool may be NaN"
         );
     }
@@ -1608,6 +1666,7 @@ mod tests {
                 "bind pose",
                 &vec![0u8; count as usize * VERTEX_STRIDE],
                 &[0, 1, 2],
+                UvRange::default(),
             )
             .expect("room in both pools");
         pool.flush(device.as_ref()).expect("the null backend lands");
@@ -1638,6 +1697,7 @@ mod tests {
                 binding_base: 0,
                 joint_base: 0,
                 joint_count: 1,
+                attribute_base: 0,
             }
             .to_bytes();
         }
@@ -1824,6 +1884,7 @@ mod tests {
                     binding_base: 0,
                     joint_base: 0,
                     joint_count: 3,
+                    attribute_base: pool.attribute_base(),
                 }
             );
             seen.push(block.output_base);
@@ -2297,6 +2358,7 @@ mod tests {
             joints: 1,
             bindings: 1,
             vertices: pool.vertex_buffer(),
+            attribute_base: pool.attribute_base(),
         };
         for desc in [
             SkinningDesc { frames: 0, ..base },

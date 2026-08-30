@@ -36,6 +36,7 @@
 //! and a `--check` beside it. See [`crate::cluster_dag`].
 
 use crate::mesh::MeshVertex;
+use crate::vertex::UvRange;
 
 /// Quads along each side of the patch.
 ///
@@ -160,12 +161,28 @@ pub fn vertex_at(position: [f32; 3]) -> MeshVertex {
     let color =
         [0, 1, 2].map(|channel| VALLEY[channel] + climb * (CREST[channel] - VALLEY[channel]));
     let uv = [x, z].map(|axis| (axis + DUNES_EXTENT) / (2.0 * DUNES_EXTENT));
-    MeshVertex {
-        position: [x, y, z, 1.0],
-        normal: [normal[0], normal[1], normal[2], 0.0],
-        color: [color[0], color[1], color[2], 1.0],
-        uv: [uv[0], uv[1], 0.0, 0.0],
-    }
+    MeshVertex::from_normal(
+        position,
+        normal,
+        [color[0], color[1], color[2], 1.0],
+        uv,
+        &uv_range(),
+    )
+}
+
+/// The range every coordinate [`vertex_at`] produces is quantised against: the
+/// unit square.
+///
+/// The patch spans `[-DUNES_EXTENT, DUNES_EXTENT]` on both axes and the
+/// coordinate is that mapped onto `0..=1`, so the corners reach both ends
+/// exactly and nothing reaches outside. **Every level of the DAG shares it**,
+/// which is what the mesh path needs: that path resolves a row through
+/// `instance.mesh`, so a coarser level's vertices are decoded through level
+/// 0's range — see [`GpuMesh::uv_range`](crate::mesh::GpuMesh::uv_range). A
+/// decimated vertex sits inside the patch, so the shared range covers it.
+#[must_use]
+pub fn uv_range() -> UvRange {
+    UvRange::from_uvs(&[[0.0, 0.0], [1.0, 1.0]])
 }
 
 /// The patch's grid positions, row by row along `z`, each row ascending in `x`.
@@ -215,18 +232,7 @@ pub fn vertices() -> Vec<MeshVertex> {
 /// [`crate::mesh::cube_vertex_bytes`]' terms exactly.
 #[must_use]
 pub fn vertex_bytes() -> Vec<u8> {
-    let vertices = vertices();
-    crate::pack_f32_le(
-        vertices.iter().flat_map(|vertex| {
-            vertex
-                .position
-                .iter()
-                .chain(&vertex.normal)
-                .chain(&vertex.color)
-                .chain(&vertex.uv)
-        }),
-        vertices.len() * crate::mesh::VERTEX_STRIDE,
-    )
+    crate::mesh::vertex_bytes(&vertices())
 }
 
 /// [`indices`] as the bytes an index buffer holds.
@@ -238,6 +244,8 @@ pub fn index_bytes() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vertex::QTangent;
+    use crate::vertex::encode_rgba8 as crcbl_encode_rgba8;
 
     /// The two arrays are the sizes the constants promise, and every index
     /// names a vertex that exists.
@@ -360,21 +368,30 @@ mod tests {
     fn a_vertex_off_the_surface_takes_the_surfaces_normal() {
         let (x, z) = (1.5f32, 2.25f32);
         let lifted = vertex_at([x, height(x, z) + 1.0, z]);
-        assert_eq!(lifted.normal, {
-            let normal = normal_at(x, z);
-            [normal[0], normal[1], normal[2], 0.0]
-        });
-        assert_eq!(lifted.position, [x, height(x, z) + 1.0, z, 1.0]);
+        // Through the encoding, because that is what the vertex now carries:
+        // the frame the quantised quaternion decodes to has to be the surface's
+        // to within the error `QTangent` states.
+        let decoded = lifted.qtangent.decode().normal;
+        let surface = normal_at(x, z);
+        for axis in 0..3 {
+            assert!(
+                (decoded[axis] - surface[axis]).abs() <= QTangent::MAX_COMPONENT_ERROR,
+                "axis {axis} of the decoded normal is {} where the surface's is {}",
+                decoded[axis],
+                surface[axis]
+            );
+        }
+        assert_eq!(lifted.position, [x, height(x, z) + 1.0, z]);
 
         // The ramp's two ends, so the colour is a function of height rather
         // than a constant that happens to look right.
         assert_eq!(
             vertex_at([0.0, 0.0, 0.0]).color,
-            [VALLEY[0], VALLEY[1], VALLEY[2], 1.0]
+            crcbl_encode_rgba8([VALLEY[0], VALLEY[1], VALLEY[2], 1.0])
         );
         assert_eq!(
             vertex_at([0.0, AMPLITUDE, 0.0]).color,
-            [CREST[0], CREST[1], CREST[2], 1.0]
+            crcbl_encode_rgba8([CREST[0], CREST[1], CREST[2], 1.0])
         );
     }
 }

@@ -139,26 +139,108 @@
 // pass — is a multiply of two values in the same space. The tonemap pass and
 // the swapchain's sRGB encode are what turn the product into pixels.
 
-/// One vertex of a hardcoded mesh, matching `crcbl_shaders::mesh::MeshVertex`.
+// The vertex pool's two streams, and the arithmetic that reads one back.
+//
+// `docs/plan/43-render-standards.md` §2's 2026-08-30 layout: the pool is one
+// storage buffer holding `POSITION_WORDS` words of position for every vertex
+// and then `ATTRIBUTE_WORDS` words of attributes for every vertex, and
+// `FrameUniforms::vertex_pool` says where the second region starts. Everything
+// below is spelled character for character in `mesh_cluster.slang` and — the
+// pure functions — in `skinning.slang`, because there is no shared header and
+// the compile script hashes one source per artifact;
+// `crcbl_shaders::mesh::every_shader_decodes_a_vertex_the_same_way` is what
+// holds the copies equal.
+//
+// A drift here is not a compile error anywhere: every file builds, and the
+// shaders simply read the same bytes as different numbers.
+
+/// Words one vertex spends in the pool's **position** region, matching
+/// `crcbl_shaders::mesh::POSITION_STRIDE`.
+static const uint POSITION_WORDS = 3;
+
+/// Words one vertex spends in the pool's **attribute** region, matching
+/// `crcbl_shaders::mesh::ATTRIBUTE_STRIDE`.
+static const uint ATTRIBUTE_WORDS = 5;
+
+/// An orthonormal tangent frame — the three vectors a QTangent stands in for,
+/// matching `crcbl_shaders::vertex::TangentFrame`.
+struct TangentFrame
+{
+    float3 tangent;
+    float3 bitangent;
+    float3 normal;
+};
+
+/// One `snorm16` lane read back the way `crcbl_shaders::vertex`'s
+/// `dequantise_snorm` does: `n / 32767`, clamped at the one end the division
+/// can pass, which is what makes both `+1` and `-1` exactly representable.
+float dequantise_snorm(int lane)
+{
+    return max(float(lane) / 32767.0, -1.0);
+}
+
+/// The four `snorm16` lanes of a packed pair of words, low lane first.
+float4 unpack_snorm16x4(uint low, uint high)
+{
+    return float4(dequantise_snorm(asint(low << 16) >> 16),
+                  dequantise_snorm(asint(low) >> 16),
+                  dequantise_snorm(asint(high << 16) >> 16),
+                  dequantise_snorm(asint(high) >> 16));
+}
+
+/// The two `unorm16` lanes of one word, low lane first.
+float2 unpack_unorm16x2(uint word)
+{
+    return float2(float(word & 0xffffu), float(word >> 16)) / 65535.0;
+}
+
+/// One `rgba8` word as linear floats, red in the low byte.
+float4 unpack_rgba8(uint word)
+{
+    return float4(float(word & 0xffu),
+                  float((word >> 8) & 0xffu),
+                  float((word >> 16) & 0xffu),
+                  float(word >> 24)) / 255.0;
+}
+
+/// `q v q⁻¹` for a unit `q`, in the two cross products that form costs rather
+/// than the two quaternion multiplications it is written as —
+/// `crcbl_shaders::vertex`'s `rotate`, term for term.
+float3 rotate_by(float4 q, float3 v)
+{
+    float3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+/// The frame a QTangent's four lanes stand for, mirroring
+/// `crcbl_shaders::vertex::QTangent::decode`.
 ///
-/// `float4`s rather than packed `float3`/`float2` members: under `std430` a
-/// `float3` is 16-byte aligned *and* 12 bytes wide and a `float2` is 8-byte
-/// aligned, so a struct mixing them has padding the CPU side has to reproduce
-/// exactly. Four `float4`s are 64 bytes with no padding anywhere, which is a
-/// layout that cannot drift. The unused `w` components stay unused; P9's real
-/// vertex format packs them (topic 03 §3.1).
+/// Renormalised first: four independently rounded lanes are not a unit
+/// quaternion, and rotating by one that is not scales every vector it produces.
+/// The bitangent is `handedness * cross(normal, tangent)` rather than a third
+/// rotation of `(0, 1, 0)`, because the quaternion was extracted from the
+/// right-handed frame either way and only this recovers a left-handed one.
+TangentFrame decode_qtangent(float4 lanes)
+{
+    float4 q = normalize(lanes);
+    TangentFrame basis;
+    basis.tangent = rotate_by(q, float3(1.0, 0.0, 0.0));
+    basis.normal = rotate_by(q, float3(0.0, 0.0, 1.0));
+    basis.bitangent = cross(basis.normal, basis.tangent) * (lanes.w < 0.0 ? -1.0 : 1.0);
+    return basis;
+}
+
+/// One vertex, decoded out of the pool's two regions.
+///
+/// Not the memory layout: the pool holds `POSITION_WORDS` words of position for
+/// every vertex and then `ATTRIBUTE_WORDS` words of attributes for every
+/// vertex, and `load_vertex` is what turns a pair of those into this.
 struct MeshVertex
 {
-    float4 position;
-    float4 normal;
+    float3 position;
+    TangentFrame basis;
+    float2 uv0;
     float4 color;
-    /// Base-colour texture coordinates in `xy`; `zw` unused.
-    ///
-    /// A whole `float4` for two numbers, deliberately: a `float2` here would be
-    /// eight bytes followed by eight of tail padding, because the struct's own
-    /// alignment is the `float4`s' 16 — so it would cost the same and put a
-    /// hole in a layout whose whole point is not having one.
-    float4 uv;
 };
 
 /// How many cascades the sun's shadow map is split into, matching
@@ -442,6 +524,10 @@ struct FrameUniforms
     /// offset moves, so every golden blessed before this member existed still
     /// matches.
     float4x4 previous_view_proj;
+    /// Where the pool's **attribute** region begins, as a word index; `yzw`
+    /// unread padding. See `crcbl_shaders::mesh::FrameUniforms::vertex_pool`,
+    /// and `load_vertex` above, which is the only reader.
+    uint4 vertex_pool;
 };
 
 /// What `FrameUniforms::ambient`'s `w` must reach for `fragmentMain` to draw the
@@ -666,6 +752,16 @@ struct GpuMesh
     float max_x;
     float max_y;
     float max_z;
+    /// The scale and offset every `unorm16` UV lane of this mesh was quantised
+    /// against, matching `crcbl_shaders::mesh::GpuMesh::uv_range`.
+    ///
+    /// Four scalars rather than two `float2`s: `std430` aligns a `float2` to
+    /// eight, which after nine floats would leave a hole the CPU side has to
+    /// reproduce. `load_vertex` takes the four as one `float4`.
+    float uv_scale_u;
+    float uv_scale_v;
+    float uv_offset_u;
+    float uv_offset_v;
 };
 
 /// One material's shading factors **and its base-colour texture**, matching
@@ -891,8 +987,44 @@ struct DrawConstants
 [[vk::binding(0, 0)]]
 ConstantBuffer<FrameUniforms> frame;
 
+/// The vertex pool, read as raw words: both streams of every resident mesh.
+///
+/// **One binding for two streams, and that is forced rather than chosen.** This
+/// layout already binds `crcbl_hal::PORTABLE_STORAGE_BUFFERS_PER_STAGE` storage
+/// buffers in its vertex stage — every one a WebGPU device guarantees — so a
+/// second vertex binding is a renderer that cannot be built in a browser. Two
+/// regions of one buffer cost nothing two buffers would have saved: the memory
+/// system sees the same two contiguous runs either way, and a pass that wants
+/// geometry alone still reads twelve bytes a vertex.
 [[vk::binding(1, 0)]]
-StructuredBuffer<MeshVertex> vertices;
+StructuredBuffer<uint> vertices;
+
+/// Where vertex `at`'s position sits, and nothing else.
+///
+/// The twelve bytes stream 0 exists to make cheap: a depth prepass or a shadow
+/// cascade reads a contiguous run of these and never touches the attribute
+/// region at all.
+float3 load_position(uint at)
+{
+    uint word = at * POSITION_WORDS;
+    return float3(asfloat(vertices[word]),
+                  asfloat(vertices[word + 1]),
+                  asfloat(vertices[word + 2]));
+}
+
+/// The whole of vertex `at`, with its coordinates put back through the mesh's
+/// own range — `range.xy` the scale, `range.zw` the offset, which is
+/// `crcbl_shaders::vertex::UvRange::decode`.
+MeshVertex load_vertex(uint at, float4 range)
+{
+    uint word = frame.vertex_pool.x + at * ATTRIBUTE_WORDS;
+    MeshVertex vertex;
+    vertex.position = load_position(at);
+    vertex.basis = decode_qtangent(unpack_snorm16x4(vertices[word], vertices[word + 1]));
+    vertex.uv0 = range.zw + range.xy * unpack_unorm16x2(vertices[word + 2]);
+    vertex.color = unpack_rgba8(vertices[word + 4]);
+    return vertex;
+}
 
 [[vk::binding(2, 0)]]
 StructuredBuffer<GpuInstance> instances;
@@ -1249,7 +1381,9 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     uint base_vertex = (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) != 0u
         ? instance.base_vertex
         : mesh.base_vertex;
-    MeshVertex vertex = vertices[index + base_vertex];
+    MeshVertex vertex = load_vertex(
+        index + base_vertex,
+        float4(mesh.uv_scale_u, mesh.uv_scale_v, mesh.uv_offset_u, mesh.uv_offset_v));
     // **And where this vertex was**, which for a deformed instance is not this
     // vertex at all: the run above is the pose *this* frame's dispatch wrote,
     // so putting it through the previous transform says a swinging limb moved
@@ -1260,9 +1394,9 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     uint previous_base = (instance.flags & INSTANCE_BASE_VERTEX_OVERRIDE) != 0u
         ? instance.previous_base_vertex
         : base_vertex;
-    float3 previous_position = vertices[index + previous_base].position.xyz;
+    float3 previous_position = load_position(index + previous_base);
 
-    float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
+    float4 world = mul(instance.transform, float4(vertex.position, 1.0));
 
     VertexOutput output;
     output.position = mul(frame.view_proj, world);
@@ -1272,7 +1406,7 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // and a non-uniform scale moves the two apart. `normal_basis` is the matrix
     // that keeps them together, and it is built here rather than uploaded, so
     // `GpuInstance` grows nothing.
-    output.world_normal = mul(normal_basis((float3x3)instance.transform), vertex.normal.xyz);
+    output.world_normal = mul(normal_basis((float3x3)instance.transform), vertex.basis.normal);
     // **No cluster here, and that is the honest picture.** These two paths
     // select one level per *instance*, so there is neither a per-cluster level
     // to tint by nor a per-cluster projected error to shade by; a flat grey says
@@ -1286,7 +1420,7 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // second draw. Passed on rather than resolved here: the table is the
     // fragment stage's to read now, for the reason its binding gives.
     output.material = instance.material;
-    output.uv = vertex.uv.xy;
+    output.uv = vertex.uv0;
     // Both clip positions, undivided — see `VertexOutput::clip_position`. The
     // previous one is last frame's vertex under this instance's previous
     // transform seen through last frame's camera, which is the whole of the

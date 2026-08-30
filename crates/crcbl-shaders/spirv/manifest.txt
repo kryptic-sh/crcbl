@@ -89,28 +89,28 @@ entry-points = computeMain:glcompute
 
 [cull]
 source = shaders/cull.slang
-source-sha256 = edfe1261550f90939c7ee118618142f23ad29135bb0042f854ae7354e4c9b400
+source-sha256 = fc5584a46559ed4d3ad52c8feb24a54a9117b870cf89fe8d6376529972d89f0a
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/cull.spv
-spirv-sha256 = 39e24e4c3855f4a4823c6935f62247d31584eb159e6506c1edaf3ef8df5418ac
+spirv-sha256 = b7924742fa759e80d2111ebfe75400679da675d209587ffe3a5627d48de390ca
 wgsl = wgsl/cull.wgsl
-wgsl-sha256 = a8dae0ee83a0a6c135db9e1f5ac37fb2f56bdb6b1f71efdf48250d2a070d072d
+wgsl-sha256 = cf4384e1d9a6102bb5c1e6c376bbc2648639d6f371bc7e284a21950973f0e2ce
 msl = msl/cull.metal
-msl-sha256 = 664c479975f3c288fb97ad31ce45589d2f68ce691ce354341fdb525c15e02228
-dxil = computeMain:dxil/cull.computeMain.dxil:91abe73da0713cf850b929c2801e30e61fdb79216a2e23969f01dab07ff2a86c
+msl-sha256 = 9402940c85fb0d8cf57e371112b5409ef7b8cf9914baee085dbb3bee3353b8c5
+dxil = computeMain:dxil/cull.computeMain.dxil:c9ebf07173302150c0fc8e142a094dd5856ab850a36180d387fd4896a44a8cfc
 entry-points = computeMain:glcompute
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = 113f5ae8580d795dfab56e2d95a1f4bc4396d96cb3efe5ed6ee9532308db47e6
+source-sha256 = a2362039db62cb3923556601b9cc5ae298c66d57621416a8ac2527556626bc89
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
-spirv-sha256 = 7a129c82e5fd78c31371698483e255ffe8a2c5c52bf3eb5e1aeb9818f942a06b
+spirv-sha256 = 72841fb8081288e97c08fb03d2265dfde5b97519a7105bf8c5c32090daf1c1fa
 wgsl = wgsl/draw_gen.wgsl
-wgsl-sha256 = 97c10e251aeab3e20ff4cd4d17e086864c20f1f7b2c4189f87b6e7b14f1b1806
+wgsl-sha256 = 64815df321da0b784d3f599cb49e04f006378801821236ea05ff9080565295c0
 msl = msl/draw_gen.metal
-msl-sha256 = 9724643a52798b943f9a381ed386a5eb42c9d4764fb462749846e1f3c60c4680
-dxil = computeMain:dxil/draw_gen.computeMain.dxil:613773101efb05617ef8e8451715cbf9f17ce8aba20551571100aa3a8cde8909
+msl-sha256 = ec63c3f8741b5467bf8b9d24e496f3560b67296ecb2b663cb66b4ed9fac72c75
+dxil = computeMain:dxil/draw_gen.computeMain.dxil:8cf3f17d76fc3523aebbe5794fe1be5b0d3f10762178e6df256e2eb3a1c11db4
 entry-points = computeMain:glcompute
 
 [exposure]
@@ -195,29 +195,29 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 2c3072de8964f573685d28075a29f9e60de33c0e257a767490d64f146533c0f5
+source-sha256 = ffed8e6f034cdf534603e5f3362db727ea14609417dca11aa20af16894343b8f
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 919de6e071b0f317a3e2298e390a27b60146922b05ec05709090fd97f2825f88
+spirv-sha256 = 30be55a408753921e95ad4e9ba5f17323634eaaec9cfdd4d97d02fbdef24accc
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = fcc0b85d2adf7249fc9e7dbbc4ee3f0474aa34c237185fab42607d4393c7a3f1
+wgsl-sha256 = 8540a1cb15cd923cc6f941ed9ec140fa5b9679425b4b3e3128b9dd222fd28caf
 msl = msl/mesh.metal
-msl-sha256 = ad6d3052801860bc390fe7b3006e402864b7063d15be76258cb5df4ea3851045
-dxil = vertexMain:dxil/mesh.vertexMain.dxil:64fbac7e37097174e8c6d25095c7be4e573d1bb0053eb00efa596d3b2fc131f0
-dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:f6a8e17863d74a7e3a4351fdfe530737d672197a0ba440890caf04c59cab65b0
+msl-sha256 = 78f95ce7fa446dda898edb7fb35775dd62baa32b65f4a5b62d640b8410800a4a
+dxil = vertexMain:dxil/mesh.vertexMain.dxil:2352d27a068249635d3ca0699496d653b0d500ca548fe52a8e70b7f6a88a8c5c
+dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:df715630cff480dc4fd34fb3e1fbe6ae68555b2019a7f194071978df5cb7fcba
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = 47beefa78d9aeeff73767b3f03db87508b6102554a7c02865af1db8f7aa16313
+source-sha256 = d67a12ac6f5b3b8fc14995883fb7a2eb45475d48648b070faad95f10ecc53e18
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
-spirv-sha256 = e637312c15879174cf941e9117d1cc3bda0cc7d4ccc7ad018e8f9b15adb5a096
+spirv-sha256 = 97a8806b2bfc6667f8591473d361dca7c63c68e6fda73730e5c207ed1345cdf8
 msl = msl/mesh_cluster.metal
-msl-sha256 = 428570cc5b22198d486b1a7e83201122d3e0ad9a864676bb7777cfedbc4f6370
-dxil = meshMain:dxil/mesh_cluster.meshMain.dxil:d77d59f76c65858e1c51e577665892cef2b783052d9ce8300254e29760e63c01
-dxil = taskMain:dxil/mesh_cluster.taskMain.dxil:7536ad5e1dc23ca13f59b1bd82458c14f20c0f7964a73c7e3f247b4660b78cd4
-dxil = amplifiedMeshMain:dxil/mesh_cluster.amplifiedMeshMain.dxil:77412ffd62726a1a6c3a90f8f42a9f62f27d53721ba5e33d0f6104a8d96826ad
+msl-sha256 = 0bfd9c371406bd5e8446cb64e136fe27680d964681866b1d33db179d4b109dd3
+dxil = meshMain:dxil/mesh_cluster.meshMain.dxil:003c9d024e1d207a3b67ec815f1a1e0b0aa5bdd7356a053d4464fe9a53bca4a5
+dxil = taskMain:dxil/mesh_cluster.taskMain.dxil:7a2f31ca5c488c94cec30ab3693bd9a5d800a6e15bc6428bfcc18458b23e6a91
+dxil = amplifiedMeshMain:dxil/mesh_cluster.amplifiedMeshMain.dxil:8b51e87cbc9f3c9da421bbb637c6964c3cb4900c1ce93d116dd9cb5c1932f6f1
 entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext
 
 [mesh_shader]
@@ -259,15 +259,15 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [skinning]
 source = shaders/skinning.slang
-source-sha256 = 53b25564d4a9592751b481d8db8dd65203a5dfb98267817b77613868628edc08
+source-sha256 = 5ffdf3d3a986b707dbcdefd28db682760f38e757b8912bab0a79c0efefae10fa
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/skinning.spv
-spirv-sha256 = a37f7b99ffd5317469ca903250fa49589722d495b47ddf24f8e467ce4f193ddd
+spirv-sha256 = a237d1d0fdd34db2941bad9199ed34a0eff48ed31ae499b843a889a3ef848282
 wgsl = wgsl/skinning.wgsl
-wgsl-sha256 = 82f6b7cafa873babc23979874c1dc089857773ed0ab90903b754ef9160a46f67
+wgsl-sha256 = 581e30c51529771fbec7c170a968d8d80b845fa5211a954deb9d586def4de95d
 msl = msl/skinning.metal
-msl-sha256 = 179c28795fcb00ee5706083fae197a66c1cb5bf5ea09d73886f0edb543e47820
-dxil = computeMain:dxil/skinning.computeMain.dxil:5b0d9b30bf4296213b15efdcf6702c791093cb1a25577d2de77cb135fd8db9e4
+msl-sha256 = 0a0e4a32b41fd501a4a17f361bd7e52870d21eef78cfc261a7154e0ae0cd4460
+dxil = computeMain:dxil/skinning.computeMain.dxil:b378348ea94920050c803daa2944b43e710c43773bdbffeead256518067fdb65
 entry-points = computeMain:glcompute
 
 [sky]

@@ -518,6 +518,9 @@ mod tests {
             index_count: 36,
             bounds_min: [-0.5, -0.5, -0.5],
             bounds_max: [0.5, 0.5, 0.5],
+            // Read by nothing here: this pass resolves boxes, and the range is
+            // the vertex stage's.
+            uv_range: crcbl_shaders::vertex::UvRange::default(),
         }
     }
 

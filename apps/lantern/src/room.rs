@@ -95,6 +95,7 @@ use crcbl::render::{
     SpotLight,
 };
 use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
+use crcbl::shaders::vertex::UvRange;
 
 // ---------------------------------------------------------------------------
 // The room's dimensions
@@ -771,8 +772,19 @@ enum Facing {
 #[derive(Debug, Default)]
 struct MeshBuilder {
     positions: Vec<[f32; 3]>,
-    vertices: Vec<MeshVertex>,
+    /// The vertices as authored — floats, because a `unorm16` UV lane needs the
+    /// range of every coordinate the mesh carries and a builder is not finished
+    /// being handed coordinates until [`MeshBuilder::finish`].
+    vertices: Vec<RawVertex>,
     indices: Vec<u32>,
+}
+
+/// One vertex on the way to a `crcbl::shaders::mesh::MeshVertex`.
+#[derive(Clone, Copy, Debug)]
+struct RawVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
 }
 
 /// The texture coordinates of a quad's four corners, in the order the quad
@@ -801,16 +813,10 @@ impl MeshBuilder {
             .unwrap_or_else(|_| unreachable!("a room of a few hundred vertices"));
         for (corner, uv) in corners.iter().zip(&uvs) {
             self.positions.push([corner.x, corner.y, corner.z]);
-            self.vertices.push(MeshVertex {
-                position: [corner.x, corner.y, corner.z, 1.0],
-                normal: [normal.x, normal.y, normal.z, 0.0],
-                // White, so the **material row** is what colours a surface. The
-                // engine's own demo carries a diagnostic hue per face instead;
-                // this sample's subject is the material table and the light, and
-                // a vertex colour under both would be a third factor in every
-                // product a reader is trying to attribute.
-                color: [1.0, 1.0, 1.0, 1.0],
-                uv: [uv[0], uv[1], 0.0, 0.0],
+            self.vertices.push(RawVertex {
+                position: [corner.x, corner.y, corner.z],
+                normal: [normal.x, normal.y, normal.z],
+                uv: *uv,
             });
         }
         self.indices
@@ -907,22 +913,32 @@ impl MeshBuilder {
         let clusters = crcbl::scene::build_meshlets(&self.positions, &self.indices)
             .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
             .into_clusters();
-        let mut bytes = Vec::with_capacity(self.vertices.len() * mesh::VERTEX_STRIDE);
-        for vertex in &self.vertices {
-            for value in vertex
-                .position
-                .iter()
-                .chain(&vertex.normal)
-                .chain(&vertex.color)
-                .chain(&vertex.uv)
-            {
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
-        }
+        let uvs: Vec<[f32; 2]> = self.vertices.iter().map(|vertex| vertex.uv).collect();
+        let uv_range = UvRange::from_uvs(&uvs);
+        let vertices: Vec<MeshVertex> = self
+            .vertices
+            .iter()
+            .map(|vertex| {
+                MeshVertex::from_normal(
+                    vertex.position,
+                    vertex.normal,
+                    // White, so the **material row** is what colours a surface.
+                    // The engine's own demo carries a diagnostic hue per face
+                    // instead; this sample's subject is the material table and
+                    // the light, and a vertex colour under both would be a
+                    // third factor in every product a reader is trying to
+                    // attribute.
+                    [1.0, 1.0, 1.0, 1.0],
+                    vertex.uv,
+                    &uv_range,
+                )
+            })
+            .collect();
         MeshDesc {
             label: Cow::Borrowed(label),
             geometry: Geometry::Flat {
-                vertices: Cow::Owned(bytes),
+                vertices: Cow::Owned(mesh::vertex_bytes(&vertices)),
+                uv_range,
                 indices: Cow::Owned(self.indices),
                 clusters,
             },
@@ -1730,18 +1746,18 @@ mod tests {
             else {
                 panic!("{}: the room has no cluster DAG in it", desc.label);
             };
-            let read = |vertex: u32, at: usize| {
-                let base = vertex as usize * mesh::VERTEX_STRIDE + at * 4;
-                f32::from_le_bytes(
-                    vertices[base..base + 4]
+            let record = |vertex: u32| {
+                let base = vertex as usize * mesh::VERTEX_STRIDE;
+                MeshVertex::from_bytes(
+                    vertices[base..base + mesh::VERTEX_STRIDE]
                         .try_into()
-                        .expect("four bytes of an f32"),
+                        .expect("one whole record"),
                 )
             };
-            let position =
-                |vertex: u32| Vec3::new(read(vertex, 0), read(vertex, 1), read(vertex, 2));
-            // The normal sits after the four-float position.
-            let normal = |vertex: u32| Vec3::new(read(vertex, 4), read(vertex, 5), read(vertex, 6));
+            let position = |vertex: u32| Vec3::from_array(record(vertex).position);
+            // Decoded out of the quantised frame, which is what the vertex
+            // stage receives — there is no stored normal to read any more.
+            let normal = |vertex: u32| Vec3::from_array(record(vertex).qtangent.decode().normal);
 
             assert!(!indices.is_empty(), "{}: no triangles", desc.label);
             for triangle in indices.chunks_exact(3) {

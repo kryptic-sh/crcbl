@@ -7353,8 +7353,8 @@ pub(crate) mod tests {
         use crcbl_shaders::level_select::LEVEL_GROUP_STRIDE;
         use crcbl_shaders::light::LIGHT_STRIDE;
         use crcbl_shaders::mesh::{
-            FrameUniforms, GpuInstance, GpuMaterial, GpuMesh, SHADOW_CASCADES, SHADOW_LIGHT_TILES,
-            VERTEX_STRIDE,
+            FrameUniforms, GpuInstance, GpuMaterial, GpuMesh, POSITION_STRIDE, SHADOW_CASCADES,
+            SHADOW_LIGHT_TILES, VERTEX_STRIDE,
         };
         use crcbl_shaders::meshlet::{ClusterBounds, Meshlet, corner_words};
         use crcbl_shaders::probe::{PROBE_STRIDE, ProbeVolume};
@@ -7406,40 +7406,36 @@ pub(crate) mod tests {
             // motion the geometry stages emit is zero — the same rule the
             // renderer's first frame follows.
             previous_view_proj: IDENTITY,
+            vertex_pool: [PROBE_ATTRIBUTE_BASE, 0, 0, 0],
         };
 
         // One triangle over the centre of the target and neither corner, in
         // clip space: `view_proj` and the instance transform are both the
         // identity, so what is written here is what the rasteriser gets.
-        let pack = |values: &[f32]| -> Vec<u8> {
-            values
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect()
+        // The pool's own two-region arrangement, by hand: every position, then
+        // every attribute. `PROBE_ATTRIBUTE_BASE` is the boundary the frame
+        // block carries, which is what `MeshPool::attribute_base` would be for
+        // a pool of exactly these three vertices.
+        let vertex = |x: f32, y: f32| -> crcbl_shaders::mesh::MeshVertex {
+            crcbl_shaders::mesh::MeshVertex::from_normal(
+                [x, y, PROBE_DEPTH],
+                [0.0, 0.0, 1.0],
+                [1.0; 4],
+                [0.0; 2],
+                &crcbl_shaders::vertex::UvRange::default(),
+            )
         };
-        let vertex = |x: f32, y: f32| -> Vec<u8> {
-            pack(&[
-                x,
-                y,
-                PROBE_DEPTH,
-                1.0, // position
-                0.0,
-                0.0,
-                1.0,
-                0.0, // normal
-                1.0,
-                1.0,
-                1.0,
-                1.0, // colour
-                0.0,
-                0.0,
-                0.0,
-                0.0, // uv
-            ])
-        };
+        let corners: Vec<_> = [(-0.5, -0.5), (0.5, -0.5), (0.0, 0.5)]
+            .into_iter()
+            .map(|(x, y)| vertex(x, y))
+            .collect();
         let mut vertex_bytes = Vec::new();
-        for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.0, 0.5)] {
-            vertex_bytes.extend(vertex(x, y));
+        for corner in &corners {
+            vertex_bytes.extend_from_slice(&corner.position_bytes());
+        }
+        const PROBE_ATTRIBUTE_BASE: u32 = (3 * POSITION_STRIDE / size_of::<u32>()) as u32;
+        for corner in &corners {
+            vertex_bytes.extend_from_slice(&corner.attribute_bytes());
         }
         assert_eq!(
             vertex_bytes.len(),
@@ -7596,6 +7592,9 @@ pub(crate) mod tests {
                 index_count: 3,
                 bounds_min: [-1.0; 3],
                 bounds_max: [1.0; 3],
+                // Read by this probe's mesh stage and unobservable: its page is
+                // one white texel and it has no fragment stage.
+                uv_range: crcbl_shaders::vertex::UvRange::default(),
             }
             .to_bytes(),
         );

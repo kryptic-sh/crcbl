@@ -92,7 +92,7 @@ pub const SKIN_BINDING_STRIDE: usize = 32;
 
 /// Bytes of the uniform block.
 ///
-/// Six `uint`, rounded up to the 16-byte multiple `std140` requires of a
+/// Seven `uint`, rounded up to the 16-byte multiple `std140` requires of a
 /// uniform block's size. Checked against the `Offset` decorations `slangc`
 /// emits by this module's
 /// `the_skin_params_block_matches_the_offsets_slangc_emits`.
@@ -143,6 +143,17 @@ pub struct Params {
     ///
     /// Never zero; [`to_bytes`](Self::to_bytes) refuses one.
     pub joint_count: u32,
+    /// Where the vertex pool's **attribute** region begins, as a `uint` index
+    /// into the pool read as words.
+    ///
+    /// The same number
+    /// [`FrameUniforms::vertex_pool`](crate::mesh::FrameUniforms::vertex_pool)
+    /// carries, and it is here rather than read from there because this pass
+    /// binds no frame block: it has one uniform buffer and it is this one. A
+    /// dispatch handed the wrong boundary writes a mesh's attributes over
+    /// another mesh's positions, which the readback in
+    /// `crates/crcbl-vk/tests/vk_e2e/skinning.rs` is what would catch.
+    pub attribute_base: u32,
 }
 
 impl Params {
@@ -193,6 +204,7 @@ impl Params {
             self.binding_base,
             self.joint_base,
             self.joint_count,
+            self.attribute_base,
         ]
         .into_iter()
         .enumerate()
@@ -294,7 +306,8 @@ mod tests {
     /// disassembly.
     #[test]
     fn the_skin_params_block_matches_the_offsets_slangc_emits() {
-        // `OpMemberDecorate %SkinParams_std140 n Offset …`: 0, 4, 8, 12, 16, 20.
+        // `OpMemberDecorate %SkinParams_std140 n Offset …`: 0, 4, 8, 12, 16,
+        // 20, 24.
         assert_eq!(PARAMS_SIZE, 32);
         assert_eq!(
             PARAMS_SIZE % 16,
@@ -309,6 +322,7 @@ mod tests {
             binding_base: 44,
             joint_base: 55,
             joint_count: 66,
+            attribute_base: 77,
         }
         .to_bytes();
         let uint_at =
@@ -319,10 +333,11 @@ mod tests {
         assert_eq!(uint_at(12), 44, "binding_base at offset 12");
         assert_eq!(uint_at(16), 55, "joint_base at offset 16");
         assert_eq!(uint_at(20), 66, "joint_count at offset 20");
+        assert_eq!(uint_at(24), 77, "attribute_base at offset 24");
         assert!(
-            bytes[24..].iter().all(|byte| *byte == 0),
+            bytes[28..].iter().all(|byte| *byte == 0),
             "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[24..]
+            &bytes[28..]
         );
     }
 
@@ -364,19 +379,28 @@ mod tests {
     /// design: a skinned draw is an ordinary draw over a different range of the
     /// pool.
     ///
-    /// So the stride the shader writes at is [`crate::mesh::VERTEX_STRIDE`],
-    /// and `slangc` says so — `OpDecorate %_runtimearr_MeshVertex_std430
-    /// ArrayStride 64`, with members at 0, 16, 32 and 48. A skinned vertex
-    /// written at any other stride lands the renderer's next vertex inside this
-    /// one.
+    /// So the two strides it writes at are the pool's own —
+    /// [`crate::mesh::POSITION_STRIDE`] into the position region and
+    /// [`crate::mesh::ATTRIBUTE_STRIDE`] into the attribute region — and
+    /// `slangc` says so: the pool is `RWStructuredBuffer<uint>`,
+    /// `OpDecorate %_runtimearr_uint ArrayStride 4`, and `store_vertex` steps
+    /// by `POSITION_WORDS` and `ATTRIBUTE_WORDS`. A skinned vertex written at
+    /// any other stride lands the renderer's next vertex inside this one.
     #[test]
-    fn the_skinned_vertex_is_written_at_the_pools_own_stride() {
-        assert_eq!(crate::mesh::VERTEX_STRIDE, 64);
-        assert_eq!(
-            crate::mesh::VERTEX_STRIDE,
-            4 * 16,
-            "four float4s, which is what both `struct MeshVertex` declarations say"
-        );
+    fn the_skinned_vertex_is_written_at_the_pools_own_strides() {
+        assert_eq!(crate::mesh::POSITION_STRIDE, 12);
+        assert_eq!(crate::mesh::ATTRIBUTE_STRIDE, 20);
+        for (words, stride) in [
+            ("POSITION_WORDS", crate::mesh::POSITION_STRIDE),
+            ("ATTRIBUTE_WORDS", crate::mesh::ATTRIBUTE_STRIDE),
+        ] {
+            let spelling = format!("static const uint {words} = {};", stride / 4);
+            assert!(
+                SOURCE.contains(&spelling),
+                "skinning.slang does not declare `{spelling}`, so it writes the pool at a \
+                 stride the vertex stage does not read it at"
+            );
+        }
     }
 
     /// **Which resource is at which binding**, in the order the shader declares
@@ -398,7 +422,7 @@ mod tests {
             "ConstantBuffer<SkinParams> skin",
             "StructuredBuffer<float4x4> joints",
             "StructuredBuffer<SkinBinding> bindings",
-            "RWStructuredBuffer<MeshVertex> vertices",
+            "RWStructuredBuffer<uint> vertices",
         ];
         let found = bindings(SOURCE);
         assert_eq!(
@@ -480,6 +504,7 @@ mod tests {
             binding_base: 0,
             joint_base: 0,
             joint_count: 1,
+            attribute_base: 0,
         };
         // Disjoint, either way round, and touching at the boundary.
         let _ = range(0, 100, 100).to_bytes();
@@ -510,6 +535,7 @@ mod tests {
                 binding_base: 0,
                 joint_base: 0,
                 joint_count: 0,
+                attribute_base: 0,
             }
             .to_bytes()
         })
