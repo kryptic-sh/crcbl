@@ -38,7 +38,7 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::render::{EffectRequest, Flyer, RenderEffects};
+use crcbl::render::{DebugView, EffectRequest, Flyer, RenderEffects};
 use crcbl::shell::{DisplayMode, PointerMode, ShellBackend as Backend, WindowDesc, WindowId};
 use crcbl::ui::draw_list::DrawList;
 
@@ -117,12 +117,9 @@ pub struct Lantern {
     /// The fourth layer, copied once for the reason [`Paths`] is: a row is built
     /// where there is no GPU to ask, and it cannot say "unavailable" without it.
     device_effects: RenderEffects,
-    /// Whether the main view draws its occlusion channel as grey rather than the
-    /// shaded picture, edited by the panel's `AO VIEW` row and handed to the GPU
-    /// in [`HostedGame::draw`] for the reason [`Lantern::effect_request`] is.
-    occlusion_view: bool,
-    /// The values the pause panel was last built for — `None` until the first
-    /// pause, so the panel is always rebuilt once with the real ones.
+    /// The values the pause panel was last built for — the camera, the effect
+    /// request and [`occlusion_view`]; `None` until the first pause, so the
+    /// panel is always rebuilt once with the real ones.
     shown: Option<(CameraMode, EffectRequest, bool)>,
     /// Whether the loop has the simulation stopped, recorded in
     /// [`HostedGame::menu_kind`].
@@ -133,6 +130,17 @@ pub struct Lantern {
     paused: bool,
     /// Fixed steps run, for [`Lantern::log_heartbeat`]'s cadence.
     ticks: u64,
+}
+
+/// Whether the frame is drawing the ambient-occlusion channel as grey.
+///
+/// **Read, not kept.** The `AO VIEW` row used to own a `bool` of its own and
+/// hand it to the renderer in [`HostedGame::draw`]; it writes
+/// [`crcbl::debug_view`] now, so the row and the console's
+/// `debug_view ambient occlusion` are one value — `docs/plan/52-debug-console.md`
+/// decision 8 — and [`crcbl::engine::Loop`] is what puts it into force.
+fn occlusion_view() -> bool {
+    crcbl::debug_view::current() == DebugView::AmbientOcclusion
 }
 
 impl Lantern {
@@ -152,7 +160,6 @@ impl Lantern {
             paths,
             effect_request: effects,
             device_effects,
-            occlusion_view: false,
             shown: None,
             paused: false,
             ticks: 0,
@@ -458,7 +465,7 @@ impl HostedGame for Lantern {
             // forward pass writes, and every layer of that request is about
             // which passes run at all.
             LanternAction::ToggleOcclusionView => {
-                self.occlusion_view = !self.occlusion_view;
+                crcbl::debug_view::toggle(DebugView::AmbientOcclusion);
             }
         }
     }
@@ -469,7 +476,8 @@ impl HostedGame for Lantern {
         // frame, or the cursor comes back one frame into a menu the reviewer is
         // already trying to click.
         self.paused = paused;
-        if paused && self.shown != Some((self.camera, self.effect_request, self.occlusion_view)) {
+        let occlusion_view = occlusion_view();
+        if paused && self.shown != Some((self.camera, self.effect_request, occlusion_view)) {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
             // on a row does not throw the reviewer back to the top.
@@ -483,7 +491,7 @@ impl HostedGame for Lantern {
                     self.camera,
                     self.effect_request,
                     self.device_effects,
-                    self.occlusion_view,
+                    occlusion_view,
                 ),
             );
             if let Some(id) = selected {
@@ -492,7 +500,7 @@ impl HostedGame for Lantern {
                     .expect("the pause menu is in the set")
                     .select_id(id);
             }
-            self.shown = Some((self.camera, self.effect_request, self.occlusion_view));
+            self.shown = Some((self.camera, self.effect_request, occlusion_view));
         }
         paused
     }
@@ -507,7 +515,6 @@ impl HostedGame for Lantern {
         // behind it. `set_effect_request` lands on this frame — `begin_frame`
         // has not run yet — and the frame in flight never moves.
         gpu.set_effect_request(self.effect_request);
-        gpu.set_occlusion_view(self.occlusion_view);
         // Re-read rather than recomputed: the device clamps last, so what the
         // panel and the summary report comes back off the renderer.
         self.paths = gpu.paths();
@@ -651,9 +658,61 @@ mod tests {
 
     use super::*;
 
+    /// A [`Loop`] that owns the shared debug view for the length of a check.
+    ///
+    /// **Every check here goes through it, and that is the point.**
+    /// `crcbl::debug_view` is one process-global value and
+    /// [`crcbl::engine::Loop`] applies it to whatever bundle it is driving, so a
+    /// check that moves the view changes what a check running *beside* it draws
+    /// — and `ForwardRenderer::resolved_effects` drops the antialiasing tier
+    /// while any view is on, so the damage arrives as unrelated effect
+    /// assertions failing about one run in three. `cargo test` runs a crate's
+    /// tests as threads of one process, which is where that happens; `cargo
+    /// nextest`, which CI runs, gives each test a process and never shows it.
+    ///
+    /// The guard lives in the fixture rather than in the checks that move the
+    /// view so that a check added later inherits it instead of having to
+    /// remember it. It resets the view at both ends and nests per thread, so a
+    /// check that builds two of these — which shadows the first binding without
+    /// dropping it — waits for nothing —
+    /// [`crcbl::debug_view::for_test`].
+    struct Scripted {
+        _view: crcbl::debug_view::ViewLock,
+        engine: Loop<HeadlessShell>,
+    }
+
+    impl std::ops::Deref for Scripted {
+        type Target = Loop<HeadlessShell>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.engine
+        }
+    }
+
+    impl std::ops::DerefMut for Scripted {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.engine
+        }
+    }
+
+    impl Scripted {
+        /// [`crcbl::engine::Loop::finish`], which takes `self` and so cannot
+        /// arrive through [`DerefMut`](std::ops::DerefMut).
+        fn finish(
+            self,
+            exit: ExitReason,
+        ) -> Result<Summary, crcbl::engine::LoopError<core::convert::Infallible>> {
+            self.engine.finish(exit)
+        }
+    }
+
     /// A loop over a *concrete* `HeadlessShell`, so a test can play compositor.
-    fn scripted(options: &Options) -> Loop<HeadlessShell> {
-        with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+    fn scripted(options: &Options) -> Scripted {
+        Scripted {
+            _view: crcbl::debug_view::for_test(),
+            engine: with_shell(Box::new(HeadlessShell::new()), options)
+                .expect("headless always starts"),
+        }
     }
 
     /// Always `--backend null`. These run on every CI leg, including ones with
@@ -1008,6 +1067,65 @@ mod tests {
             room::View::Main.stack().difference(RenderEffects::SHADOWS),
             "the summary reports the set the run ended on",
         );
+    }
+
+    /// **The `AO VIEW` row reaches the renderer, and the console's variable is
+    /// what it moved.**
+    ///
+    /// The row was the only way to this view in the whole workspace and nothing
+    /// that runs had ever pressed it — `docs/backlog.md` said so. It goes
+    /// through `crcbl::debug_view` now rather than through a field of this
+    /// fixture's, so there are two things to check and neither implies the
+    /// other: the shared variable moved (which is what a console line reads and
+    /// writes), and the loop carried it to this bundle's renderer (which is what
+    /// a reviewer sees). The label is asserted too, because a row that fired the
+    /// right action while printing `OFF` is a panel nobody can act on.
+    ///
+    /// Read off the renderer through `Gpu::debug_view`, which resolves five
+    /// independent switches by precedence, so a press that set the wrong one
+    /// cannot satisfy it.
+    #[test]
+    fn the_ao_view_row_reaches_the_renderer_through_the_shared_variable() {
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(engine.gpu().debug_view(), DebugView::Shaded);
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        // Seven rows down from RESUME is AO VIEW: the loop's three, then
+        // CAMERA, then one row per effect, then this one last.
+        press_row(&mut engine, window, 7);
+        assert_eq!(
+            crcbl::debug_view::current(),
+            DebugView::AmbientOcclusion,
+            "the row did not move the value the console shares with it",
+        );
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::AmbientOcclusion,
+            "the variable moved and the loop did not carry it to the renderer",
+        );
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "AO VIEW: ON"),
+            "the row's label must show what the frame now draws: {:?}",
+            ui_text(&engine),
+        );
+
+        // And the same row takes it back, which is the half a reviewer needs.
+        press_row(&mut engine, window, 0);
+        assert_eq!(engine.gpu().debug_view(), DebugView::Shaded);
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "AO VIEW: OFF"),
+            "{:?}",
+            ui_text(&engine),
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// Where the free camera is looking, whichever camera the frame is drawn

@@ -251,16 +251,9 @@ pub struct Quarry {
     /// is reported as the renderer's own default rather than as the number that
     /// was asked for.
     lod_budget: f32,
-    /// Which overlay is being drawn, if any. **Owned here rather than read off
-    /// the renderer**, because the pause menu's rows are applied in
-    /// [`HostedGame::apply`], which is handed no GPU; [`HostedGame::draw`] is
-    /// where it reaches one.
-    ///
-    /// One value rather than a flag per overlay, which is what makes the panel's
-    /// rows exclusive — see [`menu::toggled_to`].
-    view: DebugView,
     /// Where the LOD selection is pinned, or [`None`] while it follows the
-    /// camera. **Owned here** on [`Self::view`]'s terms, and written to the
+    /// camera. **Owned here** — the pause menu's rows are applied in
+    /// [`HostedGame::apply`], which is handed no GPU — and written to the
     /// renderer every [`HostedGame::draw`].
     ///
     /// The *position* rather than a `bool`, because that is what the panel has
@@ -290,13 +283,7 @@ impl Quarry {
     /// `triangles` selected at `lod_budget` pixels, with the free camera at the
     /// dolly's start pose.
     #[must_use]
-    pub fn new(
-        camera: CameraMode,
-        paths: Paths,
-        triangles: usize,
-        lod_budget: f32,
-        view: DebugView,
-    ) -> Self {
+    pub fn new(camera: CameraMode, paths: Paths, triangles: usize, lod_budget: f32) -> Self {
         Self {
             camera,
             flyer: camera::flyer(),
@@ -304,7 +291,6 @@ impl Quarry {
             paths,
             triangles,
             lod_budget,
-            view,
             // Following the camera. There is no flag for it and deliberately
             // none: freezing is a thing a reviewer does *at* a viewpoint they
             // flew to, so a run that started frozen would be frozen at the
@@ -346,7 +332,7 @@ impl Quarry {
             self.camera.label(),
             self.camera().eye.z,
             self.lod_budget,
-            self.view.label(),
+            self.debug_view().label(),
             cull_row(self.cull),
         );
     }
@@ -358,9 +344,15 @@ impl Quarry {
     }
 
     /// Which overlay the frame is drawn with, if any.
+    ///
+    /// **Read, not kept.** The rows below used to move a field of this fixture's
+    /// own and [`HostedGame::draw`] pushed it at the renderer every frame; they
+    /// write [`crcbl::debug_view`] now, so a row and the console's
+    /// `debug_view lod tint` are one value — `docs/plan/52-debug-console.md`
+    /// decision 8 — and [`crcbl::engine::Loop`] is what puts it into force.
     #[must_use]
-    pub const fn debug_view(&self) -> DebugView {
-        self.view
+    pub fn debug_view(&self) -> DebugView {
+        crcbl::debug_view::current()
     }
 
     /// Where the LOD selection is pinned, or [`None`] while it follows the
@@ -509,11 +501,16 @@ fn assemble<S: Shell + ?Sized>(booted: Booted<S, Gpu>, options: &Options) -> Loo
     let paths = booted.gpu.paths();
     let triangles = booted.gpu.triangles();
     let lod_budget = booted.gpu.lod_budget();
-    let view = booted.gpu.debug_view();
+    // `--lod-tint` and `--heatmap` reached the renderer at `Gpu::open`; the
+    // shared variable is told the same thing here, because it is what the loop
+    // applies from the first frame on and a variable left at `shaded` would take
+    // the flag's view straight back off. `crcbl::debug_view` is the value from
+    // this point, for the rows, the panel and the console alike.
+    crcbl::debug_view::set(booted.gpu.debug_view());
 
     Loop::new(
         booted,
-        Quarry::new(options.camera, paths, triangles, lod_budget, view),
+        Quarry::new(options.camera, paths, triangles, lod_budget),
         options.common.loop_config(),
     )
 }
@@ -626,14 +623,12 @@ impl HostedGame for Quarry {
                 // down when the panel opened has no release coming.
                 self.flyer.release_all();
             }
-            // Recorded here and handed to the renderer in `draw`, which is the
-            // method with a GPU in it.
-            QuarryAction::ToggleLodView => {
-                self.view = menu::toggled_to(self.view, DebugView::LodTint);
-            }
-            QuarryAction::ToggleHeatmap => {
-                self.view = menu::toggled_to(self.view, DebugView::Heatmap);
-            }
+            // Written into the one variable every host shares, and put into
+            // force by the loop on this same frame — `crcbl::debug_view`. The
+            // rows stay exclusive because that is one value and not a flag per
+            // overlay: a row that is on is its own off switch.
+            QuarryAction::ToggleLodView => crcbl::debug_view::toggle(DebugView::LodTint),
+            QuarryAction::ToggleHeatmap => crcbl::debug_view::toggle(DebugView::Heatmap),
             QuarryAction::ToggleFreeze => self.toggle_freeze(),
         }
     }
@@ -644,7 +639,8 @@ impl HostedGame for Quarry {
         // frame, or the cursor comes back one frame into a menu the reviewer is
         // already trying to click.
         self.paused = paused;
-        let showing = (self.camera, self.view, self.frozen.is_some());
+        let view = self.debug_view();
+        let showing = (self.camera, view, self.frozen.is_some());
         if paused && self.shown != Some(showing) {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a press
@@ -655,7 +651,7 @@ impl HostedGame for Quarry {
                 .map(|item| item.id);
             menus.replace(
                 true,
-                menu::pause_menu(self.camera, self.view, self.frozen.is_some()),
+                menu::pause_menu(self.camera, view, self.frozen.is_some()),
             );
             if let Some(id) = selected {
                 menus
@@ -674,18 +670,16 @@ impl HostedGame for Quarry {
         // the ticks moved and the tint the menu set, and read this frame's
         // numbers back.
         gpu.set_camera(self.camera());
+        // The debug view is **not** written here any more: the rows move
+        // `crcbl::debug_view` and `crcbl::engine::Loop` hands it to
+        // `GameGpu::set_debug_view` before this runs, so a console line and a
+        // row cannot each write a different view into the same renderer.
+        //
         // Here rather than in `tick`, which does not run while paused: the row
         // that was just pressed is on a panel over a frame that has to change
-        // behind it.
-        // Infallible here — this bundle has a renderer — and the `Result` is
-        // `GameGpu::set_debug_view`'s, which exists so a bundle without one can
-        // say so.
-        gpu.set_debug_view(self.view)
-            .expect("quarry's bundle holds a renderer");
-        // Here for the same reason, and unconditionally rather than on the
-        // frames it changed: a `None` written every frame is the renderer's own
-        // default written every frame, which is the state every golden was
-        // blessed in.
+        // behind it. Unconditionally rather than on the frames it changed: a
+        // `None` written every frame is the renderer's own default written every
+        // frame, which is the state every golden was blessed in.
         gpu.set_frozen_selection_eye(self.frozen);
         self.paths = gpu.paths();
         // The budget a frame was really selected under, not the one the flag
@@ -792,7 +786,7 @@ impl crcbl::ui::DebugModule for Quarry {
         // **Which view, not two on/off rows.** The three overlays share one
         // lane and resolve to one picture, so a panel with a row per switch
         // could say `on` twice about a frame that drew one of them.
-        section.row_str("view", self.view.label());
+        section.row_str("view", self.debug_view().label());
         // **Where it is frozen, not that it is.** The cut under a frozen
         // selection belongs to a viewpoint that is deliberately not this one, so
         // a row saying only `frozen` leaves a reviewer unable to tell a cut
@@ -920,9 +914,61 @@ mod tests {
 
     use super::*;
 
+    /// A [`Loop`] that owns the shared debug view for the length of a check.
+    ///
+    /// **Every check here goes through it, and that is the point.**
+    /// `crcbl::debug_view` is one process-global value and
+    /// [`crcbl::engine::Loop`] applies it to whatever bundle it is driving, so a
+    /// check that moves the view changes what a check running *beside* it draws
+    /// — and `ForwardRenderer::resolved_effects` drops the antialiasing tier
+    /// while any view is on, so the damage arrives as unrelated effect
+    /// assertions failing about one run in three. `cargo test` runs a crate's
+    /// tests as threads of one process, which is where that happens; `cargo
+    /// nextest`, which CI runs, gives each test a process and never shows it.
+    ///
+    /// The guard lives in the fixture rather than in the checks that move the
+    /// view so that a check added later inherits it instead of having to
+    /// remember it. It resets the view at both ends and nests per thread, so a
+    /// check that builds two of these — which shadows the first binding without
+    /// dropping it — waits for nothing —
+    /// [`crcbl::debug_view::for_test`].
+    struct Scripted {
+        _view: crcbl::debug_view::ViewLock,
+        engine: Loop<HeadlessShell>,
+    }
+
+    impl std::ops::Deref for Scripted {
+        type Target = Loop<HeadlessShell>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.engine
+        }
+    }
+
+    impl std::ops::DerefMut for Scripted {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.engine
+        }
+    }
+
+    impl Scripted {
+        /// [`crcbl::engine::Loop::finish`], which takes `self` and so cannot
+        /// arrive through [`DerefMut`](std::ops::DerefMut).
+        fn finish(
+            self,
+            exit: ExitReason,
+        ) -> Result<Summary, crcbl::engine::LoopError<core::convert::Infallible>> {
+            self.engine.finish(exit)
+        }
+    }
+
     /// A loop over a *concrete* `HeadlessShell`, so a test can play compositor.
-    fn scripted(options: &Options) -> Loop<HeadlessShell> {
-        with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+    fn scripted(options: &Options) -> Scripted {
+        Scripted {
+            _view: crcbl::debug_view::for_test(),
+            engine: with_shell(Box::new(HeadlessShell::new()), options)
+                .expect("headless always starts"),
+        }
     }
 
     /// Always `--backend null`. These run on every CI leg, including ones with
@@ -984,7 +1030,6 @@ mod tests {
             },
             1000,
             1.0,
-            DebugView::Shaded,
         );
         quarry.cull = cull;
         let mut section = crcbl::ui::DebugSection::default();
@@ -1265,9 +1310,9 @@ mod tests {
     /// than joining it.**
     ///
     /// The exclusivity is checked *through the renderer* rather than on
-    /// [`menu::toggled_to`] alone — that function has its own unit test — because
-    /// what a reviewer sees is the frame, and the two settings are separate
-    /// booleans on the far side of this crate. A press that left the tint set
+    /// `crcbl::debug_view::toggle` alone — that function has its own unit test —
+    /// because what a reviewer sees is the frame, and the two settings are
+    /// separate booleans on the far side of this crate. A press that left the tint set
     /// would still draw the heatmap, by the renderer's precedence, and would
     /// then draw the tint the moment the heatmap row was pressed again.
     #[test]

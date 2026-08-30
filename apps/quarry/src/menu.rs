@@ -98,9 +98,10 @@ pub enum QuarryAction {
     /// each cluster shaded by the projected error the selection judged it on.
     ///
     /// **Switching one overlay on switches the other off** — see
-    /// [`toggled_to`], which is where the fixture's exclusivity lives. Two rows
-    /// that could both read `ON` while one picture is drawn would be a panel
-    /// that lies about the frame under it.
+    /// `crcbl::debug_view::toggle`, where that exclusivity lives now: the two
+    /// rows move one shared value rather than a flag each. Two rows that could
+    /// both read `ON` while one picture is drawn would be a panel that lies
+    /// about the frame under it.
     ToggleHeatmap,
     /// Pin the LOD selection at the camera's current position, or let it follow
     /// the camera again —
@@ -110,29 +111,9 @@ pub enum QuarryAction {
     /// are one picture chosen between, so pressing one row replaces the others;
     /// this changes what the *selection* answers and leaves the picture's choice
     /// alone. Freezing the cut and then reading it off the LOD tint is the whole
-    /// point of having both, so [`toggled_to`] does not know about this row.
+    /// point of having both, so `crcbl::debug_view` does not know about this
+    /// row.
     ToggleFreeze,
-}
-
-/// The view a row leaves in force: `on` if it was not already showing, and the
-/// shaded picture if it was.
-///
-/// **The whole of this fixture's exclusivity.** The renderer resolves a
-/// precedence over three independent switches — a debug view has to survive a
-/// caller setting two of them — but a *panel* has rows, and a row that says
-/// `LOD VIEW: ON` while the heatmap is drawn is a row nobody can act on. So the
-/// fixture holds one view rather than a flag per overlay, and pressing a row is
-/// this function.
-#[must_use]
-pub const fn toggled_to(view: DebugView, on: DebugView) -> DebugView {
-    if matches!(
-        (view, on),
-        (DebugView::LodTint, DebugView::LodTint) | (DebugView::Heatmap, DebugView::Heatmap)
-    ) {
-        DebugView::Shaded
-    } else {
-        on
-    }
 }
 
 /// The id carrying [`QuarryAction::ToggleCamera`]. The first id a game may use,
@@ -185,8 +166,8 @@ pub const fn action_for(id: crcbl::ui::WidgetId) -> Option<QuarryAction> {
 /// row per overlay, and whether the LOD selection is pinned.
 ///
 /// Each overlay row says whether *it* is the view being drawn, so at most one of
-/// them reads `ON` — see [`toggled_to`]. The freeze row is outside that
-/// exclusivity and can read `ON` beside any of them, which is
+/// them reads `ON` — see `crcbl::debug_view::toggle`. The freeze row is outside
+/// that exclusivity and can read `ON` beside any of them, which is
 /// [`QuarryAction::ToggleFreeze`]'s whole point; the *position* it is frozen at
 /// is a debug-panel row rather than a menu label, because a label wide enough
 /// for three coordinates is a label nothing else on the panel can line up with.
@@ -361,7 +342,7 @@ mod tests {
     ///
     /// The combination a reviewer actually wants is a frozen cut *and* the LOD
     /// tint, so the freeze row has to be able to read `ON` beside an overlay row
-    /// reading `ON`. Folding freezing into [`toggled_to`]'s exclusivity — the
+    /// reading `ON`. Folding freezing into the overlays' exclusivity — the
     /// obvious way to add a fourth row to a panel that already has three — would
     /// make the two mutually exclusive and the feature unusable, and every
     /// single-row assertion above would still pass.
@@ -379,50 +360,6 @@ mod tests {
                 .contains(&"LOD VIEW: ON".to_string()),
             "and the tint stayed on while the selection was frozen",
         );
-    }
-
-    /// **The two overlay rows are mutually exclusive**, and each one is its own
-    /// off switch.
-    ///
-    /// Every start × every row, so the case a naive toggle gets wrong is
-    /// covered: pressing HEATMAP while the tint is showing must *replace* it
-    /// rather than leave both set, and pressing a row that is already on must
-    /// return the shaded picture rather than doing nothing.
-    #[test]
-    fn each_overlay_row_replaces_the_other_and_switches_itself_off() {
-        for start in [DebugView::Shaded, DebugView::LodTint, DebugView::Heatmap] {
-            assert_eq!(
-                toggled_to(start, DebugView::LodTint),
-                if start == DebugView::LodTint {
-                    DebugView::Shaded
-                } else {
-                    DebugView::LodTint
-                },
-                "LOD VIEW pressed from {start:?}"
-            );
-            assert_eq!(
-                toggled_to(start, DebugView::Heatmap),
-                if start == DebugView::Heatmap {
-                    DebugView::Shaded
-                } else {
-                    DebugView::Heatmap
-                },
-                "HEATMAP pressed from {start:?}"
-            );
-            // And pressing one row twice comes back to where it started, which
-            // is what a reviewer flicking a row expects.
-            for row in [DebugView::LodTint, DebugView::Heatmap] {
-                assert_eq!(
-                    toggled_to(toggled_to(start, row), row),
-                    if start == row {
-                        start
-                    } else {
-                        DebugView::Shaded
-                    },
-                    "{row:?} pressed twice from {start:?}"
-                );
-            }
-        }
     }
 
     /// Every spelling of every mode round-trips, and nothing else parses.

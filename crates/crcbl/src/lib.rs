@@ -290,6 +290,8 @@ pub mod backend;
 
 pub mod debug_console;
 
+pub mod debug_view;
+
 pub mod engine;
 
 pub mod perf;
@@ -302,10 +304,11 @@ pub mod settings;
 ///
 /// One list per crate, gathered by the engine at one seam —
 /// `docs/plan/52-debug-console.md` decision 2. It holds the commands the engine
-/// itself owns and, through [`settings::console_bindings`], one `ARCHIVE`
-/// variable per catalogue key, so every setting the engine reads is a console
-/// variable with nothing declared twice. `tests/console_table.rs` is what keeps
-/// the command half in step with what the source actually declares.
+/// itself owns, [`debug_view::r_debug_view`] — the one view every host draws —
+/// and, through [`settings::console_bindings`], one `ARCHIVE` variable per
+/// catalogue key, so every setting the engine reads is a console variable with
+/// nothing declared twice. `tests/console_table.rs` is what keeps the declared
+/// half in step with what the source actually declares.
 ///
 /// **The bindings are a slice rather than a `table!` entry**, because they are
 /// generated one per catalogue key by a macro in `settings` and
@@ -313,14 +316,16 @@ pub mod settings;
 /// the same construction that macro writes.
 #[must_use]
 pub fn console_table() -> crcbl_console::Table {
+    static VARS: &[&crcbl_console::ConVar] = &[&debug_view::r_debug_view];
     static COMMANDS: &[&crcbl_console::ConCommand] = &[
         &debug_console::fps,
         &debug_console::pause,
         &debug_console::quit,
+        &debug_view::debug_view,
         &settings::dump,
         &settings::save,
     ];
-    crcbl_console::Table::new(&[], settings::console_bindings(), COMMANDS)
+    crcbl_console::Table::new(VARS, settings::console_bindings(), COMMANDS)
 }
 
 // Deliberately **not** gated to `wasm32`, even though only a browser build calls

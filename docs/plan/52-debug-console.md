@@ -319,16 +319,25 @@ decision 2.
 
 ### 8. The AO view, and every debug view, in every build — the user's specific ask
 
-`r_debug_view` is declared in `crcbl-render` beside `DebugView`, so every host
-has it the moment the console lands. Applying it needs the renderer, which the
-engine cannot reach today: that is `GameGpu::set_debug_view` from decision 3,
-one forwarding line in each of the sixteen `Gpu` bundles and the CLI template,
-defaulted to `Unsupported` so a host without a `ForwardRenderer` (the options
+`r_debug_view` is one enum variable holding the view every host draws, and
+applying it needs the renderer: that is `GameGpu::set_debug_view` from decision
+3, defaulted to `Unsupported` so a host without a `ForwardRenderer` (the options
 screen, hud) reports rather than pretends. `apps/lantern`'s `AO VIEW` row stays
 — it is the touch path — and reads the same variable, so the two cannot
 disagree. Wireframe is not a `DebugView` and stays the viewer's key; making it
 one is `47-reflections.md`'s style of question for the renderer, not this
 plan's.
+
+**Two things this sketch had wrong, corrected when it was built (2026-08-31).**
+The variable is declared in **`crcbl`**, not in `crcbl-render`: nothing in that
+crate can apply it — a static has no renderer to reach — and the seam that can,
+`GameGpu::set_debug_view`, is the engine's, so the declaration and the code that
+acts on it are in one crate, which is what decision 2 asks for. And a sample's
+own view has to _be_ the variable rather than sit beside it: `apps/lantern`,
+`apps/quarry` and `apps/viewer` each wrote their view into their renderer on
+**every frame**, so a console line was undone by the next one. All three read
+and write `crcbl::debug_view` now, and the loop is the only writer of the
+renderer's switches.
 
 ### 9. Determinism, replay and the network — reserved, not built
 
@@ -473,9 +482,39 @@ entry; the browser gate runs on every slice that touches a demo.
    7's), and a console audio-gain write reaching the running mixer, which needs
    a `HostedGame` seam the loop does not have.
 
-6. **Every debug view everywhere**: `r_debug_view`, the sixteen forwarders,
-   lantern's row reading the variable; the AO view proven on a demo that never
-   had it (breakout) through the headless e2e and the browser gate.
+6. **Every debug view everywhere — landed 2026-08-31.** `crcbl::debug_view` is
+   the module: the `r_debug_view` enum variable over `DebugView::label`'s six
+   names, the `debug_view` command decision 7's table spells (`debug_view` alone
+   prints, `debug_view ambient occlusion` sets — the value keeps its space),
+   `current`/`set`/`toggle` for a sample's own row, and `for_test`, a guard that
+   serialises the checks which move a process-global and hands it back `Shaded`.
+   `Loop::apply_debug_view` runs beside `drain_console`, before the tick and the
+   draw, and hands a **change** to `GameGpu::set_debug_view` — an edge, so a
+   renderer is left exactly as its sample set it up until something moves the
+   variable, and a bundle with no renderer prints that the view drew no frame
+   rather than passing (a `shaded` ask is silent, or the eight samples that hold
+   no renderer would open with the line). The forwarders were slice 2's: the
+   eight bundles with a `ForwardRenderer` already had them and the other eight
+   keep the default, so this slice added none. What it did add is the other half
+   of "so the two cannot disagree": `apps/lantern`'s `AO VIEW` row,
+   `apps/quarry`'s `LOD VIEW`/`HEATMAP` rows and `--lod-tint`/`--heatmap`, and
+   `apps/viewer`'s `N` all write the variable now, and
+   `Lantern::occlusion_view`, `Quarry::view`, `Viewer::normals`,
+   `lantern::Gpu::set_occlusion_view`, `viewer::Gpu::set_normals_view` and
+   `quarry::menu::toggled_to` are gone with the per-frame writes that used them.
+
+   **The exit criterion's demo is `apps/quarry`, not breakout.** Breakout has
+   had no forward pass since 2026-08-28 — its paddle is a sprite and its bundle
+   holds no `ForwardRenderer` at all — so no debug view can ever draw there, and
+   this plan named it before that was checked. quarry has the renderer, runs the
+   occlusion pass (`RenderEffects::DEFAULT_STACK` carries it), had no
+   ambient-occlusion control anywhere, and has a device suite of its own:
+   `apps/quarry/tests/device/console.rs` opens the console with `` ` `` on a
+   `HeadlessShell`, types the line, and reads the view back off the renderer,
+   then measures the picture — 47 104 of 49 152 pixels grey against none in the
+   shaded frame, 559 of them darker than the placeholder on radv and 557 on
+   lavapipe.
+
 7. **The web**: `TextCommit` emission in the web backend, `Backquote` swallowed
    by the shim, the browser e2e typing a command in one demo.
 8. **Follow-ups, each its own slice**: clipboard paste; `bind`/`unbind` over
@@ -493,6 +532,8 @@ entry; the browser gate runs on every slice that touches a demo.
 - `antialiasing` prints the value; `antialiasing smaa` and `antialiasing = smaa`
   set it, the frame changes, and `save` writes it.
 - `debug_view ambient occlusion` shows the AO channel in a demo that never
-  exposed it.
+  exposed it — `apps/quarry`, for the reason slice 6 gives, and proven on radv
+  and lavapipe. **Not proven in a browser**: the web backend emits no
+  `TextCommit`, so nothing can be typed at the console there until slice 7.
 - No golden moves; the closed console adds no measurable frame cost on the
   browser tier.

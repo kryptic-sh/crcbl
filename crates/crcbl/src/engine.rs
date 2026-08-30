@@ -5553,6 +5553,15 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// [`crate::debug_console::engine_tables`] — and drawn last in the frame, so
     /// nothing covers it.
     console: crate::debug_console::Console,
+    /// The debug view this loop has already put into force, or [`None`] before
+    /// the first frame has looked.
+    ///
+    /// [`crate::debug_view::r_debug_view`] is the value; this is the memory that
+    /// makes [`Self::apply_debug_view`] an **edge**. Writing it every frame
+    /// instead would take the view away from a sample that sets its renderer's
+    /// switches for a reason of its own, and writing it never would leave a
+    /// console line with nothing to act on.
+    debug_view: Option<crcbl_render::DebugView>,
     /// What each pass has cost over the run, beside the overlay's frame total.
     ///
     /// Not in [`Self::debug`] because it cannot be: `crcbl-ui` is below
@@ -5737,6 +5746,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             pointer: PointerCapture::new(),
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
             console,
+            debug_view: None,
             passes: crcbl_render::PassStats::new(),
             paused: false,
             held_keys: Vec::new(),
@@ -6031,6 +6041,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // `&mut dyn Any` and cannot hold a borrow of the renderer; this is the
         // drain that arrangement is built around.
         self.drain_console();
+        self.apply_debug_view();
         if self.console.host_mut().engine_mut().take_quit() {
             return Ok(Flow::Stop(ExitReason::Quit));
         }
@@ -6541,6 +6552,48 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
     }
 
+    /// Puts the debug view every host shares into force where it has moved.
+    ///
+    /// `docs/plan/52-debug-console.md` decision 8's whole seam:
+    /// [`crate::debug_view::r_debug_view`] is the value — set by
+    /// `debug_view ambient occlusion`, by `apps/lantern`'s `AO VIEW` row, by
+    /// `apps/quarry`'s `LOD`/`HEATMAP` rows and by `apps/viewer`'s `N` — and
+    /// this is the one place it reaches a renderer, through
+    /// [`GameGpu::set_debug_view`]. No sample writes a view into its own
+    /// renderer per frame any more, so there is nothing here to fight with; the
+    /// one thing a sample still owes is re-applying it to a renderer it
+    /// **rebuilds** mid-run, which the edge below cannot see — `apps/viewer`'s
+    /// `Gpu::reload` is the only such path and carries it.
+    ///
+    /// **An edge, not a state written every frame.** [`Self::debug_view`] is
+    /// what was last put into force: the first frame of a run applies whatever
+    /// the variable holds, and after that a frame writes only where a press or a
+    /// console line moved it. A renderer's five switches are otherwise left
+    /// exactly as the sample set them up.
+    ///
+    /// Beside [`Self::drain_console`] in the frame, and before the tick and the
+    /// draw, so a row pressed on this frame is drawn on this frame.
+    /// [`Unsupported`](crate::settings::Unsupported) is not a failure — the
+    /// options screen and hud hold no renderer — but it is worth a line, because
+    /// a person who typed the command is owed an answer about a picture that did
+    /// not change.
+    fn apply_debug_view(&mut self) {
+        let wanted = crate::debug_view::current();
+        if self.debug_view == Some(wanted) {
+            return;
+        }
+        self.debug_view = Some(wanted);
+        // A `Shaded` ask a bundle cannot take is not worth a word: the shaded
+        // frame is what it was already drawing, and every run of the eight
+        // samples that hold no renderer would open with the line.
+        if self.gpu.set_debug_view(wanted).is_err() && wanted != crcbl_render::DebugView::Shaded {
+            crcbl_core::log::console::print(&format!(
+                "debug_view: this bundle has no renderer, so `{}` draws no frame here",
+                wanted.label()
+            ));
+        }
+    }
+
     /// Tears the frame down and reports what the run did.
     ///
     /// # Errors
@@ -7040,6 +7093,14 @@ mod tests {
         /// way the loop's own application of `[engine.video]` can be exercised
         /// at all, since a real `GpuContext` needs a device.
         video: crate::settings::VideoSettings,
+        /// Whether [`GameGpu::set_debug_view`] answers
+        /// [`Unsupported`](crate::settings::Unsupported) instead of recording.
+        ///
+        /// A bundle with no renderer — `apps/options`, `apps/hud` — and what
+        /// [`Loop::apply_debug_view`]'s answer to one is asserted against.
+        /// [`BareGpu`] says the *default body* refuses; nothing but this can say
+        /// what the loop does when it does.
+        refuse_views: bool,
         /// Every `[engine.video]` section [`GameGpu::apply_video`] was handed,
         /// in order.
         ///
@@ -7050,6 +7111,14 @@ mod tests {
         /// called a body answering `Unsupported`. [`BareGpu`] is what keeps the
         /// trait's own default under test.
         applied_video: Vec<crate::settings::VideoSettings>,
+        /// Every view [`GameGpu::set_debug_view`] was handed, in order.
+        ///
+        /// A list rather than the last one, for
+        /// [`Self::frame_extents`]' reason: what
+        /// [`Loop::apply_debug_view`] claims is that a view reaches the bundle
+        /// **on the frame it moved and on no other**, and a fake that kept only
+        /// the newest could not tell that from one written every frame.
+        applied_views: Vec<crcbl_render::DebugView>,
     }
 
     impl FakeGpu {
@@ -7064,7 +7133,9 @@ mod tests {
                 counters: crcbl_render::FrameCounters::default(),
                 frame_extents: Vec::new(),
                 video: crate::settings::VideoSettings::unrestricted(),
+                refuse_views: false,
                 applied_video: Vec::new(),
+                applied_views: Vec::new(),
             }
         }
 
@@ -7164,6 +7235,17 @@ mod tests {
             video: &crate::settings::VideoSettings,
         ) -> Result<(), crate::settings::Unsupported> {
             self.applied_video.push(*video);
+            Ok(())
+        }
+
+        fn set_debug_view(
+            &mut self,
+            view: crcbl_render::DebugView,
+        ) -> Result<(), crate::settings::Unsupported> {
+            if self.refuse_views {
+                return Err(crate::settings::Unsupported);
+            }
+            self.applied_views.push(view);
             Ok(())
         }
 
@@ -14007,6 +14089,107 @@ mod tests {
                 .expect("and again for the `=` spelling")
                 .antialiasing,
             Some(crcbl_render::Antialiasing::Fxaa),
+        );
+    }
+
+    /// **`debug_view ambient occlusion` reaches the bundle**, in both the
+    /// spellings the plan promises and with the space in the value intact.
+    ///
+    /// `docs/plan/52-debug-console.md`'s slice-6 exit criterion, at the seam it
+    /// is made of: the command and the variable underneath it write one cell,
+    /// and [`Loop::apply_debug_view`] is what carries it to
+    /// [`GameGpu::set_debug_view`]. The value is two words, which is the case a
+    /// parser that split on whitespace would lose — and `ambient occlusion` is
+    /// exactly the view the user asked to be able to reach everywhere.
+    #[test]
+    fn a_debug_view_typed_into_the_console_reaches_the_bundle() {
+        let _view = crate::debug_view::for_test();
+        let mut engine = with_console_open();
+        assert_eq!(
+            engine.gpu.applied_views,
+            [crcbl_render::DebugView::Shaded],
+            "a run opens on the shaded frame, and the loop says so once"
+        );
+
+        run_line(&mut engine, "debug_view ambient occlusion");
+        assert_eq!(
+            engine.gpu.applied_views.last().copied(),
+            Some(crcbl_render::DebugView::AmbientOcclusion),
+            "the console's view did not reach `GameGpu::set_debug_view`"
+        );
+
+        // The variable underneath, which is what a sample's own row writes.
+        run_line(&mut engine, "r_debug_view lod tint");
+        assert_eq!(
+            engine.gpu.applied_views.last().copied(),
+            Some(crcbl_render::DebugView::LodTint),
+            "the command and the variable are meant to be one cell"
+        );
+
+        // And back, so the line that undoes it is exercised too.
+        run_line(&mut engine, "debug_view shaded");
+        assert_eq!(
+            engine.gpu.applied_views.last().copied(),
+            Some(crcbl_render::DebugView::Shaded),
+        );
+    }
+
+    /// **The view reaches the bundle on the frame it moved and on no other.**
+    ///
+    /// The edge [`Loop::apply_debug_view`] documents. Written every frame
+    /// instead, this would leave the same view in force and be indistinguishable
+    /// from the working version by any assertion about *state* — which is why
+    /// the fake keeps the whole list.
+    #[test]
+    fn the_debug_view_reaches_the_bundle_once_and_not_once_a_frame() {
+        let _view = crate::debug_view::for_test();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "debug_view motion");
+        let after_the_line = engine.gpu.applied_views.len();
+        for _ in 0..4 {
+            step(&mut engine);
+        }
+        assert_eq!(
+            engine.gpu.applied_views.len(),
+            after_the_line,
+            "four frames that changed nothing wrote the view again: {:?}",
+            engine.gpu.applied_views,
+        );
+    }
+
+    /// **A bundle with no renderer says the view drew no frame**, rather than
+    /// letting the line look as though it worked.
+    ///
+    /// The other half of `a_bundle_with_no_renderer_reports_unsupported_for_both_video_seams`:
+    /// that one proves the default body refuses, and this one proves the loop
+    /// tells the person who typed the line. A `Shaded` ask is deliberately
+    /// silent — see [`Loop::apply_debug_view`] — so the check reads the count of
+    /// lines rather than trusting one to be there.
+    #[test]
+    fn a_bundle_with_no_renderer_says_the_debug_view_drew_no_frame() {
+        let _view = crate::debug_view::for_test();
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        engine.gpu.refuse_views = true;
+
+        run_line(&mut engine, "debug_view normals");
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.contains("no renderer") && line.contains("normals")),
+            "the console did not say the view reached no frame: {printed:?}"
+        );
+
+        run_line(&mut engine, "debug_view shaded");
+        let after = console_lines(&logs);
+        assert_eq!(
+            after
+                .iter()
+                .filter(|line| line.contains("no renderer"))
+                .count(),
+            1,
+            "going back to the shaded frame is not worth a line: {after:?}"
         );
     }
 

@@ -558,9 +558,11 @@ impl Gpu {
     ///
     /// The exposure and the wireframe are the renderer's own state, so they are
     /// re-applied here — a re-export that reset the picture's brightness would
-    /// be a reload the artist has to undo. Everything the frame pushes anyway
-    /// (the camera, the normals view) needs nothing: `crate::app::Viewer`'s
-    /// `draw` writes those every frame.
+    /// be a reload the artist has to undo. The **debug view** is re-applied for
+    /// a sharper version of the same reason: it is `crcbl::debug_view`'s now
+    /// rather than this sample's, and the loop writes it only where it moved, so
+    /// nothing else would ever put it back. The camera needs nothing —
+    /// `crate::app::Viewer`'s `draw` writes it every frame.
     ///
     /// **The camera is deliberately not re-framed.** An artist who has just
     /// placed the view to look at one corner of a model does not want it moved
@@ -624,6 +626,12 @@ impl Gpu {
         // Carried for the same reason the request above is: a reload must not
         // quietly draw at full size again for a player who asked for less.
         next.set_render_scale(self.renderer.render_scale());
+        // Carried for the same reason again, and it is **not** the caller's
+        // state: `crcbl::engine::Loop` hands the debug view to
+        // `GameGpu::set_debug_view` only where the value *moved*, so a reload
+        // under `debug_view normals` would put a shaded frame back and leave the
+        // console, the HUD row and the picture disagreeing until the next press.
+        crcbl::settings::set_debug_view_on(&mut next, crcbl::debug_view::current());
         // Through the renderer rather than through `Gpu::set_wireframe`, which
         // logs: a device that refused the view once has already said so, and a
         // line per re-export is a log nobody reads. The answer is what the
@@ -678,18 +686,16 @@ impl Gpu {
         self.wireframe_supported
     }
 
-    /// Draws each surface's world-space normal instead of shading it, so the
-    /// document's normals can be looked at directly.
+    /// Which debug channel the frame is drawing, if any.
     ///
-    /// **No answer to keep, unlike [`Gpu::set_wireframe`]**, and the asymmetry is
-    /// the feature's rather than an oversight: the wireframe needs a second
-    /// pipeline and a device that can build one, where this is one lane of a
-    /// uniform block every device already reads — see
-    /// [`ForwardRenderer::set_normals_view`], which cannot fail and so has no
-    /// `supports_` probe beside it. There is nothing for a caller's state to
-    /// disagree with, so this may be called once a frame or on an edge.
-    pub const fn set_normals_view(&mut self, on: bool) {
-        self.renderer.set_normals_view(on);
+    /// Read back off [`ForwardRenderer::debug_view`], which resolves five
+    /// independent switches by precedence, rather than kept beside them: what
+    /// [`NORMALS_KEY`](crate::app::NORMALS_KEY) and the console's
+    /// `debug_view normals` both write is `crcbl::debug_view`, and this is what
+    /// the frame actually came out as.
+    #[must_use]
+    pub const fn debug_view(&self) -> crcbl::render::DebugView {
+        self.renderer.debug_view()
     }
 
     /// Multiplies the tonemap's exposure by `factor` and returns what is now in
@@ -1960,6 +1966,83 @@ mod tests {
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");
         (opened, reloaded)
+    }
+
+    /// **A debug view survives a re-export.**
+    ///
+    /// The guard for one line in [`Gpu::reload`], and it needs its own check
+    /// rather than riding on the effect one because it fails for a reason none
+    /// of the other carries has: the debug view is not this bundle's state at
+    /// all. It is `crcbl::debug_view`'s, and `crcbl::engine::Loop` writes it to
+    /// a bundle only where the value **moved** — so a fresh renderer built
+    /// mid-run is the one thing that can silently lose it, and nothing else in
+    /// the process would ever put it back.
+    ///
+    /// Read off [`ForwardRenderer::debug_view`], which resolves the five
+    /// switches by precedence, so a carry that set the wrong one fails here.
+    #[test]
+    fn a_debug_view_survives_a_reload() {
+        use crcbl::engine::{Clock, SettingsSource, open_window, wait_for_configure};
+        use crcbl::render::DebugView;
+        use crcbl::shell::{HeadlessShell, WindowDesc};
+
+        // The view is one process-global value — `crcbl::debug_view` — so this
+        // check owns it for its duration and hands it back shaded.
+        let _view = crcbl::debug_view::for_test();
+
+        let mut shell = HeadlessShell::new();
+        let clock = Clock::new(true);
+        let window = open_window(
+            &mut shell,
+            &clock,
+            &WindowDesc {
+                title: "viewer",
+                app_id: "sh.kryptic.crcbl.viewer",
+                ..WindowDesc::default()
+            },
+        )
+        .expect("headless always creates a window");
+        let mut events = 0;
+        let extent =
+            wait_for_configure(&mut shell, window, &mut events).expect("headless configures");
+        let ctx = GpuContext::open(
+            &shell,
+            window,
+            extent,
+            &GpuContextDesc {
+                backend: Some(GpuBackend::Null),
+                settings: SettingsSource::None,
+                ..desc(GpuOptions::default())
+            },
+        )
+        .expect("the null backend opens everywhere");
+        let nothing_skinned = crate::model::Skinned::default();
+        let mut gpu = Gpu::from_context(
+            ctx,
+            &crcbl::render::scene::demo(),
+            &[],
+            &nothing_skinned,
+            1.0,
+        )
+        .expect("the null device builds the viewer's renderer");
+
+        assert_eq!(gpu.debug_view(), DebugView::Shaded);
+        // Through the seam the loop uses, so this is the state a `N` press or a
+        // console line would have left behind.
+        crcbl::debug_view::set(DebugView::Normals);
+        crcbl::settings::set_debug_view_on(&mut gpu.renderer, crcbl::debug_view::current());
+        assert_eq!(gpu.debug_view(), DebugView::Normals);
+
+        gpu.reload(&crcbl::render::scene::demo(), &[], &nothing_skinned, 1.0)
+            .expect("the null device builds the replacement renderer");
+        assert_eq!(
+            gpu.debug_view(),
+            DebugView::Normals,
+            "the re-export put a shaded frame back under a view nothing will re-apply",
+        );
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
     }
 
     /// **The player's `[engine.video]` clamp reaches the frames this

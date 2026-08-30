@@ -112,5 +112,5 @@ pub use args::{
 pub use gpu::{CELLS, Forced, Gpu, GpuError, Paths};
 pub use menu::{
     CAMERA_ID, CameraMode, FREEZE_ID, FREEZE_KEY, HEATMAP_ID, LOD_VIEW_ID, Menus, QuarryAction,
-    action_for, menus, pause_menu, toggled_to,
+    action_for, menus, pause_menu,
 };

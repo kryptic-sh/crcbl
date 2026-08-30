@@ -94,11 +94,12 @@ one arrives.
 Planned in `docs/plan/52-debug-console.md` on the user's ask — a Source-style
 console on `` ` `` in every demo, the log in a panel, an input with Send, every
 settings key a variable, `help` and autocomplete, variables declared beside the
-code. Its eight delivery slices are the plan's; slices 1 to 5 have landed, so
-`` ` `` opens a working console in every game and slices 6 to 8 are what is
-left. The one decision the user's "go with your recs" settled: registration is a
-per-crate table gathered at one seam with a source-reading guard, not `linkme`
-(no wasm) or `inventory` (life-before-main) — see the plan's decision 2.
+code. Its eight delivery slices are the plan's; slices 1 to 6 have landed, so
+`` ` `` opens a working console in every game, `debug_view ambient occlusion`
+draws any renderer's channel, and slices 7 and 8 are what is left. The one
+decision the user's "go with your recs" settled: registration is a per-crate
+table gathered at one seam with a source-reading guard, not `linkme` (no wasm)
+or `inventory` (life-before-main) — see the plan's decision 2.
 
 What slice 1 left as limits rather than fixed, each stated in the code:
 
@@ -256,10 +257,67 @@ limits rather than fixed:
   `ConsolePanel::point`. So "a click on Send submits" is proven in the widget
   and not through the loop.
 
-**Also owed with it:** the AO debug view is lantern's alone today
-(`ForwardRenderer::set_occlusion_view` behind lantern's pause panel). The user
-wants every debug view available in every build and demo; the debug console
-below is how.
+What slice 6 — `crcbl::debug_view`, the shared view, the samples that gave up
+their own — left as limits rather than fixed:
+
+- **No browser gate presses a debug view, and none can until slice 7.** The
+  console's field is fed by `ShellEvent::TextCommit` alone and
+  `crates/crcbl-shell/src/web/mod.rs` emits none, so
+  `debug_view ambient occlusion` cannot be typed at a page. The browser runs for
+  this slice are therefore regressions — the demos still open, tick and draw —
+  and not a proof of the view. The other way in is `apps/lantern`'s `AO VIEW`
+  row, which a browser check could press through the pause menu and then sample
+  the canvas for grey; that is a group in `web/tools/browser-e2e.mjs` nobody has
+  written.
+- **`crcbl::debug_view::r_debug_view` is process-global, which is a test
+  hazard.** A `ConVar` **is** the storage — plan decision 1 — so two loops in
+  one process share the view, and `cargo test` runs a crate's tests as threads
+  of one process. `debug_view::for_test()` is the answer and it is public for
+  that reason: it serialises the checks that move the view and restores `Shaded`
+  at both ends. The damage does not arrive where the view was moved:
+  `ForwardRenderer::resolved_effects` drops the antialiasing tier while any view
+  is on, so a bystander check asserting a bundle's effects fails instead —
+  measured at about one `cargo test -p quarry --lib` run in three before the
+  guard. In `apps/lantern`, `apps/quarry` and `apps/viewer` the guard is
+  therefore held by the test fixture — the `Scripted` wrapper each crate's
+  `scripted` helper now returns, which derefs to the `Loop` — so a check added
+  later inherits it rather than having to remember it. The guard nests per
+  thread — a check that builds two loops holds two of them, and
+  `let mut engine = scripted(..)` twice in one scope does not drop the first —
+  which it has to: against a plain mutex that check hangs rather than fails, and
+  arrives as a 240-second nextest timeout. Anywhere else, a check that moves the
+  view and forgets the guard is a **flake**, not a failure, which is the shape
+  nobody diagnoses from a CI log. `cargo nextest`, which CI runs, gives each
+  test a process and would not show it at all.
+- **lantern's in-scene monitor now greys with the main view.** The deleted
+  `lantern::Gpu::set_occlusion_view` applied the channel to the main renderer
+  alone and its doc argued for that — a reviewer keeps the shaded frame beside
+  the grey one — and `GameGpu::set_debug_view`, which is the only path now,
+  writes both. The argument was traded for one path rather than answered;
+  putting it back is a main-renderer-only body in
+  `lantern::Gpu::set_debug_view`, which the forwarder seam allows a bundle to
+  write for itself.
+- **A renderer rebuilt mid-run has to carry the view itself, and only one does
+  it.** `Loop::apply_debug_view` writes on an edge, so a bundle that replaces
+  its `ForwardRenderer` while a view is showing loses it with nothing to put it
+  back. `apps/viewer`'s `Gpu::reload` is the only such path in the workspace
+  today — a re-export builds a new renderer — and it now carries the view beside
+  the exposure, the effect request, the render scale and the wireframe;
+  `a_debug_view_survives_a_reload` is the guard. A sample that grows a second
+  rebuild path has to remember the same line, and nothing enforces that.
+- **The occlusion channel over quarry's face is shallow, and the pose was swept
+  to find any of it.** `OCCLUSION_POSE` is three quarters down the dolly because
+  that is where the most pixels darken: 559 of 49 152 on radv, 557 on lavapipe,
+  and **zero** at the dolly's end, where the camera is inside the quarry. The
+  face is a displaced ridge with no corners, so this is the fixture and not the
+  pass. A sample with an interior — `apps/lantern`'s room — would show far more,
+  and that is where a richer picture of this view belongs if anyone wants one.
+- **Nothing reads pixels through the `Loop`.** The device check draws its frames
+  from the quarry harness's own renderer, joined to the console's path at
+  `crcbl::settings::set_debug_view_on` — the body the forwarder calls — while
+  the loop half asserts on `ForwardRenderer::debug_view` rather than on a
+  picture. A single check that did both would need `--screenshot`, which quarry
+  is one of the three samples not to have.
 
 ## The render-quality programme (opened 2026-08-27)
 
@@ -1004,12 +1062,12 @@ What it did not cover:
   cross-backend suite rather than blessing an image: the assertions are already
   structural (uniformly white without the pass, not uniformly white with it) and
   neither half needs a reference frame.
-- **`lantern`'s `AO VIEW` row is not exercised by anything that runs.** Its
-  wiring is covered by
-  `the_ambient_occlusion_view_row_switches_the_view_not_the_pass`, which reads
-  labels and actions on the host; no golden and no browser gate presses it. That
-  is the same standing as the panel's other rows, and it is written down here
-  because the row is the only place a reviewer actually reaches this view.
+- **`lantern`'s `AO VIEW` row is not exercised by any _picture_.**
+  `the_ao_view_row_reaches_the_renderer_through_the_shared_variable` presses it
+  through the loop now and reads the view back off the renderer, so the wiring
+  is covered; no golden and no browser gate looks at what it draws. The row is
+  no longer the only place a reviewer reaches this view — the console's
+  `debug_view ambient occlusion` reaches it in every sample with a renderer.
 - **Nothing sets the AO radius or intensity from outside.** `SSAO_RADIUS` is a
   `forward.rs` constant and there is no intensity term at all, so the two live
   controls `docs/plan/sample/19-alcove.md` puts in milestone 1 beside this view

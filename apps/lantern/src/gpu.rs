@@ -622,15 +622,17 @@ impl Gpu {
         self.paths.monitor_effects = self.monitor.resolved_effects();
     }
 
-    /// Draw the main view's ambient-occlusion channel as grey instead of the
-    /// shaded picture — `crcbl_render::ForwardRenderer::set_occlusion_view`.
+    /// Which debug channel the two views are drawing, if any.
     ///
-    /// **The main view only, and the monitor deliberately keeps shading.** The
-    /// two are the same room from two poses, so leaving one of them lit is what
-    /// makes the grey one readable: a reviewer has the shaded frame to hold the
-    /// occlusion against without pressing the row twice.
-    pub fn set_occlusion_view(&mut self, on: bool) {
-        self.renderer.set_occlusion_view(on);
+    /// The main renderer's answer — the monitor is handed the same view by
+    /// `GameGpu::set_debug_view`, so one of them is the pair's. Read back off
+    /// [`ForwardRenderer::debug_view`], which resolves five independent switches
+    /// by precedence, rather than kept beside them: what a row and the console
+    /// both write is `crcbl::debug_view`, and this is what the frame actually
+    /// came out as.
+    #[must_use]
+    pub const fn debug_view(&self) -> crcbl::render::DebugView {
+        self.renderer.debug_view()
     }
 
     /// The context, for a caller arming `--screenshot` before the first frame.

@@ -180,6 +180,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   what lights the far end of a room without a bake. Rectangles only for now — a
   `fill` field on `PointLight` and `SpotLight` is `docs/backlog.md`'s.
 
+- **`debug_view ambient occlusion` draws any renderer's debug channel, in every
+  game.** The six views `crcbl_render::DebugView` has always had — `shaded`,
+  `heatmap`, `lod tint`, `normals`, `ambient occlusion`, `motion` — were
+  reachable only where a sample had wired one up: the occlusion channel was
+  `apps/lantern`'s pause row alone. `crcbl::debug_view` is now the one value
+  behind all of them: the `r_debug_view` console variable, the `debug_view`
+  command that sets it in words, and `current`/`set`/`toggle` for a game's own
+  row. `crcbl::engine::Loop` reads it once a frame and hands a **change** to
+  `GameGpu::set_debug_view`, so every bundle that holds a `ForwardRenderer` gets
+  every view with no code of its own, and a bundle without one says the view
+  drew no frame rather than passing. `apps/lantern`'s `AO VIEW` row,
+  `apps/quarry`'s `LOD VIEW` and `HEATMAP` rows and `apps/viewer`'s `N` key all
+  write that variable now instead of their own fields, so a row and a console
+  line cannot disagree — and lantern's row greys its in-scene monitor along with
+  the main view, which the row alone used to leave shaded.
 - **The debug console opens on `` ` `` in every game, with no per-app code.**
   `crcbl::engine::CONSOLE_KEY` (`KeyCode::Backquote`) joins `F3`, `Escape` and
   `F11` as a key the loop keeps for itself — the bare key only, so a

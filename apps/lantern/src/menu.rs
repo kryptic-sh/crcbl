@@ -87,7 +87,8 @@ pub enum LanternAction {
     /// several-effect action would have no one state to flip.
     ToggleEffect(RenderEffects),
     /// Swap between the shaded picture and the ambient-occlusion channel drawn
-    /// as grey — `crcbl_render::ForwardRenderer::set_occlusion_view`.
+    /// as grey — `crcbl::debug_view`, the one variable the console's
+    /// `debug_view ambient occlusion` writes too.
     ///
     /// **Not a [`ToggleEffect`](Self::ToggleEffect)**, and the distinction is
     /// the point of the row: the `AO` row above turns the occlusion pass off,

@@ -93,8 +93,10 @@ Every sample takes the same flags: `--backend vk|mtl|dx12|null`, `--headless`,
 `--frames N`, `--fullscreen`, `--pacing adaptive`, `--debug-overlay`. `F3` opens
 the debug panel, `F11` toggles fullscreen, `ESC` opens the menu, and `` ` ``
 opens the debug console — `help` lists every command and every setting the
-engine reads, `antialiasing smaa` sets one for the running frame, and `save`
-writes it to the settings file.
+engine reads, `antialiasing smaa` sets one for the running frame,
+`debug_view ambient occlusion` draws a renderer's debug channel instead of the
+shaded picture (`shaded`, `heatmap`, `lod tint`, `normals`, `ambient occlusion`,
+`motion`), and `save` writes it to the settings file.
 
 `CRCBL_SHELL=x11` forces a windowing backend and `CRCBL_LOG=debug` prints every
 shell event.

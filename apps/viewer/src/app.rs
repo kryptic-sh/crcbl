@@ -56,7 +56,7 @@ use crcbl::engine::{
 };
 use crcbl::prelude::*;
 use crcbl::render::cull::Aabb;
-use crcbl::render::{OrbitCamera, RenderEffects};
+use crcbl::render::{DebugView, OrbitCamera, RenderEffects};
 use crcbl::scene::gltf_render::Skip;
 use crcbl::shell::{CursorIcon, DisplayMode};
 use crcbl::ui::{DebugModule, DebugSection, draw_list::DrawList};
@@ -325,14 +325,6 @@ pub struct Viewer {
     wireframe_pending: bool,
     /// Whether [`WIREFRAME_KEY`] is currently held, for `listing_held`'s reason.
     wireframe_held: bool,
-    /// Whether the frame is drawn as world-space normals rather than shaded.
-    ///
-    /// **No `_pending` twin beside it, unlike the wireframe**, because there is
-    /// nothing to defer to: the normals view builds no pipeline and cannot be
-    /// refused — see [`Gpu::set_normals_view`](crate::gpu::Gpu::set_normals_view)
-    /// — so this is both what was asked for and what is drawn, and
-    /// [`Viewer::draw`] pushes it at the renderer every frame beside the camera.
-    normals: bool,
     /// Whether [`NORMALS_KEY`] is currently held, for `listing_held`'s reason.
     normals_held: bool,
     /// Whether the posed skeleton is drawn over the frame — see
@@ -600,7 +592,6 @@ fn assemble<S: Shell + ?Sized>(
             wireframe: false,
             wireframe_pending: false,
             wireframe_held: false,
-            normals: false,
             normals_held: false,
             skeleton: false,
             skeleton_held: false,
@@ -698,6 +689,17 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
         };
         Ok(Some(assemble(booted, &self.options, &self.model)))
     }
+}
+
+/// Whether the frame is drawn as world-space normals rather than shaded.
+///
+/// **Read, not kept.** [`NORMALS_KEY`] used to flip a field of this sample's
+/// own and [`Viewer::draw`] pushed it at the renderer every frame; the key
+/// writes [`crcbl::debug_view`] now, so it and the console's
+/// `debug_view normals` are one value — `docs/plan/52-debug-console.md`
+/// decision 8 — and [`crcbl::engine::Loop`] is what puts it into force.
+fn normals_view() -> bool {
+    crcbl::debug_view::current() == DebugView::Normals
 }
 
 impl Viewer {
@@ -1196,7 +1198,10 @@ impl HostedGame for Viewer {
             }
             NORMALS_KEY => {
                 if pressed && !self.normals_held {
-                    self.normals = !self.normals;
+                    // The one value the console's `debug_view normals` writes
+                    // too — `crcbl::debug_view` — so this key and that line
+                    // cannot hold different answers.
+                    crcbl::debug_view::toggle(DebugView::Normals);
                 }
                 self.normals_held = pressed;
             }
@@ -1425,10 +1430,6 @@ impl HostedGame for Viewer {
         if let Some(exposure) = std::mem::take(&mut self.exposure_pending) {
             self.exposure = gpu.set_exposure(exposure);
         }
-        // Every frame rather than on the key's edge, because there is no answer
-        // to keep: the normals view builds nothing and cannot be refused, so the
-        // field is the state and pushing it is idempotent.
-        gpu.set_normals_view(self.normals);
         // The turntable, after every key and before the camera is handed over,
         // so a frame that re-framed still leaves on the new pose rather than one
         // step behind it. `render_dt` rather than the tick's: this is a property
@@ -1598,7 +1599,7 @@ impl Viewer {
             self.turned.to_degrees() % 360.0,
             if self.handed_over { "on" } else { "off" },
             if self.wireframe { "on" } else { "off" },
-            if self.normals { "world" } else { "off" },
+            if normals_view() { "world" } else { "off" },
         );
     }
 }
@@ -1633,7 +1634,7 @@ impl DebugModule for Viewer {
         );
         out.row(
             "normals",
-            format_args!("{}", if self.normals { "world" } else { "off" }),
+            format_args!("{}", if normals_view() { "world" } else { "off" }),
         );
     }
 }
@@ -1917,7 +1918,55 @@ mod tests {
             .expect("these fixtures always name a path")
     }
 
-    fn scripted(options: &Options) -> Loop<HeadlessShell> {
+    /// A [`Loop`] that owns the shared debug view for the length of a check.
+    ///
+    /// **Every check here goes through it, and that is the point.**
+    /// `crcbl::debug_view` is one process-global value and
+    /// [`crcbl::engine::Loop`] applies it to whatever bundle it is driving, so a
+    /// check that moves the view changes what a check running *beside* it draws
+    /// — and `ForwardRenderer::resolved_effects` drops the antialiasing tier
+    /// while any view is on, so the damage arrives as unrelated effect
+    /// assertions failing about one run in three. `cargo test` runs a crate's
+    /// tests as threads of one process, which is where that happens; `cargo
+    /// nextest`, which CI runs, gives each test a process and never shows it.
+    ///
+    /// The guard lives in the fixture rather than in the checks that move the
+    /// view so that a check added later inherits it instead of having to
+    /// remember it. It resets the view at both ends and nests per thread, so a
+    /// check that builds two of these — which shadows the first binding without
+    /// dropping it — waits for nothing —
+    /// [`crcbl::debug_view::for_test`].
+    struct Scripted {
+        _view: crcbl::debug_view::ViewLock,
+        engine: Loop<HeadlessShell>,
+    }
+
+    impl std::ops::Deref for Scripted {
+        type Target = Loop<HeadlessShell>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.engine
+        }
+    }
+
+    impl std::ops::DerefMut for Scripted {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.engine
+        }
+    }
+
+    impl Scripted {
+        /// [`crcbl::engine::Loop::finish`], which takes `self` and so cannot
+        /// arrive through [`DerefMut`](std::ops::DerefMut).
+        fn finish(
+            self,
+            exit: ExitReason,
+        ) -> Result<Summary, crcbl::engine::LoopError<core::convert::Infallible>> {
+            self.engine.finish(exit)
+        }
+    }
+
+    fn scripted(options: &Options) -> Scripted {
         let model = model::load(model_path(options)).expect("the fixture loads");
         scripted_with(options, model)
     }
@@ -1926,8 +1975,12 @@ mod tests {
     ///
     /// For the run that names no path: its document comes off the shelf rather
     /// than off `options`, and `load_and_report` is the thing under test.
-    fn scripted_with(options: &Options, model: Model) -> Loop<HeadlessShell> {
-        with_shell(Box::new(HeadlessShell::new()), options, model).expect("headless always starts")
+    fn scripted_with(options: &Options, model: Model) -> Scripted {
+        Scripted {
+            _view: crcbl::debug_view::for_test(),
+            engine: with_shell(Box::new(HeadlessShell::new()), options, model)
+                .expect("headless always starts"),
+        }
     }
 
     /// **The idle turntable turns, and stops for good when someone takes hold.**
@@ -2838,7 +2891,15 @@ mod tests {
         assert_eq!(
             row_value(&ui_text(&engine), "normals"),
             "world",
-            "the press never reached the renderer, so the repeats below prove nothing",
+            "the press never reached the shared variable, so the repeats below prove nothing",
+        );
+        // The row reads `crcbl::debug_view`, which is where the press lands;
+        // this is the other half — the loop carrying it to the renderer this
+        // sample draws with, which is what a viewer of the picture sees.
+        assert_eq!(
+            engine.gpu().debug_view(),
+            DebugView::Normals,
+            "the variable moved and the loop did not carry it to the renderer",
         );
 
         for _ in 0..2 {
@@ -2869,6 +2930,7 @@ mod tests {
         // released rather than latched.
         tap(&mut engine, window, NORMALS_KEY);
         assert_eq!(row_value(&ui_text(&engine), "normals"), "off");
+        assert_eq!(engine.gpu().debug_view(), DebugView::Shaded);
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
