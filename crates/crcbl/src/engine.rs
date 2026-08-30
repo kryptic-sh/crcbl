@@ -2997,6 +2997,13 @@ pub struct Pending {
     pub toggle_pause: bool,
     /// [`FULLSCREEN_KEY`] was pressed.
     pub toggle_fullscreen: bool,
+    /// [`CONSOLE_KEY`] was pressed without `Ctrl` or `Meta` held.
+    ///
+    /// **The modifier check is here rather than at the console**, because it is
+    /// what decides whether the key is the loop's at all: a `Ctrl`-backquote is
+    /// not claimed, so it goes on to the game and to the page like any other
+    /// key.
+    pub toggle_console: bool,
 }
 
 /// One contact event, as a batch saw it.
@@ -3143,6 +3150,7 @@ impl Pending {
                 key_code: Some(code),
                 state,
                 repeat,
+                modifiers,
                 ..
             } => {
                 // `!repeat` because holding F11 down would otherwise toggle the
@@ -3152,6 +3160,18 @@ impl Pending {
                     DEBUG_OVERLAY_KEY => self.toggle_debug_overlay |= edge,
                     PAUSE_KEY => self.toggle_pause |= edge,
                     FULLSCREEN_KEY => self.toggle_fullscreen |= edge,
+                    // Left for the page when a devtools modifier is held — see
+                    // [`CONSOLE_KEY`]. Claimed either way once it is the
+                    // console's key, press and release alike, so a game never
+                    // sees the key that opened the panel over it.
+                    CONSOLE_KEY
+                        if !modifiers.intersects(
+                            crcbl_core::input::Modifiers::CTRL
+                                | crcbl_core::input::Modifiers::SUPER,
+                        ) =>
+                    {
+                        self.toggle_console |= edge;
+                    }
                     _ => return Handled::Game,
                 }
             }
@@ -3173,6 +3193,44 @@ pub const PAUSE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Es
 
 /// Toggles fullscreen.
 pub const FULLSCREEN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::F11;
+
+/// Shows and hides the debug console.
+///
+/// The fourth reserved key, and Source's: the `` ` ``/`~` key, which is
+/// [`KeyCode::Backquote`](crcbl_core::input::KeyCode::Backquote) on every
+/// backend the engine has. It is the engine's rather than each game's for
+/// [`DEBUG_OVERLAY_KEY`]'s reason — the thing it opens is the engine's — and
+/// `docs/plan/52-debug-console.md` decision 5 is where that is argued.
+///
+/// **Only the bare key toggles.** With `Ctrl` or `Meta` held it is a browser's
+/// devtools shortcut on two platforms, so [`Pending::observe`] leaves those
+/// alone and the press reaches the page. `Shift` still toggles: `~` and
+/// `` ` `` are one key and a player holding shift meant the console.
+pub const CONSOLE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Backquote;
+
+/// Whether `event` is a press of [`CONSOLE_KEY`] the loop will claim.
+///
+/// The same condition [`Pending::observe`] folds, spelled once and read twice:
+/// the pump needs it a second time to swallow the character the press commits,
+/// and a copy that disagreed would type a backtick into the field on whichever
+/// side forgot the modifier.
+///
+/// **Repeats count here and not there.** A held key toggles once, so
+/// [`Pending::toggle_console`] ignores a repeat — but every repeat commits a
+/// character, and every one of those has to be swallowed.
+fn toggles_console(event: &ShellEvent) -> bool {
+    matches!(
+        event,
+        ShellEvent::Key {
+            key_code: Some(CONSOLE_KEY),
+            state: crcbl_shell::ButtonState::Pressed,
+            modifiers,
+            ..
+        } if !modifiers.intersects(
+            crcbl_core::input::Modifiers::CTRL | crcbl_core::input::Modifiers::SUPER,
+        )
+    )
+}
 
 /// Moves the selection up, while a menu is showing.
 ///
@@ -3995,6 +4053,13 @@ pub enum ExitReason {
     WindowDestroyed,
     /// A frame failed. The loop stopped, and teardown still ran.
     Failed,
+    /// The debug console's `quit` command asked the run to stop.
+    ///
+    /// A reason of its own rather than [`CloseRequested`](Self::CloseRequested),
+    /// which is the window system's ask: the window is still there and still
+    /// needs destroying, and a summary that reported a typed `quit` as a title
+    /// bar click would be describing something that did not happen.
+    Quit,
 }
 
 impl ExitReason {
@@ -5391,6 +5456,30 @@ pub trait HostedGame: Sized {
         false
     }
 
+    /// Everything this game exposes to the debug console.
+    ///
+    /// The one seam `docs/plan/52-debug-console.md` decision 2 puts on a host:
+    /// a game declares its variables and commands beside the code that owns
+    /// them, lists them once in a `console_table()` of its own, and hands that
+    /// list over here. [`Loop::new`] gathers it beside the engine's own tables,
+    /// so a game's variable is in `help` and reachable by name with no other
+    /// wiring at all.
+    ///
+    /// **A static list rather than a method on `self`**, because the gather
+    /// happens once and a [`crcbl_console::Table`] is `&'static` data: a
+    /// variable *is* its own storage, so there is nothing per-instance for a
+    /// table to close over.
+    ///
+    /// The empty default carries [`debug_sections`](Self::debug_sections)'
+    /// argument: nothing is verified by this method, and a game that never
+    /// overrides it is a game that declared no console entries — which is every
+    /// game in this workspace today, since the settings keys and the engine's
+    /// own commands arrive through the engine's tables rather than through this
+    /// one.
+    fn console_table() -> crcbl_console::Table {
+        crcbl_console::Table::EMPTY
+    }
+
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
 
@@ -5457,6 +5546,13 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// are needed across frames, see [`PointerCapture`].
     pointer: PointerCapture,
     debug: crcbl_ui::DebugOverlay,
+    /// The debug console: the registry, the panel and the host every command is
+    /// run over.
+    ///
+    /// Built at [`Loop::new`] because the gather happens once — see
+    /// [`crate::debug_console::engine_tables`] — and drawn last in the frame, so
+    /// nothing covers it.
+    console: crate::debug_console::Console,
     /// What each pass has cost over the run, beside the overlay's frame total.
     ///
     /// Not in [`Self::debug`] because it cannot be: `crcbl-ui` is below
@@ -5600,6 +5696,35 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // `LoopConfig` and none of them would have remembered to do it.
         let mut clock_source = booted.clock_source;
         clock_source.set_limit(config.limit.clamped_to(booted.gpu.video().frame_limit));
+        // **The console's gather, and the one place it happens.** The engine's
+        // tables plus the game's, with `crcbl-console`'s own built-ins added by
+        // `gather` itself. The settings stack is read here a second time
+        // — `GpuContext` read the `[engine.video]` section while it opened and
+        // kept the section rather than the file — because the console edits and
+        // saves keys no renderer holds, and because a headless run must take
+        // neither: `SettingsSource::for_run` is the rule, stated once, and a run
+        // with no file to read is a run with nowhere to save.
+        let source = SettingsSource::for_run(!config.windowed);
+        let host = match source.open(G::NAME) {
+            Some(stack) => crate::settings::ConsoleHost::new(stack).saving_as(G::NAME),
+            // **A stack over memory rather than an empty one**, and the
+            // difference is not cosmetic: `SettingsStack::set` refuses a stack
+            // with no user layer, so a bare `SettingsStack::default()` would
+            // make every settings variable read-only on exactly the runs a
+            // developer types into a console — the headless ones. The layer is
+            // writable and reaches no disk, which is what
+            // `SettingsSource::None` asks for; `saving_as` is left unset, so
+            // `save` says there is nowhere to save rather than pretending.
+            None => crate::settings::ConsoleHost::new(SettingsStack::from_storage(
+                &crcbl_store::MemoryStorage::new(),
+            )),
+        };
+        let tables: Vec<crcbl_console::Table> = crate::debug_console::engine_tables()
+            .into_iter()
+            .map(|(_, table)| table)
+            .chain(std::iter::once(G::console_table()))
+            .collect();
+        let console = crate::debug_console::Console::new(&tables, host);
         Self {
             shell: booted.shell,
             window: booted.window,
@@ -5611,6 +5736,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             menus: G::menus(),
             pointer: PointerCapture::new(),
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
+            console,
             passes: crcbl_render::PassStats::new(),
             paused: false,
             held_keys: Vec::new(),
@@ -5682,13 +5808,34 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // frame's state is known, and the menu the player is pressing keys at
         // is the one that was on screen when they pressed them.
         let showing = self.menus.current().is_some();
+        // **Last frame's console, for `showing`'s reason.** The panel the player
+        // is typing at is the one that was on screen when they typed, and the
+        // toggle this batch carries is applied below rather than mid-pump.
+        let console_showing = self.console.is_open();
+        let console = &mut self.console;
         let mut menu = MenuPump::new(&mut self.menus, &mut self.held_keys, showing);
+        // The character the toggling key produced, which must not be typed into
+        // the field it just opened — plan decision 5. Set from the key event
+        // itself rather than from `Pending::toggle_console`, because a *repeat*
+        // of the key commits text too and does not toggle anything.
+        let mut swallow_text = false;
         self.shell.pump(&mut |event| {
+            if toggles_console(&event) {
+                swallow_text = true;
+            }
             // The window's business, the pointer, focus loss and the loop's
-            // three reserved keys are all folded by `Pending::observe`; the
-            // menu's three and the held-key list are `MenuPump`'s. What comes
-            // back from that is the key the *game* should see.
+            // four reserved keys are all folded by `Pending::observe`; the
+            // console claims what is left while it is open; the menu's three
+            // and the held-key list are `MenuPump`'s. What comes back from that
+            // is the key the *game* should see.
             if pending.observe(&event) == Handled::Loop {
+                return;
+            }
+            if swallow_text && matches!(event, ShellEvent::TextCommit { .. }) {
+                swallow_text = false;
+                return;
+            }
+            if console_showing && console.observe(&event) {
                 return;
             }
             if let Some((code, pressed)) = menu.observe(&event) {
@@ -5723,12 +5870,19 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         if pending.pointer_pressed && showing {
             self.menu_owns_press = true;
         }
+        // **The console is over everything, so it gets the pointer first.** It
+        // answers whether the cursor is on the panel; a press there is the
+        // console's and must not also latch a menu button underneath it, which
+        // is `menu_owns_press`' rule applied to a panel the loop draws last.
+        let console_took_pointer =
+            self.console
+                .point(self.gpu.extent(), self.gpu.atlas(), pointer_input);
         let from_pointer = self.menus.point(
             self.gpu.extent(),
             self.gpu.atlas(),
             crcbl_ui::PointerInput {
-                down: pointer_input.down && self.menu_owns_press,
-                released: pointer_input.released && self.menu_owns_press,
+                down: pointer_input.down && self.menu_owns_press && !console_took_pointer,
+                released: pointer_input.released && self.menu_owns_press && !console_took_pointer,
                 ..pointer_input
             },
         );
@@ -5803,7 +5957,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             self.game.button_event(button, pressed);
         }
         for delta in std::mem::take(&mut pending.scrolls) {
-            self.game.wheel_event(delta);
+            // The wheel is the console's while it is open — it is the only thing
+            // on screen with a scrollback — and the game's the rest of the time.
+            if console_showing {
+                self.console.scroll(delta);
+            } else {
+                self.game.wheel_event(delta);
+            }
         }
         // Beside the button and wheel dispatch because a drop is the same kind
         // of thing: an event the loop has nothing of its own to say about. One
@@ -5817,7 +5977,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // have had it. `showing` is
         // last frame's menu for the same reason the keyboard's claim is: the
         // panel the player tapped is the one that was on screen when they did.
-        let pressed = pending.pointer_pressed && !showing;
+        let pressed = pending.pointer_pressed && !showing && !console_took_pointer;
         // `|| pressed` because a tap faster than a frame is one batch, and its
         // release has to go out with the press it answers — which on a phone is
         // every tap. Without it the game keeps the button down, and the *next*
@@ -5849,6 +6009,30 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // one the new cap paces.
         if let Some(limit) = self.game.take_pending_frame_limit() {
             self.clock_source.set_limit(limit);
+        }
+
+        // **The console's takeover, and the held-key repair beside it.** A game
+        // told a key is down and never told it came up walks south for the rest
+        // of the run — the repair `MenuPump::observe` documents for a menu
+        // opening over a held key, owed here for the same reason and discharged
+        // the same way. The other direction needs nothing: the console claims
+        // both edges of every key it takes, so the game sees matched pairs.
+        if pending.toggle_console {
+            if !self.console.is_open() {
+                let game = &mut self.game;
+                for key in std::mem::take(&mut self.held_keys) {
+                    game.key_event(key, false);
+                }
+            }
+            self.console.toggle();
+        }
+        // Where a console write reaches the frame. `Binding`s record into a
+        // `settings::Deferred` because they are handed their host as
+        // `&mut dyn Any` and cannot hold a borrow of the renderer; this is the
+        // drain that arrangement is built around.
+        self.drain_console();
+        if self.console.host_mut().engine_mut().take_quit() {
+            return Ok(Flow::Stop(ExitReason::Quit));
         }
 
         if pending.toggle_debug_overlay {
@@ -5904,7 +6088,15 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // frame to toggle the pause a second time. Both in one frame is one
         // toggle: the player asked once, with two fingers or with two hands.
         let pause_control = self.game.take_pending_pause();
-        if pending.toggle_pause || pause_control {
+        // **Escape closes the console before it pauses the game** — plan
+        // decision 5. One press does one thing, and the thing on top of the
+        // frame is what it does it to.
+        let escape_closed_console = pending.toggle_pause && self.console.is_open();
+        if escape_closed_console {
+            self.console.close();
+        }
+        let console_pause = self.console.host_mut().engine_mut().take_pause();
+        if (pending.toggle_pause && !escape_closed_console) || pause_control || console_pause {
             self.paused = !self.paused;
             log::info!("game {}", if self.paused { "paused" } else { "resumed" });
         }
@@ -5938,6 +6130,18 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // fills while you are looking at it shows two seconds of nothing every
         // time you press F3.
         self.debug.record(self.frame_clock.render_dt());
+        // What the console's `fps` command reads. Overwritten rather than
+        // queued: the answer to "how fast is this running" is about the frame
+        // that just happened, not about a backlog of old ones.
+        let render_secs = self.frame_clock.render_dt_secs();
+        self.console.host_mut().engine_mut().set_frame_timing(
+            if render_secs > 0.0 {
+                1.0 / render_secs
+            } else {
+                0.0
+            },
+            render_secs * 1000.0,
+        );
         // A paused frame keeps the clock and throws the ticks away, which is
         // `run_ticks`'s whole job; its docs carry the argument for why.
         let tick = crcbl_core::trace::span(crate::perf::TICK_SPAN);
@@ -5966,6 +6170,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.game.draw(&mut self.gpu, &mut self.draw_list, info);
         self.draw_menu();
         self.draw_debug_overlay();
+        // **Last, so nothing covers it** — plan decision 6. The overlay is a
+        // developer tool that stays legible over the game; the console is the
+        // one thing that stays legible over the overlay.
+        let extent = self.gpu.extent();
+        let render_dt = self.frame_clock.render_dt();
+        self.console
+            .draw(&mut self.draw_list, extent, self.gpu.atlas(), render_dt);
         self.gpu.take_draw_list(&mut self.draw_list);
         drop(draw);
 
@@ -6288,6 +6499,48 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         );
     }
 
+    /// Hands what a console write recorded to the seams that can apply it.
+    ///
+    /// `docs/plan/52-debug-console.md` slice 2 left this: a
+    /// [`Binding`](crcbl_console::Binding) reaches its host as `&mut dyn Any`
+    /// and so cannot hold a borrow of the renderer or the clock, and records
+    /// into a [`settings::Deferred`](crate::settings::Deferred) instead. This is
+    /// where the bundle and the clock are in hand — the arrangement
+    /// [`HostedGame::take_pending_frame_limit`] already had.
+    ///
+    /// **The audio gains are the one seam the loop cannot reach**: a mixer is
+    /// the game's and no [`HostedGame`] method hands one over, so a gain a
+    /// console set is in the settings stack and in the file and not in the
+    /// running mix. It is said out loud rather than dropped, on this file's own
+    /// terms about a value that reached no frame; `docs/backlog.md` carries what
+    /// closing it would take.
+    fn drain_console(&mut self) {
+        let pending = self.console.host_mut().pending_mut();
+        let video = pending.take_video();
+        let gains = pending.take_gains();
+        let limit = pending.take_frame_limit();
+        if let Some(video) = video {
+            // `Unsupported` is not a failure: a bundle with no renderer — the
+            // options screen, hud — has nothing to put a section into force on,
+            // and the key is written either way.
+            if self.gpu.apply_video(&video).is_err() {
+                log::debug!("console: this bundle has no renderer to apply `[engine.video]` to");
+            }
+        }
+        for (bus, gain) in crcbl_audio::mixer::Bus::ALL.into_iter().zip(gains) {
+            if let Some(gain) = gain {
+                crcbl_core::log::console::print(&format!(
+                    "{}: {gain} is in the settings stack and not in the running mix — \
+                     the loop can reach no mixer",
+                    bus.settings_key()
+                ));
+            }
+        }
+        if let Some(limit) = limit {
+            self.clock_source.set_limit(limit);
+        }
+    }
+
     /// Tears the frame down and reports what the run did.
     ///
     /// # Errors
@@ -6510,6 +6763,21 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// run starts at.
     pub const fn clock_source_mut(&mut self) -> &mut Clock {
         &mut self.clock_source
+    }
+
+    /// The debug console this loop drew last, to read.
+    ///
+    /// Public for the reason [`held_keys`](Self::held_keys) is: what the panel
+    /// is showing and what has been typed into it are testable, and a test that
+    /// drove the console through the shell and could not read the answer would
+    /// be asserting on the log alone.
+    ///
+    /// Read-only on purpose. Everything that changes the console is an event —
+    /// a key, a wheel, a pointer — and a caller reaching in to set the field
+    /// would be a second way in that the takeover rules do not cover.
+    #[must_use]
+    pub const fn console(&self) -> &crate::debug_console::Console {
+        &self.console
     }
 
     /// Keys forwarded to the game as pressed and not yet released.
@@ -6772,6 +7040,16 @@ mod tests {
         /// way the loop's own application of `[engine.video]` can be exercised
         /// at all, since a real `GpuContext` needs a device.
         video: crate::settings::VideoSettings,
+        /// Every `[engine.video]` section [`GameGpu::apply_video`] was handed,
+        /// in order.
+        ///
+        /// This fake **does** implement that seam, unlike
+        /// [`GameGpu::set_debug_view`]: it is the only way to see that
+        /// [`Loop::drain_console`] reached the bundle at all, and a drain that
+        /// called nothing leaves exactly the same state behind as one that
+        /// called a body answering `Unsupported`. [`BareGpu`] is what keeps the
+        /// trait's own default under test.
+        applied_video: Vec<crate::settings::VideoSettings>,
     }
 
     impl FakeGpu {
@@ -6786,6 +7064,7 @@ mod tests {
                 counters: crcbl_render::FrameCounters::default(),
                 frame_extents: Vec::new(),
                 video: crate::settings::VideoSettings::unrestricted(),
+                applied_video: Vec::new(),
             }
         }
 
@@ -6880,6 +7159,14 @@ mod tests {
             self.counters
         }
 
+        fn apply_video(
+            &mut self,
+            video: &crate::settings::VideoSettings,
+        ) -> Result<(), crate::settings::Unsupported> {
+            self.applied_video.push(*video);
+            Ok(())
+        }
+
         fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
             self.frames += 1;
             self.frame_extents.push(self.extent);
@@ -6904,9 +7191,63 @@ mod tests {
         }
     }
 
+    /// A bundle that overrides neither video seam — `apps/options`' and
+    /// `apps/hud`'s shape, and what puts [`GameGpu`]'s own defaults under test
+    /// now that [`FakeGpu`] forwards [`GameGpu::apply_video`] so the console
+    /// drain can be seen.
+    ///
+    /// Every other method is [`FakeGpu`]'s, forwarded, because a second fake
+    /// frame would be a second thing to keep in step with the first.
+    #[derive(Debug)]
+    struct BareGpu(FakeGpu);
+
+    impl GpuSurface for BareGpu {
+        fn extent(&self) -> (u32, u32) {
+            self.0.extent()
+        }
+
+        fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
+            self.0.resize(extent)
+        }
+    }
+
+    impl GameGpu for BareGpu {
+        fn atlas(&self) -> &crcbl_ui::FontAtlas {
+            self.0.atlas()
+        }
+
+        fn set_menu(&mut self, menu: Option<(&crcbl_ui::menu::Menu, &crcbl_ui::menu::MenuLayout)>) {
+            self.0.set_menu(menu);
+        }
+
+        fn take_draw_list(&mut self, list: &mut crcbl_ui::draw_list::DrawList) {
+            self.0.take_draw_list(list);
+        }
+
+        fn video(&self) -> &crate::settings::VideoSettings {
+            self.0.video()
+        }
+
+        fn timings(&self) -> Option<&crcbl_render::FrameTimings> {
+            self.0.timings()
+        }
+
+        fn counters(&self) -> crcbl_render::FrameCounters {
+            self.0.counters()
+        }
+
+        fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
+            self.0.frame()
+        }
+
+        fn destroy(self) -> Result<(), GpuError> {
+            self.0.destroy()
+        }
+    }
+
     /// **A bundle with no renderer says so, rather than passing.**
     ///
-    /// [`FakeGpu`] implements neither of
+    /// [`BareGpu`] implements neither of
     /// [`GameGpu::apply_video`]/[`GameGpu::set_debug_view`], which is exactly
     /// what `apps/options` and `apps/hud` do, so this is the default body under
     /// test. A default that answered `Ok(())` would let
@@ -6915,7 +7256,7 @@ mod tests {
     /// [`GameGpu::counters`] refuses a default over.
     #[test]
     fn a_bundle_with_no_renderer_reports_unsupported_for_both_video_seams() {
-        let mut gpu = FakeGpu::at((64, 64));
+        let mut gpu = BareGpu(FakeGpu::at((64, 64)));
         assert_eq!(
             gpu.apply_video(&crate::settings::VideoSettings::unrestricted()),
             Err(crate::settings::Unsupported)
@@ -11301,6 +11642,29 @@ mod tests {
 
         const NAME: &'static str = "fake";
 
+        /// One command of the game's own, so the gather's third table is not
+        /// always `EMPTY` under test — see
+        /// `a_games_own_console_table_is_reachable_by_name`.
+        ///
+        /// Built through [`crcbl_console::ConCommand::new`] rather than
+        /// `concommand!` on purpose: `tests/console_table.rs` reads this file
+        /// for that macro and holds every declaration it finds to
+        /// [`crate::console_table`], and a fake game's command is not the
+        /// crate's.
+        fn console_table() -> crcbl_console::Table {
+            fn run(
+                cx: &mut crcbl_console::Context<'_>,
+                _args: &[&str],
+            ) -> Result<(), crcbl_console::Fault> {
+                cx.print("the fake game served");
+                Ok(())
+            }
+            static SERVE: crcbl_console::ConCommand =
+                crcbl_console::ConCommand::new("fake_serve", "Serve, from the game's table.", run);
+            static COMMANDS: &[&crcbl_console::ConCommand] = &[&SERVE];
+            crcbl_console::Table::new(&[], &[], COMMANDS)
+        }
+
         fn menus() -> crcbl_ui::menu::MenuSet<FakeMenu> {
             use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
             MenuSet::new(
@@ -13352,6 +13716,597 @@ mod tests {
         assert!(
             matches!(SettingsSource::for_run(false), SettingsSource::Platform),
             "a run with a window reads the player's own settings directory",
+        );
+    }
+
+    // ---- the debug console -------------------------------------------------
+
+    /// A loop hosting [`FakeGame`], typed at through its headless shell.
+    type Hosted = Loop<crcbl_shell::HeadlessShell, FakeGame>;
+
+    /// Presses `key` and releases it, the way a finger does.
+    fn tap(engine: &mut Hosted, key: crcbl_core::input::KeyCode) {
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_press(window, key)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, key)
+            .expect("the window is live");
+    }
+
+    /// Commits `text`, the way a keyboard layout does.
+    ///
+    /// The only way a character reaches a field: `TextCommit` carries the
+    /// layout's answer, and a field rebuilt from key codes could not type in a
+    /// language whose letters are not on them.
+    fn typed(engine: &mut Hosted, text: &str) {
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .commit_text(window, text)
+            .expect("the window is live");
+    }
+
+    /// One frame of a loop with no budget to spend.
+    fn step(engine: &mut Hosted) {
+        assert_eq!(
+            engine.frame_body().expect("the fake never fails"),
+            Flow::Continue
+        );
+    }
+
+    /// A loop whose console the console key has just opened.
+    fn with_console_open() -> Hosted {
+        let mut engine = hosted(None);
+        assert!(!engine.console().is_open(), "a run starts with it closed");
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(
+            engine.console().is_open(),
+            "the console key opens the panel"
+        );
+        engine
+    }
+
+    /// Types `line` into the open console and submits it.
+    fn run_line(engine: &mut Hosted, line: &str) {
+        typed(engine, line);
+        tap(engine, crcbl_core::input::KeyCode::Enter);
+        step(engine);
+    }
+
+    /// Every line the console printed during `logs`, in order.
+    fn console_lines(logs: &crcbl_core::log::Capture) -> Vec<String> {
+        logs.records()
+            .iter()
+            .filter(|record| record.target == crcbl_core::log::CONSOLE_TARGET)
+            .map(|record| record.message.clone())
+            .collect()
+    }
+
+    /// **The console key opens the panel, and the game never sees the key.**
+    ///
+    /// Both halves, because either alone is a different bug: a key that toggled
+    /// nothing is a console that cannot be opened, and a key the game also gets
+    /// is a game that jumps every time the console does.
+    #[test]
+    fn the_console_key_opens_the_panel_and_the_game_never_sees_it() {
+        let mut engine = with_console_open();
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(!engine.console().is_open(), "and the same key closes it");
+        assert!(
+            !engine.game.keys.iter().any(|(key, _)| *key == CONSOLE_KEY),
+            "the game was told about the console's own key: {:?}",
+            engine.game.keys,
+        );
+    }
+
+    /// **A `Ctrl`-held console key is not the console's**, so the page keeps its
+    /// devtools shortcut and the game keeps the key.
+    #[test]
+    fn a_devtools_modifier_leaves_the_console_key_alone() {
+        let mut engine = hosted(None);
+        engine
+            .shell_mut()
+            .set_modifiers(crcbl_core::input::Modifiers::CTRL);
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(
+            !engine.console().is_open(),
+            "Ctrl-backquote opened the console instead of leaving it to the page"
+        );
+        assert!(
+            engine.game.keys.contains(&(CONSOLE_KEY, true)),
+            "an unclaimed key is the game's: {:?}",
+            engine.game.keys,
+        );
+    }
+
+    /// **A key held when the console opens is released to the game.**
+    ///
+    /// The repair [`MenuPump::observe`] documents for a menu, owed here for the
+    /// same reason: a game told a key is down and never told it came up walks
+    /// south for the rest of the run.
+    #[test]
+    fn a_key_held_when_the_console_opens_is_released_to_the_game() {
+        let mut engine = hosted(None);
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_press(window, SERVE_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert_eq!(
+            engine.held_keys(),
+            [SERVE_KEY],
+            "the game is holding the key the console is about to take"
+        );
+
+        tap(&mut engine, CONSOLE_KEY);
+        step(&mut engine);
+        assert!(engine.console().is_open());
+        assert_eq!(
+            engine.game.keys.last().copied(),
+            Some((SERVE_KEY, false)),
+            "the console opened over a held key and the game was not told it came up: {:?}",
+            engine.game.keys,
+        );
+        assert!(
+            engine.held_keys().is_empty(),
+            "and the loop is not still holding it either"
+        );
+    }
+
+    /// **The open console claims the keyboard**, letters included: a game that
+    /// saw what is being typed would be played by the console.
+    #[test]
+    fn the_open_console_claims_every_key_the_game_would_have_had() {
+        let mut engine = with_console_open();
+        let before = engine.game.keys.len();
+        tap(&mut engine, crcbl_core::input::KeyCode::KeyW);
+        typed(&mut engine, "w");
+        step(&mut engine);
+        assert_eq!(
+            engine.game.keys.len(),
+            before,
+            "a key reached the game through an open console: {:?}",
+            engine.game.keys,
+        );
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "w",
+            "and the character reached the field"
+        );
+    }
+
+    /// **The character the toggling key commits is never typed into the field.**
+    ///
+    /// Every backend commits a `` ` `` for that press, and the two directions
+    /// are protected by different things — which is why both are here. Opening
+    /// is safe because the console claims nothing until the frame *after* it
+    /// opened, the same rule a menu follows. **Closing is not**: the panel is up
+    /// while the key is pressed, so the commit that follows it would land in the
+    /// field, and the swallow in the pump is the only thing that stops the
+    /// half-typed line growing a backtick every time the console is dismissed.
+    #[test]
+    fn the_key_that_toggles_the_console_is_never_typed_into_it() {
+        let mut engine = hosted(None);
+        let window = engine.window;
+        // Opening.
+        engine
+            .shell_mut()
+            .key_press(window, CONSOLE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .commit_text(window, "`")
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, CONSOLE_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert!(engine.console().is_open());
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "",
+            "the backtick that opened the console was typed into it"
+        );
+
+        // Closing, over a line that is being typed.
+        typed(&mut engine, "ech");
+        step(&mut engine);
+        assert_eq!(engine.console().panel().field().text(), "ech");
+        engine
+            .shell_mut()
+            .key_press(window, CONSOLE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .commit_text(window, "`")
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, CONSOLE_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert!(!engine.console().is_open(), "the key closed the panel");
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "ech",
+            "the backtick that closed the console was typed into the line first"
+        );
+    }
+
+    /// **A bare variable prints its value, on stderr and in the panel.**
+    ///
+    /// Plan decision 4's whole claim: the console's own output goes through the
+    /// log, so the terminal and the panel show one line and not two that can
+    /// disagree. Asserted on both — the capture is the sink's side and the
+    /// panel's `LogView` is the ring's.
+    #[test]
+    fn a_variable_typed_into_the_console_prints_its_value_to_the_log_and_the_panel() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "antialiasing");
+
+        let printed = console_lines(&logs);
+        assert!(
+            printed.iter().any(|line| line == "] antialiasing"),
+            "the console did not echo the line it ran: {printed:?}"
+        );
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.starts_with("antialiasing = ")),
+            "the variable's value did not reach the log: {printed:?}"
+        );
+        assert!(
+            engine
+                .console()
+                .panel()
+                .log()
+                .lines()
+                .any(|line| line.text.starts_with("antialiasing = ")),
+            "the value is on stderr and not in the panel, so the two disagree"
+        );
+    }
+
+    /// **A set reaches the bundle on the frame it was typed.**
+    ///
+    /// The drain `docs/plan/52-debug-console.md` slice 2 left owed: a `Binding`
+    /// records into a `settings::Deferred` because it cannot hold a borrow of
+    /// the renderer, and this is the loop handing that over. Both spellings the
+    /// plan promises are exercised, because the `=` is optional and a parser
+    /// that dropped it would still pass a test that only typed one of them.
+    #[test]
+    fn setting_a_variable_through_the_console_reaches_the_bundle() {
+        let mut engine = with_console_open();
+        run_line(&mut engine, "antialiasing smaa");
+        assert_eq!(
+            engine
+                .gpu
+                .applied_video
+                .last()
+                .expect("the drain reached the bundle")
+                .antialiasing,
+            Some(crcbl_render::Antialiasing::Smaa),
+            "the console's write did not reach `GameGpu::apply_video`"
+        );
+
+        run_line(&mut engine, "antialiasing = fxaa");
+        assert_eq!(
+            engine
+                .gpu
+                .applied_video
+                .last()
+                .expect("and again for the `=` spelling")
+                .antialiasing,
+            Some(crcbl_render::Antialiasing::Fxaa),
+        );
+    }
+
+    /// **A frame-limit write reaches the loop's own clock**, which is the other
+    /// half of the drain and the one seam that is not the bundle's.
+    #[test]
+    fn a_frame_limit_set_in_the_console_reaches_the_clock() {
+        let mut engine = with_console_open();
+        run_line(&mut engine, "frame_limit 37");
+        assert_eq!(
+            engine.clock_source.limit().rate(),
+            37,
+            "the clock is still pacing at whatever the run started with"
+        );
+    }
+
+    /// **`help` prints every key the catalogue names.**
+    ///
+    /// Counted against [`crate::settings::catalogue`] itself rather than against
+    /// a number written here, so the test cannot pass on a half-empty registry
+    /// and cannot go stale when a key is added.
+    #[test]
+    fn help_prints_every_settings_key_the_engine_defines() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "help");
+
+        let printed = console_lines(&logs);
+        let catalogue = crate::settings::catalogue();
+        assert!(
+            !catalogue.is_empty(),
+            "a catalogue with no keys proves nothing"
+        );
+        for key in &catalogue {
+            assert!(
+                printed
+                    .iter()
+                    .any(|line| line.starts_with(&format!("{} = ", key.name))),
+                "`help` did not print `{}`: {printed:?}",
+                key.name,
+            );
+        }
+    }
+
+    /// **`find` answers with the entries whose name or help holds the text**,
+    /// which is how a variable is found without knowing its prefix.
+    #[test]
+    fn find_answers_with_the_entries_that_hold_the_text() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "find antialias");
+
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.starts_with("antialiasing = ")),
+            "`find` did not answer with the key it names: {printed:?}"
+        );
+    }
+
+    /// **`Tab` fills in the prefix every candidate shares**, and stops there
+    /// rather than choosing between them.
+    #[test]
+    fn tab_fills_in_the_prefix_every_candidate_shares() {
+        let mut engine = with_console_open();
+        typed(&mut engine, "an");
+        tap(&mut engine, crcbl_core::input::KeyCode::Tab);
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "an",
+            "`anisotropic_filtering` and `antialiasing` share only `an`, so a longer \
+             fill would have chosen between them"
+        );
+        assert!(
+            engine.console().panel().candidates().len() >= 2,
+            "and both are offered: {:?}",
+            engine.console().panel().candidates(),
+        );
+
+        typed(&mut engine, "ti");
+        tap(&mut engine, crcbl_core::input::KeyCode::Tab);
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "antialiasing",
+            "one candidate completes to the whole name"
+        );
+    }
+
+    /// **The up arrow puts the last submitted line back**, with the field
+    /// cleared by the submit that preceded it.
+    #[test]
+    fn the_up_arrow_recalls_the_line_that_was_submitted() {
+        let mut engine = with_console_open();
+        run_line(&mut engine, "echo hello");
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "",
+            "a submit clears the field"
+        );
+        tap(&mut engine, crcbl_core::input::KeyCode::ArrowUp);
+        step(&mut engine);
+        assert_eq!(engine.console().panel().field().text(), "echo hello");
+        tap(&mut engine, crcbl_core::input::KeyCode::ArrowDown);
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().field().text(),
+            "",
+            "and walking back down gives the half-typed line back"
+        );
+    }
+
+    /// **Escape closes the console before it pauses the game** — plan decision
+    /// 5. One press does one thing, to the thing on top of the frame.
+    #[test]
+    fn escape_closes_the_console_before_it_pauses_the_game() {
+        let mut engine = with_console_open();
+        tap(&mut engine, PAUSE_KEY);
+        step(&mut engine);
+        assert!(
+            !engine.console().is_open(),
+            "escape did not close the panel"
+        );
+        assert!(
+            !engine.paused,
+            "escape closed the console and paused the game as well"
+        );
+
+        tap(&mut engine, PAUSE_KEY);
+        step(&mut engine);
+        assert!(engine.paused, "and the next escape is the game's again");
+    }
+
+    /// **`pause` and `quit` reach the loop**, which is what
+    /// [`crate::debug_console::EngineLink`] exists for: a command cannot hold a
+    /// borrow of the loop, so it records the ask and the frame takes it.
+    #[test]
+    fn the_console_can_pause_the_simulation_and_stop_the_run() {
+        let mut engine = with_console_open();
+        run_line(&mut engine, "pause");
+        assert!(engine.paused, "`pause` did not reach the loop");
+        run_line(&mut engine, "pause");
+        assert!(!engine.paused, "and it toggles rather than latching");
+
+        typed(&mut engine, "quit");
+        tap(&mut engine, crcbl_core::input::KeyCode::Enter);
+        assert_eq!(
+            engine.frame_body().expect("the fake never fails"),
+            Flow::Stop(ExitReason::Quit),
+            "`quit` did not stop the run"
+        );
+    }
+
+    /// **The wheel scrolls the console and not the game while it is open.**
+    #[test]
+    fn the_wheel_scrolls_the_console_while_it_is_open() {
+        let mut engine = with_console_open();
+        // Straight into the ring rather than through `log::info!`: under one
+        // process per test nothing has installed a logger here, so the facade's
+        // maximum is `Off` and a macro call reaches no sink. The ring is what
+        // the panel reads, and the push is the same one every sink makes.
+        for line in 0..40 {
+            crcbl_core::log::console::push(
+                crcbl_core::log::Level::Info,
+                "crcbl::engine::tests::wheel",
+                Duration::ZERO,
+                format_args!("a line to scroll past: {line}"),
+            );
+        }
+        step(&mut engine);
+        assert!(
+            engine.console().panel().log().len() > 1,
+            "nothing reached the panel, so a scroll would prove nothing"
+        );
+
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .scroll(
+                window,
+                crcbl_core::input::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+                None,
+            )
+            .expect("the window is live");
+        step(&mut engine);
+        assert!(
+            engine.console().panel().log().scroll() > 0,
+            "the wheel did not scroll the log"
+        );
+        assert!(
+            engine.game.scrolls.is_empty(),
+            "and the game got the wheel as well: {:?}",
+            engine.game.scrolls,
+        );
+    }
+
+    /// **The console is drawn last, so nothing covers it** — plan decision 6.
+    ///
+    /// Asserted as *nothing after it leaves its rectangle*, rather than as a
+    /// count: the overlay's own row count moves with what the frame recorded, so
+    /// a length comparison would be asserting on the overlay instead. Something
+    /// has to be drawn under it as well, or a console drawn first into an empty
+    /// list would pass.
+    #[test]
+    fn the_console_is_drawn_over_everything_else_in_the_frame() {
+        let mut engine = with_console_open();
+        engine.debug.toggle();
+        step(&mut engine);
+
+        let extent = engine.gpu.extent();
+        let layout = engine.console().panel().layout(extent, engine.gpu.atlas());
+        let (panel_min, panel_max) = layout.panel();
+        let scrim = layout.style().panel_color;
+        let commands = engine.gpu.draw_list.commands();
+        let at = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    crcbl_ui::draw_list::DrawCommand::Rect { min, color, .. }
+                        if *min == panel_min && *color == scrim
+                )
+            })
+            .expect("the console's own scrim is in the frame");
+        assert!(
+            at > 0,
+            "the console drew first, so nothing was underneath it"
+        );
+
+        let inside = |point: glam::Vec2| {
+            point.x >= panel_min.x
+                && point.x <= panel_max.x
+                && point.y >= panel_min.y
+                && point.y <= panel_max.y
+        };
+        for command in &commands[at..] {
+            let ok = match command {
+                crcbl_ui::draw_list::DrawCommand::Rect { min, max, .. }
+                | crcbl_ui::draw_list::DrawCommand::RectOutline { min, max, .. } => {
+                    inside(*min) && inside(*max)
+                }
+                crcbl_ui::draw_list::DrawCommand::Line { from, to, .. } => {
+                    inside(*from) && inside(*to)
+                }
+                crcbl_ui::draw_list::DrawCommand::Polyline { points, .. } => {
+                    points.iter().copied().all(inside)
+                }
+                crcbl_ui::draw_list::DrawCommand::Text { pos, .. } => inside(*pos),
+            };
+            assert!(
+                ok,
+                "something outside the console's panel was drawn after it: {command:?}"
+            );
+        }
+    }
+
+    /// **A game's own table is gathered beside the engine's**, so a command a
+    /// game declared is reachable by name with no other wiring.
+    ///
+    /// The engine's two tables are held to their crates by two guards; nothing
+    /// else holds `Loop::new` to the third one. A gather that dropped
+    /// `HostedGame::console_table` would pass every other test in this section,
+    /// because the engine's own commands and every settings key still arrive.
+    #[test]
+    fn a_games_own_console_table_is_reachable_by_name() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        assert!(
+            engine.console().registry().lookup("fake_serve").is_some(),
+            "the game's command is not in the gathered registry"
+        );
+        run_line(&mut engine, "fake_serve");
+        let printed = console_lines(&logs);
+        assert!(
+            printed.iter().any(|line| line == "the fake game served"),
+            "the game's command did not run, or its output went nowhere: {printed:?}"
+        );
+    }
+
+    /// **A run with no settings file to read has nowhere to save to, and says
+    /// so** rather than reporting a write that went nowhere.
+    #[test]
+    fn a_headless_run_refuses_to_save_and_still_writes_its_stack() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "render_scale 0.5");
+        run_line(&mut engine, "save");
+
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line.starts_with("render_scale = 0.5")),
+            "the write itself was refused: {printed:?}"
+        );
+        assert!(
+            printed.iter().any(|line| line.contains("nowhere to save")),
+            "`save` reported something other than having nowhere to write: {printed:?}"
         );
     }
 }

@@ -147,6 +147,45 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The debug console opens on `` ` `` in every game, with no per-app code.**
+  `crcbl::engine::CONSOLE_KEY` (`KeyCode::Backquote`) joins `F3`, `Escape` and
+  `F11` as a key the loop keeps for itself — the bare key only, so a
+  `Ctrl`/`Meta` chord is still the browser's devtools shortcut — and
+  `Pending::toggle_console` is where a batch reports it. While the panel is up
+  the loop claims every key, every `TextCommit`, the wheel and the pointer over
+  the panel; a key the game was holding when it opened is released to the game,
+  the way `MenuPump` already repairs a menu opening over a held key; the
+  character the toggling press commits is swallowed rather than typed; and
+  `Escape` closes the console before it pauses the game. The panel is drawn
+  **after** the debug overlay, last in the frame. `Enter` and **Send** submit
+  through `crcbl_console::Registry::execute`, whose output goes through
+  `crcbl_core::log::console::print`, so the terminal and the panel show the same
+  records; `Tab` fills the prefix every candidate shares and then cycles them,
+  the arrows walk `crcbl_console::History`, `PageUp`/`PageDown` and the wheel
+  scroll the log, and `crcbl::debug_console::CONSOLE_LEVEL_KEY` (`F2`) cycles
+  the panel's own level threshold.
+- **Every crate's console table is gathered at one seam, and a game can add its
+  own.** `crcbl::console_table()` is this crate's list — `pause`, `quit`, `fps`,
+  `save`, `dump`, plus one `ARCHIVE` variable per settings key through
+  `settings::console_bindings()` — and `crcbl::debug_console::engine_tables()`
+  names it beside `crcbl_core::console_table()`. `Loop::new` gathers those with
+  the new `HostedGame::console_table()`, which defaults to
+  `crcbl_console::Table::EMPTY`, so a game declares its variables beside the
+  code that owns them and hands over one list. Two guards hold the gather
+  together: `crates/crcbl/tests/console_table.rs` reads this crate's own `src/`
+  for every declaration, and `crates/crcbl/tests/console_gather.rs` reads the
+  workspace manifests so a crate that depends on `crcbl-console` and is missing
+  from `engine_tables()` is a red test rather than a command nothing can reach.
+- **A console write reaches the running frame.** `Loop` drains
+  `settings::ConsoleHost`'s `Deferred` once a frame: an `[engine.video]` section
+  goes to `GameGpu::apply_video` and a frame ceiling to the loop's own clock, so
+  `antialiasing smaa` or `frame_limit 30` typed at the console changes the frame
+  it was typed on rather than the next start-up. An audio gain is written to the
+  stack and says so — the loop can reach no mixer, and `docs/backlog.md` carries
+  what closing that would take. `crcbl::debug_console::EngineLink` is the same
+  arrangement for the loop itself: `pause` toggles the simulation, `quit` stops
+  the run with the new `ExitReason::Quit`, and `fps` reads the frame the loop
+  last measured.
 - **The debug console's widgets, drawn from values and nothing else.**
   `crcbl_ui::console` is the panel the `` ` `` key will drop down: `TextField`,
   the crate's first editable widget — a line, a caret counted in characters,

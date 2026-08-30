@@ -288,6 +288,8 @@ pub mod args;
 
 pub mod backend;
 
+pub mod debug_console;
+
 pub mod engine;
 
 pub mod perf;
@@ -295,6 +297,31 @@ pub mod perf;
 pub mod session;
 
 pub mod settings;
+
+/// Everything this crate exposes to the debug console.
+///
+/// One list per crate, gathered by the engine at one seam —
+/// `docs/plan/52-debug-console.md` decision 2. It holds the commands the engine
+/// itself owns and, through [`settings::console_bindings`], one `ARCHIVE`
+/// variable per catalogue key, so every setting the engine reads is a console
+/// variable with nothing declared twice. `tests/console_table.rs` is what keeps
+/// the command half in step with what the source actually declares.
+///
+/// **The bindings are a slice rather than a `table!` entry**, because they are
+/// generated one per catalogue key by a macro in `settings` and
+/// [`crcbl_console::table!`] takes named paths; [`crcbl_console::Table::new`] is
+/// the same construction that macro writes.
+#[must_use]
+pub fn console_table() -> crcbl_console::Table {
+    static COMMANDS: &[&crcbl_console::ConCommand] = &[
+        &debug_console::fps,
+        &debug_console::pause,
+        &debug_console::quit,
+        &settings::dump,
+        &settings::save,
+    ];
+    crcbl_console::Table::new(&[], settings::console_bindings(), COMMANDS)
+}
 
 // Deliberately **not** gated to `wasm32`, even though only a browser build calls
 // it: the log queue is plain Rust with no web dependency, and gating it would

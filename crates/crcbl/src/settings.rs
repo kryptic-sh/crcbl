@@ -1375,16 +1375,33 @@ pub const fn set_debug_view_on(
 pub struct ConsoleHost {
     stack: SettingsStack,
     pending: Deferred,
+    engine: crate::debug_console::EngineLink,
 }
 
 impl ConsoleHost {
-    /// A host over `stack`, with nothing pending.
+    /// A host over `stack`, with nothing pending and nowhere to save.
     #[must_use]
     pub const fn new(stack: SettingsStack) -> Self {
         Self {
             stack,
             pending: Deferred::new(),
+            engine: crate::debug_console::EngineLink::new(),
         }
+    }
+
+    /// This host, with `save` writing the platform settings file for
+    /// `app_name`.
+    ///
+    /// Left unset by [`new`](Self::new) rather than defaulted to the game's
+    /// name, because the run that must not write one is exactly the run that
+    /// would not notice: a golden comparison or a determinism harness takes its
+    /// settings from [`SettingsSource::None`](crate::engine::SettingsSource) and
+    /// must not persist into whichever home directory it executes in. The
+    /// caller that read a file is the caller that names it.
+    #[must_use]
+    pub fn saving_as(mut self, app_name: &str) -> Self {
+        self.engine.app_name = Some(app_name.to_owned());
+        self
     }
 
     /// The settings as they stand.
@@ -1401,6 +1418,61 @@ impl ConsoleHost {
     /// What a write has asked for and nothing has applied yet.
     pub const fn pending_mut(&mut self) -> &mut Deferred {
         &mut self.pending
+    }
+
+    /// What the console's commands have asked of the loop, to read.
+    #[must_use]
+    pub const fn engine(&self) -> &crate::debug_console::EngineLink {
+        &self.engine
+    }
+
+    /// What the console's commands have asked of the loop, to record and to
+    /// drain.
+    pub const fn engine_mut(&mut self) -> &mut crate::debug_console::EngineLink {
+        &mut self.engine
+    }
+}
+
+crcbl_console::concommand! {
+    /// Write the settings file. Nothing a console sets is saved until this runs.
+    pub fn save(cx, _args) {
+        let saved = {
+            let host = cx
+                .host_mut()
+                .downcast_mut::<ConsoleHost>()
+                .expect("the engine's console is only ever run over a `ConsoleHost`");
+            let Some(app_name) = host.engine.app_name.clone() else {
+                // Deliberately a fault rather than a quiet success: a run with
+                // no file to write is the golden-run case, and "saved" arriving
+                // for a write that went nowhere is the failure this module's
+                // `Unsupported` exists to refuse.
+                return Err(Fault::new(
+                    "this run reads no settings file, so there is nowhere to save to",
+                ));
+            };
+            host.stack
+                .save_platform(&app_name)
+                .map_err(|error| Fault::new(error.to_string()))?;
+            app_name
+        };
+        cx.print(format!("settings saved for `{saved}`"));
+        Ok(())
+    }
+}
+
+crcbl_console::concommand! {
+    /// Print every key the settings stack holds, layer by layer.
+    pub fn dump(cx, _args) {
+        let text = cx
+            .host()
+            .downcast_ref::<ConsoleHost>()
+            .expect("the engine's console is only ever run over a `ConsoleHost`")
+            .stack
+            .dump();
+        for line in text.lines() {
+            cx.print(line);
+        }
+        Ok(())
     }
 }
 

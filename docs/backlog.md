@@ -94,11 +94,11 @@ one arrives.
 Planned in `docs/plan/52-debug-console.md` on the user's ask — a Source-style
 console on `` ` `` in every demo, the log in a panel, an input with Send, every
 settings key a variable, `help` and autocomplete, variables declared beside the
-code. Its eight delivery slices are the plan's; slice 1, the `crcbl-console`
-crate, is built and nothing draws it. The one decision the user's "go with your
-recs" settled: registration is a per-crate table gathered at one seam with a
-source-reading guard, not `linkme` (no wasm) or `inventory` (life-before-main) —
-see the plan's decision 2.
+code. Its eight delivery slices are the plan's; slices 1 to 5 have landed, so
+`` ` `` opens a working console in every game and slices 6 to 8 are what is
+left. The one decision the user's "go with your recs" settled: registration is a
+per-crate table gathered at one seam with a source-reading guard, not `linkme`
+(no wasm) or `inventory` (life-before-main) — see the plan's decision 2.
 
 What slice 1 left as limits rather than fixed, each stated in the code:
 
@@ -143,10 +143,6 @@ limits rather than fixed:
   tier. The same goes for the cost decision 10 prices: every record now renders
   its message and allocates a target `String`, where before a filtered-out
   record cost nothing — no frame-time measurement was taken either way.
-- **`console::print` has no caller in the engine.** Slice 5 drains a
-  `crcbl_console::Context`'s lines into it; today only
-  `crates/crcbl-core/tests/console_log.rs` does, which is what proves the target
-  round-trips.
 - **The web sink's ring push is verified natively, not in a browser.**
   `crcbl::web` is deliberately not `wasm32`-gated, so
   `the_web_sink_rings_a_line_its_filter_refused` in `crates/crcbl/src/web.rs`
@@ -164,10 +160,6 @@ limits rather than fixed:
   half: a `set_filter` the web sink honours, or `log` reaching
   `log::set_max_level` directly when that sink is the one installed. Found in
   review, not by a test; nothing runs the command in a browser yet.
-- **Not reviewed:** `crcbl_core::console_table()` is held to its own crate's
-  source and to nothing else. Nothing yet checks that a crate depending on
-  `crcbl-console` appears in the engine's gather at all — that second guard is
-  decision 2's other half and is slice 5's, along with the gather itself.
 
 What slice 4 — `crcbl_ui::console`, the panel's widgets — left as limits rather
 than fixed:
@@ -185,8 +177,9 @@ than fixed:
   `LogView::set_filter` takes `Off` through `Trace` and hides lines without
   dropping them; decision 4's wording was "a separate toggle per level". A
   threshold is what a key can cycle, which is what that decision asked for in
-  the same sentence. **Nothing binds a key to it yet** — that is slice 5, and
-  until then the filter is only reachable from code.
+  the same sentence. `crcbl::debug_console::CONSOLE_LEVEL_KEY` is the key, and
+  it is `F2` because while the panel is up the loop claims every key, so the
+  choice takes nothing from a game and no other key was a better one.
 - **The caret is measured, not read off `layout_line`'s rectangles.** Decision 6
   says the caret rectangle comes from the glyph rectangles;
   `FontAtlas::layout_line` drops every zero-ink glyph, so its `n`-th rectangle
@@ -202,17 +195,66 @@ than fixed:
   gets the whole line and no window at all.
 - **The pointer reaches the Send button and nothing else.**
   `ConsolePanel::point` hit-tests that one rectangle: the completion rows are
-  not clickable, the log cannot be selected or dragged, and the wheel is not
-  read here — `LogView::scroll_by` is the seam slice 5 drives from a wheel or a
-  `PageUp`.
-- **The panel holds no history.** `crcbl_console::History` is the storage and
-  `TextField::set_text` is what a recall calls; joining the two is slice 5's.
-- **Not measured, and not seen.** Nothing in the workspace constructs a
-  `ConsolePanel` yet, so the widgets are exercised by their own tests alone —
-  the panel has never been drawn on a screen, and its per-frame cost (one draw
-  command per visible row, and a `String` per wrapped row because
-  `DrawList::text` takes an owned one) was never timed on any tier. Decision 10
-  priced the shape and nothing has priced the numbers.
+  not clickable and the log cannot be selected or dragged. The wheel is not read
+  here either; the loop drives `LogView::scroll_by` from a wheel event and from
+  `PageUp`/`PageDown`, a page being whatever `ConsoleLayout::log_rows` reported
+  for the frame that was last drawn.
+- **Not measured.** `Loop` builds and draws a `ConsolePanel` now, and its
+  per-frame cost (one draw command per visible row, and a `String` per wrapped
+  row because `DrawList::text` takes an owned one) has still never been timed on
+  any tier. Decision 10 priced the shape and nothing has priced the numbers. Nor
+  has the panel been _looked_ at: every check of it is headless and asserts on
+  rectangles and text, so nothing has confirmed it is legible on a screen.
+
+What slice 5 — `CONSOLE_KEY`, the takeover, the gather and the drain — left as
+limits rather than fixed:
+
+- **`toggle` and `reset` are not built.** Plan decision 7's table lists both,
+  and both are registry-generic — they belong in `crcbl-console`'s `builtin.rs`
+  beside `help`/`find`/`echo`/`clear`, which is the crate slice 5 did not own.
+  Each is about ten lines over `Registry::lookup` and `Var::set`/`Var::default`,
+  and landing them means extending `builtin_table` and the exact list
+  `crates/crcbl-console/tests/guard.rs`'s
+  `the_guard_reads_the_names_the_declarations_actually_use` asserts.
+- **A console audio-gain write does not reach the running mixer.** The loop
+  drains `settings::Deferred`'s video section into `GameGpu::apply_video` and
+  its frame limit into `Clock::set_limit`, and has nowhere to send a gain: a
+  mixer is the game's and no `HostedGame` method hands one over.
+  `Loop::drain_console` prints a line per pending gain saying the value is in
+  the settings stack and not in the running mix, rather than dropping it.
+  Closing it is a defaulted `HostedGame::set_bus_gain` and one override in each
+  of the five `apps/*` that own a mixer — asteroids, breakout, flappy, horde and
+  options, which already has `impl Stage for Audio` to forward to.
+- **`fps` reads the loop's own frame clock, not the GPU's.**
+  `debug_console::EngineLink::set_frame_timing` is fed
+  `FrameClock::render_dt_secs` once a frame, so the number is the wall time
+  between frames; the per-pass GPU timings the debug overlay shows are not in
+  it.
+- **The console's stack is a second copy of the settings file.** `Loop::new`
+  reads `SettingsSource::for_run(...).open(G::NAME)` for the `ConsoleHost`, and
+  `apps/options` owns a stack of its own that it writes and saves — so within
+  one run a key set on the options screen is not what the console prints, and
+  the last `save` of the two wins. Nothing else in the workspace edits settings,
+  so the drift needs the options screen to be open. The fix is a `HostedGame`
+  seam handing the loop the game's own stack, which would also give the console
+  somewhere to save on the web (below).
+- **`save` writes nothing in a browser or a headless run, and says so.**
+  `ConsoleHost::saving_as` is set only for `SettingsSource::Platform`, and
+  `save` goes through `SettingsStack::save_platform`. A headless run gets a
+  stack over `crcbl_store::MemoryStorage` — writable, so every variable is still
+  settable — and no name, so `save` faults with "nowhere to save to". A browser
+  run _is_ `Platform`, so it saves through whatever OPFS store the page
+  installed, and that path has not been exercised by any gate.
+- **A fault prints at `Level::Info`, like every other console line.**
+  `console::print` is the only sink the console has and it is fixed at `Info`,
+  so a refused command is the same colour in the panel as a value. A
+  `console::print_at(level, …)` is the fix and nothing needed it yet.
+- **The pointer test is the keyboard's.** `Console::point` is wired and reports
+  whether the cursor was over the panel, and no headless check drives it: the
+  `HeadlessShell` pointer path is exercised for menus elsewhere, and the
+  console's **Send** button is covered by `crcbl_ui`'s own tests over
+  `ConsolePanel::point`. So "a click on Send submits" is proven in the widget
+  and not through the loop.
 
 **Also owed with it:** the AO debug view is lantern's alone today
 (`ForwardRenderer::set_occlusion_view` behind lantern's pause panel). The user
@@ -1802,28 +1844,29 @@ The counter-argument is real: flattening is what lets `main.rs` write
 
 ## Unbuilt work
 
-### The debug console's settings slice — what slice 2 left for slice 5 (2026-08-30)
+### The debug console's settings slice — what slice 2 left (2026-08-30)
 
 `docs/plan/52-debug-console.md` slice 2 landed the typed catalogue,
 `crcbl::settings::apply`, `settings::console_bindings()` and the
 `GameGpu::apply_video`/`set_debug_view` pair. What it deliberately did not do:
 
-- **A console write is recorded, not applied.** `crcbl_console::Binding` reaches
-  its host as `&mut dyn Any` and `Any` is implemented only for `'static` types,
-  so `settings::ConsoleHost` cannot hold a borrow of the renderer, the mixer or
-  the clock — it records into `settings::Deferred` instead. **Slice 5 owes the
-  drain**: read `ConsoleHost::pending_mut()`'s `take_video`, `take_gains` and
-  `take_frame_limit` once a frame where the bundle is in hand, and hand each to
-  `GameGpu::apply_video`, the game's mixer and the clock. Nothing drains it
-  today, so a set through a binding writes the file and changes no frame. If
-  that arrangement is ever unwanted, the alternative is a `Binding` host bound
-  by something other than `Any` — which is a change to `crcbl-console`'s public
-  shape, not to this module.
-- **`settings::Stage::set_frame_limit` has no implementor at all.** `Loop::new`
-  takes the ceiling when it is built and `HostedGame::take_pending_frame_limit`
-  is the only way it moves, so `apply` on `engine.video.frame_limit` answers
-  `Applied::NextStart` everywhere. Making it live means a seam that reaches the
-  loop's `Clock` mid-frame.
+- **A console write is recorded and then drained, and one seam has nowhere to
+  drain to.** `crcbl_console::Binding` reaches its host as `&mut dyn Any` and
+  `Any` is implemented only for `'static` types, so `settings::ConsoleHost`
+  cannot hold a borrow of the renderer, the mixer or the clock — it records into
+  `settings::Deferred` instead. `Loop::drain_console` (slice 5) reads
+  `take_video` into `GameGpu::apply_video` and `take_frame_limit` into
+  `Clock::set_limit` once a frame; `take_gains` has no destination, which is the
+  console section above. If the arrangement is ever unwanted, the alternative is
+  a `Binding` host bound by something other than `Any` — a change to
+  `crcbl-console`'s public shape, not to this module.
+- **`settings::Stage::set_frame_limit`'s only implementor is `Deferred`.** A
+  console write is live — the loop drains the recorded limit into its own
+  `Clock` — but `apps/options` applies its rows through `GpuStage`, which
+  inherits the `Unsupported` default, so `apply` on `engine.video.frame_limit`
+  still answers `Applied::NextStart` there. The options screen has its own
+  `HostedGame::take_pending_frame_limit` path for the same key, so nothing is
+  broken; the two ways of moving one ceiling are what would be worth collapsing.
 - **`GpuContext::set_pacing` is reachable from no catalogue key.** The key that
   would want it is `engine.video.present_mode`, which is `KeyStatus::Named` — so
   plan decision 3's "the seams that exist" list is one shorter than it reads. It
@@ -1847,17 +1890,20 @@ The counter-argument is real: flattening is what lets `main.rs` write
   with both answers.
 - **No test owns a real `ForwardRenderer`.** `debug_view_switches` is asserted
   against `ForwardRenderer::debug_view`'s precedence order without a device, and
-  `apply_video_to`'s body is covered only by compiling. Nothing calls the
-  `GameGpu` pair yet, so no e2e or browser gate reaches either body — that
-  arrives with slice 5 and slice 6, whose exit criterion
-  ("`debug_view ambient occlusion` shows the AO channel in a demo that never
-  exposed it") is the real proof.
-- **`crcbl-console` has no `Kind: Display`, and slice 2 did not need one.** The
-  brief expected `crcbl settings list` to print the domain; it does not — that
-  command reads `CatalogueKey::status` and nothing else, so its output shape is
-  untouched. Slice 5's `help` is the first thing that will want to print a
-  `Kind`, and that is where the `Display` belongs (in `crcbl-console`, tested
-  there).
+  `apply_video_to`'s body is covered only by compiling. Slice 5 proved the
+  _loop_ reaches `GameGpu::apply_video` with the section a console line asked
+  for — `setting_a_variable_through_the_console_reaches_the_bundle`, against a
+  fake bundle — and nothing yet drives a real renderer through it. That is slice
+  6's, whose exit criterion ("`debug_view ambient occlusion` shows the AO
+  channel in a demo that never exposed it") is the real proof.
+- **`crcbl-console` still has no `Kind: Display`, and nothing wants one yet.**
+  The brief expected `crcbl settings list` to print the domain; it does not —
+  that command reads `CatalogueKey::status` and nothing else. Slice 5's `help`
+  turned out not to want one either: the line `help` prints — the registry's own
+  `describe`, in `crates/crcbl-console/src/registry.rs` — carries the name, the
+  value, the default and the flags, so a variable's _range_ is the one thing the
+  console cannot show. Adding the `Display` (in `crcbl-console`, tested there)
+  and putting it in that line is what would fix it.
 
 ### The scaffold template has no renderer to forward to (2026-08-30)
 

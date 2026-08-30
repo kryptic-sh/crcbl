@@ -441,14 +441,38 @@ entry; the browser gate runs on every slice that touches a demo.
    `MINIMUM_FIELD_COLUMNS` columns. Nothing here reads the ring, the registry, a
    clock or a keycode — the records, the candidates and the caret's blink
    (`caret_shown`) all arrive as values, which is what slice 5 wires up.
-5. **The engine**: `CONSOLE_KEY`, the takeover and the held-key repair, the
-   `TextCommit` pump, the draw after the overlay, the gather at `Loop::new` with
-   both guards, `HostedGame::console_table`, the built-in commands, and the CLI
-   template. Headless e2e through `HeadlessShell`: toggle, type `antialiasing`,
-   `Enter`, the value line in the ring; `antialiasing smaa` applied and read
-   back off the renderer; `help` lists every catalogue key (the count asserted
-   against the catalogue, so the test cannot pass on an empty list); `find`;
-   `Tab`; `Escape` closes before it pauses.
+5. **The engine — landed 2026-08-31.** `crcbl::engine::CONSOLE_KEY` is the
+   fourth reserved key, folded by `Pending::observe` into `toggle_console` for
+   the bare key only; the open console claims every key, every `TextCommit`, the
+   wheel and the pointer over the panel, releases whatever the game was holding
+   when it opened, and swallows the character the toggling press commits — which
+   matters on the _closing_ press, since the panel is not yet up on the opening
+   one. `Escape` closes it before it pauses. `crcbl::debug_console::Console` is
+   the loop's state: the gathered `Registry`, the `ConsolePanel`, a `History`,
+   and the `settings::ConsoleHost` every command and binding runs over.
+   `Loop::new` gathers `debug_console::engine_tables()` — `crcbl-core`'s table
+   and `crcbl::console_table()` — plus the new defaulted
+   `HostedGame::console_table()`, and both guards are red tests:
+   `crates/crcbl/tests/console_table.rs` over this crate's source and
+   `crates/crcbl/tests/console_gather.rs` over the workspace manifests. The
+   engine's own commands are `pause`, `quit` (a new `ExitReason::Quit`), `fps`,
+   `save` and `dump`, each recording on `debug_console::EngineLink` where it
+   needs the loop. `Loop::drain_console` is slice 2's owed drain: the
+   `[engine.video]` section to `GameGpu::apply_video` and the ceiling to the
+   loop's clock, on the frame the line was typed. The panel draws last, after
+   the debug overlay. `Tab` completes then cycles, the arrows walk the history,
+   `PageUp`/`PageDown` and the wheel scroll, and `CONSOLE_LEVEL_KEY` (`F2`)
+   cycles the panel's level threshold. Every check is headless, through
+   `HeadlessShell`, and every one was shown red by breaking the mechanism it
+   guards. The CLI template needed no change — `console_table` is defaulted and
+   it declares nothing.
+
+   **What it did not do**, each in `docs/backlog.md`: `toggle` and `reset` (they
+   belong in `crcbl-console`'s `builtin.rs`, which this slice did not own),
+   `debug_view` and `r_debug_view` (slice 6's), the web half of `log` (slice
+   7's), and a console audio-gain write reaching the running mixer, which needs
+   a `HostedGame` seam the loop does not have.
+
 6. **Every debug view everywhere**: `r_debug_view`, the sixteen forwarders,
    lantern's row reading the variable; the AO view proven on a demo that never
    had it (breakout) through the headless e2e and the browser gate.
