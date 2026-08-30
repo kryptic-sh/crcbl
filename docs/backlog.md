@@ -12726,6 +12726,17 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
+## Two PBR showcase demos are planned and not started (2026-08-30)
+
+`docs/plan/sample/21-gallery.md`: `suzanne` (Khronos' CC0 Suzanne, the one-mesh
+material fixture) and `gallery` (a shelf of CC0 Khronos models). Both wait on
+foundation (a) and the normal-map rung with (d). The plan carries the asset
+licence rule (CC0 first, CC-BY with `ATTRIBUTION.md`, no NC/SA) and the verdicts
+read at the sources on 2026-08-30 — the Stanford bunny is research-only and
+cannot ship in an MIT repository; a rabbit here is a CC0 one. Nothing is
+downloaded yet; when the slice starts, re-read each licence at its source before
+committing a file.
+
 ## The v2 vertex encodings: what the next slice owes (2026-08-30)
 
 `crcbl_shaders::vertex` landed host side only, by design. Left behind:

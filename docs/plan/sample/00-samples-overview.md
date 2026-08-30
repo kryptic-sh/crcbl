@@ -54,6 +54,7 @@ GitHub Pages site.
 | 18  | [sundial](18-sundial.md)     | S4D (P7B–P7C)                | Shadow ladder: every filter, a moving sun, and somewhere for each named shadow artefact to appear                  |
 | 19  | [alcove](19-alcove.md)       | S4D (P7B–P7C)                | AO ladder: every occlusion technique, an AO-only view, and flat surfaces that hide nothing                         |
 | 20  | [options](20-options.md)     | S4E (P10)                    | Settings acceptance: the whole catalogue on a screen, saved and reloaded, on desktop and in a browser tab          |
+| 21  | [gallery](21-gallery.md)     | S4F (material set)           | PBR showcase on CC0 models: `suzanne` the one-mesh material fixture, `gallery` the shelf; the asset licence rule   |
 
 01–06 stay tiny (days, not weeks, each; hud is continuous — a P4 skeleton that
 grows until P10). 07 is the MVP-era flagship and long-lived dogfood. 08 exists
